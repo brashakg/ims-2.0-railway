@@ -12,6 +12,7 @@
 // Role gate: SUPERADMIN / ADMIN only (matches the backend /ondc/status gate).
 
 import { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Network,
   RefreshCw,
@@ -24,9 +25,16 @@ import {
   IndianRupee,
   Clock,
   Loader2,
+  Settings,
 } from 'lucide-react';
 import { ondcSellerApi, type OndcStatus, type OndcPublishResult } from '../../services/api/ondcSeller';
 import { useToast } from '../../context/ToastContext';
+
+/** Defensive numeric cast: a partial /ondc/status payload must render as 0,
+ *  never crash `.toLocaleString` on undefined (OS-058). */
+function safeNum(v: unknown): number {
+  return typeof v === 'number' && isFinite(v) ? v : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -192,21 +200,21 @@ export default function OndcSellerPage() {
           <KpiCard
             icon={Package}
             label="Catalog items"
-            value={status.last_item_count}
+            value={safeNum(status.last_item_count)}
             sub="last publish"
             color="blue"
           />
           <KpiCard
             icon={ShoppingCart}
             label="ONDC orders"
-            value={status.ondc_order_count}
+            value={safeNum(status.ondc_order_count)}
             sub="channel=ONDC in IMS"
             color="green"
           />
           <KpiCard
             icon={IndianRupee}
             label="TCS recorded"
-            value={`₹${status.tcs_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
+            value={`₹${safeNum(status.tcs_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
             sub="1% on gross payout"
             color="purple"
           />
@@ -232,7 +240,7 @@ export default function OndcSellerPage() {
             {status?.last_published_at && (
               <p className="mt-2 text-xs text-gray-400">
                 Last publish: {fmt(status.last_published_at)}
-                {status.last_item_count > 0 && ` — ${status.last_item_count} items`}
+                {safeNum(status.last_item_count) > 0 && ` — ${safeNum(status.last_item_count)} items`}
               </p>
             )}
           </div>
@@ -294,32 +302,28 @@ export default function OndcSellerPage() {
         )}
       </div>
 
-      {/* SNP configuration empty state */}
+      {/* SNP configuration empty state — points at the in-app Integrations
+          settings (matching the backend's own guidance), not raw MongoDB
+          instructions (OS-058). */}
       {status && !status.enabled && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
           <Network className="mx-auto h-10 w-10 text-gray-400" />
           <h3 className="mt-3 text-base font-semibold text-gray-900">Configure SNP partner</h3>
-          <p className="mt-2 max-w-sm mx-auto text-sm text-gray-500">
-            To go live, choose an SNP (Eunimart, eSamudaay, eSellers, etc.), obtain
-            credentials, and add an integration record in your MongoDB:
+          <p className="mt-2 max-w-md mx-auto text-sm text-gray-500">
+            To go live: choose an SNP (Seller Network Participant — e.g. Eunimart, eSamudaay,
+            eSellers), obtain credentials from them, and save the ONDC integration in Settings.
+            Once the integration is saved and enabled, the owner arms the gate and this page goes
+            ACTIVE automatically.
           </p>
-          <pre className="mt-4 mx-auto max-w-lg rounded-lg bg-gray-100 p-4 text-left text-xs text-gray-700 overflow-auto">
-{`// integrations collection (MongoDB)
-{
-  "type": "ondc",
-  "enabled": true,
-  "config": {
-    "snp_url": "https://your-snp.example.com",
-    "subscriber_id": "yourdomain.in",
-    "subscriber_url": "https://api.yourdomain.in/api/v1/ondc",
-    "ukp": "<HMAC secret from SNP>",
-    "city_code": "std:020"
-  }
-}`}
-          </pre>
+          <Link
+            to="/settings?tab=integrations"
+            className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          >
+            <Settings className="h-4 w-4" />
+            Open Settings → Integrations
+          </Link>
           <p className="mt-3 text-xs text-gray-500">
-            Then set <code className="rounded bg-gray-200 px-1 py-0.5">IMS_ONDC_ENABLED=1</code> in
-            the Railway environment variables and redeploy.
+            Until then, everything on this page stays DARK (simulated) — no network calls are made.
           </p>
         </div>
       )}

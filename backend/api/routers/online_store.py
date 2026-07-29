@@ -99,9 +99,18 @@ def _get_db():
     return None
 
 
-def _safe_count(db, name: str, filter_: Optional[Dict] = None) -> int:
+def _safe_count(
+    db,
+    name: str,
+    filter_: Optional[Dict] = None,
+    failures: Optional[list] = None,
+) -> int:
     """count_documents on a collection, fail-soft to 0. Works on real Mongo and
-    the in-memory MockCollection (both implement count_documents)."""
+    the in-memory MockCollection (both implement count_documents).
+
+    When `failures` is passed, a mid-request error appends the collection name
+    to it so the caller can report degraded=True -- otherwise the fail-soft zero
+    is indistinguishable from a genuinely-empty business state (OS-021)."""
     if db is None:
         return 0
     try:
@@ -110,7 +119,58 @@ def _safe_count(db, name: str, filter_: Optional[Dict] = None) -> int:
             return 0
         return int(coll.count_documents(filter_ or {}))
     except Exception:  # noqa: BLE001
+        if failures is not None:
+            failures.append(name)
         return 0
+
+
+def _storefront_postures(db, push_mode: Optional[Dict]) -> list:
+    """Per-storefront push posture rows for the summary (OS-034).
+
+    Names come from the storefronts registry (services.storefronts) -- never
+    page-level string literals -- falling back to the BV seed definition when
+    the registry has no rows yet, so the payload always names at least the
+    default storefront. Posture per row: is_live = writes gate AND dispatch
+    gate AND that storefront's credentials. The default storefront reuses
+    push_mode's already-resolved creds_present (no second credential lookup);
+    non-default storefronts (WizOpt, once registered) resolve their own and
+    stay DARK until configured. Fail-soft -> [] (the summary never 500s)."""
+    try:
+        from ..services import storefronts as sf_registry
+
+        rows = sf_registry.list_storefronts(db) if db is not None else []
+        if not rows:
+            rows = [dict(sf_registry.BV_STOREFRONT)]
+        writes = bool(push_mode and push_mode.get("writes_enabled"))
+        dispatch_live = bool(push_mode and push_mode.get("dispatch_mode") == "live")
+        default_creds = bool(push_mode and push_mode.get("creds_present"))
+        out = []
+        for row in rows:
+            sid = str(row.get("storefront_id") or "")
+            is_default = bool(row.get("is_default")) or (
+                sid == sf_registry.DEFAULT_STOREFRONT_ID
+            )
+            if is_default:
+                creds = default_creds
+            else:
+                try:
+                    from ..services.shopify_push import _has_shopify_creds
+
+                    creds = _has_shopify_creds(db, sid)
+                except Exception:  # noqa: BLE001
+                    creds = False
+            out.append(
+                {
+                    "storefront_id": sid,
+                    "name": row.get("name") or sid,
+                    "is_default": is_default,
+                    "creds_present": creds,
+                    "is_live": bool(writes and dispatch_live and creds),
+                }
+            )
+        return out
+    except Exception:  # noqa: BLE001 -- posture rows must never 500 the summary
+        return []
 
 
 @router.get("/summary")
@@ -125,25 +185,34 @@ async def online_store_summary(
     the collection doesn't exist yet (fail-soft, no 500).
     """
     db = _get_db()
+    # Mid-request count failures -> degraded=True (OS-021): the FE renders an
+    # honest "figures may be incomplete" note instead of presenting fail-soft
+    # zeros as real business counts.
+    count_failures: list = []
     counts: Dict = {
         # Products / PIM card -- catalog_products with ecom sub-doc.
-        "products": _safe_count(db, "catalog_products", {"ecom": {"$exists": True}}),
+        "products": _safe_count(
+            db, "catalog_products", {"ecom": {"$exists": True}}, count_failures
+        ),
         # Variant tier (catalog_variants collection).
-        "variants": _safe_count(db, "catalog_variants"),
+        "variants": _safe_count(db, "catalog_variants", None, count_failures),
         # Collections (Phase 2 -- ecom_collections).
-        "collections": _safe_count(db, "ecom_collections"),
+        "collections": _safe_count(db, "ecom_collections", None, count_failures),
         # Menus / mega-menu (Phase 3 -- ecom_menus).
-        "menus": _safe_count(db, "ecom_menus"),
+        "menus": _safe_count(db, "ecom_menus", None, count_failures),
         # Images awaiting design work (Phase 4 -- product_images, QUEUED status).
         "images_pending_design": _safe_count(
-            db, "product_images", {"design_status": "QUEUED"}
+            db, "product_images", {"design_status": "QUEUED"}, count_failures
         ),
         # Online customers (joined from Shopify -- have shopify_customer_id set).
         "customers": _safe_count(
-            db, "customers", {"shopify_customer_id": {"$exists": True, "$ne": None}}
+            db,
+            "customers",
+            {"shopify_customer_id": {"$exists": True, "$ne": None}},
+            count_failures,
         ),
         # Online orders (Phase 3b -- orders ingested from Shopify webhooks).
-        "orders": _safe_count(db, "orders", {"channel": "ONLINE"}),
+        "orders": _safe_count(db, "orders", {"channel": "ONLINE"}, count_failures),
     }
     # DRAFT vs PUBLISHED breakdown + text-only (no images) among staged docs.
     # Makes the owner's 2,032-draft publish decision VISIBLE in the UI without
@@ -152,10 +221,16 @@ async def online_store_summary(
     products_ecom = {
         # ecom.status is the field the Shopify push honours (DRAFT->DRAFT,
         # PUBLISHED->ACTIVE). A status query implies the ecom sub-doc exists.
-        "draft": _safe_count(db, "catalog_products", {"ecom.status": "DRAFT"}),
-        "published": _safe_count(db, "catalog_products", {"ecom.status": "PUBLISHED"}),
+        "draft": _safe_count(
+            db, "catalog_products", {"ecom.status": "DRAFT"}, count_failures
+        ),
+        "published": _safe_count(
+            db, "catalog_products", {"ecom.status": "PUBLISHED"}, count_failures
+        ),
         # Everything staged for online (has an ecom sub-doc) -- mirrors counts.products.
-        "staged_total": _safe_count(db, "catalog_products", {"ecom": {"$exists": True}}),
+        "staged_total": _safe_count(
+            db, "catalog_products", {"ecom": {"$exists": True}}, count_failures
+        ),
         # Staged but carrying no product images (array empty/null/missing) --
         # the text-only drafts left after the 2026-07-20 image loss. $in with
         # [None, []] matches missing, null, and the empty array.
@@ -163,27 +238,40 @@ async def online_store_summary(
             db,
             "catalog_products",
             {"ecom": {"$exists": True}, "images": {"$in": [None, []]}},
+            count_failures,
         ),
     }
-    # Truthful posture (owner 2026-07-05): phases 1-5 are BUILT; the module is
-    # waiting on the Phase-6 baton cutover (arm the triple gate + flip BVI's
-    # writer off). Report the REAL push gate instead of hardcoded foundation
-    # values -- the landing page kept saying "Phase 1 / push OFF" even though
-    # the engine + screens shipped long ago.
+    # Report the REAL push gate instead of hardcoded values. OS-033: `status`
+    # and `phase` DERIVE from the live gate -- "live"/6 once the Phase-6 cutover
+    # is armed (2026-07-20), "cutover-ready"/5 while the gates are dark. The
+    # hub can no longer show "cutover-ready" next to "Shopify push: LIVE".
     try:
         from ..services import shopify_push
 
         push_mode = shopify_push.push_mode_status(db)
     except Exception:  # noqa: BLE001 - status endpoint must never 500
         push_mode = None
+    is_live = bool(push_mode and push_mode.get("is_live"))
+    # Derive the shopify_push feature status the same way (copy, never mutate
+    # the module-level constant).
+    planned_features = [dict(f) for f in _PLANNED_FEATURES]
+    for feat in planned_features:
+        if feat.get("key") == "shopify_push":
+            feat["status"] = "live" if is_live else "built-gated"
     return {
         "module": "online_store",
-        "status": "cutover-ready",
-        "phase": 5,
+        "status": "live" if is_live else "cutover-ready",
+        "phase": 6 if is_live else 5,
         "db_connected": db is not None,
-        "shopify_writes_enabled": bool(push_mode and push_mode.get("is_live")),
+        # OS-021: True when any count failed mid-request -- the zeros in
+        # counts/products_ecom are then fail-soft artefacts, not business truth.
+        "degraded": bool(count_failures),
+        "shopify_writes_enabled": is_live,
         "push_mode": push_mode,
-        "planned_features": _PLANNED_FEATURES,
+        # OS-034: per-storefront posture rows (BV live / WO dark once
+        # registered), names from the storefronts registry.
+        "storefronts": _storefront_postures(db, push_mode),
+        "planned_features": planned_features,
         "counts": counts,
         "products_ecom": products_ecom,
         "blueprint": "docs/reference/BVI_MERGE_PLAN.md",

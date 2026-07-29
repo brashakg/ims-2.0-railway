@@ -37,13 +37,58 @@ export interface OnlineStoreProductsEcom {
   text_only?: number | null;
 }
 
+// ----------------------------------------------------------------------------
+// RC-E: honest failure classification, shared by EVERY online-store data path.
+// ----------------------------------------------------------------------------
+/** Why a fail-soft read came back unavailable:
+ *  - 'forbidden'   -> the viewer's role can't read this (HTTP 403). NEVER
+ *                     render this as "coming soon" / "not deployed" / DARK —
+ *                     the feature exists and may well be LIVE.
+ *  - 'unavailable' -> the backend genuinely doesn't serve this yet (404/501,
+ *                     e.g. a stale deploy) — the "coming online" card is honest.
+ *  - 'error'       -> anything else (500 / timeout / network / expired
+ *                     session) -> render "Couldn't load — Retry", never a fake
+ *                     empty/zero state. */
+export type OnlineStoreLoadFailure = 'forbidden' | 'unavailable' | 'error';
+
+/** Classify a failed online-store read (see OnlineStoreLoadFailure). 401s are
+ *  intercepted by the api client (redirect to /login) and never reach here. */
+export function classifyLoadError(err: unknown): OnlineStoreLoadFailure {
+  const status = (err as { response?: { status?: number } } | undefined)?.response
+    ?.status;
+  if (status === 403) return 'forbidden';
+  if (_isUnavailable(err)) return 'unavailable';
+  return 'error';
+}
+
+/** One storefront's push posture (OS-034): name from the storefronts registry,
+ *  is_live per that storefront's gates+credentials (BV live, WO dark). */
+export interface StorefrontPosture {
+  storefront_id: string;
+  name: string;
+  is_default?: boolean | null;
+  creds_present?: boolean | null;
+  is_live?: boolean | null;
+}
+
 export interface OnlineStoreSummary {
   /** Whether the backend module endpoint answered at all. false => placeholder. */
   available: boolean;
-  /** High-level module phase/status string from the backend (e.g. "FOUNDATION"). */
+  /** Why the read failed when available=false (null on success). Drives the
+   *  honest error/permission/coming-online distinction (OS-020). */
+  reason?: OnlineStoreLoadFailure | null;
+  /** High-level module phase/status string from the backend. Post-cutover the
+   *  backend derives this from the real push gate ('live' / 'cutover-ready'). */
   status?: string | null;
   /** Whether IMS is the live Shopify writer yet (kill-switch). Default false. */
   shopify_writes_enabled?: boolean | null;
+  /** false => the backend answered but its DB was unreachable — every count is
+   *  a fail-soft zero, NOT business truth (OS-021). */
+  db_connected?: boolean | null;
+  /** true => some counts failed mid-request — figures may be incomplete. */
+  degraded?: boolean | null;
+  /** Per-storefront push posture rows (OS-034). */
+  storefronts?: StorefrontPosture[] | null;
   counts?: OnlineStoreCounts | null;
   /** DRAFT/PUBLISHED/text-only staged-product breakdown (Phase-1 truth slice). */
   products_ecom?: OnlineStoreProductsEcom | null;
@@ -53,8 +98,12 @@ export interface OnlineStoreSummary {
 
 const PLACEHOLDER: OnlineStoreSummary = {
   available: false,
+  reason: 'unavailable',
   status: 'COMING_SOON',
   shopify_writes_enabled: false,
+  db_connected: null,
+  degraded: false,
+  storefronts: null,
   counts: {},
   message: null,
 };
@@ -110,9 +159,11 @@ export interface StockTallySummary {
 export interface StockTallyResult {
   items: StockTallyRow[];
   summary: StockTallySummary;
-  /** false => the backend endpoint isn't deployed yet / not permitted; the
-   *  screen shows the friendly "coming online" note rather than "0 SKUs". */
+  /** false => the read failed; see `reason` for WHY (403 vs stale deploy vs
+   *  real error) so the screen never mislabels a failure as "coming online". */
   available: boolean;
+  /** Why the read failed when available=false (null on success). */
+  reason?: OnlineStoreLoadFailure | null;
 }
 
 const STOCK_TALLY_PLACEHOLDER: StockTallyResult = {
@@ -130,6 +181,7 @@ const STOCK_TALLY_PLACEHOLDER: StockTallyResult = {
     listed_mapped_rows: 0,
   },
   available: false,
+  reason: 'unavailable',
 };
 
 function _tallyRowFrom(r: Record<string, any>): StockTallyRow {
@@ -151,22 +203,38 @@ function _tallyRowFrom(r: Record<string, any>): StockTallyRow {
 }
 
 export const onlineStoreApi = {
-  /** Fetch the module summary. Never throws: any error (incl. a 404 on a stale
-   *  deploy) resolves to the COMING_SOON placeholder so the shell still renders. */
+  /** Fetch the module summary. Never throws: any error resolves to the
+   *  placeholder with `reason` classified (forbidden / unavailable / error) so
+   *  the shell renders an HONEST failure state, not a blanket "coming soon". */
   getSummary: async (): Promise<OnlineStoreSummary> => {
     try {
       const res = await api.get('/online-store/summary');
       const data = (res?.data ?? {}) as Partial<OnlineStoreSummary>;
       return {
         available: true,
+        reason: null,
         status: data.status ?? 'FOUNDATION',
         shopify_writes_enabled: data.shopify_writes_enabled ?? false,
+        // A stale backend that omits the flag answered 200 -> assume connected;
+        // an explicit false means every count below is a fail-soft zero.
+        db_connected: data.db_connected ?? true,
+        degraded: data.degraded ?? false,
+        storefronts: Array.isArray(data.storefronts)
+          ? data.storefronts.map((r) => ({
+              storefront_id: String(r?.storefront_id ?? ''),
+              name: String(r?.name ?? r?.storefront_id ?? ''),
+              is_default: r?.is_default ?? null,
+              creds_present: r?.creds_present ?? null,
+              is_live: !!r?.is_live,
+            }))
+          : null,
         counts: data.counts ?? {},
         products_ecom: data.products_ecom ?? null,
         message: data.message ?? null,
       };
-    } catch {
-      return PLACEHOLDER;
+    } catch (err) {
+      // RC-E: label the failure honestly — a 403 is NOT "coming soon".
+      return { ...PLACEHOLDER, reason: classifyLoadError(err) };
     }
   },
 
@@ -195,9 +263,10 @@ export const onlineStoreApi = {
           listed_mapped_rows: num(s.listed_mapped_rows),
         },
         available: true,
+        reason: null,
       };
-    } catch {
-      return STOCK_TALLY_PLACEHOLDER;
+    } catch (err) {
+      return { ...STOCK_TALLY_PLACEHOLDER, reason: classifyLoadError(err) };
     }
   },
 
@@ -210,6 +279,10 @@ export const onlineStoreApi = {
       const d = (res?.data ?? {}) as Partial<StoreHealth>;
       return {
         available: true,
+        reason: null,
+        // A stale backend omitting the flag answered 200 -> assume connected.
+        db_connected: d.db_connected ?? true,
+        degraded: d.degraded ?? false,
         readiness_pct: typeof d.readiness_pct === 'number' ? d.readiness_pct : 0,
         total_products: typeof d.total_products === 'number' ? d.total_products : 0,
         orphans: {
@@ -247,8 +320,8 @@ export const onlineStoreApi = {
           orphan_free_pct: d.sub_scores?.orphan_free_pct ?? 0,
         },
       };
-    } catch {
-      return STORE_HEALTH_PLACEHOLDER;
+    } catch (err) {
+      return { ...STORE_HEALTH_PLACEHOLDER, reason: classifyLoadError(err) };
     }
   },
 };
@@ -277,8 +350,15 @@ export interface StoreHealthFix {
 }
 
 export interface StoreHealth {
-  /** false => the backend didn't answer (stale deploy / 403) — zeroed envelope. */
+  /** false => the backend didn't answer — zeroed envelope; `reason` says WHY. */
   available: boolean;
+  /** Why the read failed when available=false (null on success). */
+  reason?: OnlineStoreLoadFailure | null;
+  /** false => backend answered but its DB was unreachable — the zeros below
+   *  are fail-soft artefacts, not a real 0/100 readiness verdict (OS-021). */
+  db_connected?: boolean | null;
+  /** true => the readiness assembly failed mid-request (DB was connected). */
+  degraded?: boolean | null;
   /** Composite readiness 0-100. */
   readiness_pct: number;
   total_products: number;
@@ -321,6 +401,9 @@ export interface StoreHealth {
  *  outside the gate / any error occurs. Always reads as "0 / not available". */
 const STORE_HEALTH_PLACEHOLDER: StoreHealth = {
   available: false,
+  reason: 'unavailable',
+  db_connected: null,
+  degraded: false,
   readiness_pct: 0,
   total_products: 0,
   orphans: {
@@ -710,10 +793,10 @@ export const collectionsApi = {
       }));
       const total = typeof data.count === 'number' ? data.count : products.length;
       return { products, total, available: true };
-    } catch (err) {
-      // 404/501 = backend not live yet -> degrade to an empty, "unavailable"
-      // preview. Any other error also degrades (the editor stays usable).
-      void _isUnavailable(err);
+    } catch {
+      // Any error degrades to an empty, "unavailable" preview (the editor
+      // stays usable). Callers needing the 403-vs-stale-deploy-vs-error
+      // distinction use classifyLoadError.
       return { products: [], total: 0, available: false };
     }
   },
@@ -1362,11 +1445,16 @@ export interface PushCounts {
 }
 
 /** The GET /push/status payload. `db_connected=false` => the push store is
- *  unavailable (counts are zeros). */
+ *  unavailable (counts are zeros). `status_reason` is set when the READ itself
+ *  failed (OS-018): 'forbidden' means the viewer's role can't see the posture
+ *  — which must NEVER be rendered as "writes OFF"/DARK, since pushes may well
+ *  be LIVE under admin control. */
 export interface PushStatus {
   mode: PushMode;
   db_connected: boolean;
   counts: PushCounts;
+  /** Why the status read failed (null when the backend answered). */
+  status_reason?: OnlineStoreLoadFailure | null;
 }
 
 /** The POST /push/all-pending sweep result — the same engine, run over every
@@ -1388,13 +1476,14 @@ export interface PushSweepResult {
 
 const PUSH_BASE = '/online-store/push';
 
-/** A safe DARK placeholder for getStatus — used when the backend is absent, the
- *  viewer isn't an admin (403), or any error occurs. Always reads as "writes
- *  OFF" so the banner can never mislead. */
+/** A safe placeholder for a FAILED getStatus read. The caller must branch on
+ *  `status_reason` before rendering: a 403 read means "posture unknown to this
+ *  role", NOT "writes OFF" — pushes may be LIVE under admin control (OS-018). */
 const PUSH_STATUS_PLACEHOLDER: PushStatus = {
   mode: { mode: 'SIMULATED', is_live: false },
   db_connected: false,
   counts: {},
+  status_reason: 'unavailable',
 };
 
 /** Unwrap the {result: PushResult} envelope the push routes return. Tolerates a
@@ -1425,9 +1514,13 @@ export const pushApi = {
         },
         db_connected: !!data.db_connected,
         counts: (data.counts ?? {}) as PushCounts,
+        status_reason: null,
       };
-    } catch {
-      return PUSH_STATUS_PLACEHOLDER;
+    } catch (err) {
+      // RC-E/OS-018: label the failed read. A 403 (catalog/design manager)
+      // must render as "posture not visible to your role" — never a false
+      // "Shopify writes OFF" banner while pushes are actually LIVE.
+      return { ...PUSH_STATUS_PLACEHOLDER, status_reason: classifyLoadError(err) };
     }
   },
 
@@ -1686,6 +1779,9 @@ export interface OnlineOrdersResult {
   total: number;
   failed_count: number;
   available: boolean;
+  /** Why the read failed when available=false (null on success) — lets the
+   *  screen distinguish "no permission" / "not deployed" / "couldn't load". */
+  reason?: OnlineStoreLoadFailure | null;
 }
 
 const ORDERS_BASE = '/online-store/orders';
@@ -1774,9 +1870,15 @@ export const ordersApi = {
         typeof data?.failed_count === 'number'
           ? data.failed_count
           : orders.filter((o) => o.map_status === 'FAILED').length;
-      return { orders, total, failed_count, available: true };
-    } catch {
-      return { orders: [], total: 0, failed_count: 0, available: false };
+      return { orders, total, failed_count, available: true, reason: null };
+    } catch (err) {
+      return {
+        orders: [],
+        total: 0,
+        failed_count: 0,
+        available: false,
+        reason: classifyLoadError(err),
+      };
     }
   },
 
@@ -1844,6 +1946,9 @@ export interface RefundReviewsResult {
   reviews: RefundReview[];
   total: number;
   available: boolean;
+  /** Why the read failed when available=false (null on success) — lets the
+   *  screen distinguish "no permission" / "not deployed" / "couldn't load". */
+  reason?: OnlineStoreLoadFailure | null;
 }
 
 export interface RefundReviewFilters {
@@ -1869,9 +1974,9 @@ export const refundReviewsApi = {
       const arr = Array.isArray(data) ? data : (data?.reviews ?? data?.items ?? []);
       const reviews = (Array.isArray(arr) ? arr : []) as RefundReview[];
       const total = typeof data?.total === 'number' ? data.total : reviews.length;
-      return { reviews, total, available: true };
-    } catch {
-      return { reviews: [], total: 0, available: false };
+      return { reviews, total, available: true, reason: null };
+    } catch (err) {
+      return { reviews: [], total: 0, available: false, reason: classifyLoadError(err) };
     }
   },
 
