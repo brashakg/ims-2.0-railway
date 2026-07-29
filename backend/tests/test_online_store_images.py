@@ -572,3 +572,44 @@ def test_design_manager_can_still_sign_off(client, auth_headers, patched_db):
                     json={"status": "REJECTED"})
     assert r.status_code == 200, r.text
     assert r.json()["image"]["status"] == "REJECTED"
+
+
+def test_signoff_role_set_is_pinned():
+    """One-line pin on the approver circle: any widening/narrowing of the
+    sign-off set must be a deliberate, reviewed change (mirrors the frontend
+    canApprove gate in DesignQueuePage)."""
+    from api.routers.online_store_images import _SIGNOFF_ROLES
+
+    assert _SIGNOFF_ROLES == {"SUPERADMIN", "ADMIN", "DESIGN_MANAGER"}
+
+
+def test_admin_can_sign_off(client, auth_headers, patched_db):
+    """OS-024 positive case for ADMIN (SUPERADMIN and DESIGN_MANAGER already
+    have positive cases): an ADMIN token -- which passes require_roles via the
+    _ECOM_ROLES tuple, not the SUPERADMIN bypass -- must clear the handler's
+    sign-off gate too."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": "test-admin-002",
+            "username": "testadmin2",
+            "roles": ["ADMIN"],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    admin_headers = {"Authorization": f"Bearer {token}"}
+
+    base = "/api/v1/online-store/images"
+    r = client.post(base, headers=auth_headers,
+                    json={"product_id": "P-024c", "url": "http://x/raw.jpg"})
+    iid = r.json()["image"]["image_id"]
+    client.post(f"{base}/{iid}/status", headers=admin_headers,
+                json={"status": "IN_PROGRESS"})
+    client.post(f"{base}/{iid}/edited", headers=admin_headers,
+                json={"edited_url": "http://x/edited.jpg"})
+    r = client.post(f"{base}/{iid}/status", headers=admin_headers,
+                    json={"status": "APPROVED"})
+    assert r.status_code == 200, r.text
+    assert r.json()["image"]["status"] == "APPROVED"

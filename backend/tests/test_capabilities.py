@@ -154,3 +154,41 @@ def test_module_grant_or_absent_maps_to_nothing():
     assert C.module_deny_to_capability_denies({"pos": True}) == set()
     assert C.module_deny_to_capability_denies({}) == set()
     assert C.module_deny_to_capability_denies(None) == set()
+
+
+def test_ecommerce_deny_maps_to_online_store_capabilities():
+    """OS-053: denying the 'ecommerce' module must block the online-store API
+    surface, not just the nav -- exactly read+write of the online-store module."""
+    denies = C.module_deny_to_capability_denies({"ecommerce": False})
+    assert denies == {"online-store:read", "online-store:write"}
+
+
+def test_module_capability_mapping_is_live():
+    """Tripwire against the silent fail-OPEN: module_deny_to_capability_denies
+    silently DROPS capability keys not in VALID_CAPABILITY_KEYS, so a future
+    API path-prefix rename (e.g. /online-store -> /shop) would degrade a
+    module deny to nav-only with zero API enforcement -- and green tests.
+    Pin (a) every mapped frontend module is a real deniable module key, and
+    (b) every mapped api module still produces at least one live capability."""
+    from api.services.user_roles import VALID_MODULE_KEYS
+
+    # (a) mapping keys are a subset of the deniable module keys.
+    assert set(C.MODULE_TO_CAPABILITY_MODULES) <= set(VALID_MODULE_KEYS)
+
+    # (b) each mapped api module yields >= 1 key in VALID_CAPABILITY_KEYS, and
+    # each module's deny is non-empty overall.
+    for mod_key, api_mods in C.MODULE_TO_CAPABILITY_MODULES.items():
+        denies = C.module_deny_to_capability_denies({mod_key: False})
+        assert denies, (
+            f"module deny for '{mod_key}' produces NO capability denies (fail-open)"
+        )
+        for api_mod in api_mods:
+            live = {
+                f"{api_mod}:{verb}"
+                for verb in ("read", "write")
+                if f"{api_mod}:{verb}" in C.VALID_CAPABILITY_KEYS
+            }
+            assert live, (
+                f"'{mod_key}' maps to api module '{api_mod}' which produces no key "
+                "in VALID_CAPABILITY_KEYS -- stale path mapping, the deny fails open"
+            )
