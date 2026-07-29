@@ -232,11 +232,16 @@ def test_pim_sku_present_when_mirror_flag_is_OFF(
 def test_write_mirror_records_FAILED_and_does_not_raise_without_sku(
     fake_db, monkeypatch
 ):
-    """catalog_products.sku_1 is unique+sparse: an explicit null would insert
-    once then DuplicateKeyError forever, swallowed into a FAILED sync_status.
-    So a skuless spine must be REFUSED -- but _write_mirror's contract is
-    'NEVER raises' (it runs after the spine is already committed), so the
-    refusal has to surface as a FAILED target, not an exception."""
+    """DEFENCE-IN-DEPTH, unreachable by construction in production: every spine
+    reaching a writer went through normalise_payload, which ALWAYS sets a
+    non-blank sku (product_master.py doc build, `"sku": resolved_sku`) -- there
+    is no live path that hands _write_mirror a skuless spine. This pins the
+    failure MODE if that invariant is ever broken, not a live risk:
+    catalog_products.sku_1 is unique+sparse, an explicit null would insert once
+    then DuplicateKeyError forever, so a skuless spine must be REFUSED -- but
+    _write_mirror's contract is 'NEVER raises' (it runs after the spine is
+    already committed), so the refusal has to surface as a FAILED target, not
+    an exception."""
     monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
     assert pm.mirror_enabled() is True
     spine = {"pim_product_id": "PIM-1", "category": "FRAME", "sku": None}
@@ -249,8 +254,10 @@ def test_write_mirror_records_FAILED_and_does_not_raise_without_sku(
 
 
 def test_stage_catalog_draft_records_FAILED_and_does_not_raise_without_sku(fake_db):
-    """Same contract for the ALWAYS-ON staging writer: fail-soft FAILED target,
-    no exception into the create, no skuless doc written."""
+    """DEFENCE-IN-DEPTH, unreachable by construction in production (see the
+    _write_mirror twin above: normalise_payload always sets a sku). Pins the
+    same failure MODE for the ALWAYS-ON staging writer: fail-soft FAILED
+    target, no exception into the create, no skuless doc written."""
     spine = {"pim_product_id": "PIM-2", "category": "FRAME", "sku": "  "}
     target = pm._stage_catalog_draft(spine, catalog_repo=None, db=fake_db)
     assert target.name == "catalog_draft"
@@ -271,6 +278,162 @@ def test_build_pim_doc_is_pure_and_never_raises():
     with pytest.raises(pm.ProductMasterError):
         pm._assert_pim_sku({"sku": None})
     pm._assert_pim_sku({"sku": "FRX-1"})  # does not raise
+
+
+def test_write_mirror_db_path_lands_the_sku_on_an_existing_pim_doc(
+    fake_db, monkeypatch
+):
+    """The MIRROR writer's db branch is observed actually landing the sku:
+    pre-seed a catalog_products doc at the pim id, run _write_mirror with the
+    mirror ON, and the mirrored doc carries sku == parent_sku == the spine sku.
+
+    NOTE (pre-existing, out of scope here): _write_mirror's db branch uses a
+    NO-upsert update_one and records OK even when it matched 0 docs -- a false
+    OK for a doc that does not exist yet. The always-on _stage_catalog_draft
+    upsert is what actually creates the doc; this test therefore pre-seeds."""
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
+    fake_db["catalog_products"].insert_one({"id": "PIM-MIRROR-1"})
+    spine = {
+        "pim_product_id": "PIM-MIRROR-1",
+        "sku": "FRMIRROR9",
+        "category": "FRAME",
+        "attributes": {},
+    }
+    targets = pm._write_mirror(spine, catalog_repo=None, variant_repo=None, db=fake_db)
+    by_name = {t.name: t for t in targets}
+    assert by_name["catalog_products"].status == "OK"
+    doc = fake_db["catalog_products"].find_one({"id": "PIM-MIRROR-1"})
+    assert doc is not None
+    assert doc["sku"] == "FRMIRROR9"
+    assert doc["parent_sku"] == "FRMIRROR9"
+
+
+# ===========================================================================
+# 2b. P1: the mint consults catalog_products; a unique-index collision is a
+#     NAMED failure, never a generic FAILED behind a 201
+# ===========================================================================
+
+
+def test_mint_unique_sku_consults_catalog_products(fake_db):
+    """Prod holds sku-carrying catalog_products rows with NO products spine
+    (SGRAYMETARW4006601 / SB5050 etc.) -- invisible to product_repo.find_by_sku.
+    build_sku is deterministic, so a Gen-2-style create can mint exactly one of
+    those strings. The mint must consult catalog_products too and take the
+    existing '-<counter>' suffix path."""
+    attrs = _frame_attrs()
+    base = pm.build_sku("FRAME", attrs)
+    fake_db["catalog_products"].insert_one({"id": "CAT-ONLY-1", "sku": base})
+    minted = pm.mint_unique_sku("FRAME", attrs, product_repo=None, db=fake_db)
+    assert minted != base
+    assert minted.startswith(base + "-"), minted
+
+
+def test_mint_unique_sku_without_db_behaves_as_before():
+    """Fail-soft plumbing: no repo AND no db -> the deterministic base,
+    untouched, no counter burn (what the bulk-row validator relies on)."""
+    attrs = _frame_attrs()
+    assert pm.mint_unique_sku("FRAME", attrs) == pm.build_sku("FRAME", attrs)
+
+
+def test_mint_unique_sku_free_in_both_collections_returns_base(fake_db):
+    attrs = _frame_attrs()
+    base = pm.build_sku("FRAME", attrs)
+    # catalog_products holds only an UNRELATED sku -> no collision.
+    fake_db["catalog_products"].insert_one({"id": "CAT-OTHER", "sku": "FRSOMETHINGELSE"})
+    assert pm.mint_unique_sku("FRAME", attrs, product_repo=None, db=fake_db) == base
+
+
+class _DupRaisingCollection(_UpsertCollection):
+    """update_one raises the REAL pymongo DuplicateKeyError, as the sku_1
+    unique index would."""
+
+    def update_one(self, filter: Dict, update: Dict, upsert: bool = False):  # noqa: A002
+        from pymongo.errors import DuplicateKeyError
+
+        raise DuplicateKeyError(
+            "E11000 duplicate key error collection: ims_2_0.catalog_products "
+            "index: sku_1"
+        )
+
+
+def _conflict_db() -> _FakeDb:
+    db = _FakeDb()
+    coll = _DupRaisingCollection("catalog_products")
+    coll.insert_one({"id": "PIM-EXISTING", "sku": "FRCOLLIDE1"})
+    db._colls["catalog_products"] = coll
+    return db
+
+
+def test_stage_catalog_draft_surfaces_FAILED_SKU_CONFLICT(caplog):
+    """A DuplicateKeyError from the catalog write surfaces as the DISTINCT
+    FAILED_SKU_CONFLICT target (not generic FAILED), with an ERROR log naming
+    the colliding sku AND the existing row's id."""
+    import logging as _logging
+
+    db = _conflict_db()
+    spine = {
+        "pim_product_id": "PIM-NEW",
+        "sku": "FRCOLLIDE1",
+        "category": "FRAME",
+        "attributes": {},
+    }
+    with caplog.at_level(_logging.ERROR, logger="api.services.product_master"):
+        target = pm._stage_catalog_draft(spine, catalog_repo=None, db=db)
+    assert target.name == "catalog_draft"
+    assert target.status == "FAILED_SKU_CONFLICT"
+    assert "FRCOLLIDE1" in (target.detail or "")
+    assert "PIM-EXISTING" in (target.detail or "")
+    assert "FRCOLLIDE1" in caplog.text
+    assert "PIM-EXISTING" in caplog.text
+
+
+def test_write_mirror_surfaces_FAILED_SKU_CONFLICT(monkeypatch, caplog):
+    """Same distinct status from the flag-gated mirror writer."""
+    import logging as _logging
+
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
+    db = _conflict_db()
+    spine = {
+        "pim_product_id": "PIM-NEW-2",
+        "sku": "FRCOLLIDE1",
+        "category": "FRAME",
+        "attributes": {},
+    }
+    with caplog.at_level(_logging.ERROR, logger="api.services.product_master"):
+        targets = pm._write_mirror(
+            spine, catalog_repo=None, variant_repo=None, db=db
+        )
+    by_name = {t.name: t for t in targets}
+    assert by_name["catalog_products"].status == "FAILED_SKU_CONFLICT"
+    assert "FRCOLLIDE1" in caplog.text
+    assert "PIM-EXISTING" in caplog.text
+
+
+def test_create_door_survives_a_catalog_side_base_collision(
+    product_repo, variant_repo, audit_repo, fake_db
+):
+    """End-to-end (the Gen-2 shape): the deterministic base sku already exists
+    as a SPINELESS catalog_products row. The create must NOT dangle -- the mint
+    suffixes, the create succeeds under the suffixed sku, and the staged draft
+    lands under the new pim id."""
+    attrs = _frame_attrs()
+    base = pm.build_sku("FRAME", attrs)
+    fake_db["catalog_products"].insert_one({"id": "CAT-ONLY-GEN2", "sku": base})
+    created = pm.create_via_door(
+        _form_payload(),
+        source="FORM",
+        actor="u1",
+        product_repo=product_repo,
+        variant_repo=variant_repo,
+        audit_repo=audit_repo,
+        db=fake_db,
+    )
+    assert created["sku"] != base
+    assert created["sku"].startswith(base + "-")
+    staged = fake_db["catalog_products"].find_one({"id": created["pim_product_id"]})
+    assert staged is not None
+    assert staged["sku"] == created["sku"]
+    assert created["sync_status"]["targets"]["catalog_draft"]["status"] == "OK"
 
 
 # ===========================================================================
@@ -327,8 +490,11 @@ def test_skuless_pim_doc_cannot_be_blocked_which_is_why_sku_is_required(fake_db)
 def test_blocked_sku_batch_classifier_matches_the_landed_pim_sku(
     product_repo, variant_repo, audit_repo, fake_db, monkeypatch
 ):
-    """End-to-end shape of the push-sweep guard: `dirty_skus` is built from
-    `doc.get("sku")` and re-checked with `doc.get("sku") in blocked_set`."""
+    """The block classifier, keyed on the LANDED sku, matches. NOTE the honest
+    scope: this REIMPLEMENTS the push-sweep's `dirty_skus` construction
+    (`doc.get("sku")` -> classify_blocked_skus) rather than calling the sweep
+    itself -- it pins the classifier's contract on the landed doc shape, not
+    the sweep's end-to-end wiring."""
     monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
     created = pm.create_via_door(
         _form_payload(),
@@ -525,7 +691,13 @@ def test_backfill_never_touches_ecom():
         ("G6", lambda c, p, v: v.rows.pop(0)),
     ],
 )
-def test_backfill_each_gate_aborts_with_zero_writes(gate, mutate):
+def test_backfill_each_gate_detects_and_names_its_corruption(gate, mutate):
+    """Each corruption raises GateFailure classified as the RIGHT gate, with
+    offenders attached. HONEST SCOPE: run_gates only ever READS, so asserting
+    'zero writes' here would be tautological -- the actual zero-writes-on-gate-
+    failure guarantee is main()'s ordering (gates run before apply_repairs),
+    pinned end-to-end by test_backfill_main_gate_failure_exits_4_zero_writes
+    below."""
     catalog, products, variants = _bf_world(3)
     mutate(catalog, products, variants)
     targets = bf.select_targets(catalog)
@@ -533,9 +705,6 @@ def test_backfill_each_gate_aborts_with_zero_writes(gate, mutate):
         bf.run_gates(targets, catalog, products, variants)
     assert ei.value.gate == gate
     assert ei.value.offenders
-    # Gates run BEFORE any write -- nothing was written.
-    assert catalog.write_calls == []
-    assert catalog.count_documents(bf.TARGET_PREDICATE) == len(targets)
 
 
 def test_backfill_fingerprint_must_match_before_any_write():
@@ -588,3 +757,226 @@ def test_backfill_resolve_uri_fails_loud_without_env(monkeypatch):
         bf.resolve_uri()
     monkeypatch.setenv("MONGO_PUBLIC_URL", "mongodb://h:1/x")
     assert bf.resolve_uri() == "mongodb://h:1/x"
+
+
+def _bf_prod_world():
+    """The EXACT prod fingerprint shape: 59 catalog rows (53 skuless targets +
+    6 sku-carrying rows with NO spine, the SGRAYMETARW4006601-style strays),
+    53 products spine rows, 53 variants. Gap = 6, targets = 53."""
+    catalog_rows = [
+        {
+            "id": f"PIM-{i:02d}",
+            "parent_sku": f"FRSKU{i:02d}",
+            "ecom": {"status": "DRAFT"},
+        }
+        for i in range(53)
+    ]
+    catalog_rows += [{"id": f"CAT-ONLY-{j}", "sku": f"SGSTRAY{j}"} for j in range(6)]
+    products_rows = [
+        {"pim_product_id": f"PIM-{i:02d}", "sku": f"FRSKU{i:02d}"} for i in range(53)
+    ]
+    variant_rows = [
+        {"parent_product_id": f"PIM-{i:02d}", "sku": f"FRSKU{i:02d}"}
+        for i in range(53)
+    ]
+    return _BfColl(catalog_rows), _BfColl(products_rows), _BfColl(variant_rows)
+
+
+def test_backfill_fingerprint_growth_tolerant_but_target_count_exact():
+    """P2 (counts freeze): exact 59/53 would brick the script on the FIRST
+    product create after deploy (each create adds a row to BOTH collections).
+    The floors are >=, the (catalog - products) gap stays EXACTLY 6, and the
+    no-sku TARGET count stays EXACTLY 53 unless --expect-targets overrides."""
+    catalog, products, _variants = _bf_prod_world()
+    # Exact prod shape passes.
+    assert bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products) == []
+    # Post-deploy growth: two creates add one row to BOTH collections each.
+    for i in range(2):
+        catalog.rows.append(
+            {"id": f"NEW-{i}", "sku": f"FRNEW{i}", "parent_sku": f"FRNEW{i}"}
+        )
+        products.rows.append({"pim_product_id": f"NEW-{i}", "sku": f"FRNEW{i}"})
+    assert bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products) == []
+    # A CHANGED target set aborts... (a 54th skuless row appears)
+    catalog.rows.append({"id": "T-NEW", "parent_sku": "FRTNEW"})
+    products.rows.append({"pim_product_id": "T-NEW", "sku": "FRTNEW"})
+    problems = bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products)
+    assert any("target" in p.lower() for p in problems)
+    # ...unless --expect-targets records the verified new count.
+    assert (
+        bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products, expect_targets=54)
+        == []
+    )
+    # The gap invariant stays HARD: a catalog-only row (no spine) breaks == 6.
+    catalog.rows.append({"id": "STRAY-NEW", "sku": "SGSTRAYNEW"})
+    problems = bf.check_fingerprint(
+        bf.EXPECTED_DB_NAME, catalog, products, expect_targets=54
+    )
+    assert any("gap" in p.lower() for p in problems)
+
+
+def test_backfill_fingerprint_db_name_and_index_shape_stay_hard():
+    """The db name + sku_1 unique+sparse assertions were NOT loosened."""
+    catalog, products, _variants = _bf_prod_world()
+    assert any(
+        "db name" in p for p in bf.check_fingerprint("wrong_db", catalog, products)
+    )
+    bad_index = _BfColl(
+        [dict(r) for r in catalog.rows],
+        index_info={"sku_1": {"unique": False, "sparse": True}},
+    )
+    assert any(
+        "not unique" in p
+        for p in bf.check_fingerprint(bf.EXPECTED_DB_NAME, bad_index, products)
+    )
+
+
+# ===========================================================================
+# 5. bf.main() end-to-end against injected fakes (P1: main was untested)
+# ===========================================================================
+
+
+class _BfFakeMongoDb:
+    def __init__(self, name: str, colls: Dict[str, Any]):
+        self.name = name
+        self._colls = colls
+
+    def command(self, *_a, **_k):
+        return {"ok": 1}
+
+    def __getitem__(self, name: str):
+        return self._colls.get(name, _BfColl([]))
+
+
+class _BfFakeMongoClient:
+    """Stands in for pymongo.MongoClient: returns the SAME fake db whatever
+    name the uri carries (main derives the db name from the uri, so the test
+    controls it via the MONGO_PUBLIC_URL it sets)."""
+
+    _colls: Dict[str, Any] = {}
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def __getitem__(self, name: str):
+        return _BfFakeMongoDb(name, type(self)._colls)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def bf_main_world(monkeypatch, tmp_path):
+    """Wire bf.main() to a clean full-prod-shape fake world. Returns
+    (catalog, products, variants, audit_path, run) where run(argv) invokes
+    main with the audit path appended and returns the exit code."""
+    import json as _json
+
+    catalog, products, variants = _bf_prod_world()
+    _BfFakeMongoClient._colls = {
+        "catalog_products": catalog,
+        "products": products,
+        "catalog_variants": variants,
+    }
+    monkeypatch.setattr(bf, "MongoClient", _BfFakeMongoClient)
+    monkeypatch.setenv("MONGO_PUBLIC_URL", "mongodb://h:1/ims_2_0")
+    monkeypatch.delenv("MONGODB_URL", raising=False)
+    monkeypatch.delenv("MONGO_URL", raising=False)
+    audit_path = tmp_path / "audit.json"
+
+    def run(argv):
+        return bf.main(list(argv) + ["--audit-path", str(audit_path)])
+
+    def read_audit():
+        assert audit_path.exists(), "the audit file must be written on EVERY path"
+        with open(audit_path, encoding="ascii") as fh:
+            return _json.load(fh)
+
+    return catalog, products, variants, run, read_audit
+
+
+def test_backfill_main_dry_run_writes_nothing_exit_0(bf_main_world):
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    assert run([]) == 0
+    assert catalog.write_calls == []
+    audit = read_audit()
+    assert audit["outcome"] == "DRY-RUN-COMPLETE"
+    assert audit["mode"] == "DRY-RUN"
+    assert audit["target_count"] == 53
+    assert audit["modified_count"] == 0
+
+
+def test_backfill_main_apply_without_deploy_flag_refused_exit_6(bf_main_world):
+    """P1 (deploy ordering): --apply alone is REFUSED before any connection --
+    if the 53 rows gain a sku while the OLD online_catalog.py is deployed,
+    sellable_online flips True->False for the 27 live Ray-Ban Meta SKUs and
+    the oversell alarm goes silent."""
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    assert run(["--apply"]) == 6
+    assert catalog.write_calls == []
+    audit = read_audit()
+    assert audit["outcome"] == "ABORTED-DEPLOY-GATE"
+    assert audit["modified_count"] == 0
+
+
+def test_backfill_main_apply_with_deploy_flag_completes_exit_0(bf_main_world):
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    assert run(["--apply", "--code-is-deployed"]) == 0
+    audit = read_audit()
+    assert audit["outcome"] == "COMPLETE"
+    assert audit["modified_count"] == 53
+    assert len(audit["modified_ids"]) == 53
+    # Every target really carries its parent_sku now; the strays are untouched.
+    assert catalog.count_documents(bf.TARGET_PREDICATE) == 0
+    assert catalog.find_one({"id": "PIM-00"})["sku"] == "FRSKU00"
+    assert catalog.find_one({"id": "CAT-ONLY-0"})["sku"] == "SGSTRAY0"
+
+
+def test_backfill_main_fingerprint_mismatch_exit_3_zero_writes(
+    bf_main_world, monkeypatch
+):
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    # Point the uri at a WRONG db name -- the fake client hands back the same
+    # collections under that name, so ONLY the db-name assertion trips.
+    monkeypatch.setenv("MONGO_PUBLIC_URL", "mongodb://h:1/wrong_db")
+    assert run(["--apply", "--code-is-deployed"]) == 3
+    assert catalog.write_calls == []
+    audit = read_audit()
+    assert audit["outcome"] == "ABORTED-FINGERPRINT"
+    assert audit["modified_count"] == 0
+
+
+def test_backfill_main_gate_failure_exits_4_zero_writes(bf_main_world):
+    """THE ordering guarantee the reworded gate test above defers to: a gate
+    failure inside main() aborts BEFORE apply_repairs -- zero writes."""
+    catalog, products, _variants, run, read_audit = bf_main_world
+    products.rows[0]["sku"] = "DISAGREES"  # breaks G5 for PIM-00
+    assert run(["--apply", "--code-is-deployed"]) == 4
+    assert catalog.write_calls == []
+    audit = read_audit()
+    assert audit["outcome"] == "ABORTED-GATE-G5"
+    assert audit["modified_count"] == 0
+
+
+class _BfRefusingColl(_BfColl):
+    """update_one reports modified_count=0 for ONE id (a row a concurrent
+    writer stole), everything else behaves normally."""
+
+    refuse_id = "PIM-52"
+
+    def update_one(self, filter, update, *_a, **_k):  # noqa: A002
+        if (filter or {}).get("id") == self.refuse_id:
+            self.write_calls.append((filter, update))
+            return type("obj", (object,), {"modified_count": 0})()
+        return super().update_one(filter, update)
+
+
+def test_backfill_main_write_shortfall_exit_5_outcome_partial(bf_main_world):
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    refusing = _BfRefusingColl([dict(r) for r in catalog.rows])
+    _BfFakeMongoClient._colls["catalog_products"] = refusing
+    assert run(["--apply", "--code-is-deployed"]) == 5
+    audit = read_audit()
+    assert audit["outcome"] == "PARTIAL@PIM-51"
+    assert audit["modified_count"] == 52
+    assert "PIM-52" not in audit["modified_ids"]
