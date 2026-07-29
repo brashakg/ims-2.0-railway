@@ -36,6 +36,29 @@ join key (never Mongo _id), so a re-push UPDATES the same Shopify object instead
 of creating a duplicate. The presence of a stored Shopify id is what selects
 create-vs-update in the mutation.
 
+VARIANT SEEDING ON CREATE (2026-07 fix -- IMS is the sole Shopify writer):
+ProductInput carries NO price and NO sku (the 2024-04+ product model moved both
+onto the variant), so a bare productCreate lands a product whose default variant
+is price 0.00 with no SKU. Every CREATE therefore runs a second step:
+productCreate returns its auto-created variant(s); we set price /
+compareAtPrice / barcode / inventoryItem.sku on them via
+productVariantsBulkUpdate, create any REMAINING IMS variants via
+productVariantsBulkCreate, and write every returned ProductVariant gid back
+(ecom.shopify_variant_id + catalog_variants.shopify_variant_id) so a later price
+push can find them. UPDATES of already-mapped products are UNCHANGED by default
+-- seeding a price onto the ~4,400 live products is opt-in via
+SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
+
+Optional env flags (all default OFF -- nothing changes unless the owner sets them):
+  SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
+                                  an UPDATE of an already-mapped product.
+  SHOPIFY_PUBLISH_ON_CREATE=1     publish a newly created ACTIVE product to the
+                                  Online Store sales channel (publishablePublish).
+                                  A DRAFT is NEVER published. The publication id
+                                  can be pinned with SHOPIFY_ONLINE_STORE_PUBLICATION_ID
+                                  (else it is looked up once via `publications`,
+                                  which needs the read_publications scope).
+
 FAIL-SOFT: every function returns a structured PushResult and NEVER raises. A
 Shopify/GraphQL error becomes {ok: False, error: ...}; a missing doc becomes a
 404-style {ok: False}. A push must never take down the caller.
@@ -118,6 +141,15 @@ class PushResult:
     # planned ProductVariantsBulkInput rows; LIVE -> a summary dict. None
     # elsewhere (and None when the product has no variants).
     variant_prices: Optional[Any] = None
+    # Product CREATE only (and UPDATE when SHOPIFY_PUSH_PRICE_ON_UPDATE is on):
+    # the variant-seeding side channel that gives the new Shopify variants their
+    # price / compareAtPrice / barcode / SKU. SIMULATED -> the planned rows;
+    # LIVE -> an {updated, created, skipped, errors} summary. None elsewhere.
+    variants_seeded: Optional[Any] = None
+    # Product CREATE only, and only when SHOPIFY_PUBLISH_ON_CREATE is on: the
+    # Online-Store sales-channel publish side channel. None when the flag is off
+    # (the default) or the product is a DRAFT.
+    publication: Optional[Any] = None
     # Collection pushes only (CUSTOM): the manual-membership side channel (the
     # collectionAddProducts step -- IMS's stored manual member list reproduced on
     # Shopify). SIMULATED -> the planned {product_ids, skipped_not_on_shopify};
@@ -132,6 +164,35 @@ class PushResult:
 # ===========================================================================
 # Gating -- the single source of truth for "are we DARK or LIVE?"
 # ===========================================================================
+
+
+def _env_on(name: str) -> bool:
+    """A truthy env flag, read at CALL time (never cached at import) so a
+    deploy-time change -- or a test monkeypatch -- takes effect immediately.
+    Mirrors nexus_providers.ims_shopify_writes_enabled's accepted values."""
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def price_on_update_enabled() -> bool:
+    """SHOPIFY_PUSH_PRICE_ON_UPDATE -- default OFF.
+
+    OFF (default): an UPDATE of an already-mapped product behaves EXACTLY as it
+    did before the variant-seeding fix -- no price/sku seeding, no variant-gid
+    capture. This is deliberate: ~4,400 products are already live on Shopify and
+    silently re-pricing them from IMS is an owner decision, not a side effect of
+    a catalogue edit. (The existing, separately gated variant-price push is
+    unaffected: it still updates variants that ALREADY carry a stored gid.)"""
+    return _env_on("SHOPIFY_PUSH_PRICE_ON_UPDATE")
+
+
+def publish_on_create_enabled() -> bool:
+    """SHOPIFY_PUBLISH_ON_CREATE -- default OFF.
+
+    OFF (default): a newly created product is NOT published to the Online Store
+    sales channel, so it stays invisible on the storefront exactly as today.
+    ON: an ACTIVE new product is published via publishablePublish. A DRAFT is
+    never published regardless of the flag (the owner's publish gate)."""
+    return _env_on("SHOPIFY_PUBLISH_ON_CREATE")
 
 
 def push_mode_status(db) -> Dict[str, Any]:
@@ -156,6 +217,9 @@ def push_mode_status(db) -> Dict[str, Any]:
         "creds_present": creds,
         "is_live": live,
         "api_version": SHOPIFY_API_VERSION,
+        # Additive, default-OFF behaviour flags (see the module docstring).
+        "price_on_update": price_on_update_enabled(),
+        "publish_on_create": publish_on_create_enabled(),
         "single_writer_note": (
             "IMS is the single Shopify writer (BVI was retired on 2026-07-20). "
             "Push runs LIVE only when IMS_SHOPIFY_WRITES=1 AND "
@@ -423,19 +487,41 @@ def _now() -> datetime:
 # bump can't silently change the contract. Each create returns the new gid which
 # we write back for idempotency; each update is selected when a gid already exists.
 
+# NOTE (API 2024-10 product model): ProductInput carries NO price and NO sku --
+# both live on the VARIANT since 2024-04. productCreate therefore auto-creates a
+# single variant (Shopify: "Only one product variant is created and linked with
+# the first option value specified for each option name") at price 0.00 with no
+# SKU. We select that variant back so the seeding step can price + SKU it; the
+# extra selection is read-only and changes nothing about what is written.
 _PRODUCT_CREATE = """
 mutation imsProductCreate($input: ProductInput!) {
   productCreate(input: $input) {
-    product { id handle }
+    product {
+      id
+      handle
+      variants(first: 100) {
+        nodes { id title selectedOptions { name value } }
+      }
+    }
     userErrors { field message }
   }
 }
 """
 
+# The UPDATE mutation ALSO selects the variants back, but the seeding step is
+# only reached on an update when SHOPIFY_PUSH_PRICE_ON_UPDATE is on (default
+# OFF) -- so by default an update is byte-identical to before apart from this
+# read-only selection.
 _PRODUCT_UPDATE = """
 mutation imsProductUpdate($input: ProductInput!) {
   productUpdate(input: $input) {
-    product { id handle }
+    product {
+      id
+      handle
+      variants(first: 100) {
+        nodes { id title selectedOptions { name value } }
+      }
+    }
     userErrors { field message }
   }
 }
@@ -520,6 +606,44 @@ mutation imsVariantPricesUpdate($productId: ID!, $variants: [ProductVariantsBulk
 # Shopify caps productVariantsBulkUpdate at 250 variants per call (eyewear
 # products carry a handful, but the cap keeps a pathological doc safe).
 _VARIANTS_PER_CALL = 250
+
+# CREATE-side companion: productCreate only ever materialises ONE variant, so
+# any REMAINING IMS variant (a second colour / size) has to be created. Same
+# ProductVariantsBulkInput shape, plus optionValues to place it on the option
+# grid. Returns the new gids so they can be written back for idempotency.
+_VARIANTS_BULK_CREATE = """
+mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkCreate(productId: $productId, variants: $variants) {
+    productVariants { id title selectedOptions { name value } }
+    userErrors { field message }
+  }
+}
+"""
+
+# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE, default OFF). A product that
+# is ACTIVE but published to NO channel is invisible on the storefront; this is
+# the step that puts it on the Online Store. Only `userErrors` is selected so
+# the operation stays valid across Admin API versions.
+_PUBLISHABLE_PUBLISH = """
+mutation imsPublishablePublish($id: ID!, $input: [PublicationInput!]!) {
+  publishablePublish(id: $id, input: $input) {
+    userErrors { field message }
+  }
+}
+"""
+
+# Publication lookup (only when SHOPIFY_ONLINE_STORE_PUBLICATION_ID is not set).
+# Needs the read_publications scope; fail-soft when the app lacks it.
+_PUBLICATIONS_QUERY = """
+query imsPublications {
+  publications(first: 25) { nodes { id name } }
+}
+"""
+
+# The Shopify sales channel whose publication we target on create.
+_ONLINE_STORE_PUBLICATION_NAME = "Online Store"
+# Resolved once per process (a publication id is stable for the shop).
+_publication_id_cache: Dict[str, str] = {}
 
 
 # ===========================================================================
@@ -795,6 +919,334 @@ def build_variant_price_inputs(
     return rows, skipped
 
 
+# ---------------------------------------------------------------------------
+# CREATE-side variant seeding (the price-0.00 / no-SKU fix)
+# ---------------------------------------------------------------------------
+# ProductInput has no price/sku, so a bare productCreate lands a product whose
+# variant is unsellable-looking (0.00) and unjoinable (no SKU). These pure
+# builders describe the variant state we WANT; _seed_variants_after_write applies
+# it to the variants Shopify actually materialised.
+
+
+def _norm_opt(value: Any) -> str:
+    """Normalised option token used to join an IMS variant to a Shopify one."""
+    return str(value or "").strip().lower()
+
+
+def _variant_option_key(variant: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    """(color, size) join key for an IMS catalog_variants row. The product-level
+    pseudo-variant (None) keys to ("", ""), which is exactly what Shopify's
+    "Default Title" variant keys to -- so a no-variant product maps 1:1 onto the
+    single default variant."""
+    v = variant or {}
+    return (_norm_opt(v.get("option_color")), _norm_opt(v.get("option_size")))
+
+
+def _node_option_key(node: Dict[str, Any]) -> Tuple[str, str]:
+    """(color, size) join key for a Shopify ProductVariant node, read off its
+    selectedOptions. Any option we do not model (incl. "Title"/"Default Title")
+    contributes nothing, so a default variant keys to ("", "")."""
+    color = size = ""
+    for so in (node or {}).get("selectedOptions") or []:
+        name = _norm_opt((so or {}).get("name"))
+        if name == "color":
+            color = _norm_opt(so.get("value"))
+        elif name == "size":
+            size = _norm_opt(so.get("value"))
+    return (color, size)
+
+
+def _variant_option_values(variant: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """VariantOptionValueInput rows (used only when CREATING a variant Shopify
+    did not auto-create). Empty for a product-level / option-less variant --
+    such a variant can never be created, only updated."""
+    v = variant or {}
+    out: List[Dict[str, str]] = []
+    if v.get("option_color"):
+        out.append({"optionName": "Color", "name": str(v["option_color"])})
+    if v.get("option_size"):
+        out.append({"optionName": "Size", "name": str(v["option_size"])})
+    return out
+
+
+def build_variant_seed_rows(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """The DESIRED Shopify variant state for a product being created. Pure.
+
+    One entry per IMS variant, or exactly ONE product-level entry when the
+    product carries no catalog_variants row (the common eyewear case: a single
+    Shopify "Default Title" variant). Each entry is
+    {key, option_values, row, variant} where `row` is the price/sku part of a
+    ProductVariantsBulkInput:
+        price            the resolved selling price, "0.00" is NEVER sent
+        compareAtPrice   the MRP, only when it is strictly above the price
+        barcode          the GTIN (variant gtin/barcode, else the product's) --
+                         `store_barcode` is the physical join key and is never pushed
+        inventoryItem.sku the IMS SKU (variant sku, else the product sku) -- in
+                         the 2024-04+ product model the SKU lives on the
+                         inventory item, NOT on the variant
+
+    An entry with NEITHER a usable price NOR a SKU is dropped: there would be
+    nothing to say about that variant."""
+    rows: List[Dict[str, Any]] = []
+    source: List[Optional[Dict[str, Any]]] = list(variants or []) or [None]
+    for v in source:
+        vd = v or {}
+        price, mrp = _resolve_variant_pricing(product, vd)
+        sku = str(vd.get("sku") or product.get("sku") or "").strip()
+        barcode = (
+            vd.get("gtin")
+            or vd.get("barcode")
+            or product.get("gtin")
+            or product.get("barcode")
+        )
+        row: Dict[str, Any] = {}
+        if price > 0:
+            row["price"] = f"{price:.2f}"
+            if mrp > price:
+                row["compareAtPrice"] = f"{mrp:.2f}"
+        if sku:
+            row["inventoryItem"] = {"sku": sku}
+        if barcode:
+            row["barcode"] = str(barcode)
+        if not row.get("price") and not row.get("inventoryItem"):
+            # No price and no SKU -> nothing worth a mutation for this variant.
+            continue
+        rows.append(
+            {
+                "key": _variant_option_key(v),
+                "option_values": _variant_option_values(v),
+                "row": row,
+                "variant": v,  # None for the product-level pseudo-variant
+            }
+        )
+    return rows
+
+
+def plan_variant_seed(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> Optional[Dict[str, Any]]:
+    """The SIMULATED (dry-run) view of the seeding step: the exact rows that
+    WOULD be applied to the new Shopify variants, with no gid yet (Shopify mints
+    those at create time). None when there is nothing to seed."""
+    rows = build_variant_seed_rows(product, variants)
+    if not rows:
+        return None
+    planned: List[Dict[str, Any]] = []
+    for r in rows:
+        entry = dict(r["row"])
+        if r["option_values"]:
+            entry["optionValues"] = r["option_values"]
+        planned.append(entry)
+    return {
+        "variants": planned,
+        "note": (
+            "price/compareAtPrice/barcode/sku are applied to the variants "
+            "Shopify creates (productVariantsBulkUpdate), and any remaining IMS "
+            "variant is created (productVariantsBulkCreate)"
+        ),
+    }
+
+
+def _assign_seed_rows(
+    seed_rows: List[Dict[str, Any]], nodes: Optional[List[Dict[str, Any]]]
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Optional[Dict[str, Any]]],
+    List[Tuple[Optional[Dict[str, Any]], str]],
+    int,
+]:
+    """Split the desired rows against the variants Shopify actually created.
+    Pure. Returns (update_rows, create_rows, create_variants, pairs, skipped):
+
+      update_rows      ProductVariantsBulkInput rows carrying the matched gid
+      create_rows      rows for IMS variants Shopify did NOT create (productCreate
+                       only ever materialises one variant)
+      create_variants  the IMS variant docs aligned 1:1 with create_rows
+      pairs            (ims_variant_or_None, gid) for the matched ones -> write-back
+      skipped          rows we can neither update nor create (no gid, no options)
+    """
+    pool: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    unmatched: List[Dict[str, Any]] = []
+    for n in nodes or []:
+        if isinstance(n, dict) and n.get("id"):
+            pool.setdefault(_node_option_key(n), []).append(n)
+            unmatched.append(n)
+
+    update_rows: List[Dict[str, Any]] = []
+    create_rows: List[Dict[str, Any]] = []
+    create_variants: List[Optional[Dict[str, Any]]] = []
+    pairs: List[Tuple[Optional[Dict[str, Any]], str]] = []
+    skipped = 0
+    # Single-row / single-variant products: trust the 1:1 pairing even if the
+    # option labels do not line up (e.g. Shopify kept a "Title" option).
+    lone = len(seed_rows) == 1 and len(unmatched) == 1
+
+    for r in seed_rows:
+        bucket = pool.get(r["key"]) or []
+        node = bucket.pop(0) if bucket else (unmatched[0] if lone else None)
+        if node is not None:
+            if node in unmatched:
+                unmatched.remove(node)
+            gid = _as_shopify_gid(node.get("id"), "ProductVariant")
+            update_rows.append({"id": gid, **r["row"]})
+            pairs.append((r["variant"], gid))
+        elif r["option_values"]:
+            create_rows.append({"optionValues": r["option_values"], **r["row"]})
+            create_variants.append(r["variant"])
+        else:
+            skipped += 1
+    return update_rows, create_rows, create_variants, pairs, skipped
+
+
+async def _seed_variants_after_write(
+    db,
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]],
+    product_gid: str,
+    nodes: Optional[List[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """LIVE-only: give the freshly created Shopify variants their price / MRP /
+    barcode / SKU, create any remaining IMS variant, and write every gid back.
+
+    Fail-SOFT side channel, exactly like metafields: an error is reported in the
+    returned summary and NEVER flips the product push's ok (the product itself
+    was created successfully; a re-push repairs the variants). Returns None when
+    there is nothing to seed (no price and no SKU anywhere)."""
+    seed_rows = build_variant_seed_rows(product, variants)
+    if not seed_rows:
+        return None
+    update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
+        seed_rows, nodes
+    )
+    summary: Dict[str, Any] = {
+        "updated": 0,
+        "created": 0,
+        "skipped_unmatched": skipped,
+        "errors": [],
+        "default_variant_gid": None,
+        "variant_gids": [],
+    }
+
+    for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
+        chunk = update_rows[i : i + _VARIANTS_PER_CALL]
+        try:
+            body = await _graphql(
+                db, _VARIANTS_BULK_UPDATE, {"productId": product_gid, "variants": chunk}
+            )
+            err = _user_errors(body, "productVariantsBulkUpdate")
+            if err:
+                summary["errors"].append(err)
+            else:
+                summary["updated"] += len(chunk)
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            summary["errors"].append(str(e))
+
+    created_nodes: List[Dict[str, Any]] = []
+    for i in range(0, len(create_rows), _VARIANTS_PER_CALL):
+        chunk = create_rows[i : i + _VARIANTS_PER_CALL]
+        try:
+            body = await _graphql(
+                db, _VARIANTS_BULK_CREATE, {"productId": product_gid, "variants": chunk}
+            )
+            err = _user_errors(body, "productVariantsBulkCreate")
+            if err:
+                summary["errors"].append(err)
+                continue
+            made = (
+                (body.get("data") or {}).get("productVariantsBulkCreate") or {}
+            ).get("productVariants") or []
+            created_nodes.extend(n for n in made if isinstance(n, dict) and n.get("id"))
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            summary["errors"].append(str(e))
+    summary["created"] = len(created_nodes)
+
+    # Match the newly created variants back to their IMS rows (same option key)
+    # so their gids are persisted too.
+    if created_nodes:
+        by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for n in created_nodes:
+            by_key.setdefault(_node_option_key(n), []).append(n)
+        for v in create_variants:
+            bucket = by_key.get(_variant_option_key(v)) or []
+            if bucket:
+                pairs.append(
+                    (v, _as_shopify_gid(bucket.pop(0).get("id"), "ProductVariant"))
+                )
+
+    for variant_doc, gid in pairs:
+        summary["variant_gids"].append(gid)
+        if variant_doc:
+            _writeback_variant(db, variant_doc, gid)
+    if pairs:
+        # The FIRST pair is the default variant (the product-level row for a
+        # no-variant product) -- the one a later price push needs.
+        summary["default_variant_gid"] = pairs[0][1]
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE -- default OFF)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_online_store_publication_id(db) -> Optional[str]:
+    """The Online Store publication gid: the pinned env value when set, else a
+    one-time `publications` lookup (cached per process). Fail-soft -> None (the
+    publish step then reports why instead of raising)."""
+    pinned = (os.getenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID") or "").strip()
+    if pinned:
+        return _as_shopify_gid(pinned, "Publication")
+    cached = _publication_id_cache.get(_ONLINE_STORE_PUBLICATION_NAME)
+    if cached:
+        return cached
+    try:
+        body = await _graphql(db, _PUBLICATIONS_QUERY, {})
+    except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+        logger.warning("[SHOPIFY_PUSH] publication lookup failed: %s", e)
+        return None
+    nodes = ((body.get("data") or {}).get("publications") or {}).get("nodes") or []
+    for n in nodes:
+        if str((n or {}).get("name") or "").strip().lower() == (
+            _ONLINE_STORE_PUBLICATION_NAME.lower()
+        ):
+            gid = n.get("id")
+            if gid:
+                _publication_id_cache[_ONLINE_STORE_PUBLICATION_NAME] = gid
+                return gid
+    return None
+
+
+async def _publish_to_online_store(db, product_gid: str) -> Dict[str, Any]:
+    """LIVE-only: publish ONE product to the Online Store sales channel so an
+    ACTIVE product is actually visible on the storefront. Fail-SOFT side channel
+    (reported, never flips the push's ok). Only ever called on a CREATE, only
+    when SHOPIFY_PUBLISH_ON_CREATE is on, and never for a DRAFT."""
+    pub_id = await _resolve_online_store_publication_id(db)
+    if not pub_id:
+        return {
+            "published": False,
+            "error": (
+                "Online Store publication id not resolved (set "
+                "SHOPIFY_ONLINE_STORE_PUBLICATION_ID or grant read_publications)"
+            ),
+        }
+    try:
+        body = await _graphql(
+            db,
+            _PUBLISHABLE_PUBLISH,
+            {"id": product_gid, "input": [{"publicationId": pub_id}]},
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+        return {"published": False, "publication_id": pub_id, "error": str(e)}
+    err = _user_errors(body, "publishablePublish")
+    if err:
+        return {"published": False, "publication_id": pub_id, "error": err}
+    return {"published": True, "publication_id": pub_id}
+
+
 def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
     """Build a Shopify CollectionInput from an ecom_collections doc. A SMART
     collection's rules become a ruleSet; a CUSTOM collection's manual SKU list is
@@ -972,9 +1424,17 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ===========================================================================
 
 
-def _writeback_product(db, product_id: str, shopify_id: str) -> None:
+def _writeback_product(
+    db, product_id: str, shopify_id: str, variant_gid: Optional[str] = None
+) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
+
+    `variant_gid` (optional) additionally persists ecom.shopify_variant_id -- the
+    DEFAULT Shopify variant of this product. Without it a product created by IMS
+    could never have its price corrected: ProductInput carries no price, so the
+    only handle on the money is the variant gid. It is only ever SET, never
+    cleared, so a call without it leaves an existing mapping intact.
 
     We READ-MERGE-WRITE the whole `ecom` sub-doc (read the doc, mutate the ecom
     dict in Python, $set ecom back) rather than `$set {"ecom.shopify_product_id":
@@ -990,11 +1450,40 @@ def _writeback_product(db, product_id: str, shopify_id: str) -> None:
             return
         ecom = dict(doc.get("ecom") or {})
         ecom["shopify_product_id"] = shopify_id
+        if variant_gid:
+            ecom["shopify_variant_id"] = variant_gid
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
+
+
+def _writeback_variant(db, variant: Dict[str, Any], shopify_variant_id: str) -> bool:
+    """Persist shopify_variant_id on the catalog_variants row, keyed on `sku`
+    (its primary identity; `variant_id` is the fallback). This is what makes the
+    EXISTING price push (build_variant_price_inputs, which skips gid-less
+    variants) able to repair a price later. Returns True iff a row was written.
+    Fail-soft: never raises -- the Shopify write already succeeded."""
+    filt: Optional[Dict[str, Any]] = None
+    if (variant or {}).get("sku"):
+        filt = {"sku": variant["sku"]}
+    elif (variant or {}).get("variant_id"):
+        filt = {"variant_id": variant["variant_id"]}
+    if filt is None:
+        return False
+    try:
+        res = db["catalog_variants"].update_one(
+            filt,
+            {"$set": {"shopify_variant_id": shopify_variant_id, "updated_at": _now()}},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[SHOPIFY_PUSH] variant write-back failed {filt}: {e}")
+        return False
+    touched = getattr(res, "matched_count", None)
+    if touched is None:
+        touched = getattr(res, "modified_count", 0)
+    return bool(touched)
 
 
 def _writeback_simple(
@@ -1113,6 +1602,13 @@ async def push_product(
         if variants:
             vp_rows, vp_skipped = build_variant_price_inputs(product, variants)
             vp_plan = {"variants": vp_rows, "skipped_no_gid_or_price": vp_skipped}
+        # The CREATE-side seeding plan (price + SKU for the variants Shopify will
+        # mint) rides on the dry-run too, so the owner can SEE the money before
+        # anything goes live. On an update it only appears when the opt-in flag
+        # is on -- mirroring what the LIVE branch would actually do.
+        seed_plan = None
+        if action == "create" or price_on_update_enabled():
+            seed_plan = plan_variant_seed(product, variants)
         return PushResult(
             mode=MODE_SIMULATED,
             entity="product",
@@ -1124,6 +1620,7 @@ async def push_product(
             reason=reason,
             metafields=metafields or None,
             variant_prices=vp_plan,
+            variants_seeded=seed_plan,
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -1150,11 +1647,39 @@ async def push_product(
         mf_summary = None
         if metafields and new_gid:
             mf_summary = await _set_product_metafields(db, new_gid, metafields)
+        # VARIANT SEEDING -- the price-0.00 / no-SKU fix. ProductInput carries
+        # neither, so on a CREATE the variants Shopify just minted are priced +
+        # SKU'd here and their gids written back. On an UPDATE this is skipped
+        # unless the owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE), so the ~4,400
+        # already-live products are never silently re-priced. Fail-soft.
+        seed_summary = None
+        seeded = False
+        if new_gid and (action == "create" or price_on_update_enabled()):
+            variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
+            seed_summary = await _seed_variants_after_write(
+                db, product, variants, new_gid, variant_nodes
+            )
+            seeded = seed_summary is not None
+            if seed_summary and seed_summary.get("default_variant_gid") and pid:
+                _writeback_product(
+                    db, pid, new_gid, variant_gid=seed_summary["default_variant_gid"]
+                )
+        # Sales-channel publish (default OFF): an ACTIVE product published to no
+        # channel is invisible on the storefront. DRAFTs are never published.
+        pub_summary = None
+        if (
+            new_gid
+            and action == "create"
+            and publish_on_create_enabled()
+            and payload.get("status") == "ACTIVE"
+        ):
+            pub_summary = await _publish_to_online_store(db, new_gid)
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.
+        # Skipped when the seeding step above already wrote these exact prices.
         vp_summary = None
-        if variants and new_gid:
+        if variants and new_gid and not seeded:
             vp_product = dict(product)
             vp_ecom = dict(vp_product.get("ecom") or {})
             vp_ecom["shopify_product_id"] = new_gid
@@ -1179,6 +1704,8 @@ async def push_product(
             payload=payload,
             metafields=mf_summary,
             variant_prices=vp_summary,
+            variants_seeded=seed_summary,
+            publication=pub_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
