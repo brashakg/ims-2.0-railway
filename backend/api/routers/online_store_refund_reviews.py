@@ -9,7 +9,8 @@ act on, with no GST credit note and no restock (the exact compliance gap the
 module claims to close).
 
 This router lets the accountant SEE the queue and ACT on it:
-  GET  /                       list review rows (filter ?status=), store-scoped
+  GET  /                       list review rows (filter ?status=); the whole
+                               queue for ACCOUNTANT/ADMIN/SUPERADMIN (OS-013)
   POST /{review_id}/confirm    POST the credit note + restock from the STORED row
                                (reuses shopify_refund.post_from_review -> the SAME
                                _issue_store_credit + _restock_good_items the AUTO
@@ -19,7 +20,13 @@ This router lets the accountant SEE the queue and ACT on it:
 Mounted at /api/v1/online-store/refund-reviews. ROLE GATE (router-level +
 rbac_policy.POLICY, in lock-step): ACCOUNTANT / ADMIN / SUPERADMIN (SUPERADMIN
 auto-granted by require_roles). The books are the accountant's, so ACCOUNTANT is
-first-class here. Non-HQ callers are FORCED to their own store scope.
+first-class here -- and CROSS-STORE for this queue (OS-013): review rows are
+stamped with the ONLINE billing store id (BV-ONLINE-01 / WO-ONLINE-01), a store
+no physical-store accountant carries in their store_ids, and UNMATCHED rows have
+store_id=None -- so the old per-store scope silently emptied the queue for every
+store-scoped accountant ('No refunds awaiting review. Nice and clear.' while real
+Shopify refunds sat unposted: no GST credit note, no restock). The books span
+entities; any other non-HQ role that ever lands here stays store-bounded.
 
 FAIL-SOFT: no DB -> the list is an empty page (never a 500); confirm/reject on a
 missing row is a 404; a re-confirm of a resolved row is a 409. AUDIT EVERYTHING:
@@ -81,6 +88,53 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _queue_scope(current_user: dict):
+    """Store reach for THIS queue (OS-013). ACCOUNTANT is cross-store here: the
+    refund-review queue is a books surface whose rows are stamped with the ONLINE
+    billing store id (or store_id=None for UNMATCHED), so the generic per-store
+    scope matched zero rows for every store-scoped accountant and the queue
+    rendered a false 'all clear' while unposted refunds accumulated. Reading AND
+    acting use the same scope -- an accountant must be able to confirm/reject
+    exactly the rows they can see. Every other role falls through to the generic
+    user_store_scope (ADMIN/SUPERADMIN cross-store; anything else store-bounded)."""
+    roles = set(current_user.get("roles") or [])
+    if "ACCOUNTANT" in roles:
+        return True, set()
+    return user_store_scope(current_user)
+
+
+def _attach_restock_store_names(db, reviews: List[Dict[str, Any]]) -> None:
+    """OS-061: the accountant approves a restock into a REAL physical store --
+    show its display name, not a raw code. Response-only enrichment: attach
+    `restock_store_name` resolved from the stores registry. Fail-soft: any error
+    leaves the rows unchanged (the FE falls back to the raw id)."""
+    ids = sorted(
+        {
+            str(r.get("restock_store_id"))
+            for r in reviews
+            if isinstance(r, dict) and r.get("restock_store_id")
+        }
+    )
+    if not ids:
+        return
+    try:
+        coll = db.get_collection("stores")
+        if coll is None:
+            return
+        names: Dict[str, str] = {}
+        for s in coll.find({"store_id": {"$in": ids}}):
+            if isinstance(s, dict) and s.get("store_id"):
+                name = s.get("name") or s.get("store_name")
+                if name:
+                    names[str(s["store_id"])] = str(name)
+        for r in reviews:
+            name = names.get(str(r.get("restock_store_id") or ""))
+            if name:
+                r["restock_store_name"] = name
+    except Exception:  # noqa: BLE001 - cosmetic enrichment must never break the list
+        pass
+
+
 def _duplicate_has_credit_note(db, row: Dict[str, Any]) -> bool:
     """Defense-in-depth for the CONFIRM path: a post that returns 'duplicate' may
     only be treated as truly POSTED when a REAL credit note exists behind the
@@ -118,17 +172,27 @@ async def list_refund_reviews(
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_roles(*_REVIEW_ROLES)),
 ) -> Dict[str, Any]:
-    """List Shopify refund review rows, newest first. Store-scoped: a non-HQ
-    caller only sees the review rows of the store(s) they manage (the row's
-    billing store_id). Fail-soft: no DB -> an empty page."""
+    """List Shopify refund review rows, newest first. ACCOUNTANT / ADMIN /
+    SUPERADMIN see the WHOLE queue (cross-store -- see _queue_scope / OS-013);
+    any other role is bounded to its own stores. The response says which scope
+    applied (`scope`) so the screen can render an honest hint instead of a
+    silently-filtered 'all clear'. Fail-soft: no DB -> an empty page."""
     db = _get_db()
     if db is None:
-        return {"reviews": [], "total": 0, "limit": limit, "offset": offset, "db_connected": False}
+        return {
+            "reviews": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "scope": "all-stores",
+            "db_connected": False,
+        }
 
     query: Dict[str, Any] = {}
-    is_cross, allowed_stores = user_store_scope(current_user)
+    is_cross, allowed_stores = _queue_scope(current_user)
     if not is_cross:
         query["store_id"] = {"$in": sorted(allowed_stores)}
+    scope = "all-stores" if is_cross else "store-scoped"
     if status:
         query["status"] = status
     if resolved is not None:
@@ -137,18 +201,35 @@ async def list_refund_reviews(
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         if coll is None:
-            return {"reviews": [], "total": 0, "limit": limit, "offset": offset, "db_connected": True}
+            return {
+                "reviews": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "scope": scope,
+                "db_connected": True,
+            }
         total = int(coll.count_documents(query))
         cursor = coll.find(query).sort("created_at", -1).skip(offset).limit(limit)
         reviews: List[Dict[str, Any]] = [_clean(d) for d in cursor]
     except Exception:  # noqa: BLE001 - reads degrade, never 500
-        return {"reviews": [], "total": 0, "limit": limit, "offset": offset, "db_connected": True}
+        return {
+            "reviews": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "scope": scope,
+            "db_connected": True,
+        }
+
+    _attach_restock_store_names(db, reviews)
 
     return {
         "reviews": reviews,
         "total": total,
         "limit": limit,
         "offset": offset,
+        "scope": scope,
         "db_connected": True,
     }
 
@@ -159,8 +240,9 @@ async def list_refund_reviews(
 
 
 def _load_review(db, review_id: str, current_user: dict) -> Dict[str, Any]:
-    """Fetch one review row by review_id, enforcing store scope. 404 when absent
-    or outside the caller's scope."""
+    """Fetch one review row by review_id, enforcing the QUEUE scope (same reach
+    as the list -- an accountant can act on exactly the rows they can see).
+    404 when absent or outside the caller's scope."""
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         row = coll.find_one({"review_id": review_id}) if coll is not None else None
@@ -168,7 +250,7 @@ def _load_review(db, review_id: str, current_user: dict) -> Dict[str, Any]:
         row = None
     if not row:
         raise HTTPException(status_code=404, detail="Refund review not found")
-    is_cross, allowed_stores = user_store_scope(current_user)
+    is_cross, allowed_stores = _queue_scope(current_user)
     if not is_cross and row.get("store_id") not in allowed_stores:
         # Fail closed: do not reveal another store's row.
         raise HTTPException(status_code=404, detail="Refund review not found")

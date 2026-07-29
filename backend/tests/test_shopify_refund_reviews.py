@@ -437,6 +437,72 @@ def test_no_customer_first_confirm_is_credit_failed_not_posted(ctx):
     assert ctx["ledger"].count_documents({}) == 0
 
 
+# ---------------------------------------------------------------------------
+# OS-013: the queue is the accountant's BOOKS surface -> ACCOUNTANT is
+# cross-store. Review rows bill under the ONLINE store (a store no
+# physical-store accountant carries) and UNMATCHED rows have store_id=None, so
+# the old per-store scope silently emptied the queue ("No refunds awaiting
+# review. Nice and clear.") while real refunds sat unposted.
+# ---------------------------------------------------------------------------
+
+
+def test_accountant_scoped_to_physical_store_still_sees_whole_queue(ctx):
+    _seed_pending_review(ctx)  # store_id = BV-ONLINE-01
+    ctx["review"].insert_one(
+        {
+            "review_id": "rev-un",
+            "shopify_refund_id": "700099",
+            "shopify_order_id": "5099",
+            "store_id": None,  # UNMATCHED rows carry no store at all
+            "status": "UNMATCHED",
+            "resolved": False,
+            "created_at": "2026-07-02T00:00:00Z",
+        }
+    )
+    r = ctx["client"].get(
+        "/api/v1/online-store/refund-reviews",
+        headers={"Authorization": f"Bearer {_token(['ACCOUNTANT'], store_id='BV-BOK-01')}"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["total"] == 2  # BOTH the online-store row and the unmatched row
+    assert data["scope"] == "all-stores"
+
+
+def test_accountant_scoped_to_physical_store_can_confirm(ctx):
+    # Acting must match seeing: the same cross-store scope applies to confirm.
+    _seed_pending_review(ctx)
+    ctx["stock_repo"].units.append(
+        {"stock_id": "stk-1", "product_id": "IMS-P-1", "store_id": "BV-GANGA-01",
+         "order_id": "ord-abc", "status": "SOLD"}
+    )
+    r = ctx["client"].post(
+        "/api/v1/online-store/refund-reviews/rev-1/confirm",
+        headers={"Authorization": f"Bearer {_token(['ACCOUNTANT'], store_id='BV-BOK-01')}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "POSTED"
+
+
+# ---------------------------------------------------------------------------
+# OS-061: the restock target is an operational decision the accountant approves
+# -> show the store's display name, not a raw code.
+# ---------------------------------------------------------------------------
+
+
+def test_restock_store_name_attached_from_registry(ctx):
+    ctx["db"].get_collection("stores").insert_one(
+        {"store_id": "BV-GANGA-01", "name": "Better Vision Gangadham"}
+    )
+    _seed_pending_review(ctx)
+    r = ctx["client"].get(
+        "/api/v1/online-store/refund-reviews",
+        headers={"Authorization": f"Bearer {_token(['ACCOUNTANT'])}"},
+    )
+    row = r.json()["reviews"][0]
+    assert row["restock_store_name"] == "Better Vision Gangadham"
+
+
 def test_retry_still_no_customer_refails_not_silently_posted(ctx):
     # (b) The bug: on retry the claim-first insert hits the unique index. The OLD
     # code returned "duplicate" -> router stamped POSTED with NO credit note. Now

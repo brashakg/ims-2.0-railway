@@ -5,7 +5,7 @@
 import api from './client';
 
 export const customerApi = {
-  getCustomers: async (params?: { search?: string; page?: number; pageSize?: number; storeId?: string; limit?: number; skip?: number; channel?: string; customer_type?: string }) => {
+  getCustomers: async (params?: { search?: string; page?: number; pageSize?: number; storeId?: string; limit?: number; skip?: number; channel?: string; customer_type?: string; exclude_marketing?: boolean }) => {
     // Convert camelCase storeId → snake_case store_id for the FastAPI Query.
     // Pre-fix, this passed `storeId` through as-is and the backend silently
     // dropped it (FastAPI Query param name didn't match), so every "Pune"

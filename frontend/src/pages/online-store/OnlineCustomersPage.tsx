@@ -17,11 +17,19 @@
 // customer record + 360 view already live under /customers. Nothing is written
 // here.
 //
-// Reads: GET /api/v1/customers?channel=ONLINE  (paginated envelope)
+// Reads: GET /api/v1/customers?channel=ONLINE  (paginated envelope). The backend
+// enriches the online segment server-side with orders_count / total_spent
+// (OS-026 — the raw docs carry no such fields; before this every shopper showed
+// Rs 0 / an em-dash forever), and email-only records carry the owner's
+// MARKETING contact tier (mobile-primary identity model, 2026-07-20) which this
+// screen badges + can exclude (OS-045).
 //
 // FAIL-SOFT: the read degrades quietly to a friendly empty state (never a white
 // screen). Gated SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER at the
-// route (App.tsx), matching the rest of the module. Light theme only.
+// route (App.tsx), matching the rest of the module. The name link opens the
+// Customer 360 (OS-027 — /customers/:id/360 is the real route; the old
+// /customers/:id target 404'd on every click) and renders as plain text for
+// roles the 360 route does not admit. Light theme only.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -36,6 +44,7 @@ import {
   ShoppingBag,
 } from 'lucide-react';
 import { customerApi } from '../../services/api/customers';
+import { useAuth } from '../../context/AuthContext';
 import { formatDateIST } from '../../utils/datetime';
 
 // ---------------------------------------------------------------------------
@@ -50,11 +59,18 @@ interface OnlineCustomerRow {
   joined_at: string | null;
   orders_count: number | null;
   ltv: number | null;
+  /** Owner model (2026-07-20): identity is mobile-primary; an email-only record
+   *  is a MARKETING contact (no loyalty / no WhatsApp), not a full customer. */
+  marketing: boolean;
 }
 
 /** Project a raw customer doc onto OnlineCustomerRow, tolerating the several
  *  field aliases the customers collection carries (mobile/phone; created_at;
- *  total_purchases / orders_count / total_spent). */
+ *  orders_count / total_orders; total_spent / lifetime_value). orders_count and
+ *  total_spent are computed server-side over the customer's actual orders
+ *  (OS-026); when absent (older backend / fail-soft) the columns render an
+ *  honest em-dash — deliberately NOT the doc's total_purchases field, which is
+ *  minted 0 and never incremented, so it faked a believable Rs 0 lifetime. */
 function toRow(c: Record<string, any>): OnlineCustomerRow {
   const ordersCount =
     typeof c.orders_count === 'number'
@@ -67,14 +83,14 @@ function toRow(c: Record<string, any>): OnlineCustomerRow {
       ? c.total_spent
       : typeof c.lifetime_value === 'number'
         ? c.lifetime_value
-        : typeof c.total_purchases === 'number'
-          ? c.total_purchases
-          : null;
+        : null;
+  const phone = c.mobile ?? c.phone ?? null;
+  const email = c.email ?? null;
   return {
     id: String(c.customer_id ?? c.id ?? c._id ?? ''),
     name: c.name ?? c.customer_name ?? 'Unnamed shopper',
-    phone: c.mobile ?? c.phone ?? null,
-    email: c.email ?? null,
+    phone,
+    email,
     shopify_customer_id:
       c.shopify_customer_id != null && c.shopify_customer_id !== ''
         ? String(c.shopify_customer_id)
@@ -82,6 +98,10 @@ function toRow(c: Record<string, any>): OnlineCustomerRow {
     joined_at: c.created_at ?? c.createdAt ?? c.joined_at ?? null,
     orders_count: ordersCount,
     ltv,
+    // The persisted tier wins; an untagged legacy email-only record is still,
+    // by the owner's definition, a marketing contact (no phone = no identity).
+    marketing:
+      String(c.contact_tier ?? '').toUpperCase() === 'MARKETING' || (!phone && !!email),
   };
 }
 
@@ -102,16 +122,28 @@ function fmtMoney(amount: number | null | undefined): string {
 // Page
 // ===========================================================================
 export default function OnlineCustomersPage() {
+  const { hasRole } = useAuth();
+  // The Customer 360 route admits SUPERADMIN/ADMIN (+ store roles) but NOT
+  // CATALOG_MANAGER / DESIGN_MANAGER — for those the name renders as plain text
+  // instead of a link that would bounce to /unauthorized (OS-027).
+  const canOpen360 = hasRole(['SUPERADMIN', 'ADMIN']);
+
   const [rows, setRows] = useState<OnlineCustomerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [available, setAvailable] = useState(true);
   const [search, setSearch] = useState('');
+  // OS-045: hide email-only MARKETING contacts (backend-side additive filter).
+  const [hideMarketing, setHideMarketing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       // Ask the backend for only the online-origin segment (step-4 channel tag).
-      const res = await customerApi.getCustomers({ channel: 'ONLINE', limit: 500 });
+      const res = await customerApi.getCustomers({
+        channel: 'ONLINE',
+        limit: 500,
+        ...(hideMarketing ? { exclude_marketing: true } : {}),
+      });
       const arr = Array.isArray(res)
         ? res
         : (res?.customers ?? res?.data ?? res?.items ?? []);
@@ -125,7 +157,7 @@ export default function OnlineCustomersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hideMarketing]);
 
   useEffect(() => {
     load();
@@ -185,6 +217,15 @@ export default function OnlineCustomersPage() {
             className="input-field w-full pl-9"
           />
         </div>
+        <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={hideMarketing}
+            onChange={(e) => setHideMarketing(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          Hide marketing contacts
+        </label>
         {!loading && available && (
           <span className="text-xs text-gray-500">
             {visible.length.toLocaleString('en-IN')} customer{visible.length !== 1 ? 's' : ''}
@@ -233,16 +274,28 @@ export default function OnlineCustomersPage() {
                 {visible.map((r, idx) => (
                   <tr key={r.id || idx} className="hover:bg-gray-50">
                     <td className="px-4 py-2.5">
-                      {r.id ? (
-                        <Link
-                          to={`/customers/${r.id}`}
-                          className="font-medium text-gray-900 hover:text-bv-red-600"
-                        >
-                          {r.name}
-                        </Link>
-                      ) : (
-                        <span className="font-medium text-gray-900">{r.name}</span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {r.id && canOpen360 ? (
+                          // OS-027: the real route is /customers/:id/360 (the old
+                          // /customers/:id link 404'd on every click).
+                          <Link
+                            to={`/customers/${r.id}/360`}
+                            className="font-medium text-gray-900 hover:text-bv-red-600"
+                          >
+                            {r.name}
+                          </Link>
+                        ) : (
+                          <span className="font-medium text-gray-900">{r.name}</span>
+                        )}
+                        {r.marketing && (
+                          <span
+                            className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 text-[11px]"
+                            title="Email-only record — a marketing contact, not a full customer (identity is mobile-first: no loyalty, no WhatsApp)"
+                          >
+                            Email-only (marketing)
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2.5 text-gray-700">
                       <div className="flex flex-col gap-0.5">
