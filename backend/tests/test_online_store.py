@@ -34,8 +34,9 @@ def test_summary_mounts_and_returns_status(client, auth_headers):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["module"] == "online_store"
-    # 2026-07-05 truth refresh: phases 1-5 shipped; the summary now reports the
-    # REAL push gate (not hardcoded foundation values).
+    # OS-033: status/phase are DERIVED from the real push gate. The triple gate
+    # is unarmed in tests, so the summary must report the pre-cutover posture
+    # ("live"/6 would only appear when is_live is True).
     assert body["status"] == "cutover-ready"
     assert body["phase"] == 5
     # Single-writer safety: the triple gate is unarmed in tests -> writes OFF.
@@ -104,6 +105,52 @@ def test_summary_products_ecom_counts(client, auth_headers):
         assert after["text_only"] - before["text_only"] == 2
     finally:
         coll.delete_many({"product_id": {"$regex": "^ZZ_ECOM_"}})
+
+
+def test_summary_status_derivation_matches_gate(client, auth_headers):
+    """OS-033 regression lock: the status/phase pair must always agree with the
+    live push gate -- 'cutover-ready'/5 when dark, 'live'/6 when armed. The
+    hardcoded-'cutover-ready'-next-to-'push: LIVE' contradiction can't recur."""
+    body = client.get(SUMMARY, headers=auth_headers).json()
+    if body["shopify_writes_enabled"]:
+        assert body["status"] == "live" and body["phase"] == 6
+    else:
+        assert body["status"] == "cutover-ready" and body["phase"] == 5
+    # The shopify_push planned-feature row derives the same way.
+    push_feat = next(
+        f for f in body["planned_features"] if f["key"] == "shopify_push"
+    )
+    expected = "live" if body["shopify_writes_enabled"] else "built-gated"
+    assert push_feat["status"] == expected
+
+
+def test_summary_degraded_and_storefronts_shape(client, auth_headers):
+    """OS-021 / OS-034 contract: the summary always carries
+    db_connected (bool), degraded (bool, False on a healthy read) and
+    storefronts (non-empty list; the default row is named from the storefronts
+    registry and is dark while the test gates are unarmed)."""
+    body = client.get(SUMMARY, headers=auth_headers).json()
+    assert isinstance(body["db_connected"], bool)
+    assert body["degraded"] is False
+    sfs = body["storefronts"]
+    assert isinstance(sfs, list) and len(sfs) >= 1
+    row = sfs[0]
+    assert {"storefront_id", "name", "is_default", "creds_present", "is_live"} <= set(
+        row
+    )
+    assert row["name"], "storefront row must carry a human name"
+    # Gates unarmed in tests -> every storefront posture must be dark.
+    assert all(r["is_live"] is False for r in sfs)
+
+
+def test_store_health_carries_db_and_degraded_flags(client, auth_headers):
+    """OS-021: /store-health always reports db_connected + degraded so the FE
+    can label fail-soft zeros honestly instead of a fake 0/100 verdict."""
+    r = client.get("/api/v1/online-store/store-health", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["db_connected"], bool)
+    assert isinstance(body["degraded"], bool)
 
 
 def test_summary_forbidden_for_sales_staff(client, staff_headers):

@@ -3,7 +3,7 @@
 // ============================================================================
 // A prominent, unmistakable banner that states the CURRENT Shopify push posture
 // so nobody ever thinks a dry-run went live. It reads GET /online-store/push/status
-// (pushApi.getStatus, fail-soft) and renders one of two states:
+// (pushApi.getStatus, fail-soft) and renders one of FOUR states:
 //
 //   DARK (default / not live)  -> a neutral amber banner: "Shopify writes are OFF
 //                                 — preview / dry-run only". Lists exactly WHY
@@ -11,6 +11,10 @@
 //                                 what to flip at the Phase-6 cutover.
 //   LIVE (all three gates on)  -> a connected green banner: pushes write to the
 //                                 live storefront.
+//   NO PERMISSION (403 read)   -> a neutral gray banner: the viewer's role can't
+//                                 see the posture. NEVER rendered as "writes OFF"
+//                                 — pushes may be LIVE under admin control (OS-018).
+//   READ FAILED (500/network)  -> "Couldn't check" + Retry — never a fake DARK.
 //
 // Reused on every Online Store screen that exposes a Publish control (Collections,
 // Mega-menu, Design queue) AND on the module shell. It re-fetches on mount and
@@ -24,7 +28,7 @@ import {
   useImperativeHandle,
   useState,
 } from 'react';
-import { Loader2, ShieldAlert, Zap, RefreshCw } from 'lucide-react';
+import { Loader2, ShieldAlert, Zap, RefreshCw, EyeOff, AlertTriangle } from 'lucide-react';
 import { pushApi, type PushStatus, type PushResult } from '../../services/api/onlineStore';
 
 export interface OnlineStoreSyncBannerHandle {
@@ -91,6 +95,84 @@ const OnlineStoreSyncBanner = forwardRef<OnlineStoreSyncBannerHandle, Props>(
           }
         >
           <Loader2 className="w-4 h-4 animate-spin" /> Checking Shopify sync status…
+        </div>
+      );
+    }
+
+    // RC-E/OS-018: the status READ itself failed — branch on WHY before ever
+    // claiming a posture. A 403 must not render the amber "writes OFF" banner:
+    // catalog/design managers would see a false DARK while pushes are LIVE.
+    const failure = status?.status_reason ?? null;
+    if (failure === 'forbidden') {
+      return (
+        <div
+          className={
+            'rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-1 ' +
+            className
+          }
+          role="status"
+        >
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 text-gray-700 border border-gray-200 px-2.5 py-1 text-xs font-semibold">
+            <EyeOff className="w-3.5 h-3.5" /> Shopify posture not visible to your role
+          </span>
+          <span className="text-sm text-gray-600">
+            Push status is admin-only. This does <span className="font-semibold">not</span> mean
+            writes are off — publishing runs under admin control.
+          </span>
+        </div>
+      );
+    }
+    if (failure === 'error') {
+      return (
+        <div
+          className={
+            'rounded-xl border border-red-200 bg-red-50 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-1 ' +
+            className
+          }
+          role="status"
+        >
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 text-red-800 border border-red-200 px-2.5 py-1 text-xs font-semibold">
+            <AlertTriangle className="w-3.5 h-3.5" /> Couldn't check Shopify sync status
+          </span>
+          <span className="text-sm text-red-900">
+            The status read failed — the current posture is unknown (not necessarily off).
+          </span>
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-red-800 hover:text-red-900 disabled:opacity-50"
+            title="Retry"
+          >
+            <RefreshCw className={'w-3.5 h-3.5 ' + (loading ? 'animate-spin' : '')} /> Retry
+          </button>
+        </div>
+      );
+    }
+    if (failure === 'unavailable') {
+      return (
+        <div
+          className={
+            'rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-1 ' +
+            className
+          }
+          role="status"
+        >
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200 px-2.5 py-1 text-xs font-semibold">
+            Sync status not served by this deploy
+          </span>
+          <span className="text-sm text-blue-900">
+            The push-status endpoint isn't available yet — posture unknown.
+          </span>
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            className="ml-auto inline-flex items-center gap-1 text-xs text-blue-800 hover:text-blue-900 disabled:opacity-50"
+            title="Re-check"
+          >
+            <RefreshCw className={'w-3.5 h-3.5 ' + (loading ? 'animate-spin' : '')} /> Re-check
+          </button>
         </div>
       );
     }

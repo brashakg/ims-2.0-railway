@@ -509,13 +509,20 @@ def store_health_envelope(db) -> Dict[str, Any]:
         "fixes_needed": [],
         "sub_scores": {"coverage_pct": 0.0, "barcode_pct": 0.0, "orphan_free_pct": 0.0},
         "db_connected": db is not None,
+        # OS-021: degraded=True marks a MID-REQUEST failure (db was connected
+        # but the assembly errored) so the FE can label the zeros as fail-soft
+        # artefacts instead of a real 0/100 readiness verdict.
+        "degraded": False,
     }
     if db is None:
         return empty
     try:
         out = readiness_score(db)
         out["db_connected"] = True
+        out["degraded"] = False
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STORE_HEALTH] readiness assemble failed: %s", exc)
-        return empty
+        degraded_env = dict(empty)
+        degraded_env["degraded"] = True
+        return degraded_env

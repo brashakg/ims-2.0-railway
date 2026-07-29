@@ -28,6 +28,7 @@ import {
   ListChecks,
   CheckCircle2,
   AlertTriangle,
+  EyeOff,
 } from 'lucide-react';
 import { onlineStoreApi, type StoreHealth } from '../../services/api/onlineStore';
 
@@ -185,6 +186,15 @@ export default function OnlineStoreHealthPage() {
   const readiness = health?.readiness_pct ?? 0;
   const readinessTone = toneFor(readiness);
   const orphanFree = health?.sub_scores?.orphan_free_pct ?? 0;
+  // RC-E: why the read failed (only when !available) — 403 / stale deploy /
+  // real error each get an honest, distinct note instead of deploy-era copy.
+  const failure = health && !health.available ? (health.reason ?? 'unavailable') : null;
+  // OS-021: the backend answered but its DB was unreachable (or the assembly
+  // failed mid-request) — the zeros are fail-soft artefacts, NOT a real 0/100
+  // readiness verdict, so the gauge is replaced by an amber warning.
+  const dbDown = !!health?.available && health.db_connected === false;
+  const degraded = !!health?.available && !dbDown && !!health.degraded;
+  const showFigures = !dbDown && !degraded;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -223,14 +233,58 @@ export default function OnlineStoreHealthPage() {
         </div>
       ) : (
         <>
-          {/* Not-available note (stale backend / outside the gate) */}
-          {health && !health.available && (
+          {/* Failed-read note — labeled honestly by WHY it failed (RC-E). */}
+          {failure === 'forbidden' && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+              <EyeOff className="w-4 h-4 shrink-0 mt-0.5 text-gray-500" />
+              <span>
+                <span className="font-semibold">No permission for this view.</span> Your role can't
+                read store health — the zeros below are placeholders, not real readiness figures.
+              </span>
+            </div>
+          )}
+          {failure === 'error' && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+              <span>
+                <span className="font-semibold">Couldn't load store health.</span> The read failed —
+                the zeros below are placeholders, not a real 0/100 verdict.{' '}
+                <button type="button" onClick={load} className="font-medium underline hover:text-red-900">
+                  Retry
+                </button>
+              </span>
+            </div>
+          )}
+          {failure === 'unavailable' && (
             <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
-              The store-health backend isn’t reachable yet — showing zeros. Live readiness appears once
-              the module backend is deployed.
+              This deploy doesn't serve the store-health check — showing zeros, not a real readiness
+              verdict. Use Refresh to try again.
+            </div>
+          )}
+          {/* OS-021: DB-down / degraded on a 200 — amber warning instead of a
+              fake red 0/100 gauge. */}
+          {dbDown && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>
+                <span className="font-semibold">Database unreachable — readiness can't be assessed.</span>{' '}
+                The store-health service answered but couldn't reach its database, so no figures are
+                shown (a 0/100 gauge here would be fake). Use Refresh to try again.
+              </span>
+            </div>
+          )}
+          {degraded && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>
+                <span className="font-semibold">Store health couldn't be computed.</span> The readiness
+                assembly failed mid-request, so no figures are shown. Use Refresh to try again.
+              </span>
             </div>
           )}
 
+          {showFigures && (
+          <>
           {/* Readiness summary */}
           <div className="mb-6 rounded-xl border border-gray-200 bg-white p-5 flex flex-wrap items-center gap-6">
             <ReadinessGauge pct={readiness} />
@@ -380,22 +434,24 @@ export default function OnlineStoreHealthPage() {
                 {health.fixes_needed.map((f, idx) => (
                   <li key={(f.check || f.issue) + idx} className="flex items-center gap-3 px-4 py-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                    {/* One count per row (bold, inline) — the former duplicate
+                        amber count pill was redundant noise (OS-057). */}
                     <span className="text-sm text-gray-700 flex-1">
                       <span className="font-semibold text-gray-900">{fmtInt(f.count)}</span>{' '}
                       product{f.count !== 1 ? 's' : ''} {f.issue}
-                    </span>
-                    <span className="inline-flex items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 text-[11px] font-medium">
-                      {fmtInt(f.count)}
                     </span>
                   </li>
                 ))}
               </ul>
             )}
           </div>
+          </>
+          )}
 
           <p className="mt-6 text-xs text-gray-400">
-            Online Store module · Store health. A read-only pre-cutover readiness view. Products are
-            edited from the catalog; collections and mappings from the Online Store sections.
+            Online Store module · Store health. A read-only readiness view of the online catalog.
+            Products are edited from the catalog; collections and mappings from the Online Store
+            sections.
           </p>
         </>
       )}
