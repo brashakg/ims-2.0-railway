@@ -187,13 +187,47 @@ def _ecom_online(ecom: Dict[str, Any]) -> bool:
 
 
 def _ecom_sellable(ecom: Dict[str, Any]) -> bool:
-    """SELLABLE semantics: customers can actually buy it online -- ecom.status
-    PUBLISHED (push maps PUBLISHED -> Shopify ACTIVE). A product pushed as a
-    Shopify DRAFT (gid present, status DRAFT) is NOT sellable and must never
-    trip oversell alarms."""
+    """SELLABLE semantics, ecom-status leg only: ecom.status PUBLISHED (push
+    maps PUBLISHED -> Shopify ACTIVE).
+
+    THE ACTUAL RULE lives at the call sites in online_status_for_skus, where
+    this is OR-ed with "the product's own variant carries a live Shopify
+    variant gid". Net effect, stated plainly: a product PUSHED to Shopify --
+    even as a Shopify DRAFT -- is treated as sellable for alarm purposes,
+    because shopify_push writes variant gids back for DRAFT pushes too and the
+    variant-gid write-back precedes the staged-draft publish on this project's
+    own roadmap. TRADE-OFF: that can raise an oversell alert for a pushed,
+    not-yet-purchasable draft; it deliberately errs toward ALERTING, because
+    the alternative (keying on ecom.status alone) went silent for 27 live
+    Ray-Ban Meta SKUs whose IMS status said DRAFT while Shopify said ACTIVE.
+    Only a staged-but-never-pushed DRAFT (no gid anywhere) stays silent."""
     if not isinstance(ecom, dict):
         return False
     return str(ecom.get("status") or "").upper() == "PUBLISHED"
+
+
+def _own_variant(doc: Dict[str, Any], var: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return `var` only when it is DOC'S OWN variant, else {}.
+
+    _variants_by_key matches a requested key on sku > store_barcode > barcode >
+    gtin -- so the variant resolved for a key can be an UNRELATED variant whose
+    barcode merely equals this product's sku. Lending that variant's Shopify
+    gids to the product would fabricate online/sellable flags. Ownership =
+    variant.parent_product_id == doc.id, or the variant's sku/parent_sku equals
+    the product's sku (a PM-created parent has exactly one variant whose sku ==
+    the spine sku)."""
+    if not var or not isinstance(var, dict):
+        return {}
+    doc_id = str(doc.get("id") or "")
+    if doc_id and str(var.get("parent_product_id") or "") == doc_id:
+        return var
+    doc_sku = normalize_sku(doc.get("sku"))
+    if doc_sku and (
+        normalize_sku(var.get("sku")) == doc_sku
+        or normalize_sku(var.get("parent_sku")) == doc_sku
+    ):
+        return var
+    return {}
 
 
 def online_mapping_available(db) -> bool:
@@ -228,13 +262,20 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
     for identifiers that exist in the IMS online catalog (catalog_products.ecom,
     resolved directly or via a matching catalog_variants row).
 
-    online          -- DISPLAY flag: pushed to Shopify (gid present) OR staged
-                       PUBLISHED (includes unpurchasable Shopify DRAFTs).
-    sellable_online -- GUARD flag: customers can actually buy it -- ecom.status
-                       PUBLISHED, or a live variant gid (resolved the SAME way
-                       on the product and the variant path). Use THIS for
-                       oversell alarms, never `online`: a staged-but-never-
-                       pushed DRAFT has neither, so it stays silent.
+    online          -- DISPLAY + assessment flag: pushed to Shopify (product
+                       gid, or the product's OWN variant carrying a variant /
+                       inventory-item gid -- resolved the SAME way on the
+                       product and the variant path) OR staged PUBLISHED.
+                       Includes unpurchasable Shopify DRAFTs. Gates the
+                       stock-tally oversell assessment (online_sync_health)
+                       and the reconcile screen.
+    sellable_online -- GUARD flag: ecom.status PUBLISHED, or the product's OWN
+                       variant carrying a live variant gid (same resolution on
+                       both paths). PLAINLY: anything PUSHED to Shopify, even
+                       as a DRAFT, counts -- errs toward alerting (see
+                       _ecom_sellable). Use THIS for oversell alarms, never
+                       `online` alone; a staged-but-never-pushed DRAFT has no
+                       gid anywhere, so it alone stays silent.
     online_stock    -- ALWAYS None: Shopify owns the live listed quantity and
                        IMS does not mirror it; use online_sync_health's live
                        readers for a real number. Never a fake 0.
@@ -262,16 +303,30 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
         ecom = doc.get("ecom") or {}
         if not ecom:
             continue
+        # ONLY the product's OWN variant may lend it Shopify ids: the key
+        # lookup matches sku/store_barcode/barcode/gtin, so an unrelated
+        # variant whose barcode equals this product's sku would otherwise
+        # fabricate the flags (see _own_variant).
+        var = _own_variant(doc, variants.get(key))
+        # Mirrors the variant branch below, BOTH flags. THE RULE, plainly: a
+        # product pushed to Shopify (even as a DRAFT -- shopify_push writes
+        # variant gids back for DRAFT pushes too, and the variant-gid
+        # write-back precedes the staged-draft publish on this project's own
+        # roadmap) is treated as online AND as sellable for alarm purposes.
+        # Deliberate trade-off: errs toward ALERTING (a pushed draft may raise
+        # an oversell alert before it is purchasable) rather than silence for
+        # live SKUs whose IMS status lags Shopify. Only a staged-but-never-
+        # pushed DRAFT (no gid anywhere) stays out of both flags. `online`
+        # matters beyond display: it gates the stock-tally oversell assessment
+        # (online_sync_health) and the reconcile screen.
+        var_pushed = bool(
+            normalize_sku(var.get("shopify_variant_id"))
+            or normalize_sku(var.get("shopify_inventory_item_id"))
+        )
         out[key] = {
-            "online": _ecom_online(ecom),
-            # Mirrors the variant branch below: a live variant gid is itself
-            # proof of a purchasable storefront object, whatever ecom.status
-            # claims. A never-pushed DRAFT has no variant gid, so a future
-            # draft import still cannot trip this.
+            "online": _ecom_online(ecom) or var_pushed,
             "sellable_online": _ecom_sellable(ecom)
-            or bool(
-                normalize_sku((variants.get(key) or {}).get("shopify_variant_id"))
-            ),
+            or bool(normalize_sku(var.get("shopify_variant_id"))),
             "online_stock": None,
             "status": ecom.get("status"),
         }
