@@ -1281,11 +1281,9 @@ async def gst_report(
         customer_state = (
             cust_state_map.get(str(o.get("customer_id", ""))) or store_state
         )
-        is_inter_state = bool(
-            store_state
-            and customer_state
-            and store_state.strip().lower() != customer_state.strip().lower()
-        )
+        # OS-008: the order's own interstate flag wins (online orders carry it);
+        # store-vs-customer state stays the fallback for docs without it.
+        is_inter_state = _order_is_interstate(o, store_state, customer_state)
         if is_inter_state:
             cgst = sgst = 0.0
             igst = round(tax, 2)
@@ -2459,6 +2457,28 @@ def _get_raw_db():
     return None
 
 
+def _order_is_interstate(order: dict, store_state: str, customer_state: str) -> bool:
+    """Inter-state (IGST) vs intra-state (CGST+SGST) for ONE order in the GST
+    report family (/finance/gst report, GSTR-1, GSTR-3B).
+
+    Prefer the order doc's OWN persisted ``interstate`` flag (OS-008): online
+    (Shopify) orders stamp it at ingest from the buyer's DELIVERY address via
+    the shared _build_invoice_gst_split -- while their buyer customer records
+    are minted stateless, so deriving the split from customers.state misfiled
+    every inter-state online sale as CGST/SGST even though the minted invoice
+    said IGST. The store-state vs customer-state string comparison stays as the
+    FALLBACK for docs without the flag (POS orders don't persist it),
+    byte-identical to the prior rule (unknown either side -> intra)."""
+    flag = order.get("interstate")
+    if isinstance(flag, bool):
+        return flag
+    return bool(
+        store_state
+        and customer_state
+        and store_state.strip().lower() != customer_state.strip().lower()
+    )
+
+
 def _order_taxable_and_tax(order: dict) -> tuple:
     """Derive (taxable_value, total_tax) for GST returns from an order doc.
 
@@ -2718,14 +2738,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 )
                 taxable_value, total_tax = _order_taxable_and_tax(order)
 
-                # Intra vs inter-state split. We don't have CGST/SGST/IGST
-                # split on the order doc, so derive it from store_state vs
-                # customer_state. When customer_state is empty (walk-in
-                # without state on file), assume same as store (intra).
-                is_inter_state = bool(
-                    store_state
-                    and customer_state
-                    and store_state.strip().lower() != customer_state.strip().lower()
+                # Intra vs inter-state split. Online (Shopify) orders DO carry
+                # their own `interstate` flag (stamped at ingest from the
+                # delivery address) -- prefer it (OS-008); otherwise derive
+                # from store_state vs customer_state. When customer_state is
+                # empty (walk-in without state on file), assume same as store
+                # (intra).
+                is_inter_state = _order_is_interstate(
+                    order, store_state, customer_state
                 )
                 if is_inter_state:
                     igst = round(total_tax, 2)
@@ -3662,10 +3682,11 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
 
                 cust_id = str(order.get("customer_id", ""))
                 customer_state = cust_state_map.get(cust_id, "") or store_state
-                is_inter_state = bool(
-                    store_state
-                    and customer_state
-                    and store_state.strip().lower() != customer_state.strip().lower()
+                # OS-008: the order's own interstate flag wins (online orders
+                # carry it), keeping 3.1(a) heads consistent with GSTR-1 and
+                # the cross-check; state comparison stays the fallback.
+                is_inter_state = _order_is_interstate(
+                    order, store_state, customer_state
                 )
                 if is_inter_state:
                     out_igst += tax

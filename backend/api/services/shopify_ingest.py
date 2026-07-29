@@ -503,6 +503,84 @@ def _webhook_already_seen(db, webhook_id: Optional[str]) -> bool:
 # byte-identical to before.
 # ---------------------------------------------------------------------------
 
+def _live_payment_fields(
+    payload: Dict[str, Any], grand_total: float
+) -> Dict[str, Any]:
+    """amount_paid / balance_due / payment_status for a LIVE-ingested order,
+    derived from the payload's financial_status (OS-007).
+
+    The old create wrote amount_paid=grand_total for BOTH "paid" and
+    "partially_paid" while balance_due stayed grand_total for anything not
+    exactly "paid" -- a partially-paid order therefore booked amount_paid +
+    balance_due == 2x grand_total (double-counted money) under an "UNPAID"
+    chip. Now:
+
+      * payment_status uses the mapper's ONE canonical vocabulary
+        (online_order_mapper._PAYMENT_STATUS_MAP: paid->PAID,
+        partially_paid->PARTIAL, ...), the same map _sync_existing_order_status
+        applies on every later webhook -- so create and sync can never disagree.
+      * amount_paid: "paid" -> grand_total; "partially_paid" -> grand_total
+        minus Shopify's own total_outstanding (the order webhook carries no
+        transactions[] list; total_outstanding is the payload's statement of
+        what is still owed), clamped to [0, grand_total]. No parseable
+        total_outstanding -> 0.0, the conservative minimum (an under-stated
+        collection is repaired by the next orders/updated webhook; an
+        over-stated one would fabricate collected money). Anything else
+        (pending / authorized / voided / refunded) -> 0.0, the prior behaviour.
+      * balance_due is ALWAYS grand_total - amount_paid, so the two fields can
+        never again sum past the order value.
+    """
+    fin = str(payload.get("financial_status") or "").strip().lower()
+    grand = round(_f(grand_total), 2)
+
+    try:
+        from .online_order_mapper import _PAYMENT_STATUS_MAP as _pay_vocab
+    except Exception:  # noqa: BLE001 -- a vocab import must never drop a paid order
+        _pay_vocab = {"paid": "PAID", "partially_paid": "PARTIAL"}
+
+    if fin == "paid":
+        amount_paid = grand
+    elif fin == "partially_paid":
+        try:
+            outstanding = float(payload.get("total_outstanding"))
+        except (TypeError, ValueError):
+            outstanding = None
+        if outstanding is None:
+            amount_paid = 0.0
+        else:
+            amount_paid = min(max(round(grand - outstanding, 2), 0.0), grand)
+    else:
+        amount_paid = 0.0
+
+    return {
+        "amount_paid": amount_paid,
+        "balance_due": round(grand - amount_paid, 2),
+        "payment_status": _pay_vocab.get(fin, "UNPAID"),
+    }
+
+
+def _synth_gateway_payment(
+    amount: float, shopify_order_id: Any, received_at: datetime
+) -> Dict[str, Any]:
+    """One synthesized SETTLED gateway payment row for a LIVE-ingested online
+    order (OS-030). Shopify collected the money at checkout, OUTSIDE the IMS
+    till, but the order previously booked payments: [] -- so the Day-End tender
+    columns and the GST cross-check's payments_collected (which sums
+    order.payments[].amount) read zero against real online sales. Mirrors the
+    POS payment-row shape (orders.py record_payment) and the historical
+    import's settled row so every payments[] consumer treats it uniformly."""
+    return {
+        "payment_id": str(uuid.uuid4()),
+        "method": "SHOPIFY",
+        "amount": round(_f(amount), 2),
+        "reference": f"shopify:{shopify_order_id}",
+        "status": "SETTLED",
+        "settled_outside_ims": True,
+        "received_by": "SYSTEM_SHOPIFY_WEBHOOK",
+        "received_at": received_at.isoformat(),
+    }
+
+
 # Shopify financial_status -> IMS payment_status for a SETTLED historical order.
 # NOTE: partially_paid -> PAID (not PARTIAL). A historical import books the sale as
 # fully SETTLED (amount_paid == grand_total, balance_due == 0, one settled payment
@@ -1425,6 +1503,10 @@ def ingest_shopify_order(
             logger.warning("[SHOPIFY_INGEST] invoice number alloc failed: %s", exc)
             invoice_number = None
 
+    # Payment truth for the LIVE path (OS-007). A HISTORICAL import overlays its
+    # own settled fields below (_historical_overrides), unaffected by these.
+    pay_fields = _live_payment_fields(payload, grand_total)
+
     order_doc = {
         "order_id": order_id,
         "_id": order_id,
@@ -1455,24 +1537,11 @@ def ingest_shopify_order(
         # Shopify confirmation is the RECEIPT; the IMS invoice is the tax doc.
         "invoice_number": invoice_number,
         "invoice_date": now,
-        # Shopify already collected payment -> the online order is PAID on
-        # ingestion (its financial_status is typically "paid").
-        "amount_paid": (
-            grand_total
-            if str(payload.get("financial_status") or "").lower()
-            in ("paid", "partially_paid")
-            else 0.0
-        ),
-        "balance_due": (
-            0.0
-            if str(payload.get("financial_status") or "").lower() == "paid"
-            else grand_total
-        ),
-        "payment_status": (
-            "PAID"
-            if str(payload.get("financial_status") or "").lower() == "paid"
-            else "UNPAID"
-        ),
+        # OS-007: amount_paid / balance_due / payment_status derived from the
+        # payload's financial_status via the mapper's canonical vocabulary +
+        # total_outstanding -- a partially_paid order books the actually
+        # collected amount (never amount_paid == balance_due == grand_total).
+        **pay_fields,
         "status": "CONFIRMED",
         # CLINICAL FLAG & HOLD: a prescription-lens line without a valid Rx (or an
         # out-of-range power) marks the order rx_pending + fulfillment_hold so it
@@ -1486,7 +1555,14 @@ def ingest_shopify_order(
         "interstate": gst_split.get("interstate", False),
         "tax_summary": gst_split.get("rows", []),
         "tax_totals": gst_split.get("totals", {}),
-        "payments": [],
+        # OS-030: one synthesized SETTLED gateway payment row for the money
+        # Shopify already collected, so tender breakdowns / payments_collected
+        # reconcile with the online channel. Nothing collected yet -> [].
+        "payments": (
+            [_synth_gateway_payment(pay_fields["amount_paid"], shopify_order_id, now)]
+            if pay_fields["amount_paid"] > 0
+            else []
+        ),
         "created_at": now,
         "updated_at": now,
     }

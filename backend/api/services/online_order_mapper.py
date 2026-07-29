@@ -268,7 +268,11 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
         or _norm(payload.get("contact_email"))
     )
 
-    # Address fallbacks for phone + a human name.
+    # Address fallbacks for phone + a human name + the buyer's state (OS-008:
+    # an online-minted customer must carry a state, or every inter-state online
+    # sale is misfiled CGST/SGST by the finance state-map fallback). Shipping
+    # first (the place of supply), then billing, then the account default.
+    state = ""
     for key in ("shipping_address", "billing_address", "default_address"):
         addr = cust.get(key) if isinstance(cust.get(key), dict) else payload.get(key)
         if isinstance(addr, dict):
@@ -283,6 +287,16 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
                         if _norm(p)
                     ).strip()
                 )
+            if not state:
+                # Prefer the full province name ("Maharashtra") -- the shape
+                # store.state / customers.state comparisons already use; the
+                # 2-letter code and a raw state key are fallbacks (finance's
+                # _norm_state canonicalizes name / abbr / GST code alike).
+                state = (
+                    _norm(addr.get("province"))
+                    or _norm(addr.get("province_code"))
+                    or _norm(addr.get("state"))
+                )
 
     if not name:
         name = email or phone or "Online Customer"
@@ -291,6 +305,7 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
         "name": name,
         "phone": phone,
         "email": email,
+        "state": state,
         "shopify_customer_id": _norm(cust.get("id")),
     }
 
@@ -466,8 +481,11 @@ def _match_or_create_customer(
             customer_id, created = (None, False)
         if customer_id:
             # Stamp the Shopify-specific fields the generic skeleton omits onto a
-            # NEWLY created record (a dedup match keeps its existing identity).
-            if created and (email or shopify_id):
+            # NEWLY created record (a dedup match keeps its existing identity --
+            # in particular we never overwrite an in-store customer's state with
+            # a delivery address).
+            buyer_state = _norm(buyer.get("state"))
+            if created and (email or shopify_id or buyer_state):
                 try:
                     repo.update(
                         customer_id,
@@ -476,8 +494,12 @@ def _match_or_create_customer(
                             for k, v in {
                                 "email": email or None,
                                 "shopify_customer_id": shopify_id,
+                                # OS-008: delivery state -> customers.state so
+                                # the finance/GSTR state-map fallback classifies
+                                # this buyer's sales inter/intra correctly.
+                                "state": buyer_state or None,
                             }.items()
-                            if v is not None
+                            if v
                         },
                     )
                 except Exception:  # noqa: BLE001
@@ -515,6 +537,9 @@ def _match_or_create_customer(
         "raw_phone": raw_phone,
         "email": email,
         "customer_type": "B2C",
+        # OS-008: delivery-address state so GST inter/intra classification's
+        # customer-state fallback works for online-minted buyers ('' = unknown).
+        "state": _norm(buyer.get("state")),
         "source": "ONLINE",
         "channel": "ONLINE",
         "home_store_id": store_id,
@@ -662,7 +687,9 @@ def _sync_existing_order_status(
     payload (orders/updated, orders/paid, orders/cancelled). Does NOT touch money
     lines / the GST invoice (those are immutable once minted) -- only the lifecycle
     status, payment_status, fulfillment_status, balance_due + amount_paid on a
-    paid transition, and cancelled_at. Returns True on a write. Fail-soft."""
+    paid/partial transition (plus the ingest-synthesized gateway payment row kept
+    coherent with amount_paid), and cancelled_at. Returns True on a write.
+    Fail-soft."""
     if db is None or not shopify_order_id:
         return False
     try:
@@ -707,6 +734,56 @@ def _sync_existing_order_status(
     if st["payment_status"] == "PAID":
         update["amount_paid"] = grand_total
         update["balance_due"] = 0.0
+    elif st["payment_status"] == "PARTIAL":
+        # OS-007 (sync half): a partially_paid webhook carries Shopify's own
+        # total_outstanding -- recompute collected vs due from it instead of
+        # leaving the create-time values (which pre-fix were grand_total on BOTH
+        # sides, i.e. double-counted). No parseable total_outstanding -> leave
+        # the money fields untouched (never guess).
+        try:
+            outstanding = float(payload.get("total_outstanding"))
+        except (TypeError, ValueError):
+            outstanding = None
+        if outstanding is not None:
+            grand = round(grand_total, 2)
+            collected = min(max(round(grand - outstanding, 2), 0.0), grand)
+            update["amount_paid"] = collected
+            update["balance_due"] = round(grand - collected, 2)
+
+    # OS-030 (sync half): keep the ingest-SYNTHESIZED gateway payment row
+    # coherent with amount_paid, so payments_collected / tender columns track
+    # the money actually collected across pending->paid / partial->paid
+    # transitions. ONLY rows this pipeline synthesized (settled_outside_ims
+    # SHOPIFY rows) are ever rewritten; the moment a staff-recorded payment
+    # exists on the order, the list is frozen (all([]) is True -> an empty list
+    # is replaceable).
+    if "amount_paid" in update:
+        existing_payments = existing.get("payments") or []
+        only_synth = all(
+            isinstance(p, dict)
+            and p.get("settled_outside_ims")
+            and _norm(p.get("method")).upper() == "SHOPIFY"
+            for p in existing_payments
+        )
+        if only_synth:
+            amt = _f(update["amount_paid"])
+            if amt > 0:
+                try:
+                    from .shopify_ingest import _synth_gateway_payment
+
+                    update["payments"] = [
+                        _synth_gateway_payment(
+                            amt,
+                            shopify_order_id,
+                            datetime.now(timezone.utc).replace(tzinfo=None),
+                        )
+                    ]
+                except Exception:  # noqa: BLE001 -- payments repair is best-effort
+                    logger.debug(
+                        "[ONLINE_MAP] gateway payment repair skipped", exc_info=True
+                    )
+            else:
+                update["payments"] = []
     if st["cancelled"]:
         update["cancelled_at"] = _norm(payload.get("cancelled_at"))
 
