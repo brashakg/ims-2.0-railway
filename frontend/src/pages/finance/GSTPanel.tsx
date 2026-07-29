@@ -15,6 +15,22 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
 
   return (
     <div className="space-y-6">
+      {/* OS-031: /gst/summary has no store/entity/date params — these figures
+          are ALWAYS org-wide for the current month, while the rest of the
+          Finance dashboard is scoped to the active store + date filters. Say
+          so explicitly instead of letting the card silently imply the same
+          scope as its neighbours. The per-GSTIN filable numbers live in the
+          "GST reconciliation by entity" table below. */}
+      <div className="flex items-center gap-2 text-xs text-gray-500">
+        <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 font-medium">
+          All entities &amp; stores · current month
+        </span>
+        <span>
+          Not affected by the store or date filters above — per-entity figures are in the
+          reconciliation table below.
+        </span>
+      </div>
+
       {/* GST Summary Cards — unified neutral chrome (was indigo/violet/cyan). */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-6 text-gray-900">

@@ -85,6 +85,10 @@ export const MODULE_KEYS = [
   'hr',
   'reports',
   'finance',
+  // OS-053: the Online Store module (/online-store/*) — deniable per-user like
+  // every other operational module. Key mirrors VALID_MODULE_KEYS in
+  // backend/api/services/user_roles.py.
+  'ecommerce',
 ] as const;
 
 export type ModuleKey = (typeof MODULE_KEYS)[number];
@@ -102,6 +106,7 @@ export const MODULE_ACCESS_OPTIONS: { key: ModuleKey; label: string }[] = [
   { key: 'hr', label: 'HR & Tasks' },
   { key: 'reports', label: 'Reports' },
   { key: 'finance', label: 'Finance' },
+  { key: 'ecommerce', label: 'Online Store' },
 ];
 
 // Route-prefix -> canonical module key. Ordered longest-prefix-first so a more
@@ -133,6 +138,10 @@ const PATH_MODULE_PREFIXES: { prefix: string; key: ModuleKey }[] = [
   { prefix: '/incentive', key: 'hr' },
   { prefix: '/reports', key: 'reports' },
   { prefix: '/finance', key: 'finance' },
+  // OS-053: every /online-store screen belongs to the ecommerce module, so the
+  // per-user deny hides the nav item (navConfig.filterVisibleGroups) AND blocks
+  // direct URLs (ProtectedRoute derives the module from the path).
+  { prefix: '/online-store', key: 'ecommerce' },
 ];
 
 /** Resolve the canonical module key that owns `path`, or null if ungated.

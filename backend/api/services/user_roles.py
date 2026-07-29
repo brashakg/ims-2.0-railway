@@ -136,6 +136,10 @@ VALID_MODULE_KEYS = frozenset(
         "hr",
         "reports",
         "finance",
+        # OS-053: the Online Store module (frontend /online-store/*). Deny-only,
+        # like every other key -- an admin can now restrict a specific
+        # CATALOG_MANAGER / DESIGN_MANAGER from the live-storefront module.
+        "ecommerce",
     }
 )
 

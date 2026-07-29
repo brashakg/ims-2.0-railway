@@ -31,6 +31,7 @@ import {
   ArrowRight,
   Tag,
   ReceiptText,
+  Network,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import OnlineStoreSyncBanner from '../../components/online-store/OnlineStoreSyncBanner';
@@ -61,6 +62,10 @@ interface Section {
    *  ProtectedRoute allowedRoles in App.tsx (OS-035: no card may dead-link a
    *  role into the /unauthorized bounce). Omitted = every hub role sees it. */
   allowedRoles?: string[];
+  /** When true, the section is live in-app but intentionally DARK/simulated
+   *  (no network writes) — the card shows an amber "DARK" pill instead of the
+   *  green "Live" one (OS-036). */
+  dark?: boolean;
 }
 
 // The Online Store sections, ordered by the blueprint's original phase roadmap.
@@ -194,6 +199,21 @@ const SECTIONS: Section[] = [
     // Phase 6 shipped: the Shopify sync control panel (status + dry-run) is live
     // in-app. The live push itself stays owner-armed behind the backend gates.
     href: '/online-store/shopify',
+  },
+  {
+    key: 'ondc',
+    title: 'ONDC seller',
+    blurb:
+      'The ONDC network seller console — catalogue publish via an SNP partner. Intentionally DARK (simulated): no network calls until an SNP integration is configured and the owner arms the gate.',
+    icon: Network,
+    phase: 'ONDC',
+    // OS-036: the page was an orphan (route + working screen, zero links).
+    // Consistent with #946, which pointed the page itself at Settings ->
+    // Integrations: keep the route, surface it here with an honest DARK pill.
+    href: '/online-store/ondc',
+    // Mirrors the /online-store/ondc ProtectedRoute gate (SUPERADMIN/ADMIN).
+    allowedRoles: ['SUPERADMIN', 'ADMIN'],
+    dark: true,
   },
 ];
 
@@ -439,7 +459,14 @@ export default function OnlineStorePage() {
                   </span>
                   <h2 className="text-sm font-semibold text-gray-900">{section.title}</h2>
                 </div>
-                {isLive ? (
+                {isLive && section.dark ? (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap"
+                    title="In-app and functional, but simulated — no network writes until the owner arms the gate"
+                  >
+                    <EyeOff className="w-3 h-3" /> DARK
+                  </span>
+                ) : isLive ? (
                   <span className="inline-flex items-center gap-1 rounded-full bg-green-100 text-green-800 border border-green-200 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap">
                     <CheckCircle2 className="w-3 h-3" /> Live
                   </span>

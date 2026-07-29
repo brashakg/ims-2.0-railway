@@ -65,7 +65,12 @@ const EMPTY_FORM: FormState = {
 
 function recomputeNote(r?: RecomputeResult): string {
   if (!r) return '';
-  if (r.ok === false) return ' (price recompute deferred)';
+  // OS-068: ok:false means the bulk recompute ERRORED after the rule saved —
+  // stored online prices may now be inconsistent with the rules. "Deferred"
+  // implied it would happen by itself; nothing retries automatically.
+  if (r.ok === false) {
+    return ' — but the price recompute FAILED, so stored online prices may be stale. Use "Recompute prices" to retry.';
+  }
   const p = r.products ?? 0;
   const v = r.variants ?? 0;
   if (!p && !v) return '';
@@ -79,6 +84,28 @@ export default function DiscountRulesPage() {
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  // OS-068: manual retry for a failed post-save recompute (POST /recompute
+  // existed on the backend but had no button here).
+  const [recomputing, setRecomputing] = useState(false);
+
+  const recomputeAll = async () => {
+    setRecomputing(true);
+    try {
+      const res = await onlineDiscountRulesApi.recompute();
+      const r = res.recompute;
+      if (r?.ok === false) {
+        toast.error('Price recompute failed again — check the backend logs.');
+      } else {
+        toast.success(
+          `Online prices recomputed (${r?.products ?? 0} products, ${r?.variants ?? 0} variants)`,
+        );
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || e?.message || 'Recompute failed');
+    } finally {
+      setRecomputing(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -183,13 +210,29 @@ export default function DiscountRulesPage() {
         <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
           <Tag className="w-5 h-5" /> Online Discount Rules
         </h1>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv-red-600 hover:bg-bv-red-700 rounded-lg px-3 py-1.5"
-        >
-          <Plus className="w-4 h-4" /> Add rule
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={recomputeAll}
+            disabled={recomputing}
+            title="Re-apply every active rule to the stored online prices — use after a save reports a failed recompute"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 border border-gray-300 bg-white hover:bg-gray-50 rounded-lg px-3 py-1.5 disabled:opacity-50"
+          >
+            {recomputing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Recompute prices
+          </button>
+          <button
+            type="button"
+            onClick={openCreate}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv-red-600 hover:bg-bv-red-700 rounded-lg px-3 py-1.5"
+          >
+            <Plus className="w-4 h-4" /> Add rule
+          </button>
+        </div>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
         These rules set the <span className="font-medium text-gray-700">website</span> price

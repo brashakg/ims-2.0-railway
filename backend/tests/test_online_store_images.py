@@ -486,3 +486,89 @@ def test_live_get_and_delete_unknown_is_404(client, auth_headers, patched_db):
     base = "/api/v1/online-store/images"
     assert client.get(f"{base}/no-such", headers=auth_headers).status_code == 404
     assert client.delete(f"{base}/no-such", headers=auth_headers).status_code == 404
+
+
+# --- OS-024: sign-off (APPROVE/REJECT) is approver-only in the HANDLER --------
+
+
+@pytest.fixture
+def catalog_manager_headers():
+    """JWT for a CATALOG_MANAGER -- inside the ecom queue set, OUTSIDE the
+    sign-off set."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": "test-catmgr-001",
+            "username": "testcatmgr",
+            "roles": ["CATALOG_MANAGER"],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_catalog_manager_cannot_approve_or_reject(
+    client, auth_headers, catalog_manager_headers, patched_db
+):
+    """OS-024: the frontend hides Approve/Reject from CATALOG_MANAGER but the
+    backend used to accept them (UI-only enforcement). The handler must 403 a
+    CATALOG_MANAGER on APPROVED/REJECTED targets while leaving the earlier
+    transitions (QUEUED->IN_PROGRESS->REVIEW) open to them -- and the image
+    must remain in REVIEW after the rejected attempts (no partial write)."""
+    base = "/api/v1/online-store/images"
+    r = client.post(base, headers=auth_headers,
+                    json={"product_id": "P-024", "url": "http://x/raw.jpg"})
+    iid = r.json()["image"]["image_id"]
+
+    # CATALOG_MANAGER may run the design flow up to REVIEW...
+    r = client.post(f"{base}/{iid}/status", headers=catalog_manager_headers,
+                    json={"status": "IN_PROGRESS"})
+    assert r.status_code == 200, r.text
+    r = client.post(f"{base}/{iid}/edited", headers=catalog_manager_headers,
+                    json={"edited_url": "http://x/edited.jpg"})
+    assert r.status_code == 200, r.text
+
+    # ...but must NOT sign it off (403, not 409: role gate, not transition gate).
+    for target in ("APPROVED", "REJECTED"):
+        r = client.post(f"{base}/{iid}/status", headers=catalog_manager_headers,
+                        json={"status": target})
+        assert r.status_code == 403, f"{target}: {r.text}"
+
+    # No state change leaked, and an approver can still complete the sign-off.
+    r = client.get(f"{base}/{iid}", headers=auth_headers)
+    assert r.json()["image"]["status"] == "REVIEW"
+    r = client.post(f"{base}/{iid}/status", headers=auth_headers,
+                    json={"status": "APPROVED"})
+    assert r.status_code == 200, r.text
+
+
+def test_design_manager_can_still_sign_off(client, auth_headers, patched_db):
+    """OS-024 guard-rail: DESIGN_MANAGER (the intended approver below ADMIN)
+    still passes the handler check."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": "test-design-001",
+            "username": "testdesign",
+            "roles": ["DESIGN_MANAGER"],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    dm_headers = {"Authorization": f"Bearer {token}"}
+
+    base = "/api/v1/online-store/images"
+    r = client.post(base, headers=auth_headers,
+                    json={"product_id": "P-024b", "url": "http://x/raw.jpg"})
+    iid = r.json()["image"]["image_id"]
+    client.post(f"{base}/{iid}/status", headers=dm_headers,
+                json={"status": "IN_PROGRESS"})
+    client.post(f"{base}/{iid}/edited", headers=dm_headers,
+                json={"edited_url": "http://x/edited.jpg"})
+    r = client.post(f"{base}/{iid}/status", headers=dm_headers,
+                    json={"status": "REJECTED"})
+    assert r.status_code == 200, r.text
+    assert r.json()["image"]["status"] == "REJECTED"

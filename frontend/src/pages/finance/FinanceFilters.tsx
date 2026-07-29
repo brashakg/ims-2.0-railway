@@ -4,7 +4,6 @@
 
 import {
   BarChart3,
-  Download,
   TrendingUp,
   TrendingDown,
   Calendar,
@@ -110,10 +109,9 @@ export default function FinanceFilters({
                 <option key={fy} value={fy}>{fy}</option>
               ))}
             </select>
-            <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded border border-blue-700 transition-colors font-medium text-sm">
-              <Download className="w-4 h-4" />
-              Export
-            </button>
+            {/* OS-069: the primary-styled "Export" button here had no onClick —
+                a dead control on a money screen. Removed; the working path is
+                "Export to Tally" inside the dashboard body. */}
           </div>
         </div>
 
