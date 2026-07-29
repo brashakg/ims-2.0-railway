@@ -3,8 +3,7 @@ IMS 2.0 - Admin Catalog Router
 ==============================
 Master-data CRUD for catalog admin UI: categories, brands (+ subbrands),
 lens master (brands / indices / coatings / addons / pricing), and the
-two product helpers (bulk-import, generate-sku) the frontend expects at
-`/api/v1/admin/*`.
+bulk-import product helper the frontend expects at `/api/v1/admin/*`.
 
 Why this router exists:
 The frontend `services/api/products.ts` was written against an
@@ -997,39 +996,16 @@ async def quote_lens_price(payload: LensPriceQuoteInput):
 
 
 # ============================================================================
-# PRODUCTS — bulk-import + generate-sku helpers
+# PRODUCTS — bulk-import helper
 # ============================================================================
-# Sit alongside the existing /catalog/products surface. Frontend posts
+# Sits alongside the existing /catalog/products surface. Frontend posts
 # multipart/form-data for bulk-import; we stash the row count + accept
 # the file, then defer the actual ingestion to the catalog router's
 # /catalog/products/import endpoint (which already exists at line 1358).
-# generate-sku is pure utility: builds an SKU string from category +
-# brand + model_no without persisting anything.
-
-
-class GenerateSkuInput(BaseModel):
-    category: str
-    brand: str
-    model_no: str
-
-
-@router.post("/products/generate-sku")
-async def generate_product_sku(payload: GenerateSkuInput):
-    """Compose an SKU string from category, brand, and model_no.
-    Pure function; does not persist or check uniqueness — the create-product
-    endpoint downstream will fail with 409 if the SKU is already taken.
-    """
-    cat = (payload.category or "").upper().strip().replace(" ", "")[:6]
-    brand = (payload.brand or "").upper().strip().replace(" ", "")[:6]
-    model = (payload.model_no or "").upper().strip().replace(" ", "")[:8]
-    rand = uuid.uuid4().hex[:4].upper()
-    sku = "-".join(p for p in (cat, brand, model, rand) if p)
-    return {
-        "sku": sku,
-        "category": payload.category,
-        "brand": payload.brand,
-        "model_no": payload.model_no,
-    }
+# (A THIRD SKU generator used to live here: POST /products/generate-sku,
+# CAT-BRAND-MODEL-RAND4 with uuid randomness and no auth Depends on the
+# handler. REMOVED -- zero frontend callers; the canonical deterministic
+# preview is POST /products/sku-preview in routers/product_master.py.)
 
 
 @router.post("/products/bulk-import", status_code=202)
@@ -1199,5 +1175,5 @@ async def get_product(product_id: str):
 #   POST   /api/v1/products/bulk-create  (batch create, same validators)
 #   PUT    /api/v1/products/{id}         (update -- incl. barcode + reorder fields)
 # The frontend callers (adminProductApi writes, reorderApi) were repointed to
-# productApi accordingly. The GET reads above + generate-sku + bulk-import
-# (file-stash only; not a product writer) remain for backwards-compat.
+# productApi accordingly. The GET reads above + bulk-import (file-stash
+# only; not a product writer) remain for backwards-compat.
