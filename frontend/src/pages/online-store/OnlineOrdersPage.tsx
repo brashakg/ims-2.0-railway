@@ -227,17 +227,21 @@ function humanise(s: string | null | undefined): string | null {
 }
 
 /** Colour a payment/fulfillment token green when it reads as "done", amber for
- *  partial, red for bad, neutral otherwise — purely cosmetic, fail-soft to
- *  neutral. The "done" tokens are anchored so 'unpaid' / 'unfulfilled' can never
- *  substring-match 'paid' / 'fulfilled' into success-green (OS-041). */
+ *  partial/pending, red for bad, neutral otherwise — purely cosmetic, fail-soft
+ *  to neutral. ORDER MATTERS (OS-041 + review round): the NEGATIVE branches run
+ *  FIRST — amber catches every partial/pending state ('partially_paid',
+ *  'partially_fulfilled', 'unfulfilled') and red catches the bad ones
+ *  ('unpaid', 'refunded', 'cancelled') — before the green branch, whose plain
+ *  'paid'/'fulfilled' tokens would otherwise substring-match inside them and
+ *  paint a not-fully-paid state success-green on a money-adjacent screen. */
 function statusChipClass(s: string | null | undefined): string {
   const t = (s || '').toLowerCase();
-  if (/(^|[^n])paid|(^|[^n])fulfilled|complete|captured|success/.test(t))
-    return 'bg-green-100 text-green-800 border-green-200';
   if (/partial|pending|authorized|unfulfilled/.test(t))
     return 'bg-amber-100 text-amber-800 border-amber-200';
   if (/refund|cancel|void|fail|unpaid/.test(t))
     return 'bg-red-100 text-red-700 border-red-200';
+  if (/paid|fulfilled|complete|captured|success/.test(t))
+    return 'bg-green-100 text-green-800 border-green-200';
   return 'bg-gray-100 text-gray-600 border-gray-200';
 }
 

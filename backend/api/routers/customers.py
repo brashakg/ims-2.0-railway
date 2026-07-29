@@ -519,7 +519,7 @@ def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
 _CUSTOMER_STATS_EXCLUDED_STATUSES = {"CANCELLED", "DRAFT", "REFUNDED"}
 
 
-def _attach_order_stats(rows: List[Dict[str, Any]]) -> None:
+def _attach_order_stats(rows: List[Dict[str, Any]], current_user: dict) -> None:
     """OS-026: the Online-customers screen renders 'Orders' / 'Lifetime' columns
     from fields (orders_count / total_spent) that NOTHING ever writes to customer
     docs -- every online shopper showed 0 orders / Rs 0 forever. Compute them
@@ -528,8 +528,21 @@ def _attach_order_stats(rows: List[Dict[str, Any]]) -> None:
     real Mongo and the seeded mock -- no aggregation pipeline needed for a page
     of <=500 customers). RESPONSE-ONLY enrichment: nothing is persisted.
 
+    CROSS-STORE CALLERS ONLY (adversarial review, PR #947): the sum spans the
+    WHOLE orders collection -- all stores and channels, which is exactly what
+    makes it a truthful lifetime figure -- and store-pinned roles must never
+    see cross-store money. A store-bounded caller therefore gets NO enrichment:
+    the FE renders its honest em-dash for the absent fields, which is truthful,
+    unlike a partial per-store sum wearing a 'Lifetime' label. (The consuming
+    Online-customers screen is HQ-gated anyway.)
+
     Fail-soft: any error leaves the rows unchanged (the FE then renders its
     honest em-dash fallback, never a fake zero)."""
+    from ..dependencies import user_store_scope
+
+    is_cross, _allowed = user_store_scope(current_user)
+    if not is_cross:
+        return
     ids = [str(r.get("customer_id") or "") for r in rows if isinstance(r, dict)]
     ids = [i for i in ids if i]
     if not ids:
@@ -708,9 +721,10 @@ async def list_customers(
         # OS-026: the online-segment list drives the Online-customers screen's
         # Orders / Lifetime columns -- fields nothing persists. Enrich the page
         # server-side (response-only). Scoped to ?channel=ONLINE so the general
-        # CRM list keeps its exact prior shape and cost.
+        # CRM list keeps its exact prior shape and cost; inside, cross-store
+        # callers only (store-pinned roles never see cross-store money).
         if channel and str(channel).strip().upper() in _ONLINE_CHANNEL_VALUES:
-            _attach_order_stats(customers)
+            _attach_order_stats(customers, current_user)
 
         from ..utils.pagination import paginate
 

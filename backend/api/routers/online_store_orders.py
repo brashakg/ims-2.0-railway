@@ -93,9 +93,12 @@ _REMAP_ROLES = ("ADMIN",)
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
 
-# How many recent shopify webhook_inbox rows to scan for the FAILED queue. The
-# collection is TTL-bounded to 30 days (webhooks.py), so this covers the entire
-# actionable window at current volumes.
+# How many recent shopify webhook_inbox rows to scan -- shared by BOTH the
+# FAILED-queue builder (_unbooked_webhook_rows) and the remap payload lookup
+# (_load_last_shopify_payload). ONE constant on purpose: with a wider queue
+# window than remap's lookup (300 vs 200), a surfaced FAILED row could 404 the
+# moment its Re-map button was clicked. The collection is TTL-bounded to 30 days
+# (webhooks.py), so this covers the entire actionable window at current volumes.
 _INBOX_SCAN_LIMIT = 300
 
 # Mapper result statuses that mean "the order IS (still) in the books" -- the ONLY
@@ -259,10 +262,25 @@ def _unbooked_webhook_rows(db, *, search: Optional[str]) -> List[Dict[str, Any]]
         payload = payload if isinstance(payload, dict) else {}
         headers = row.get("headers")
         headers = headers if isinstance(headers, dict) else {}
-        topic = str(headers.get("x-shopify-topic") or "").lower()
-        # Only ORDER-shaped deliveries belong in this queue -- refund/fulfillment
-        # webhooks reference a parent order but are not order payloads.
-        if not (topic.startswith("orders/") or isinstance(payload.get("line_items"), list)):
+        topic = str(headers.get("x-shopify-topic") or "").strip().lower()
+        # Only ORDER deliveries belong in this queue. IMS also subscribes to
+        # CHILD-resource webhooks (fulfillments/*, refunds/*, checkouts/*) whose
+        # payloads LOOK order-shaped -- a Shopify fulfillment carries a top-level
+        # line_items list -- but whose top-level id is the CHILD id, which never
+        # matches orders.shopify_order_id. Admitting them made every fulfilled
+        # order re-surface as a phantom FAILED "not in the books" row whose
+        # Re-map button could book a DUPLICATE order + GST invoice under the
+        # fulfillment id. So: admit only rows with an orders/* topic; a legacy
+        # row with NO stored topic header must be order-shaped AND carry no
+        # parent order_id (child resources always reference their parent order;
+        # true order payloads carry only "id").
+        if topic:
+            if not topic.startswith("orders/"):
+                continue
+        elif (
+            not isinstance(payload.get("line_items"), list)
+            or payload.get("order_id") is not None
+        ):
             continue
         sid = str(payload.get("id") or "").strip()
         if not sid or sid in candidates:
@@ -435,7 +453,10 @@ async def list_online_orders(
             branches.append({"created_at": created_dt})
         and_clauses.append({"$or": branches})
 
-    search_txt = (search or "").strip()
+    # isinstance guard: pre-existing scope tests (and any internal caller) invoke
+    # this handler DIRECTLY, so `search` can arrive as the FastAPI Query sentinel
+    # object rather than a string -- treat anything non-str as "no search".
+    search_txt = search.strip() if isinstance(search, str) else ""
     if search_txt:
         and_clauses.append(_search_clause(search_txt))
     if and_clauses:
@@ -502,12 +523,15 @@ async def remap_online_order(
     current_user: dict = Depends(require_roles(*_REMAP_ROLES)),
 ) -> Dict[str, Any]:
     """Re-run the Shopify->IMS mapper for ONE order from its last persisted
-    `webhook_inbox` payload. Recovers an order whose first mapping failed (or needs
-    a status re-sync). Idempotent: the mapper's order-id guard means a re-run never
-    creates a 2nd order -- it returns 'duplicate' + syncs the status.
+    `webhook_inbox` ORDER payload. Recovers an order whose first mapping failed
+    (or needs a status re-sync). Idempotent: the mapper's order-id guard means a
+    re-run never creates a 2nd order -- it returns 'duplicate' + syncs the status.
 
-    404 when no webhook_inbox payload is on file for this Shopify order id (nothing
-    to replay). Writes a chained audit_logs row either way (fail-soft).
+    404 when no ORDER webhook payload is on file for this Shopify order id
+    (nothing safe to replay -- child-resource payloads such as fulfillments /
+    refunds / checkouts are never eligible: replaying one would book a duplicate
+    order + GST invoice under the child id); 422 belt-and-braces if a non-order
+    topic ever slips past the loader. Writes a chained audit_logs row (fail-soft).
     """
     db = _get_db()
     if db is None:
@@ -519,13 +543,31 @@ async def remap_online_order(
     if payload is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No webhook payload on file for Shopify order {shopify_order_id}",
+            detail=(
+                f"No order webhook payload on file for Shopify order "
+                f"{shopify_order_id} (only order webhooks can be re-mapped)"
+            ),
+        )
+    # Defense-in-depth: the loader only returns orders/* (or legacy topicless
+    # order-shaped) payloads, but a non-order topic must NEVER reach the mapper
+    # -- it would be normalized to orders/create and booked as a real order.
+    if topic and not str(topic).lower().startswith("orders/"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"The stored webhook for {shopify_order_id} is a "
+                f"'{topic}' delivery, not an order -- it cannot be re-mapped."
+            ),
         )
 
     try:
         from ..services.online_order_mapper import map_shopify_order
 
-        result = map_shopify_order(payload, db, webhook_id=webhook_id, topic=topic)
+        # A legacy topicless row was admitted by the loader ONLY because it is
+        # order-shaped (line_items, no parent order_id) -> replay as a create.
+        result = map_shopify_order(
+            payload, db, webhook_id=webhook_id, topic=topic or "orders/create"
+        )
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
 
@@ -652,18 +694,37 @@ def _write_rx_hold_audit(order: Dict[str, Any], current_user: dict) -> None:
 
 
 def _load_last_shopify_payload(db, shopify_order_id: str):
-    """Find the most-recent webhook_inbox row whose payload is for this Shopify
-    order id; return (payload, webhook_id, topic) or (None, None, None).
+    """Find the most-recent webhook_inbox ORDER payload for this Shopify order
+    id; return (payload, webhook_id, topic) or (None, None, None).
+
+    ONLY order deliveries qualify -- this feeds the mapper's CREATE path, so a
+    child-resource payload (fulfillments/refunds/checkouts, whose top-level id is
+    the CHILD id and whose line items are not an order) must never be replayed:
+    it would book a duplicate/garbage order + GST invoice under the child id.
+    Guards, mirroring _unbooked_webhook_rows:
+      * a row whose stored topic exists and is not orders/* is skipped;
+      * a topicless legacy row shaped like a child resource (payload.order_id
+        present and different from payload.id) is skipped;
+      * the payload matches on payload.id ONLY -- never payload.order_id, so
+        remapping a legitimate order id can no longer pick up that order's NEWER
+        fulfillment payload instead of the order itself.
+    The topic is returned AS STORED (None for legacy topicless rows) -- no more
+    defaulting unknown topics to 'orders/create'; the caller decides.
 
     Shopify's order id can land in webhook_inbox as a number or string, so match
-    both. We scan the (TTL-bounded, recent) shopify rows newest-first and pick the
-    first whose payload id matches -- portable across real Mongo + the in-memory
-    mock (neither needs a numeric/string-coercing query)."""
+    stringified. We scan the (TTL-bounded, recent) shopify rows newest-first --
+    the same _INBOX_SCAN_LIMIT window the FAILED queue scans, so a surfaced row
+    can always be re-mapped -- portable across real Mongo + the in-memory mock
+    (neither needs a numeric/string-coercing query)."""
     try:
         coll = db.get_collection("webhook_inbox")
         if coll is None:
             return None, None, None
-        rows = list(coll.find({"vendor": "shopify"}).sort("received_at", -1).limit(200))
+        rows = list(
+            coll.find({"vendor": "shopify"})
+            .sort("received_at", -1)
+            .limit(_INBOX_SCAN_LIMIT)
+        )
     except Exception:  # noqa: BLE001
         return None, None, None
 
@@ -672,18 +733,21 @@ def _load_last_shopify_payload(db, shopify_order_id: str):
         payload = row.get("payload") if isinstance(row, dict) else None
         if not isinstance(payload, dict):
             continue
-        pid = str(payload.get("id") or payload.get("order_id") or "").strip()
+        headers = row.get("headers") if isinstance(row, dict) else None
+        headers = headers if isinstance(headers, dict) else {}
+        topic = str(headers.get("x-shopify-topic") or "").strip().lower()
+        if topic and not topic.startswith("orders/"):
+            # A stored non-order topic (fulfillments/*, refunds/*, ...) is a
+            # child resource -- never replayable as an order.
+            continue
+        pid = str(payload.get("id") or "").strip()
+        parent = str(payload.get("order_id") or "").strip()
+        if not topic and parent and parent != pid:
+            # Topicless legacy row shaped like a child resource.
+            continue
         if pid and pid == target:
-            headers = row.get("headers") or {}
-            webhook_id = (
-                headers.get("x-shopify-webhook-id")
-                if isinstance(headers, dict)
-                else None
-            )
-            topic = (
-                headers.get("x-shopify-topic") if isinstance(headers, dict) else None
-            ) or "orders/create"
-            return payload, webhook_id, topic
+            webhook_id = headers.get("x-shopify-webhook-id")
+            return payload, webhook_id, (topic or None)
     return None, None, None
 
 

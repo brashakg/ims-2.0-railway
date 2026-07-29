@@ -315,7 +315,11 @@ class _OnlineOrdersColl:
     def count_documents(self, q):
         return sum(1 for d in self.docs if self._match(d, q))
 
-    def find(self, q):
+    def find(self, q, projection=None):
+        # `projection` accepted (and ignored, like the other test fakes): the
+        # list endpoint passes a server-side projection since PR #947 (OS-063).
+        # The scope assertions below are unchanged -- they pin WHICH docs match,
+        # not their shape.
         matched = [copy.deepcopy(d) for d in self.docs if self._match(d, q)]
         return _Cursor(matched)
 

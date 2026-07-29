@@ -211,7 +211,11 @@ def _seed_booked(ctx, sid="1001", status="CONFIRMED", **over):
 
 
 def _seed_inbox(ctx, sid, *, processed=True, line_items=True, topic="orders/create",
-                handler_error=None, customer_name=("Guest", "Buyer")):
+                handler_error=None, customer_name=("Guest", "Buyer"), order_id=None):
+    """Seed one shopify webhook_inbox row. topic=None -> a legacy row with NO
+    stored topic header. order_id -> a CHILD-resource-shaped payload
+    (fulfillments / refunds / checkouts reference their parent order; true
+    order payloads carry only 'id')."""
     payload = {
         "id": int(sid),
         "name": f"#{sid}",
@@ -223,11 +227,13 @@ def _seed_inbox(ctx, sid, *, processed=True, line_items=True, topic="orders/crea
     }
     if line_items:
         payload["line_items"] = [{"sku": "Z", "quantity": 1}]
+    if order_id is not None:
+        payload["order_id"] = order_id
     row = {
         "webhook_id": f"wh-{sid}",
         "vendor": "shopify",
         "received_at": f"2026-07-21T09:{int(sid) % 60:02d}:00Z",
-        "headers": {"x-shopify-topic": topic},
+        "headers": ({"x-shopify-topic": topic} if topic else {}),
         "payload": payload,
         "processed": processed,
     }
@@ -289,6 +295,96 @@ def test_failed_rows_only_on_first_page(ctx):
     data = r.json()
     assert data["failed"] == []  # no duplication across pages
     assert data["failed_count"] == 1  # ... but the count stays visible
+
+
+# ---------------------------------------------------------------------------
+# P0 regression (adversarial review of PR #947): CHILD-resource webhooks
+# (fulfillments/refunds/checkouts) carry line_items but their payload.id is the
+# CHILD id -- they must NEVER surface as FAILED rows, and Re-map must refuse
+# them (replaying one would book a DUPLICATE order + GST invoice under the
+# fulfillment id).
+# ---------------------------------------------------------------------------
+
+
+def test_fulfillment_webhook_never_surfaces_as_failed(ctx):
+    # A booked + fulfilled order: its fulfillments/create webhook carries
+    # line_items and payload.id = the FULFILLMENT id (parent in order_id).
+    _seed_booked(ctx, "5001")
+    _seed_inbox(
+        ctx, "9990001", processed=True, topic="fulfillments/create", order_id=5001
+    )
+    r = ctx["client"].get(BASE, headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200
+    data = r.json()
+    assert data["failed"] == []  # no phantom 'not in the books' row
+    assert data["failed_count"] == 0
+    assert data["total"] == 1  # the real order is simply in the books
+
+
+def test_remap_refuses_fulfillment_payload_and_books_nothing(ctx, monkeypatch):
+    _seed_booked(ctx, "5001")
+    _seed_inbox(
+        ctx, "9990001", processed=True, topic="fulfillments/create", order_id=5001
+    )
+    calls = []
+    monkeypatch.setattr(
+        mapper_mod,
+        "map_shopify_order",
+        lambda *a, **k: calls.append(a) or {"status": "created"},
+    )
+    r = ctx["client"].post(f"{BASE}/remap/9990001", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 404, r.text  # nothing safe to replay
+    assert calls == []  # the mapper was never consulted
+    assert ctx["orders"].count_documents({}) == 1  # no duplicate order booked
+
+
+def test_remap_by_order_id_never_matches_its_fulfillment_payload(ctx, monkeypatch):
+    # Secondary hazard: remapping a LEGIT order id used to match the order's
+    # NEWER fulfillment payload via payload.order_id and book a phantom.
+    _seed_inbox(
+        ctx, "9990002", processed=True, topic="fulfillments/create", order_id=5002
+    )
+    calls = []
+    monkeypatch.setattr(
+        mapper_mod,
+        "map_shopify_order",
+        lambda *a, **k: calls.append(a) or {"status": "created"},
+    )
+    r = ctx["client"].post(f"{BASE}/remap/5002", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_topicless_legacy_order_row_still_surfaces_and_remaps(ctx, monkeypatch):
+    # A legacy inbox row with NO stored topic header but a true ORDER shape
+    # (line_items, no parent order_id) must keep working end-to-end.
+    _seed_inbox(ctx, "6006", processed=True, topic=None)
+    data = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()
+    assert [f["shopify_order_id"] for f in data["failed"]] == ["6006"]
+    assert data["failed"][0]["map_status"] == "FAILED"
+
+    seen_topics = []
+    monkeypatch.setattr(
+        mapper_mod,
+        "map_shopify_order",
+        lambda payload, db, webhook_id=None, topic=None: (
+            seen_topics.append(topic) or {"status": "created", "order_id": "ord-6006"}
+        ),
+    )
+    r = ctx["client"].post(f"{BASE}/remap/6006", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    # An order-shaped topicless row replays as a create -- the ONLY case that
+    # may still default; stored non-order topics never reach the mapper.
+    assert seen_topics == ["orders/create"]
+
+
+def test_topicless_child_shaped_row_is_skipped(ctx):
+    # No topic header + parent order_id != id -> a child resource: not queued.
+    _seed_inbox(ctx, "9990003", processed=True, topic=None, order_id=7007)
+    data = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()
+    assert data["failed"] == []
+    assert data["failed_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -438,3 +534,38 @@ def test_clear_rx_hold_requires_admin(ctx):
         f"{BASE}/ord-5007/clear-rx-hold", headers=_hdr(["CATALOG_MANAGER"])
     )
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# P1 regression (adversarial review of PR #947): the OS-026 lifetime-spend
+# enrichment sums the WHOLE orders collection -- store-pinned roles must never
+# receive that cross-store money. Cross-store callers only; everyone else gets
+# nothing (the FE renders an honest em-dash for the absent fields).
+# ---------------------------------------------------------------------------
+
+
+def test_attach_order_stats_skipped_for_store_pinned_roles(monkeypatch):
+    from api.routers import customers as customers_router
+
+    db = _DB()
+    orders = db.get_collection("orders")
+    orders.insert_one(
+        {"customer_id": "C1", "grand_total": 100.0, "status": "DELIVERED", "store_id": "BV-PUN-01"}
+    )
+    orders.insert_one(
+        {"customer_id": "C1", "grand_total": 50.0, "status": "DELIVERED", "store_id": "BV-BOK-01"}
+    )
+    monkeypatch.setattr(deps, "get_db", lambda: db, raising=False)
+
+    rows = [{"customer_id": "C1"}]
+    customers_router._attach_order_stats(
+        rows, {"roles": ["STORE_MANAGER"], "active_store_id": "BV-BOK-01"}
+    )
+    # Store-pinned caller: NO cross-store totals attached at all.
+    assert "orders_count" not in rows[0]
+    assert "total_spent" not in rows[0]
+
+    customers_router._attach_order_stats(rows, {"roles": ["ADMIN"]})
+    # HQ caller: full lifetime figures.
+    assert rows[0]["orders_count"] == 2
+    assert rows[0]["total_spent"] == 150.0
