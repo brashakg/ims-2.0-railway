@@ -37,9 +37,22 @@ and agrees. Any row that fails any gate aborts the WHOLE run with 0 writes.
 SAFETY CONTRACT
 ---------------
 - DRY-RUN IS THE DEFAULT. Nothing is written unless you pass --apply.
-- MANDATORY PRE-FLIGHT FINGERPRINT (db name, collection counts, the sku_1
-  index shape). A mismatch aborts with exit 3 BEFORE any write -- this is what
-  stops the script from cheerfully "succeeding" against the wrong database.
+- DEPLOY-ORDERING GATE: --apply is REFUSED (exit 6, 0 writes) unless
+  --code-is-deployed is ALSO passed. See STEP 0 in USAGE below: applying this
+  repair while the OLD online_catalog.py is still deployed flips
+  sellable_online True->False for the 27 live Ray-Ban Meta SKUs (their
+  catalog_products rows gain a `sku`, so they stop falling through to the
+  variant branch that reads the live variant gid) and the post-sale oversell
+  alarm goes SILENT -- the exact P0 the online_catalog.py fix on this branch
+  prevents.
+- MANDATORY PRE-FLIGHT FINGERPRINT (db name; the sku_1 index shape; GROWTH-
+  TOLERANT collection floors counts >= 59 / >= 53 -- every product create adds
+  one row to BOTH collections, so exact counts would break on the first
+  post-deploy create; the EXACT no-sku target count == 53, overridable via
+  --expect-targets N; and the invariant catalog_products - products == 6, the
+  six sku-carrying catalog rows that have no spine). A mismatch aborts with
+  exit 3 BEFORE any write -- this is what stops the script from cheerfully
+  "succeeding" against the wrong database.
 - The connection string is resolved ONLY from MONGODB_URL / MONGO_PUBLIC_URL /
   MONGO_URL. There is deliberately NO DatabaseConfig.from_env() fallback: that
   helper silently defaults to localhost/ims_2_0, so a missing env var would
@@ -58,14 +71,22 @@ SAFETY CONTRACT
 
 USAGE
 -----
+  # STEP 0: this branch must be MERGED and DEPLOYED to Railway before --apply.
+  #   The fixed online_catalog.py (sellable_online resolved from the live
+  #   variant gid on the PRODUCT branch too) must be LIVE first. If the 53
+  #   rows gain a sku while the OLD online_catalog.py is deployed,
+  #   sellable_online flips True->False for the 27 live Ray-Ban Meta SKUs and
+  #   the post-sale oversell alarm goes silent. --apply therefore refuses to
+  #   run unless --code-is-deployed is ALSO passed.
+
   # DRY RUN (default) against prod Mongo -- writes nothing:
   cd "C:\\Users\\avina\\IMS 2.0 CLAUDE COWORK\\ims-2.0-railway"
   railway run --service MongoDB -- ".venv\\Scripts\\python.exe" \\
       backend/scripts/backfill_pim_sku_from_parent.py
 
-  # APPLY (owner-gated):
+  # APPLY (owner-gated; ONLY after STEP 0 is verifiably true):
   railway run --service MongoDB -- ".venv\\Scripts\\python.exe" \\
-      backend/scripts/backfill_pim_sku_from_parent.py --apply
+      backend/scripts/backfill_pim_sku_from_parent.py --apply --code-is-deployed
 
 EXIT CODES
 ----------
@@ -74,6 +95,7 @@ EXIT CODES
   3  pre-flight fingerprint mismatch (aborted, 0 writes)
   4  a gate G1-G6 failed (aborted, 0 writes)
   5  write shortfall (PARTIAL -- see the audit file)
+  6  --apply without --code-is-deployed (deploy-ordering gate; 0 writes)
 """
 from __future__ import annotations
 
@@ -83,6 +105,14 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+# Module-level so tests can monkeypatch a fake client class onto this module
+# (main() reads the MODULE attribute, never re-imports). None = driver missing,
+# handled loud in main().
+try:
+    from pymongo import MongoClient
+except Exception:  # noqa: BLE001 - surfaced as ABORTED-DRIVER in main()
+    MongoClient = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # The ONE shared predicate: "this row has no usable sku".
@@ -102,10 +132,22 @@ HAS_SKU_PREDICATE: Dict[str, Any] = {"sku": {"$exists": True, "$nin": [None, ""]
 
 # ---------------------------------------------------------------------------
 # Pre-flight fingerprint -- verified live on prod 2026-07-29.
+#
+# The COUNTS are growth-tolerant FLOORS (>=), not exact: every product create
+# adds one row to BOTH collections, so exact 59/53 would break on the first
+# create after the branch deploys. What stays HARD and exact:
+#   * the db name and the sku_1 unique+sparse index shape,
+#   * the TARGET_PREDICATE count (53 no-sku rows; --expect-targets overrides),
+#   * the invariant catalog_products_count - products_count == 6 -- the six
+#     sku-carrying catalog rows with no products spine (SGRAYMETARW4006601 /
+#     SB5050 etc.), which creates on the fixed code can never change because
+#     they always add to both sides.
 # ---------------------------------------------------------------------------
 EXPECTED_DB_NAME = "ims_2_0"
-EXPECTED_CATALOG_PRODUCTS = 59
-EXPECTED_PRODUCTS = 53
+MIN_CATALOG_PRODUCTS = 59
+MIN_PRODUCTS = 53
+EXPECTED_TARGETS = 53
+EXPECTED_COUNT_GAP = 6
 EXPECTED_SKU_INDEX = "sku_1"
 
 GATE_DESCRIPTIONS = {
@@ -163,29 +205,51 @@ def select_targets(catalog) -> List[Dict[str, Any]]:
     return rows
 
 
-def check_fingerprint(db_name: str, catalog, products) -> List[str]:
+def check_fingerprint(
+    db_name: str, catalog, products, expect_targets: int = EXPECTED_TARGETS
+) -> List[str]:
     """Return a list of fingerprint problems ([] == matches).
 
-    Checks the db NAME, both collection counts, and the sku_1 index shape
-    (unique + sparse). The index shape is not cosmetic: `sparse` is exactly why
-    53 key-absent rows coexist today, and `unique` is why writing an explicit
-    null instead of a real sku would insert once and then collide forever.
+    HARD + exact: the db NAME and the sku_1 index shape (unique + sparse) --
+    `sparse` is exactly why 53 key-absent rows coexist today, and `unique` is
+    why writing an explicit null instead of a real sku would insert once and
+    then collide forever. Also HARD + exact: the TARGET_PREDICATE count
+    (== expect_targets, default 53; --expect-targets overrides) and the
+    invariant catalog_products_count - products_count == 6.
+
+    GROWTH-TOLERANT: the raw collection counts are FLOORS (>= 59 / >= 53),
+    because every product create after the branch deploys adds one row to BOTH
+    collections -- an exact count would brick the script on the first create,
+    while the gap invariant and the exact target count still pin the shape.
     """
     problems: List[str] = []
     if db_name != EXPECTED_DB_NAME:
         problems.append(f"db name is {db_name!r}, expected {EXPECTED_DB_NAME!r}")
 
     cp_count = catalog.count_documents({})
-    if cp_count != EXPECTED_CATALOG_PRODUCTS:
+    if cp_count < MIN_CATALOG_PRODUCTS:
         problems.append(
-            f"catalog_products count is {cp_count}, expected "
-            f"{EXPECTED_CATALOG_PRODUCTS}"
+            f"catalog_products count is {cp_count}, expected >= "
+            f"{MIN_CATALOG_PRODUCTS}"
         )
 
     pr_count = products.count_documents({})
-    if pr_count != EXPECTED_PRODUCTS:
+    if pr_count < MIN_PRODUCTS:
+        problems.append(f"products count is {pr_count}, expected >= {MIN_PRODUCTS}")
+
+    if (cp_count - pr_count) != EXPECTED_COUNT_GAP:
         problems.append(
-            f"products count is {pr_count}, expected {EXPECTED_PRODUCTS}"
+            f"count gap (catalog_products - products) is {cp_count - pr_count}, "
+            f"expected exactly {EXPECTED_COUNT_GAP} (the 6 sku-carrying catalog "
+            "rows with no spine)"
+        )
+
+    target_count = catalog.count_documents(TARGET_PREDICATE)
+    if target_count != int(expect_targets):
+        problems.append(
+            f"no-sku target count is {target_count}, expected exactly "
+            f"{expect_targets} (pass --expect-targets N if this changed for a "
+            "verified reason)"
         )
 
     try:
@@ -368,7 +432,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="actually write. Omitted = DRY RUN (the default).",
+        help="actually write. Omitted = DRY RUN (the default). REFUSED unless "
+        "--code-is-deployed is also passed (STEP 0: deploy ordering).",
+    )
+    parser.add_argument(
+        "--code-is-deployed",
+        action="store_true",
+        help="required WITH --apply: confirms this branch (the fixed "
+        "online_catalog.py) is MERGED and DEPLOYED to Railway. Without the "
+        "new code live, repairing the 53 rows flips sellable_online "
+        "True->False for the 27 live Ray-Ban Meta SKUs and silences the "
+        "oversell alarm.",
+    )
+    parser.add_argument(
+        "--expect-targets",
+        type=int,
+        default=EXPECTED_TARGETS,
+        help=f"exact TARGET_PREDICATE row count required by the pre-flight "
+        f"fingerprint (default {EXPECTED_TARGETS}). Override ONLY after "
+        "verifying why the target set changed.",
     )
     parser.add_argument(
         "--audit-path",
@@ -399,13 +481,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     client = None
 
     try:
+        # --- STEP 0: deploy-ordering gate (BEFORE any connection) -----------
+        if args.apply and not args.code_is_deployed:
+            audit["outcome"] = "ABORTED-DEPLOY-GATE"
+            audit["error"] = "--apply without --code-is-deployed"
+            _out("=" * 72)
+            _out("APPLY REFUSED -- DEPLOY-ORDERING GATE (0 writes)")
+            _out("=" * 72)
+            _out("STEP 0: this branch must be MERGED and DEPLOYED to Railway")
+            _out("BEFORE --apply. If the 53 rows gain a sku while the OLD")
+            _out("online_catalog.py is still deployed, sellable_online flips")
+            _out("True->False for the 27 live Ray-Ban Meta SKUs and the")
+            _out("post-sale oversell alarm goes SILENT.")
+            _out("")
+            _out("Verify the deploy is live, then re-run with BOTH flags:")
+            _out("    --apply --code-is-deployed")
+            return 6
+
+        if args.apply:
+            _out("=" * 72)
+            _out("STEP 0 ACKNOWLEDGED via --code-is-deployed: you are asserting")
+            _out("the fixed online_catalog.py is LIVE on Railway. If that is")
+            _out("not true, STOP NOW (Ctrl+C) -- applying against the old code")
+            _out("silences the oversell alarm for the 27 live Ray-Ban Meta SKUs.")
+            _out("=" * 72)
+
         # --- connect (fail loud) --------------------------------------------
-        try:
-            from pymongo import MongoClient
-        except Exception as exc:  # noqa: BLE001
+        if MongoClient is None:
             audit["outcome"] = "ABORTED-DRIVER"
-            audit["error"] = f"pymongo import failed: {exc}"
-            _out(f"FATAL: pymongo is not importable: {exc}")
+            audit["error"] = "pymongo import failed at module load"
+            _out("FATAL: pymongo is not importable.")
             return 2
 
         try:
@@ -435,23 +540,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         # --- MANDATORY pre-flight fingerprint --------------------------------
         _out("")
         _out("--- PRE-FLIGHT FINGERPRINT ---")
-        problems = check_fingerprint(db.name, catalog, products)
+        problems = check_fingerprint(
+            db.name, catalog, products, expect_targets=args.expect_targets
+        )
         fingerprint = {
             "db_name": db.name,
             "catalog_products_count": catalog.count_documents({}),
             "products_count": products.count_documents({}),
             "catalog_variants_count": variants.count_documents({}),
+            "no_sku_target_count": catalog.count_documents(TARGET_PREDICATE),
             "sku_index": dict(catalog.index_information()).get(EXPECTED_SKU_INDEX),
         }
         audit["fingerprint"] = fingerprint
         _out(f"  db name                 : {fingerprint['db_name']}")
         _out(
             f"  catalog_products count  : {fingerprint['catalog_products_count']}"
-            f" (expected {EXPECTED_CATALOG_PRODUCTS})"
+            f" (expected >= {MIN_CATALOG_PRODUCTS})"
         )
         _out(
             f"  products count          : {fingerprint['products_count']}"
-            f" (expected {EXPECTED_PRODUCTS})"
+            f" (expected >= {MIN_PRODUCTS})"
+        )
+        _out(
+            "  count gap (cp - pr)     : "
+            f"{fingerprint['catalog_products_count'] - fingerprint['products_count']}"
+            f" (expected exactly {EXPECTED_COUNT_GAP})"
+        )
+        _out(
+            f"  no-sku target count     : {fingerprint['no_sku_target_count']}"
+            f" (expected exactly {args.expect_targets})"
         )
         _out(f"  catalog_variants count  : {fingerprint['catalog_variants_count']}")
         _out(f"  index {EXPECTED_SKU_INDEX}            : {fingerprint['sku_index']}")
