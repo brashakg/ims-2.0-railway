@@ -49,12 +49,29 @@ push can find them. UPDATES of already-mapped products are UNCHANGED by default
 -- seeding a price onto the ~4,400 live products is opt-in via
 SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
 
+Three rules the seeding step never bends:
+  * NEVER a fake GTIN. Shopify's `barcode` is what feeds Google/Meta shopping,
+    so only a MANUFACTURER code goes there (variant gtin/barcode, product gtin,
+    or the "GTIN (mfr)"/"UPC (mfr)" attributes). The internal EAN-13 minted at
+    GRN under a GS1 20-29 restricted-distribution prefix is NEVER pushed -- no
+    real GTIN simply means no `barcode` key (_manufacturer_gtin).
+  * NEVER a duplicated SKU. A SKU is unique per variant, so the parent SKU only
+    stands in when the product resolves to exactly one variant row.
+  * NEVER a silent money no-op. Shopify mints new variants at 0.00, so a row we
+    could not match, or had no price for, leaves a live 0.00 variant. Those are
+    counted separately (skipped_unmatched / skipped_no_price), roll up into
+    `warnings` on the PushResult, and make `updated` count PRICED rows only.
+
 Optional env flags (all default OFF -- nothing changes unless the owner sets them):
   SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
                                   an UPDATE of an already-mapped product.
   SHOPIFY_PUBLISH_ON_CREATE=1     publish a newly created ACTIVE product to the
                                   Online Store sales channel (publishablePublish).
-                                  A DRAFT is NEVER published. The publication id
+                                  A DRAFT is NEVER published, and neither is a
+                                  product whose variant seeding did not cleanly
+                                  land a price -- publishing then would make a
+                                  0.00 product publicly buyable
+                                  (_publish_block_reason). The publication id
                                   can be pinned with SHOPIFY_ONLINE_STORE_PUBLICATION_ID
                                   (else it is looked up once via `publications`,
                                   which needs the read_publications scope).
@@ -144,11 +161,14 @@ class PushResult:
     # Product CREATE only (and UPDATE when SHOPIFY_PUSH_PRICE_ON_UPDATE is on):
     # the variant-seeding side channel that gives the new Shopify variants their
     # price / compareAtPrice / barcode / SKU. SIMULATED -> the planned rows;
-    # LIVE -> an {updated, created, skipped, errors} summary. None elsewhere.
+    # LIVE -> an {updated, created, priced, skipped_no_price, skipped_unmatched,
+    # errors, warnings, ok} summary. `updated` counts PRICED rows only. None
+    # elsewhere.
     variants_seeded: Optional[Any] = None
     # Product CREATE only, and only when SHOPIFY_PUBLISH_ON_CREATE is on: the
     # Online-Store sales-channel publish side channel. None when the flag is off
-    # (the default) or the product is a DRAFT.
+    # (the default) or the product is a DRAFT; {published: False, skipped: True,
+    # reason: ...} when the money gate refused the publish.
     publication: Optional[Any] = None
     # Collection pushes only (CUSTOM): the manual-membership side channel (the
     # collectionAddProducts step -- IMS's stored manual member list reproduced on
@@ -156,6 +176,13 @@ class PushResult:
     # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
     # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
     membership: Optional[Any] = None
+    # Non-fatal problems the caller/audit row MUST still see: the push itself
+    # succeeded (ok stays True -- the fail-soft side-channel contract is
+    # unchanged) but something money-bearing did not land, e.g. a variant we
+    # could not match, or a variant left at 0.00 because IMS had no price. A
+    # partial push must never read as a clean success. None when there is
+    # nothing to report.
+    warnings: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -969,6 +996,66 @@ def _variant_option_values(variant: Optional[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 
+# GS1 reserves prefixes 20-29 for "restricted distribution" / in-store use so a
+# retailer can mint its own codes without ever colliding with a real
+# manufacturer GTIN -- which is EXACTLY what IMS does at Goods-Receipt (see
+# backend/api/services/barcode.py). Such a code identifies nothing outside our
+# own four stores: Shopify's `barcode` field is what feeds Google/Meta shopping
+# as the product's GTIN, so pushing an internal code there publishes a FAKE GTIN
+# into the shopping feeds.
+_INTERNAL_EAN13_PREFIXES = frozenset(str(p) for p in range(20, 30))
+
+
+def _is_internal_restricted_code(value: str) -> bool:
+    """True for a GS1 restricted-distribution (in-store) barcode: an EAN-13
+    whose first two digits are 20-29, or the equivalent 12-digit UPC-A starting
+    with 2. Those are IMS's own minted unit barcodes -- never a public GTIN."""
+    digits = str(value or "").strip()
+    if not digits.isdigit():
+        return False
+    if len(digits) == 13 and digits[:2] in _INTERNAL_EAN13_PREFIXES:
+        return True
+    if len(digits) == 12 and digits[0] == "2":
+        return True
+    return False
+
+
+def _manufacturer_gtin(
+    product: Dict[str, Any], variant: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """The PUBLIC manufacturer GTIN for this variant, or None. Pure.
+
+    Only a genuine manufacturer code may be sent as Shopify's `barcode`:
+      * the variant's own gtin/barcode (catalog_variants two-barcode model:
+        gtin/barcode IS the GTIN; `store_barcode` is the physical join key and
+        is NEVER pushed) -- same source build_variant_price_inputs uses;
+      * the product's `gtin`;
+      * the "GTIN (mfr)" / "UPC (mfr)" ATTRIBUTES captured on the Add-Product
+        form (product_master._CATEGORY_SPECS -> attributes.gtin / attributes.upc,
+        documented there as "the MANUFACTURER's barcodes").
+
+    Deliberately NOT product["barcode"]: that is the INTERNAL EAN-13 minted at
+    GRN under a GS1 20-29 restricted-distribution prefix. It is not a valid
+    public GTIN and would pollute the Google/Meta shopping feeds. Any candidate
+    that IS such a restricted code is rejected too -- whichever field someone
+    typed it into. No real GTIN -> None -> the `barcode` key is omitted
+    entirely (an absent barcode is honest; a fake one is not)."""
+    vd = variant or {}
+    attrs = product.get("attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    for candidate in (
+        vd.get("gtin"),
+        vd.get("barcode"),
+        product.get("gtin"),
+        attrs.get("gtin"),
+        attrs.get("upc"),
+    ):
+        value = str(candidate or "").strip()
+        if value and not _is_internal_restricted_code(value):
+            return value
+    return None
+
+
 def build_variant_seed_rows(
     product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
@@ -981,26 +1068,29 @@ def build_variant_seed_rows(
     ProductVariantsBulkInput:
         price            the resolved selling price, "0.00" is NEVER sent
         compareAtPrice   the MRP, only when it is strictly above the price
-        barcode          the GTIN (variant gtin/barcode, else the product's) --
-                         `store_barcode` is the physical join key and is never pushed
-        inventoryItem.sku the IMS SKU (variant sku, else the product sku) -- in
-                         the 2024-04+ product model the SKU lives on the
-                         inventory item, NOT on the variant
+        barcode          the MANUFACTURER GTIN only (see _manufacturer_gtin) --
+                         the internally minted product barcode and
+                         `store_barcode` are NEVER pushed
+        inventoryItem.sku the IMS SKU (the variant's own; the parent SKU stands
+                         in ONLY for a single-row product) -- in the 2024-04+
+                         product model the SKU lives on the inventory item, NOT
+                         on the variant
 
     An entry with NEITHER a usable price NOR a SKU is dropped: there would be
     nothing to say about that variant."""
     rows: List[Dict[str, Any]] = []
     source: List[Optional[Dict[str, Any]]] = list(variants or []) or [None]
+    # A SKU is unique PER VARIANT. The parent/product SKU may therefore only
+    # stand in when this product resolves to exactly ONE row (the no-variant
+    # eyewear case, whose single row IS the product); copying it onto every row
+    # of a multi-variant product would ship the same SKU 2..n times. This
+    # matches build_variant_price_inputs, which deliberately has no fallback.
+    lone_row = len(source) == 1
     for v in source:
         vd = v or {}
         price, mrp = _resolve_variant_pricing(product, vd)
-        sku = str(vd.get("sku") or product.get("sku") or "").strip()
-        barcode = (
-            vd.get("gtin")
-            or vd.get("barcode")
-            or product.get("gtin")
-            or product.get("barcode")
-        )
+        parent_sku = product.get("sku") if lone_row else ""
+        sku = str(vd.get("sku") or parent_sku or "").strip()
         row: Dict[str, Any] = {}
         if price > 0:
             row["price"] = f"{price:.2f}"
@@ -1008,8 +1098,9 @@ def build_variant_seed_rows(
                 row["compareAtPrice"] = f"{mrp:.2f}"
         if sku:
             row["inventoryItem"] = {"sku": sku}
-        if barcode:
-            row["barcode"] = str(barcode)
+        gtin = _manufacturer_gtin(product, v)
+        if gtin:
+            row["barcode"] = gtin
         if not row.get("price") and not row.get("inventoryItem"):
             # No price and no SKU -> nothing worth a mutation for this variant.
             continue
@@ -1024,12 +1115,47 @@ def build_variant_seed_rows(
     return rows
 
 
+def _seed_warnings(summary: Dict[str, Any]) -> List[str]:
+    """Every reason this seeding step (planned OR applied) is NOT a clean money
+    success. Pure. An empty list means: everything we meant to say about every
+    variant landed, and at least one of them carried a price.
+
+    This is what stops a price no-op from reading as a success. Shopify mints
+    every new variant at 0.00, so a row we could not match, a row we had no
+    price for, or a failed mutation all leave a live variant sitting at 0.00 --
+    each has to be visible to the caller/audit row instead of being folded into
+    an `updated` count with an empty `errors` list."""
+    out: List[str] = []
+    errors = summary.get("errors") or []
+    if errors:
+        out.append(f"variant seeding reported {len(errors)} error(s)")
+    unmatched = int(summary.get("skipped_unmatched") or 0)
+    if unmatched:
+        out.append(
+            f"{unmatched} variant row(s) matched no Shopify variant and could "
+            "not be created -- those variants were NOT priced"
+        )
+    no_price = int(summary.get("skipped_no_price") or 0)
+    if no_price:
+        out.append(
+            f"{no_price} variant row(s) carried no usable IMS price -- those "
+            "Shopify variants are still 0.00"
+        )
+    if not int(summary.get("priced") or 0):
+        out.append("no variant was priced")
+    return out
+
+
 def plan_variant_seed(
     product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[Dict[str, Any]]:
     """The SIMULATED (dry-run) view of the seeding step: the exact rows that
     WOULD be applied to the new Shopify variants, with no gid yet (Shopify mints
-    those at create time). None when there is nothing to seed."""
+    those at create time). None when there is nothing to seed.
+
+    `priced` / `skipped_no_price` make the MONEY visible up front: a row with no
+    price leaves that Shopify variant at 0.00, so the owner can see -- before
+    anything goes live -- that the dry-run would not actually price it."""
     rows = build_variant_seed_rows(product, variants)
     if not rows:
         return None
@@ -1039,14 +1165,20 @@ def plan_variant_seed(
         if r["option_values"]:
             entry["optionValues"] = r["option_values"]
         planned.append(entry)
-    return {
+    priced = sum(1 for e in planned if e.get("price"))
+    plan: Dict[str, Any] = {
         "variants": planned,
+        "priced": priced,
+        "skipped_no_price": len(planned) - priced,
         "note": (
             "price/compareAtPrice/barcode/sku are applied to the variants "
             "Shopify creates (productVariantsBulkUpdate), and any remaining IMS "
             "variant is created (productVariantsBulkCreate)"
         ),
     }
+    plan["warnings"] = _seed_warnings(plan)
+    plan["ok"] = not plan["warnings"]
+    return plan
 
 
 def _assign_seed_rows(
@@ -1114,7 +1246,18 @@ async def _seed_variants_after_write(
     Fail-SOFT side channel, exactly like metafields: an error is reported in the
     returned summary and NEVER flips the product push's ok (the product itself
     was created successfully; a re-push repairs the variants). Returns None when
-    there is nothing to seed (no price and no SKU anywhere)."""
+    there is nothing to seed (no price and no SKU anywhere).
+
+    The summary is deliberately HONEST about money:
+      updated           update rows that actually CARRIED A PRICE and landed
+      created           variants Shopify created for us
+      priced            total rows that carried a price and landed (updated +
+                        created-with-a-price) -- the "money landed" counter
+      skipped_no_price  rows sent with only a SKU: that Shopify variant is
+                        still 0.00 and the caller must be able to see it
+      skipped_unmatched rows we could neither update nor create
+      warnings/ok       the roll-up: ok is True ONLY when nothing was skipped,
+                        nothing errored, and at least one row was priced."""
     seed_rows = build_variant_seed_rows(product, variants)
     if not seed_rows:
         return None
@@ -1124,6 +1267,8 @@ async def _seed_variants_after_write(
     summary: Dict[str, Any] = {
         "updated": 0,
         "created": 0,
+        "priced": 0,
+        "skipped_no_price": 0,
         "skipped_unmatched": skipped,
         "errors": [],
         "default_variant_gid": None,
@@ -1132,6 +1277,7 @@ async def _seed_variants_after_write(
 
     for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
         chunk = update_rows[i : i + _VARIANTS_PER_CALL]
+        priced_in_chunk = sum(1 for r in chunk if r.get("price"))
         try:
             body = await _graphql(
                 db, _VARIANTS_BULK_UPDATE, {"productId": product_gid, "variants": chunk}
@@ -1140,13 +1286,21 @@ async def _seed_variants_after_write(
             if err:
                 summary["errors"].append(err)
             else:
-                summary["updated"] += len(chunk)
+                # `updated` is the MONEY counter: only rows that actually
+                # carried a price count. A SKU-only row is real work (the join
+                # key lands) but it left that variant at 0.00, so it is
+                # reported separately -- a price no-op must never be
+                # indistinguishable from a successful re-price.
+                summary["updated"] += priced_in_chunk
+                summary["priced"] += priced_in_chunk
+                summary["skipped_no_price"] += len(chunk) - priced_in_chunk
         except Exception as e:  # noqa: BLE001 -- fail-soft side channel
             summary["errors"].append(str(e))
 
     created_nodes: List[Dict[str, Any]] = []
     for i in range(0, len(create_rows), _VARIANTS_PER_CALL):
         chunk = create_rows[i : i + _VARIANTS_PER_CALL]
+        priced_in_chunk = sum(1 for r in chunk if r.get("price"))
         try:
             body = await _graphql(
                 db, _VARIANTS_BULK_CREATE, {"productId": product_gid, "variants": chunk}
@@ -1159,6 +1313,10 @@ async def _seed_variants_after_write(
                 (body.get("data") or {}).get("productVariantsBulkCreate") or {}
             ).get("productVariants") or []
             created_nodes.extend(n for n in made if isinstance(n, dict) and n.get("id"))
+            # A variant CREATED without a price is born 0.00 on Shopify -- the
+            # same money hole as an unpriced update, counted the same way.
+            summary["priced"] += priced_in_chunk
+            summary["skipped_no_price"] += len(chunk) - priced_in_chunk
         except Exception as e:  # noqa: BLE001 -- fail-soft side channel
             summary["errors"].append(str(e))
     summary["created"] = len(created_nodes)
@@ -1184,12 +1342,39 @@ async def _seed_variants_after_write(
         # The FIRST pair is the default variant (the product-level row for a
         # no-variant product) -- the one a later price push needs.
         summary["default_variant_gid"] = pairs[0][1]
+    # Roll the money holes up so the caller/audit row cannot read a partial (or
+    # price-less) seed as a clean success -- see _seed_warnings.
+    summary["warnings"] = _seed_warnings(summary)
+    summary["ok"] = not summary["warnings"]
     return summary
 
 
 # ---------------------------------------------------------------------------
 # Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE -- default OFF)
 # ---------------------------------------------------------------------------
+
+
+def _publish_block_reason(seed_summary: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why this product must NOT go on the Online Store, or None when it is safe
+    to publish. Pure.
+
+    THE MONEY GATE. Shopify mints every new variant at price 0.00 and
+    ProductInput carries no price, so the ONLY thing that makes a new product
+    sellable at the right money is the seeding step. Publishing before that has
+    cleanly landed would put a PUBLICLY BUYABLE 0.00 product on the storefront.
+    We therefore publish only when seeding ran, reported no error, skipped
+    nothing, and actually priced at least one row."""
+    if seed_summary is None:
+        return (
+            "variant seeding did not run (no IMS price/SKU to seed) -- the "
+            "Shopify variant would still be 0.00"
+        )
+    warnings = seed_summary.get("warnings")
+    if warnings is None:
+        warnings = _seed_warnings(seed_summary)
+    if warnings:
+        return "variant seeding was not clean: " + "; ".join(warnings)
+    return None
 
 
 async def _resolve_online_store_publication_id(db) -> Optional[str]:
@@ -1621,6 +1806,9 @@ async def push_product(
             metafields=metafields or None,
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
+            # The dry-run is honest too: if the plan would leave a variant at
+            # 0.00, say so now rather than after the cutover.
+            warnings=((seed_plan or {}).get("warnings") or None),
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -1665,7 +1853,11 @@ async def push_product(
                     db, pid, new_gid, variant_gid=seed_summary["default_variant_gid"]
                 )
         # Sales-channel publish (default OFF): an ACTIVE product published to no
-        # channel is invisible on the storefront. DRAFTs are never published.
+        # channel is invisible on the storefront. DRAFTs are never published --
+        # and neither is a product whose variant seeding did not cleanly land a
+        # price, because Shopify mints every new variant at 0.00 and publishing
+        # then would put a PUBLICLY BUYABLE 0.00 product on the storefront
+        # (_publish_block_reason). A blocked publish is REPORTED, not silent.
         pub_summary = None
         if (
             new_gid
@@ -1673,7 +1865,15 @@ async def push_product(
             and publish_on_create_enabled()
             and payload.get("status") == "ACTIVE"
         ):
-            pub_summary = await _publish_to_online_store(db, new_gid)
+            publish_block = _publish_block_reason(seed_summary)
+            if publish_block:
+                pub_summary = {
+                    "published": False,
+                    "skipped": True,
+                    "reason": publish_block,
+                }
+            else:
+                pub_summary = await _publish_to_online_store(db, new_gid)
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.
@@ -1694,6 +1894,16 @@ async def push_product(
                 ),
                 "error": vp_res.error,
             }
+        # Surface the money holes at the TOP level of the result. ok stays True
+        # (the product itself was written; the fail-soft side-channel contract
+        # is unchanged) but a partial/unpriced seed, or a publish we refused,
+        # must be visible to the caller and to the chained audit row instead of
+        # being buried in a nested counter.
+        warnings: List[str] = list((seed_summary or {}).get("warnings") or [])
+        if pub_summary and pub_summary.get("skipped"):
+            warnings.append(
+                "Online Store publish SKIPPED -- " + str(pub_summary.get("reason"))
+            )
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
@@ -1706,6 +1916,7 @@ async def push_product(
             variant_prices=vp_summary,
             variants_seeded=seed_summary,
             publication=pub_summary,
+            warnings=warnings or None,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(

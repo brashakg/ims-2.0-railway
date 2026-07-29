@@ -96,9 +96,14 @@ def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
             return
         mode = result.get("mode")
         ok = result.get("ok")
+        # A push can succeed and still leave money on the floor (a variant we
+        # could not price, a publish we refused). Those ride on `warnings`, and
+        # a warned push is audited as a WARNING too -- a partial push must never
+        # read as a clean success in the audit trail.
+        warnings = result.get("warnings") or None
         # A failed push (live or dry-run) is a WARNING so it surfaces in the
         # warnings/critical audit views; a clean push is INFO.
-        severity = "INFO" if ok else "WARNING"
+        severity = "INFO" if (ok and not warnings) else "WARNING"
         audit.create(
             {
                 "action": "ONLINE_STORE_PUSH",
@@ -113,6 +118,7 @@ def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
                     "shopify_id": result.get("shopify_id"),
                     "error": result.get("error"),
                     "reason": result.get("reason"),
+                    "warnings": warnings,
                 },
             }
         )
@@ -298,11 +304,17 @@ async def push_all_pending(
     summary: Dict[str, Dict[str, int]] = {}
 
     def _tally(entity: str, data: Dict[str, Any]) -> None:
-        bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0})
+        bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "warned": 0})
         if data.get("ok"):
             bucket["pushed"] += 1
         else:
             bucket["failed"] += 1
+        # A push that succeeded but left something money-bearing unfinished (an
+        # unpriced/unmatched variant, a refused publish) is counted separately
+        # so a sweep of 2,000 products cannot report a clean run while silently
+        # leaving 0.00 variants behind.
+        if data.get("warnings"):
+            bucket["warned"] = bucket.get("warned", 0) + 1
         results.append(data)
 
     # The sweep order mirrors a dependency-safe cutover: products (+ variants)
@@ -347,7 +359,7 @@ async def push_all_pending(
             _write_audit(data, current_user)
             _tally("products", data)
         if blocked_skipped:
-            summary.setdefault("products", {"pushed": 0, "failed": 0})[
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "warned": 0})[
                 "blocked_skipped"
             ] = blocked_skipped
 
