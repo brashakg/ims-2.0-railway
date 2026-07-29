@@ -1232,7 +1232,21 @@ async def bulk_create_products(
         if not errors and repo is not None and sku_norm:
             try:
                 if repo.find_by_sku(sku_norm) is not None:
-                    errors.append("Product with this SKU already exists")
+                    # DELIBERATE DIVERGENCE from the FORM door (panel decision):
+                    # the FORM door resolves an auto-mint collision by suffixing
+                    # ("-<counter>") and creating anyway; BULK hard-rejects it.
+                    # A blank-SKU bulk row whose deterministic base collides is
+                    # far more likely a RE-UPLOAD of an existing product than a
+                    # genuine second product -- silently suffix-minting would
+                    # create an identity-less duplicate billing master. The
+                    # rejection is made explicit + actionable instead.
+                    if not str(product.sku or "").strip():
+                        errors.append(
+                            f"A product with the auto-generated SKU {sku_norm} "
+                            "already exists -- supply an explicit SKU"
+                        )
+                    else:
+                        errors.append("Product with this SKU already exists")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[BULK-CREATE] SKU lookup failed for %s: %s", sku_norm, exc

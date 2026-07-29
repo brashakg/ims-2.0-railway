@@ -438,6 +438,116 @@ class TestBulkCreateEndpoint:
         # The seed is still the only doc with that SKU.
         assert mongo_db["products"].count_documents({"sku": "RG-EXIST"}) == 1
 
+    # -- blank-SKU rows at the ENDPOINT layer (P1: this layer was untested) --
+
+    def test_blank_sku_rows_created_with_distinct_minted_skus(self, mongo_db, patch_db):
+        """Two blank-SKU rows with DISTINCT identities are both created, and
+        the response carries distinct, non-empty minted SKUs."""
+        from api.routers.products import bulk_create_products
+
+        rows = [
+            {
+                "category": "FRAME",
+                "brand": "MintBrand",
+                "model": "MM1",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            },
+            {
+                "category": "FRAME",
+                "brand": "MintBrand",
+                "model": "MM2",
+                "color": "BLK",
+                "mrp": 1100.0,
+                "offer_price": 1000.0,
+            },
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"] == {"total": 2, "created": 2, "failed": 0}
+        skus = [r["sku"] for r in res["results"]]
+        assert all(skus), f"minted SKUs must be non-empty: {skus}"
+        assert len(set(skus)) == 2, f"minted SKUs must be distinct: {skus}"
+        # The response sku is the PERSISTED sku (iii).
+        for r in res["results"]:
+            doc = mongo_db["products"].find_one({"sku": r["sku"]})
+            assert doc is not None
+            assert doc["product_id"] == r["product_id"]
+
+    def test_blank_sku_base_collision_rejected_with_explicit_message(
+        self, mongo_db, patch_db
+    ):
+        """DECISION (panel): a blank-SKU row whose deterministic base collides
+        with an existing product is HARD-REJECTED (never silently
+        suffix-minted -- deliberate divergence from the FORM door, which
+        suffixes), and the error names the auto-generated SKU + the way out."""
+        from api.routers.products import bulk_create_products
+        from api.services import product_master as pm
+        from database.repositories.product_repository import ProductRepository
+
+        base = pm.build_sku(
+            "FRAME",
+            {"brand_name": "ClashBrand", "model_no": "CB1", "colour_code": "BLK"},
+        )
+        ProductRepository(mongo_db["products"]).create(
+            {
+                "sku": base,
+                "category": "FRAME",
+                "brand": "ClashBrand",
+                "model": "CB1",
+                "color": "BLK",
+                "mrp": 999.0,
+                "offer_price": 999.0,
+                "is_active": True,
+            }
+        )
+
+        rows = [
+            {
+                # NO sku supplied -- the deterministic base collides.
+                "category": "FRAME",
+                "brand": "ClashBrand",
+                "model": "CB1",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            },
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"] == {"total": 1, "created": 0, "failed": 1}
+        errors = res["results"][0]["errors"]
+        assert any(
+            f"auto-generated SKU {base}" in e and "supply an explicit SKU" in e
+            for e in errors
+        ), errors
+        # Nothing new was persisted under the base.
+        assert mongo_db["products"].count_documents({"sku": base}) == 1
+
+    def test_response_sku_field_carries_the_minted_value(self, mongo_db, patch_db):
+        """A single blank-SKU row: the response `sku` is the minted value, not
+        None/blank, and it matches the persisted doc."""
+        from api.routers.products import bulk_create_products
+
+        rows = [
+            {
+                "category": "SUNGLASS",
+                "brand": "MintBrand",
+                "model": "SG9",
+                "color": "GRY",
+                "mrp": 2000.0,
+                "offer_price": 1800.0,
+            },
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"]["created"] == 1
+        minted = res["results"][0]["sku"]
+        assert minted and str(minted).strip()
+        doc = mongo_db["products"].find_one({"sku": minted})
+        assert doc is not None
+
     def test_gst_hsn_defaults_applied(self, mongo_db, patch_db):
         from api.routers.products import bulk_create_products
         from api.services.gst_rates import gst_rate_for_category
