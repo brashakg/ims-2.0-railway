@@ -231,9 +231,10 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
     online          -- DISPLAY flag: pushed to Shopify (gid present) OR staged
                        PUBLISHED (includes unpurchasable Shopify DRAFTs).
     sellable_online -- GUARD flag: customers can actually buy it -- ecom.status
-                       PUBLISHED, or (variant path) a live variant gid. Use
-                       THIS for oversell alarms, never `online` (fix-round P1:
-                       the 2,032 staged drafts must not trip guard alerts).
+                       PUBLISHED, or a live variant gid (resolved the SAME way
+                       on the product and the variant path). Use THIS for
+                       oversell alarms, never `online`: a staged-but-never-
+                       pushed DRAFT has neither, so it stays silent.
     online_stock    -- ALWAYS None: Shopify owns the live listed quantity and
                        IMS does not mirror it; use online_sync_health's live
                        readers for a real number. Never a fake 0.
@@ -245,7 +246,15 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
         return {}
 
     products = _products_by_key(db, keys)
-    variants = _variants_by_key(db, [k for k in keys if k not in products])
+    # ALL keys, not just the ones the product branch missed. The product branch
+    # is resolved FIRST and wins, so scoping this to the residue would let a
+    # catalog_products row SHADOW its own variant's live Shopify gid -- and the
+    # `or live variant gid` clause below (mirrored from the variant branch) is
+    # the only thing that keeps a stale-DRAFT-in-IMS-but-ACTIVE-on-Shopify SKU
+    # tripping the post-sale oversell-guard alarm. Before catalog_products rows
+    # carried a top-level `sku` these keys fell through to the variant branch by
+    # accident; populating `sku` must not silently disarm the alarm.
+    variants = _variants_by_key(db, keys)
     parents = _parents_for_variants(db, list(variants.values()))
 
     out: Dict[str, Dict[str, Any]] = {}
@@ -255,7 +264,14 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
             continue
         out[key] = {
             "online": _ecom_online(ecom),
-            "sellable_online": _ecom_sellable(ecom),
+            # Mirrors the variant branch below: a live variant gid is itself
+            # proof of a purchasable storefront object, whatever ecom.status
+            # claims. A never-pushed DRAFT has no variant gid, so a future
+            # draft import still cannot trip this.
+            "sellable_online": _ecom_sellable(ecom)
+            or bool(
+                normalize_sku((variants.get(key) or {}).get("shopify_variant_id"))
+            ),
             "online_stock": None,
             "status": ecom.get("status"),
         }

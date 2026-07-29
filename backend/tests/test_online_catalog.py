@@ -224,22 +224,83 @@ def test_status_unknown_and_blank_skus_skipped():
 
 
 def test_sellable_online_excludes_unpurchasable_drafts():
-    """Fix-round P1: `online` (display) vs `sellable_online` (guard). A product
-    pushed as a Shopify DRAFT is online for display but NOT sellable -- it must
-    never trip oversell alarms. PUBLISHED products are sellable."""
+    """`online` (display) vs `sellable_online` (guard). A STAGED DRAFT that was
+    never pushed is online for neither -- it must never trip oversell alarms.
+
+    UPDATED (pim-sku fix): the guard flag is now resolved IDENTICALLY on the
+    product and the variant path -- PUBLISHED, or a live variant gid. SKU-PUSHED
+    is ecom DRAFT but its variant carries shopify_variant_id=111, so it IS
+    treated as sellable (that is the live-storefront shape: IMS says DRAFT,
+    Shopify says ACTIVE). Previously the product branch shadowed the variant and
+    returned False, which would have silently disarmed the oversell alarm the
+    moment catalog_products rows started carrying a top-level `sku`."""
     out = online_status_for_skus(
         _db(), ["SKU-PUSHED", "SKU-PUB", "SKU-DRAFT", "VAR-2"]
     )
-    # Pushed but DRAFT: display-online, NOT sellable.
+    # Pushed, ecom DRAFT, but a LIVE variant gid -> display-online AND guarded.
     assert out["SKU-PUSHED"]["online"] is True
-    assert out["SKU-PUSHED"]["sellable_online"] is False
+    assert out["SKU-PUSHED"]["sellable_online"] is True
     # PUBLISHED: sellable.
     assert out["SKU-PUB"]["sellable_online"] is True
-    # Unpushed DRAFT: neither.
+    # Unpushed DRAFT (no gid anywhere): neither.
     assert out["SKU-DRAFT"]["online"] is False
     assert out["SKU-DRAFT"]["sellable_online"] is False
     # Variant of a PUBLISHED parent: sellable.
     assert out["VAR-2"]["sellable_online"] is True
+
+
+def test_draft_product_without_variant_gid_stays_unsellable():
+    """The regression the ORIGINAL plan feared: a DRAFT catalog row that carries
+    a top-level `sku` (post-fix) but has NO variant gid must stay
+    sellable_online False, so a future draft import never spams the
+    oversell-guard alarm. Covers both 'no variant row at all' and 'variant row
+    present but gid-less'."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [
+                    {"id": "CPD1", "sku": "DRAFT-NOVAR", "ecom": {"status": "DRAFT"}},
+                    {"id": "CPD2", "sku": "DRAFT-GIDLESS", "ecom": {"status": "DRAFT"}},
+                ]
+            ),
+            "catalog_variants": _Coll(
+                [{"sku": "DRAFT-GIDLESS", "parent_product_id": "CPD2"}]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["DRAFT-NOVAR", "DRAFT-GIDLESS"])
+    assert out["DRAFT-NOVAR"]["sellable_online"] is False
+    assert out["DRAFT-GIDLESS"]["sellable_online"] is False
+    # ...and neither is display-online either (never pushed).
+    assert out["DRAFT-NOVAR"]["online"] is False
+    assert out["DRAFT-GIDLESS"]["online"] is False
+
+
+def test_draft_product_with_live_variant_gid_is_sellable():
+    """Hunk 2 (the 27 Ray-Ban Meta SKUs): a catalog_products row that now
+    carries its own `sku` and is ecom DRAFT, but whose variant holds a live
+    Shopify variant gid, MUST still report sellable_online -- otherwise the
+    post-sale oversell-guard alarm (_alert_unmapped_online) goes quiet for
+    products customers can actually buy right now."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [{"id": "CPRB", "sku": "RB-META-01", "ecom": {"status": "DRAFT"}}]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "RB-META-01",
+                        "parent_product_id": "CPRB",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/55",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["RB-META-01"])
+    assert out["RB-META-01"]["sellable_online"] is True
+    assert out["RB-META-01"]["status"] == "DRAFT"
 
 
 def test_identifier_priority_sku_beats_barcode_across_variants():
