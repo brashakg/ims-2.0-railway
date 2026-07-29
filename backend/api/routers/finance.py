@@ -313,9 +313,11 @@ def gst_reconciliation(
     for o in orders:
         eid = _ent(o.get("store_id"))
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
-        seller = _norm_state(store_state_by_id.get(o.get("store_id")))
-        buyer = _norm_state(customer_state_by_id.get(o.get("customer_id")))
-        is_inter_state = bool(seller and buyer and seller != buyer)
+        # OS-008: the order's own interstate flag wins (online orders carry it);
+        # store-vs-customer state stays the fallback for docs without it.
+        is_inter_state = _order_is_interstate(
+            o, store_state_by_id, customer_state_by_id
+        )
         bucket = acc.setdefault(eid, _blank())
         if is_inter_state:
             bucket["igst"] += tax
@@ -367,6 +369,28 @@ def _norm_state(value) -> str:
     return _ov.normalize_state_code(str(value or "").strip()) or ""
 
 
+def _order_is_interstate(
+    order, store_state_by_id: dict, customer_state_by_id: dict
+) -> bool:
+    """Inter-state (IGST) vs intra-state (CGST+SGST) classification for ONE order.
+
+    Prefer the order doc's OWN persisted ``interstate`` flag (OS-008): online
+    (Shopify) orders stamp it at ingest from the buyer's DELIVERY address via
+    the same _build_invoice_gst_split the POS invoice uses -- while their buyer
+    customer records are minted stateless, so recomputing the split from
+    customers.state misfiled every inter-state online sale as CGST/SGST even
+    though the minted invoice (place of supply) said IGST. The store-state vs
+    customer-state heuristic stays as the FALLBACK for docs that don't carry
+    the flag (POS orders don't persist it). Requires callers that project
+    fields to include ``interstate`` in the projection."""
+    flag = order.get("interstate")
+    if isinstance(flag, bool):
+        return flag
+    seller = _norm_state(store_state_by_id.get(order.get("store_id")))
+    buyer = _norm_state(customer_state_by_id.get(order.get("customer_id")))
+    return bool(seller and buyer and seller != buyer)
+
+
 def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dict):
     """Split output tax into (cgst, sgst, igst), paise-balanced.
 
@@ -385,9 +409,9 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
             t = o.get("tax_total")
         tax = float(t or 0)
         total += tax
-        seller = _norm_state(store_state_by_id.get(o.get("store_id")))
-        buyer = _norm_state(customer_state_by_id.get(o.get("customer_id")))
-        if seller and buyer and seller != buyer:
+        # OS-008: the order's own interstate flag wins (online orders carry it);
+        # store-vs-customer state stays the fallback for docs without it.
+        if _order_is_interstate(o, store_state_by_id, customer_state_by_id):
             igst += tax
     igst = round(igst, 2)
     intra = round(total - igst, 2)
@@ -904,6 +928,8 @@ async def get_gst_summary(
                 "customer_id": 1,
                 "tax_amount": 1,
                 "tax_total": 1,
+                # OS-008: the order-carried inter-state flag (online orders).
+                "interstate": 1,
             },
         )
     )
@@ -2267,6 +2293,8 @@ async def get_gst_reconciliation(
                 "customer_id": 1,
                 "tax_amount": 1,
                 "tax_total": 1,
+                # OS-008: the order-carried inter-state flag (online orders).
+                "interstate": 1,
             },
         )
     )
@@ -2383,6 +2411,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             "tax_amount": 1,
             "tax_total": 1,
             "payments": 1,
+            # OS-008: the order-carried inter-state flag (online orders).
+            "interstate": 1,
         },
     )
     for o in cursor:
@@ -2390,9 +2420,9 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         sales_grand += grand
         sales_tax += tax
-        seller = _norm_state(store_states.get(o.get("store_id")))
-        buyer = _norm_state(customer_states.get(o.get("customer_id")))
-        if seller and buyer and seller != buyer:
+        # OS-008: the order's own interstate flag wins (online orders carry it);
+        # store-vs-customer state stays the fallback for docs without it.
+        if _order_is_interstate(o, store_states, customer_states):
             t_igst += tax
         else:
             cgst, sgst = _jv_cgst_sgst_split(tax)
@@ -3322,9 +3352,9 @@ async def get_tally_sales_jv(
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
-        seller = _norm_state(_store_states.get(o.get("store_id")))
-        buyer = _norm_state(_customer_states.get(o.get("customer_id")))
-        is_inter_state = bool(seller and buyer and seller != buyer)
+        # OS-008: the order's own interstate flag wins (online orders carry it);
+        # store-vs-customer state stays the fallback for docs without it.
+        is_inter_state = _order_is_interstate(o, _store_states, _customer_states)
         if is_inter_state:
             o["igst_amount"] = round(tax, 2)
             o["cgst_amount"] = 0.0

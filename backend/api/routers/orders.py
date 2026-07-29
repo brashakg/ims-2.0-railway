@@ -3129,6 +3129,17 @@ async def superadmin_invoice_change(
                 f"(order edit on invoice {original_invoice})",
                 ref=note_doc["note_number"],
                 current_user=current_user,
+                # GSTR-1 CDNR head consistency (money-panel round 2): this
+                # type=ISSUED ledger row reaches the CDNR loop, so it must
+                # reverse under the SAME CGST/SGST-vs-IGST head its parent
+                # invoice filed under. Online parents persist `interstate`;
+                # bool-gated -- POS parents carry no flag and keep the legacy
+                # state-compare fallback.
+                interstate=(
+                    order.get("interstate")
+                    if isinstance(order.get("interstate"), bool)
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ORDERS] store-credit bump skipped: %s", exc)
