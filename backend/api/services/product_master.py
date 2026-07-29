@@ -1367,8 +1367,37 @@ class _SyncTarget:
     detail: Optional[str] = None
 
 
+def _assert_pim_sku(spine: Dict[str, Any]) -> None:
+    """Refuse to write a catalog_products PIM doc without a `sku`.
+
+    WHY THIS CANNOT BE A SILENT SKIP: `catalog_products.sku_1` is UNIQUE +
+    SPARSE. A doc with the key ABSENT is exempt from the index, but a doc
+    carrying an explicit `sku: None` IS indexed -- so a null would insert once
+    and then DuplicateKeyError forever, swallowed into a FAILED sync_status
+    nobody reads. Failing loud inside the writer's own try block turns that into
+    a recorded FAILED target on the FIRST write instead of a silent divergence.
+
+    Deliberately NOT called from _build_pim_doc: that builder runs OUTSIDE the
+    try block in _write_mirror, whose contract is "NEVER raises". A raise there
+    would escape as a 500 AFTER the spine row is already committed and would
+    skip _stage_catalog_draft, leaving exactly the dangling pim_product_id that
+    staging exists to prevent. Each writer calls this from INSIDE its own try.
+    """
+    if not str(spine.get("sku") or "").strip():
+        raise ProductMasterError(
+            "Cannot mirror a product without a SKU (catalog_products.sku is "
+            "unique+sparse; a null would poison the index).",
+            status=500,
+            field="sku",
+        )
+
+
 def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     """Project the spine + its attributes into a catalog_products PIM doc.
+
+    PURE: builds and returns a dict, never raises, never touches the DB. The
+    SKU precondition lives in _assert_pim_sku, called from inside each writer's
+    try block (see that docstring for why it must not raise from here).
 
     The PIM doc is schemaless; it carries the Shopify/PIM superset attributes
     untouched under `ecom.category_specific` so they round-trip to NEXUS. It
@@ -1384,6 +1413,19 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     seo_description = build_seo_description(spine)
     return {
         "id": spine.get("pim_product_id"),
+        # ROOT FIX: the PIM row IS the parent and carries its OWN `sku`. Every
+        # online consumer joins catalog_products on `sku`, never `parent_sku` --
+        # the push block classifier (online_store_push: doc.get("sku") in
+        # blocked_set), online_block._membership_hit, shopify_push's collection
+        # member lookup (find_one({"sku": sku})) and ecom_smart_rules all read
+        # the top-level `sku`. Without it those guards silently no-op. A
+        # PM-created parent has exactly ONE default variant whose sku == the
+        # spine sku, the same convention the CATALOG door uses (it stamps the
+        # SAME sku on the catalog doc and the spine).
+        "sku": spine.get("sku"),
+        # KEEP parent_sku: still read by online_store_push's id/sku/parent_sku
+        # fallback + variant linkage, online_discount_engine's variant lookup,
+        # and the frontend (raw.sku ?? raw.parent_sku).
         "parent_sku": spine.get("sku"),
         "category": spine.get("category"),
         "sku_prefix": spine.get("sku_prefix"),
@@ -1441,6 +1483,9 @@ def _write_mirror(
 
     # --- catalog_products (Mongo PIM doc) -- internal, flag-gated only ---
     try:
+        # Precondition INSIDE the try: a skuless PIM doc is refused loudly and
+        # recorded as FAILED, never written as an index-poisoning null.
+        _assert_pim_sku(spine)
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
             targets.append(_SyncTarget("catalog_products", "OK"))
@@ -1528,6 +1573,9 @@ def _stage_catalog_draft(
     if not pim_id:
         return _SyncTarget("catalog_draft", "SKIPPED", "no pim_product_id")
     try:
+        # Same precondition as _write_mirror, inside this writer's own try so
+        # staging records a FAILED target instead of raising into the create.
+        _assert_pim_sku(spine)
         pim_doc = _build_pim_doc(spine)
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
