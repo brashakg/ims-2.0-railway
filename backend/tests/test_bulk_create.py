@@ -94,75 +94,103 @@ def _cl_row(**overrides) -> Any:
     return ProductCreate(**base)
 
 
+def _errors(row, seen=None) -> List[str]:
+    """_validate_bulk_row now returns (errors, resolved_sku) -- SKU became
+    OPTIONAL (auto-minted), so the validator has to report the SKU the row will
+    actually be created with. These pure tests only care about the errors."""
+    from api.routers.products import _validate_bulk_row
+
+    return _validate_bulk_row(row, set() if seen is None else seen)[0]
+
+
 class TestValidateBulkRow:
     """Exhaustive, deterministic tests of the pure per-row validator."""
 
     def test_valid_row_has_no_errors(self):
-        from api.routers.products import _validate_bulk_row
-
-        assert _validate_bulk_row(_row(), set()) == []
+        assert _errors(_row()) == []
 
     def test_blank_category_rejected(self):
-        from api.routers.products import _validate_bulk_row
-
-        errors = _validate_bulk_row(_row(category="   "), set())
+        errors = _errors(_row(category="   "))
         assert errors
         assert any("category" in e.lower() for e in errors)
 
     def test_unknown_category_rejected(self):
-        from api.routers.products import _validate_bulk_row
-
-        errors = _validate_bulk_row(_row(category="NONSENSE"), set())
+        errors = _errors(_row(category="NONSENSE"))
         assert any("category" in e.lower() for e in errors)
 
     def test_category_normalized_in_place_on_success(self):
-        from api.routers.products import _validate_bulk_row
-
         # Lowercase/whitespace -> normalized to the canonical key.
         row = _row(category="  frame  ")
-        assert _validate_bulk_row(row, set()) == []
+        assert _errors(row) == []
         assert row.category == "frame".strip() or row.category.upper() == "FRAME"
 
     def test_offer_above_mrp_rejected(self):
-        from api.routers.products import _validate_bulk_row
-
-        errors = _validate_bulk_row(_row(mrp=1000.0, offer_price=1200.0), set())
+        errors = _errors(_row(mrp=1000.0, offer_price=1200.0))
         assert any("mrp" in e.lower() for e in errors)
 
     def test_offer_equal_mrp_ok(self):
-        from api.routers.products import _validate_bulk_row
-
-        assert _validate_bulk_row(_row(mrp=1000.0, offer_price=1000.0), set()) == []
+        assert _errors(_row(mrp=1000.0, offer_price=1000.0)) == []
 
     def test_bad_modality_rejected(self):
-        from api.routers.products import _validate_bulk_row
-
-        errors = _validate_bulk_row(_cl_row(modality="WEEKLY"), set())
+        errors = _errors(_cl_row(modality="WEEKLY"))
         assert any("modality" in e.lower() for e in errors)
 
     def test_good_modality_ok(self):
-        from api.routers.products import _validate_bulk_row
-
         # A complete CL row (model_name + power + expiry_date) with a good
         # modality has no errors.
-        assert _validate_bulk_row(_cl_row(modality="DAILY"), set()) == []
+        assert _errors(_cl_row(modality="DAILY")) == []
 
     def test_duplicate_sku_in_batch_rejected(self):
-        from api.routers.products import _validate_bulk_row
-
-        seen = {"RG-1"}
-        errors = _validate_bulk_row(_row(sku="RG-1"), seen)
+        errors = _errors(_row(sku="RG-1"), {"RG-1"})
         assert any("duplicate" in e.lower() for e in errors)
 
     def test_multiple_errors_accumulate(self):
-        from api.routers.products import _validate_bulk_row
-
         # Bad category AND offer > MRP -> both reported (validation does not
         # short-circuit on the first failure).
-        errors = _validate_bulk_row(
-            _row(category="", mrp=100.0, offer_price=200.0), set()
-        )
+        errors = _errors(_row(category="", mrp=100.0, offer_price=200.0))
         assert len(errors) >= 2
+
+    # -- SKU is now OPTIONAL (owner ask: auto-generate) --------------------
+
+    def test_blank_sku_is_accepted_and_minted(self):
+        """A blank SKU is no longer 'SKU is required' -- the validator resolves
+        the SKU the canonical door will mint and reports it back."""
+        from api.routers.products import _validate_bulk_row
+
+        errors, resolved = _validate_bulk_row(_row(sku=None), set())
+        assert errors == []
+        assert resolved, "a blank SKU must resolve to a minted SKU"
+        assert not any("sku is required" in e.lower() for e in errors)
+
+    def test_supplied_sku_wins_verbatim(self):
+        from api.routers.products import _validate_bulk_row
+
+        errors, resolved = _validate_bulk_row(_row(sku="LEGACY-SKU-9"), set())
+        assert errors == []
+        assert resolved == "LEGACY-SKU-9"
+
+    def test_two_blank_sku_rows_resolving_to_same_sku_collide_in_batch(self):
+        """PANEL P1: identical blank-SKU rows mint the SAME base SKU. The Hub
+        identity guard cannot catch this for a category with no brand+model
+        (compute_identity_key returns None), so the in-batch dedupe MUST key on
+        the RESOLVED sku or two duplicate billing masters land silently."""
+        from api.routers.products import _validate_bulk_row
+
+        first_errors, first_sku = _validate_bulk_row(_row(sku=None), set())
+        assert first_errors == []
+        seen = {first_sku}
+        second_errors, second_sku = _validate_bulk_row(_row(sku=None), seen)
+        assert second_sku == first_sku
+        assert any("duplicate" in e.lower() for e in second_errors)
+
+    def test_two_blank_sku_rows_with_distinct_identity_do_not_collide(self):
+        """Different products with blank SKUs mint DISTINCT SKUs and both pass."""
+        from api.routers.products import _validate_bulk_row
+
+        e1, sku1 = _validate_bulk_row(_row(sku=None, model="M1"), set())
+        e2, sku2 = _validate_bulk_row(_row(sku=None, model="M2"), {sku1})
+        assert e1 == [] and e2 == []
+        assert sku1 and sku2 and sku1 != sku2
 
 
 # ============================================================================

@@ -8,7 +8,7 @@ import io
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import logging
 import random
@@ -1112,24 +1112,37 @@ async def create_product(
 
 def _validate_bulk_row(
     product: ProductCreate, seen_skus: set, *, as_draft: bool = False
-) -> List[str]:
-    """Validate one bulk-create row WITHOUT raising. Returns a list of human
-    error strings (empty == valid). Mirrors the single-create checks:
+) -> Tuple[List[str], str]:
+    """Validate one bulk-create row WITHOUT raising. Returns
+    ``(errors, resolved_sku)`` -- errors empty == valid. Mirrors the
+    single-create checks:
       - category present + recognized (_validate_category_or_422)
       - registry category-conditional required fields (STRICT, step-9) so a bulk
         row is rejected for the SAME incomplete payload the FORM door 422s on
       - MRP >= offer_price (_assert_mrp_ge_offer)
       - modality (CL) within the allowed set
-      - SKU not duplicated earlier in THIS batch
+      - resolved SKU not duplicated earlier in THIS batch
     Normalizes product.category in place on success so the persist step uses
     the canonical value. (pydantic already enforced mrp/offer_price > 0 and the
     cl_axis/axis 0-180 + pack_size >= 1 ranges before this is reached.)
+
+    SKU IS OPTIONAL (owner ask: SKUs auto-generate). A supplied SKU wins
+    verbatim; blank means the canonical door mints one. `resolved_sku` is the
+    SKU this row will actually be created with -- taken from the SAME
+    build_canonical_product call the registry gate already runs (which mints
+    deterministically with no repo and no counter burn). The caller MUST dedupe
+    on THAT value, in-batch and against the DB: the Hub identity guard cannot
+    substitute, because compute_identity_key returns None unless BOTH brand and
+    model are present, so e.g. two blank-SKU SERVICES rows would sail past it
+    and mint two DUPLICATE billing masters ('SVC' and 'SVC-1001').
 
     Hub Phase 0: with `as_draft` the registry gate relaxes to the DRAFT floor
     (brand+model+category) so an incomplete row is accepted (persisted DRAFT)
     rather than reported as a failure -- mirroring the FORM door.
     """
     errors: List[str] = []
+    supplied_sku = str(product.sku or "").strip()
+    resolved_sku = supplied_sku
 
     # Category (reuse the single-create validator; capture its 422 message).
     category_ok = True
@@ -1154,9 +1167,12 @@ def _validate_bulk_row(
     # reported here exactly as the FORM door would 422 on it (or, with as_draft,
     # relaxed to the floor). Captures the message instead of raising.
     try:
-        _pm.build_canonical_product(
+        _canonical = _pm.build_canonical_product(
             _canonical_door_payload(product, as_draft=as_draft), source="BULK"
         )
+        # The SKU this row will really be created with (supplied verbatim, or
+        # deterministically minted). No repo/db passed -> no counter is burned.
+        resolved_sku = str((_canonical or {}).get("sku") or "").strip() or supplied_sku
     except _pm.ProductMasterError as exc:
         errors.append(exc.message)
     except Exception:  # noqa: BLE001 - any builder error is a row-level failure
@@ -1171,13 +1187,13 @@ def _validate_bulk_row(
     if product.modality and product.modality not in CL_MODALITIES:
         errors.append(f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}")
 
-    sku_norm = str(product.sku or "").strip()
-    if not sku_norm:
-        errors.append("SKU is required")
-    elif sku_norm in seen_skus:
+    # Dedupe on the RESOLVED sku, not the supplied one -- a blank supplied SKU
+    # is legal (auto-mint), but two blank rows that mint the SAME base SKU are
+    # still a duplicate and must be rejected here.
+    if resolved_sku and resolved_sku in seen_skus:
         errors.append("Duplicate SKU within this batch")
 
-    return errors
+    return errors, resolved_sku
 
 
 @router.post("/bulk-create", status_code=201)
@@ -1202,13 +1218,18 @@ async def bulk_create_products(
     seen_skus: set = set()
 
     for index, product in enumerate(body.products):
-        sku_norm = str(product.sku or "").strip()
-        errors = _validate_bulk_row(product, seen_skus, as_draft=body.as_draft)
+        # `sku_norm` is the RESOLVED SKU (supplied verbatim, or the SKU the
+        # canonical door will mint for a blank one) -- it is what both the
+        # in-batch and the cross-batch dedupe must key on. A blank supplied SKU
+        # is legal: SKUs auto-generate.
+        errors, sku_norm = _validate_bulk_row(
+            product, seen_skus, as_draft=body.as_draft
+        )
 
         # Cross-batch dedupe: reject a SKU that already exists in the catalog.
         # Only checked once the SKU is otherwise valid (avoids a pointless DB
         # hit on a row that's already failing for another reason).
-        if not errors and repo is not None:
+        if not errors and repo is not None and sku_norm:
             try:
                 if repo.find_by_sku(sku_norm) is not None:
                     errors.append("Product with this SKU already exists")
@@ -1225,9 +1246,10 @@ async def bulk_create_products(
             )
             continue
 
-        # Reserve the SKU in-batch BEFORE the write so a later duplicate fails
-        # even if the create itself errors.
-        seen_skus.add(sku_norm)
+        # Reserve the RESOLVED SKU in-batch BEFORE the write so a later row that
+        # resolves to the same SKU fails even if the create itself errors.
+        if sku_norm:
+            seen_skus.add(sku_norm)
 
         if repo is None:
             # No DB (local dev / mock mode): echo a synthetic id so the shape is
@@ -1238,7 +1260,7 @@ async def bulk_create_products(
                     "index": index,
                     "ok": True,
                     "errors": [],
-                    "sku": product.sku,
+                    "sku": sku_norm or product.sku,
                     "product_id": str(uuid.uuid4()),
                 }
             )
@@ -1269,7 +1291,7 @@ async def bulk_create_products(
                     "index": index,
                     "ok": True,
                     "errors": [],
-                    "sku": created.get("sku", product.sku),
+                    "sku": created.get("sku") or sku_norm,
                     "product_id": created.get("product_id"),
                 }
             )
