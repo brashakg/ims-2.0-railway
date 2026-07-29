@@ -49,6 +49,21 @@ push can find them. UPDATES of already-mapped products are UNCHANGED by default
 -- seeding a price onto the ~4,400 live products is opt-in via
 SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
 
+INVENTORY-ITEM CAPTURE (oversell-guard publish precondition, stacks on the
+seeding fix): the same returned variants also select inventoryItem { id }, and
+that gid is persisted ALONGSIDE the variant gid --
+catalog_variants.shopify_inventory_item_id per variant row, plus
+ecom.shopify_inventory_item_id for a product with NO catalog_variants rows
+(its single "Default Title" variant IS the product). Those are exactly the two
+fields the stock write-back resolver reads
+(online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
+online_sync_health._inventory_item_id_for_sku): without them a product IMS
+creates on Shopify can never have its listed quantity synced down after an
+in-store sale -- unguardable against oversell. shopify_location_id is NOT
+captured here: the create/update response carries no location (this push never
+sets stock), and the resolver sources the location from
+SHOPIFY_ONLINE_LOCATION_ID / the integrations config.
+
 Optional env flags (all default OFF -- nothing changes unless the owner sets them):
   SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
                                   an UPDATE of an already-mapped product.
@@ -143,8 +158,11 @@ class PushResult:
     variant_prices: Optional[Any] = None
     # Product CREATE only (and UPDATE when SHOPIFY_PUSH_PRICE_ON_UPDATE is on):
     # the variant-seeding side channel that gives the new Shopify variants their
-    # price / compareAtPrice / barcode / SKU. SIMULATED -> the planned rows;
-    # LIVE -> an {updated, created, skipped, errors} summary. None elsewhere.
+    # price / compareAtPrice / barcode / SKU and captures their gids. SIMULATED
+    # -> the planned rows; LIVE -> an {updated, created, skipped, errors,
+    # variant_gids, inventory_item_gids, ...} summary (the inventory-item gids
+    # are the oversell-guard stock targets persisted for the resolver). None
+    # elsewhere.
     variants_seeded: Optional[Any] = None
     # Product CREATE only, and only when SHOPIFY_PUBLISH_ON_CREATE is on: the
     # Online-Store sales-channel publish side channel. None when the flag is off
@@ -493,6 +511,11 @@ def _now() -> datetime:
 # the first option value specified for each option name") at price 0.00 with no
 # SKU. We select that variant back so the seeding step can price + SKU it; the
 # extra selection is read-only and changes nothing about what is written.
+#
+# inventoryItem { id } rides on the same selection (oversell-guard publish
+# precondition): the InventoryItem gid is what the stock write-back resolver
+# needs (catalog_variants.shopify_inventory_item_id) to sync the listed
+# quantity down after an in-store sale. Read-only; no extra network call.
 _PRODUCT_CREATE = """
 mutation imsProductCreate($input: ProductInput!) {
   productCreate(input: $input) {
@@ -500,7 +523,7 @@ mutation imsProductCreate($input: ProductInput!) {
       id
       handle
       variants(first: 100) {
-        nodes { id title selectedOptions { name value } }
+        nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
     }
     userErrors { field message }
@@ -519,7 +542,7 @@ mutation imsProductUpdate($input: ProductInput!) {
       id
       handle
       variants(first: 100) {
-        nodes { id title selectedOptions { name value } }
+        nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
     }
     userErrors { field message }
@@ -610,11 +633,12 @@ _VARIANTS_PER_CALL = 250
 # CREATE-side companion: productCreate only ever materialises ONE variant, so
 # any REMAINING IMS variant (a second colour / size) has to be created. Same
 # ProductVariantsBulkInput shape, plus optionValues to place it on the option
-# grid. Returns the new gids so they can be written back for idempotency.
+# grid. Returns the new gids (and each variant's inventoryItem gid -- the
+# oversell-guard stock target) so they can be written back for idempotency.
 _VARIANTS_BULK_CREATE = """
 mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
   productVariantsBulkCreate(productId: $productId, variants: $variants) {
-    productVariants { id title selectedOptions { name value } }
+    productVariants { id title selectedOptions { name value } inventoryItem { id } }
     userErrors { field message }
   }
 }
@@ -956,6 +980,21 @@ def _node_option_key(node: Dict[str, Any]) -> Tuple[str, str]:
     return (color, size)
 
 
+def _node_inventory_item_gid(node: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The InventoryItem gid off a returned ProductVariant node
+    (inventoryItem { id }), normalised to a full gid -- the oversell-guard
+    stock-write-back target. None when the response does not carry it (an old
+    canned body, a partial node): the write-back then leaves any existing
+    mapping untouched (set-only, never cleared)."""
+    inv = (node or {}).get("inventoryItem")
+    if not isinstance(inv, dict):
+        return None
+    raw = inv.get("id")
+    if not raw:
+        return None
+    return _as_shopify_gid(raw, "InventoryItem") or None
+
+
 def _variant_option_values(variant: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
     """VariantOptionValueInput rows (used only when CREATING a variant Shopify
     did not auto-create). Empty for a product-level / option-less variant --
@@ -1055,7 +1094,7 @@ def _assign_seed_rows(
     List[Dict[str, Any]],
     List[Dict[str, Any]],
     List[Optional[Dict[str, Any]]],
-    List[Tuple[Optional[Dict[str, Any]], str]],
+    List[Tuple[Optional[Dict[str, Any]], str, Optional[str]]],
     int,
 ]:
     """Split the desired rows against the variants Shopify actually created.
@@ -1065,7 +1104,10 @@ def _assign_seed_rows(
       create_rows      rows for IMS variants Shopify did NOT create (productCreate
                        only ever materialises one variant)
       create_variants  the IMS variant docs aligned 1:1 with create_rows
-      pairs            (ims_variant_or_None, gid) for the matched ones -> write-back
+      pairs            (ims_variant_or_None, gid, inventory_item_gid_or_None)
+                       for the matched ones -> write-back. The third member is
+                       the node's inventoryItem gid -- the oversell-guard stock
+                       target -- None when the response did not carry it.
       skipped          rows we can neither update nor create (no gid, no options)
     """
     pool: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -1078,7 +1120,7 @@ def _assign_seed_rows(
     update_rows: List[Dict[str, Any]] = []
     create_rows: List[Dict[str, Any]] = []
     create_variants: List[Optional[Dict[str, Any]]] = []
-    pairs: List[Tuple[Optional[Dict[str, Any]], str]] = []
+    pairs: List[Tuple[Optional[Dict[str, Any]], str, Optional[str]]] = []
     skipped = 0
     # Single-row / single-variant products: trust the 1:1 pairing even if the
     # option labels do not line up (e.g. Shopify kept a "Title" option).
@@ -1092,7 +1134,7 @@ def _assign_seed_rows(
                 unmatched.remove(node)
             gid = _as_shopify_gid(node.get("id"), "ProductVariant")
             update_rows.append({"id": gid, **r["row"]})
-            pairs.append((r["variant"], gid))
+            pairs.append((r["variant"], gid, _node_inventory_item_gid(node)))
         elif r["option_values"]:
             create_rows.append({"optionValues": r["option_values"], **r["row"]})
             create_variants.append(r["variant"])
@@ -1109,7 +1151,9 @@ async def _seed_variants_after_write(
     nodes: Optional[List[Dict[str, Any]]],
 ) -> Optional[Dict[str, Any]]:
     """LIVE-only: give the freshly created Shopify variants their price / MRP /
-    barcode / SKU, create any remaining IMS variant, and write every gid back.
+    barcode / SKU, create any remaining IMS variant, and write every gid back --
+    BOTH the ProductVariant gid (a later price push's handle) and the
+    InventoryItem gid (the oversell-guard stock write-back's target).
 
     Fail-SOFT side channel, exactly like metafields: an error is reported in the
     returned summary and NEVER flips the product push's ok (the product itself
@@ -1128,6 +1172,13 @@ async def _seed_variants_after_write(
         "errors": [],
         "default_variant_gid": None,
         "variant_gids": [],
+        # Oversell-guard capture: every InventoryItem gid persisted (aligned
+        # 1:1 with variant_gids; None where the response carried none), plus
+        # the PRODUCT-LEVEL one (set ONLY for a no-variant-row product, whose
+        # single default variant is the product itself -- see push_product's
+        # ecom fallback write-back).
+        "inventory_item_gids": [],
+        "product_level_inventory_item_gid": None,
     }
 
     for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
@@ -1172,14 +1223,29 @@ async def _seed_variants_after_write(
         for v in create_variants:
             bucket = by_key.get(_variant_option_key(v)) or []
             if bucket:
+                made_node = bucket.pop(0)
                 pairs.append(
-                    (v, _as_shopify_gid(bucket.pop(0).get("id"), "ProductVariant"))
+                    (
+                        v,
+                        _as_shopify_gid(made_node.get("id"), "ProductVariant"),
+                        _node_inventory_item_gid(made_node),
+                    )
                 )
 
-    for variant_doc, gid in pairs:
+    for variant_doc, gid, inventory_item_gid in pairs:
         summary["variant_gids"].append(gid)
+        summary["inventory_item_gids"].append(inventory_item_gid)
         if variant_doc:
-            _writeback_variant(db, variant_doc, gid)
+            _writeback_variant(db, variant_doc, gid, inventory_item_gid)
+        elif inventory_item_gid:
+            # The product-level pseudo-variant (product has NO catalog_variants
+            # rows): there is no variant row to stamp, so its InventoryItem gid
+            # goes onto the PRODUCT's ecom sub-doc instead (push_product passes
+            # it to _writeback_product). NEVER set for a product that HAS
+            # variant rows -- stamping variant #1's inventory item on the
+            # parent would hand a parent-sku stock lookup the WRONG variant's
+            # inventory target.
+            summary["product_level_inventory_item_gid"] = inventory_item_gid
     if pairs:
         # The FIRST pair is the default variant (the product-level row for a
         # no-variant product) -- the one a later price push needs.
@@ -1425,7 +1491,11 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _writeback_product(
-    db, product_id: str, shopify_id: str, variant_gid: Optional[str] = None
+    db,
+    product_id: str,
+    shopify_id: str,
+    variant_gid: Optional[str] = None,
+    inventory_item_gid: Optional[str] = None,
 ) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
@@ -1435,6 +1505,15 @@ def _writeback_product(
     could never have its price corrected: ProductInput carries no price, so the
     only handle on the money is the variant gid. It is only ever SET, never
     cleared, so a call without it leaves an existing mapping intact.
+
+    `inventory_item_gid` (optional) additionally persists
+    ecom.shopify_inventory_item_id -- the oversell-guard stock target for a
+    product with NO catalog_variants rows. This is the documented resolver
+    fallback (online_catalog.inventory_items_for_skus /
+    online_variant_targets_for_skus and online_sync_health.
+    _inventory_item_id_for_sku all read ecom.shopify_inventory_item_id when no
+    variant row matches a SKU). The caller only ever passes it for the
+    product-level pseudo-variant, and it too is set-only, never cleared.
 
     We READ-MERGE-WRITE the whole `ecom` sub-doc (read the doc, mutate the ecom
     dict in Python, $set ecom back) rather than `$set {"ecom.shopify_product_id":
@@ -1452,6 +1531,8 @@ def _writeback_product(
         ecom["shopify_product_id"] = shopify_id
         if variant_gid:
             ecom["shopify_variant_id"] = variant_gid
+        if inventory_item_gid:
+            ecom["shopify_inventory_item_id"] = inventory_item_gid
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
@@ -1459,11 +1540,22 @@ def _writeback_product(
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
 
 
-def _writeback_variant(db, variant: Dict[str, Any], shopify_variant_id: str) -> bool:
-    """Persist shopify_variant_id on the catalog_variants row, keyed on `sku`
-    (its primary identity; `variant_id` is the fallback). This is what makes the
+def _writeback_variant(
+    db,
+    variant: Dict[str, Any],
+    shopify_variant_id: str,
+    inventory_item_gid: Optional[str] = None,
+) -> bool:
+    """Persist shopify_variant_id (+ shopify_inventory_item_id when the response
+    carried it) on the catalog_variants row, keyed on `sku` (its primary
+    identity; `variant_id` is the fallback). The variant gid is what makes the
     EXISTING price push (build_variant_price_inputs, which skips gid-less
-    variants) able to repair a price later. Returns True iff a row was written.
+    variants) able to repair a price later; the InventoryItem gid is what the
+    oversell-guard stock write-back resolver reads
+    (catalog_variants.shopify_inventory_item_id) to sync the listed quantity
+    down after an in-store sale. `inventory_item_gid` is set-only: when None
+    (an old canned response, a partial node) any existing mapping is left
+    untouched, never cleared. Returns True iff a row was written.
     Fail-soft: never raises -- the Shopify write already succeeded."""
     filt: Optional[Dict[str, Any]] = None
     if (variant or {}).get("sku"):
@@ -1472,11 +1564,14 @@ def _writeback_variant(db, variant: Dict[str, Any], shopify_variant_id: str) -> 
         filt = {"variant_id": variant["variant_id"]}
     if filt is None:
         return False
+    update: Dict[str, Any] = {
+        "shopify_variant_id": shopify_variant_id,
+        "updated_at": _now(),
+    }
+    if inventory_item_gid:
+        update["shopify_inventory_item_id"] = inventory_item_gid
     try:
-        res = db["catalog_variants"].update_one(
-            filt,
-            {"$set": {"shopify_variant_id": shopify_variant_id, "updated_at": _now()}},
-        )
+        res = db["catalog_variants"].update_one(filt, {"$set": update})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] variant write-back failed {filt}: {e}")
         return False
@@ -1649,8 +1744,12 @@ async def push_product(
             mf_summary = await _set_product_metafields(db, new_gid, metafields)
         # VARIANT SEEDING -- the price-0.00 / no-SKU fix. ProductInput carries
         # neither, so on a CREATE the variants Shopify just minted are priced +
-        # SKU'd here and their gids written back. On an UPDATE this is skipped
-        # unless the owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE), so the ~4,400
+        # SKU'd here and their gids written back -- BOTH the ProductVariant gid
+        # (the price push's handle) and the InventoryItem gid (the oversell-
+        # guard stock write-back's target: catalog_variants.
+        # shopify_inventory_item_id per row, ecom.shopify_inventory_item_id for
+        # a no-variant-row product). On an UPDATE this is skipped unless the
+        # owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE), so the ~4,400
         # already-live products are never silently re-priced. Fail-soft.
         seed_summary = None
         seeded = False
@@ -1662,7 +1761,17 @@ async def push_product(
             seeded = seed_summary is not None
             if seed_summary and seed_summary.get("default_variant_gid") and pid:
                 _writeback_product(
-                    db, pid, new_gid, variant_gid=seed_summary["default_variant_gid"]
+                    db,
+                    pid,
+                    new_gid,
+                    variant_gid=seed_summary["default_variant_gid"],
+                    # Only ever set for the product-level pseudo-variant (the
+                    # product has NO catalog_variants rows) -- the resolver's
+                    # documented ecom fallback. None otherwise, which leaves
+                    # ecom untouched (set-only).
+                    inventory_item_gid=seed_summary.get(
+                        "product_level_inventory_item_gid"
+                    ),
                 )
         # Sales-channel publish (default OFF): an ACTIVE product published to no
         # channel is invisible on the storefront. DRAFTs are never published.

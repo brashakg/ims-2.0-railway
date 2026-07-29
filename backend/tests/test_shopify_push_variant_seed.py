@@ -16,6 +16,14 @@ THE FIX (covered here):
   * Every returned ProductVariant gid is written back --
     ecom.shopify_variant_id on the product + catalog_variants.shopify_variant_id
     -- so a later price push can find the money.
+  * INVENTORY-ITEM CAPTURE (oversell-guard publish precondition, stacked on the
+    seeding fix): the same returned variants carry inventoryItem { id }, and
+    that gid is persisted too -- catalog_variants.shopify_inventory_item_id per
+    variant row, ecom.shopify_inventory_item_id for a no-variant-row product --
+    the exact fields the stock write-back resolver reads
+    (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
+    online_sync_health._inventory_item_id_for_sku). Section 6 proves the
+    resolver finds a freshly pushed product's inventory item.
   * UPDATE of an already-mapped product is UNCHANGED by default (the ~4,400 live
     products are never silently re-priced); opt in with
     SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
@@ -246,7 +254,9 @@ def test_assign_seed_rows_matches_by_option_key_and_flags_the_rest_for_create():
         {"optionName": "Color", "name": "Gold"}
     ]
     assert crt_vars[0]["sku"] == "S-GLD"
-    assert pairs == [(variants[0], "gid://shopify/ProductVariant/5001")]
+    # Pairs are (variant, gid, inventory_item_gid) -- the node above carries no
+    # inventoryItem, so the third member is None (set-only, never cleared).
+    assert pairs == [(variants[0], "gid://shopify/ProductVariant/5001", None)]
     assert skipped == 0
 
 
@@ -632,3 +642,389 @@ def test_push_mode_status_reports_the_new_flags(monkeypatch):
     assert status["mode"] == "SIMULATED"
     assert status["price_on_update"] is False
     assert status["publish_on_create"] is False
+
+
+# ===========================================================================
+# 6. Inventory-item capture -- the oversell-guard publish precondition
+# ===========================================================================
+# The stock write-back that keeps the website from overselling resolves a SKU
+# to its Shopify InventoryItem via catalog_variants.shopify_inventory_item_id
+# (with an ecom.shopify_inventory_item_id fallback on the product). These tests
+# prove a LIVE push now persists that mapping for products IMS itself creates,
+# that SIMULATED writes nothing, that a re-push is idempotent, and -- the point
+# of it all -- that the REAL resolvers find a freshly pushed product.
+
+
+_DEFAULT_NODE_WITH_INV = {
+    "id": "gid://shopify/ProductVariant/5001",
+    "title": "Default Title",
+    "selectedOptions": [{"name": "Title", "value": "Default Title"}],
+    "inventoryItem": {"id": "gid://shopify/InventoryItem/7001"},
+}
+
+_BLACK_NODE_WITH_INV = {
+    "id": "gid://shopify/ProductVariant/5001",
+    "selectedOptions": [{"name": "Color", "value": "Black"}],
+    "inventoryItem": {"id": "gid://shopify/InventoryItem/7001"},
+}
+
+_GOLD_NODE_WITH_INV = {
+    "id": "gid://shopify/ProductVariant/5002",
+    "selectedOptions": [{"name": "Color", "value": "Gold"}],
+    "inventoryItem": {"id": "gid://shopify/InventoryItem/7002"},
+}
+
+_BULK_UPDATE_OK = {
+    "data": {
+        "productVariantsBulkUpdate": {
+            "productVariants": [{"id": "gid://shopify/ProductVariant/5001"}],
+            "userErrors": [],
+        }
+    }
+}
+
+
+class _ProjColl(MockCollection):
+    """MockCollection that ALSO accepts pymongo's (filter, projection) call
+    shape -- online_sync_health._inventory_item_id_for_sku passes a projection,
+    which the plain MockCollection.find_one signature rejects."""
+
+    def find_one(self, filter=None, projection=None, *a, **k):  # noqa: A002
+        return super().find_one(filter or {})
+
+
+class _ProjDB(_EngineDB):
+    def __getitem__(self, name):
+        return self._colls.setdefault(name, _ProjColl(name))
+
+
+def test_node_inventory_item_gid_is_failsoft_and_normalising():
+    f = shopify_push._node_inventory_item_gid
+    assert f(None) is None
+    assert f({}) is None
+    assert f({"inventoryItem": None}) is None
+    assert f({"inventoryItem": {}}) is None
+    assert f({"inventoryItem": {"id": ""}}) is None
+    # A bare numeric id is promoted to a full gid; a full gid passes through.
+    assert f({"inventoryItem": {"id": "7001"}}) == "gid://shopify/InventoryItem/7001"
+    assert (
+        f({"inventoryItem": {"id": "gid://shopify/InventoryItem/7001"}})
+        == "gid://shopify/InventoryItem/7001"
+    )
+
+
+def test_mutations_select_the_inventory_item_id():
+    """The selection is the capture vehicle: every mutation the seeding flow
+    reads variants back from must ask for inventoryItem { id }."""
+    for q in (
+        shopify_push._PRODUCT_CREATE,
+        shopify_push._PRODUCT_UPDATE,
+        shopify_push._VARIANTS_BULK_CREATE,
+    ):
+        assert "inventoryItem { id }" in q
+
+
+def test_live_create_stamps_the_inventory_item_on_a_no_variant_product(monkeypatch):
+    """A no-variant product's single default variant IS the product: its
+    InventoryItem gid must land on ecom.shopify_inventory_item_id (the
+    resolver's documented product-level fallback)."""
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_NODE_WITH_INV]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    product = db["catalog_products"].find_one({"id": "P1"})
+
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.ok is True and res.mode == "LIVE" and res.action == "create"
+    # The create mutation actually sent asked for the inventory item.
+    assert "inventoryItem { id }" in spy.call_for("productCreate")["query"]
+    assert res.variants_seeded["inventory_item_gids"] == [
+        "gid://shopify/InventoryItem/7001"
+    ]
+    assert (
+        res.variants_seeded["product_level_inventory_item_gid"]
+        == "gid://shopify/InventoryItem/7001"
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert (
+        saved["ecom"]["shopify_inventory_item_id"]
+        == "gid://shopify/InventoryItem/7001"
+    )
+
+
+def test_live_create_stamps_the_inventory_item_on_each_variant_row(monkeypatch):
+    """Multi-variant: the productCreate-materialised variant AND the
+    bulk-created one BOTH get shopify_inventory_item_id on their
+    catalog_variants row -- and the PARENT ecom does NOT get any variant's
+    inventory item (a parent-sku lookup must never hit the wrong variant's
+    stock target)."""
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_BLACK_NODE_WITH_INV]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+            "productVariantsBulkCreate": {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        "productVariants": [_GOLD_NODE_WITH_INV],
+                        "userErrors": [],
+                    }
+                }
+            },
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black"}
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V2", "sku": "S-GLD", "parent_product_id": "P1",
+         "option_color": "Gold"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [
+        db["catalog_variants"].find_one({"sku": "S-BLK"}),
+        db["catalog_variants"].find_one({"sku": "S-GLD"}),
+    ]
+
+    res = _run(shopify_push.push_product(db, product, variants))
+    assert res.ok is True
+    assert res.variants_seeded["product_level_inventory_item_gid"] is None
+
+    blk = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    gld = db["catalog_variants"].find_one({"sku": "S-GLD"})
+    assert blk["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert blk["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7001"
+    assert gld["shopify_variant_id"] == "gid://shopify/ProductVariant/5002"
+    assert gld["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7002"
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    # ecom carries the default VARIANT gid (price handle) but NOT an inventory
+    # item -- that belongs to the variant rows only for a variant-ful product.
+    assert "shopify_inventory_item_id" not in saved["ecom"]
+
+
+def test_live_create_without_inventory_item_in_response_leaves_mapping_alone(
+    monkeypatch,
+):
+    """An old/partial response (no inventoryItem selected) must NOT clear an
+    existing mapping: the write is set-only."""
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response(
+                [
+                    {
+                        "id": "gid://shopify/ProductVariant/5001",
+                        "selectedOptions": [{"name": "Color", "value": "Black"}],
+                    }
+                ]
+            ),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black",
+         "shopify_inventory_item_id": "gid://shopify/InventoryItem/OLD"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [db["catalog_variants"].find_one({"sku": "S-BLK"})]
+
+    res = _run(shopify_push.push_product(db, product, variants))
+    assert res.ok is True
+    row = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    # gid stamped, existing inventory-item mapping untouched (NOT cleared).
+    assert row["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert row["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/OLD"
+
+
+@pytest.mark.parametrize("reason", ["writes_off", "dispatch_off", "no_creds"])
+def test_simulated_push_writes_no_inventory_mapping(monkeypatch, reason):
+    """SIMULATED writes NOTHING: no variant gid, no inventory item, no ecom
+    stamp -- and never reaches the network (the _boom boundary proves that)."""
+    _force_dark(monkeypatch, reason)
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [db["catalog_variants"].find_one({"sku": "S-BLK"})]
+
+    res = _run(shopify_push.push_product(db, product, variants))
+    assert res.mode == "SIMULATED" and res.ok is True
+
+    row = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    assert "shopify_variant_id" not in row
+    assert "shopify_inventory_item_id" not in row
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert "shopify_product_id" not in (saved.get("ecom") or {})
+    assert "shopify_inventory_item_id" not in (saved.get("ecom") or {})
+
+
+def test_repush_is_idempotent_for_the_inventory_item_mapping(monkeypatch):
+    """CREATE stamps the mapping; a later UPDATE re-push (owner opt-in flag on)
+    returning the SAME variants re-stamps the SAME values -- no duplicate rows,
+    no changed target."""
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_BLACK_NODE_WITH_INV]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [db["catalog_variants"].find_one({"sku": "S-BLK"})]
+    res1 = _run(shopify_push.push_product(db, product, variants))
+    assert res1.ok is True and res1.action == "create"
+
+    # Second push: the product now carries the Shopify gid -> UPDATE. Opt in to
+    # the seeding-on-update path so the capture runs again.
+    monkeypatch.setenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", "1")
+    _force_live(
+        monkeypatch,
+        {
+            "productUpdate": {
+                "data": {
+                    "productUpdate": {
+                        "product": {
+                            "id": "gid://shopify/Product/900",
+                            "handle": "rb",
+                            "variants": {"nodes": [_BLACK_NODE_WITH_INV]},
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    product2 = db["catalog_products"].find_one({"id": "P1"})
+    assert (product2["ecom"]["shopify_product_id"]) == "gid://shopify/Product/900"
+    variants2 = [db["catalog_variants"].find_one({"sku": "S-BLK"})]
+    res2 = _run(shopify_push.push_product(db, product2, variants2))
+    assert res2.ok is True and res2.action == "update"
+
+    rows = list(db["catalog_variants"].find({"sku": "S-BLK"}))
+    assert len(rows) == 1  # updated in place, never duplicated
+    assert rows[0]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert (
+        rows[0]["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7001"
+    )
+
+
+def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
+    """END-TO-END against the REAL resolvers (the point of the whole change):
+    after a LIVE push, online_catalog's variant-target resolver and
+    online_sync_health's per-SKU lookup -- the two paths the oversell-guard
+    stock write-back uses -- both find the inventory item, for BOTH shapes:
+    a variant-row product (catalog_variants mapping) and a no-variant product
+    (ecom fallback)."""
+    from api.services import online_catalog
+    from api.services import online_sync_health
+
+    db = _ProjDB()
+    # Product A: no catalog_variants rows (the common eyewear case).
+    db["catalog_products"].insert_one(_product())  # sku BV-RB-0001, id P1
+    # Product B: one variant row.
+    db["catalog_products"].insert_one(
+        {
+            "id": "P2",
+            "title": "Wayfarer",
+            "sku": "BV-RB-0002",
+            "mrp": 9990,
+            "offer_price": 7990,
+            "ecom": {"status": "PUBLISHED"},
+        }
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P2",
+         "option_color": "Black"}
+    )
+
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_NODE_WITH_INV]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    res_a = _run(
+        shopify_push.push_product(
+            db, db["catalog_products"].find_one({"id": "P1"}), []
+        )
+    )
+    assert res_a.ok is True
+
+    # Product B's variant carries a DISTINCT inventory item (7002) so any
+    # cross-product contamination of the mapping would be caught below.
+    black_b = {
+        "id": "gid://shopify/ProductVariant/5002",
+        "selectedOptions": [{"name": "Color", "value": "Black"}],
+        "inventoryItem": {"id": "gid://shopify/InventoryItem/7002"},
+    }
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response(
+                [black_b], gid="gid://shopify/Product/901"
+            ),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    res_b = _run(
+        shopify_push.push_product(
+            db,
+            db["catalog_products"].find_one({"id": "P2"}),
+            [db["catalog_variants"].find_one({"sku": "S-BLK"})],
+        )
+    )
+    assert res_b.ok is True
+
+    # --- online_catalog: the mapping the stock write-back resolves through ---
+    items = online_catalog.inventory_items_for_skus(db, ["S-BLK", "BV-RB-0001"])
+    assert items["S-BLK"] == "gid://shopify/InventoryItem/7002"
+    assert items["BV-RB-0001"] == "gid://shopify/InventoryItem/7001"
+
+    monkeypatch.setenv(
+        "SHOPIFY_ONLINE_LOCATION_ID", "gid://shopify/Location/11"
+    )
+    targets = online_catalog.online_variant_targets_for_skus(
+        db, ["S-BLK", "BV-RB-0001"]
+    )
+    assert targets["S-BLK"] == {
+        "inventory_item_id": "gid://shopify/InventoryItem/7002",
+        "location_id": "gid://shopify/Location/11",
+    }
+    assert targets["BV-RB-0001"]["inventory_item_id"] == (
+        "gid://shopify/InventoryItem/7001"
+    )
+
+    # --- online_sync_health: the oversell re-push sweep's per-SKU lookup ---
+    assert (
+        online_sync_health._inventory_item_id_for_sku(db, "S-BLK")
+        == "gid://shopify/InventoryItem/7002"
+    )
+    assert (
+        online_sync_health._inventory_item_id_for_sku(db, "BV-RB-0001")
+        == "gid://shopify/InventoryItem/7001"
+    )
