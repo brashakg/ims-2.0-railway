@@ -1239,6 +1239,113 @@ def test_no_race_common_case_still_applies_money_header(wired):
     assert len(o["payments"]) == 1 and o["payments"][0]["amount"] == 499.0
 
 
+def test_racing_small_staff_tender_retry_recovers_combined_amount(wired):
+    """Money-panel P1 must-fix (bounded retry): the race in
+    test_racing_add_payment_defers_header_instead_of_clobbering happens to
+    leave an ALREADY-correct staff-covered header untouched, so a naive
+    "just defer forever" implementation would look safe there too. This is
+    the adversarial case the panel asked for: the racing staff tender is
+    SMALL and does NOT cover the order -- the Shopify-collected money this
+    webhook was about to record is the ONLY thing that makes the header
+    correct. Without the bounded retry, the single conditional-write miss
+    would leave the header stuck at its stale pre-webhook values (money
+    understated by the full gateway-collected leg) until some hypothetical
+    future webhook arrives -- not guaranteed for an order this far along, and
+    _sync_existing_order_status has no periodic sweep. The retry must recover
+    the COMBINED total (gateway + staff) within this same call."""
+    _seed_online_order(
+        wired,
+        8022,
+        grand=1000.0,
+        amount_paid=0.0,
+        balance_due=1000.0,
+        payment_status="UNPAID",
+        payments=[],
+    )
+    orders_coll = wired["orders"]
+    original_update_one = orders_coll.update_one
+    calls = {"n": 0}
+
+    def _racing_update_one(filter_, update, upsert=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # A staff member records a SMALL in-store CASH collection
+            # concurrently, between this sync's read of `existing` and its own
+            # write -- it knows nothing about the much larger gateway
+            # collection this webhook is about to record.
+            for d in orders_coll.docs:
+                if d.get("shopify_order_id") == "8022":
+                    d["payments"] = [
+                        {"payment_id": "p-staff", "method": "CASH", "amount": 100.0}
+                    ]
+                    d["amount_paid"] = 100.0
+                    d["balance_due"] = 900.0
+                    d["payment_status"] = "PARTIAL"
+        return original_update_one(filter_, update, upsert=upsert)
+
+    orders_coll.update_one = _racing_update_one
+    # Shopify says 400 is still outstanding on a 1000 order -> it collected
+    # 600 at the gateway. Combined with the racing staff's 100 cash, the
+    # order should end up 700 collected / 300 due.
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8022", _sync_payload(8022, "partially_paid", "400.00")
+    )
+    assert ok is True
+    o = _the_order(wired, 8022)
+    assert o["amount_paid"] == 700.0  # 600 gateway + 100 staff -- neither lost
+    assert o["balance_due"] == 300.0
+    assert o["payment_status"] == "PARTIAL"
+    amounts = sorted(p["amount"] for p in o["payments"])
+    assert amounts == [100.0, 600.0]
+    assert round(sum(p["amount"] for p in o["payments"]), 2) == 700.0
+    # The retry actually happened (first attempt missed, second recovered).
+    assert calls["n"] >= 3
+
+
+def test_money_retry_exhausts_and_defers_after_persistent_contention(wired):
+    """Companion: if EVERY attempt (including the bounded retries) keeps
+    missing the snapshot, the function still returns True (the lifecycle leg
+    landed) and logs a deferral instead of raising or silently fabricating a
+    write -- it does not retry forever."""
+    _seed_online_order(
+        wired,
+        8023,
+        grand=999.0,
+        amount_paid=0.0,
+        balance_due=999.0,
+        payment_status="UNPAID",
+        payments=[],
+    )
+    orders_coll = wired["orders"]
+    original_update_one = orders_coll.update_one
+
+    def _always_racing_update_one(filter_, update, upsert=False):
+        # Every call mutates the payments array first, so the conditional
+        # write's snapshot filter can never match -- persistent contention.
+        if "payments" in filter_:
+            for d in orders_coll.docs:
+                if d.get("shopify_order_id") == "8023":
+                    d["payments"] = list(d.get("payments") or []) + [
+                        {
+                            "payment_id": f"p-{len(d.get('payments') or [])}",
+                            "method": "CASH",
+                            "amount": 1.0,
+                        }
+                    ]
+        return original_update_one(filter_, update, upsert=upsert)
+
+    orders_coll.update_one = _always_racing_update_one
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8023", _sync_payload(8023, "paid")
+    )
+    assert ok is True  # lifecycle leg still lands; function does not raise
+    o = _the_order(wired, 8023)
+    # Money was never durably written (every attempt's snapshot was stale by
+    # the time it wrote) -- header stays at its pre-sync value, not corrupted.
+    assert o["amount_paid"] == 0.0
+    assert o["balance_due"] == 999.0
+
+
 # --- Follow-up 4: shared order_interstate_flag gate -------------------------
 
 
