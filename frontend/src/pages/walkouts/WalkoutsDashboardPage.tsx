@@ -135,13 +135,13 @@ export function WalkoutsDashboardPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          {canTopup && (
+          {/* #949-4: on an ONLINE store (no door) the intake button is replaced
+              by a visible note below rather than shown disabled with a tooltip. */}
+          {canTopup && !isOnlineStoreActive && (
             <button
               type="button"
               onClick={() => setTopupOpen(true)}
-              className="btn-secondary inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={isOnlineStoreActive}
-              title={isOnlineStoreActive ? 'Not available for an online store — it has no door for walk-ins' : undefined}
+              className="btn-secondary inline-flex items-center gap-2"
             >
               <Plus className="w-4 h-4" /> Log walk-in
             </button>
@@ -156,6 +156,15 @@ export function WalkoutsDashboardPage() {
           </button>
         </div>
       </div>
+
+      {/* #949-4: ONLINE-store intake note (visible, not a tooltip) — mirrors the
+          Attendance-page pattern so touch users get a real explanation. */}
+      {isOnlineStoreActive && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+          This is the online store — it has no door for walk-ins. Switch to a physical
+          store from the top bar to log a walk-in.
+        </div>
+      )}
 
       {error && (
         <div className="card p-4 bg-amber-50 border border-amber-200 text-sm text-amber-800 flex items-center gap-2">

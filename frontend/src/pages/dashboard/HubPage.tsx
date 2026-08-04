@@ -91,10 +91,11 @@ interface ModuleCard {
   feature?: boolean;
   badge?: string;
   requireRoles?: string[]; // hide card unless user holds one of these
+  moduleKey?: string; // hide card when the per-user module deny blocks it
 }
 
 export default function HubPage() {
-  const { user, hasRole } = useAuth();
+  const { user, hasRole, hasModuleAccess } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   // OS-064: under an ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) the Hub must
@@ -277,6 +278,7 @@ export default function HubPage() {
           feature: true,
           badge: 'Online store',
           requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'],
+          moduleKey: 'ecommerce',
         },
         {
           id: 'online-orders',
@@ -288,6 +290,7 @@ export default function HubPage() {
           meta: [['Channel', 'ONLINE'], ['Sales · Today', meta.salesToday]],
           feature: true,
           requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'],
+          moduleKey: 'ecommerce',
         },
       ]
     : [
@@ -379,6 +382,10 @@ export default function HubPage() {
   ];
 
   const visibleModules = modules.filter((m) => {
+    // #949-1: a per-user module deny hides the card even when the role gate
+    // would allow it — mirrors the nav item + /online-store route guard.
+    // hasModuleAccess is deny-only (never grants), so the role check still runs.
+    if (m.moduleKey && !hasModuleAccess(m.moduleKey)) return false;
     if (!m.requireRoles) return true;
     return m.requireRoles.some((r) => hasRole([r as any]));
   });
