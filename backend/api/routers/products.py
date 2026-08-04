@@ -1210,6 +1210,18 @@ async def bulk_create_products(
     SUPERADMIN auto-passes)."""
     repo = get_product_repository()
 
+    # The SAME db handle the canonical door hands the mint. The cross-batch
+    # dedupe below has to consult catalog_products through it, because
+    # repo.find_by_sku only sees the `products` spine (see the check for why).
+    # Resolved ONCE per batch; fail-soft (None just means the catalog leg of the
+    # check is a no-op, exactly as before this existed).
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        _db = _get_db_dep()
+    except Exception:  # noqa: BLE001 - never block a bulk create
+        _db = None
+
     results: List[dict] = []
     created_count = 0
     failed_count = 0
@@ -1231,7 +1243,21 @@ async def bulk_create_products(
         # hit on a row that's already failing for another reason).
         if not errors and repo is not None and sku_norm:
             try:
-                if repo.find_by_sku(sku_norm) is not None:
+                # BOTH collections, because the anti-duplicate POLICY below is
+                # only as wide as the predicate that feeds it. repo.find_by_sku
+                # sees the `products` spine ONLY, and prod holds sku-carrying
+                # catalog_products rows with NO spine (SGRAYMETARW4006601 ...)
+                # -- invisible to it. A blank-SKU row whose deterministic base
+                # equals one of those used to pass the validator, pass this
+                # lookup, then reach create_via_door, where mint_unique_sku DOES
+                # consult the catalog and suffix-mints: a 201, no error, and
+                # exactly the identity-less duplicate billing master the policy
+                # forbids. Asking product_master's OWN predicate keeps the gate
+                # and the mint in lockstep by construction.
+                taken = repo.find_by_sku(sku_norm) is not None
+                if not taken:
+                    taken = _pm.catalog_sku_taken(sku_norm, db=_db)
+                if taken:
                     # DELIBERATE DIVERGENCE from the FORM door (panel decision):
                     # the FORM door resolves an auto-mint collision by suffixing
                     # ("-<counter>") and creating anyway; BULK hard-rejects it.
@@ -1300,12 +1326,20 @@ async def bulk_create_products(
 
         if created:
             created_count += 1
+            # Reserve what the door ACTUALLY minted, not only the base reserved
+            # before the write: create_via_door resolves a collision the gate
+            # above could not see by suffixing, so the landed SKU can differ
+            # from `sku_norm`. Holding BOTH keeps the in-batch dedupe honest for
+            # every later row.
+            actual_sku = str(created.get("sku") or "").strip() or sku_norm
+            if actual_sku:
+                seen_skus.add(actual_sku)
             results.append(
                 {
                     "index": index,
                     "ok": True,
                     "errors": [],
-                    "sku": created.get("sku") or sku_norm,
+                    "sku": actual_sku,
                     "product_id": created.get("product_id"),
                 }
             )

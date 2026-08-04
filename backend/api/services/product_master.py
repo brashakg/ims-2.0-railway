@@ -599,6 +599,18 @@ def _catalog_sku_taken(sku: Any, db=None) -> bool:
         return False
 
 
+def catalog_sku_taken(sku: Any, db=None) -> bool:
+    """PUBLIC wrapper over the predicate mint_unique_sku itself consults.
+
+    Callers that dedupe a SKU *before* reaching the mint (the bulk-create door's
+    cross-batch check) must ask the SAME question the mint will ask, or they let
+    through exactly the collision they exist to reject: product_repo.find_by_sku
+    only sees the `products` spine, while prod holds sku-carrying
+    catalog_products rows with NO spine. Same fail-soft contract as the private
+    helper -- no db / unreadable collection -> False, never raises."""
+    return _catalog_sku_taken(sku, db=db)
+
+
 def mint_unique_sku(
     category: Any, attributes: Dict[str, Any], product_repo=None, db=None
 ) -> str:

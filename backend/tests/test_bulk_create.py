@@ -753,6 +753,55 @@ class TestBulkCreateEndpointBlankSku:
         )
         assert all_skus == [base], all_skus
 
+    def test_blank_sku_base_taken_by_a_SPINELESS_catalog_row_is_rejected(
+        self, mem_world
+    ):
+        """R3-3: the anti-duplicate POLICY is only as wide as the predicate that
+        feeds it. repo.find_by_sku sees the `products` spine ONLY, and prod
+        holds sku-carrying catalog_products rows with NO spine
+        (SGRAYMETARW4006601 ...). A blank-SKU row whose deterministic base
+        equals one of those passed the validator, passed the spine lookup, then
+        reached create_via_door -- where mint_unique_sku DOES consult the
+        catalog and suffix-mints, producing exactly the identity-less duplicate
+        billing master the policy forbids, behind a 201 with no error."""
+        from api.routers.products import bulk_create_products
+        from api.services import product_master as pm
+
+        repo, db = mem_world
+        base = pm.build_sku(
+            "FRAME",
+            {"brand_name": "SpineLess", "model_no": "SL1", "colour_code": "BLK"},
+        )
+        # A catalog_products row on the base, with NO products spine row.
+        db.get_collection("catalog_products").insert_one(
+            {"id": "CAT-ONLY-SPINELESS", "sku": base}
+        )
+        assert repo.find_by_sku(base) is None, "precondition: invisible to the spine"
+
+        rows = [
+            {
+                # NO sku supplied -- the deterministic base is the taken one.
+                "category": "FRAME",
+                "brand": "SpineLess",
+                "model": "SL1",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            }
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"] == {"total": 1, "created": 0, "failed": 1}
+        errors = res["results"][0]["errors"]
+        assert any(
+            f"auto-generated SKU {base}" in e and "supply an explicit SKU" in e
+            for e in errors
+        ), errors
+        # And nothing was suffix-minted behind our back: no spine row at all.
+        assert (
+            list(db.get_collection("products")._inner._data.values()) == []
+        ), "a duplicate billing master was created despite the hard-reject policy"
+
     def test_supplied_sku_collision_keeps_the_original_message(self, mem_world):
         """The SUPPLIED-sku collision message is unchanged -- the new wording is
         scoped to auto-generated SKUs only."""
