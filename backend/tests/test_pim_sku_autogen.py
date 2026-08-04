@@ -522,6 +522,103 @@ def test_blocked_sku_batch_classifier_matches_the_landed_pim_sku(
 
 
 # ===========================================================================
+# 3b. R3-4: FAILED_SKU_CONFLICT must be diagnosable OUTSIDE the Railway log
+# ===========================================================================
+# sync_status used to be returned by exactly ONE route (routers/product_master
+# .py, the MASTER door). The FORM door returned {product_id, sku} and BULK
+# returned {index, ok, errors, sku, product_id} -- so the failure this branch
+# added FAILED_SKU_CONFLICT to surface still presented to the cataloguer as a
+# clean 201 over a spine row whose pim_product_id points at a catalog doc that
+# was never created: a product that can NEVER be pushed online, evidenced by one
+# ERROR line in a log nobody is watching. The fix is ADDITIVE (nothing renamed).
+#
+# The blip modelled here is the one the mint CANNOT prevent: _catalog_sku_taken
+# is deliberately fail-soft, so a catalog read that returns nothing while the
+# unique index still rejects the write re-opens the path even post-mint-fix.
+
+
+class _BlindDupCollection(_UpsertCollection):
+    """catalog_products whose READ says "free" but whose WRITE is rejected by
+    the sku_1 unique index -- exactly the fail-soft-read blip that survives the
+    mint fix (find_one is what _catalog_sku_taken consults)."""
+
+    def find_one(self, filter: Dict, *a, **k):  # noqa: A002
+        if "sku" in (filter or {}):
+            return None
+        return super().find_one(filter, *a, **k)
+
+    def update_one(self, filter: Dict, update: Dict, upsert: bool = False):  # noqa: A002
+        from pymongo.errors import DuplicateKeyError
+
+        raise DuplicateKeyError(
+            "E11000 duplicate key error collection: ims_2_0.catalog_products "
+            "index: sku_1"
+        )
+
+
+class _RouterDb(_FakeDb):
+    """_FakeDb + the `is_connected` flag the router branches on."""
+
+    is_connected = True
+
+
+@pytest.fixture
+def router_world(monkeypatch):
+    """Wire the FORM + BULK product routes onto in-memory storage whose
+    catalog_products rejects every write. Returns (repo, db)."""
+    import api.dependencies as deps
+    import api.routers.products as products_router
+
+    db = _RouterDb()
+    db._colls["catalog_products"] = _BlindDupCollection("catalog_products")
+    repo = ProductRepository(db.get_collection("products"))
+    audit_repo = AuditRepository(db.get_collection("audit_logs"))
+
+    monkeypatch.setattr(deps, "DATABASE_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: audit_repo)
+    monkeypatch.setattr(products_router, "get_product_repository", lambda: repo)
+    return repo, db
+
+
+_ADMIN = {"user_id": "u1", "username": "admin", "roles": ["ADMIN"]}
+
+
+def test_form_door_response_surfaces_FAILED_SKU_CONFLICT(router_world):
+    """R3-4: the FORM door's 201 must SAY the catalog mirror did not land."""
+    import asyncio
+
+    from api.routers.products import ProductCreate, create_product
+
+    created = asyncio.run(
+        create_product(
+            ProductCreate(**_form_payload()),
+            _ADMIN,
+        )
+    )
+    assert created["product_id"] and created["sku"]  # contract UNCHANGED
+    targets = (created.get("sync_status") or {}).get("targets") or {}
+    assert targets, "the FORM door tells the cataloguer nothing about the mirror"
+    assert targets["catalog_draft"]["status"] == "FAILED_SKU_CONFLICT", targets
+
+
+def test_bulk_door_row_surfaces_FAILED_SKU_CONFLICT(router_world):
+    """Same for each BULK row: ok:true is not the whole truth."""
+    import asyncio
+
+    from api.routers.products import BulkCreateRequest, bulk_create_products
+
+    body = BulkCreateRequest(products=[_form_payload()])
+    res = asyncio.run(bulk_create_products(body, _ADMIN))
+
+    row = res["results"][0]
+    assert row["ok"] is True and row["sku"]  # contract UNCHANGED
+    targets = (row.get("sync_status") or {}).get("targets") or {}
+    assert targets, "the BULK row tells the cataloguer nothing about the mirror"
+    assert targets["catalog_draft"]["status"] == "FAILED_SKU_CONFLICT", targets
+
+
+# ===========================================================================
 # 4. The backfill script's PURE CORE (no live Mongo)
 # ===========================================================================
 

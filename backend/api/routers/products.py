@@ -1023,8 +1023,11 @@ async def create_product(
     so this door enforces the SAME registry rulebook as /products/bulk-create
     and /catalog/products. Category, MRP>=offer, and category->GST/HSN are still
     enforced; STRICT now adds the registry's category-conditional required-field
-    gate (e.g. a FRAME without colour_code is rejected at entry). Auth/RBAC and
-    the {product_id, sku} response shape are unchanged.
+    gate (e.g. a FRAME without colour_code is rejected at entry). Auth/RBAC are
+    unchanged; the response shape is {product_id, sku} PLUS the additive
+    `sync_status` (nothing renamed) so a catalog-mirror failure -- notably
+    FAILED_SKU_CONFLICT, which leaves the product unpushable online -- is
+    visible to the caller instead of only to the Railway log.
 
     Hub Phase 0: `?as_draft=true` lets an incomplete product persist as
     catalog_status=DRAFT (still above the brand+model+category floor) instead of
@@ -1081,7 +1084,20 @@ async def create_product(
             )
             # Step-13: recompute SMART collections (fail-soft, never blocks).
             _refresh_collections_after_product(created)
-            return {"product_id": created["product_id"], "sku": created["sku"]}
+            return {
+                "product_id": created["product_id"],
+                "sku": created["sku"],
+                # ADDITIVE (nothing renamed): the per-target mirror status the
+                # MASTER door (routers/product_master.py) already returns.
+                # WITHOUT IT a FAILED_SKU_CONFLICT -- the catalog_products
+                # sku_1 collision that leaves pim_product_id pointing at a doc
+                # that was never created, i.e. a product that can NEVER be
+                # pushed online -- reached the cataloguer as a clean 201, with
+                # one ERROR line in the Railway log as the only evidence.
+                # `_catalog_sku_taken` is deliberately fail-soft, so a transient
+                # catalog read blip re-opens that path even with the mint fix.
+                "sync_status": created.get("sync_status"),
+            }
 
         raise HTTPException(status_code=500, detail="Failed to create product")
 
@@ -1341,6 +1357,10 @@ async def bulk_create_products(
                     "errors": [],
                     "sku": actual_sku,
                     "product_id": created.get("product_id"),
+                    # ADDITIVE, same reason as the FORM door: a per-row
+                    # FAILED_SKU_CONFLICT was previously diagnosable only in
+                    # the Railway log while the row reported ok: true.
+                    "sync_status": created.get("sync_status"),
                 }
             )
         else:
