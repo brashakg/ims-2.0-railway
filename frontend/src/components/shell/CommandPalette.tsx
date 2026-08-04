@@ -20,8 +20,10 @@ import { customerApi } from '../../services/api/customers';
 import { orderApi } from '../../services/api/sales';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
-import { filterVisibleGroups } from './navConfig';
+import { moduleForPath } from '../../context/ModuleContext';
+import { filterVisibleGroups, hasAnyRole } from './navConfig';
 import { Icon } from './Icon';
+import type { UserRole } from '../../types';
 
 // ----------------------------------------------------------------------------
 // Recent items (localStorage)
@@ -89,6 +91,39 @@ interface JumpPage {
   /** Nav group title (e.g. "Growth") — shown as context, and searchable. */
   hint?: string;
 }
+
+// ----------------------------------------------------------------------------
+// EXTRA_JUMPS — palette-only pages that are legitimately ABSENT from NAV_GROUPS
+// (#949-2). The derived list above can only surface what the nav model knows;
+// a few real destinations have no nav item (the product-add door /catalog/add)
+// or a nav item scoped to a different role (/purchase/vendor-returns is a
+// WORKSHOP_STAFF-only nav item, but managers/admins reach it via a Purchase
+// tab). These are gated with the SAME two checks as the nav (role ceiling +
+// per-user module deny) and merged AFTER the derived pages, deduped by route —
+// so the derive-from-nav invariant is preserved and this only fills known gaps.
+// requireRoles MIRRORS each route's ProtectedRoute allowedRoles in App.tsx.
+// ----------------------------------------------------------------------------
+interface ExtraJump {
+  label: string;
+  route: string;
+  hint: string;
+  requireRoles: UserRole[];
+}
+
+const EXTRA_JUMPS: ExtraJump[] = [
+  {
+    label: 'Add Product',
+    route: '/catalog/add',
+    hint: 'Stock & supply',
+    requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'],
+  },
+  {
+    label: 'Vendor Returns',
+    route: '/purchase/vendor-returns',
+    hint: 'Stock & supply',
+    requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF'],
+  },
+];
 
 // ----------------------------------------------------------------------------
 // Debounce hook (200ms per the spec)
@@ -334,6 +369,20 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         seen.add(item.to);
         pages.push({ label: item.label, route: item.to, hint: group.title });
       }
+    }
+    // #949-2: merge palette-only pages AFTER the derived list, gated the SAME
+    // way (role ceiling + per-user module deny) and deduped by route — so a page
+    // absent from NAV_GROUPS stays Ctrl-K jumpable without reintroducing drift.
+    for (const extra of EXTRA_JUMPS) {
+      if (seen.has(extra.route)) continue;
+      const roleOk =
+        hasAnyRole(user?.roles, extra.requireRoles) ||
+        (user?.activeRole != null && extra.requireRoles.includes(user.activeRole));
+      if (!roleOk) continue;
+      const mod = moduleForPath(extra.route);
+      if (mod && !hasModuleAccess(mod)) continue;
+      seen.add(extra.route);
+      pages.push({ label: extra.label, route: extra.route, hint: extra.hint });
     }
     return pages;
   }, [user, hasModuleAccess]);
