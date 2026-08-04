@@ -710,7 +710,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:  # noqa: BLE001 - a raise mid-write is PARTIAL
             landed = audit.get("modified_ids") or []
             last = landed[-1] if landed else "NONE"
-            audit["outcome"] = f"PARTIAL-EXCEPTION@{last}"
+            # Do not label a run PARTIAL when NOTHING landed -- an operator
+            # reading only the outcome string would believe a partial write
+            # occurred. Exit code stays 5 either way.
+            audit["outcome"] = (
+                f"PARTIAL-EXCEPTION@{last}" if landed else "ABORTED-EXCEPTION@NONE"
+            )
             audit["error"] = repr(exc)
             _out("")
             _out(f"WRITE FAILED MID-LOOP: {exc!r}")

@@ -1111,7 +1111,10 @@ async def create_product(
             )
         except Exception:  # noqa: BLE001 - never block the (stub) create
             stub_sku = None
-    return {"product_id": str(uuid.uuid4()), "sku": stub_sku}
+    # sync_status is ALWAYS present in the response shape, even on the stub
+    # path -- a consumer that reads it must not see it silently absent in
+    # mock/dev mode and conclude the mirror succeeded.
+    return {"product_id": str(uuid.uuid4()), "sku": stub_sku, "sync_status": None}
 
 
 # ============================================================================
