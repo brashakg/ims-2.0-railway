@@ -573,6 +573,222 @@ class TestBulkCreateEndpoint:
 
 
 # ============================================================================
+# Layer 2b -- ENDPOINT tests with NO Mongo (in-memory repo + fake db)
+# ============================================================================
+# WHY THIS LAYER EXISTS ALONGSIDE Layer 2: the Layer-2 endpoint tests are
+# mongo-gated and SKIP on any machine without a mongo:7.0 (every laptop run),
+# so the auto-mint endpoint behaviour would be exercised in CI only. The
+# blank-SKU contract is the one the reviewers flagged as untested, so it gets a
+# layer that runs EVERYWHERE: the real handler, the real canonical door, the
+# real ProductRepository -- only the storage underneath is in-memory.
+# ============================================================================
+
+
+class _MemUpsertCollection:
+    """MockCollection + the two things the production create path needs that
+    MockCollection lacks: `update_one(..., upsert=True)` and being reachable via
+    `db.get_collection(name)`."""
+
+    def __init__(self, name: str):
+        from database.connection import MockCollection
+
+        self._inner = MockCollection(name)
+
+    def __getattr__(self, item):
+        return getattr(self._inner, item)
+
+    def update_one(self, filter, update, upsert: bool = False):  # noqa: A002
+        existing = self._inner.find_one(filter)
+        if existing is None and upsert:
+            doc: Dict[str, Any] = {}
+            for key, val in (filter or {}).items():
+                if not key.startswith("$") and not isinstance(val, dict):
+                    doc[key] = val
+            doc.update(dict(update.get("$set") or {}))
+            self._inner.insert_one(doc)
+            return type("obj", (object,), {"modified_count": 0, "upserted_id": 1})()
+        return self._inner.update_one(filter, update)
+
+
+class _MemDb:
+    """get_db() shape over in-memory collections. `is_connected` True so the
+    handler takes the REAL repo path, not the stub-mode branch."""
+
+    def __init__(self):
+        self.is_connected = True
+        self._colls: Dict[str, _MemUpsertCollection] = {}
+
+    def get_collection(self, name: str) -> _MemUpsertCollection:
+        if name not in self._colls:
+            self._colls[name] = _MemUpsertCollection(name)
+        return self._colls[name]
+
+    def __getitem__(self, name: str):
+        return self.get_collection(name)
+
+    def __getattr__(self, name: str):
+        # db.products / db.catalog_variants attribute style.
+        return self.get_collection(name)
+
+
+@pytest.fixture
+def mem_world(monkeypatch):
+    """Wire the bulk endpoint + the canonical door onto in-memory storage.
+
+    Returns the (repo, db) pair so a test can seed a pre-existing product and
+    read back what actually persisted."""
+    from database.repositories.product_repository import ProductRepository
+    from database.repositories.audit_repository import AuditRepository
+    import api.dependencies as deps
+    import api.routers.products as products_router
+
+    db = _MemDb()
+    repo = ProductRepository(db.get_collection("products"))
+    audit_repo = AuditRepository(db.get_collection("audit_logs"))
+
+    monkeypatch.setattr(deps, "DATABASE_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: audit_repo)
+    # The handler AND _create_via_canonical_door both call the name bound in
+    # the router module, so one patch covers the endpoint and the door.
+    monkeypatch.setattr(products_router, "get_product_repository", lambda: repo)
+    return repo, db
+
+
+class TestBulkCreateEndpointBlankSku:
+    """POST /products/bulk-create, blank-SKU rows -- no Mongo required."""
+
+    def test_two_blank_sku_rows_both_created_with_distinct_minted_skus(
+        self, mem_world
+    ):
+        """(i) Two blank-SKU rows with DISTINCT identities are both created and
+        the response carries distinct, non-empty MINTED skus."""
+        from api.routers.products import bulk_create_products
+
+        repo, _db = mem_world
+        rows = [
+            {
+                "category": "FRAME",
+                "brand": "MemBrand",
+                "model": "MB1",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            },
+            {
+                "category": "FRAME",
+                "brand": "MemBrand",
+                "model": "MB2",
+                "color": "BLK",
+                "mrp": 1100.0,
+                "offer_price": 1000.0,
+            },
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"] == {"total": 2, "created": 2, "failed": 0}
+        skus = [r["sku"] for r in res["results"]]
+        assert all(s and str(s).strip() for s in skus), f"minted skus empty: {skus}"
+        assert len(set(skus)) == 2, f"minted skus must be distinct: {skus}"
+        # (iii) the response sku is the PERSISTED sku.
+        for r in res["results"]:
+            doc = repo.find_by_sku(r["sku"])
+            assert doc is not None, f"{r['sku']} did not persist"
+            assert doc.get("product_id") == r["product_id"]
+
+    def test_blank_sku_base_collision_is_rejected_with_the_explicit_message(
+        self, mem_world
+    ):
+        """(ii) DECISION (panel): a blank-SKU row whose deterministic base
+        collides with an EXISTING product is HARD-REJECTED -- never silently
+        suffix-minted (the deliberate divergence from the FORM door, which
+        suffixes) -- and the error names the auto-generated SKU + the way out.
+        """
+        from api.routers.products import bulk_create_products
+        from api.services import product_master as pm
+
+        repo, _db = mem_world
+        base = pm.build_sku(
+            "FRAME",
+            {"brand_name": "MemClash", "model_no": "MC1", "colour_code": "BLK"},
+        )
+        repo.create(
+            {
+                "sku": base,
+                "category": "FRAME",
+                "brand": "MemClash",
+                "model": "MC1",
+                "color": "BLK",
+                "mrp": 999.0,
+                "offer_price": 999.0,
+                "is_active": True,
+            }
+        )
+
+        rows = [
+            {
+                # NO sku supplied -- the deterministic base collides.
+                "category": "FRAME",
+                "brand": "MemClash",
+                "model": "MC1",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            }
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"] == {"total": 1, "created": 0, "failed": 1}
+        errors = res["results"][0]["errors"]
+        assert any(
+            f"auto-generated SKU {base}" in e and "supply an explicit SKU" in e
+            for e in errors
+        ), errors
+        # Not suffix-minted behind our back: still exactly one row on the base,
+        # and no "<base>-<counter>" sibling was created.
+        assert repo.find_by_sku(base) is not None
+        all_skus = sorted(
+            str(d.get("sku") or "")
+            for d in _db.get_collection("products")._inner._data.values()
+        )
+        assert all_skus == [base], all_skus
+
+    def test_supplied_sku_collision_keeps_the_original_message(self, mem_world):
+        """The SUPPLIED-sku collision message is unchanged -- the new wording is
+        scoped to auto-generated SKUs only."""
+        from api.routers.products import bulk_create_products
+
+        repo, _db = mem_world
+        repo.create(
+            {
+                "sku": "MEM-TAKEN",
+                "category": "FRAME",
+                "brand": "B",
+                "model": "M",
+                "color": "BLK",
+                "mrp": 999.0,
+                "offer_price": 999.0,
+                "is_active": True,
+            }
+        )
+        rows = [
+            {
+                "sku": "MEM-TAKEN",
+                "category": "FRAME",
+                "brand": "B",
+                "model": "M",
+                "color": "BLK",
+                "mrp": 1000.0,
+                "offer_price": 900.0,
+            }
+        ]
+        res = asyncio.run(bulk_create_products(_body(rows), ADMIN_USER))
+
+        assert res["summary"]["failed"] == 1
+        assert "Product with this SKU already exists" in res["results"][0]["errors"]
+
+
+# ============================================================================
 # Layer 3 -- role gating (no DB needed; require_roles runs before the handler)
 # ============================================================================
 
