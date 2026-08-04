@@ -576,6 +576,12 @@ def test_live_push_product_simulated_over_http_writes_audit(client, auth_headers
     assert row["entity_id"] == "P1"
     assert row["details"]["mode"] == "SIMULATED"
     assert row["user_id"] == "test-admin-001"
+    # #950 follow-up: `timestamp` is now stamped explicitly (matching the
+    # convention every other audit_logs writer already uses) so this row
+    # rides the pre-existing (action, timestamp) compound index instead of an
+    # unindexed sort on `created_at` -- see push_history's sort key + the
+    # real-Mongo test above.
+    assert row.get("timestamp") is not None
 
 
 def test_live_push_product_404_when_missing(client, auth_headers, patched_db):
@@ -721,6 +727,61 @@ def test_push_all_pending_limit_caps_the_sweep(client, auth_headers, patched_db,
     body = r.json()
     assert body["pushed_count"] == 1
     assert body["limit_reached"] is True
+
+
+def test_all_pending_rejects_offset_with_multiple_entities(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """#950 follow-up (P3): `offset` only has meaning for the variant-prices
+    resync's own paged walk. Combined with another entity, that entity's
+    per-doc pushes can consume the WHOLE `limit` budget before the
+    variant-prices loop runs a single iteration, so it returns
+    next_offset == offset -- a naive "call again with next_offset" loop then
+    spins forever, never advancing. The combination is rejected outright
+    rather than returning a 200 that looks like progress but makes none."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending"
+        "?entities=products,variant-prices&offset=5",
+        headers=auth_headers,
+    )
+    assert r.status_code == 400, r.text
+    assert "offset" in r.json()["detail"].lower()
+
+
+def test_all_pending_allows_offset_with_a_single_entity(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """The guard is specific to MULTIPLE entities -- a lone `variant-prices`
+    resync (the FE's actual paging loop) is unaffected."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "mrp": 1000,
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=variant-prices&offset=1",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_all_pending_allows_offset_zero_with_multiple_entities(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """offset=0 (the default -- "start from the top") is never rejected, even
+    combined with every entity -- only a NONZERO offset paired with more than
+    one entity is the naive-spin trap."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products,collections",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
 
 
 def test_push_all_pending_403_for_catalog_manager(client, catalog_headers, patched_db):
@@ -1259,3 +1320,152 @@ def test_push_history_403_for_catalog_manager(client, catalog_headers, patched_d
     """History rides the narrowed push surface -> CATALOG_MANAGER 403."""
     r = client.get("/api/v1/online-store/push/history", headers=catalog_headers)
     assert r.status_code == 403, r.text
+
+
+class _RealishCollection:
+    """Stand-in for a REAL pymongo Collection: carries the `.database`
+    attribute online_store_push._audit_collection_is_real_mongo checks for
+    (MockCollection carries no such attribute), and evaluates a flat
+    dot-notation equality filter server-side -- exactly the {details.mode,
+    details.ok} shape push_history now builds. Used to prove the mode/ok
+    filters are pushed into the QUERY on a real deployment, not just applied
+    in Python after an over-fetch."""
+
+    def __init__(self, rows):
+        self.database = object()  # the real-vs-mock discriminator
+        self._rows = list(rows)
+
+    @staticmethod
+    def _get(doc, dotted_key):
+        cur = doc
+        for part in dotted_key.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return None
+            cur = cur[part]
+        return cur
+
+    def _matches(self, doc, filt):
+        return all(self._get(doc, k) == v for k, v in (filt or {}).items())
+
+    def find(self, filt=None):
+        return [r for r in self._rows if self._matches(r, filt)]
+
+
+class _RealishAuditRepoSpy:
+    """A fake audit repo whose `.collection` LOOKS real (see
+    _RealishCollection) and whose find_many records every call so a test can
+    assert exactly what filter/sort/limit push_history sent."""
+
+    def __init__(self, rows):
+        self.collection = _RealishCollection(rows)
+        self.calls: list = []
+
+    def find_many(self, filt=None, sort=None, limit=100):
+        self.calls.append({"filter": dict(filt or {}), "sort": sort, "limit": limit})
+        rows = self.collection.find(filt)
+        if sort:
+            field, direction = sort[0]
+            rows = sorted(rows, key=lambda d: d.get(field) or "", reverse=direction == -1)
+        return rows[: (limit or len(rows))] if limit else rows
+
+
+def test_push_history_pushes_mode_and_ok_into_the_query_on_real_mongo(
+    client, auth_headers, monkeypatch
+):
+    """#950 follow-up (P2, OS-047-adjacent): on a REAL Mongo deployment the
+    mode/ok filters must ride the query itself (`details.mode` /
+    `details.ok`), not a Python post-filter over a flat 500-row over-fetch --
+    otherwise a filtered view (e.g. "Failures only") goes blind past whatever
+    sits outside the newest 500 rows once the ledger grows past that. Also
+    proves the call is NOT over-fetching (limit stays 50, not 500) because the
+    server already did the filtering, and that the sort key is `timestamp`
+    (the indexed field), not the unindexed `created_at`."""
+    from api import dependencies as deps
+
+    rows = [
+        {
+            "action": "ONLINE_STORE_PUSH", "entity_type": "product",
+            "entity_id": "P-LIVE-OK", "user_id": "u1",
+            "timestamp": "2026-08-02T00:00:00",
+            "details": {"mode": "LIVE", "ok": True, "push_action": "update"},
+        },
+        {
+            "action": "ONLINE_STORE_PUSH", "entity_type": "product",
+            "entity_id": "P-SIM-FAIL", "user_id": "u1",
+            "timestamp": "2026-08-01T00:00:00",
+            "details": {"mode": "SIMULATED", "ok": False, "push_action": "create"},
+        },
+    ]
+    repo = _RealishAuditRepoSpy(rows)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: repo)
+
+    r = client.get("/api/v1/online-store/push/history?mode=LIVE", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["available"] is True and body["count"] == 1
+    assert body["entries"][0]["target_id"] == "P-LIVE-OK"
+
+    call = repo.calls[-1]
+    assert call["filter"].get("details.mode") == "LIVE"
+    assert call["limit"] == 50  # server-side filtered -> no 500-row over-fetch
+    assert call["sort"] == [("timestamp", -1)]
+
+    # `ok` filter rides the query too.
+    r2 = client.get("/api/v1/online-store/push/history?ok=false", headers=auth_headers)
+    assert r2.json()["count"] == 1
+    assert r2.json()["entries"][0]["target_id"] == "P-SIM-FAIL"
+    assert repo.calls[-1]["filter"].get("details.ok") is False
+
+
+def test_push_history_mock_collection_keeps_the_python_post_filter(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """The in-memory MockCollection (tests / no-DB mode) does not understand
+    dot-notation queries -- pushing `details.mode` into its filter would
+    silently match zero rows instead of raising. push_history must detect
+    that (MockCollection carries no `.database`) and keep the original
+    over-fetch + Python-post-filter path, so mode/ok filtering still works
+    correctly there too."""
+    conn, audit_repo = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "sku": "SKU-1", "ecom": {"status": "PUBLISHED", "handle": "rb"}})
+    r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
+    assert r.status_code == 200, r.text
+
+    h = client.get("/api/v1/online-store/push/history?mode=SIMULATED", headers=auth_headers)
+    assert h.status_code == 200, h.text
+    assert h.json()["available"] is True and h.json()["count"] == 1
+    # A mode that cannot match (LIVE never happened) is honestly empty, not an
+    # error -- proving the Python filter still runs correctly on Mock.
+    h2 = client.get("/api/v1/online-store/push/history?mode=LIVE", headers=auth_headers)
+    assert h2.json()["available"] is True and h2.json()["count"] == 0
+
+
+def test_push_history_query_failure_reports_unavailable_not_a_false_empty(
+    client, auth_headers, monkeypatch
+):
+    """A query error is NOT the same thing as a genuinely-empty ledger: the
+    old code swallowed the exception and returned rows=[] with
+    available=True, which reads as "nothing has ever been pushed" -- a lie
+    the first time a real read failure happens. It must report the SAME
+    honest available:false the "no audit store" case already uses."""
+    from api import dependencies as deps
+
+    class _BoomCollection:
+        database = object()
+
+    class _BoomRepo:
+        def __init__(self):
+            self.collection = _BoomCollection()
+
+        def find_many(self, *a, **k):
+            raise RuntimeError("Mongo timeout")
+
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: _BoomRepo())
+    r = client.get("/api/v1/online-store/push/history", headers=auth_headers)
+    assert r.status_code == 200, r.text  # fail-soft: never a 500
+    body = r.json()
+    assert body["available"] is False
+    assert body["count"] == 0
+    assert body["entries"] == []

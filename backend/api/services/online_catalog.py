@@ -278,12 +278,18 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
             continue
         out[key] = {
             "online": _ecom_online(ecom) or var_pushed,
-            # Sellable when the parent is PUBLISHED, or -- per the audit
-            # fix-round instruction -- when the variant carries a live variant
-            # gid (BVI-era imported variants whose parent linkage/ecom may be
-            # missing belong to live storefront products).
+            # Sellable when the parent is PUBLISHED, or -- ONLY when the parent
+            # ecom doc is MISSING -- when the variant carries a live variant gid.
+            # That gid-implies-sellable proxy is a BVI-orphan heuristic: an
+            # imported variant whose parent linkage/ecom is gone still belongs to
+            # a live storefront product. It must NEVER override a KNOWN parent
+            # status -- a DRAFT parent (gid present, status DRAFT) is
+            # unpurchasable, so a variant of a DRAFT product is NOT sellable and
+            # must never trip an oversell alarm (#944 follow-up). Applying the
+            # proxy only when `not ecom` keeps the orphan heuristic while letting
+            # a real DRAFT status win.
             "sellable_online": _ecom_sellable(ecom)
-            or bool(normalize_sku(var.get("shopify_variant_id"))),
+            or (not ecom and bool(normalize_sku(var.get("shopify_variant_id")))),
             "online_stock": None,
             "status": ecom.get("status"),
         }

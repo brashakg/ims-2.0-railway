@@ -242,6 +242,66 @@ def test_sellable_online_excludes_unpurchasable_drafts():
     assert out["VAR-2"]["sellable_online"] is True
 
 
+def test_sellable_online_draft_parent_with_variant_gid_is_not_sellable():
+    """#944 follow-up: the variant truth-slice's gid-implies-sellable proxy is a
+    BVI-orphan heuristic (a variant whose parent linkage/ecom is genuinely
+    MISSING still belongs to a live storefront product). It must NEVER
+    override a KNOWN parent status -- a DRAFT parent (gid present, status
+    DRAFT) is unpurchasable, so a variant of a DRAFT product must stay
+    NOT sellable and never trip an oversell alarm, even though the variant
+    itself carries a Shopify gid."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [
+                    {
+                        "id": "CP5",
+                        "sku": "PARENT-DRAFT",
+                        "ecom": {
+                            "status": "DRAFT",
+                            "shopify_product_id": "gid://shopify/Product/5",
+                        },
+                    }
+                ]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "V-DRAFT-1",
+                        "parent_product_id": "CP5",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/51",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["V-DRAFT-1"])
+    assert out["V-DRAFT-1"]["online"] is True  # display: pushed to Shopify
+    assert out["V-DRAFT-1"]["sellable_online"] is False  # guard: DRAFT wins
+
+
+def test_sellable_online_orphan_variant_gid_without_parent_is_sellable():
+    """The gid-implies-sellable proxy DOES still apply when the parent
+    linkage/ecom is genuinely MISSING -- the BVI-orphan case it exists for."""
+    db = _Db(
+        {
+            "catalog_products": _Coll([]),  # no parent doc resolves at all
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "V-ORPHAN-1",
+                        "parent_product_id": "MISSING",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/61",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["V-ORPHAN-1"])
+    assert out["V-ORPHAN-1"]["online"] is True
+    assert out["V-ORPHAN-1"]["sellable_online"] is True
+
+
 def test_identifier_priority_sku_beats_barcode_across_variants():
     """Heads-up hardening: when one requested identifier is variant A's barcode
     AND variant B's sku, the SKU owner must win deterministically (field

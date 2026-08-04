@@ -302,15 +302,47 @@ def test_dark_create_plans_price_and_sku_without_touching_the_network(
 
 
 def test_dark_update_does_not_plan_a_reprice_by_default(monkeypatch):
+    """An ALREADY-SEEDED product (carries a stored default-variant gid, i.e. a
+    previous create-seed succeeded) is left alone on an ordinary update -- the
+    flag protects an already-priced product from a silent re-price, it does
+    NOT gate the repair-only path (see the sibling _never_seeded test below,
+    which covers the product that has NO stored gid anywhere)."""
     _force_dark(monkeypatch, "writes_off")
     product = _product()
     product["ecom"] = {
         "status": "PUBLISHED",
         "shopify_product_id": "gid://shopify/Product/111",
+        "shopify_variant_id": "gid://shopify/ProductVariant/5001",
+        "shopify_inventory_item_id": "gid://shopify/InventoryItem/7001",
     }
     res = _run(shopify_push.push_product(_EngineDB(), product, []))
     assert res.action == "update"
     assert res.variants_seeded is None  # nothing would be re-priced
+
+
+def test_dark_update_never_seeded_plans_a_repair_seed_regardless_of_the_flag(
+    monkeypatch,
+):
+    """#944 follow-up: a mapped product (has shopify_product_id) that was NEVER
+    seeded -- no stored shopify_variant_id / shopify_inventory_item_id anywhere
+    -- must plan a repair seed on an ordinary update even with
+    SHOPIFY_PUSH_PRICE_ON_UPDATE OFF. Before this fix such a product was
+    permanently stuck at Shopify's auto-created 0.00/no-SKU with no self-heal
+    path (a failed create-seed, or a pre-#943 push, could never be repaired
+    short of manually arming the global re-price flag)."""
+    _force_dark(monkeypatch, "writes_off")
+    product = _product()
+    product["ecom"] = {
+        "status": "PUBLISHED",
+        "shopify_product_id": "gid://shopify/Product/111",
+        # NO shopify_variant_id / shopify_inventory_item_id -> never seeded.
+    }
+    res = _run(shopify_push.push_product(_EngineDB(), product, []))
+    assert res.action == "update"
+    plan = res.variants_seeded
+    assert plan is not None
+    assert plan["variants"][0]["price"] == "10990.00"
+    assert plan["variants"][0]["inventoryItem"] == {"sku": "BV-RB-0001"}
 
 
 # ===========================================================================
@@ -450,6 +482,106 @@ def test_live_create_creates_the_remaining_variants_and_writes_back_each_gid(
     )
 
 
+def test_live_create_harvests_partially_successful_bulk_create(monkeypatch):
+    """#944 follow-up: productVariantsBulkCreate can return BOTH userErrors AND
+    a non-empty productVariants list -- some rows in the chunk were rejected,
+    others were actually created on Shopify. The old code `continue`d past the
+    body on ANY error, discarding the ones that DID succeed: they existed on
+    Shopify but their ProductVariant/InventoryItem gids were never written
+    back, so IMS could neither re-price nor oversell-guard them again. Gold
+    (created) must be harvested and written back even though Silver (in the
+    SAME bulk-create call) failed."""
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response(
+                [
+                    {
+                        "id": "gid://shopify/ProductVariant/5001",
+                        "selectedOptions": [{"name": "Color", "value": "Black"}],
+                    }
+                ]
+            ),
+            "productVariantsBulkUpdate": {
+                "data": {
+                    "productVariantsBulkUpdate": {
+                        "productVariants": [
+                            {"id": "gid://shopify/ProductVariant/5001"}
+                        ],
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkCreate": {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        # Gold WAS created; Silver is simply absent (rejected) --
+                        # a real partial-success Shopify response shape.
+                        "productVariants": [
+                            {
+                                "id": "gid://shopify/ProductVariant/5002",
+                                "selectedOptions": [
+                                    {"name": "Color", "value": "Gold"}
+                                ],
+                                "inventoryItem": {
+                                    "id": "gid://shopify/InventoryItem/7002"
+                                },
+                            }
+                        ],
+                        "userErrors": [
+                            {
+                                "field": ["variants", "1", "sku"],
+                                "message": "SKU has already been taken",
+                            }
+                        ],
+                    }
+                }
+            },
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black"}
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V2", "sku": "S-GLD", "parent_product_id": "P1",
+         "option_color": "Gold"}
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V3", "sku": "S-SLV", "parent_product_id": "P1",
+         "option_color": "Silver"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [
+        db["catalog_variants"].find_one({"sku": "S-BLK"}),
+        db["catalog_variants"].find_one({"sku": "S-GLD"}),
+        db["catalog_variants"].find_one({"sku": "S-SLV"}),
+    ]
+
+    res = _run(shopify_push.push_product(db, product, variants))
+    assert res.ok is True  # the product push stays fail-soft either way
+
+    # The partial error IS reported...
+    assert any("SKU has already been taken" in e for e in res.variants_seeded["errors"])
+    # ...but the ROW SHOPIFY DID CREATE is still harvested, not discarded.
+    assert res.variants_seeded["created"] == 1
+    assert "gid://shopify/ProductVariant/5002" in res.variants_seeded["variant_gids"]
+    assert (
+        "gid://shopify/InventoryItem/7002"
+        in res.variants_seeded["inventory_item_gids"]
+    )
+
+    gold = db["catalog_variants"].find_one({"sku": "S-GLD"})
+    assert gold["shopify_variant_id"] == "gid://shopify/ProductVariant/5002"
+    assert gold["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7002"
+    # Silver genuinely failed -- no gid to write back, mapping stays absent.
+    silver = db["catalog_variants"].find_one({"sku": "S-SLV"})
+    assert "shopify_variant_id" not in silver
+    assert spy.count_for("productVariantsBulkCreate") == 1
+
+
 def test_live_create_seed_failure_never_fails_the_product_push(monkeypatch):
     """The seeding step is a fail-SOFT side channel: a userErrors from the bulk
     update is reported, but the product create itself stays ok (a re-push
@@ -498,10 +630,22 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
 # ===========================================================================
 
 
-def test_live_update_of_a_mapped_product_does_not_touch_prices(monkeypatch):
-    """The ~4,400 already-live products must not be silently re-priced by an
-    ordinary catalogue edit: an UPDATE issues the productUpdate and NOTHING
-    else."""
+def test_live_update_of_a_seeded_product_does_not_reseed(monkeypatch):
+    """An ALREADY-SEEDED product (carries a stored default-variant gid from a
+    prior successful seed) is never RE-SEEDED by an ordinary catalogue edit:
+    no `variants_seeded` summary is produced and productVariantsBulkCreate is
+    never called (the ~4,400 already-live products are never silently
+    force-recreated).
+
+    Its price MAY still ride the SEPARATE, pre-existing OS-016
+    push_variant_prices side channel (#950): that mechanism re-prices every
+    gid-mapped product on every live update regardless of ANY flag here --
+    it is untouched by this change, is exactly why the stored default gid
+    exists in the first place (`_variants_for_price_push`'s pseudo-variant
+    synthesis), and is covered on its own in test_online_store_push.py /
+    test_online_discount_engine.py. This test's scope is narrowly "seeding
+    does not run twice", not "nothing about this product's price ever
+    changes on Shopify"."""
     spy = _force_live(
         monkeypatch,
         {
@@ -517,6 +661,8 @@ def test_live_update_of_a_mapped_product_does_not_touch_prices(monkeypatch):
                     }
                 }
             },
+            # Answers the OS-016 push_variant_prices side channel, which DOES
+            # still fire for this already-mapped product -- see the docstring.
             "productVariantsBulkUpdate": {
                 "data": {
                     "productVariantsBulkUpdate": {
@@ -532,12 +678,62 @@ def test_live_update_of_a_mapped_product_does_not_touch_prices(monkeypatch):
     product["ecom"] = {
         "status": "PUBLISHED",
         "shopify_product_id": "gid://shopify/Product/111",
+        "shopify_variant_id": "gid://shopify/ProductVariant/5001",
+        "shopify_inventory_item_id": "gid://shopify/InventoryItem/7001",
     }
     res = _run(shopify_push.push_product(db, product, []))
     assert res.action == "update" and res.ok is True
-    assert res.variants_seeded is None
-    assert spy.count_for("productVariantsBulkUpdate") == 0
-    assert len(spy.calls) == 1  # productUpdate only
+    assert res.variants_seeded is None  # no re-seed: already seeded
+    assert spy.count_for("productVariantsBulkCreate") == 0  # never creates
+
+
+def test_live_update_never_seeded_repairs_regardless_of_the_flag(monkeypatch):
+    """#944 follow-up: repair-only seeding is INDEPENDENT of
+    SHOPIFY_PUSH_PRICE_ON_UPDATE. A mapped product with NO stored variant /
+    inventory-item gid anywhere (a previous create-seed failed, or it predates
+    the #943/#944 stack) must self-heal on its next ordinary update -- price,
+    SKU, and BOTH gids get written back -- with the flag left OFF."""
+    monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productUpdate": {
+                "data": {
+                    "productUpdate": {
+                        "product": {
+                            "id": "gid://shopify/Product/111",
+                            "handle": "rb",
+                            "variants": {"nodes": [_DEFAULT_NODE_WITH_INV]},
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        _product(
+            ecom={
+                "status": "PUBLISHED",
+                "shopify_product_id": "gid://shopify/Product/111",
+                # NO shopify_variant_id / shopify_inventory_item_id.
+            }
+        )
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.action == "update" and res.ok is True
+    assert res.variants_seeded is not None
+    assert res.variants_seeded["updated"] == 1
+    assert spy.count_for("productVariantsBulkUpdate") == 1
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert (
+        saved["ecom"]["shopify_inventory_item_id"]
+        == "gid://shopify/InventoryItem/7001"
+    )
 
 
 def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):

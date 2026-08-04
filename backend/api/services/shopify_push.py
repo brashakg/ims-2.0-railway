@@ -1166,6 +1166,42 @@ def plan_variant_seed(
     }
 
 
+def _never_seeded(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> bool:
+    """True when this product carries NO stored variant->Shopify mapping at all.
+
+    "Never seeded" == the create-side seeding either never ran or its bulk write
+    failed, so the Shopify variant still sits at the auto-created 0.00 / no-SKU /
+    no-stock-target. Detected as the ABSENCE of any stored shopify_variant_id /
+    shopify_inventory_item_id:
+      * a product WITH catalog_variants rows  -> none of the rows carry either id;
+      * a product with NO rows (single default variant) -> its ecom sub-doc
+        carries neither ecom.shopify_variant_id nor ecom.shopify_inventory_item_id.
+
+    Used to run REPAIR-only seeding on an UPDATE, INDEPENDENT of
+    SHOPIFY_PUSH_PRICE_ON_UPDATE: a product that was pushed (has a
+    shopify_product_id) but never seeded must still get its price/SKU/gids, else
+    it is stranded on Shopify at 0.00 with no stock-guard target and no way to
+    self-heal. An already-mapped product (any stored gid) is left ALONE unless
+    the owner opts into re-pricing, so the ~4,400 BVI-era gid-bearing products
+    are never silently re-priced. Pure. A partially-mapped product counts as
+    SEEDED (a single partial repair is _seed_variants_after_write's own concern;
+    we never force-reprice a live product from here)."""
+    rows = list(variants or [])
+    if rows:
+        return not any(
+            str((v or {}).get("shopify_variant_id") or "").strip()
+            or str((v or {}).get("shopify_inventory_item_id") or "").strip()
+            for v in rows
+        )
+    ecom = product.get("ecom") or {}
+    return not (
+        str(ecom.get("shopify_variant_id") or "").strip()
+        or str(ecom.get("shopify_inventory_item_id") or "").strip()
+    )
+
+
 def _assign_seed_rows(
     seed_rows: List[Dict[str, Any]], nodes: Optional[List[Dict[str, Any]]]
 ) -> Tuple[
@@ -1333,7 +1369,15 @@ async def _seed_variants_after_write(
             err = _user_errors(body, "productVariantsBulkCreate")
             if err:
                 summary["errors"].append(err)
-                continue
+            # Harvest whatever the call DID create even on a partial-error
+            # response. productVariantsBulkCreate can return BOTH userErrors AND
+            # a non-empty productVariants list (some rows rejected, others
+            # created). The old `continue` on any error discarded that list, so
+            # the variants Shopify HAD created were orphaned: their
+            # ProductVariant / InventoryItem gids were never written back,
+            # leaving live variants IMS could neither re-price nor oversell-guard
+            # again. We now always read the returned nodes (empty on a total
+            # failure -> nothing harvested), then match + write them back below.
             made = (
                 (body.get("data") or {}).get("productVariantsBulkCreate") or {}
             ).get("productVariants") or []
@@ -1829,10 +1873,15 @@ async def push_product(
             vp_plan = {"variants": vp_rows, "skipped_no_gid_or_price": vp_skipped}
         # The CREATE-side seeding plan (price + SKU for the variants Shopify will
         # mint) rides on the dry-run too, so the owner can SEE the money before
-        # anything goes live. On an update it only appears when the opt-in flag
-        # is on -- mirroring what the LIVE branch would actually do.
+        # anything goes live. On an update it appears when the opt-in flag is on
+        # OR when the product was never seeded (repair-only path) -- mirroring
+        # exactly what the LIVE branch below would actually do.
         seed_plan = None
-        if action == "create" or price_on_update_enabled():
+        if (
+            action == "create"
+            or price_on_update_enabled()
+            or _never_seeded(product, variants)
+        ):
             seed_plan = plan_variant_seed(product, variants)
         return PushResult(
             mode=MODE_SIMULATED,
@@ -1878,12 +1927,21 @@ async def push_product(
         # (the price push's handle) and the InventoryItem gid (the oversell-
         # guard stock write-back's target: catalog_variants.
         # shopify_inventory_item_id per row, ecom.shopify_inventory_item_id for
-        # a no-variant-row product). On an UPDATE this is skipped unless the
-        # owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE), so the ~4,400
-        # already-live products are never silently re-priced. Fail-soft.
+        # a no-variant-row product). On an UPDATE this is skipped unless EITHER
+        # the owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE) OR the product was
+        # never seeded (no stored variant/inventory gid anywhere -- the
+        # repair-only path: a previously create-seed-failed product still sits at
+        # 0.00/no-SKU with no stock target and must self-heal on its next push,
+        # independent of the re-price flag). An already-mapped product is left
+        # untouched, so the ~4,400 already-live products are never silently
+        # re-priced. Idempotent + fail-soft.
         seed_summary = None
         seeded = False
-        if new_gid and (action == "create" or price_on_update_enabled()):
+        if new_gid and (
+            action == "create"
+            or price_on_update_enabled()
+            or _never_seeded(product, variants)
+        ):
             variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
             seed_summary = await _seed_variants_after_write(
                 db, product, variants, new_gid, variant_nodes
