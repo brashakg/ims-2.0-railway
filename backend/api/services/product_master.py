@@ -571,30 +571,84 @@ def _next_collision_suffix(prefix: str, db=None) -> int:
         return int(uuid.uuid4().int % 100000)
 
 
+def _catalog_sku_taken(sku: Any, db=None) -> bool:
+    """True when a catalog_products row already carries this top-level sku.
+
+    WHY THE MINT MUST LOOK HERE TOO: catalog_products.sku_1 is UNIQUE+SPARSE
+    and prod holds sku-carrying catalog rows with NO products spine
+    (SGRAYMETARW4006601 / SB5050 etc.) -- invisible to product_repo.find_by_sku.
+    build_sku is deterministic, so a create can mint exactly one of those
+    strings; without this check the spine insert succeeds and the PIM upsert
+    then raises DuplicateKeyError, i.e. a dangling pim_product_id behind a 201.
+
+    FAIL-SOFT: no db / no collection / any read error -> False (behaves exactly
+    as before this check existed).
+    """
+    key = str(sku or "").strip()
+    if not key or db is None:
+        return False
+    try:
+        if hasattr(db, "get_collection"):
+            coll = db.get_collection("catalog_products")
+        else:
+            coll = db["catalog_products"]
+        if coll is None:
+            return False
+        return coll.find_one({"sku": key}) is not None
+    except Exception:  # noqa: BLE001 - the mint must never block a create
+        return False
+
+
+def catalog_sku_taken(sku: Any, db=None) -> bool:
+    """PUBLIC wrapper over the predicate mint_unique_sku itself consults.
+
+    Callers that dedupe a SKU *before* reaching the mint (the bulk-create door's
+    cross-batch check) must ask the SAME question the mint will ask, or they let
+    through exactly the collision they exist to reject: product_repo.find_by_sku
+    only sees the `products` spine, while prod holds sku-carrying
+    catalog_products rows with NO spine. Same fail-soft contract as the private
+    helper -- no db / unreadable collection -> False, never raises."""
+    return _catalog_sku_taken(sku, db=db)
+
+
 def mint_unique_sku(
     category: Any, attributes: Dict[str, Any], product_repo=None, db=None
 ) -> str:
     """Mint a SKU and resolve any collision by appending an atomic counter.
 
     The canonical SKU is tried first (deterministic per the Excel rule). If a
-    product with that SKU already exists (checked via product_repo.find_by_sku),
-    a counter suffix is appended so the second product of the same
-    brand/model/colour is still distinct and the `sku` unique index holds.
+    product with that SKU already exists -- in the `products` spine (checked
+    via product_repo.find_by_sku) OR as a catalog_products top-level sku
+    (checked via db; covers the spineless sku-carrying catalog rows the repo
+    cannot see, whose unique index would otherwise reject the PIM write later)
+    -- a counter suffix is appended so the second product of the same
+    brand/model/colour is still distinct and BOTH `sku` unique indexes hold.
+
+    FAIL-SOFT plumbing: with neither product_repo nor db the deterministic base
+    is returned untouched (no counter burn) -- exactly the pre-existing
+    behaviour the bulk-row validator relies on.
     """
     base = build_sku(category, attributes, db=db)
-    if product_repo is None:
+    if product_repo is None and db is None:
         return base
-    try:
-        if product_repo.find_by_sku(base) is None:
-            return base
-    except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
-        pass
+    spine_taken = False
+    if product_repo is not None:
+        try:
+            spine_taken = product_repo.find_by_sku(base) is not None
+        except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
+            spine_taken = True
+    if not spine_taken and not _catalog_sku_taken(base, db=db):
+        return base
     spec = category_spec(category)
     prefix = spec.prefix if spec else "XX"
     # Loop a few times in the unlikely event the suffixed SKU also collides.
     for _ in range(10):
         suffix = _next_collision_suffix(prefix, db=db)
         candidate = f"{base}-{suffix}"
+        if _catalog_sku_taken(candidate, db=db):
+            continue
+        if product_repo is None:
+            return candidate
         try:
             if product_repo.find_by_sku(candidate) is None:
                 return candidate
@@ -1367,8 +1421,92 @@ class _SyncTarget:
     detail: Optional[str] = None
 
 
+def _assert_pim_sku(spine: Dict[str, Any]) -> None:
+    """Refuse to write a catalog_products PIM doc without a `sku`.
+
+    WHY THIS CANNOT BE A SILENT SKIP: `catalog_products.sku_1` is UNIQUE +
+    SPARSE. A doc with the key ABSENT is exempt from the index, but a doc
+    carrying an explicit `sku: None` IS indexed -- so a null would insert once
+    and then DuplicateKeyError forever, swallowed into a FAILED sync_status
+    nobody reads. Failing loud inside the writer's own try block turns that into
+    a recorded FAILED target on the FIRST write instead of a silent divergence.
+
+    Deliberately NOT called from _build_pim_doc: that builder runs OUTSIDE the
+    try block in _write_mirror, whose contract is "NEVER raises". A raise there
+    would escape as a 500 AFTER the spine row is already committed and would
+    skip _stage_catalog_draft, leaving exactly the dangling pim_product_id that
+    staging exists to prevent. Each writer calls this from INSIDE its own try.
+    """
+    if not str(spine.get("sku") or "").strip():
+        raise ProductMasterError(
+            "Cannot mirror a product without a SKU (catalog_products.sku is "
+            "unique+sparse; a null would poison the index).",
+            status=500,
+            field="sku",
+        )
+
+
+def _is_duplicate_key_error(exc: BaseException) -> bool:
+    """True for pymongo's DuplicateKeyError (matched by class NAME, the same
+    convention create_product uses, so fakes raising the real class or a
+    same-named stand-in both match without importing pymongo here)."""
+    return any(
+        klass.__name__ == "DuplicateKeyError" for klass in type(exc).__mro__
+    )
+
+
+def _sku_conflict_target(
+    name: str, spine: Dict[str, Any], exc: BaseException, *, catalog_repo=None, db=None
+) -> _SyncTarget:
+    """Build the DISTINCT FAILED_SKU_CONFLICT sync target for a catalog_products
+    unique-index (sku_1) collision, logging the colliding sku AND the existing
+    row's id at ERROR.
+
+    WHY DISTINCT: prod holds sku-carrying catalog rows with NO spine, invisible
+    to the spine dedupe -- a deterministic mint can collide with one, the upsert
+    raises DuplicateKeyError, and before this the failure was swallowed into a
+    generic FAILED target while the API returned 201 (dangling pim_product_id,
+    no catalog row). A named status + an ERROR log make that diagnosable.
+    Fail-soft: the existing-row lookup never raises (id logged as None if
+    unreadable)."""
+    sku = spine.get("sku")
+    existing_id = None
+    try:
+        row = None
+        if catalog_repo is not None and hasattr(catalog_repo, "find_by_sku"):
+            row = catalog_repo.find_by_sku(sku)
+        elif db is not None:
+            if hasattr(db, "get_collection"):
+                coll = db.get_collection("catalog_products")
+            else:
+                coll = db["catalog_products"]
+            if coll is not None:
+                row = coll.find_one({"sku": sku})
+        existing_id = (row or {}).get("id")
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        existing_id = None
+    logger.error(
+        "[PM] catalog_products sku CONFLICT (%s): sku %r already belongs to "
+        "existing catalog row id=%r -- PIM write rejected by the sku_1 unique "
+        "index: %s",
+        name,
+        sku,
+        existing_id,
+        exc,
+    )
+    return _SyncTarget(
+        name,
+        "FAILED_SKU_CONFLICT",
+        f"sku {sku!r} already on catalog row id={existing_id!r}: {str(exc)[:120]}",
+    )
+
+
 def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     """Project the spine + its attributes into a catalog_products PIM doc.
+
+    PURE: builds and returns a dict, never raises, never touches the DB. The
+    SKU precondition lives in _assert_pim_sku, called from inside each writer's
+    try block (see that docstring for why it must not raise from here).
 
     The PIM doc is schemaless; it carries the Shopify/PIM superset attributes
     untouched under `ecom.category_specific` so they round-trip to NEXUS. It
@@ -1384,6 +1522,19 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     seo_description = build_seo_description(spine)
     return {
         "id": spine.get("pim_product_id"),
+        # ROOT FIX: the PIM row IS the parent and carries its OWN `sku`. Every
+        # online consumer joins catalog_products on `sku`, never `parent_sku` --
+        # the push block classifier (online_store_push: doc.get("sku") in
+        # blocked_set), online_block._membership_hit, shopify_push's collection
+        # member lookup (find_one({"sku": sku})) and ecom_smart_rules all read
+        # the top-level `sku`. Without it those guards silently no-op. A
+        # PM-created parent has exactly ONE default variant whose sku == the
+        # spine sku, the same convention the CATALOG door uses (it stamps the
+        # SAME sku on the catalog doc and the spine).
+        "sku": spine.get("sku"),
+        # KEEP parent_sku: still read by online_store_push's id/sku/parent_sku
+        # fallback + variant linkage, online_discount_engine's variant lookup,
+        # and the frontend (raw.sku ?? raw.parent_sku).
         "parent_sku": spine.get("sku"),
         "category": spine.get("category"),
         "sku_prefix": spine.get("sku_prefix"),
@@ -1441,6 +1592,9 @@ def _write_mirror(
 
     # --- catalog_products (Mongo PIM doc) -- internal, flag-gated only ---
     try:
+        # Precondition INSIDE the try: a skuless PIM doc is refused loudly and
+        # recorded as FAILED, never written as an index-poisoning null.
+        _assert_pim_sku(spine)
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
             targets.append(_SyncTarget("catalog_products", "OK"))
@@ -1455,10 +1609,19 @@ def _write_mirror(
                 _SyncTarget("catalog_products", "SKIPPED", "no catalog target")
             )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[PM] catalog_products mirror failed for %s: %s", spine.get("sku"), exc
-        )
-        targets.append(_SyncTarget("catalog_products", "FAILED", str(exc)[:200]))
+        if _is_duplicate_key_error(exc):
+            # sku_1 unique-index collision: DISTINCT status + ERROR naming the
+            # colliding sku and the existing row, never a generic FAILED.
+            targets.append(
+                _sku_conflict_target(
+                    "catalog_products", spine, exc, catalog_repo=catalog_repo, db=db
+                )
+            )
+        else:
+            logger.warning(
+                "[PM] catalog_products mirror failed for %s: %s", spine.get("sku"), exc
+            )
+            targets.append(_SyncTarget("catalog_products", "FAILED", str(exc)[:200]))
 
     # --- catalog_variants (per-SKU identity) -- internal, flag-gated only ---
     try:
@@ -1528,6 +1691,9 @@ def _stage_catalog_draft(
     if not pim_id:
         return _SyncTarget("catalog_draft", "SKIPPED", "no pim_product_id")
     try:
+        # Same precondition as _write_mirror, inside this writer's own try so
+        # staging records a FAILED target instead of raising into the create.
+        _assert_pim_sku(spine)
         pim_doc = _build_pim_doc(spine)
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
@@ -1540,6 +1706,12 @@ def _stage_catalog_draft(
             return _SyncTarget("catalog_draft", "OK")
         return _SyncTarget("catalog_draft", "SKIPPED", "no catalog target")
     except Exception as exc:  # noqa: BLE001 - staging must never fail a create
+        if _is_duplicate_key_error(exc):
+            # Same distinct handling as _write_mirror: a sku_1 collision is a
+            # NAMED failure, never a generic FAILED nobody investigates.
+            return _sku_conflict_target(
+                "catalog_draft", spine, exc, catalog_repo=catalog_repo, db=db
+            )
         logger.warning(
             "[PM] catalog_products DRAFT staging failed for %s: %s",
             spine.get("sku"),

@@ -80,3 +80,6 @@ scripts/_*.py
 mig_*.txt
 mig_*_out.txt
 *TEMPvr_router.py
+
+# backfill audit artefacts (prod row ids, no secrets) - never commit
+backfill_pim_sku_audit_*.json
