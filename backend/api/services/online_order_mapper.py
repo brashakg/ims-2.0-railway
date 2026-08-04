@@ -56,22 +56,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .phone import normalize_indian_mobile
+from ..utils.online_gst import PAYMENT_STATUS_MAP as _PAYMENT_STATUS_MAP
 
 logger = logging.getLogger(__name__)
 
 
-# Shopify financial_status -> canonical IMS payment_status.
+# Shopify financial_status -> canonical IMS payment_status now lives in the
+# shared utils.online_gst.PAYMENT_STATUS_MAP (imported above as
+# _PAYMENT_STATUS_MAP) so the shopify_ingest create path (_live_payment_fields)
+# books off the SAME vocabulary instead of a two-entry emergency fallback.
 # (Shopify: pending | authorized | partially_paid | paid | partially_refunded |
 #  refunded | voided.) Anything unknown -> UNPAID (safe: it shows as a receivable).
-_PAYMENT_STATUS_MAP = {
-    "paid": "PAID",
-    "partially_paid": "PARTIAL",
-    "authorized": "UNPAID",
-    "pending": "UNPAID",
-    "voided": "CANCELLED",
-    "refunded": "REFUNDED",
-    "partially_refunded": "PARTIAL_REFUND",
-}
 
 # Shopify fulfillment_status -> canonical IMS fulfillment_status.
 # (Shopify: null (unfulfilled) | partial | fulfilled | restocked.)
@@ -734,6 +729,37 @@ def _sync_existing_order_status(
         )
         return False
 
+    # OUT-OF-ORDER WEBHOOK GUARD (follow-up P2): Shopify webhook delivery is NOT
+    # ordered -- a stale orders/updated (e.g. a partially_paid Shopify retried)
+    # can arrive AFTER a newer orders/paid. Recomputing money/status from the
+    # older payload would transiently regress collected money (a Day-End run in
+    # the gap then shows a phantom shortfall; it self-heals only on the next
+    # webhook). Guard: compare the payload's OWN `updated_at` against the one we
+    # last applied and SKIP the whole recompute for a STRICTLY OLDER payload. A
+    # missing/unparseable incoming stamp, or no stored watermark yet, never skips
+    # (fail-open -- the guard fires only when the payload is provably stale).
+    try:
+        from .shopify_ingest import _to_naive_utc as _parse_dt
+    except Exception:  # noqa: BLE001 -- staleness is best-effort, never blocks
+        _parse_dt = None
+    incoming_updated = _parse_dt(payload.get("updated_at")) if _parse_dt else None
+    stored_updated = existing.get("shopify_updated_at")
+    if isinstance(stored_updated, str) and _parse_dt is not None:
+        stored_updated = _parse_dt(stored_updated)
+    if (
+        incoming_updated is not None
+        and isinstance(stored_updated, datetime)
+        and incoming_updated < stored_updated
+    ):
+        logger.info(
+            "[ONLINE_MAP] skip STALE webhook for shopify_order=%s "
+            "(payload updated_at %s < last applied %s)",
+            shopify_order_id,
+            incoming_updated,
+            stored_updated,
+        )
+        return False
+
     st = _derive_statuses(payload)
     grand_total = _f(existing.get("grand_total"))
     update: Dict[str, Any] = {
@@ -745,6 +771,11 @@ def _sync_existing_order_status(
         # to strings on every status webhook (mixed-type regeneration).
         "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
     }
+    # Persist the applied staleness watermark (the payload's own updated_at) so a
+    # later STALE re-delivery is detected by the guard above. Lifecycle field --
+    # always applied (unconditional leg below), even if the money leg defers.
+    if incoming_updated is not None:
+        update["shopify_updated_at"] = incoming_updated
     # Staff-vs-gateway tender split, inspected BEFORE any money recompute
     # (money-panel fix 1): rows this pipeline synthesized carry the marker
     # settled_outside_ims + method SHOPIFY; every OTHER row is a staff-recorded
@@ -843,27 +874,50 @@ def _sync_existing_order_status(
     if st["cancelled"]:
         update["cancelled_at"] = _norm(payload.get("cancelled_at"))
 
+    # HEADER RACE CLOSURE (follow-up P2): split the recompute into (a) LIFECYCLE
+    # fields, always safe to apply, and (b) MONEY fields (amount_paid /
+    # balance_due / payment_status) which must not clobber a staff add_payment
+    # that raced between our read of `existing` and this write. Previously the
+    # payments ARRAY was snapshot-conditional but the money HEADER $set was
+    # unconditional -- so a concurrent staff tender's recomputed header could be
+    # overwritten with our stale figures. Now the money header rides the SAME
+    # payments-snapshot filter as the gateway-row reconciliation: a concurrent
+    # tender changes orders.payments -> the filter misses -> the whole money leg
+    # defers to the next webhook (which re-reads the fresh header), while the
+    # lifecycle fields (fulfillment/status/cancelled/timestamps/watermark) still
+    # land. In the no-race common case the snapshot matches and money applies.
+    _MONEY_KEYS = ("amount_paid", "balance_due", "payment_status")
+    money_update = {k: update[k] for k in _MONEY_KEYS if k in update}
+    lifecycle_update = {k: v for k, v in update.items() if k not in _MONEY_KEYS}
+
+    conditional_set: Dict[str, Any] = dict(money_update)
+    if payments_after is not None:
+        conditional_set["payments"] = payments_after
+
     try:
-        orders_coll.update_one({"shopify_order_id": shopify_order_id}, {"$set": update})
-        if payments_after is not None:
-            # SNAPSHOT-CONDITIONAL write (panel fix 2): only replace the exact
-            # array we inspected. A staff add_payment racing between our read
-            # and this write changes the array -> the filter misses -> we skip
-            # instead of clobbering a just-recorded tender; the next webhook
-            # re-reconciles against the fresh list.
+        if lifecycle_update:
+            orders_coll.update_one(
+                {"shopify_order_id": shopify_order_id}, {"$set": lifecycle_update}
+            )
+        if conditional_set:
+            # SNAPSHOT-CONDITIONAL write (panel fix 2 + P2 header-race closure):
+            # apply the money leg (+ the reconciled payments array) ONLY while
+            # the payments array still equals the one we inspected. A staff
+            # add_payment racing between our read and this write changes the
+            # array -> the filter misses -> we defer instead of clobbering the
+            # just-recorded tender; the next webhook re-reconciles against the
+            # fresh header + list.
             snap_filter: Dict[str, Any] = {"shopify_order_id": shopify_order_id}
             if "payments" in existing:
                 snap_filter["payments"] = existing.get("payments")
             else:
                 snap_filter["payments"] = {"$exists": False}
-            res = orders_coll.update_one(
-                snap_filter, {"$set": {"payments": payments_after}}
-            )
+            res = orders_coll.update_one(snap_filter, {"$set": conditional_set})
             if not getattr(res, "matched_count", 1):
                 logger.info(
                     "[ONLINE_MAP] payments changed concurrently for "
-                    "shopify_order=%s -- gateway row reconciliation deferred "
-                    "to the next webhook",
+                    "shopify_order=%s -- money header + gateway row "
+                    "reconciliation deferred to the next webhook",
                     shopify_order_id,
                 )
         logger.info(

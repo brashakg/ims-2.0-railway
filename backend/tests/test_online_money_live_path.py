@@ -1014,3 +1014,292 @@ def test_email_only_marketing_contact_carries_state(wired):
     assert cust is not None
     assert cust.get("state") == "Maharashtra"
     assert cust.get("contact_tier") == "MARKETING"
+
+
+# ---------------------------------------------------------------------------
+# PR #945 tracked follow-ups
+# ---------------------------------------------------------------------------
+#   1. [P2] A FAILED GST split must not stamp a definitive interstate=False.
+#   2. [P2] Out-of-order webhook guard (shopify_updated_at watermark).
+#   3. [P2] Header $set race closure (money header rides the payments snapshot).
+#   4. [P3] Shared order_interstate_flag gate (finance.py / reports.py agree).
+#   5. [P3] Degraded-import fallback vocab mirrors the full live map.
+# ---------------------------------------------------------------------------
+
+
+def test_failed_gst_split_omits_interstate_not_false(wired, monkeypatch):
+    """Follow-up 1: when the shared splitter raises (gst_split stays {}), the
+    order doc must OMIT interstate/tax_summary/tax_totals entirely -- never
+    default interstate to a definitive False, which would isinstance-win at
+    every finance/GST read site forever and freeze out both the state-map
+    fallback and the later customer-state healing."""
+    import api.routers.orders as orders_mod
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("gst split boom")
+
+    monkeypatch.setattr(orders_mod, "_build_invoice_gst_split", _boom)
+
+    payload = _frame_order(7040, buyer_state="27")  # Maharashtra buyer
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], payload, topic="orders/create"
+    )
+    assert res["status"] == "created"
+    assert res["interstate"] is None  # never a definitive False on a failed split
+
+    o = _the_order(wired, 7040)
+    assert "interstate" not in o
+    assert "tax_summary" not in o
+    assert "tax_totals" not in o
+
+    # The heuristic fallback (finance._order_is_interstate) is therefore free to
+    # classify this order once store/customer state are known -- it is NOT
+    # frozen intra-state by a bogus stamped False.
+    from api.routers import finance
+
+    assert (
+        finance._order_is_interstate(
+            o, {o["store_id"]: "Jharkhand"}, {o.get("customer_id"): "Maharashtra"}
+        )
+        is True
+    )
+
+
+def test_successful_split_still_stamps_definitive_flag(wired):
+    """Companion to the above: a SUCCESSFUL split still stamps the real bool
+    (this PR must not weaken the happy path)."""
+    payload = _frame_order(7041, buyer_state="27")  # interstate vs Jharkhand seller
+    shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    o = _the_order(wired, 7041)
+    assert isinstance(o["interstate"], bool)
+    assert "tax_summary" in o and "tax_totals" in o
+
+
+# --- Follow-up 2: out-of-order webhook guard -------------------------------
+
+
+def test_stale_webhook_after_newer_payload_is_skipped(wired):
+    newer_ts = datetime(2026, 7, 2, 12, 0, 0)
+    _seed_online_order(
+        wired,
+        8010,
+        grand=999.0,
+        amount_paid=999.0,
+        balance_due=0.0,
+        payment_status="PAID",
+        shopify_updated_at=newer_ts,
+        payments=[
+            {
+                "payment_id": "p1",
+                "method": "SHOPIFY",
+                "amount": 999.0,
+                "status": "SETTLED",
+                "settled_outside_ims": True,
+                "reference": "shopify:8010",
+                "received_at": "2026-07-02T12:00:00",
+            }
+        ],
+    )
+    # A STALE partially_paid re-delivery (older updated_at) arriving after the
+    # order was already fully paid must NOT regress the header.
+    stale_payload = {
+        "id": 8010,
+        "financial_status": "partially_paid",
+        "total_outstanding": "999.00",
+        "updated_at": "2026-07-01T09:00:00Z",
+    }
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8010", stale_payload
+    )
+    assert ok is False
+    o = _the_order(wired, 8010)
+    assert o["amount_paid"] == 999.0
+    assert o["balance_due"] == 0.0
+    assert o["payment_status"] == "PAID"
+
+
+def test_newer_webhook_after_watermark_still_applies(wired):
+    older_ts = datetime(2026, 7, 1, 9, 0, 0)
+    _seed_online_order(
+        wired,
+        8011,
+        grand=999.0,
+        amount_paid=0.0,
+        balance_due=999.0,
+        payment_status="UNPAID",
+        shopify_updated_at=older_ts,
+        payments=[],
+    )
+    newer_payload = {
+        "id": 8011,
+        "financial_status": "paid",
+        "updated_at": "2026-07-02T12:00:00Z",
+    }
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8011", newer_payload
+    )
+    assert ok is True
+    o = _the_order(wired, 8011)
+    assert o["amount_paid"] == 999.0
+    assert o["balance_due"] == 0.0
+    assert o["payment_status"] == "PAID"
+    assert o["shopify_updated_at"] == datetime(2026, 7, 2, 12, 0, 0)
+
+
+def test_first_ever_status_sync_has_no_watermark_and_never_skips(wired):
+    """No stored watermark yet (order created but never status-synced) -> the
+    guard must fail OPEN, not skip the very first sync."""
+    _seed_online_order(wired, 8012, grand=999.0, payments=[])
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8012", _sync_payload(8012, "paid")
+    )
+    assert ok is True
+    o = _the_order(wired, 8012)
+    assert o["payment_status"] == "PAID"
+    assert o["amount_paid"] == 999.0
+
+
+# --- Follow-up 3: header $set race closure ----------------------------------
+
+
+def test_racing_add_payment_defers_header_instead_of_clobbering(wired):
+    """A staff add_payment that writes payments/amount_paid/balance_due/
+    payment_status BETWEEN this function's read of `existing` and its own
+    write must make the money-header write MISS (deferred to the next
+    webhook) instead of clobbering the staff-recorded header with a stale
+    recompute. Previously only the payments ARRAY write was snapshot-
+    conditional; the header $set was unconditional and could win the race."""
+    _seed_online_order(
+        wired,
+        8020,
+        grand=999.0,
+        amount_paid=0.0,
+        balance_due=999.0,
+        payment_status="UNPAID",
+        payments=[],
+    )
+    orders_coll = wired["orders"]
+    original_update_one = orders_coll.update_one
+    calls = {"n": 0}
+
+    def _racing_update_one(filter_, update, upsert=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate a staff add_payment landing concurrently, AFTER this
+            # sync's read of `existing` but BEFORE its own write below: the
+            # order is fully settled in cash.
+            for d in orders_coll.docs:
+                if d.get("shopify_order_id") == "8020":
+                    d["payments"] = [
+                        {"payment_id": "p-staff", "method": "CASH", "amount": 999.0}
+                    ]
+                    d["amount_paid"] = 999.0
+                    d["balance_due"] = 0.0
+                    d["payment_status"] = "PAID"
+        return original_update_one(filter_, update, upsert=upsert)
+
+    orders_coll.update_one = _racing_update_one
+    # A routine partially_paid webhook that -- if it clobbered -- would write
+    # amount_paid back DOWN to 499 over the staff's cash collection.
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8020", _sync_payload(8020, "partially_paid", "500.00")
+    )
+    assert ok is True  # the lifecycle leg still lands; function still succeeds
+    o = _the_order(wired, 8020)
+    # The staff-recorded PAID/999/0 header survives untouched.
+    assert o["amount_paid"] == 999.0
+    assert o["balance_due"] == 0.0
+    assert o["payment_status"] == "PAID"
+    assert o["payments"] == [
+        {"payment_id": "p-staff", "method": "CASH", "amount": 999.0}
+    ]
+
+
+def test_no_race_common_case_still_applies_money_header(wired):
+    """Companion to the race test: WITHOUT a race, the money header (+
+    reconciled payments array) still applies normally through the same
+    snapshot-conditional write."""
+    _seed_online_order(
+        wired,
+        8021,
+        grand=999.0,
+        amount_paid=0.0,
+        balance_due=999.0,
+        payment_status="UNPAID",
+        payments=[],
+    )
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8021", _sync_payload(8021, "partially_paid", "500.00")
+    )
+    assert ok is True
+    o = _the_order(wired, 8021)
+    assert o["amount_paid"] == 499.0
+    assert o["balance_due"] == 500.0
+    assert o["payment_status"] == "PARTIAL"
+    assert len(o["payments"]) == 1 and o["payments"][0]["amount"] == 499.0
+
+
+# --- Follow-up 4: shared order_interstate_flag gate -------------------------
+
+
+def test_order_interstate_flag_gate_pinning():
+    from api.utils.online_gst import order_interstate_flag
+
+    assert order_interstate_flag({"interstate": True}) is True
+    assert order_interstate_flag({"interstate": False}) is False
+    assert order_interstate_flag({}) is None
+    assert order_interstate_flag({"interstate": None}) is None
+    assert order_interstate_flag({"interstate": "true"}) is None  # non-bool
+
+
+def test_finance_and_reports_interstate_gate_agree():
+    """finance.py and reports.py each keep their OWN (deliberately different)
+    state-comparison fallback, but both must delegate the flag-preference gate
+    to the SAME shared helper -- so when the flag IS present, both agree."""
+    from api.routers import finance as fin_mod
+    from api.routers import reports as rep_mod
+
+    order_true = {"store_id": "s1", "customer_id": "c1", "interstate": True}
+    order_false = {"store_id": "s1", "customer_id": "c1", "interstate": False}
+
+    assert fin_mod._order_is_interstate(order_true, {}, {}) is True
+    assert rep_mod._order_is_interstate(order_true, "", "") is True
+    assert (
+        fin_mod._order_is_interstate(
+            order_false, {"s1": "Jharkhand"}, {"c1": "Maharashtra"}
+        )
+        is False
+    )
+    assert rep_mod._order_is_interstate(order_false, "Jharkhand", "Maharashtra") is False
+
+
+# --- Follow-up 5: degraded-import fallback vocab mirrors the full live map --
+
+
+def test_degraded_vocab_import_still_maps_voided_and_refunded(wired, monkeypatch):
+    """If the shared utils.online_gst.PAYMENT_STATUS_MAP import ever fails, the
+    degraded fallback inside _live_payment_fields must mirror the FULL live
+    vocabulary (not just paid/partially_paid) so a voided/refunded CREATE still
+    books CANCELLED/REFUNDED -- matching what the sync path
+    (_sync_existing_order_status, via _derive_statuses) would book for the same
+    payload -- instead of a misleading UNPAID."""
+    import api.utils.online_gst as online_gst
+
+    monkeypatch.delattr(online_gst, "PAYMENT_STATUS_MAP")
+
+    voided = _frame_order(7050, financial_status="voided")
+    shopify_ingest.ingest_shopify_order(wired["db"], voided, topic="orders/create")
+    o = _the_order(wired, 7050)
+    assert o["payment_status"] == "CANCELLED"
+
+    refunded = _frame_order(7051, financial_status="refunded")
+    shopify_ingest.ingest_shopify_order(wired["db"], refunded, topic="orders/create")
+    o2 = _the_order(wired, 7051)
+    assert o2["payment_status"] == "REFUNDED"
+
+    partially_refunded = _frame_order(7052, financial_status="partially_refunded")
+    shopify_ingest.ingest_shopify_order(
+        wired["db"], partially_refunded, topic="orders/create"
+    )
+    o3 = _the_order(wired, 7052)
+    assert o3["payment_status"] == "PARTIAL_REFUND"
