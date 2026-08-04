@@ -114,7 +114,11 @@ def _catalog_products() -> List[Dict]:
 
 
 def _products_by_sku(skus: List[str]) -> Dict[str, Dict]:
-    """Map sku -> product detail doc, looking in catalog_products then products.
+    """Map sku -> product detail doc, looking in the `products` spine FIRST,
+    then catalog_products (SPINE WINS on an SKU clash -- the convention shared
+    with collection_materializer._all_products / catalogue_pdf._detail_by_sku;
+    catalog_products rows carry neither images nor the spine product_id, so a
+    catalog row shadowing the spine rendered image-less member rows).
 
     Used to render a CUSTOM collection's manual membership (stored SKU-only) as
     rich rows for the editor. Fail-soft -> {} (the route then returns sku-only
@@ -125,7 +129,7 @@ def _products_by_sku(skus: List[str]) -> Dict[str, Dict]:
     db = _get_db()
     if db is None:
         return out
-    for coll_name in ("catalog_products", "products"):
+    for coll_name in ("products", "catalog_products"):
         try:
             coll = db[coll_name]
             for d in coll.find({"sku": {"$in": skus}}):
@@ -533,7 +537,8 @@ async def list_collection_products(
 
     Membership is stored as an embedded `products: [{sku, position}]` array
     (SKU-keyed). The editor needs title/brand/category/image to render the list,
-    so we join the catalog (catalog_products, then products) by SKU, ordered by
+    so we join the catalog (products spine, then catalog_products -- spine
+    wins) by SKU, ordered by
     position. Fail-soft: an unknown SKU still appears (sku-only) so a catalog gap
     never hides a member. A SMART collection has no manual membership here -> []
     (its set is served by GET /{id}/resolved-products). This is the read the FE
