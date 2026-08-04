@@ -295,6 +295,9 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
     # tripping the post-sale oversell-guard alarm. Before catalog_products rows
     # carried a top-level `sku` these keys fell through to the variant branch by
     # accident; populating `sku` must not silently disarm the alarm.
+    # THE PRICE OF WIDENING: both loops below must now enforce ownership
+    # (_own_variant), not just the product loop -- see the check in the variant
+    # loop for the ecom-less-row hole widening alone would have re-opened.
     variants = _variants_by_key(db, keys)
     parents = _parents_for_variants(db, list(variants.values()))
 
@@ -332,6 +335,19 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
         }
     for key, var in variants.items():
         if key in out:
+            continue
+        # SAME OWNERSHIP DISCIPLINE AS THE PRODUCT BRANCH ABOVE. `key in out` is
+        # NOT the guard it looks like: when a key resolves to a catalog_products
+        # row with no `ecom` sub-doc, the product loop `continue`s and the key
+        # never enters `out` -- so without this check the key would be served
+        # from whatever variant matched on the barcode / store_barcode / gtin
+        # tier, inheriting an UNRELATED parent's ecom (status string included).
+        # Widening the variant lookup to ALL keys (so a catalog row can no
+        # longer shadow its own variant's live Shopify gid) is what re-opened
+        # that hole on this branch. A genuinely OWN gid-carrying variant still
+        # reports online -- _own_variant returns it.
+        owner = products.get(key)
+        if owner is not None and not _own_variant(owner, var):
             continue
         parent = (
             parents.get(str(var.get("parent_product_id") or ""))

@@ -362,6 +362,71 @@ def test_unrelated_variants_barcode_cannot_lend_its_gid():
     assert out["A-SKU"]["online"] is False
 
 
+def test_ecomless_product_row_cannot_be_served_from_an_unrelated_variant():
+    """R3-2 (cross-key contamination, VARIANT branch): the widened
+    `_variants_by_key(db, keys)` covers ALL keys, and the variant loop's
+    `if key in out: continue` does NOT protect a key whose catalog_products row
+    has no `ecom` sub-doc -- the product loop skips such a row, so the key never
+    enters `out`. Without an ownership check the key is then served from
+    whatever variant matched on the barcode/gtin tier, inheriting THAT variant's
+    parent's ecom (status string and all). Product A is a bare catalog row with
+    no ecom: it must report NOTHING, not product B's PUBLISHED."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [
+                    # A: exists in the catalog, no ecom sub-doc at all.
+                    {"id": "A", "sku": "A-NOECOM"},
+                    # B: a genuinely live product, unrelated to A.
+                    {
+                        "id": "B-PARENT",
+                        "sku": "B-SKU",
+                        "ecom": {
+                            "status": "PUBLISHED",
+                            "shopify_product_id": "gid://shopify/Product/7",
+                        },
+                    },
+                ]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "B-SKU",
+                        "barcode": "A-NOECOM",  # collides with A's sku
+                        "parent_product_id": "B-PARENT",  # NOT product A
+                        "shopify_variant_id": "gid://shopify/ProductVariant/77",
+                        "shopify_inventory_item_id": "inv-b",
+                    }
+                ]
+            ),
+        }
+    )
+    assert online_status_for_skus(db, ["A-NOECOM"]) == {}
+
+
+def test_ecomless_product_row_still_reports_online_via_its_OWN_variant():
+    """The intended win of the widened lookup must survive the ownership check:
+    a catalog_products row with no ecom whose OWN variant carries a live Shopify
+    gid IS online (that variant is proof of a push)."""
+    db = _Db(
+        {
+            "catalog_products": _Coll([{"id": "OWN", "sku": "OWN-SKU"}]),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "OWN-SKU",
+                        "parent_product_id": "OWN",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/88",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["OWN-SKU"])
+    assert out["OWN-SKU"]["online"] is True
+    assert out["OWN-SKU"]["sellable_online"] is True
+
+
 def test_identifier_priority_sku_beats_barcode_across_variants():
     """Heads-up hardening: when one requested identifier is variant A's barcode
     AND variant B's sku, the SKU owner must win deterministically (field
