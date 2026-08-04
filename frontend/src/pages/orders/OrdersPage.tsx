@@ -57,6 +57,28 @@ const PAYMENT_STATUS_CONFIG: Record<PaymentStatus, { label: string; color: strin
   REFUNDED: { label: 'Refunded', color: 'text-gray-600', bgColor: 'bg-gray-100' },
 };
 
+// Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): an online spectacle
+// order missing a valid prescription is booked but held (rx_pending +
+// fulfillment_hold). The backend REJECTS marking it ready/delivered/shipped
+// until an admin clears the hold, so we surface WHY the transition is blocked.
+// The generic orders payload carries the flags straight through order_to_frontend
+// (snake_case); tolerate a camelCase variant too. This mirrors the OnlineOrdersPage
+// Rx-hold chip (#947), rebuilt here for the generic orders page.
+const isOnRxHold = (order: Order): boolean => {
+  const o = order as unknown as {
+    rx_pending?: boolean;
+    fulfillment_hold?: boolean;
+    rxPending?: boolean;
+    fulfillmentHold?: boolean;
+  };
+  return Boolean(o.rx_pending || o.fulfillment_hold || o.rxPending || o.fulfillmentHold);
+};
+
+const rxHoldReason = (order: Order): string => {
+  const o = order as unknown as { rx_hold_reason?: string; rxHoldReason?: string };
+  return String(o.rx_hold_reason || o.rxHoldReason || '');
+};
+
 export function OrdersPage() {
   const { user } = useAuth();
   const toast = useToast();
@@ -565,6 +587,15 @@ export function OrdersPage() {
                         )}>
                           {paymentConfig?.label}
                         </span>
+                        {isOnRxHold(order) && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 inline-flex items-center gap-1"
+                            title="On Rx hold - clear the hold before marking it delivered/ready"
+                          >
+                            <AlertCircle className="w-3 h-3" />
+                            Rx hold
+                          </span>
+                        )}
                       </div>
                       {order.balanceDue > 0 && (
                         <p className="text-xs text-red-600 mt-1">
@@ -640,6 +671,22 @@ export function OrdersPage() {
                   <XCircle className="w-5 h-5 text-gray-500" />
                 </button>
               </div>
+
+              {/* Rx flag-and-hold banner: explains why this order can't be
+                  marked ready / delivered / shipped until an admin clears it. */}
+              {isOnRxHold(selectedOrder) && (
+                <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-700 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-amber-800">
+                    <span className="font-medium">On Rx hold.</span> This order is missing a valid
+                    prescription and cannot be marked ready, delivered, or shipped until an admin
+                    clears the hold.
+                    {rxHoldReason(selectedOrder) && (
+                      <span className="block text-amber-700 mt-0.5">{rxHoldReason(selectedOrder)}</span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">

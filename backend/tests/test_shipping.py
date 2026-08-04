@@ -430,6 +430,39 @@ def test_book_address_override_wins(ctx):
     assert doc["ship_to"]["city"] == "Mumbai"
 
 
+def test_book_blocked_on_active_rx_hold(ctx):
+    """Clinical Rx FLAG-AND-HOLD: a held order must NOT be dispatched (and the
+    ONLINE fulfilment push-back that a booking triggers must never fire). The
+    booking is rejected 400 and nothing is persisted."""
+    ctx["order_repo"]._order["fulfillment_hold"] = True
+    ctx["order_repo"]._order["rx_pending"] = True
+    tok = _staff_token(["STORE_MANAGER"])
+    r = ctx["client"].post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-1"},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 400, r.text
+    assert "rx hold" in r.text.lower()
+    # No shipment doc was written (the guard runs before booking + push).
+    assert ctx["shipments_coll"].docs == []
+
+
+def test_book_allowed_after_rx_hold_cleared(ctx):
+    """A released order (both flags cleared to False) books normally."""
+    ctx["order_repo"]._order["fulfillment_hold"] = False
+    ctx["order_repo"]._order["rx_pending"] = False
+    ctx["order_repo"]._order["rx_hold_cleared"] = True
+    tok = _staff_token(["STORE_MANAGER"])
+    r = ctx["client"].post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-1"},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "SIMULATED"
+
+
 def test_list_shipments_store_scoped(ctx):
     tok_admin = _staff_token(["ADMIN"])
     tok_other = _staff_token(["CASHIER"], store_id="BV-OTHER-02")

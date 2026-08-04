@@ -261,6 +261,17 @@ async def book_shipment(
     network call is made - so the flow is always exercisable safely.
     """
     order = _resolve_order(body.order_id)
+    if order is not None:
+        # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a held
+        # spectacle order (missing a valid prescription) must never be
+        # dispatched -- and booking a shipment for an ONLINE order ALSO pushes a
+        # "Fulfilled" back to Shopify (see _maybe_push_online_fulfillment) -- so
+        # block the booking here while rx_pending / fulfillment_hold is active.
+        # Mirrors the orders.py deliver/ready guard; a released order (both flags
+        # cleared to False) books normally. Late import avoids an import cycle.
+        from .orders import assert_no_active_rx_hold
+
+        assert_no_active_rx_hold(order)
     if order is None:
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
         logger.info(
