@@ -998,3 +998,63 @@ def test_backfill_main_write_shortfall_exit_5_outcome_partial(bf_main_world):
     assert audit["outcome"] == "PARTIAL@PIM-51"
     assert audit["modified_count"] == 52
     assert "PIM-52" not in audit["modified_ids"]
+
+
+class _BfRaisingColl(_BfColl):
+    """update_one RAISES on the Nth call -- the realistic live failure is a
+    transient pymongo AutoReconnect / NetworkTimeout partway through 53 writes
+    over the Railway proxy, NOT a duplicate key (G3 proves 0 intersection)."""
+
+    raise_on_call = 3
+
+    def __init__(self, rows=None, index_info=None):
+        super().__init__(rows, index_info)
+        self.update_calls = 0
+
+    def update_one(self, filter, update, *_a, **_k):  # noqa: A002
+        self.update_calls += 1
+        if self.update_calls == self.raise_on_call:
+            raise RuntimeError("AutoReconnect: connection pool paused")
+        return super().update_one(filter, update)
+
+
+def test_backfill_main_write_raising_mid_loop_audits_the_ids_that_LANDED(
+    bf_main_world,
+):
+    """R3-1: THE AUDIT FILE MUST NOT REPORT ZERO WRITES AFTER A PARTIAL APPLY.
+
+    `ids, n = apply_repairs(...)` never completes its assignment when the callee
+    raises mid-loop, so the audit-writing `finally` used to serialise the
+    untouched initial values: rows P0/P1 WERE written, yet the audit said
+    modified_ids [] / modified_count 0 / outcome ABORTED-EXCEPTION -- flatly
+    contradicting the module docstring's promise of "the ORDERED ids actually
+    modified, always". Progress is now recorded INSIDE the write loop."""
+    catalog, _products, _variants, run, read_audit = bf_main_world
+    raising = _BfRaisingColl([dict(r) for r in catalog.rows])
+    _BfFakeMongoClient._colls["catalog_products"] = raising
+
+    assert run(["--apply", "--code-is-deployed"]) == 5
+
+    audit = read_audit()
+    # The 3rd write raised; the first TWO landed and the audit NAMES them.
+    assert audit["modified_ids"] == ["PIM-00", "PIM-01"], audit["modified_ids"]
+    assert audit["modified_count"] == 2
+    assert audit["outcome"] == "PARTIAL-EXCEPTION@PIM-01", audit["outcome"]
+    assert "AutoReconnect" in str(audit["error"])
+    # ...and the audit is not lying in the other direction either: those two
+    # rows really do carry their sku now, and the failed one does not.
+    assert raising.find_one({"id": "PIM-00"})["sku"] == "FRSKU00"
+    assert raising.find_one({"id": "PIM-01"})["sku"] == "FRSKU01"
+    assert "sku" not in raising.find_one({"id": "PIM-02"})
+
+
+def test_backfill_apply_repairs_records_progress_into_the_live_audit_dict():
+    """Unit-level companion: the audit dict is updated DURING the loop, so a
+    caller that never gets the return value still has the landed ids."""
+    catalog, products, variants = _bf_world(3)
+    targets = bf.select_targets(catalog)
+    bf.run_gates(targets, catalog, products, variants)
+    audit: Dict[str, Any] = {"modified_ids": [], "modified_count": 0}
+    bf.apply_repairs(catalog, targets, audit=audit)
+    assert audit["modified_ids"] == ["PIM-0", "PIM-1", "PIM-2"]
+    assert audit["modified_count"] == 3

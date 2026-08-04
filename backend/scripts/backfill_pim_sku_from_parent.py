@@ -70,6 +70,14 @@ SAFETY CONTRACT
   crash -- carrying the host/db fingerprint, the ORDERED ids actually modified,
   and the outcome. Ids are also echoed to stdout as they land, so a killed
   terminal still leaves a record of exactly how far the run got.
+  PROGRESS IS RECORDED AS IT LANDS, NOT ON RETURN: apply_repairs writes each id
+  into the live audit dict INSIDE the write loop. The earlier shape
+  (`ids, n = apply_repairs(...)`, audit updated after) never completed the
+  assignment when a write raised mid-loop -- a transient pymongo AutoReconnect /
+  NetworkTimeout partway through 53 writes over the Railway proxy -- so the
+  `finally` serialised the untouched initial values and the audit claimed ZERO
+  writes after a PARTIAL apply. A mid-loop raise is now outcome
+  PARTIAL-EXCEPTION@<last id> with exit 5.
 - ASCII only (no emoji -- Windows cp1252). No secret values are ever printed;
   only the HOST.
 
@@ -98,7 +106,8 @@ EXIT CODES
   2  connection / driver failure
   3  pre-flight fingerprint mismatch (aborted, 0 writes)
   4  a gate G1-G6 failed (aborted, 0 writes)
-  5  write shortfall (PARTIAL -- see the audit file)
+  5  write shortfall, OR a write raised mid-loop (PARTIAL / PARTIAL-EXCEPTION
+     -- the audit file names the ids that DID land)
   6  --apply without --code-is-deployed (deploy-ordering gate; 0 writes)
 """
 from __future__ import annotations
@@ -357,16 +366,33 @@ def run_gates(targets, catalog, products, variants) -> None:
         raise GateFailure("G6", g6)
 
 
-def apply_repairs(catalog, targets) -> Tuple[List[str], int]:
+def apply_repairs(
+    catalog, targets, audit: Optional[Dict[str, Any]] = None
+) -> Tuple[List[str], int]:
     """Write `sku := parent_sku` for each target, one row at a time.
 
     Returns ``(modified_ids, total_modified)``. The write filter is the row's id
     ANDed with the SAME TARGET_PREDICATE used for selection, so a row that
     somehow gained a sku between selection and write is a no-op (0 modified)
     rather than a clobber -- and the shortfall assertion in main() catches it.
+
+    `audit` (the LIVE audit dict, passed by main): progress is recorded INSIDE
+    the loop -- the id is appended and `modified_count` bumped BEFORE the next
+    update_one is issued. THIS IS NOT COSMETIC. A caller that only assigned on
+    RETURN (`ids, n = apply_repairs(...)`) never completed the assignment when a
+    write raised mid-loop, so the audit-writing `finally` serialised the
+    untouched initial values: rows really were written, yet the audit file said
+    modified_ids [] / modified_count 0. The realistic live trigger is not a
+    duplicate key (G3 proves 0 intersection) but a transient pymongo
+    AutoReconnect / NetworkTimeout partway through 53 writes over the Railway
+    proxy. `audit["modified_ids"]` is REBOUND to the same list object this
+    function appends to, so every append is visible to the `finally` instantly.
     """
     modified_ids: List[str] = []
     total_modified = 0
+    if audit is not None:
+        audit["modified_ids"] = modified_ids  # same object -> appends are live
+        audit["modified_count"] = 0
     for d in targets:
         doc_id = d.get("id")
         repair = _s(d.get("parent_sku"))
@@ -381,6 +407,10 @@ def apply_repairs(catalog, targets) -> Tuple[List[str], int]:
             _out(f"  MODIFIED {doc_id}  sku={repair}")
         else:
             _out(f"  NOT-MODIFIED {doc_id}  (filter matched 0 rows)")
+        # Recorded BEFORE the next update_one, so a raise on any later row
+        # leaves the audit naming exactly the rows that already landed.
+        if audit is not None:
+            audit["modified_count"] = total_modified
     return modified_ids, total_modified
 
 
@@ -669,9 +699,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         # --- APPLY -------------------------------------------------------------
         _out("")
         _out(f"--- APPLYING {len(targets)} repair(s) ---")
-        modified_ids, total_modified = apply_repairs(catalog, targets)
-        audit["modified_ids"] = modified_ids
-        audit["modified_count"] = total_modified
+        # apply_repairs OWNS audit["modified_ids"] / ["modified_count"] from
+        # here on (it rebinds them and updates in-loop). Do NOT re-assign them
+        # after the call: the assignment would never run on a mid-loop raise,
+        # which is exactly the bug this shape fixes.
+        try:
+            modified_ids, total_modified = apply_repairs(
+                catalog, targets, audit=audit
+            )
+        except Exception as exc:  # noqa: BLE001 - a raise mid-write is PARTIAL
+            landed = audit.get("modified_ids") or []
+            last = landed[-1] if landed else "NONE"
+            audit["outcome"] = f"PARTIAL-EXCEPTION@{last}"
+            audit["error"] = repr(exc)
+            _out("")
+            _out(f"WRITE FAILED MID-LOOP: {exc!r}")
+            _out(
+                f"  rows CONFIRMED written before the failure: "
+                f"{audit.get('modified_count')} of {len(targets)}"
+            )
+            _out(f"  last id written: {last}")
+            _out("  The audit file names every id that landed -- re-running is")
+            _out("  safe (the shared predicate skips repaired rows).")
+            return 5
 
         # HARD assertion: success is NEVER inferred from a re-count.
         if total_modified != len(targets):
