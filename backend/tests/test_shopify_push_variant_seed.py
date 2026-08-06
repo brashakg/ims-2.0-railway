@@ -582,6 +582,192 @@ def test_live_create_harvests_partially_successful_bulk_create(monkeypatch):
     assert spy.count_for("productVariantsBulkCreate") == 1
 
 
+def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_ones(
+    monkeypatch,
+):
+    """#955 fix-round (P1): _needs_repair must be ROW-aware, not product-aware.
+    Push 1 partially harvests a 3-variant product (Black auto-created + seeded
+    on productCreate; Gold created + seeded via the bulk-create harvest;
+    Silver REJECTED, no gid at all -- exactly
+    test_live_create_harvests_partially_successful_bulk_create's scenario).
+    The old `not any(...)` gate would see Black/Gold's stored gids and
+    report the WHOLE product 'seeded' from then on, permanently stranding
+    Silver with SHOPIFY_PUSH_PRICE_ON_UPDATE off. This proves push 2 (an
+    ordinary update, flag still OFF) still attempts to seed Silver -- AND
+    does not re-touch Black/Gold: no productVariantsBulkUpdate call at all on
+    push 2, and their stored gids are byte-identical before/after."""
+    # ---- Push 1: create, partial harvest (Gold ok, Silver rejected) ----
+    _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response(
+                [
+                    {
+                        "id": "gid://shopify/ProductVariant/5001",
+                        "selectedOptions": [{"name": "Color", "value": "Black"}],
+                    }
+                ]
+            ),
+            "productVariantsBulkUpdate": {
+                "data": {
+                    "productVariantsBulkUpdate": {
+                        "productVariants": [
+                            {"id": "gid://shopify/ProductVariant/5001"}
+                        ],
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkCreate": {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        "productVariants": [
+                            {
+                                "id": "gid://shopify/ProductVariant/5002",
+                                "selectedOptions": [
+                                    {"name": "Color", "value": "Gold"}
+                                ],
+                                "inventoryItem": {
+                                    "id": "gid://shopify/InventoryItem/7002"
+                                },
+                            }
+                        ],
+                        "userErrors": [
+                            {
+                                "field": ["variants", "1", "sku"],
+                                "message": "SKU has already been taken",
+                            }
+                        ],
+                    }
+                }
+            },
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product())
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V1", "sku": "S-BLK", "parent_product_id": "P1",
+         "option_color": "Black"}
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V2", "sku": "S-GLD", "parent_product_id": "P1",
+         "option_color": "Gold"}
+    )
+    db["catalog_variants"].insert_one(
+        {"variant_id": "V3", "sku": "S-SLV", "parent_product_id": "P1",
+         "option_color": "Silver"}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [
+        db["catalog_variants"].find_one({"sku": "S-BLK"}),
+        db["catalog_variants"].find_one({"sku": "S-GLD"}),
+        db["catalog_variants"].find_one({"sku": "S-SLV"}),
+    ]
+    res1 = _run(shopify_push.push_product(db, product, variants))
+    assert res1.ok is True and res1.action == "create"
+
+    black = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    gold = db["catalog_variants"].find_one({"sku": "S-GLD"})
+    silver = db["catalog_variants"].find_one({"sku": "S-SLV"})
+    assert black.get("shopify_variant_id") == "gid://shopify/ProductVariant/5001"
+    assert gold.get("shopify_variant_id") == "gid://shopify/ProductVariant/5002"
+    assert "shopify_variant_id" not in silver  # still stranded after push 1
+
+    # ---- Push 2: ordinary update, flag OFF -- must repair ONLY Silver ----
+    monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
+    spy2 = _force_live(
+        monkeypatch,
+        {
+            "productUpdate": {
+                "data": {
+                    "productUpdate": {
+                        "product": {
+                            "id": "gid://shopify/Product/900",
+                            "handle": "rb",
+                            # Shopify's LIVE node list: Black + Gold exist;
+                            # Silver was never created (its bulk-create call
+                            # was rejected), so it is genuinely absent here.
+                            "variants": {
+                                "nodes": [
+                                    {
+                                        "id": "gid://shopify/ProductVariant/5001",
+                                        "selectedOptions": [
+                                            {"name": "Color", "value": "Black"}
+                                        ],
+                                    },
+                                    {
+                                        "id": "gid://shopify/ProductVariant/5002",
+                                        "selectedOptions": [
+                                            {"name": "Color", "value": "Gold"}
+                                        ],
+                                    },
+                                ]
+                            },
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkCreate": {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        "productVariants": [
+                            {
+                                "id": "gid://shopify/ProductVariant/5003",
+                                "selectedOptions": [
+                                    {"name": "Color", "value": "Silver"}
+                                ],
+                                "inventoryItem": {
+                                    "id": "gid://shopify/InventoryItem/7003"
+                                },
+                            }
+                        ],
+                        "userErrors": [],
+                    }
+                }
+            },
+            # Deliberately NO "productVariantsBulkUpdate" response registered:
+            # if the repair pass wrongly resubmits Black/Gold, the spy's
+            # count_for assertion below catches it regardless of response
+            # shape (the router spy answers an unregistered marker with an
+            # empty body, which would still register as a CALL).
+        },
+    )
+    product2 = db["catalog_products"].find_one({"id": "P1"})
+    variants2 = [
+        db["catalog_variants"].find_one({"sku": "S-BLK"}),
+        db["catalog_variants"].find_one({"sku": "S-GLD"}),
+        db["catalog_variants"].find_one({"sku": "S-SLV"}),
+    ]
+    res2 = _run(shopify_push.push_product(db, product2, variants2))
+    assert res2.ok is True and res2.action == "update"
+
+    # Silver DID get another seeding attempt this push...
+    assert res2.variants_seeded is not None
+    assert res2.variants_seeded["created"] == 1
+    assert (
+        "gid://shopify/ProductVariant/5003" in res2.variants_seeded["variant_gids"]
+    )
+    # ...and Black/Gold were NEVER resubmitted -- no bulk-update call at all,
+    # they were not even part of this push's seed_rows.
+    assert spy2.count_for("productVariantsBulkUpdate") == 0
+    assert spy2.count_for("productVariantsBulkCreate") == 1
+
+    black2 = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    gold2 = db["catalog_variants"].find_one({"sku": "S-GLD"})
+    silver2 = db["catalog_variants"].find_one({"sku": "S-SLV"})
+    # Black/Gold's stored mapping is byte-identical to after push 1 -- never
+    # re-touched by the repair pass.
+    assert black2["shopify_variant_id"] == black["shopify_variant_id"]
+    assert gold2["shopify_variant_id"] == gold["shopify_variant_id"]
+    assert gold2["shopify_inventory_item_id"] == gold["shopify_inventory_item_id"]
+    # Silver is finally mapped.
+    assert silver2["shopify_variant_id"] == "gid://shopify/ProductVariant/5003"
+    assert (
+        silver2["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7003"
+    )
+
+
 def test_live_create_seed_failure_never_fails_the_product_push(monkeypatch):
     """The seeding step is a fail-SOFT side channel: a userErrors from the bulk
     update is reported, but the product create itself stays ok (a re-push
