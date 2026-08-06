@@ -448,25 +448,22 @@ export function ClinicalPage() {
             {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
-          {canAddPatient && (
+          {/* Phase 6.13 — search-existing first, new-patient second. Most
+              walk-ins are repeat customers; this flow saves re-keying their
+              details every visit. #949-4: on an ONLINE store (no exam room, no
+              walk-ins) the intake buttons are replaced by a visible note below
+              rather than shown disabled with a tooltip touch users never see. */}
+          {canAddPatient && !isOnlineStoreActive && (
             <>
-              {/* Phase 6.13 — search-existing first, new-patient second.
-                  Most walk-ins are repeat customers; this flow saves
-                  re-keying their details every visit. OS-065: disabled for an
-                  ONLINE store (no exam room, no walk-ins). */}
               <button
                 onClick={() => setShowQueueExistingModal(true)}
                 className="btn sm"
-                disabled={isOnlineStoreActive}
-                title={isOnlineStoreActive ? 'Not available for an online store — it has no walk-in queue' : undefined}
               >
                 <Search className="w-4 h-4" /> Queue existing
               </button>
               <button
                 onClick={() => setShowAddCustomerModal(true)}
                 className="btn sm primary"
-                disabled={isOnlineStoreActive}
-                title={isOnlineStoreActive ? 'Not available for an online store — it has no walk-in queue' : undefined}
               >
                 <Plus className="w-4 h-4" /> New patient
               </button>
@@ -474,6 +471,18 @@ export function ClinicalPage() {
           )}
         </div>
       </div>
+
+      {/* #949-4: ONLINE-store intake note (visible, not a tooltip) — mirrors the
+          Attendance-page pattern so touch users get a real explanation. */}
+      {isOnlineStoreActive && (
+        <div
+          className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600"
+          style={{ marginBottom: 14 }}
+        >
+          This is the online store — it has no exam room or walk-in queue. Switch to a
+          physical store from the top bar to queue a patient.
+        </div>
+      )}
 
       {/* Error banner */}
       {error && (

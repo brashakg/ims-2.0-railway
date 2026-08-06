@@ -85,6 +85,35 @@ def _sort_key(doc: Dict[str, Any]):
     )
 
 
+def _mirror_rename_ops(
+    doc: Dict[str, Any], old_sku: str, new_sku: str
+) -> Dict[str, tuple]:
+    """{mirror collection name: (filter, update)} for a spine re-SKU.
+
+    PM mirror docs DO NOT carry the spine's product_id (prod-verified: 0 of 59
+    catalog_products have one), so the old filter
+    {"sku": old, "product_id": spine.product_id} never matched a mirror row and
+    the rename silently skipped them. What mirror docs actually carry
+    (api/services/product_master.py _build_pim_doc / _write_mirror):
+      catalog_products: id == the spine's pim_product_id, join field parent_sku
+      catalog_variants: parent_product_id == the same, join fields sku/parent_sku
+    A spine with no pim_product_id has no PM mirror -> {} (never emit an
+    {"id": None} filter -- it would match every non-mirror row missing `id`)."""
+    pim_id = doc.get("pim_product_id")
+    if not pim_id:
+        return {}
+    return {
+        "catalog_products": (
+            {"id": pim_id},
+            {"$set": {"parent_sku": new_sku}},
+        ),
+        "catalog_variants": (
+            {"parent_product_id": pim_id, "sku": old_sku},
+            {"$set": {"sku": new_sku, "parent_sku": new_sku}},
+        ),
+    }
+
+
 def run_dedupe(
     products, *, apply: bool, catalog_products=None, catalog_variants=None
 ) -> Dict[str, Any]:
@@ -108,6 +137,10 @@ def run_dedupe(
     # (plus any it mints this run) so it never re-creates the exact dup we are clearing.
     all_skus = {doc.get("sku") for doc in rows if doc.get("sku")}
     seen_skus: Dict[str, int] = {}
+    # pim_product_id of the KEPT first occurrence per SKU. If a later duplicate
+    # SHARES that pim id (doc-copy corruption), renaming the single shared
+    # mirror row would orphan the kept occurrence's join -- skip it instead.
+    first_pim_by_sku: Dict[str, Any] = {}
 
     def _mint_unique(base: str) -> str:
         n = 2
@@ -154,19 +187,34 @@ def run_dedupe(
         sku = doc.get("sku")
         if sku:
             seen_skus[sku] = seen_skus.get(sku, 0) + 1
+            if seen_skus[sku] == 1:
+                first_pim_by_sku[sku] = doc.get("pim_product_id")
             if seen_skus[sku] > 1:
                 new_sku = _mint_unique(sku)
                 stats["resku"] += 1
                 stats["resku_map"][f"{sku}#{seen_skus[sku]}"] = new_sku
+                shared_pim = bool(
+                    doc.get("pim_product_id")
+                    and doc.get("pim_product_id") == first_pim_by_sku.get(sku)
+                )
+                if shared_pim:
+                    stats["mirror_rename_skipped_shared_pim"] = (
+                        stats.get("mirror_rename_skipped_shared_pim", 0) + 1
+                    )
                 if apply:
                     set_fields["sku"] = new_sku
-                    for mirror in (catalog_products, catalog_variants):
+                    mirrors = {
+                        "catalog_products": catalog_products,
+                        "catalog_variants": catalog_variants,
+                    }
+                    rename_ops = (
+                        {} if shared_pim else _mirror_rename_ops(doc, sku, new_sku)
+                    )
+                    for kind, (m_filter, m_update) in rename_ops.items():
+                        mirror = mirrors.get(kind)
                         if mirror is not None:
                             try:
-                                mirror.update_one(
-                                    {"sku": sku, "product_id": doc.get("product_id")},
-                                    {"$set": {"sku": new_sku}},
-                                )
+                                mirror.update_one(m_filter, m_update)
                             except Exception:  # noqa: BLE001
                                 pass
 

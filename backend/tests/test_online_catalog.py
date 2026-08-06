@@ -223,83 +223,238 @@ def test_status_unknown_and_blank_skus_skipped():
     assert "SKU-PLAIN" not in out
 
 
-def test_sellable_online_excludes_unpurchasable_drafts():
-    """Fix-round P1: `online` (display) vs `sellable_online` (guard). A product
-    pushed as a Shopify DRAFT is online for display but NOT sellable -- it must
-    never trip oversell alarms. PUBLISHED products are sellable."""
+def test_sellable_pushed_even_as_draft_errs_toward_alerting():
+    """THE TRADE-OFF, named: a product PUSHED to Shopify counts as sellable for
+    alarm purposes EVEN when its ecom.status says DRAFT -- deliberately erring
+    toward alerting. This is NOT hypothetical on this project: shopify_push
+    writes variant gids back for DRAFT pushes too, and the variant-gid
+    write-back precedes the staged-draft publish on the roadmap, so pushed
+    drafts WILL carry gids. A false oversell alert on an unpurchasable pushed
+    draft is acceptable; a silent alarm on a purchasable live SKU (the 27
+    Ray-Ban Meta rows: IMS says DRAFT, Shopify says ACTIVE) is not.
+
+    The guard flag is resolved IDENTICALLY on the product and the variant path
+    -- PUBLISHED, or the product's own live variant gid. Only a staged-but-
+    never-PUSHED draft (no gid anywhere) stays out of both flags."""
     out = online_status_for_skus(
         _db(), ["SKU-PUSHED", "SKU-PUB", "SKU-DRAFT", "VAR-2"]
     )
-    # Pushed but DRAFT: display-online, NOT sellable.
+    # Pushed, ecom DRAFT, but a LIVE variant gid -> display-online AND guarded.
     assert out["SKU-PUSHED"]["online"] is True
-    assert out["SKU-PUSHED"]["sellable_online"] is False
+    assert out["SKU-PUSHED"]["sellable_online"] is True
     # PUBLISHED: sellable.
     assert out["SKU-PUB"]["sellable_online"] is True
-    # Unpushed DRAFT: neither.
+    # Unpushed DRAFT (no gid anywhere): neither.
     assert out["SKU-DRAFT"]["online"] is False
     assert out["SKU-DRAFT"]["sellable_online"] is False
     # Variant of a PUBLISHED parent: sellable.
     assert out["VAR-2"]["sellable_online"] is True
 
 
-def test_sellable_online_draft_parent_with_variant_gid_is_not_sellable():
-    """#944 follow-up: the variant truth-slice's gid-implies-sellable proxy is a
-    BVI-orphan heuristic (a variant whose parent linkage/ecom is genuinely
-    MISSING still belongs to a live storefront product). It must NEVER
-    override a KNOWN parent status -- a DRAFT parent (gid present, status
-    DRAFT) is unpurchasable, so a variant of a DRAFT product must stay
-    NOT sellable and never trip an oversell alarm, even though the variant
-    itself carries a Shopify gid."""
+def test_draft_product_without_variant_gid_stays_unsellable():
+    """The regression the ORIGINAL plan feared: a DRAFT catalog row that carries
+    a top-level `sku` (post-fix) but has NO variant gid must stay
+    sellable_online False, so a future draft import never spams the
+    oversell-guard alarm. Covers both 'no variant row at all' and 'variant row
+    present but gid-less'."""
     db = _Db(
         {
             "catalog_products": _Coll(
                 [
-                    {
-                        "id": "CP5",
-                        "sku": "PARENT-DRAFT",
-                        "ecom": {
-                            "status": "DRAFT",
-                            "shopify_product_id": "gid://shopify/Product/5",
-                        },
-                    }
+                    {"id": "CPD1", "sku": "DRAFT-NOVAR", "ecom": {"status": "DRAFT"}},
+                    {"id": "CPD2", "sku": "DRAFT-GIDLESS", "ecom": {"status": "DRAFT"}},
                 ]
             ),
             "catalog_variants": _Coll(
-                [
-                    {
-                        "sku": "V-DRAFT-1",
-                        "parent_product_id": "CP5",
-                        "shopify_variant_id": "gid://shopify/ProductVariant/51",
-                    }
-                ]
+                [{"sku": "DRAFT-GIDLESS", "parent_product_id": "CPD2"}]
             ),
         }
     )
-    out = online_status_for_skus(db, ["V-DRAFT-1"])
-    assert out["V-DRAFT-1"]["online"] is True  # display: pushed to Shopify
-    assert out["V-DRAFT-1"]["sellable_online"] is False  # guard: DRAFT wins
+    out = online_status_for_skus(db, ["DRAFT-NOVAR", "DRAFT-GIDLESS"])
+    assert out["DRAFT-NOVAR"]["sellable_online"] is False
+    assert out["DRAFT-GIDLESS"]["sellable_online"] is False
+    # ...and neither is display-online either (never pushed).
+    assert out["DRAFT-NOVAR"]["online"] is False
+    assert out["DRAFT-GIDLESS"]["online"] is False
 
 
-def test_sellable_online_orphan_variant_gid_without_parent_is_sellable():
-    """The gid-implies-sellable proxy DOES still apply when the parent
-    linkage/ecom is genuinely MISSING -- the BVI-orphan case it exists for."""
+def test_draft_product_with_live_variant_gid_is_sellable():
+    """Hunk 2 (the 27 Ray-Ban Meta SKUs): a catalog_products row that now
+    carries its own `sku` and is ecom DRAFT, but whose variant holds a live
+    Shopify variant gid, MUST still report sellable_online -- otherwise the
+    post-sale oversell-guard alarm (_alert_unmapped_online) goes quiet for
+    products customers can actually buy right now."""
     db = _Db(
         {
-            "catalog_products": _Coll([]),  # no parent doc resolves at all
+            "catalog_products": _Coll(
+                [{"id": "CPRB", "sku": "RB-META-01", "ecom": {"status": "DRAFT"}}]
+            ),
             "catalog_variants": _Coll(
                 [
                     {
-                        "sku": "V-ORPHAN-1",
-                        "parent_product_id": "MISSING",
-                        "shopify_variant_id": "gid://shopify/ProductVariant/61",
+                        "sku": "RB-META-01",
+                        "parent_product_id": "CPRB",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/55",
                     }
                 ]
             ),
         }
     )
-    out = online_status_for_skus(db, ["V-ORPHAN-1"])
-    assert out["V-ORPHAN-1"]["online"] is True
-    assert out["V-ORPHAN-1"]["sellable_online"] is True
+    out = online_status_for_skus(db, ["RB-META-01"])
+    assert out["RB-META-01"]["sellable_online"] is True
+    assert out["RB-META-01"]["status"] == "DRAFT"
+
+
+def test_draft_product_variant_key_path_agrees_with_product_key_path():
+    """#955 fix-round: the VARIANT-branch resolution (requested key matches the
+    variant's own sku, not the product's) must compute sellable_online
+    IDENTICALLY to the product-branch case above -- an earlier narrower gate
+    here (`not ecom`-only) would have let the SAME conceptual scenario (DRAFT
+    parent, own gid-carrying variant) disagree purely because of which
+    key-matching path resolved the identifier. Uses a variant sku DISTINCT
+    from the parent's sku so this only exercises the variant loop."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [{"id": "CPRB2", "sku": "RB-META-02", "ecom": {"status": "DRAFT"}}]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "RB-META-02-BLK",
+                        "parent_product_id": "CPRB2",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/56",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["RB-META-02-BLK"])
+    assert out["RB-META-02-BLK"]["online"] is True
+    assert out["RB-META-02-BLK"]["sellable_online"] is True
+    assert out["RB-META-02-BLK"]["status"] == "DRAFT"
+
+
+def test_draft_product_with_inventory_item_only_variant_is_online():
+    """P2 (display-flag mirror): the `online` flag gates the stock-tally
+    oversell ASSESSMENT (online_sync_health) and the reconcile screen, so the
+    product branch must mirror the variant branch's var_pushed rule for it too:
+    a DRAFT catalog row whose OWN variant carries only a Shopify
+    inventory-item gid (no variant gid) IS online -- it demonstrably exists on
+    Shopify -- while sellable_online (keyed on the variant gid) stays False."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [{"id": "CPI", "sku": "INV-ONLY-01", "ecom": {"status": "DRAFT"}}]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "INV-ONLY-01",
+                        "parent_product_id": "CPI",
+                        "shopify_inventory_item_id": "inv-item-42",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["INV-ONLY-01"])
+    assert out["INV-ONLY-01"]["online"] is True
+    assert out["INV-ONLY-01"]["sellable_online"] is False
+
+
+def test_unrelated_variants_barcode_cannot_lend_its_gid():
+    """P2 (cross-key contamination): _variants_by_key matches a requested key
+    on sku > store_barcode > barcode > gtin, so the variant resolved for
+    product A's sku can be an UNRELATED variant B whose barcode merely equals
+    that sku. B's live Shopify gid must NOT be lent to A: A is a never-pushed
+    DRAFT and stays offline + unsellable."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [{"id": "A", "sku": "A-SKU", "ecom": {"status": "DRAFT"}}]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "B-SKU",
+                        "barcode": "A-SKU",  # collides with A's sku
+                        "parent_product_id": "B-PARENT",  # NOT product A
+                        "shopify_variant_id": "gid://shopify/ProductVariant/99",
+                        "shopify_inventory_item_id": "inv-b",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["A-SKU"])
+    assert out["A-SKU"]["sellable_online"] is False
+    assert out["A-SKU"]["online"] is False
+
+
+def test_ecomless_product_row_cannot_be_served_from_an_unrelated_variant():
+    """R3-2 (cross-key contamination, VARIANT branch): the widened
+    `_variants_by_key(db, keys)` covers ALL keys, and the variant loop's
+    `if key in out: continue` does NOT protect a key whose catalog_products row
+    has no `ecom` sub-doc -- the product loop skips such a row, so the key never
+    enters `out`. Without an ownership check the key is then served from
+    whatever variant matched on the barcode/gtin tier, inheriting THAT variant's
+    parent's ecom (status string and all). Product A is a bare catalog row with
+    no ecom: it must report NOTHING, not product B's PUBLISHED."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [
+                    # A: exists in the catalog, no ecom sub-doc at all.
+                    {"id": "A", "sku": "A-NOECOM"},
+                    # B: a genuinely live product, unrelated to A.
+                    {
+                        "id": "B-PARENT",
+                        "sku": "B-SKU",
+                        "ecom": {
+                            "status": "PUBLISHED",
+                            "shopify_product_id": "gid://shopify/Product/7",
+                        },
+                    },
+                ]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "B-SKU",
+                        "barcode": "A-NOECOM",  # collides with A's sku
+                        "parent_product_id": "B-PARENT",  # NOT product A
+                        "shopify_variant_id": "gid://shopify/ProductVariant/77",
+                        "shopify_inventory_item_id": "inv-b",
+                    }
+                ]
+            ),
+        }
+    )
+    assert online_status_for_skus(db, ["A-NOECOM"]) == {}
+
+
+def test_ecomless_product_row_still_reports_online_via_its_OWN_variant():
+    """The intended win of the widened lookup must survive the ownership check:
+    a catalog_products row with no ecom whose OWN variant carries a live Shopify
+    gid IS online (that variant is proof of a push)."""
+    db = _Db(
+        {
+            "catalog_products": _Coll([{"id": "OWN", "sku": "OWN-SKU"}]),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "OWN-SKU",
+                        "parent_product_id": "OWN",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/88",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["OWN-SKU"])
+    assert out["OWN-SKU"]["online"] is True
+    assert out["OWN-SKU"]["sellable_online"] is True
 
 
 def test_identifier_priority_sku_beats_barcode_across_variants():

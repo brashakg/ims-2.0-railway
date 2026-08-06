@@ -54,6 +54,12 @@ _IMG_CONCURRENCY = 8
 # Longest edge (px) an embedded image is downscaled to (keeps the PDF small).
 _IMG_MAX_EDGE = 420
 
+# Cap PER SOURCE COLLECTION for the product-union scan (mirrors
+# collection_materializer._SCAN_MAX) so a runaway catalogue can never make the
+# PDF's member resolution scan unbounded -- while each source keeps its own
+# budget (a large catalog_products must not starve the `products` spine).
+_SCAN_MAX = 5000
+
 
 # ===========================================================================
 # Row building (PURE -- unit-tested without any PDF encoding)
@@ -262,7 +268,9 @@ def _strip_id(doc: Dict) -> Dict:
 def _product_union(db) -> List[Dict]:
     """UNION of the `products` spine + `catalog_products`, de-duped by SKU with the
     SPINE WINNING (so governed tags/attrs are present for the smart resolver).
-    Fail-soft -> []."""
+    Fail-soft -> []. EACH source's scan is capped at _SCAN_MAX (was fully
+    unbounded) so total work is bounded (<= 2x _SCAN_MAX docs) while the spine
+    keeps its own budget and is never starved by a large catalog_products."""
     if db is None:
         return []
     by_sku: Dict[str, Dict] = {}
@@ -272,7 +280,19 @@ def _product_union(db) -> List[Dict]:
             cursor = db[coll_name].find({})
         except Exception:  # noqa: BLE001
             continue
+        scanned = 0
         for doc in cursor:
+            if scanned >= _SCAN_MAX:
+                # Cap trip must never be silent: the PDF would omit products
+                # past this point with no operational signal otherwise.
+                logger.warning(
+                    "[PDF] %s scan capped at %d docs - catalogue PDF may be "
+                    "missing products beyond the cap",
+                    coll_name,
+                    _SCAN_MAX,
+                )
+                break
+            scanned += 1
             if not isinstance(doc, dict):
                 continue
             sku = doc.get("sku")

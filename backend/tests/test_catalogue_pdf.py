@@ -135,6 +135,25 @@ def test_validity_days_clamped_to_max_7():
     assert _clamp_validity_days(None) == 7
 
 
+def test_product_union_scan_capped_without_starving_spine(monkeypatch):
+    """_product_union's scan must be bounded (it was fully unbounded) with a
+    PER-SOURCE budget: a catalog_products bigger than _SCAN_MAX must not stop
+    the `products` spine from contributing (spine carries the governed tags
+    the smart resolver matches on)."""
+    from database.connection import MockDatabase
+
+    monkeypatch.setattr(pdf, "_SCAN_MAX", 5)
+    db = MockDatabase()
+    for i in range(10):  # catalog alone exceeds the (patched) cap
+        db["catalog_products"].insert_one({"sku": f"CAT-{i}", "category": "FRAME"})
+    db["products"].insert_one({"sku": "SP-1", "product_id": "SP-1", "tags": ["a"]})
+    db["products"].insert_one({"sku": "SP-2", "product_id": "SP-2", "tags": ["b"]})
+
+    skus = {d["sku"] for d in pdf._product_union(db)}
+    assert "SP-1" in skus and "SP-2" in skus  # spine not starved
+    assert sum(1 for s in skus if s.startswith("CAT-")) == 5  # scan bounded
+
+
 # ===========================================================================
 # Layer 2 -- router wiring (works WITHOUT a DB)
 # ===========================================================================
