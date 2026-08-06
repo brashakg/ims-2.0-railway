@@ -807,7 +807,16 @@ export function OrdersPage() {
                   {selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
                     <button
                       onClick={() => openDeliverModal(selectedOrder)}
-                      className="btn-success flex-1 flex items-center justify-center gap-2 min-w-[150px]"
+                      disabled={isOnRxHold(selectedOrder)}
+                      title={
+                        isOnRxHold(selectedOrder)
+                          ? 'On Rx hold - clear the hold before marking it delivered/ready'
+                          : undefined
+                      }
+                      className={clsx(
+                        'btn-success flex-1 flex items-center justify-center gap-2 min-w-[150px]',
+                        isOnRxHold(selectedOrder) && 'opacity-50 cursor-not-allowed'
+                      )}
                     >
                       <CheckCheck className="w-4 h-4" />
                       Mark Delivered

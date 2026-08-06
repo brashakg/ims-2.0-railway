@@ -667,6 +667,38 @@ def _match_existing_customer(db, buyer: Dict[str, str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _raise_hold_conflict_task(db, order: Dict[str, Any], *, source: str) -> None:
+    """Best-effort: (re)raise the Rx-hold follow-up task so staff see why a
+    re-ingested Shopify payload could NOT flip this order to DELIVERED. Reuses
+    the SAME idempotent task-raiser ingest already uses (services.
+    online_rx_hold.raise_rx_hold_task -> the canonical ``tasks`` collection) --
+    a call for an order that already carries the task (the normal case; ingest
+    raised it when the hold was first stamped) is a no-op. Never raises -- a
+    task-side failure must never break the webhook / remap flow."""
+    try:
+        from .online_rx_hold import raise_rx_hold_task
+
+        raise_rx_hold_task(
+            db,
+            order_id=order.get("order_id"),
+            order_ref=order.get("order_number") or order.get("order_id"),
+            store_id=order.get("store_id"),
+            channel=str(order.get("channel") or "ONLINE"),
+            evaluation={
+                "reasons": order.get("rx_hold_reasons") or [],
+                "lines": [],
+                "detail": order.get("rx_hold_reason") or "",
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[%s] rx-hold conflict task raise skipped for order=%s",
+            source,
+            order.get("order_id"),
+            exc_info=True,
+        )
+
+
 def _derive_statuses(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Canonical (payment_status, fulfillment_status, order_status) from a Shopify
     payload's financial_status / fulfillment_status / cancelled_at."""
@@ -736,10 +768,32 @@ def _sync_existing_order_status(
 
     st = _derive_statuses(payload)
     grand_total = _f(existing.get("grand_total"))
+    order_status = st["order_status"]
+    # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a re-ingested
+    # Shopify payload (orders/updated webhook, or the ADMIN/SUPERADMIN remap
+    # endpoint replaying map_shopify_order) must NOT be able to silently flip a
+    # still-HELD order (rx_pending / fulfillment_hold) to DELIVERED -- that is
+    # exactly the escape the deliver-guard (orders.py mark_ready/deliver_order,
+    # shipping.py book_shipment) exists to close. CANCELLED/REFUNDED are NOT
+    # withheld (a cancellation must still land regardless of the hold). The
+    # payment_status / fulfillment_status fields below are unaffected -- only
+    # the terminal order_status flip is held back; order.status stays as-is.
+    from ..routers.orders import order_has_active_rx_hold
+
+    if order_status == "DELIVERED" and order_has_active_rx_hold(existing):
+        logger.warning(
+            "[ONLINE_MAP] shopify_order=%s is on an active Rx hold -- withheld "
+            "the order_status flip to DELIVERED (payment/fulfillment status "
+            "still synced). Clear the hold via clear-rx-hold to let this "
+            "complete.",
+            shopify_order_id,
+        )
+        _raise_hold_conflict_task(db, existing, source="ONLINE_MAP")
+        order_status = existing.get("status") or order_status
     update: Dict[str, Any] = {
         "payment_status": st["payment_status"],
         "fulfillment_status": st["fulfillment_status"],
-        "status": st["order_status"],
+        "status": order_status,
         # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
         # ISO string here would flip backfilled datetime updated_at values back
         # to strings on every status webhook (mixed-type regeneration).

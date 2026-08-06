@@ -348,6 +348,93 @@ def test_status_only_update_without_line_items_syncs_existing(wired):
 
 
 # ---------------------------------------------------------------------------
+# Rx flag-and-hold guard on status sync (fix-round: PR #953 adversarial review
+# found this re-ingest path -- fired by an orders/updated webhook OR by the
+# ADMIN/SUPERADMIN 'remap' endpoint replaying map_shopify_order -- could
+# silently flip a HELD spectacle order to DELIVERED with zero rx_pending/
+# fulfillment_hold awareness, bypassing the orders.py/shipping.py deliver-guard
+# entirely. payment_status/fulfillment_status must still sync; only the
+# terminal order_status flip to DELIVERED is withheld while the hold is active.
+# ---------------------------------------------------------------------------
+
+
+def test_held_order_status_withheld_from_delivered_on_status_sync(wired):
+    online_order_mapper.map_shopify_order(_frame_order(10101), wired["db"], topic="orders/create")
+    wired["orders"].update_one(
+        {"shopify_order_id": "10101"},
+        {"$set": {"rx_pending": True, "fulfillment_hold": True}},
+    )
+
+    update = {"id": 10101, "financial_status": "paid", "fulfillment_status": "fulfilled"}
+    res = online_order_mapper.map_shopify_order(update, wired["db"], topic="orders/updated")
+
+    assert res["status"] == "status_synced"
+    order = wired["orders"].find_one({"shopify_order_id": "10101"})
+    # order_status flip withheld -- still CONFIRMED (the create-time status).
+    assert order["status"] == "CONFIRMED"
+    # payment_status / fulfillment_status are NOT held back -- they still sync.
+    assert order["fulfillment_status"] == "FULFILLED"
+    assert order["payment_status"] == "PAID"
+    # Hold flags untouched.
+    assert order["rx_pending"] is True
+    assert order["fulfillment_hold"] is True
+
+
+def test_held_order_raises_conflict_task_on_status_sync(wired):
+    online_order_mapper.map_shopify_order(_frame_order(10102), wired["db"], topic="orders/create")
+    wired["orders"].update_one(
+        {"shopify_order_id": "10102"},
+        {"$set": {"rx_pending": True, "fulfillment_hold": True, "rx_hold_reasons": ["RX_MISSING"]}},
+    )
+
+    update = {"id": 10102, "financial_status": "paid", "fulfillment_status": "fulfilled"}
+    online_order_mapper.map_shopify_order(update, wired["db"], topic="orders/updated")
+
+    order = wired["orders"].find_one({"shopify_order_id": "10102"})
+    tasks = wired["db"].get_collection("tasks")
+    row = tasks.find_one({"order_id": order["order_id"], "task_type": "online_rx_hold"})
+    assert row is not None
+    assert row["status"] == "PENDING"
+
+
+def test_held_order_status_proceeds_after_hold_cleared(wired):
+    online_order_mapper.map_shopify_order(_frame_order(10103), wired["db"], topic="orders/create")
+    # Released order: both flags False, as clear-rx-hold leaves them.
+    wired["orders"].update_one(
+        {"shopify_order_id": "10103"},
+        {"$set": {"rx_pending": False, "fulfillment_hold": False, "rx_hold_cleared": True}},
+    )
+
+    update = {"id": 10103, "financial_status": "paid", "fulfillment_status": "fulfilled"}
+    res = online_order_mapper.map_shopify_order(update, wired["db"], topic="orders/updated")
+
+    assert res["status"] == "status_synced"
+    order = wired["orders"].find_one({"shopify_order_id": "10103"})
+    assert order["status"] == "DELIVERED"
+
+
+def test_held_order_cancellation_still_lands(wired):
+    """CANCELLED/REFUNDED are NOT withheld by the hold guard -- a cancellation
+    must still land regardless of an active Rx hold."""
+    online_order_mapper.map_shopify_order(_frame_order(10104), wired["db"], topic="orders/create")
+    wired["orders"].update_one(
+        {"shopify_order_id": "10104"},
+        {"$set": {"rx_pending": True, "fulfillment_hold": True}},
+    )
+
+    cancelled = {
+        "id": 10104,
+        "financial_status": "refunded",
+        "cancelled_at": "2026-08-01T10:00:00Z",
+    }
+    res = online_order_mapper.map_shopify_order(cancelled, wired["db"], topic="orders/cancelled")
+
+    assert res["status_synced"] is True
+    order = wired["orders"].find_one({"shopify_order_id": "10104"})
+    assert order["status"] == "CANCELLED"
+
+
+# ---------------------------------------------------------------------------
 # Variant resolution + graceful fallback
 # ---------------------------------------------------------------------------
 
