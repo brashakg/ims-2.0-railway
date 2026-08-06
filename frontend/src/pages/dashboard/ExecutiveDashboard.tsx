@@ -22,7 +22,8 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../../context/AuthContext';
-import { isOnlineStoreId } from '../../utils/storeMode';
+import { isOnlineStore } from '../../utils/storeMode';
+import { useStores } from '../../hooks/usePOSQueries';
 import { reportsApi, analyticsApi } from '../../services/api';
 // financeApi isn't re-exported from the api barrel — import it directly (the
 // barrel re-export resolves to undefined for this module; see prior sessions).
@@ -106,6 +107,10 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
 
 export function ExecutiveDashboard() {
   const { user } = useAuth();
+  // #949-3: prefer the store doc's store_type (from the cached GET /stores list)
+  // to badge virtual storefronts, so a future 3rd ONLINE store is badged too;
+  // fall back to the known-id list when the row hasn't loaded / lacks a type.
+  const { data: storesCache } = useStores();
 
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'quarter' | 'year'>('month');
   const [isLoading, setIsLoading] = useState(true);
@@ -238,6 +243,15 @@ export function ExecutiveDashboard() {
       return `₹${(amount / 100000).toFixed(2)} L`;
     }
     return `₹${amount.toLocaleString('en-IN')}`;
+  };
+
+  // #949-3: classify a perf-row store as ONLINE. store_type from the stores
+  // cache wins (badges any store_type==='ONLINE', incl. a future 3rd storefront);
+  // isOnlineStore falls back to the known-id list when the row is absent/typeless.
+  const isOnlineRow = (storeId: string): boolean => {
+    const list: any[] = Array.isArray(storesCache) ? storesCache : [];
+    const row = list.find((s) => (s?.store_id || s?.id || s?._id) === storeId);
+    return isOnlineStore({ store_id: storeId, store_type: row?.store_type ?? null });
   };
 
   if (isLoading) {
@@ -450,7 +464,7 @@ export function ExecutiveDashboard() {
                       {/* OS-066: mark virtual storefronts so their rows aren't
                           read as physical peers (stock value 0, no footfall,
                           no sqft are structural here, not underperformance). */}
-                      {isOnlineStoreId(store.storeId) && (
+                      {isOnlineRow(store.storeId) && (
                         <span
                           className="inline-flex items-center rounded-full bg-blue-100 text-blue-800 border border-blue-200 px-2 py-0.5 text-[11px] font-medium"
                           title="Virtual storefront — sells pooled stock from all shops; holds no stock and has no floor"

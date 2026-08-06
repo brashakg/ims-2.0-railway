@@ -587,11 +587,6 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
-        "method": "POST",
-        "path": "/api/v1/admin/products/generate-sku",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
         "method": "GET",
         "path": "/api/v1/admin/products/{product_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],

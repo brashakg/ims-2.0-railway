@@ -284,6 +284,12 @@ export default function OnlineShopifySyncPage() {
           if (res.next_offset === null || res.next_offset === undefined) break;
           offset = res.next_offset;
         }
+        // #950: the loop caps at 80 pages. If it exited with next_offset still
+        // non-null, the cap (not an exhausted set) ended it — NOT everything was
+        // resynced. Surface it like the OS-046 safety-cap case (limit_reached +
+        // the run-again toast) instead of silently reporting a finished sweep.
+        const capHit =
+          last != null && last.next_offset !== null && last.next_offset !== undefined;
         if (last) {
           // Store the AGGREGATED tallies (the last page's rows for the detail
           // list, the whole run's counts for the honest headline).
@@ -292,7 +298,7 @@ export default function OnlineShopifySyncPage() {
             [ent.key]: {
               ...last!,
               pushed_count: processed,
-              limit_reached: false,
+              limit_reached: capHit,
               summary: { [ent.token]: { pushed: updated, failed, noop } },
             },
           }));
@@ -303,6 +309,13 @@ export default function OnlineShopifySyncPage() {
           `${failed} failed of ${total ?? processed} mapped products`;
         if (failed > 0) toast.warning(msg);
         else toast.success(msg);
+        // OS-046: a capped run must never read as complete — same run-again cue.
+        if (capHit) {
+          toast.info(
+            `${ent.label}: stopped at the page safety cap — not everything was resynced; ` +
+              'run again to continue.',
+          );
+        }
       } else {
         const res = await pushApi.pushAllPending(ent.token, 100);
         setSweeps((prev) => ({ ...prev, [ent.key]: res }));

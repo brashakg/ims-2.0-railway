@@ -411,3 +411,86 @@ def test_dedupe_dry_run_writes_nothing():
     stats = dd.run_dedupe(coll, apply=False)
     assert stats["identity_backfilled"] == 1  # counted
     assert "identity_key" not in coll.docs[0]  # but not written
+
+
+def test_mirror_rename_ops_key_on_pim_id_not_product_id():
+    """PM mirror docs carry NO product_id: catalog_products key on
+    id == the spine's pim_product_id, catalog_variants on parent_product_id ==
+    the same. The old {"sku", "product_id"} filter matched nothing."""
+    from scripts import backfill_dedupe_prep as dd
+
+    ops = dd._mirror_rename_ops(
+        {"product_id": "P2", "pim_product_id": "PIM-9"}, "FR-DUP", "FR-DUP-DUP2"
+    )
+    cp_filter, cp_update = ops["catalog_products"]
+    assert cp_filter == {"id": "PIM-9"}
+    assert "product_id" not in cp_filter
+    assert cp_update == {"$set": {"parent_sku": "FR-DUP-DUP2"}}
+    cv_filter, cv_update = ops["catalog_variants"]
+    assert cv_filter == {"parent_product_id": "PIM-9", "sku": "FR-DUP"}
+    assert cv_update == {"$set": {"sku": "FR-DUP-DUP2", "parent_sku": "FR-DUP-DUP2"}}
+
+
+def test_mirror_rename_ops_no_pim_id_yields_no_ops():
+    """No pim_product_id -> no PM mirror can exist -> NO ops. Guards against an
+    {"id": None} filter, which would match every non-mirror row missing id."""
+    from scripts import backfill_dedupe_prep as dd
+
+    assert dd._mirror_rename_ops({"product_id": "P2"}, "A", "B") == {}
+
+
+def test_dedupe_resku_renames_pm_mirror_rows():
+    """End-to-end through run_dedupe: the re-SKU'd spine's PM mirror rows
+    (which carry id/parent_product_id, NOT product_id) get renamed too."""
+    from scripts import backfill_dedupe_prep as dd
+
+    products = _FakeColl(
+        [
+            {"product_id": "P1", "sku": "FR-DUP", "created_at": "2026-01-01"},
+            {
+                "product_id": "P2",
+                "sku": "FR-DUP",
+                "created_at": "2026-01-02",
+                "pim_product_id": "PIM-9",
+            },
+        ]
+    )
+    # PM-shaped mirror rows: no sku/product_id on the catalog doc.
+    catalog = _FakeColl([{"id": "PIM-9", "parent_sku": "FR-DUP"}])
+    variants = _FakeColl(
+        [{"parent_product_id": "PIM-9", "sku": "FR-DUP", "parent_sku": "FR-DUP"}]
+    )
+    stats = dd.run_dedupe(
+        products, apply=True, catalog_products=catalog, catalog_variants=variants
+    )
+    assert stats["resku"] == 1
+    assert catalog.docs[0]["parent_sku"] == "FR-DUP-DUP2"
+    assert variants.docs[0]["sku"] == "FR-DUP-DUP2"
+    assert variants.docs[0]["parent_sku"] == "FR-DUP-DUP2"
+
+
+def test_dedupe_dry_run_leaves_mirrors_untouched():
+    """Dry-run semantics preserved: mirror rows are NOT written without --apply."""
+    from scripts import backfill_dedupe_prep as dd
+
+    products = _FakeColl(
+        [
+            {"product_id": "P1", "sku": "FR-DUP", "created_at": "2026-01-01"},
+            {
+                "product_id": "P2",
+                "sku": "FR-DUP",
+                "created_at": "2026-01-02",
+                "pim_product_id": "PIM-9",
+            },
+        ]
+    )
+    catalog = _FakeColl([{"id": "PIM-9", "parent_sku": "FR-DUP"}])
+    variants = _FakeColl(
+        [{"parent_product_id": "PIM-9", "sku": "FR-DUP", "parent_sku": "FR-DUP"}]
+    )
+    stats = dd.run_dedupe(
+        products, apply=False, catalog_products=catalog, catalog_variants=variants
+    )
+    assert stats["resku"] == 1  # counted
+    assert catalog.docs[0]["parent_sku"] == "FR-DUP"  # but not written
+    assert variants.docs[0]["sku"] == "FR-DUP"
