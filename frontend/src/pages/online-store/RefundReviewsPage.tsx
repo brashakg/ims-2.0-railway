@@ -87,6 +87,10 @@ export default function RefundReviewsPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('OPEN');
   const [actingId, setActingId] = useState<string | null>(null);
+  // OS-013 / PR #947 follow-up 5: which reach the backend actually applied
+  // ('all-stores' | 'store-scoped' | null before the first load) -- drives the
+  // scope hint below instead of a static sentence that could go stale.
+  const [scope, setScope] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,6 +99,7 @@ export default function RefundReviewsPage() {
       setReviews(res.reviews);
       setTotal(res.total);
       setAvailable(res.available);
+      setScope(res.scope ?? null);
     } finally {
       setLoading(false);
     }
@@ -180,13 +185,17 @@ export default function RefundReviewsPage() {
         post the credit note and put the returned stock back, or reject if it should not be booked.
         Nothing hits the books until you confirm.
       </p>
-      {/* Scope hint (OS-013): refund rows bill under the ONLINE store, so this
-          queue deliberately spans every store — an empty list genuinely means
-          nothing is waiting, not that your active store filtered it out. */}
-      <p className="-mt-2 mb-4 text-xs text-gray-400 max-w-3xl">
-        This queue spans all stores — online refunds bill under the online store, so nothing here is
-        hidden by your active store.
-      </p>
+      {/* Scope hint (OS-013 / PR #947 follow-up 5): driven by the envelope's
+          `scope` field, not a static sentence — a role the backend actually
+          store-bounds (anything but ACCOUNTANT/ADMIN/SUPERADMIN) must not be
+          told "spans all stores" when its queue was silently narrowed. */}
+      {!loading && available && (
+        <p className="-mt-2 mb-4 text-xs text-gray-400 max-w-3xl">
+          {scope === 'store-scoped'
+            ? 'This queue is limited to your active store — an empty list may mean another store has refunds waiting.'
+            : 'This queue spans all stores — online refunds bill under the online store, so nothing here is hidden by your active store.'}
+        </p>
+      )}
 
       {openCount > 0 && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-1">

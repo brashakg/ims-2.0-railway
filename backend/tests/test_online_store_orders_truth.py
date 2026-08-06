@@ -537,6 +537,130 @@ def test_clear_rx_hold_requires_admin(ctx):
 
 
 # ---------------------------------------------------------------------------
+# PR #947 follow-up 4: clear-rx-hold accepts an optional {note, prescription_id}
+# body and audits loudly on failure.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_rx_hold_persists_optional_note_and_prescription_id(ctx):
+    _seed_booked(ctx, "5008", rx_pending=True, fulfillment_hold=True)
+    r = ctx["client"].post(
+        f"{BASE}/ord-5008/clear-rx-hold",
+        headers=_hdr(["ADMIN"]),
+        json={"note": "Verified over phone", "prescription_id": "RX-99"},
+    )
+    assert r.status_code == 200, r.text
+    doc = ctx["orders"].find_one({"order_id": "ord-5008"})
+    assert doc["rx_hold_cleared_note"] == "Verified over phone"
+    assert doc["rx_hold_cleared_prescription_id"] == "RX-99"
+
+
+def test_clear_rx_hold_body_is_optional_backward_compatible(ctx):
+    # No body at all (the existing FE call shape) must keep working exactly as
+    # before -- no note/prescription_id keys written.
+    _seed_booked(ctx, "5009", rx_pending=True, fulfillment_hold=True)
+    r = ctx["client"].post(f"{BASE}/ord-5009/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    doc = ctx["orders"].find_one({"order_id": "ord-5009"})
+    assert "rx_hold_cleared_note" not in doc
+    assert "rx_hold_cleared_prescription_id" not in doc
+
+
+def test_clear_rx_hold_audit_failure_is_logged_loudly(ctx, monkeypatch, caplog):
+    """A clinical release must never be blocked by a broken audit trail (the
+    release still succeeds), but the failure must be LOUD -- logged at ERROR --
+    not silently swallowed. Covers both audit failure modes: fail-soft None
+    return AND a raised exception."""
+    import logging as _logging
+
+    from api import dependencies as deps
+    from api.routers import online_store_orders as orders_router
+
+    class _FailingAudit:
+        def create(self, row):
+            return None  # audit_repository.create()'s own fail-soft contract
+
+    _seed_booked(ctx, "5010", rx_pending=True, fulfillment_hold=True)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: _FailingAudit())
+    with caplog.at_level(_logging.ERROR, logger=orders_router.logger.name):
+        r = ctx["client"].post(f"{BASE}/ord-5010/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text  # the release itself is never blocked
+    error_records = [rec for rec in caplog.records if rec.levelno == _logging.ERROR]
+    assert error_records, "expected a LOUD (ERROR) log on audit write failure"
+    assert any("audit" in rec.message.lower() for rec in error_records)
+
+
+def test_clear_rx_hold_audit_exception_is_logged_loudly(ctx, monkeypatch, caplog):
+    import logging as _logging
+
+    from api import dependencies as deps
+    from api.routers import online_store_orders as orders_router
+
+    class _RaisingAudit:
+        def create(self, row):
+            raise RuntimeError("boom")
+
+    _seed_booked(ctx, "5011", rx_pending=True, fulfillment_hold=True)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: _RaisingAudit())
+    with caplog.at_level(_logging.ERROR, logger=orders_router.logger.name):
+        r = ctx["client"].post(f"{BASE}/ord-5011/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text  # the release itself is never blocked
+    assert any(rec.levelno == _logging.ERROR for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# PR #947 follow-up 2: server-side rx_hold filter + envelope count. The
+# banner/count/filter must reflect the WHOLE scope, not just loaded pages.
+# ---------------------------------------------------------------------------
+
+
+def test_rx_hold_count_reflects_full_scope_beyond_page_size(ctx):
+    # Two held orders + one clean order; request a page size of 1 so the held
+    # rows are NOT all on the loaded page -- rx_hold_count must still be 2.
+    _seed_booked(ctx, "6001", rx_pending=True, fulfillment_hold=True)
+    _seed_booked(ctx, "6002", rx_pending=False, fulfillment_hold=True)
+    _seed_booked(ctx, "6003", rx_pending=False, fulfillment_hold=False)
+    r = ctx["client"].get(f"{BASE}?limit=1", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert len(data["orders"]) == 1  # only one row loaded...
+    assert data["rx_hold_count"] == 2  # ...but the count covers the whole scope
+
+
+def test_rx_hold_filter_returns_only_held_orders(ctx):
+    _seed_booked(ctx, "6001", rx_pending=True, fulfillment_hold=True)
+    _seed_booked(ctx, "6002", rx_pending=False, fulfillment_hold=False)
+    r = ctx["client"].get(f"{BASE}?rx_hold=true", headers=_hdr(["ADMIN"]))
+    data = r.json()
+    assert data["total"] == 1
+    assert data["orders"][0]["shopify_order_id"] == "6001"
+    # The count stays accurate under the filter too.
+    assert data["rx_hold_count"] == 1
+
+
+def test_rx_hold_filter_excludes_the_failed_queue(ctx):
+    # Unbooked webhook rows carry no rx-hold state -- an Rx-hold-only view must
+    # not surface them (they were previously merged in unconditionally).
+    _seed_booked(ctx, "6001", rx_pending=True, fulfillment_hold=True)
+    _seed_inbox(ctx, "7007", processed=True)
+    r = ctx["client"].get(f"{BASE}?rx_hold=true", headers=_hdr(["ADMIN"]))
+    data = r.json()
+    assert data["failed"] == []
+    assert data["failed_count"] == 0
+
+
+def test_rx_hold_count_honours_search_and_store_scope(ctx):
+    _seed_booked(ctx, "6001", rx_pending=True, customer_name="Ravi Kumar")
+    _seed_booked(ctx, "6002", rx_pending=True, customer_name="Anita Shah")
+    r = ctx["client"].get(f"{BASE}?search=ravi", headers=_hdr(["ADMIN"]))
+    assert r.json()["rx_hold_count"] == 1
+
+    # Store-scoped caller: rx_hold_count must respect their own store scope too.
+    r2 = ctx["client"].get(BASE, headers=_hdr(["ACCOUNTANT"], store_id="BV-BOK-01"))
+    assert r2.json()["rx_hold_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # P1 regression (adversarial review of PR #947): the OS-026 lifetime-spend
 # enrichment sums the WHOLE orders collection -- store-pinned roles must never
 # receive that cross-store money. Cross-store callers only; everyone else gets

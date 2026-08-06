@@ -2020,6 +2020,13 @@ export interface RefundReviewsResult {
   /** Why the read failed when available=false (null on success) — lets the
    *  screen distinguish "no permission" / "not deployed" / "couldn't load". */
   reason?: OnlineStoreLoadFailure | null;
+  /** Store reach the backend actually applied (OS-013 / PR #947 follow-up 5):
+   *  'all-stores' for ACCOUNTANT/ADMIN/SUPERADMIN (the refund-review queue
+   *  bills under the ONLINE store, so it is cross-store for them regardless of
+   *  active store), 'store-scoped' for any other role. Drives the screen's
+   *  scope hint instead of a static "spans all stores" sentence that could go
+   *  stale (or read wrong) for a role the backend actually store-bounds. */
+  scope?: 'all-stores' | 'store-scoped' | string | null;
 }
 
 export interface RefundReviewFilters {
@@ -2045,7 +2052,8 @@ export const refundReviewsApi = {
       const arr = Array.isArray(data) ? data : (data?.reviews ?? data?.items ?? []);
       const reviews = (Array.isArray(arr) ? arr : []) as RefundReview[];
       const total = typeof data?.total === 'number' ? data.total : reviews.length;
-      return { reviews, total, available: true, reason: null };
+      const scope = typeof data?.scope === 'string' ? data.scope : null;
+      return { reviews, total, available: true, reason: null, scope };
     } catch (err) {
       return { reviews: [], total: 0, available: false, reason: classifyLoadError(err) };
     }

@@ -127,17 +127,30 @@ interface OrdersPage {
   failed: OrderRow[];
   failedCount: number;
   total: number;
+  /** True count of orders with an active Rx hold across the caller's WHOLE
+   *  scope (server-computed, honours status/date/search but not pagination or
+   *  the rx_hold filter itself -- PR #947 follow-up 2). Never limited to the
+   *  loaded page, unlike the old client-side count over `allRows`. */
+  rxHoldCount: number;
   available: boolean;
 }
 
 /** Fetch one page. NEVER throws: any error (403 outside the backend gate, 404 on
  *  a stale deploy) resolves to an unavailable result so the screen always
- *  renders the friendly note instead of a white screen. */
-async function fetchOrders(offset: number, search: string): Promise<OrdersPage> {
+ *  renders the friendly note instead of a white screen.
+ *  `rxHoldOnly` requests the server-side ?rx_hold=true filter (PR #947 follow-up
+ *  2) so switching to the Rx-hold tab sees every held order across the whole
+ *  scope, not just whichever ones happened to already be on a loaded page. */
+async function fetchOrders(
+  offset: number,
+  search: string,
+  rxHoldOnly = false,
+): Promise<OrdersPage> {
   try {
-    const params: Record<string, string | number> = { limit: PAGE_SIZE, offset };
+    const params: Record<string, string | number | boolean> = { limit: PAGE_SIZE, offset };
     const q = search.trim();
     if (q) params.search = q;
+    if (rxHoldOnly) params.rx_hold = true;
     const res = await api.get('/online-store/orders', { params });
     const data = (res?.data ?? {}) as Record<string, any>;
     const rows = (Array.isArray(data.orders) ? data.orders : []).map(toRow);
@@ -150,10 +163,14 @@ async function fetchOrders(offset: number, search: string): Promise<OrdersPage> 
           ? data.failed_count
           : failed.filter((f: OrderRow) => f.map_status === 'FAILED').length,
       total: typeof data.total === 'number' ? data.total : rows.length,
+      rxHoldCount:
+        typeof data.rx_hold_count === 'number'
+          ? data.rx_hold_count
+          : rows.filter((r: OrderRow) => r.rx_hold).length,
       available: true,
     };
   } catch {
-    return { rows: [], failed: [], failedCount: 0, total: 0, available: false };
+    return { rows: [], failed: [], failedCount: 0, total: 0, rxHoldCount: 0, available: false };
   }
 }
 
@@ -261,6 +278,11 @@ export default function OnlineOrdersPage() {
   const [failedRows, setFailedRows] = useState<OrderRow[]>([]);
   const [failedCount, setFailedCount] = useState(0);
   const [total, setTotal] = useState(0);
+  // True count of orders on an active Rx hold across the caller's WHOLE scope
+  // (server-computed -- PR #947 follow-up 2). Updated on every load/loadMore so
+  // the banner/chip never lag behind what's actually on the server, unlike the
+  // old client-side count over only the rows the page happened to have loaded.
+  const [rxHoldCount, setRxHoldCount] = useState(0);
   const [available, setAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -279,19 +301,25 @@ export default function OnlineOrdersPage() {
     return () => clearTimeout(t);
   }, [search]);
 
+  // Selecting the "Rx hold" tab asks the SERVER for ?rx_hold=true (PR #947
+  // follow-up 2) instead of filtering whatever page happened to be loaded, so
+  // the view is complete across the whole scope, not just loaded rows.
+  const rxHoldOnly = filter === 'RX_HOLD';
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const page = await fetchOrders(0, committedSearch);
+      const page = await fetchOrders(0, committedSearch, rxHoldOnly);
       setOrders(page.rows);
       setFailedRows(page.failed);
       setFailedCount(page.failedCount);
       setTotal(page.total);
+      setRxHoldCount(page.rxHoldCount);
       setAvailable(page.available);
     } finally {
       setLoading(false);
     }
-  }, [committedSearch]);
+  }, [committedSearch, rxHoldOnly]);
 
   useEffect(() => {
     load();
@@ -300,25 +328,44 @@ export default function OnlineOrdersPage() {
   const loadMore = useCallback(async () => {
     setLoadingMore(true);
     try {
-      const page = await fetchOrders(orders.length, committedSearch);
-      setOrders((prev) => [...prev, ...page.rows]);
+      const page = await fetchOrders(orders.length, committedSearch, rxHoldOnly);
+      setOrders((prev) => {
+        // De-dupe on append (PR #947 follow-up 5): offset-based pagination reads
+        // `orders.length` as the next offset, but a webhook burst landing
+        // between the initial load and this Load-more can insert new rows and
+        // shift the created_at-desc ordering underneath that now-stale offset —
+        // the row sitting at the boundary can be re-fetched and appended a
+        // second time. Key on id (booked rows) or shopify_order_id (unbooked
+        // rows never carry an id); a row with neither is kept as-is since
+        // duplication can't be determined safely for it.
+        const keyOf = (o: OrderRow) => o.id ?? (o.shopify_order_id ? `sid:${o.shopify_order_id}` : null);
+        const seen = new Set(prev.map(keyOf).filter((k): k is string => k != null));
+        const deduped = page.rows.filter((o) => {
+          const key = keyOf(o);
+          if (key == null) return true;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return [...prev, ...deduped];
+      });
       setTotal(page.total);
+      setRxHoldCount(page.rxHoldCount);
     } finally {
       setLoadingMore(false);
     }
-  }, [orders.length, committedSearch]);
+  }, [orders.length, committedSearch, rxHoldOnly]);
 
   // Failed/pending (unbooked) rows first — they are the ones needing attention.
   const allRows = useMemo(() => [...failedRows, ...orders], [failedRows, orders]);
 
   const counts = useMemo(() => {
-    const c: Record<MapFilter, number> = { ALL: allRows.length, MAPPED: 0, FAILED: 0, PENDING: 0, RX_HOLD: 0 };
+    const c: Record<MapFilter, number> = { ALL: allRows.length, MAPPED: 0, FAILED: 0, PENDING: 0, RX_HOLD: rxHoldCount };
     for (const o of allRows) {
       c[o.map_status] = (c[o.map_status] ?? 0) + 1;
-      if (o.rx_hold) c.RX_HOLD += 1;
     }
     return c;
-  }, [allRows]);
+  }, [allRows, rxHoldCount]);
 
   const visible = useMemo(() => {
     if (filter === 'ALL') return allRows;

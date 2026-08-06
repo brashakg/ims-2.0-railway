@@ -49,15 +49,18 @@ immutable record of every manual re-run (SYSTEM_INTENT: Audit Everything).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..dependencies import user_store_scope
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _parse_created_bound(raw: Optional[str], *, end: bool) -> Optional[datetime]:
@@ -163,6 +166,11 @@ _SEARCH_FIELDS = (
     "customer_phone",
     "customer_email",
 )
+
+# An order carries an ACTIVE Rx FLAG-AND-HOLD when either legacy flag is true --
+# mirrors the FE's `rx_hold: !!(o.fulfillment_hold || o.rx_pending)` (OS-012).
+# clear-rx-hold sets BOTH to False, so a cleared order never matches this clause.
+_RX_HELD_CLAUSE: Dict[str, Any] = {"$or": [{"rx_pending": True}, {"fulfillment_hold": True}]}
 
 
 # ---------------------------------------------------------------------------
@@ -377,22 +385,39 @@ async def list_online_orders(
             "ref / customer name, phone, email (regex-escaped literal)."
         ),
     ),
+    rx_hold: Optional[bool] = Query(
+        None,
+        description=(
+            "When true, return only orders with an ACTIVE Rx FLAG-AND-HOLD "
+            "(rx_pending or fulfillment_hold). The envelope's rx_hold_count "
+            "always reports the true count across every page regardless of this "
+            "filter (OS-012 follow-up: the banner/count/filter used to be "
+            "computed client-side over loaded pages only, so a held order "
+            "beyond page 1 was invisible)."
+        ),
+    ),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_roles(*_READ_ROLES)),
 ) -> Dict[str, Any]:
     """List IMS orders that originated from the online channel (channel='ONLINE'),
     newest first. Optional filters: ?status=, ?date_from=, ?date_to= (created_at),
-    ?search=. Rows are server-side projected (no line items / tax tables /
-    payments / addresses reach the browser -- OS-063).
+    ?search=, ?rx_hold=true. Rows are server-side projected (no line items / tax
+    tables / payments / addresses reach the browser -- OS-063).
 
     Cross-store callers additionally receive the FAILED queue (`failed` +
     `failed_count`): recent Shopify order webhooks with no matching orders doc,
     surfaced as map_status=FAILED/PENDING synthetic rows so unbooked orders are
     visible and re-mappable (OS-011). `failed` rows accompany the FIRST page only
-    (offset=0, no ?status filter) so pagination never duplicates them; store-scoped
-    callers don't receive them (unbooked webhook payloads carry no store stamp, so
-    they are admin/HQ material -- fail closed).
+    (offset=0, no ?status filter, no ?rx_hold filter -- unbooked webhook payloads
+    carry no rx-hold state, so they are out of scope for an Rx-hold view) so
+    pagination never duplicates them; store-scoped callers don't receive them
+    (unbooked webhook payloads carry no store stamp, so they are admin/HQ
+    material -- fail closed).
+
+    `rx_hold_count` is the TRUE count of orders with an active hold across the
+    caller's whole scope (honouring ?status/?date/?search but NOT ?rx_hold or
+    pagination), so the FE banner/chip is never limited to loaded pages.
 
     Fail-soft: no DB -> an empty page (never a 500). Returns a bounded page plus the
     total count so the UI can paginate.
@@ -404,6 +429,7 @@ async def list_online_orders(
             "failed": [],
             "failed_count": 0,
             "total": 0,
+            "rx_hold_count": 0,
             "limit": limit,
             "offset": offset,
             "db_connected": False,
@@ -454,18 +480,36 @@ async def list_online_orders(
         and_clauses.append({"$or": branches})
 
     # isinstance guard: pre-existing scope tests (and any internal caller) invoke
-    # this handler DIRECTLY, so `search` can arrive as the FastAPI Query sentinel
-    # object rather than a string -- treat anything non-str as "no search".
+    # this handler DIRECTLY, so `search` / `rx_hold` can arrive as the FastAPI
+    # Query sentinel object rather than a str/bool -- treat anything of the wrong
+    # type as "no search" / "no filter".
     search_txt = search.strip() if isinstance(search, str) else ""
     if search_txt:
         and_clauses.append(_search_clause(search_txt))
+
+    # rx_hold_count (OS-012 follow-up): the TRUE count of orders with an ACTIVE
+    # Rx hold across the caller's whole scope, honouring status/date/search but
+    # NOT the ?rx_hold filter itself or pagination -- computed on the base query
+    # (and_clauses so far) BEFORE the rx_hold filter clause is (maybe) layered on,
+    # so the banner/chip always reflects every matching page, not just the one
+    # the FE has loaded.
+    rx_hold_flag = rx_hold if isinstance(rx_hold, bool) else False
+    held_query: Dict[str, Any] = dict(query)
+    held_query["$and"] = list(and_clauses) + [_RX_HELD_CLAUSE]
+
     if and_clauses:
         query["$and"] = and_clauses
+    if rx_hold_flag:
+        held_and = list(query.get("$and") or [])
+        held_and.append(_RX_HELD_CLAUSE)
+        query["$and"] = held_and
 
     # The FAILED queue (OS-011) -- cross-store callers, first page, no status
-    # filter (synthetic rows have no IMS status to filter on).
+    # filter (synthetic rows have no IMS status to filter on) and no rx_hold
+    # filter (unbooked webhook payloads carry no rx-hold state, so they are out
+    # of scope for an Rx-hold-only view).
     failed_rows: List[Dict[str, Any]] = []
-    if is_cross and not status:
+    if is_cross and not status and not rx_hold_flag:
         failed_rows = _unbooked_webhook_rows(db, search=search_txt or None)
     failed_count = sum(1 for r in failed_rows if r.get("map_status") == "FAILED")
 
@@ -477,11 +521,13 @@ async def list_online_orders(
                 "failed": [],
                 "failed_count": 0,
                 "total": 0,
+                "rx_hold_count": 0,
                 "limit": limit,
                 "offset": offset,
                 "db_connected": True,
             }
         total = int(coll.count_documents(query))
+        rx_hold_count = int(coll.count_documents(held_query))
         cursor = (
             coll.find(query, dict(_LIST_PROJECTION))
             .sort("created_at", -1)
@@ -495,6 +541,7 @@ async def list_online_orders(
             "failed": [],
             "failed_count": 0,
             "total": 0,
+            "rx_hold_count": 0,
             "limit": limit,
             "offset": offset,
             "db_connected": True,
@@ -505,6 +552,7 @@ async def list_online_orders(
         # First page only, so Load-more pagination never duplicates these rows.
         "failed": failed_rows if offset == 0 else [],
         "failed_count": failed_count,
+        "rx_hold_count": rx_hold_count,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -598,9 +646,28 @@ async def remap_online_order(
 # ---------------------------------------------------------------------------
 
 
+class ClearRxHoldBody(BaseModel):
+    """Optional context for a clear-rx-hold release (PR #947 follow-up 4). Both
+    fields are free-form operator input, not validated against a prescriptions
+    record -- the endpoint stays FAIL-SOFT (a release is not blocked on either
+    being present or well-formed)."""
+
+    note: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Free-text note on why/how the prescription was verified.",
+    )
+    prescription_id: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="The prescriptions collection id the Rx was captured/verified against, if any.",
+    )
+
+
 @router.post("/{order_id}/clear-rx-hold")
 async def clear_rx_hold(
     order_id: str,
+    body: Optional[ClearRxHoldBody] = None,
     current_user: dict = Depends(require_roles(*_REMAP_ROLES)),
 ) -> Dict[str, Any]:
     """Release the Rx FLAG-AND-HOLD on ONE online order (OS-012).
@@ -613,6 +680,12 @@ async def clear_rx_hold(
     (matches the remap gate; a wider OPTOMETRIST flow can ride the Tasks
     worklist). The cleared markers stay on the doc as an audit trail, plus a
     chained audit_logs row.
+
+    Accepts an OPTIONAL JSON body ``{note, prescription_id}`` (PR #947 follow-up
+    4) recording why/how the prescription was verified -- both fields are
+    stamped onto the order doc alongside the existing cleared markers and carried
+    into the audit row. Neither is required; an empty/absent body behaves exactly
+    as before.
 
     409 when the order carries no active hold; 404 when it doesn't exist (or is
     not an online order)."""
@@ -639,6 +712,11 @@ async def clear_rx_hold(
             status_code=409, detail="This order has no active Rx hold to clear."
         )
 
+    note = (body.note or "").strip() if body and body.note else None
+    prescription_id = (
+        (body.prescription_id or "").strip() if body and body.prescription_id else None
+    )
+
     now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     update = {
         "rx_pending": False,
@@ -648,6 +726,10 @@ async def clear_rx_hold(
         "rx_hold_cleared_at": now_dt.isoformat(),
         "updated_at": now_dt,
     }
+    if note:
+        update["rx_hold_cleared_note"] = note
+    if prescription_id:
+        update["rx_hold_cleared_prescription_id"] = prescription_id
     try:
         coll.update_one({"order_id": order_id}, {"$set": update})
     except Exception:  # noqa: BLE001 - surface the failure, don't fake success
@@ -655,7 +737,7 @@ async def clear_rx_hold(
             status_code=503, detail="Could not update the order (database error)"
         )
 
-    _write_rx_hold_audit(order, current_user)
+    _write_rx_hold_audit(order, current_user, note=note, prescription_id=prescription_id)
     return {
         "order_id": order_id,
         "rx_pending": False,
@@ -664,20 +746,38 @@ async def clear_rx_hold(
     }
 
 
-def _write_rx_hold_audit(order: Dict[str, Any], current_user: dict) -> None:
-    """Chained audit row for an Rx-hold release. Fail-soft: audit errors are
-    swallowed so they can never block the release (mirrors _write_remap_audit)."""
+def _write_rx_hold_audit(
+    order: Dict[str, Any],
+    current_user: dict,
+    *,
+    note: Optional[str] = None,
+    prescription_id: Optional[str] = None,
+) -> None:
+    """Chained audit row for an Rx-hold release. The RELEASE itself is never
+    blocked by an audit problem (mirrors _write_remap_audit's fail-soft
+    contract) -- but for this CLINICAL action a failed/skipped audit write must
+    be LOUD, not silent, so an operator/on-call can notice a broken audit trail
+    for a clinical release instead of it vanishing into a swallowed exception
+    (PR #947 follow-up 4). Logs at ERROR both when audit.create() raises AND
+    when it fail-softs to None (the repository's own contract for a chain/insert
+    failure -- see database/repositories/audit_repository.py)."""
+    entity_id = order.get("order_id")
     try:
         from ..dependencies import get_audit_repository
 
         audit = get_audit_repository()
         if audit is None:
+            logger.error(
+                "[ONLINE_STORE] Rx-hold-clear audit SKIPPED (no audit repository) "
+                "for order %s -- clinical action has NO audit trail",
+                entity_id,
+            )
             return
-        audit.create(
+        row = audit.create(
             {
                 "action": "ONLINE_ORDER_RX_HOLD_CLEAR",
                 "entity_type": "order",
-                "entity_id": order.get("order_id"),
+                "entity_id": entity_id,
                 "store_id": order.get("store_id"),
                 "user_id": current_user.get("user_id"),
                 "severity": "INFO",
@@ -686,11 +786,28 @@ def _write_rx_hold_audit(order: Dict[str, Any], current_user: dict) -> None:
                     "shopify_order_id": order.get("shopify_order_id"),
                     "prior_rx_hold_reasons": order.get("rx_hold_reasons"),
                     "prior_rx_hold_reason": order.get("rx_hold_reason"),
+                    "note": note,
+                    "prescription_id": prescription_id,
                 },
             }
         )
-    except Exception:  # noqa: BLE001 -- audit must never break the release
-        pass
+        if not row:
+            # audit_repository.create() fail-softs to None on any chain/insert
+            # error -- that is a SILENT failure by contract, so surface it here.
+            logger.error(
+                "[ONLINE_STORE] Rx-hold-clear audit write FAILED (fail-soft None) "
+                "for order %s, user %s -- clinical action has NO audit trail",
+                entity_id,
+                current_user.get("user_id"),
+            )
+    except Exception:  # noqa: BLE001 -- the release itself must never break
+        logger.error(
+            "[ONLINE_STORE] Rx-hold-clear audit write RAISED for order %s, user %s "
+            "-- clinical action has NO audit trail",
+            entity_id,
+            current_user.get("user_id"),
+            exc_info=True,
+        )
 
 
 def _load_last_shopify_payload(db, shopify_order_id: str):
