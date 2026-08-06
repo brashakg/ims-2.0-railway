@@ -56,22 +56,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .phone import normalize_indian_mobile
+from ..utils.online_gst import PAYMENT_STATUS_MAP as _PAYMENT_STATUS_MAP
 
 logger = logging.getLogger(__name__)
 
 
-# Shopify financial_status -> canonical IMS payment_status.
+# Shopify financial_status -> canonical IMS payment_status now lives in the
+# shared utils.online_gst.PAYMENT_STATUS_MAP (imported above as
+# _PAYMENT_STATUS_MAP) so the shopify_ingest create path (_live_payment_fields)
+# books off the SAME vocabulary instead of a two-entry emergency fallback.
 # (Shopify: pending | authorized | partially_paid | paid | partially_refunded |
 #  refunded | voided.) Anything unknown -> UNPAID (safe: it shows as a receivable).
-_PAYMENT_STATUS_MAP = {
-    "paid": "PAID",
-    "partially_paid": "PARTIAL",
-    "authorized": "UNPAID",
-    "pending": "UNPAID",
-    "voided": "CANCELLED",
-    "refunded": "REFUNDED",
-    "partially_refunded": "PARTIAL_REFUND",
-}
 
 # Shopify fulfillment_status -> canonical IMS fulfillment_status.
 # (Shopify: null (unfulfilled) | partial | fulfilled | restocked.)
@@ -85,6 +80,15 @@ _FULFILLMENT_STATUS_MAP = {
 # Shopify cancelled / fulfilled -> the IMS order lifecycle `status`.
 # A cancelled Shopify order maps the IMS order to CANCELLED so finance excludes it.
 _DELIVERED_FULFILLMENT = {"fulfilled"}
+
+# Money-panel P1 follow-up: bounded retry count for _sync_existing_order_status's
+# snapshot-conditional money write. _sync_existing_order_status runs ONLY from
+# live webhook delivery (no periodic sweep), so a single miss-and-give-up on a
+# racing staff add_payment could leave amount_paid/balance_due understated
+# indefinitely for an order that never receives another webhook. A few
+# in-request retries (re-read + recompute against the fresh snapshot) close
+# that gap deterministically without needing a hypothetical future webhook.
+_MONEY_SYNC_MAX_ATTEMPTS = 3
 
 
 def _f(value, default: float = 0.0) -> float:
@@ -766,8 +770,40 @@ def _sync_existing_order_status(
         )
         return False
 
+    # OUT-OF-ORDER WEBHOOK GUARD (follow-up P2): Shopify webhook delivery is NOT
+    # ordered -- a stale orders/updated (e.g. a partially_paid Shopify retried)
+    # can arrive AFTER a newer orders/paid. Recomputing money/status from the
+    # older payload would transiently regress collected money (a Day-End run in
+    # the gap then shows a phantom shortfall; it self-heals only on the next
+    # webhook). Guard: compare the payload's OWN `updated_at` against the one we
+    # last applied and SKIP the whole recompute for a STRICTLY OLDER payload. A
+    # missing/unparseable incoming stamp, or no stored watermark yet, never skips
+    # (fail-open -- the guard fires only when the payload is provably stale).
+    try:
+        from .shopify_ingest import _to_naive_utc as _parse_dt
+    except Exception:  # noqa: BLE001 -- staleness is best-effort, never blocks
+        _parse_dt = None
+    incoming_updated = _parse_dt(payload.get("updated_at")) if _parse_dt else None
+    stored_updated = existing.get("shopify_updated_at")
+    if isinstance(stored_updated, str) and _parse_dt is not None:
+        stored_updated = _parse_dt(stored_updated)
+    if (
+        incoming_updated is not None
+        and isinstance(stored_updated, datetime)
+        and incoming_updated < stored_updated
+    ):
+        logger.info(
+            "[ONLINE_MAP] skip STALE webhook for shopify_order=%s "
+            "(payload updated_at %s < last applied %s)",
+            shopify_order_id,
+            incoming_updated,
+            stored_updated,
+        )
+        return False
+
     st = _derive_statuses(payload)
     grand_total = _f(existing.get("grand_total"))
+
     order_status = st["order_status"]
     # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a re-ingested
     # Shopify payload (orders/updated webhook, or the ADMIN/SUPERADMIN remap
@@ -790,8 +826,11 @@ def _sync_existing_order_status(
         )
         _raise_hold_conflict_task(db, existing, source="ONLINE_MAP")
         order_status = existing.get("status") or order_status
-    update: Dict[str, Any] = {
-        "payment_status": st["payment_status"],
+
+    # LIFECYCLE fields never depend on the payments snapshot (only on the
+    # payload + `now`), so they are computed and written ONCE, unconditionally
+    # -- no race window to close here.
+    lifecycle_update: Dict[str, Any] = {
         "fulfillment_status": st["fulfillment_status"],
         "status": order_status,
         # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
@@ -799,127 +838,186 @@ def _sync_existing_order_status(
         # to strings on every status webhook (mixed-type regeneration).
         "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
     }
-    # Staff-vs-gateway tender split, inspected BEFORE any money recompute
-    # (money-panel fix 1): rows this pipeline synthesized carry the marker
-    # settled_outside_ims + method SHOPIFY; every OTHER row is a staff-recorded
-    # tender (CASH/CARD/UPI...) the gateway knows NOTHING about -- Shopify's
-    # financial_status stays partially_paid forever after an in-store balance
-    # collection, so its total_outstanding must never write the header below
-    # money the till actually recorded. CREDIT-type rows (credit-note /
-    # store-credit adjustments) are not collected tenders and are excluded.
-    existing_payments = [
-        p for p in (existing.get("payments") or []) if isinstance(p, dict)
-    ]
-    staff_sum = round(
-        sum(
-            _f(p.get("amount"))
-            for p in existing_payments
-            if not _is_synth_gateway_row(p)
-            and "CREDIT" not in _norm(p.get("method") or p.get("mode")).upper()
-        ),
-        2,
-    )
-
-    if st["payment_status"] == "PAID":
-        update["amount_paid"] = grand_total
-        update["balance_due"] = 0.0
-    elif st["payment_status"] == "PARTIAL":
-        # OS-007 (sync half): a partially_paid webhook carries Shopify's own
-        # total_outstanding -- recompute collected vs due from it instead of
-        # leaving the create-time values (which pre-fix were grand_total on BOTH
-        # sides, i.e. double-counted). No parseable/finite total_outstanding ->
-        # leave the money fields untouched (never guess).
-        try:
-            outstanding = float(payload.get("total_outstanding"))
-        except (TypeError, ValueError):
-            outstanding = None
-        if outstanding is not None and not math.isfinite(outstanding):
-            outstanding = None  # "NaN"/"inf" strings parse; never book them
-        if outstanding is not None:
-            grand = round(grand_total, 2)
-            shopify_collected = min(max(round(grand - outstanding, 2), 0.0), grand)
-            # FLOOR at gateway + staff tenders (panel fix 1): the header must
-            # never drop below recorded collections just because Shopify does
-            # not know about the in-store leg.
-            collected = min(
-                grand,
-                max(shopify_collected, round(shopify_collected + staff_sum, 2)),
-            )
-            update["amount_paid"] = collected
-            update["balance_due"] = round(grand - collected, 2)
-            if collected >= grand:
-                # Gateway + till together cover the order. A PARTIAL label over
-                # a zero balance would be incoherent -- and would clobber the
-                # PAID status the staff add_payment already computed.
-                update["payment_status"] = "PAID"
-
-    # OS-030 (sync half), ROW-GRANULAR (panel fix 2): reconcile ONLY the
-    # pipeline's own synthesized gateway row -- its amount is the collected
-    # money the staff tenders do not explain (amount_paid - staff_sum) -- and
-    # never touch any other row. The existing row's identity (payment_id /
-    # received_at / reference) is preserved; only `amount` mutates, and an
-    # unchanged list is not written at all (no churn on routine webhooks).
-    payments_after: Optional[List[Dict[str, Any]]] = None
-    if "amount_paid" in update:
-        gateway_amount = max(0.0, round(_f(update["amount_paid"]) - staff_sum, 2))
-        rebuilt: List[Dict[str, Any]] = []
-        replaced = False
-        for p in existing_payments:
-            if _is_synth_gateway_row(p):
-                if replaced:
-                    continue  # defensive: collapse accidental duplicate synth rows
-                replaced = True
-                if gateway_amount > 0:
-                    keep = dict(p)  # preserve payment_id / received_at / reference
-                    keep["amount"] = gateway_amount
-                    rebuilt.append(keep)
-                # gateway_amount == 0 -> the gateway explains no money: drop it
-            else:
-                rebuilt.append(dict(p))
-        if not replaced and gateway_amount > 0:
-            try:
-                from .shopify_ingest import _synth_gateway_payment
-
-                rebuilt.append(
-                    _synth_gateway_payment(
-                        gateway_amount,
-                        shopify_order_id,
-                        datetime.now(timezone.utc).replace(tzinfo=None),
-                    )
-                )
-            except Exception:  # noqa: BLE001 -- payments repair is best-effort
-                logger.debug(
-                    "[ONLINE_MAP] gateway payment synth skipped", exc_info=True
-                )
-        if rebuilt != existing_payments:
-            payments_after = rebuilt
-
+    # Persist the applied staleness watermark (the payload's own updated_at) so a
+    # later STALE re-delivery is detected by the guard above. Lifecycle field --
+    # always applied, even if the money leg below has to retry/defer.
+    if incoming_updated is not None:
+        lifecycle_update["shopify_updated_at"] = incoming_updated
     if st["cancelled"]:
-        update["cancelled_at"] = _norm(payload.get("cancelled_at"))
+        lifecycle_update["cancelled_at"] = _norm(payload.get("cancelled_at"))
+
+    def _recompute_money(payments_snapshot: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """MONEY fields (amount_paid / balance_due / payment_status) + the
+        row-granular gateway-payment reconciliation, recomputed fresh against
+        ONE payments-array snapshot. Pure function of (st, payload, grand_total,
+        payments_snapshot) -- calling it twice with the SAME snapshot yields the
+        SAME result, which is what makes the bounded retry below safe: each
+        retry attempt re-derives money from the CURRENT truth instead of
+        replaying stale figures.
+
+        Staff-vs-gateway tender split (money-panel fix 1): rows this pipeline
+        synthesized carry the marker settled_outside_ims + method SHOPIFY;
+        every OTHER row is a staff-recorded tender (CASH/CARD/UPI...) the
+        gateway knows NOTHING about -- Shopify's financial_status stays
+        partially_paid forever after an in-store balance collection, so its
+        total_outstanding must never write the header below money the till
+        actually recorded. CREDIT-type rows (credit-note / store-credit
+        adjustments) are not collected tenders and are excluded.
+        """
+        staff_sum = round(
+            sum(
+                _f(p.get("amount"))
+                for p in payments_snapshot
+                if not _is_synth_gateway_row(p)
+                and "CREDIT" not in _norm(p.get("method") or p.get("mode")).upper()
+            ),
+            2,
+        )
+
+        money: Dict[str, Any] = {"payment_status": st["payment_status"]}
+        if st["payment_status"] == "PAID":
+            money["amount_paid"] = grand_total
+            money["balance_due"] = 0.0
+        elif st["payment_status"] == "PARTIAL":
+            # OS-007 (sync half): a partially_paid webhook carries Shopify's own
+            # total_outstanding -- recompute collected vs due from it instead of
+            # leaving the create-time values (which pre-fix were grand_total on
+            # BOTH sides, i.e. double-counted). No parseable/finite
+            # total_outstanding -> leave the money fields untouched (never guess).
+            try:
+                outstanding = float(payload.get("total_outstanding"))
+            except (TypeError, ValueError):
+                outstanding = None
+            if outstanding is not None and not math.isfinite(outstanding):
+                outstanding = None  # "NaN"/"inf" strings parse; never book them
+            if outstanding is not None:
+                grand = round(grand_total, 2)
+                shopify_collected = min(
+                    max(round(grand - outstanding, 2), 0.0), grand
+                )
+                # FLOOR at gateway + staff tenders (panel fix 1): the header must
+                # never drop below recorded collections just because Shopify does
+                # not know about the in-store leg.
+                collected = min(
+                    grand,
+                    max(shopify_collected, round(shopify_collected + staff_sum, 2)),
+                )
+                money["amount_paid"] = collected
+                money["balance_due"] = round(grand - collected, 2)
+                if collected >= grand:
+                    # Gateway + till together cover the order. A PARTIAL label
+                    # over a zero balance would be incoherent -- and would
+                    # clobber the PAID status the staff add_payment already
+                    # computed.
+                    money["payment_status"] = "PAID"
+
+        # OS-030 (sync half), ROW-GRANULAR (panel fix 2): reconcile ONLY the
+        # pipeline's own synthesized gateway row -- its amount is the collected
+        # money the staff tenders do not explain (amount_paid - staff_sum) --
+        # and never touch any other row. The existing row's identity
+        # (payment_id / received_at / reference) is preserved; only `amount`
+        # mutates, and an unchanged list is not written at all (no churn on
+        # routine webhooks).
+        if "amount_paid" in money:
+            gateway_amount = max(0.0, round(_f(money["amount_paid"]) - staff_sum, 2))
+            rebuilt: List[Dict[str, Any]] = []
+            replaced = False
+            for p in payments_snapshot:
+                if _is_synth_gateway_row(p):
+                    if replaced:
+                        continue  # defensive: collapse accidental duplicate rows
+                    replaced = True
+                    if gateway_amount > 0:
+                        keep = dict(p)  # preserve payment_id/received_at/reference
+                        keep["amount"] = gateway_amount
+                        rebuilt.append(keep)
+                    # gateway_amount == 0 -> the gateway explains no money: drop
+                else:
+                    rebuilt.append(dict(p))
+            if not replaced and gateway_amount > 0:
+                try:
+                    from .shopify_ingest import _synth_gateway_payment
+
+                    rebuilt.append(
+                        _synth_gateway_payment(
+                            gateway_amount,
+                            shopify_order_id,
+                            datetime.now(timezone.utc).replace(tzinfo=None),
+                        )
+                    )
+                except Exception:  # noqa: BLE001 -- payments repair is best-effort
+                    logger.debug(
+                        "[ONLINE_MAP] gateway payment synth skipped", exc_info=True
+                    )
+            if rebuilt != payments_snapshot:
+                money["payments"] = rebuilt
+        return money
 
     try:
-        orders_coll.update_one({"shopify_order_id": shopify_order_id}, {"$set": update})
-        if payments_after is not None:
-            # SNAPSHOT-CONDITIONAL write (panel fix 2): only replace the exact
-            # array we inspected. A staff add_payment racing between our read
-            # and this write changes the array -> the filter misses -> we skip
-            # instead of clobbering a just-recorded tender; the next webhook
-            # re-reconciles against the fresh list.
+        if lifecycle_update:
+            orders_coll.update_one(
+                {"shopify_order_id": shopify_order_id}, {"$set": lifecycle_update}
+            )
+
+        # MONEY LEG -- BOUNDED RETRY (money-panel P1 follow-up). The payments
+        # array + header write is snapshot-conditional (a concurrent staff
+        # add_payment / UPI auto-reconcile must never be clobbered), but
+        # `_sync_existing_order_status` is invoked ONLY from live webhook
+        # delivery -- there is no periodic sweep that would otherwise heal a
+        # deferred write, and the racing writer (a plain add_payment) has zero
+        # knowledge of the Shopify-side gateway money this webhook was about to
+        # record. A single miss-and-give-up could therefore leave amount_paid
+        # understated by the full gateway-collected amount indefinitely. So: on
+        # a snapshot-mismatch miss, re-read the payments array fresh and
+        # RECOMPUTE money against the new snapshot (never replay the stale
+        # figures), then retry the conditional write -- up to
+        # _MONEY_SYNC_MAX_ATTEMPTS times -- before giving up and deferring to
+        # whatever comes next (a future webhook or the manual /remap route).
+        snapshot_doc = existing
+        money_written = False
+        for attempt in range(_MONEY_SYNC_MAX_ATTEMPTS):
+            if attempt > 0:
+                try:
+                    snapshot_doc = orders_coll.find_one(
+                        {"shopify_order_id": shopify_order_id}
+                    )
+                except Exception:  # noqa: BLE001
+                    snapshot_doc = None
+                if not snapshot_doc:
+                    break  # order vanished mid-retry -- nothing left to reconcile
+
+            payments_snapshot = [
+                p for p in (snapshot_doc.get("payments") or []) if isinstance(p, dict)
+            ]
+            conditional_set = _recompute_money(payments_snapshot)
+
             snap_filter: Dict[str, Any] = {"shopify_order_id": shopify_order_id}
-            if "payments" in existing:
-                snap_filter["payments"] = existing.get("payments")
+            if "payments" in snapshot_doc:
+                snap_filter["payments"] = snapshot_doc.get("payments")
             else:
                 snap_filter["payments"] = {"$exists": False}
-            res = orders_coll.update_one(
-                snap_filter, {"$set": {"payments": payments_after}}
+            res = orders_coll.update_one(snap_filter, {"$set": conditional_set})
+            if getattr(res, "matched_count", 1):
+                money_written = True
+                break
+            logger.info(
+                "[ONLINE_MAP] payments changed concurrently for "
+                "shopify_order=%s (attempt %d/%d) -- re-reading and retrying "
+                "the money reconciliation against the fresh snapshot",
+                shopify_order_id,
+                attempt + 1,
+                _MONEY_SYNC_MAX_ATTEMPTS,
             )
-            if not getattr(res, "matched_count", 1):
-                logger.info(
-                    "[ONLINE_MAP] payments changed concurrently for "
-                    "shopify_order=%s -- gateway row reconciliation deferred "
-                    "to the next webhook",
-                    shopify_order_id,
-                )
+
+        if not money_written:
+            logger.info(
+                "[ONLINE_MAP] money header + gateway row reconciliation "
+                "exhausted %d retries for shopify_order=%s -- deferred to the "
+                "next webhook",
+                _MONEY_SYNC_MAX_ATTEMPTS,
+                shopify_order_id,
+            )
+
         logger.info(
             "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
             "fulfillment=%s",

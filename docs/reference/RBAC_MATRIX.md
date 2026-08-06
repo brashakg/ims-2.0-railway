@@ -219,7 +219,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/admin/products` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/products/bulk-import` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/products/bulk-import/{job_id}/file` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/products/generate-sku` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/products/{product_id}` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/seed-database` | PUBLIC |  |
 | `GET` | `/api/v1/admin/system-health` | AUTH |  |

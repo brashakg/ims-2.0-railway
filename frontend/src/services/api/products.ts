@@ -636,7 +636,10 @@ export const pricingApi = {
 // camelCase keys (offerPrice vs offer_price) -> split-brain. All product
 // writes now go through the single validated `productApi` (`/products`,
 // `/products/bulk-create`, `PUT /products/{id}`). The reads below + the
-// CSV file-stash + generate-sku helper are kept (they are not product writers).
+// CSV file-stash helper are kept (they are not product writers). The old
+// generateSku helper (POST /admin/products/generate-sku, uuid-random SKUs)
+// was removed with its endpoint: SKUs are minted by the backend create door;
+// the deterministic preview is POST /products/sku-preview.
 // ============================================================================
 
 export const adminProductApi = {
@@ -657,11 +660,6 @@ export const adminProductApi = {
     const response = await api.post('/admin/products/bulk-import', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
-    return response.data;
-  },
-
-  generateSku: async (category: string, brand: string, modelNo: string) => {
-    const response = await api.post('/admin/products/generate-sku', { category, brand, model_no: modelNo });
     return response.data;
   },
 };

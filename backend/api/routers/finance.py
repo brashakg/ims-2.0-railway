@@ -14,6 +14,7 @@ from ..utils.ist import (
     fy_start_year_ist,
 )
 from ..utils.dates import to_date_str
+from ..utils.online_gst import order_interstate_flag
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Body
 from fastapi.responses import Response
@@ -382,9 +383,15 @@ def _order_is_interstate(
     though the minted invoice (place of supply) said IGST. The store-state vs
     customer-state heuristic stays as the FALLBACK for docs that don't carry
     the flag (POS orders don't persist it). Requires callers that project
-    fields to include ``interstate`` in the projection."""
-    flag = order.get("interstate")
-    if isinstance(flag, bool):
+    fields to include ``interstate`` in the projection.
+
+    The OS-008 flag-preference gate is the shared ``order_interstate_flag``
+    helper (utils.online_gst); the store-vs-customer state fallback below is
+    finance-specific (GST-code normalization via ``_norm_state``) and stays
+    byte-identical to this file's prior rule -- reports.py keeps its own raw
+    string-compare fallback deliberately."""
+    flag = order_interstate_flag(order)
+    if flag is not None:
         return flag
     seller = _norm_state(store_state_by_id.get(order.get("store_id")))
     buyer = _norm_state(customer_state_by_id.get(order.get("customer_id")))

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
 from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist, ist_day_start_utc, ist_today
+from ..utils.online_gst import order_interstate_flag
 from calendar import monthrange
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
@@ -2468,9 +2469,14 @@ def _order_is_interstate(order: dict, store_state: str, customer_state: str) -> 
     every inter-state online sale as CGST/SGST even though the minted invoice
     said IGST. The store-state vs customer-state string comparison stays as the
     FALLBACK for docs without the flag (POS orders don't persist it),
-    byte-identical to the prior rule (unknown either side -> intra)."""
-    flag = order.get("interstate")
-    if isinstance(flag, bool):
+    byte-identical to the prior rule (unknown either side -> intra).
+
+    The OS-008 flag-preference gate is the shared ``order_interstate_flag``
+    helper (utils.online_gst); the raw case-insensitive string-compare fallback
+    below is reports-specific and stays byte-identical to this file's prior rule
+    -- finance.py keeps its own GST-code-normalizing fallback deliberately."""
+    flag = order_interstate_flag(order)
+    if flag is not None:
         return flag
     return bool(
         store_state
