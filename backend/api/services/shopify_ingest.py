@@ -516,8 +516,8 @@ def _live_payment_fields(
     balance_due == 2x grand_total (double-counted money) under an "UNPAID"
     chip. Now:
 
-      * payment_status uses the mapper's ONE canonical vocabulary
-        (online_order_mapper._PAYMENT_STATUS_MAP: paid->PAID,
+      * payment_status uses the ONE canonical vocabulary
+        (utils.online_gst.PAYMENT_STATUS_MAP: paid->PAID,
         partially_paid->PARTIAL, ...), the same map _sync_existing_order_status
         applies on every later webhook -- so create and sync can never disagree.
       * amount_paid: "paid" -> grand_total; "partially_paid" -> grand_total
@@ -535,9 +535,21 @@ def _live_payment_fields(
     grand = round(_f(grand_total), 2)
 
     try:
-        from .online_order_mapper import _PAYMENT_STATUS_MAP as _pay_vocab
-    except Exception:  # noqa: BLE001 -- a vocab import must never drop a paid order
-        _pay_vocab = {"paid": "PAID", "partially_paid": "PARTIAL"}
+        from ..utils.online_gst import PAYMENT_STATUS_MAP as _pay_vocab
+    except Exception:  # noqa: BLE001 -- a vocab import must never drop/misbook an order
+        # Degraded fallback MIRRORS the full live vocabulary (utils.online_gst)
+        # so a voided/refunded create still books CANCELLED/REFUNDED -- matching
+        # what the sync path (_sync_existing_order_status) would book -- instead
+        # of the UNPAID a two-entry paid/partial-only subset would have produced.
+        _pay_vocab = {
+            "paid": "PAID",
+            "partially_paid": "PARTIAL",
+            "authorized": "UNPAID",
+            "pending": "UNPAID",
+            "voided": "CANCELLED",
+            "refunded": "REFUNDED",
+            "partially_refunded": "PARTIAL_REFUND",
+        }
 
     if fin == "paid":
         amount_paid = grand
@@ -1522,6 +1534,23 @@ def ingest_shopify_order(
     # own settled fields below (_historical_overrides), unaffected by these.
     pay_fields = _live_payment_fields(payload, grand_total)
 
+    # OS-008 follow-up (P2): only carry the DEFINITIVE `interstate` flag + the
+    # tax summary/totals when the shared GST splitter actually produced a split.
+    # On a FAILED split (`gst_split == {}`) these keys are OMITTED from the order
+    # doc, NOT defaulted to interstate=False / empty tax -- a real bool False
+    # would isinstance-win at all seven finance/GST read sites forever, freezing
+    # the order into a wrong intra-state (CGST/SGST) classification and locking
+    # out both the state-map fallback and the later customer-state healing.
+    # Omitting the key lets order.get("interstate") read None -> the heuristic
+    # fallback applies (and self-heals once the buyer's state is known).
+    gst_split_fields: Dict[str, Any] = {}
+    if gst_split:
+        gst_split_fields = {
+            "interstate": gst_split.get("interstate", False),
+            "tax_summary": gst_split.get("rows", []),
+            "tax_totals": gst_split.get("totals", {}),
+        }
+
     order_doc = {
         "order_id": order_id,
         "_id": order_id,
@@ -1567,9 +1596,10 @@ def ingest_shopify_order(
         "fulfillment_hold": rx_eval.get("rx_pending", False),
         "place_of_supply": gst_split.get("place_of_supply", buyer_state),
         "place_of_supply_assumed": gst_split.get("place_of_supply_assumed", False),
-        "interstate": gst_split.get("interstate", False),
-        "tax_summary": gst_split.get("rows", []),
-        "tax_totals": gst_split.get("totals", {}),
+        # interstate / tax_summary / tax_totals are stamped ONLY on a successful
+        # split (see gst_split_fields above); a failed split omits them so the
+        # heuristic fallback is not frozen out by a definitive interstate=False.
+        **gst_split_fields,
         # OS-030: one synthesized SETTLED gateway payment row for the money
         # Shopify already collected, so tender breakdowns / payments_collected
         # reconcile with the online channel. Nothing collected yet -> [].
@@ -1630,7 +1660,7 @@ def ingest_shopify_order(
         shopify_order_id,
         order_id,
         invoice_number,
-        order_doc["interstate"],
+        order_doc.get("interstate"),
     )
 
     # HISTORICAL import: a settled back-catalogue order has NO live side effects --
@@ -1647,7 +1677,7 @@ def ingest_shopify_order(
             "order_id": order_id,
             "invoice_number": None,
             "shopify_order_id": shopify_order_id,
-            "interstate": order_doc["interstate"],
+            "interstate": order_doc.get("interstate"),
             "place_of_supply": order_doc["place_of_supply"],
             "grand_total": grand_total,
             "rx_pending": False,
@@ -1774,7 +1804,7 @@ def ingest_shopify_order(
         "order_id": order_id,
         "invoice_number": invoice_number,
         "shopify_order_id": shopify_order_id,
-        "interstate": order_doc["interstate"],
+        "interstate": order_doc.get("interstate"),
         "place_of_supply": order_doc["place_of_supply"],
         "grand_total": grand_total,
         "rx_pending": order_doc["rx_pending"],
