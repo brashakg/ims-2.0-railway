@@ -15,6 +15,13 @@ registry by collapsing every catalogued ``(method, path)`` to a single key:
                                        gated and must NOT broaden the
                                        products:write role union -- see
                                        capability_for)
+    /online-store/orders/*/clear-rx-hold
+                                    -> "online-store:rx-clear"  (curated: the
+                                       clinical Rx-hold release is kept OUT of
+                                       the shared online-store:write key --
+                                       same allowed set, so no union change; a
+                                       module deny still covers it via
+                                       MODULE_EXTRA_DENY_CAPABILITIES)
 
 WHY CAPABILITIES (not raw routes, not modules)
 ----------------------------------------------
@@ -114,6 +121,18 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # broaden nothing.
     if tmpl.startswith("/api/v1/products/qc-samples"):
         return "products:qc"
+    # Curated finer capability: releasing the clinical Rx FLAG-AND-HOLD on an
+    # online order (POST /online-store/orders/{id}/clear-rx-hold). Its allowed
+    # set is IDENTICAL to the generic online-store write routes (ADMIN/SUPERADMIN),
+    # so the online-store:write role UNION is unchanged either way -- this is NOT
+    # an escalation. But a clinical mutation must not ride the shared module key:
+    # a dedicated key keeps clear-rx-hold permanently OUT of online-store:write
+    # (capability-key hygiene, PR #947 follow-up 1; precedent: approvals:approve,
+    # products:qc). A DENY of the 'ecommerce' module still covers it -- see
+    # MODULE_EXTRA_DENY_CAPABILITIES below, so the carve-out does not open a hole
+    # in the module deny.
+    if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
+        return "online-store:rx-clear"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -231,6 +250,17 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
     "ecommerce": ["online-store"],
 }
 
+# Curated non-verb capability keys that belong to an api module for DENY purposes.
+# A generic ``<module>:read|write`` deny does not name a curated finer key (e.g.
+# the clinical ``online-store:rx-clear`` carve-out), so a module deny must add it
+# explicitly or the deny would silently fail OPEN on the carved-out route (an
+# 'ecommerce'-denied user could still reach clear-rx-hold). DENY-only, exactly
+# like MODULE_TO_CAPABILITY_MODULES -- this never contributes to any grant union
+# (the rbac capability-union gotcha concerns POLICY rows, not this map).
+MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
+    "online-store": ["online-store:rx-clear"],
+}
+
 
 def module_deny_to_capability_denies(module_access: Optional[Dict[str, bool]]) -> Set[str]:
     """Translate a legacy deny-only ``module_access`` map into the set of
@@ -249,6 +279,11 @@ def module_deny_to_capability_denies(module_access: Optional[Dict[str, bool]]) -
         for api_mod in MODULE_TO_CAPABILITY_MODULES.get(mod_key, []):
             for verb in ("read", "write"):
                 cap = f"{api_mod}:{verb}"
+                if cap in VALID_CAPABILITY_KEYS:
+                    denies.add(cap)
+            # Also deny curated finer keys (e.g. online-store:rx-clear) so the
+            # module deny does not fail open on a carved-out route.
+            for cap in MODULE_EXTRA_DENY_CAPABILITIES.get(api_mod, []):
                 if cap in VALID_CAPABILITY_KEYS:
                     denies.add(cap)
     return denies

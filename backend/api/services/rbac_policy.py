@@ -4833,6 +4833,11 @@ POLICY: List[Dict[str, object]] = [
     # prescription is captured (OS-012: the hold was write-only). SAME allowed
     # set as remap above -- deliberately NOT a wider set, so this row does not
     # broaden the module's write grant-union (rbac capability-union gotcha).
+    # Capability layer (PR #947 follow-up 1): this clinical route is carved out
+    # to a dedicated capability key `online-store:rx-clear` (services/
+    # capabilities.capability_for) so it never rides the shared online-store:write
+    # key; the allowed set is unchanged, so no grant-union is broadened. A module
+    # ('ecommerce') deny still covers it via MODULE_EXTRA_DENY_CAPABILITIES.
     {
         "method": "POST",
         "path": "/api/v1/online-store/orders/{order_id}/clear-rx-hold",

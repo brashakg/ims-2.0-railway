@@ -148,7 +148,20 @@ export default function OnlineCustomersPage() {
         ? res
         : (res?.customers ?? res?.data ?? res?.items ?? []);
       const raw = (Array.isArray(arr) ? arr : []) as Record<string, any>[];
-      setRows(raw.map(toRow).filter((r) => r.id));
+      let mapped = raw.map(toRow).filter((r) => r.id);
+      // PR #947 follow-up 5: `exclude_marketing` on the backend drops only rows
+      // with a PERSISTED contact_tier === 'MARKETING' (customers.py), but the
+      // badge above also flags an UNTAGGED email-only row as marketing (the
+      // owner's mobile-primary identity rule). Without this, a row could wear
+      // the "Email-only (marketing)" badge while surviving the "Hide marketing
+      // contacts" toggle — badge and toggle disagreeing on the exact same row.
+      // Re-apply the identical predicate client-side so every badge-bearing row
+      // is actually hidden (redundant, harmless no-op for the already-tagged
+      // rows the backend removed).
+      if (hideMarketing) {
+        mapped = mapped.filter((r) => !r.marketing);
+      }
+      setRows(mapped);
       setAvailable(true);
     } catch {
       // Fail-soft: an unreachable backend -> friendly empty state, not a crash.

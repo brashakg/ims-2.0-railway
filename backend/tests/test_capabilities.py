@@ -54,12 +54,42 @@ def test_every_non_public_route_maps_to_exactly_one_capability():
 
 def test_capability_universe_nonempty_and_verb_shaped():
     """Every key is ``<module>:read|write`` or a curated key
-    (approvals:approve, products:qc)."""
+    (approvals:approve, products:qc, online-store:rx-clear)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
-        assert verb in ("read", "write", "approve", "qc"), key
+        assert verb in ("read", "write", "approve", "qc", "rx-clear"), key
+
+
+def test_clear_rx_hold_is_curated_capability():
+    """PR #947 follow-up 1: the clinical Rx-hold release is carved out to its own
+    key `online-store:rx-clear` (kept OUT of the shared online-store:write key)."""
+    assert (
+        C.capability_for(
+            "POST", "/api/v1/online-store/orders/{order_id}/clear-rx-hold"
+        )
+        == "online-store:rx-clear"
+    )
+    # A concrete id resolves identically (path-params normalised like the role layer).
+    assert (
+        C.capability_for("POST", "/api/v1/online-store/orders/ord-1/clear-rx-hold")
+        == "online-store:rx-clear"
+    )
+    assert "online-store:rx-clear" in C.VALID_CAPABILITY_KEYS
+
+
+def test_clear_rx_hold_carveout_does_not_broaden_online_store_write():
+    """The carve-out must not widen who can reach/grant online-store:write. The
+    rx-clear role union is IDENTICAL to the module write routes' set (ADMIN/
+    SUPERADMIN) and a SUBSET of online-store:write's union -- so no role gains a
+    new grant surface (rbac capability-union gotcha)."""
+    assert C.capability_roles("online-store:rx-clear") == ["ADMIN", "SUPERADMIN"]
+    write_roles = set(C.capability_roles("online-store:write"))
+    assert set(C.capability_roles("online-store:rx-clear")) <= write_roles
+    # ADMIN reaches online-store writes already, so rx-clear is not SUPERADMIN-only
+    # -> grantable exactly like remap was under online-store:write (no escalation).
+    assert not C.is_ungrantable("online-store:rx-clear")
 
 
 def test_capability_resolution_matches_role_layer_path_params():
@@ -158,9 +188,15 @@ def test_module_grant_or_absent_maps_to_nothing():
 
 def test_ecommerce_deny_maps_to_online_store_capabilities():
     """OS-053: denying the 'ecommerce' module must block the online-store API
-    surface, not just the nav -- exactly read+write of the online-store module."""
+    surface, not just the nav -- read+write of the online-store module PLUS the
+    curated online-store:rx-clear carve-out (PR #947 follow-up 1: a module deny
+    must not fail open on a route the generic read/write pair does not name)."""
     denies = C.module_deny_to_capability_denies({"ecommerce": False})
-    assert denies == {"online-store:read", "online-store:write"}
+    assert denies == {
+        "online-store:read",
+        "online-store:write",
+        "online-store:rx-clear",
+    }
 
 
 def test_module_capability_mapping_is_live():
