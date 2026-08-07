@@ -305,6 +305,36 @@ def test_draft_product_with_live_variant_gid_is_sellable():
     assert out["RB-META-01"]["status"] == "DRAFT"
 
 
+def test_draft_product_variant_key_path_agrees_with_product_key_path():
+    """#955 fix-round: the VARIANT-branch resolution (requested key matches the
+    variant's own sku, not the product's) must compute sellable_online
+    IDENTICALLY to the product-branch case above -- an earlier narrower gate
+    here (`not ecom`-only) would have let the SAME conceptual scenario (DRAFT
+    parent, own gid-carrying variant) disagree purely because of which
+    key-matching path resolved the identifier. Uses a variant sku DISTINCT
+    from the parent's sku so this only exercises the variant loop."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [{"id": "CPRB2", "sku": "RB-META-02", "ecom": {"status": "DRAFT"}}]
+            ),
+            "catalog_variants": _Coll(
+                [
+                    {
+                        "sku": "RB-META-02-BLK",
+                        "parent_product_id": "CPRB2",
+                        "shopify_variant_id": "gid://shopify/ProductVariant/56",
+                    }
+                ]
+            ),
+        }
+    )
+    out = online_status_for_skus(db, ["RB-META-02-BLK"])
+    assert out["RB-META-02-BLK"]["online"] is True
+    assert out["RB-META-02-BLK"]["sellable_online"] is True
+    assert out["RB-META-02-BLK"]["status"] == "DRAFT"
+
+
 def test_draft_product_with_inventory_item_only_variant_is_online():
     """P2 (display-flag mirror): the `online` flag gates the stock-tally
     oversell ASSESSMENT (online_sync_health) and the reconcile screen, so the

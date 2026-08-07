@@ -365,10 +365,28 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
             continue
         out[key] = {
             "online": _ecom_online(ecom) or var_pushed,
-            # Sellable when the parent is PUBLISHED, or -- per the audit
-            # fix-round instruction -- when the variant carries a live variant
-            # gid (BVI-era imported variants whose parent linkage/ecom may be
-            # missing belong to live storefront products).
+            # Sellable when the parent is PUBLISHED, OR when the variant
+            # carries a live variant gid -- UNCONDITIONALLY, matching the
+            # product-branch resolution above (both branches must agree: the
+            # same conceptual case, "a DRAFT parent whose own variant carries
+            # a gid", must never compute a different sellable_online purely
+            # because of which key-matching path resolved the identifier).
+            #
+            # History: an earlier #944 follow-up here gated this proxy on
+            # `not ecom` (parent doc genuinely missing) specifically so a
+            # KNOWN DRAFT parent could never be reported sellable. #956
+            # (merged to main after that) proved that gate wrong against
+            # live data: once catalog_products rows carry their own sku, a
+            # KNOWN DRAFT parent whose gid-carrying variant IS actually
+            # ACTIVE on Shopify is common (Shopify's real status can lead
+            # IMS's local ecom.status) -- 27 live Ray-Ban Meta SKUs went
+            # silent to the oversell alarm under the `not ecom`-gated
+            # version. #956 deliberately errs toward ALERTING: a gid on a
+            # product's OWN variant means it was pushed, so it is treated as
+            # sellable for guard purposes even while ecom.status still says
+            # DRAFT. Only a staged-but-never-pushed DRAFT (no gid anywhere)
+            # stays silent. See _ecom_sellable's docstring for the full
+            # rationale.
             "sellable_online": _ecom_sellable(ecom)
             or bool(normalize_sku(var.get("shopify_variant_id"))),
             "online_stock": None,

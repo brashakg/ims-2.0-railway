@@ -1142,12 +1142,24 @@ def build_variant_seed_rows(
 
 
 def plan_variant_seed(
-    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]] = None,
+    *,
+    repair_only: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """The SIMULATED (dry-run) view of the seeding step: the exact rows that
     WOULD be applied to the new Shopify variants, with no gid yet (Shopify mints
-    those at create time). None when there is nothing to seed."""
-    rows = build_variant_seed_rows(product, variants)
+    those at create time). None when there is nothing to seed.
+
+    `repair_only=True` restricts the plan to the UNSEEDED subset
+    (build_repair_seed_rows) instead of every row -- the repair-only update
+    path (independent of SHOPIFY_PUSH_PRICE_ON_UPDATE) must never show/apply
+    a re-price for a row that already carries a stored gid."""
+    rows = (
+        build_repair_seed_rows(product, variants)
+        if repair_only
+        else build_variant_seed_rows(product, variants)
+    )
     if not rows:
         return None
     planned: List[Dict[str, Any]] = []
@@ -1164,6 +1176,85 @@ def plan_variant_seed(
             "variant is created (productVariantsBulkCreate)"
         ),
     }
+
+
+def _row_has_gid(v: Optional[Dict[str, Any]], ecom: Dict[str, Any]) -> bool:
+    """True when this ONE seed-row target already carries a stored gid: a real
+    IMS catalog_variants row's own shopify_variant_id/shopify_inventory_item_id,
+    or -- for the product-level pseudo-variant (v is None, a no-variant-row
+    product) -- the product's ecom fallback fields. Pure, row-level (never
+    aggregated across a product's other rows)."""
+    if v is not None:
+        return bool(
+            str(v.get("shopify_variant_id") or "").strip()
+            or str(v.get("shopify_inventory_item_id") or "").strip()
+        )
+    return bool(
+        str(ecom.get("shopify_variant_id") or "").strip()
+        or str(ecom.get("shopify_inventory_item_id") or "").strip()
+    )
+
+
+def _needs_repair(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> bool:
+    """True when AT LEAST ONE variant target of this product -- a real
+    catalog_variants row, or the product-level pseudo-variant for a
+    no-variant-row product -- has NEVER been seeded (carries no stored
+    shopify_variant_id / shopify_inventory_item_id anywhere).
+
+    "Never seeded" == the create-side seeding either never ran or its bulk
+    write failed for that specific row, so its Shopify variant still sits at
+    the auto-created 0.00 / no-SKU / no-stock-target.
+
+    ROW-aware, deliberately NOT `all(...)`/product-aware (panel fix-round,
+    #955): a multi-variant product where a PARTIAL bulk-create leaves some
+    rows seeded and others not (see _seed_variants_after_write's harvest of a
+    partially-successful productVariantsBulkCreate response) must still be
+    flagged for repair on every later push until EVERY row has a gid. The
+    earlier `not any(...)` formulation flipped False the moment ANY single
+    row acquired a gid, permanently masking the remaining stranded row(s)
+    from ever being retried without the owner globally re-arming
+    SHOPIFY_PUSH_PRICE_ON_UPDATE -- exactly the ~4,400-product blast radius
+    this repair-only mechanism exists to avoid. Pure.
+
+    Used to run REPAIR-only seeding on an UPDATE, INDEPENDENT of
+    SHOPIFY_PUSH_PRICE_ON_UPDATE. The caller pairs this with
+    build_repair_seed_rows / plan_variant_seed(repair_only=True) /
+    _seed_variants_after_write(repair_only=True) so ONLY the still-unseeded
+    row(s) are ever submitted for (re)seeding -- an already-seeded row is
+    never re-touched (re-priced/re-barcoded) by a repair pass."""
+    ecom = product.get("ecom") or {}
+    source: List[Optional[Dict[str, Any]]] = list(variants or []) or [None]
+    return any(not _row_has_gid(v, ecom) for v in source)
+
+
+def build_repair_seed_rows(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """Like build_variant_seed_rows, but restricted to the row(s) that have
+    NEVER been seeded (see _row_has_gid / _needs_repair). Used by the
+    repair-only update path so it can (re)seed a stranded variant WITHOUT
+    re-touching -- re-pricing, re-barcoding -- any row that already carries a
+    stored gid. Pure.
+
+    An already-fully-seeded product (every row/the pseudo-variant has a gid)
+    returns [] here even though build_variant_seed_rows(product, variants)
+    would still happily rebuild a full plan for it -- that full-reseed
+    behaviour is reserved for the CREATE path and the owner's explicit
+    SHOPIFY_PUSH_PRICE_ON_UPDATE opt-in, both of which call
+    build_variant_seed_rows directly instead of this function."""
+    ecom = product.get("ecom") or {}
+    source: List[Optional[Dict[str, Any]]] = list(variants or []) or [None]
+    unseeded = [v for v in source if not _row_has_gid(v, ecom)]
+    if not unseeded:
+        return []
+    # `unseeded` is either a sublist of real IMS variant dicts, or exactly
+    # [None] (the pseudo-variant case) -- both shapes are exactly what
+    # build_variant_seed_rows expects as its own `variants` argument (a bare
+    # [None] round-trips through its `list(variants or []) or [None]` guard
+    # identically to passing None/[] outright), so no special-casing needed.
+    return build_variant_seed_rows(product, unseeded)
 
 
 def _assign_seed_rows(
@@ -1273,6 +1364,8 @@ async def _seed_variants_after_write(
     variants: Optional[List[Dict[str, Any]]],
     product_gid: str,
     nodes: Optional[List[Dict[str, Any]]],
+    *,
+    repair_only: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """LIVE-only: give the freshly created Shopify variants their price / MRP /
     barcode / SKU, create any remaining IMS variant, and write every gid back --
@@ -1282,8 +1375,18 @@ async def _seed_variants_after_write(
     Fail-SOFT side channel, exactly like metafields: an error is reported in the
     returned summary and NEVER flips the product push's ok (the product itself
     was created successfully; a re-push repairs the variants). Returns None when
-    there is nothing to seed (no price and no SKU anywhere)."""
-    seed_rows = build_variant_seed_rows(product, variants)
+    there is nothing to seed (no price and no SKU anywhere).
+
+    `repair_only=True` (the flag-independent update path, #955 fix-round)
+    restricts `seed_rows` to build_repair_seed_rows' UNSEEDED subset instead
+    of every row -- so a row that already carries a stored gid can never be
+    re-priced/re-barcoded by a repair pass, and only the still-stranded
+    row(s) go through _assign_seed_rows' matching this call."""
+    seed_rows = (
+        build_repair_seed_rows(product, variants)
+        if repair_only
+        else build_variant_seed_rows(product, variants)
+    )
     if not seed_rows:
         return None
     update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
@@ -1333,7 +1436,15 @@ async def _seed_variants_after_write(
             err = _user_errors(body, "productVariantsBulkCreate")
             if err:
                 summary["errors"].append(err)
-                continue
+            # Harvest whatever the call DID create even on a partial-error
+            # response. productVariantsBulkCreate can return BOTH userErrors AND
+            # a non-empty productVariants list (some rows rejected, others
+            # created). The old `continue` on any error discarded that list, so
+            # the variants Shopify HAD created were orphaned: their
+            # ProductVariant / InventoryItem gids were never written back,
+            # leaving live variants IMS could neither re-price nor oversell-guard
+            # again. We now always read the returned nodes (empty on a total
+            # failure -> nothing harvested), then match + write them back below.
             made = (
                 (body.get("data") or {}).get("productVariantsBulkCreate") or {}
             ).get("productVariants") or []
@@ -1816,6 +1927,15 @@ async def push_product(
     # dry-run, upserted via metafieldsSet after a LIVE product write succeeds.
     metafields = build_product_metafields(product)
     action = "update" if existing_gid else "create"
+    # full_reseed: touch EVERY variant row (CREATE always does; an UPDATE only
+    # when the owner explicitly opted in). repair_only: an UPDATE that is NOT
+    # a full reseed, but at least one row/the pseudo-variant has never been
+    # seeded -- restricted to ONLY that unseeded subset (#955 fix-round:
+    # _needs_repair is ROW-aware so a partially-harvested product keeps
+    # getting a chance to finish, and build_repair_seed_rows/repair_only=True
+    # keep an already-seeded row from ever being re-touched by the repair).
+    full_reseed = action == "create" or price_on_update_enabled()
+    repair_only = (not full_reseed) and _needs_repair(product, variants)
 
     live, reason = _live_or_reason(db)
     if not live:
@@ -1829,11 +1949,15 @@ async def push_product(
             vp_plan = {"variants": vp_rows, "skipped_no_gid_or_price": vp_skipped}
         # The CREATE-side seeding plan (price + SKU for the variants Shopify will
         # mint) rides on the dry-run too, so the owner can SEE the money before
-        # anything goes live. On an update it only appears when the opt-in flag
-        # is on -- mirroring what the LIVE branch would actually do.
+        # anything goes live. On an update it appears when the opt-in flag is on
+        # (every row) OR when the product still needs repair (only the
+        # still-unseeded row(s)) -- mirroring exactly what the LIVE branch
+        # below would actually do.
         seed_plan = None
-        if action == "create" or price_on_update_enabled():
+        if full_reseed:
             seed_plan = plan_variant_seed(product, variants)
+        elif repair_only:
+            seed_plan = plan_variant_seed(product, variants, repair_only=True)
         return PushResult(
             mode=MODE_SIMULATED,
             entity="product",
@@ -1878,15 +2002,24 @@ async def push_product(
         # (the price push's handle) and the InventoryItem gid (the oversell-
         # guard stock write-back's target: catalog_variants.
         # shopify_inventory_item_id per row, ecom.shopify_inventory_item_id for
-        # a no-variant-row product). On an UPDATE this is skipped unless the
-        # owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE), so the ~4,400
-        # already-live products are never silently re-priced. Fail-soft.
+        # a no-variant-row product). On an UPDATE the FULL reseed only runs
+        # when the owner opts in (SHOPIFY_PUSH_PRICE_ON_UPDATE); otherwise a
+        # ROW-AWARE repair-only pass runs whenever ANY row still lacks a gid
+        # (_needs_repair), restricted to ONLY that unseeded subset
+        # (repair_only=True -> build_repair_seed_rows) so an already-seeded
+        # row can never be re-priced/re-touched by the repair (#955
+        # fix-round: the previous product-wide any-gid check permanently
+        # masked a partially-harvested product's remaining stranded row from
+        # ever being retried). A fully-seeded product is left untouched, so
+        # the ~4,400 already-live products are never silently re-priced.
+        # Idempotent + fail-soft.
         seed_summary = None
         seeded = False
-        if new_gid and (action == "create" or price_on_update_enabled()):
+        if new_gid and (full_reseed or repair_only):
             variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
             seed_summary = await _seed_variants_after_write(
-                db, product, variants, new_gid, variant_nodes
+                db, product, variants, new_gid, variant_nodes,
+                repair_only=repair_only,
             )
             seeded = seed_summary is not None
             if seed_summary and seed_summary.get("default_variant_gid") and pid:

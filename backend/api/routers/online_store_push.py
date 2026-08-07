@@ -39,6 +39,7 @@ zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -106,6 +107,14 @@ def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
                 "entity_id": result.get("target_id"),
                 "user_id": current_user.get("user_id"),
                 "severity": severity,
+                # Stamp `timestamp` (the field the rest of audit_logs + its
+                # (action, timestamp) compound index sort on -- see
+                # database/connection.ensure_indexes). AuditRepository.create
+                # only sets created_at/updated_at, so without this every
+                # ONLINE_STORE_PUSH row was invisible to the timestamp-sorted
+                # Activity Log views AND forced the history read (below) onto an
+                # unindexed created_at sort. Set to the audit-write instant.
+                "timestamp": datetime.now(),
                 "details": {
                     "mode": mode,
                     "push_action": result.get("action"),
@@ -255,6 +264,28 @@ async def push_status(
     return {"mode": mode, "db_connected": True, "counts": counts}
 
 
+def _audit_collection_is_real_mongo(audit) -> bool:
+    """True when the audit repo's underlying collection is a real pymongo
+    Collection, False for the in-memory MockCollection used in no-DB / test
+    mode. Discriminator: a real pymongo Collection exposes `.database`
+    (the Database it belongs to); MockCollection carries no such attribute --
+    the SAME discriminator AuditRepository.create() already relies on via
+    `getattr(self.collection, "database", None)`.
+
+    Why this matters here: MockCollection's `_matches_filter` does dict
+    equality on the filter's literal keys, so a Mongo dot-notation key like
+    `"details.mode"` is looked up as ONE flat key `doc.get("details.mode")` --
+    which is never present on a doc that actually stores a nested `details`
+    dict. It does not raise; it just silently matches nothing. Pushing the
+    mode/ok filters into the query is therefore ONLY safe on a real pymongo
+    collection; the Mock path keeps the pre-existing over-fetch + Python
+    post-filter. Fail-soft -> False (falls back to the safe path)."""
+    try:
+        return getattr(getattr(audit, "collection", None), "database", None) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @router.get("/history")
 async def push_history(
     limit: int = 50,
@@ -272,11 +303,30 @@ async def push_history(
     history surface at all: the Activity Log page is SUPERADMIN-only).
 
     Filters: `mode` (LIVE|SIMULATED), `ok` (true/false), `entity` (product /
-    collection / menu / image / variant-prices). The details.* filters are
-    applied in Python -- portable across the in-memory MockCollection, which
-    does not model dot-notation queries. READ-ONLY: the ledger stays
-    append-only; nothing here mutates audit rows. Fail-soft: no audit store ->
-    an empty, honest `available: false` payload, never a 500."""
+    collection / menu / image / variant-prices).
+
+    On a REAL Mongo deployment the mode/ok filters are pushed straight into
+    the query (`details.mode` / `details.ok`) so a filtered view (e.g.
+    "Failures only") sees the WHOLE ledger -- previously they were applied in
+    Python AFTER a flat 500-row over-fetch, so a filter went blind past
+    whatever sat outside the newest 500 rows (a busy ledger could hide every
+    older failure from the "Failures" view). The in-memory MockCollection
+    (tests / no-DB mode) does not understand dot-notation queries, so it keeps
+    the original over-fetch-then-filter-in-Python path -- harmless there since
+    test fixtures are always small. The Python filter still runs afterward
+    either way, as a redundant safety net.
+
+    Sorted on `timestamp` (stamped by _write_audit on every row), which rides
+    the existing `(action, timestamp)` compound index every other audit_logs
+    reader already relies on (database/connection.py ensure_indexes) --
+    previously sorted on the unindexed `created_at`, an full-ledger-scan sort
+    that only got slower as the ledger grew.
+
+    READ-ONLY: the ledger stays append-only; nothing here mutates audit rows.
+    Fail-soft: no audit store, OR the query itself failing, both resolve to
+    the SAME honest `available: false` payload -- a query error is explicitly
+    NOT treated as "the ledger is genuinely empty" (that would misreport a
+    real read failure as "nothing has ever been pushed")."""
     limit = max(1, min(int(limit), 200))
     try:
         from ..dependencies import get_audit_repository
@@ -287,17 +337,28 @@ async def push_history(
     if audit is None:
         return {"entries": [], "count": 0, "available": False}
 
+    want_mode = mode.strip().upper() if mode else None
+    real_mongo = _audit_collection_is_real_mongo(audit)
+
     flt: Dict[str, Any] = {"action": "ONLINE_STORE_PUSH"}
     if entity:
         flt["entity_type"] = entity.strip().lower()
-    # Over-fetch when a details filter is active (the filter is post-hoc).
-    fetch_n = limit if (mode is None and ok is None) else 500
-    try:
-        rows = audit.find_many(flt, sort=[("created_at", -1)], limit=fetch_n)
-    except Exception:  # noqa: BLE001
-        rows = []
+    if real_mongo:
+        if want_mode:
+            flt["details.mode"] = want_mode
+        if ok is not None:
+            flt["details.ok"] = bool(ok)
+        fetch_n = limit
+    else:
+        # Over-fetch when a details filter is active (the filter is post-hoc
+        # on this path -- Mock cannot evaluate the dot-notation keys above).
+        fetch_n = limit if (want_mode is None and ok is None) else 500
 
-    want_mode = mode.strip().upper() if mode else None
+    try:
+        rows = audit.find_many(flt, sort=[("timestamp", -1)], limit=fetch_n)
+    except Exception:  # noqa: BLE001
+        return {"entries": [], "count": 0, "available": False}
+
     entries: List[Dict[str, Any]] = []
     for r in rows:
         d = r.get("details") or {}
@@ -307,7 +368,10 @@ async def push_history(
             continue
         entries.append(
             {
-                "timestamp": r.get("created_at"),
+                # `timestamp` is stamped going forward; a row written before
+                # this change falls back to `created_at` so older ledger
+                # entries still render a date instead of null.
+                "timestamp": r.get("timestamp") or r.get("created_at"),
                 "user_id": r.get("user_id"),
                 "entity": r.get("entity_type"),
                 "target_id": r.get("entity_id"),
@@ -379,7 +443,9 @@ async def push_all_pending(
     default all). `limit` caps the total number of pushes in one sweep (a safety
     valve against a runaway batch); when the cap is hit `limit_reached` is True
     and the caller should run again to continue (OS-046 -- the FE surfaces it).
-    `offset` pages the variant-prices resync ONLY (see below).
+    `offset` pages the variant-prices resync ONLY (see below); it is REJECTED
+    (400) whenever more than one entity is selected alongside it -- see the
+    guard below for why.
 
     `variant-prices` is an OPT-IN extra entity (NOT in the default set): a
     normal product push already carries the variant price/barcode side channel,
@@ -411,6 +477,32 @@ async def push_all_pending(
         )
         if e.strip()
     }
+
+    # Combined-entity offset guard (#950 follow-up OS-017-adjacent): `offset`
+    # only has meaning for the variant-prices resync's OWN eligible-set walk.
+    # When another entity shares the call, THAT entity's per-doc pushes consume
+    # `limit` slots first (the sweep order below runs products before
+    # variant-prices), so the variant-prices loop can hit its `len(results) >=
+    # limit` break at `processed == 0` -- returning `next_offset == offset`.
+    # A caller that naively loops "call again with next_offset until null"
+    # spins forever, never advancing and never reaching the entities that DID
+    # have slots. Reject the combination outright rather than silently
+    # returning a call that looks like progress but makes none; a caller that
+    # wants a paged variant-prices resync must run it alone
+    # (?entities=variant-prices), exactly like the FE's sync-page loop already
+    # does. This also sidesteps the second reported risk -- a positional
+    # offset can skip a doc if the mapped set mutates between calls -- for the
+    # multi-entity case, since that path no longer accepts offset>0 at all.
+    if offset > 0 and len(selected) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "offset paging is only valid with a single entity selected "
+                "(e.g. ?entities=variant-prices&offset=...) -- combining it "
+                "with other entities can starve the paged walk of its limit "
+                "budget and never advance"
+            ),
+        )
 
     mode = shopify_push.push_mode_status(db)
     results: List[Dict[str, Any]] = []
