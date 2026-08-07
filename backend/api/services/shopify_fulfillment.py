@@ -14,6 +14,16 @@ CONTRACT:
   * NEVER regress a terminal status: a DELIVERED / CANCELLED / REFUNDED order is
     not knocked back to SHIPPED by a late fulfilment event.
   * HISTORICAL import orders (bvi_import) are skipped (settled outside IMS books).
+  * Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): while an order still
+    carries an active hold (rx_pending / fulfillment_hold), the terminal lifecycle
+    flip to SHIPPED/DELIVERED is WITHHELD -- Shopify Admin (or any connected
+    fulfilment app) marking the order Fulfilled must NOT be able to silently
+    complete a held spectacle order behind the deliver-guard's back
+    (orders.py mark_ready/deliver_order, shipping.py book_shipment all reject
+    it). The webhook is NOT blocked -- tracking / fulfillment_status /
+    shipment_status still land -- only order.status stays where it was, and a
+    follow-up task is (re)raised so staff see the conflict. Released once
+    ADMIN/SUPERADMIN clears the hold via clear-rx-hold.
 
 PUBLIC API:
     reconcile_fulfillment(db, payload, *, topic=None) -> dict
@@ -47,6 +57,38 @@ _TERMINAL_STATUSES = {"DELIVERED", "CANCELLED", "REFUNDED", "VOID", "VOIDED"}
 
 def _norm(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _raise_hold_conflict_task(db, order: Dict[str, Any], *, source: str) -> None:
+    """Best-effort: (re)raise the Rx-hold follow-up task so staff see why this
+    webhook could NOT complete the order's fulfilment lifecycle. Reuses the SAME
+    idempotent task-raiser ingest already uses (services.online_rx_hold.
+    raise_rx_hold_task -> the canonical ``tasks`` collection) -- a call for an
+    order that already carries the task (the normal case; ingest raised it when
+    the hold was first stamped) is a no-op. Never raises -- a task-side failure
+    must never break the webhook drain loop."""
+    try:
+        from .online_rx_hold import raise_rx_hold_task
+
+        raise_rx_hold_task(
+            db,
+            order_id=order.get("order_id"),
+            order_ref=order.get("order_number") or order.get("order_id"),
+            store_id=order.get("store_id"),
+            channel=str(order.get("channel") or "ONLINE"),
+            evaluation={
+                "reasons": order.get("rx_hold_reasons") or [],
+                "lines": [],
+                "detail": order.get("rx_hold_reason") or "",
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[%s] rx-hold conflict task raise skipped for order=%s",
+            source,
+            order.get("order_id"),
+            exc_info=True,
+        )
 
 
 def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
@@ -125,13 +167,35 @@ def reconcile_fulfillment(
         if shipment_status:
             update["shipment_status"] = shipment_status
 
-        # Advance the lifecycle status -- but NEVER regress a terminal one.
+        # Advance the lifecycle status -- but NEVER regress a terminal one, and
+        # NEVER silently flip a HELD (Rx flag-and-hold) order to SHIPPED/
+        # DELIVERED via a webhook -- that would bypass the deliver-guard and the
+        # ADMIN/SUPERADMIN-only clear-rx-hold release path entirely (see module
+        # docstring). Tracking / fulfillment_status / shipment_status above are
+        # written regardless; only the terminal status flip is withheld.
         current_status = _norm(order.get("status")).upper()
-        if current_status not in _TERMINAL_STATUSES:
+        would_advance = shipment_status in _DELIVERED_SHIPMENT or (
+            ful_status == "FULFILLED" or tracking_number
+        )
+        held = False
+        if current_status not in _TERMINAL_STATUSES and would_advance:
+            from ..routers.orders import order_has_active_rx_hold
+
+            held = order_has_active_rx_hold(order)
+        if current_status not in _TERMINAL_STATUSES and not held:
             if shipment_status in _DELIVERED_SHIPMENT:
                 update["status"] = "DELIVERED"
             elif ful_status == "FULFILLED" or tracking_number:
                 update["status"] = "SHIPPED"
+        elif held:
+            logger.warning(
+                "[SHOPIFY_FULFILL] order=%s is on an active Rx hold -- withheld "
+                "the lifecycle flip to SHIPPED/DELIVERED (tracking still "
+                "recorded). Clear the hold via clear-rx-hold to let fulfilment "
+                "complete.",
+                order.get("order_id"),
+            )
+            _raise_hold_conflict_task(db, order, source="SHOPIFY_FULFILL")
 
         try:
             coll = db.get_collection("orders")

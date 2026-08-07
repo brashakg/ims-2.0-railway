@@ -772,6 +772,138 @@ def test_fulfillment_unknown_order_fails_soft(wired):
     assert res["status"] == "order_not_found"  # no crash
 
 
+# ---------------------------------------------------------------------------
+# fulfillments/update -- Rx flag-and-hold guard (fix-round: PR #953 adversarial
+# review found this webhook path could silently flip a HELD spectacle order to
+# DELIVERED/SHIPPED with zero rx_pending/fulfillment_hold awareness, bypassing
+# the orders.py/shipping.py deliver-guard entirely -- anyone with Shopify Admin
+# access marking the order Fulfilled would trigger it, no IMS role check at
+# all. The webhook must still land (tracking data), only the terminal status
+# flip is withheld while the hold is active.
+# ---------------------------------------------------------------------------
+
+
+def test_fulfillment_delivered_withheld_on_active_hold(wired):
+    """A held order's status is NOT advanced to DELIVERED by a
+    fulfillments/create|update webhook -- tracking still lands."""
+    order = _seed_online_order(wired)
+    order["rx_pending"] = True
+    order["fulfillment_hold"] = True
+    wired["orders"].update_one(
+        {"order_id": "ord-abc"},
+        {"$set": {"rx_pending": True, "fulfillment_hold": True}},
+    )
+    from api.services.shopify_fulfillment import reconcile_fulfillment
+
+    payload = {
+        "id": 88883,
+        "order_id": 5001,
+        "status": "success",
+        "shipment_status": "delivered",
+        "tracking_number": "AWB-HELD-1",
+    }
+    res = reconcile_fulfillment(wired["db"], payload, topic="fulfillments/update")
+    assert res["status"] == "reconciled"
+    # order_status in the result must NOT be DELIVERED (withheld).
+    assert res["order_status"] != "DELIVERED"
+
+    saved = wired["orders"].find_one({"shopify_order_id": "5001"})
+    assert saved["status"] == "CONFIRMED"  # unchanged from the seed
+    # Tracking data still landed -- the webhook itself was not blocked.
+    assert saved["awb"] == "AWB-HELD-1"
+    assert saved["fulfillment_status"] == "FULFILLED"
+    # Hold flags remain untouched (only clear-rx-hold may clear them).
+    assert saved["rx_pending"] is True
+    assert saved["fulfillment_hold"] is True
+
+
+def test_fulfillment_shipped_withheld_on_active_hold(wired):
+    """Same guard applies to the SHIPPED flip (fulfilled + tracking, no
+    delivered shipment_status yet)."""
+    _seed_online_order(wired)
+    wired["orders"].update_one(
+        {"order_id": "ord-abc"}, {"$set": {"fulfillment_hold": True}}
+    )
+    from api.services.shopify_fulfillment import reconcile_fulfillment
+
+    payload = {
+        "id": 88884,
+        "order_id": 5001,
+        "status": "success",
+        "tracking_number": "AWB-HELD-2",
+    }
+    res = reconcile_fulfillment(wired["db"], payload, topic="fulfillments/update")
+    assert res["order_status"] != "SHIPPED"
+    saved = wired["orders"].find_one({"shopify_order_id": "5001"})
+    assert saved["status"] == "CONFIRMED"
+    assert saved["awb"] == "AWB-HELD-2"
+
+
+def test_fulfillment_raises_conflict_task_when_withheld(wired):
+    """Withholding the flip (re)raises the SAME idempotent Rx-hold task ingest
+    uses, so staff see why fulfilment did not complete."""
+    _seed_online_order(wired)
+    wired["orders"].update_one(
+        {"order_id": "ord-abc"},
+        {"$set": {"rx_pending": True, "fulfillment_hold": True, "rx_hold_reasons": ["RX_MISSING"]}},
+    )
+    from api.services.shopify_fulfillment import reconcile_fulfillment
+
+    payload = {
+        "id": 88885,
+        "order_id": 5001,
+        "status": "success",
+        "shipment_status": "delivered",
+    }
+    reconcile_fulfillment(wired["db"], payload, topic="fulfillments/update")
+    tasks = wired["db"].get_collection("tasks")
+    row = tasks.find_one({"order_id": "ord-abc", "task_type": "online_rx_hold"})
+    assert row is not None
+    assert row["status"] == "PENDING"
+
+
+def test_fulfillment_delivered_proceeds_after_hold_cleared(wired):
+    """A released order (both flags False, as clear-rx-hold leaves them)
+    advances to DELIVERED normally on the next webhook."""
+    _seed_online_order(wired)
+    wired["orders"].update_one(
+        {"order_id": "ord-abc"},
+        {"$set": {"rx_pending": False, "fulfillment_hold": False, "rx_hold_cleared": True}},
+    )
+    from api.services.shopify_fulfillment import reconcile_fulfillment
+
+    payload = {
+        "id": 88886,
+        "order_id": 5001,
+        "status": "success",
+        "shipment_status": "delivered",
+        "tracking_number": "AWB-CLEARED",
+    }
+    res = reconcile_fulfillment(wired["db"], payload, topic="fulfillments/update")
+    assert res["order_status"] == "DELIVERED"
+    saved = wired["orders"].find_one({"shopify_order_id": "5001"})
+    assert saved["status"] == "DELIVERED"
+
+
+def test_fulfillment_non_held_order_unaffected(wired):
+    """Sanity: a normal (never-held) order is completely unaffected by the new
+    guard -- identical behaviour to the pre-existing tests above."""
+    _seed_online_order(wired)
+    from api.services.shopify_fulfillment import reconcile_fulfillment
+
+    payload = {
+        "id": 88887,
+        "order_id": 5001,
+        "status": "success",
+        "shipment_status": "delivered",
+        "tracking_number": "AWB-NORMAL",
+    }
+    res = reconcile_fulfillment(wired["db"], payload, topic="fulfillments/update")
+    assert res["order_status"] == "DELIVERED"
+    saved = wired["orders"].find_one({"shopify_order_id": "5001"})
+    assert saved["status"] == "DELIVERED"
+
+
 # ===========================================================================
 # customers/create + customers/update
 # ===========================================================================

@@ -388,6 +388,51 @@ def validate_status_transition(current: str, target: str) -> bool:
     return target in allowed
 
 
+# ---------------------------------------------------------------------------
+# Clinical Rx FLAG-AND-HOLD delivery guard (enforcement half of the online
+# flag-and-hold policy). PR #947 shipped the VISIBLE + RELEASABLE half (the
+# hold chip + the ADMIN/SUPERADMIN clear-rx-hold route) and explicitly deferred
+# this ENFORCEMENT half.
+#
+# An online spectacle-lens order booked without a valid, customer-matching,
+# non-expired prescription is stamped ``rx_pending`` + ``fulfillment_hold`` at
+# ingest (owner decision 2026-06-30, services/online_rx_hold.py). Such an order
+# must NOT be advanced to READY / DELIVERED / FULFILLED until the hold is
+# cleared -- otherwise a spectacle sale could be dispensed / shipped with no
+# prescription on file. The hold is released by ADMIN/SUPERADMIN via
+# POST /api/v1/online-store/orders/{order_id}/clear-rx-hold, which sets BOTH
+# flags back to False; a released (or never-held) order therefore passes here.
+# ---------------------------------------------------------------------------
+
+# Plain-English 400 message shown to staff (ASCII only -- Windows cp1252).
+RX_HOLD_BLOCK_DETAIL = (
+    "This order is on Rx hold - clear the hold before marking it "
+    "delivered/ready."
+)
+
+
+def order_has_active_rx_hold(order: Optional[dict]) -> bool:
+    """True when an order still carries an ACTIVE clinical Rx flag-and-hold.
+
+    Mirrors the release-side predicate in
+    ``online_store_orders.clear_rx_hold``: an order is held while EITHER
+    ``rx_pending`` OR ``fulfillment_hold`` is truthy. Clearing the hold sets
+    both to False, so a released order returns False and advances normally; a
+    normal (never-held) order also returns False. Tolerant of a missing/None
+    order (returns False)."""
+    if not order:
+        return False
+    return bool(order.get("rx_pending") or order.get("fulfillment_hold"))
+
+
+def assert_no_active_rx_hold(order: Optional[dict]) -> None:
+    """Reject (400) any advance to READY / DELIVERED / FULFILLED on an order
+    that still carries an active Rx flag-and-hold. No-op for a non-held (or
+    cleared) order, so it never blocks normal fulfillment."""
+    if order_has_active_rx_hold(order):
+        raise HTTPException(status_code=400, detail=RX_HOLD_BLOCK_DETAIL)
+
+
 class PaymentMethod(str, Enum):
     CASH = "CASH"
     UPI = "UPI"
@@ -3129,6 +3174,13 @@ async def superadmin_invoice_change(
                 f"(order edit on invoice {original_invoice})",
                 ref=note_doc["note_number"],
                 current_user=current_user,
+                # GSTR-1 CDNR tax reversal (PR #945 P3): pass the note's ALREADY-
+                # COMPUTED taxable / tax split through so this fee-less credit
+                # note (gross == net) reports its true output-tax reversal in the
+                # CDNR loop instead of deriving 0 from gross-minus-net. Reuse the
+                # existing figures -- never recompute tax here.
+                taxable=note_doc["taxable_amount"],
+                tax=note_doc["tax_amount"],
                 # GSTR-1 CDNR head consistency (money-panel round 2): this
                 # type=ISSUED ledger row reaches the CDNR loop, so it must
                 # reverse under the SAME CGST/SGST-vs-IGST head its parent
@@ -3908,6 +3960,10 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
         # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
         validate_store_access(order.get("store_id"), current_user)
 
+        # Clinical Rx FLAG-AND-HOLD: a held spectacle order (missing Rx) may not
+        # advance to READY until an admin clears the hold (400 otherwise).
+        assert_no_active_rx_hold(order)
+
         if not validate_status_transition(order.get("status", ""), "READY"):
             raise HTTPException(
                 status_code=400,
@@ -3939,6 +3995,10 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
         # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
         validate_store_access(order.get("store_id"), current_user)
+
+        # Clinical Rx FLAG-AND-HOLD: a held spectacle order (missing Rx) may not
+        # be delivered until an admin clears the hold (400 otherwise).
+        assert_no_active_rx_hold(order)
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(

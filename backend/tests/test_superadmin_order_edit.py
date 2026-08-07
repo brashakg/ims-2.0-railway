@@ -522,6 +522,49 @@ def test_post_invoice_credit_note_unflagged_parent_stays_unstamped(
     assert "interstate" not in issued[-1]
 
 
+def test_post_invoice_credit_note_passes_through_taxable_and_tax(
+    client, auth_headers, wired
+):
+    """PR #945 P3: the superadmin CREDIT_NOTE path must pass the note's
+    ALREADY-COMPUTED taxable / tax split into _issue_store_credit so the GSTR-1
+    CDNR loop reports a NON-ZERO tax reversal. Before the fix the call omitted
+    them, so a fee-less note (gross == net) derived tax 0.
+
+    Seed FRAME @ 1000 inclusive 5% (tax 47.62); reduce to 800 (tax 38.10):
+      delta amount = 200; note tax = |38.10 - 47.62| = 9.52; taxable = 190.48.
+    The ISSUED store-credit ledger row (what the CDNR loop reads) must carry
+    exactly those figures, reused -- never recomputed."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0011")
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={
+            "mode": "CREDIT_NOTE",
+            "reason": "Overcharged; refund the difference",
+            "items": [_edit_item(unit_price=800.0)],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    issued = [
+        d
+        for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("type") == "ISSUED"
+    ]
+    assert issued, "store-credit ISSUED row must be booked"
+    row = issued[-1]
+    # The real reversal is NON-ZERO and matches the note's split.
+    assert row.get("tax") == 9.52
+    assert row.get("taxable") == 190.48
+    # Cross-check against the persisted note doc (single source of the figures).
+    note = next(
+        d
+        for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("note_type") == "CREDIT_NOTE"
+    )
+    assert row.get("tax") == note["tax_amount"]
+    assert row.get("taxable") == note["taxable_amount"]
+
+
 def test_post_invoice_debit_note_on_increase(client, auth_headers, wired):
     _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0003")
     resp = client.put(
