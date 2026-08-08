@@ -174,6 +174,14 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // Single transfer, fresh from the server: {transfer: {...}}. Used to
+  // re-verify the lifecycle status right before a destructive action (cancel)
+  // so a stale tab can never act on an out-of-date state.
+  getTransfer: async (transferId: string) => {
+    const response = await api.get(`/transfers/${transferId}`);
+    return response.data;
+  },
+
   // Stock Aging / Non-Moving Report
   getAgingReport: async (storeId: string, params?: { category?: string; classification?: string; min_days?: number }) => {
     const response = await api.get('/inventory/aging', { params: { store_id: storeId, ...params } });

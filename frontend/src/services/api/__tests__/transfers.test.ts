@@ -23,10 +23,21 @@ import api from '../client';
 import { inventoryApi } from '../inventory';
 
 const mockPost = api.post as unknown as ReturnType<typeof vi.fn>;
+const mockGet = api.get as unknown as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockPost.mockResolvedValue({ data: { transfer: {} } });
+  mockGet.mockResolvedValue({ data: { transfer: {} } });
+});
+
+describe('inventoryApi.getTransfer — fresh single-transfer read', () => {
+  it('GETs /transfers/{id} and returns the envelope', async () => {
+    mockGet.mockResolvedValue({ data: { transfer: { id: 'trf_1', status: 'packed' } } });
+    const res = await inventoryApi.getTransfer('trf_1');
+    expect(mockGet).toHaveBeenCalledWith('/transfers/trf_1');
+    expect(res.transfer.status).toBe('packed');
+  });
 });
 
 describe('inventoryApi.createTransfer — create payload', () => {

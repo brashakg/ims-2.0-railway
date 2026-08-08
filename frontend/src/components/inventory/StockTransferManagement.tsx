@@ -35,6 +35,7 @@ import { inventoryApi } from '../../services/api';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import * as gates from './transferPermissions';
+import { cancelWithFreshCheck } from './transferCancelGuard';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 // Which sub-flow the details modal is showing.
@@ -280,14 +281,47 @@ export function StockTransferManagement() {
   const handleComplete = (t: Transfer) =>
     runAction(() => inventoryApi.completeTransfer(t.id), 'Transfer completed');
 
-  const handleCancel = (t: Transfer) => {
+  // Cancel goes through the fresh-state guard: the transfer is re-fetched and
+  // the canCancel gate re-run on the SERVER's current doc before the POST is
+  // sent. A tab left open through a ship+receive cycle in another session can
+  // therefore never cancel a transfer whose stock has already moved — the
+  // stale click gets a toast + refresh instead of a POST.
+  const handleCancel = async (t: Transfer) => {
     const reason = window.prompt('Reason for cancelling this transfer?');
     if (!reason || !reason.trim()) return;
-    return runAction(
-      () => inventoryApi.cancelTransfer(t.id, reason.trim()),
-      'Transfer cancelled',
-      { close: true },
-    );
+    setActionLoading(true);
+    try {
+      const result = await cancelWithFreshCheck({
+        actor,
+        transferId: t.id,
+        reason: reason.trim(),
+        getTransfer: (id) => inventoryApi.getTransfer(id),
+        cancelTransfer: (id, r) => inventoryApi.cancelTransfer(id, r),
+      });
+      if (result.ok) {
+        toast.success('Transfer cancelled');
+        await loadTransfers();
+        closeDetails();
+      } else if (result.reason === 'stale_not_cancellable') {
+        toast.error(
+          `This transfer can no longer be cancelled - its status is now "${result.freshStatus}". Refreshing.`,
+        );
+        // Re-render the modal from the fresh server doc so the buttons re-gate.
+        if (result.freshTransfer) {
+          setSelectedTransfer(result.freshTransfer as unknown as Transfer);
+        }
+        setActionMode('view');
+        await loadTransfers();
+      } else {
+        toast.error(
+          'Could not verify the current transfer status - cancel was NOT sent. Please try again.',
+        );
+      }
+    } catch (error: any) {
+      toast.error(errMsg(error));
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const setLine = (key: string, patch: Partial<{ received: number; damaged: number }>) => {
