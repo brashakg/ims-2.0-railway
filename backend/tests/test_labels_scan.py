@@ -163,7 +163,10 @@ class TestScanAdvanceAuth:
 
 
 def test_scan_advance_success(client, auth_headers, patch_repo):
-    repo = patch_repo([_mk_job("j1", "PENDING")])
+    # PENDING -> IN_PROGRESS clears the sales-confirm gate (fitting confirmed).
+    repo = patch_repo(
+        [_mk_job("j1", "PENDING", fitting_details={"confirmed_by_sales": True})]
+    )
     resp = client.post(
         "/api/v1/workshop/jobs/j1/scan-advance",
         headers=auth_headers,
@@ -224,8 +227,8 @@ def test_scan_advance_wrong_station(client, auth_headers, patch_repo):
 
 
 def test_scan_advance_right_station(client, auth_headers, patch_repo):
-    """COMPLETED job at the QC station correctly advances to READY."""
-    repo = patch_repo([_mk_job("j1", "COMPLETED")])
+    """COMPLETED job that PASSED QC, at the QC station, advances to READY."""
+    repo = patch_repo([_mk_job("j1", "COMPLETED", qc_passed=True)])
     resp = client.post(
         "/api/v1/workshop/jobs/j1/scan-advance",
         headers=auth_headers,
@@ -235,6 +238,92 @@ def test_scan_advance_right_station(client, auth_headers, patch_repo):
     assert body["ok"] is True
     assert body["stage"] == "READY"
     assert repo.find_by_id("j1")["status"] == "READY"
+
+
+def test_scan_advance_completed_without_qc_rejected(client, auth_headers, patch_repo):
+    """PATIENT SAFETY: a COMPLETED lens job with NO QC pass/waiver scanned toward
+    READY (the QC station) must be REJECTED and its status held -- an unverified
+    prescription lens must never reach the patient-pickup shelf via a scan."""
+    repo = patch_repo([_mk_job("j1", "COMPLETED")])  # qc_passed / qc_waived absent
+    resp = client.post(
+        "/api/v1/workshop/jobs/j1/scan-advance",
+        headers=auth_headers,
+        json={"scanned_code": "WS-j1", "station": "QC"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["reason"] == "QC_REQUIRED"
+    assert "QC" in body["message"]
+    # HELD -- status unchanged, no scan_history appended.
+    held = repo.find_by_id("j1")
+    assert held["status"] == "COMPLETED"
+    assert not held.get("scan_history")
+
+
+def test_scan_advance_completed_with_qc_waiver_allowed(client, auth_headers, patch_repo):
+    """The SAME COMPLETED job, once QC is explicitly waived, IS allowed to READY."""
+    repo = patch_repo([_mk_job("j1", "COMPLETED", qc_waived=True)])
+    resp = client.post(
+        "/api/v1/workshop/jobs/j1/scan-advance",
+        headers=auth_headers,
+        json={"scanned_code": "WS-j1", "station": "QC"},
+    )
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["stage"] == "READY"
+    assert repo.find_by_id("j1")["status"] == "READY"
+
+
+def test_scan_advance_in_progress_without_sales_confirm_rejected(
+    client, auth_headers, patch_repo
+):
+    """A PENDING job may NOT start work (-> IN_PROGRESS) via a scan until sales
+    have confirmed the fitting (power + product correct)."""
+    repo = patch_repo([_mk_job("j1", "PENDING")])  # no fitting_details.confirmed_by_sales
+    resp = client.post(
+        "/api/v1/workshop/jobs/j1/scan-advance",
+        headers=auth_headers,
+        json={"scanned_code": "WS-j1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["reason"] == "SALES_CONFIRM_REQUIRED"
+    # HELD -- job did not start.
+    assert repo.find_by_id("j1")["status"] == "PENDING"
+
+
+def test_scan_advance_in_progress_external_lens_without_dc_rejected(
+    client, auth_headers, patch_repo, monkeypatch
+):
+    """An external-lab (ORDERED) lens job with the sales gate cleared but NO
+    Delivery Challan on file must be held at the F9 DC hardlock on a scan."""
+    from api.routers import labels as labels_module
+
+    # db=None -> the F9 lock defaults ON with no DC -> block (fail-closed).
+    monkeypatch.setattr(labels_module, "get_db", lambda: None)
+    repo = patch_repo(
+        [
+            _mk_job(
+                "j1",
+                "PENDING",
+                fitting_details={"confirmed_by_sales": True},
+                lens_status="ORDERED",
+                lens_details={"product_id": "LENS-SKU-1"},
+            )
+        ]
+    )
+    resp = client.post(
+        "/api/v1/workshop/jobs/j1/scan-advance",
+        headers=auth_headers,
+        json={"scanned_code": "WS-j1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["reason"] == "DC_REQUIRED"
+    assert repo.find_by_id("j1")["status"] == "PENDING"
 
 
 def test_scan_advance_not_found(client, auth_headers, patch_repo):

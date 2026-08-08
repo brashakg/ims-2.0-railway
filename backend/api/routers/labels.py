@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    get_db,
     get_workshop_repository,
     get_prescription_repository,
     get_product_repository,
@@ -220,7 +221,10 @@ async def scan_advance(
     return 200 rather than 4xx so the scan box can render a rich in-page
     error without axios swallowing the body.)
 
-    reasons: NOT_FOUND, WRONG_JOB, TERMINAL_STAGE, WRONG_STATION, WRITE_FAILED
+    reasons: NOT_FOUND, WRONG_JOB, TERMINAL_STAGE, WRONG_STATION, WRITE_FAILED,
+             and the patient-safety gate holds SALES_CONFIRM_REQUIRED /
+             DC_REQUIRED (-> IN_PROGRESS) and QC_REQUIRED (-> READY), which mirror
+             the manager status-PATCH gates via workshop.evaluate_scan_transition_gate.
     success: {ok: true, job_id, previous, stage, station, stamped_at}
     """
     repo = get_workshop_repository()
@@ -303,6 +307,35 @@ async def scan_advance(
                 "got": target,
                 "station": station,
             }
+
+    # PATIENT-SAFETY GATES: a barcode scan must clear the SAME gates the
+    # manager-facing workshop status PATCH enforces before it may flip the
+    # status. Without this, a COMPLETED lens scanned at the QC station lands
+    # READY (patient pickup) with ZERO QC record, and a job starts work
+    # (-> IN_PROGRESS) without sales confirming the fitting or the external-lab
+    # Delivery Challan hardlock. Delegated to the shared scan gate in workshop.py
+    # (single source of truth) so this label-scan path can never drift from the
+    # PATCH gate. A blocked gate is a HOLD: no state change, loud ok=false.
+    from .workshop import evaluate_scan_transition_gate, SCAN_GATE_MESSAGES
+
+    try:
+        db = get_db()
+    except Exception as e:  # noqa: BLE001 -- fail-soft; DC lookup falls back to lock-ON
+        logger.warning("[LABELS] scan-advance db handle unavailable: %s", e)
+        db = None
+    gate_block = evaluate_scan_transition_gate(db, job, target)
+    if gate_block is not None:
+        return {
+            "ok": False,
+            "reason": gate_block,
+            "message": SCAN_GATE_MESSAGES.get(
+                gate_block, "This job is not ready for that step yet."
+            ),
+            "expected": target,
+            "got": current,
+            "stage": current,
+            "station": station,
+        }
 
     now = datetime.now()
     operator = current_user.get("user_id")
