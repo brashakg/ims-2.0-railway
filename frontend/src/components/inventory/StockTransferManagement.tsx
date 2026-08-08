@@ -34,6 +34,7 @@ import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
+import * as gates from './transferPermissions';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 // Which sub-flow the details modal is showing.
@@ -79,23 +80,18 @@ interface Transfer {
   courier_name?: string;
 }
 
-// Roles that the backend accepts for each lifecycle endpoint (kept in lockstep
-// with routers/transfers.py so the UI never offers a button that will 403).
-const APPROVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'];
-const SHIP_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'];
-const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'];
-const COMPLETE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
-const CANCEL_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'];
-const CROSS_STORE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'];
-
 const errMsg = (e: any): string =>
   e?.response?.data?.detail?.message ||
   (typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : '') ||
   e?.message ||
   'Action failed';
 
+// quantity_shipped is authoritative once a transfer ships — including a
+// legitimate 0 (source had no AVAILABLE stock). Use ?? (not ||) so an explicit
+// 0 is respected and not overwritten by quantity_requested; this matches the
+// backend receive cap's `quantity_shipped if not None else quantity_requested`.
 const lineQty = (item: TransferItem): number =>
-  Number(item.quantity_shipped || item.quantity_requested || 0);
+  Number(item.quantity_shipped ?? item.quantity_requested ?? 0);
 
 export function StockTransferManagement() {
   const { user } = useAuth();
@@ -118,35 +114,20 @@ export function StockTransferManagement() {
     Record<string, { received: number; damaged: number }>
   >({});
 
-  const roles = user?.roles || [];
-  const hasRole = (allowed: string[]) => roles.some((r) => allowed.includes(r));
-  const isCrossStore = hasRole(CROSS_STORE_ROLES);
-  // Cross-store roles (SUPERADMIN/ADMIN/AREA_MANAGER) bypass the object-level
-  // store check on the backend, so from the UI they can act on either side.
-  const isSourceSide = (t: Transfer) =>
-    isCrossStore || t.from_location_id === user?.activeStoreId;
-  const isDestSide = (t: Transfer) =>
-    isCrossStore || t.to_location_id === user?.activeStoreId;
-  const st = (s: string) => (s || '').toLowerCase();
-
-  const canApprove = (t: Transfer) =>
-    hasRole(APPROVE_ROLES) && st(t.status) === 'pending_approval' && isSourceSide(t);
-  const canShip = (t: Transfer) =>
-    hasRole(SHIP_ROLES) &&
-    ['approved', 'packed'].includes(st(t.status)) &&
-    isSourceSide(t);
-  const canReceive = (t: Transfer) =>
-    hasRole(RECEIVE_ROLES) &&
-    ['in_transit', 'partially_received'].includes(st(t.status)) &&
-    isDestSide(t);
-  const canComplete = (t: Transfer) =>
-    hasRole(COMPLETE_ROLES) &&
-    ['received', 'partially_received'].includes(st(t.status)) &&
-    isDestSide(t);
-  const canCancel = (t: Transfer) =>
-    hasRole(CANCEL_ROLES) &&
-    !['completed', 'cancelled', 'in_transit'].includes(st(t.status)) &&
-    isSourceSide(t);
+  // Lifecycle-button visibility is delegated to the pure gates in
+  // transferPermissions.ts (mirrors the backend status+role+store guards, and
+  // is unit-tested there — incl. the P0 pre-ship-only Cancel rule). Build the
+  // actor once and wrap each gate so the call sites stay one-arg.
+  const actor: gates.TransferActor = {
+    roles: user?.roles || [],
+    storeIds: user?.storeIds || [],
+    activeStoreId: user?.activeStoreId || '',
+  };
+  const canApprove = (t: Transfer) => gates.canApprove(actor, t);
+  const canShip = (t: Transfer) => gates.canShip(actor, t);
+  const canReceive = (t: Transfer) => gates.canReceive(actor, t);
+  const canComplete = (t: Transfer) => gates.canComplete(actor, t);
+  const canCancel = (t: Transfer) => gates.canCancel(actor, t);
 
   useEffect(() => {
     loadTransfers();
