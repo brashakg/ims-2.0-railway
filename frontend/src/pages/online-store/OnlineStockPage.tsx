@@ -17,8 +17,10 @@
 //
 // Data: GET /api/v1/online-store/stock-tally (onlineStoreApi.getStockTally),
 // reusing the on-hand / reserved aggregations behind the SUPERADMIN sync-health
-// tile. FAIL-SOFT: any error (404 stale deploy / 403 outside the ecom gate)
-// degrades to a friendly "coming online" note, never a white screen.
+// tile. FAIL-SOFT + HONEST (RC-E): the read never throws, and the failure
+// reason is rendered truthfully — a 403 says "no permission", a 500/network
+// blip says "couldn't load" + Retry; ONLY a 404/501 (module genuinely not
+// deployed) shows the "coming online" note. Never a white screen.
 //
 // Gated at the route (App.tsx) to the ecom role set: SUPERADMIN / ADMIN /
 // CATALOG_MANAGER / DESIGN_MANAGER. Light theme only.
@@ -34,10 +36,12 @@ import {
   Info,
   AlertTriangle,
   CheckCircle2,
+  EyeOff,
   ShieldCheck,
 } from 'lucide-react';
 import {
   onlineStoreApi,
+  type OnlineStoreLoadFailure,
   type StockTallyRow,
   type StockTallySummary,
 } from '../../services/api/onlineStore';
@@ -60,6 +64,9 @@ export default function OnlineStockPage() {
   const [items, setItems] = useState<StockTallyRow[]>([]);
   const [summary, setSummary] = useState<StockTallySummary | null>(null);
   const [available, setAvailable] = useState(true);
+  // Why the read failed (null when it worked) — mirrors OnlineStorePage RC-E:
+  // 'forbidden' / 'error' must NOT render the "coming online" placeholder.
+  const [failure, setFailure] = useState<OnlineStoreLoadFailure | null>(null);
   const [onlineConfigured, setOnlineConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<RiskFilter>('ALL');
@@ -72,6 +79,7 @@ export default function OnlineStockPage() {
       setItems(res.items);
       setSummary(res.summary);
       setAvailable(res.available);
+      setFailure(res.available ? null : (res.reason ?? 'unavailable'));
       setOnlineConfigured(res.summary.online_configured);
     } finally {
       setLoading(false);
@@ -224,7 +232,34 @@ export default function OnlineStockPage() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 flex items-center gap-2 text-sm text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading stock tally…
         </div>
+      ) : failure === 'forbidden' ? (
+        // RC-E: a 403 is a PERMISSION state, never "coming soon".
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center">
+          <EyeOff className="w-10 h-10 mx-auto mb-2 text-gray-400" />
+          <p className="text-sm font-medium text-gray-700">No permission for this view</p>
+          <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+            Your role can't read the stock tally. The feature itself is running — ask an admin if
+            you need access.
+          </p>
+        </div>
+      ) : failure === 'error' ? (
+        // RC-E: a real failure gets an honest error + Retry, not a fake state.
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center">
+          <AlertTriangle className="w-10 h-10 mx-auto mb-2 text-red-400" />
+          <p className="text-sm font-medium text-red-900">Couldn't load the stock tally</p>
+          <p className="text-xs text-red-700 mt-1 max-w-md mx-auto">
+            The read failed — the numbers are unknown right now, not zero.
+          </p>
+          <button
+            type="button"
+            onClick={load}
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Retry
+          </button>
+        </div>
       ) : !available ? (
+        // ONLY reason==='unavailable' (404/501 — module genuinely not deployed).
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-6 text-center">
           <Boxes className="w-10 h-10 mx-auto mb-2 text-blue-400" />
           <p className="text-sm font-medium text-blue-900">Stock tally is coming online</p>

@@ -27,8 +27,11 @@
 // generic onlineStore.ts adapter is owned by a sibling change and its OnlineOrder
 // shape drops the rx/hold/status fields this screen now renders).
 //
-// FAIL-SOFT: the read degrades to a friendly "coming online" note (never a white
-// screen); actions toast the backend error. Gated SUPERADMIN / ADMIN /
+// FAIL-SOFT + HONEST (RC-E): the read never throws, and the failure reason is
+// rendered truthfully — a 403 says "no permission", a 500/network blip says
+// "couldn't load" + Retry; ONLY a 404/501 (service genuinely not deployed)
+// shows the "coming online" note (never a white screen); actions toast the
+// backend error. Gated SUPERADMIN / ADMIN /
 // CATALOG_MANAGER / DESIGN_MANAGER at the route (App.tsx); Re-map + Clear-hold
 // are further gated to SUPERADMIN / ADMIN (backend-matched). Light theme only.
 
@@ -45,6 +48,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  EyeOff,
   History,
   RotateCw,
   Send,
@@ -53,6 +57,10 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
+import {
+  classifyLoadError,
+  type OnlineStoreLoadFailure,
+} from '../../services/api/onlineStore';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 
 // ---------------------------------------------------------------------------
@@ -133,11 +141,16 @@ interface OrdersPage {
    *  loaded page, unlike the old client-side count over `allRows`. */
   rxHoldCount: number;
   available: boolean;
+  /** Why the read failed when available=false (null on success) — mirrors the
+   *  onlineStore.ts adapter envelopes so the screen can distinguish "no
+   *  permission" / "not deployed" / "couldn't load" (RC-E). */
+  reason: OnlineStoreLoadFailure | null;
 }
 
-/** Fetch one page. NEVER throws: any error (403 outside the backend gate, 404 on
- *  a stale deploy) resolves to an unavailable result so the screen always
- *  renders the friendly note instead of a white screen.
+/** Fetch one page. NEVER throws: any error resolves to an unavailable result
+ *  with `reason` classified (forbidden / unavailable / error) so the screen
+ *  renders an HONEST failure state instead of a white screen — or worse, a
+ *  false "coming online" note for a 403/500 on a fully-deployed backend.
  *  `rxHoldOnly` requests the server-side ?rx_hold=true filter (PR #947 follow-up
  *  2) so switching to the Rx-hold tab sees every held order across the whole
  *  scope, not just whichever ones happened to already be on a loaded page. */
@@ -168,9 +181,18 @@ async function fetchOrders(
           ? data.rx_hold_count
           : rows.filter((r: OrderRow) => r.rx_hold).length,
       available: true,
+      reason: null,
     };
-  } catch {
-    return { rows: [], failed: [], failedCount: 0, total: 0, rxHoldCount: 0, available: false };
+  } catch (err) {
+    return {
+      rows: [],
+      failed: [],
+      failedCount: 0,
+      total: 0,
+      rxHoldCount: 0,
+      available: false,
+      reason: classifyLoadError(err),
+    };
   }
 }
 
@@ -284,6 +306,9 @@ export default function OnlineOrdersPage() {
   // old client-side count over only the rows the page happened to have loaded.
   const [rxHoldCount, setRxHoldCount] = useState(0);
   const [available, setAvailable] = useState(true);
+  // Why the read failed (null when it worked) — mirrors OnlineStorePage RC-E:
+  // 'forbidden' / 'error' must NOT render the "coming online" placeholder.
+  const [failure, setFailure] = useState<OnlineStoreLoadFailure | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [filter, setFilter] = useState<MapFilter>('ALL');
@@ -316,6 +341,7 @@ export default function OnlineOrdersPage() {
       setTotal(page.total);
       setRxHoldCount(page.rxHoldCount);
       setAvailable(page.available);
+      setFailure(page.available ? null : (page.reason ?? 'unavailable'));
     } finally {
       setLoading(false);
     }
@@ -329,6 +355,13 @@ export default function OnlineOrdersPage() {
     setLoadingMore(true);
     try {
       const page = await fetchOrders(orders.length, committedSearch, rxHoldOnly);
+      if (!page.available) {
+        // A failed Load-more must not clobber the already-loaded truth: the
+        // zeroed placeholder would reset `total` to 0 ("Showing 100 of 0"),
+        // hide the Load-more button and zero the Rx-hold banner. Keep what we
+        // have; the user can retry Load-more or Refresh.
+        return;
+      }
       setOrders((prev) => {
         // De-dupe on append (PR #947 follow-up 5): offset-based pagination reads
         // `orders.length` as the next offset, but a webhook burst landing
@@ -550,7 +583,34 @@ export default function OnlineOrdersPage() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 flex items-center gap-2 text-sm text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading online orders…
         </div>
+      ) : failure === 'forbidden' ? (
+        // RC-E: a 403 is a PERMISSION state, never "coming soon".
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center">
+          <EyeOff className="w-10 h-10 mx-auto mb-2 text-gray-400" />
+          <p className="text-sm font-medium text-gray-700">No permission for this view</p>
+          <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+            Your role can't read the online orders list. The feature itself is running — ask an
+            admin if you need access.
+          </p>
+        </div>
+      ) : failure === 'error' ? (
+        // RC-E: a real failure gets an honest error + Retry, not a fake state.
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center">
+          <AlertTriangle className="w-10 h-10 mx-auto mb-2 text-red-400" />
+          <p className="text-sm font-medium text-red-900">Couldn't load online orders</p>
+          <p className="text-xs text-red-700 mt-1 max-w-md mx-auto">
+            The read failed — orders may be flowing in that aren't shown right now.
+          </p>
+          <button
+            type="button"
+            onClick={load}
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Retry
+          </button>
+        </div>
       ) : !available ? (
+        // ONLY reason==='unavailable' (404/501 — service genuinely not deployed).
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-6 text-center">
           <ShoppingBag className="w-10 h-10 mx-auto mb-2 text-blue-400" />
           <p className="text-sm font-medium text-blue-900">Online orders are coming online</p>

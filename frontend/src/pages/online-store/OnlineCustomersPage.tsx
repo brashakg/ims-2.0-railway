@@ -24,9 +24,13 @@
 // MARKETING contact tier (mobile-primary identity model, 2026-07-20) which this
 // screen badges + can exclude (OS-045).
 //
-// FAIL-SOFT: the read degrades quietly to a friendly empty state (never a white
-// screen). Gated SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER at the
-// route (App.tsx), matching the rest of the module. The name link opens the
+// FAIL-SOFT + HONEST (RC-E): the read never crashes the screen, and the failure
+// reason is rendered truthfully via classifyLoadError — a 403 says "no
+// permission" (this route admits CATALOG_MANAGER / DESIGN_MANAGER, who may be
+// denied by the underlying /customers endpoint), a 500/network blip says
+// "couldn't load" + Retry; ONLY a 404/501 (endpoint genuinely not deployed)
+// shows the "coming online" note. Gated SUPERADMIN / ADMIN / CATALOG_MANAGER /
+// DESIGN_MANAGER at the route (App.tsx), matching the rest of the module. The name link opens the
 // Customer 360 (OS-027 — /customers/:id/360 is the real route; the old
 // /customers/:id target 404'd on every click) and renders as plain text for
 // roles the 360 route does not admit. Light theme only.
@@ -42,8 +46,14 @@ import {
   Mail,
   Phone,
   ShoppingBag,
+  AlertTriangle,
+  EyeOff,
 } from 'lucide-react';
 import { customerApi } from '../../services/api/customers';
+import {
+  classifyLoadError,
+  type OnlineStoreLoadFailure,
+} from '../../services/api/onlineStore';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateIST } from '../../utils/datetime';
 
@@ -131,6 +141,9 @@ export default function OnlineCustomersPage() {
   const [rows, setRows] = useState<OnlineCustomerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [available, setAvailable] = useState(true);
+  // Why the read failed (null when it worked) — mirrors OnlineStorePage RC-E:
+  // 'forbidden' / 'error' must NOT render the "coming online" placeholder.
+  const [failure, setFailure] = useState<OnlineStoreLoadFailure | null>(null);
   const [search, setSearch] = useState('');
   // OS-045: hide email-only MARKETING contacts (backend-side additive filter).
   const [hideMarketing, setHideMarketing] = useState(false);
@@ -163,10 +176,14 @@ export default function OnlineCustomersPage() {
       }
       setRows(mapped);
       setAvailable(true);
-    } catch {
-      // Fail-soft: an unreachable backend -> friendly empty state, not a crash.
+      setFailure(null);
+    } catch (err) {
+      // Fail-soft, but HONEST (RC-E): classify the failure so a 403 (this
+      // route's roles may be denied by the /customers endpoint) or a 500 is
+      // never dressed up as "coming online".
       setRows([]);
       setAvailable(false);
+      setFailure(classifyLoadError(err));
     } finally {
       setLoading(false);
     }
@@ -251,7 +268,36 @@ export default function OnlineCustomersPage() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 flex items-center gap-2 text-sm text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading online customers…
         </div>
+      ) : failure === 'forbidden' ? (
+        // RC-E: a 403 is a PERMISSION state, never "coming soon". This bites
+        // for real: CATALOG_MANAGER / DESIGN_MANAGER reach this route but may
+        // be denied by the underlying /customers endpoint.
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center">
+          <EyeOff className="w-10 h-10 mx-auto mb-2 text-gray-400" />
+          <p className="text-sm font-medium text-gray-700">No permission for this view</p>
+          <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+            Your role can't read the customer list. The feature itself is running — ask an admin if
+            you need access.
+          </p>
+        </div>
+      ) : failure === 'error' ? (
+        // RC-E: a real failure gets an honest error + Retry, not a fake state.
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center">
+          <AlertTriangle className="w-10 h-10 mx-auto mb-2 text-red-400" />
+          <p className="text-sm font-medium text-red-900">Couldn't load online customers</p>
+          <p className="text-xs text-red-700 mt-1 max-w-md mx-auto">
+            The read failed — the list is unknown right now, not empty.
+          </p>
+          <button
+            type="button"
+            onClick={load}
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Retry
+          </button>
+        </div>
       ) : !available ? (
+        // ONLY reason==='unavailable' (404/501 — endpoint genuinely not deployed).
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-6 text-center">
           <Users className="w-10 h-10 mx-auto mb-2 text-blue-400" />
           <p className="text-sm font-medium text-blue-900">Online customers are coming online</p>
