@@ -7,8 +7,10 @@
 // + restock, reusing the same in-store returns machinery) or REJECT. Without this
 // screen those rows were an invisible dead letter -> no GST reversal, no restock.
 //
-// FAIL-SOFT: the backend router may not be deployed yet; the list degrades to a
-// friendly "coming online" note. Confirm/reject toast the backend result. Gated
+// FAIL-SOFT + HONEST (RC-E): the list read never throws, and the failure reason
+// is rendered truthfully — a 403 says "no permission", a 500/network blip says
+// "couldn't load" + Retry; ONLY a 404/501 (router genuinely not deployed) shows
+// the "coming online" note. Confirm/reject toast the backend result. Gated
 // SUPERADMIN / ADMIN / ACCOUNTANT at the route (App.tsx) and in the backend.
 // Light theme only. No emojis in code paths that touch Python (this is TSX).
 
@@ -22,12 +24,17 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  EyeOff,
   XCircle,
   User,
   Store,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { refundReviewsApi, type RefundReview } from '../../services/api/onlineStore';
+import {
+  refundReviewsApi,
+  type OnlineStoreLoadFailure,
+  type RefundReview,
+} from '../../services/api/onlineStore';
 import { formatDateIST } from '../../utils/datetime';
 
 // Status presentation. PENDING/DISCREPANCY/CREDIT_FAILED/NO_CUSTOMER are open;
@@ -84,6 +91,9 @@ export default function RefundReviewsPage() {
   const [reviews, setReviews] = useState<RefundReview[]>([]);
   const [total, setTotal] = useState(0);
   const [available, setAvailable] = useState(true);
+  // Why the read failed (null when it worked) — mirrors OnlineStorePage RC-E:
+  // 'forbidden' / 'error' must NOT render the "coming online" placeholder.
+  const [failure, setFailure] = useState<OnlineStoreLoadFailure | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('OPEN');
   const [actingId, setActingId] = useState<string | null>(null);
@@ -99,6 +109,7 @@ export default function RefundReviewsPage() {
       setReviews(res.reviews);
       setTotal(res.total);
       setAvailable(res.available);
+      setFailure(res.available ? null : (res.reason ?? 'unavailable'));
       setScope(res.scope ?? null);
     } finally {
       setLoading(false);
@@ -234,7 +245,34 @@ export default function RefundReviewsPage() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 flex items-center gap-2 text-sm text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading refund reviews…
         </div>
+      ) : failure === 'forbidden' ? (
+        // RC-E: a 403 is a PERMISSION state, never "coming soon".
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-6 text-center">
+          <EyeOff className="w-10 h-10 mx-auto mb-2 text-gray-400" />
+          <p className="text-sm font-medium text-gray-700">No permission for this view</p>
+          <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+            Your role can't read the refund review queue. The feature itself is running — ask an
+            admin if you need access.
+          </p>
+        </div>
+      ) : failure === 'error' ? (
+        // RC-E: a real failure gets an honest error + Retry, not a fake state.
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center">
+          <AlertTriangle className="w-10 h-10 mx-auto mb-2 text-red-400" />
+          <p className="text-sm font-medium text-red-900">Couldn't load refund reviews</p>
+          <p className="text-xs text-red-700 mt-1 max-w-md mx-auto">
+            The read failed — refunds may be waiting that aren't shown right now.
+          </p>
+          <button
+            type="button"
+            onClick={load}
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Retry
+          </button>
+        </div>
       ) : !available ? (
+        // ONLY reason==='unavailable' (404/501 — router genuinely not deployed).
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-6 text-center">
           <ReceiptText className="w-10 h-10 mx-auto mb-2 text-blue-400" />
           <p className="text-sm font-medium text-blue-900">Refund reviews are coming online</p>
