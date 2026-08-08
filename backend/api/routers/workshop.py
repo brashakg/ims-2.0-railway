@@ -136,11 +136,12 @@ def _check_dc_hardlock(db, lens_status, lens_product_id, store_id, created_at, c
     An ADMIN+ may bypass with override_reason (audited by the caller). In-house
     lenses (lens_status != ORDERED) are exempt and pass straight through.
 
-    SHARED: the F2 lab-routing scan path (services/lab_routing._dc_gate_block)
-    REUSES this exact function for its scan-driven -> IN_PROGRESS gate, passing
-    no override_reason and no privileged roles, and translating the 422 raise
-    into a status-hold (gate_block="DC_REQUIRED") -- a physical scan is never
-    failed. Keep flag/cutover/exemption/DC-lookup semantics HERE, defined once.
+    SHARED: both barcode-scan paths (labels.scan_advance + lab_routing.
+    advance_lab_station) reach this exact function through the single scan gate
+    ``evaluate_scan_transition_gate`` for their scan-driven -> IN_PROGRESS check,
+    passing no override_reason and no privileged roles, and translating the 422
+    raise into a status-hold (gate_block="DC_REQUIRED") -- a physical scan is
+    never failed. Keep flag/cutover/exemption/DC-lookup semantics HERE, once.
     """
     # Only external-lab (ORDERED) lenses are gated; in-house stock is exempt.
     if lens_status != "ORDERED":
@@ -243,6 +244,102 @@ VALID_JOB_TRANSITIONS = {
 # rework is blocked for non-managers.
 MAX_REWORK = 2
 _REWORK_OVERRIDE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
+
+
+# ---------------------------------------------------------------------------
+# SHARED SCAN-ADVANCE SAFETY GATE
+# ---------------------------------------------------------------------------
+# BOTH barcode-scan status paths -- labels.scan_advance (label scan) and
+# services.lab_routing.advance_lab_station (lab-station scan) -- must enforce the
+# SAME patient-safety gates the manager-facing status PATCH (update_job_status,
+# below) enforces before a scan is allowed to flip a job's status. Historically
+# each scan path carried its own copy of the rules, and the label-scan path
+# carried NONE at all -- which is exactly how it drifted into letting a COMPLETED
+# lens reach READY (patient pickup) with zero QC record.
+#
+# This helper is the single source of truth for the scan-side gates. It reuses
+# the SAME rule sources as the PATCH handler -- the confirmed_by_sales fitting
+# flag, the qc_passed/qc_waived QC record, and the canonical _check_dc_hardlock
+# F9 helper -- so a scan gate can no longer silently diverge from the PATCH gate.
+#
+# A scan is a PHYSICAL act at the bench: a blocked gate is a HOLD (the caller
+# keeps the scan record but does NOT flip the status), never an override surface.
+# The DC hardlock is therefore always evaluated with no override_reason and no
+# privileged roles, so its 403 override-forbidden branch is unreachable here and
+# it can only ALLOW (return) or BLOCK (raise DC_HARDLOCK). The manager PATCH
+# keeps its own audited ADMIN+ override path untouched.
+#
+# Transition LEGALITY (the VALID_JOB_TRANSITIONS map) and the QC_FAILED ->
+# IN_PROGRESS rework cap are intentionally NOT re-checked here: the scan callers
+# already constrain the target to a legal forward move (labels.next_stage / the
+# lab-station sequence) and neither scan surface exposes the rework path. This
+# adds only the missing SAFETY gates without changing any currently-legal scan
+# transition.
+
+# Machine-readable block codes + plain-English counter-staff messages. Both scan
+# callers surface these, so keeping the strings here means they cannot drift.
+SCAN_GATE_MESSAGES = {
+    "SALES_CONFIRM_REQUIRED": (
+        "Sales has not confirmed the fitting for this job yet - ask sales to "
+        "confirm the fitting details before starting work."
+    ),
+    "DC_REQUIRED": (
+        "No Delivery Challan logged for this lens - ask the Store Manager to "
+        "record the DC before starting work."
+    ),
+    "QC_REQUIRED": (
+        "QC not passed for this job - complete QC before marking it Ready."
+    ),
+}
+
+
+def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional[str]:
+    """Return None if a SCAN may advance `job` to `target_status`, else a block
+    code (a key of SCAN_GATE_MESSAGES).
+
+    Pure decision: never mutates state, never raises for a gate failure. This is
+    the single source of truth for the scan-side patient-safety gates and mirrors
+    the update_job_status PATCH gates by reusing the SAME rule sources (see the
+    section comment above).
+
+    Gate precedence matches the PATCH handler:
+      -> IN_PROGRESS : sales must have confirmed the fitting, THEN (for an
+                       external-lab ORDERED lens) an accepted Delivery Challan
+                       must cover the lens SKU (F9 hardlock).
+      -> READY       : lens QC must have passed or been explicitly waived.
+    """
+    target = (target_status or "").strip().upper()
+
+    if target == "IN_PROGRESS":
+        # BUG-116c: the workshop may only START a job once sales confirm the
+        # fitting (power + product correct).
+        if not (job.get("fitting_details") or {}).get("confirmed_by_sales"):
+            return "SALES_CONFIRM_REQUIRED"
+        # F9 DC HARDLOCK: same canonical helper the PATCH handler calls. On a
+        # scan there is no override (no reason, no privileged roles), so the
+        # helper can only ALLOW (return) or BLOCK (raise DC_HARDLOCK 422).
+        try:
+            _check_dc_hardlock(
+                db,
+                job.get("lens_status"),
+                (job.get("lens_details") or {}).get("product_id"),
+                job.get("store_id"),
+                job.get("created_at"),
+                {"roles": []},  # scan path: never privileged
+                None,  # no override_reason on a scan
+            )
+        except HTTPException:
+            return "DC_REQUIRED"
+
+    # BUG-116a (patient-safety): a lens job must NOT reach READY-for-pickup
+    # without a QC pass or an explicit waiver.
+    if target == "READY" and not (
+        job.get("qc_passed") is True or job.get("qc_waived") is True
+    ):
+        return "QC_REQUIRED"
+
+    return None
+
 
 router = APIRouter()
 
@@ -1235,6 +1332,9 @@ async def update_job_status(
         # previously bypassed that (the gate here was a no-op `pass`), so a job
         # could be PATCHed COMPLETED -> READY with zero QC and reach the patient.
         # Require an explicit QC pass or waiver on ANY -> READY transition.
+        # NOTE: the barcode-scan paths mirror THIS gate (and the IN_PROGRESS
+        # sales-confirm + DC gates above) via evaluate_scan_transition_gate --
+        # keep the two in sync if these rules change.
         if status == "READY" and not (
             job.get("qc_passed") is True or job.get("qc_waived") is True
         ):
