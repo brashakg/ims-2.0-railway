@@ -66,6 +66,9 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
   // Transfer details
   const [destinationStore, setDestinationStore] = useState('');
   const [stores, setStores] = useState<Store[]>([]);
+  // Source (active) store display name — needed so the transfer, its Rule-55
+  // challan and any GST mirror bill carry a real store name, not just the id.
+  const [fromStoreName, setFromStoreName] = useState('');
   const [notes, setNotes] = useState('');
 
   // Items
@@ -92,6 +95,11 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
         code: s.store_code || s.code || '',
         store_type: s.store_type || '',
       }));
+
+      // Capture the active store's display name from the full list BEFORE we
+      // filter it out of the destination options.
+      const active = mapped.find((s) => s.id === user?.activeStoreId);
+      setFromStoreName(active?.name || user?.activeStoreId || '');
 
       // Filter out the current store AND online stores (W1.4 / OS-032): an
       // ONLINE store sells pooled stock and owns none of its own, so it can
@@ -227,9 +235,14 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
     try {
       await inventoryApi.createTransfer({
         fromStoreId: user?.activeStoreId || '',
+        fromStoreName,
         toStoreId: destinationStore,
+        toStoreName: selectedStoreName,
+        notes: notes || undefined,
         items: transferItems.map(item => ({
-          stockId: item.productId,
+          productId: item.productId,
+          productName: item.productName,
+          sku: item.sku,
           quantity: item.quantity,
         })),
       });

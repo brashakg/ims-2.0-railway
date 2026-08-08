@@ -63,6 +63,34 @@ class TransferStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+# Statuses a transfer may be cancelled from -- an ALLOWLIST of the PRE-SHIP
+# states only (PR #959 round 2). The old guard was a denylist (completed /
+# cancelled / in_transit) which still ACCEPTED a cancel at RECEIVED /
+# PARTIALLY_RECEIVED -- i.e. after ship moved real units out of the source
+# store and receive re-homed them at the destination. A cancel at that point
+# does NO stock reversal (the units stay re-homed while the doc reads
+# CANCELLED) and permanently skips the inter-entity/inter-state GST
+# deemed-supply mirror invoice, which books only at /complete. Pre-ship,
+# nothing has moved, so cancel is harmless. REJECTED is included (pre-ship,
+# zero stock moved) so a dead request can still be tidied to cancelled.
+# Legacy "pending" is included because the endless-aisle writer stamps
+# `status: "pending"` on the stock_transfers docs it creates
+# (services/endless_aisle.py create_transfer step) -- also strictly pre-ship.
+# Matched case-insensitively: the agent-proposals writer stamps uppercase
+# "DRAFT" on its draft transfer docs.
+CANCELLABLE_TRANSFER_STATUSES = frozenset(
+    {
+        TransferStatus.DRAFT.value,
+        TransferStatus.PENDING_APPROVAL.value,
+        TransferStatus.APPROVED.value,
+        TransferStatus.PICKING.value,
+        TransferStatus.PACKED.value,
+        TransferStatus.REJECTED.value,
+        "pending",  # legacy endless-aisle transfer docs (pre-approval)
+    }
+)
+
+
 class TransferType(str, Enum):
     STORE_TO_STORE = "store_to_store"
     WAREHOUSE_TO_STORE = "warehouse_to_store"
@@ -1606,15 +1634,34 @@ async def cancel_transfer(
     # IDOR guard: cancellation authority follows the SOURCE store's chain.
     _assert_transfer_access(transfer, current_user, side="source")
 
-    if transfer["status"] in [TransferStatus.COMPLETED, TransferStatus.CANCELLED]:
+    # ALLOWLIST guard (PR #959 round 2): cancellable ONLY from a pre-ship
+    # status. The previous denylist (completed/cancelled/in_transit) still let
+    # a transfer be cancelled at RECEIVED / PARTIALLY_RECEIVED -- after the
+    # units had already left the source and been re-homed at the destination.
+    # That cancel performed no stock reversal and permanently skipped the
+    # deemed-supply GST mirror invoice (booked only at /complete). Status is
+    # normalized case-insensitively (legacy writers stamp "DRAFT"/"pending").
+    status_norm = str(transfer.get("status") or "").strip().lower()
+    if status_norm not in CANCELLABLE_TRANSFER_STATUSES:
+        if status_norm in (
+            TransferStatus.COMPLETED.value,
+            TransferStatus.CANCELLED.value,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot cancel completed or already cancelled transfer",
+            )
+        if status_norm == TransferStatus.IN_TRANSIT.value:
+            raise HTTPException(
+                status_code=400, detail="Cannot cancel transfer that is in transit"
+            )
         raise HTTPException(
             status_code=400,
-            detail="Cannot cancel completed or already cancelled transfer",
-        )
-
-    if transfer["status"] == TransferStatus.IN_TRANSIT:
-        raise HTTPException(
-            status_code=400, detail="Cannot cancel transfer that is in transit"
+            detail=(
+                "Cannot cancel a transfer after its stock has shipped - the "
+                "units have already moved. Receive and complete it, then move "
+                "the goods back with a reverse transfer if needed."
+            ),
         )
 
     transfer["status"] = TransferStatus.CANCELLED

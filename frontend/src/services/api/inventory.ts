@@ -40,22 +40,129 @@ export const inventoryApi = {
     return response.data;
   },
 
-  createTransfer: async (data: { fromStoreId: string; toStoreId: string; items: Array<{ stockId: string; quantity: number }> }) => {
-    // Real transfer API is on /transfers, not /inventory/transfers
+  createTransfer: async (data: {
+    fromStoreId: string;
+    fromStoreName?: string;
+    toStoreId: string;
+    toStoreName?: string;
+    notes?: string;
+    items: Array<{
+      productId: string;
+      productName?: string;
+      sku?: string;
+      quantity: number;
+      unitCost?: number;
+    }>;
+  }) => {
+    // Real transfer API is on /transfers, not /inventory/transfers.
+    // transfer_type MUST be a value of the backend TransferType enum
+    // (routers/transfers.py) — 'store_to_store'. The old 'inter_store' value is
+    // not in the enum, so every create 422'd before it ever reached the DB.
     const response = await api.post('/transfers', {
-      transfer_type: 'inter_store',
+      transfer_type: 'store_to_store',
       from_location_id: data.fromStoreId,
-      from_location_name: data.fromStoreId,
+      from_location_name: data.fromStoreName || data.fromStoreId,
       to_location_id: data.toStoreId,
-      to_location_name: data.toStoreId,
+      to_location_name: data.toStoreName || data.toStoreId,
       priority: 'normal',
+      ...(data.notes ? { notes: data.notes } : {}),
       items: data.items.map(i => ({
-        product_id: i.stockId,
-        product_name: i.stockId,
-        sku: '',
+        product_id: i.productId,
+        product_name: i.productName || i.productId,
+        sku: i.sku || '',
         quantity_requested: i.quantity,
-        unit_cost: 0,
+        unit_cost: i.unitCost ?? 0,
       })),
+    });
+    return response.data;
+  },
+
+  // --------------------------------------------------------------------------
+  // Transfer lifecycle actions (routers/transfers.py). Each maps 1:1 to an
+  // existing backend endpoint with its EXACT contract:
+  //   * approve  -> JSON body TransferApproval { approved, rejection_reason }
+  //   * ship / complete / cancel -> the backend declares scalar function args,
+  //     i.e. QUERY parameters (NOT a JSON body) — sent via `params`.
+  //   * receive  -> a bare JSON LIST of TransferItemReceive.
+  // --------------------------------------------------------------------------
+
+  // Approve (or reject) a PENDING_APPROVAL transfer. Source-side AM/Admin only
+  // (backend-enforced). Passing approved=false requires a rejection reason.
+  approveTransfer: async (
+    transferId: string,
+    approved: boolean,
+    rejectionReason?: string,
+  ) => {
+    const response = await api.post(`/transfers/${transferId}/approve`, {
+      approved,
+      rejection_reason: approved ? null : (rejectionReason ?? null),
+    });
+    return response.data;
+  },
+
+  // Ship an APPROVED/PACKED transfer -> IN_TRANSIT. This is the step that moves
+  // real stock_units OUT of the source store. tracking_number / courier_name are
+  // QUERY params on the backend.
+  shipTransfer: async (
+    transferId: string,
+    opts?: {
+      trackingNumber?: string;
+      trackingUrl?: string;
+      courierName?: string;
+      createShiprocket?: boolean;
+    },
+  ) => {
+    const response = await api.post(`/transfers/${transferId}/ship`, null, {
+      params: {
+        ...(opts?.trackingNumber ? { tracking_number: opts.trackingNumber } : {}),
+        ...(opts?.trackingUrl ? { tracking_url: opts.trackingUrl } : {}),
+        ...(opts?.courierName ? { courier_name: opts.courierName } : {}),
+        ...(opts?.createShiprocket ? { create_shiprocket: true } : {}),
+      },
+    });
+    return response.data;
+  },
+
+  // Receive an IN_TRANSIT / PARTIALLY_RECEIVED transfer at the destination.
+  // The backend body is a bare list of TransferItemReceive: each line needs the
+  // transfer LINE id (item.id, NOT product_id) + quantity_received. Damaged
+  // units are auto-quarantined at the destination by the backend.
+  receiveTransfer: async (
+    transferId: string,
+    items: Array<{
+      transfer_item_id: string;
+      quantity_received: number;
+      quantity_damaged?: number;
+      damage_notes?: string;
+    }>,
+  ) => {
+    const response = await api.post(
+      `/transfers/${transferId}/receive`,
+      items.map(i => ({
+        transfer_item_id: i.transfer_item_id,
+        quantity_received: i.quantity_received,
+        quantity_damaged: i.quantity_damaged ?? 0,
+        ...(i.damage_notes ? { damage_notes: i.damage_notes } : {}),
+      })),
+    );
+    return response.data;
+  },
+
+  // Complete a RECEIVED / PARTIALLY_RECEIVED transfer (destination sign-off).
+  // NOTE: for an inter-entity or inter-state move this is where the backend
+  // auto-books the GST deemed-supply mirror invoice. `notes` is a query param.
+  completeTransfer: async (transferId: string, notes?: string) => {
+    const response = await api.post(`/transfers/${transferId}/complete`, null, {
+      params: notes ? { notes } : {},
+    });
+    return response.data;
+  },
+
+  // Cancel a transfer that has not shipped/completed. `reason` is a REQUIRED
+  // query param on the backend; the backend rejects cancel once IN_TRANSIT.
+  cancelTransfer: async (transferId: string, reason: string) => {
+    const response = await api.post(`/transfers/${transferId}/cancel`, null, {
+      params: { reason },
     });
     return response.data;
   },
@@ -64,6 +171,14 @@ export const inventoryApi = {
   // Direction filtering is done client-side by comparing from_location_id.
   getTransfers: async (storeId: string, _direction?: string) => {
     const response = await api.get('/transfers', { params: { store_id: storeId } });
+    return response.data;
+  },
+
+  // Single transfer, fresh from the server: {transfer: {...}}. Used to
+  // re-verify the lifecycle status right before a destructive action (cancel)
+  // so a stale tab can never act on an out-of-date state.
+  getTransfer: async (transferId: string) => {
+    const response = await api.get(`/transfers/${transferId}`);
     return response.data;
   },
 

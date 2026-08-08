@@ -1,7 +1,12 @@
 // ============================================================================
 // IMS 2.0 - Stock Transfer Management
 // ============================================================================
-// View, track, and receive stock transfers
+// View, track, and drive stock transfers through their full backend lifecycle:
+// create (elsewhere) -> approve -> ship -> receive (incl. partial) -> complete,
+// plus cancel where the backend allows it. Every action here calls the real
+// endpoint in routers/transfers.py with its exact contract; button visibility
+// mirrors the backend's status + role gates so a user is never shown an action
+// the server would 400/403.
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -20,22 +25,35 @@ import {
   Calendar,
   Filter,
   Truck,
+  Send,
+  Ban,
+  ThumbsUp,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
-import api from '../../services/api/client';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
+import * as gates from './transferPermissions';
+import { cancelWithFreshCheck } from './transferCancelGuard';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
+// Which sub-flow the details modal is showing.
+type ActionMode = 'view' | 'ship' | 'receive';
 
 interface TransferItem {
+  // Backend stamps a per-line id (trfi_...) at create — this is what the
+  // receive endpoint keys on (transfer_item_id), NOT product_id.
+  id?: string;
   product_id: string;
   product_name: string;
   sku: string;
-  quantity: number;
+  // Backend line quantities (the old `quantity` field never existed on the
+  // server and always rendered blank).
+  quantity_requested?: number;
+  quantity_shipped?: number;
   quantity_received?: number;
+  quantity_damaged?: number;
 }
 
 interface Transfer {
@@ -47,7 +65,8 @@ interface Transfer {
   to_location_id: string;
   to_location_name: string;
   // Backend status enum is lowercase: draft / pending_approval / approved /
-  // in_transit / partially_received / received / completed / cancelled.
+  // picking / packed / in_transit / partially_received / received /
+  // completed / cancelled / rejected.
   status: string;
   items: TransferItem[];
   notes?: string;
@@ -58,7 +77,22 @@ interface Transfer {
   sent_at?: string;
   received_at?: string;
   total_items: number;
+  tracking_number?: string;
+  courier_name?: string;
 }
+
+const errMsg = (e: any): string =>
+  e?.response?.data?.detail?.message ||
+  (typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : '') ||
+  e?.message ||
+  'Action failed';
+
+// quantity_shipped is authoritative once a transfer ships — including a
+// legitimate 0 (source had no AVAILABLE stock). Use ?? (not ||) so an explicit
+// 0 is respected and not overwritten by quantity_requested; this matches the
+// backend receive cap's `quantity_shipped if not None else quantity_requested`.
+const lineQty = (item: TransferItem): number =>
+  Number(item.quantity_shipped ?? item.quantity_requested ?? 0);
 
 export function StockTransferManagement() {
   const { user } = useAuth();
@@ -69,7 +103,32 @@ export function StockTransferManagement() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedTransfer, setSelectedTransfer] = useState<Transfer | null>(null);
   const [showDetails, setShowDetails] = useState(false);
-  const [isReceiving, setIsReceiving] = useState(false);
+  const [actionMode, setActionMode] = useState<ActionMode>('view');
+  const [actionLoading, setActionLoading] = useState(false);
+
+  // Ship form
+  const [trackingNumber, setTrackingNumber] = useState('');
+  const [courierName, setCourierName] = useState('');
+
+  // Receive form — per line-id { received, damaged }
+  const [receiveLines, setReceiveLines] = useState<
+    Record<string, { received: number; damaged: number }>
+  >({});
+
+  // Lifecycle-button visibility is delegated to the pure gates in
+  // transferPermissions.ts (mirrors the backend status+role+store guards, and
+  // is unit-tested there — incl. the P0 pre-ship-only Cancel rule). Build the
+  // actor once and wrap each gate so the call sites stay one-arg.
+  const actor: gates.TransferActor = {
+    roles: user?.roles || [],
+    storeIds: user?.storeIds || [],
+    activeStoreId: user?.activeStoreId || '',
+  };
+  const canApprove = (t: Transfer) => gates.canApprove(actor, t);
+  const canShip = (t: Transfer) => gates.canShip(actor, t);
+  const canReceive = (t: Transfer) => gates.canReceive(actor, t);
+  const canComplete = (t: Transfer) => gates.canComplete(actor, t);
+  const canCancel = (t: Transfer) => gates.canCancel(actor, t);
 
   useEffect(() => {
     loadTransfers();
@@ -94,9 +153,9 @@ export function StockTransferManagement() {
       // Apply direction filter locally using the real field name.
       let data: Transfer[];
       if (direction === 'outgoing') {
-        data = all.filter(t => t.from_location_id === user.activeStoreId);
+        data = all.filter((t) => t.from_location_id === user.activeStoreId);
       } else if (direction === 'incoming') {
-        data = all.filter(t => t.to_location_id === user.activeStoreId);
+        data = all.filter((t) => t.to_location_id === user.activeStoreId);
       } else {
         data = all;
       }
@@ -108,34 +167,179 @@ export function StockTransferManagement() {
     }
   };
 
-  const handleViewDetails = (transfer: Transfer) => {
+  // Open the details modal, optionally jumping straight into a sub-flow.
+  const openDetails = (transfer: Transfer, intent: ActionMode = 'view') => {
     setSelectedTransfer(transfer);
     setShowDetails(true);
+    if (intent === 'ship') {
+      startShip(transfer);
+    } else if (intent === 'receive') {
+      startReceive(transfer);
+    } else {
+      setActionMode('view');
+    }
   };
 
-  const handleReceiveTransfer = async (transferId: string) => {
-    if (!selectedTransfer) return;
-    setIsReceiving(true);
+  const closeDetails = () => {
+    setShowDetails(false);
+    setActionMode('view');
+    setTrackingNumber('');
+    setCourierName('');
+    setReceiveLines({});
+  };
+
+  const startShip = (_transfer: Transfer) => {
+    setTrackingNumber('');
+    setCourierName('');
+    setActionMode('ship');
+  };
+
+  const startReceive = (transfer: Transfer) => {
+    // Prefill each line's received qty to what actually shipped (falling back
+    // to requested for legacy docs). The backend rejects a received qty that
+    // exceeds the shipped qty, so shipped is the correct default ceiling.
+    const lines: Record<string, { received: number; damaged: number }> = {};
+    transfer.items.forEach((item, index) => {
+      const key = item.id ?? item.product_id ?? `item-${index}`;
+      lines[key] = { received: lineQty(item), damaged: 0 };
+    });
+    setReceiveLines(lines);
+    setActionMode('receive');
+  };
+
+  // Run a lifecycle action, refresh the list, and keep the modal in sync.
+  const runAction = async (
+    fn: () => Promise<any>,
+    successMsg: string,
+    opts?: { close?: boolean },
+  ) => {
+    setActionLoading(true);
     try {
-      // Build receive payload: mark all items as fully received using their IDs.
-      // The backend endpoint is POST /api/v1/transfers/{transfer_id}/receive and
-      // expects a list of { transfer_item_id, quantity_received, quantity_damaged }.
-      const itemsReceived = selectedTransfer.items.map((item, index) => ({
-        transfer_item_id: (item as any).id ?? `item-${index}`,
-        quantity_received: item.quantity,
-        quantity_damaged: 0,
-      }));
-
-      await api.post(`/transfers/${transferId}/receive`, itemsReceived);
-
-      toast.success('Transfer received successfully');
-      setShowDetails(false);
+      const res = await fn();
+      toast.success(successMsg);
+      if (res?.transfer) setSelectedTransfer(res.transfer as Transfer);
       await loadTransfers();
+      if (opts?.close) {
+        closeDetails();
+      } else {
+        setActionMode('view');
+      }
+      return res;
     } catch (error: any) {
-      toast.error(error?.message || 'Failed to receive transfer');
+      toast.error(errMsg(error));
+      throw error;
     } finally {
-      setIsReceiving(false);
+      setActionLoading(false);
     }
+  };
+
+  const handleApprove = (t: Transfer) =>
+    runAction(() => inventoryApi.approveTransfer(t.id, true), 'Transfer approved');
+
+  const handleReject = (t: Transfer) => {
+    const reason = window.prompt('Reason for rejecting this transfer?');
+    if (!reason || !reason.trim()) return;
+    return runAction(
+      () => inventoryApi.approveTransfer(t.id, false, reason.trim()),
+      'Transfer rejected',
+      { close: true },
+    );
+  };
+
+  const handleShipConfirm = (t: Transfer) =>
+    runAction(
+      () =>
+        inventoryApi.shipTransfer(t.id, {
+          trackingNumber: trackingNumber.trim() || undefined,
+          courierName: courierName.trim() || undefined,
+        }),
+      'Transfer shipped',
+    );
+
+  const handleReceiveConfirm = (t: Transfer) => {
+    const items = t.items.map((item, index) => {
+      const key = item.id ?? item.product_id ?? `item-${index}`;
+      const line = receiveLines[key] || { received: 0, damaged: 0 };
+      return {
+        transfer_item_id: key,
+        quantity_received: Number(line.received) || 0,
+        quantity_damaged: Number(line.damaged) || 0,
+      };
+    });
+    // Guard client-side too (backend also rejects): damaged <= received.
+    const bad = items.find((i) => i.quantity_damaged > i.quantity_received);
+    if (bad) {
+      toast.error('Damaged quantity cannot exceed received quantity');
+      return;
+    }
+    return runAction(
+      () => inventoryApi.receiveTransfer(t.id, items),
+      'Transfer received',
+    );
+  };
+
+  const handleComplete = (t: Transfer) =>
+    runAction(() => inventoryApi.completeTransfer(t.id), 'Transfer completed');
+
+  // Cancel goes through the fresh-state guard: the transfer is re-fetched and
+  // the canCancel gate re-run on the SERVER's current doc before the POST is
+  // sent. A tab left open through a ship+receive cycle in another session can
+  // therefore never cancel a transfer whose stock has already moved — the
+  // stale click gets a toast + refresh instead of a POST.
+  const handleCancel = async (t: Transfer) => {
+    const reason = window.prompt('Reason for cancelling this transfer?');
+    if (!reason || !reason.trim()) return;
+    setActionLoading(true);
+    try {
+      const result = await cancelWithFreshCheck({
+        actor,
+        transferId: t.id,
+        reason: reason.trim(),
+        getTransfer: (id) => inventoryApi.getTransfer(id),
+        cancelTransfer: (id, r) => inventoryApi.cancelTransfer(id, r),
+      });
+      if (result.ok) {
+        toast.success('Transfer cancelled');
+        await loadTransfers();
+        closeDetails();
+      } else if (result.reason === 'stale_not_cancellable') {
+        toast.error(
+          `This transfer can no longer be cancelled - its status is now "${result.freshStatus}". Refreshing.`,
+        );
+        // Re-render the modal from the fresh server doc so the buttons re-gate.
+        if (result.freshTransfer) {
+          setSelectedTransfer(result.freshTransfer as unknown as Transfer);
+        }
+        setActionMode('view');
+        await loadTransfers();
+      } else {
+        toast.error(
+          'Could not verify the current transfer status - cancel was NOT sent. Please try again.',
+        );
+      }
+    } catch (error: any) {
+      toast.error(errMsg(error));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const setLine = (key: string, patch: Partial<{ received: number; damaged: number }>) => {
+    setReceiveLines((prev) => {
+      const current = prev[key] || { received: 0, damaged: 0 };
+      return { ...prev, [key]: { ...current, ...patch } };
+    });
+  };
+
+  // The single most-relevant next action for the list card (opens the modal).
+  const primaryCardAction = (
+    t: Transfer,
+  ): { label: string; intent: ActionMode; icon: React.ElementType } | null => {
+    if (canApprove(t)) return { label: 'Approve', intent: 'view', icon: ThumbsUp };
+    if (canShip(t)) return { label: 'Ship', intent: 'ship', icon: Truck };
+    if (canReceive(t)) return { label: 'Receive', intent: 'receive', icon: Check };
+    if (canComplete(t)) return { label: 'Complete', intent: 'view', icon: CheckCircle };
+    return null;
   };
 
   const getStatusBadge = (status: string) => {
@@ -264,19 +468,14 @@ export function StockTransferManagement() {
       ) : (
         <div className="space-y-3">
           {filteredTransfers.map((transfer) => {
-            // INV-5: use from_location_id; canReceive covers both lower/uppercase statuses
             const isOutgoing = transfer.from_location_id === user?.activeStoreId;
-            const canReceive =
-              !isOutgoing &&
-              (transfer.status === 'SENT' || transfer.status === 'sent' ||
-               transfer.status === 'IN_TRANSIT' || transfer.status === 'in_transit' ||
-               transfer.status === 'approved' || transfer.status === 'APPROVED');
+            const primary = primaryCardAction(transfer);
 
             return (
               <div
                 key={transfer.id}
                 className="card hover:shadow-md transition-shadow cursor-pointer"
-                onClick={() => handleViewDetails(transfer)}
+                onClick={() => openDetails(transfer)}
               >
                 <div className="flex items-center gap-4">
                   {/* Direction Icon */}
@@ -315,23 +514,23 @@ export function StockTransferManagement() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleViewDetails(transfer);
+                        openDetails(transfer);
                       }}
                       className="btn-outline text-sm flex items-center gap-2"
                     >
                       <Eye className="w-4 h-4" />
                       View
                     </button>
-                    {canReceive && (
+                    {primary && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleReceiveTransfer(transfer.id);
+                          openDetails(transfer, primary.intent);
                         }}
                         className="btn-primary text-sm flex items-center gap-2"
                       >
-                        <Check className="w-4 h-4" />
-                        Receive
+                        <primary.icon className="w-4 h-4" />
+                        {primary.label}
                       </button>
                     )}
                   </div>
@@ -372,7 +571,7 @@ export function StockTransferManagement() {
                   Delivery Challan
                 </button>
                 <button
-                  onClick={() => setShowDetails(false)}
+                  onClick={closeDetails}
                   className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
                 >
                   <X className="w-5 h-5 text-gray-500" />
@@ -414,6 +613,15 @@ export function StockTransferManagement() {
                       {selectedTransfer.total_items} items
                     </p>
                   </div>
+                  {selectedTransfer.tracking_number && (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-1">Tracking</p>
+                      <p className="font-medium text-gray-900">
+                        {selectedTransfer.tracking_number}
+                        {selectedTransfer.courier_name ? ` · ${selectedTransfer.courier_name}` : ''}
+                      </p>
+                    </div>
+                  )}
                   {selectedTransfer.received_at && (
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Received At</p>
@@ -433,9 +641,49 @@ export function StockTransferManagement() {
                 </div>
               )}
 
+              {/* Ship panel — capture tracking + carrier before shipping */}
+              {actionMode === 'ship' && (
+                <div className="mb-6 p-4 border border-blue-200 bg-blue-50 rounded-lg space-y-4">
+                  <p className="text-sm font-medium text-blue-900 flex items-center gap-2">
+                    <Truck className="w-4 h-4" />
+                    Shipping details
+                  </p>
+                  <p className="text-xs text-blue-800">
+                    Shipping moves the units out of {selectedTransfer.from_location_name} and
+                    marks the transfer In Transit.
+                  </p>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        Tracking Number (optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={trackingNumber}
+                        onChange={(e) => setTrackingNumber(e.target.value)}
+                        placeholder="e.g. AWB123456789"
+                        className="input-field w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        Carrier (optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={courierName}
+                        onChange={(e) => setCourierName(e.target.value)}
+                        placeholder="e.g. Delhivery"
+                        className="input-field w-full"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Items Table */}
               <div className="border border-gray-200 rounded-lg overflow-x-auto">
-                <table className="w-full min-w-[400px]">
+                <table className="w-full min-w-[520px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">
@@ -445,9 +693,18 @@ export function StockTransferManagement() {
                         SKU
                       </th>
                       <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">
-                        Quantity
+                        {actionMode === 'receive' ? 'Shipped' : 'Qty'}
                       </th>
-                      {selectedTransfer.status === 'PARTIALLY_RECEIVED' && (
+                      {actionMode === 'receive' ? (
+                        <>
+                          <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">
+                            Received
+                          </th>
+                          <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">
+                            Damaged
+                          </th>
+                        </>
+                      ) : (
                         <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">
                           Received
                         </th>
@@ -455,61 +712,193 @@ export function StockTransferManagement() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {selectedTransfer.items.map((item, index) => (
-                      <tr key={index}>
-                        <td className="px-4 py-3 text-sm text-gray-900">
-                          {item.product_name}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-500">{item.sku}</td>
-                        <td className="px-4 py-3 text-sm text-gray-900 text-right">
-                          {item.quantity}
-                        </td>
-                        {/* Handle both upper and lowercase from backend */}
-                        {(selectedTransfer.status === 'PARTIALLY_RECEIVED' ||
-                          selectedTransfer.status === 'partially_received') && (
-                          <td className="px-4 py-3 text-sm text-gray-900 text-right">
-                            {item.quantity_received || 0}
+                    {selectedTransfer.items.map((item, index) => {
+                      const key = item.id ?? item.product_id ?? `item-${index}`;
+                      const shippedCap = lineQty(item);
+                      const line = receiveLines[key] || { received: 0, damaged: 0 };
+                      return (
+                        <tr key={key}>
+                          <td className="px-4 py-3 text-sm text-gray-900">
+                            {item.product_name}
                           </td>
-                        )}
-                      </tr>
-                    ))}
+                          <td className="px-4 py-3 text-sm text-gray-500">{item.sku}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 text-right">
+                            {shippedCap}
+                          </td>
+                          {actionMode === 'receive' ? (
+                            <>
+                              <td className="px-4 py-3 text-right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={shippedCap}
+                                  value={line.received}
+                                  onChange={(e) =>
+                                    setLine(key, {
+                                      received: Math.max(
+                                        0,
+                                        Math.min(shippedCap, parseInt(e.target.value) || 0),
+                                      ),
+                                    })
+                                  }
+                                  className="input-field w-20 text-center"
+                                  aria-label={`Received quantity for ${item.product_name}`}
+                                />
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={line.received}
+                                  value={line.damaged}
+                                  onChange={(e) =>
+                                    setLine(key, {
+                                      damaged: Math.max(
+                                        0,
+                                        Math.min(line.received, parseInt(e.target.value) || 0),
+                                      ),
+                                    })
+                                  }
+                                  className="input-field w-20 text-center"
+                                  aria-label={`Damaged quantity for ${item.product_name}`}
+                                />
+                              </td>
+                            </>
+                          ) : (
+                            <td className="px-4 py-3 text-sm text-gray-900 text-right">
+                              {item.quantity_received || 0}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
 
-            {/* Modal Footer — INV-5: use from_location_id; cover both case variants */}
-            {selectedTransfer.from_location_id !== user?.activeStoreId &&
-              (selectedTransfer.status === 'SENT' || selectedTransfer.status === 'sent' ||
-               selectedTransfer.status === 'IN_TRANSIT' || selectedTransfer.status === 'in_transit' ||
-               selectedTransfer.status === 'approved' || selectedTransfer.status === 'APPROVED') && (
-                <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200 bg-gray-50">
+            {/* Modal Footer — lifecycle actions gated by backend status + role */}
+            <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200 bg-gray-50">
+              {actionMode === 'ship' ? (
+                <>
                   <button
-                    onClick={() => setShowDetails(false)}
-                    disabled={isReceiving}
+                    onClick={() => setActionMode('view')}
+                    disabled={actionLoading}
                     className="btn-outline"
                   >
-                    Close
+                    Back
                   </button>
                   <button
-                    onClick={() => handleReceiveTransfer(selectedTransfer.id)}
-                    disabled={isReceiving}
+                    onClick={() => handleShipConfirm(selectedTransfer)}
+                    disabled={actionLoading}
                     className="btn-primary flex items-center gap-2"
                   >
-                    {isReceiving ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Receiving...
-                      </>
+                    {actionLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
-                      <>
-                        <Check className="w-4 h-4" />
-                        Receive Transfer
-                      </>
+                      <Send className="w-4 h-4" />
                     )}
+                    Confirm Shipment
                   </button>
-                </div>
+                </>
+              ) : actionMode === 'receive' ? (
+                <>
+                  <button
+                    onClick={() => setActionMode('view')}
+                    disabled={actionLoading}
+                    className="btn-outline"
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={() => handleReceiveConfirm(selectedTransfer)}
+                    disabled={actionLoading}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    {actionLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Check className="w-4 h-4" />
+                    )}
+                    Confirm Receipt
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button onClick={closeDetails} disabled={actionLoading} className="btn-outline">
+                    Close
+                  </button>
+                  {canCancel(selectedTransfer) && (
+                    <button
+                      onClick={() => handleCancel(selectedTransfer)}
+                      disabled={actionLoading}
+                      className="btn-outline text-red-600 border-red-200 hover:bg-red-50 flex items-center gap-2"
+                    >
+                      <Ban className="w-4 h-4" />
+                      Cancel
+                    </button>
+                  )}
+                  {canApprove(selectedTransfer) && (
+                    <>
+                      <button
+                        onClick={() => handleReject(selectedTransfer)}
+                        disabled={actionLoading}
+                        className="btn-outline text-red-600 border-red-200 hover:bg-red-50 flex items-center gap-2"
+                      >
+                        <X className="w-4 h-4" />
+                        Reject
+                      </button>
+                      <button
+                        onClick={() => handleApprove(selectedTransfer)}
+                        disabled={actionLoading}
+                        className="btn-primary flex items-center gap-2"
+                      >
+                        {actionLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <ThumbsUp className="w-4 h-4" />
+                        )}
+                        Approve
+                      </button>
+                    </>
+                  )}
+                  {canShip(selectedTransfer) && (
+                    <button
+                      onClick={() => startShip(selectedTransfer)}
+                      disabled={actionLoading}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      <Truck className="w-4 h-4" />
+                      Ship
+                    </button>
+                  )}
+                  {canReceive(selectedTransfer) && (
+                    <button
+                      onClick={() => startReceive(selectedTransfer)}
+                      disabled={actionLoading}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      Receive
+                    </button>
+                  )}
+                  {canComplete(selectedTransfer) && (
+                    <button
+                      onClick={() => handleComplete(selectedTransfer)}
+                      disabled={actionLoading}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      {actionLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <CheckCircle className="w-4 h-4" />
+                      )}
+                      Complete
+                    </button>
+                  )}
+                </>
               )}
+            </div>
           </div>
         </div>
       )}
