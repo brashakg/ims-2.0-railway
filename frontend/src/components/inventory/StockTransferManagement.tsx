@@ -218,7 +218,7 @@ export function StockTransferManagement() {
     // exceeds the shipped qty, so shipped is the correct default ceiling.
     const lines: Record<string, { received: number; damaged: number }> = {};
     transfer.items.forEach((item, index) => {
-      const key = item.id ?? `item-${index}`;
+      const key = item.id ?? item.product_id ?? `item-${index}`;
       lines[key] = { received: lineQty(item), damaged: 0 };
     });
     setReceiveLines(lines);
@@ -276,7 +276,7 @@ export function StockTransferManagement() {
 
   const handleReceiveConfirm = (t: Transfer) => {
     const items = t.items.map((item, index) => {
-      const key = item.id ?? `item-${index}`;
+      const key = item.id ?? item.product_id ?? `item-${index}`;
       const line = receiveLines[key] || { received: 0, damaged: 0 };
       return {
         transfer_item_id: key,
@@ -698,7 +698,7 @@ export function StockTransferManagement() {
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {selectedTransfer.items.map((item, index) => {
-                      const key = item.id ?? `item-${index}`;
+                      const key = item.id ?? item.product_id ?? `item-${index}`;
                       const shippedCap = lineQty(item);
                       const line = receiveLines[key] || { received: 0, damaged: 0 };
                       return (
