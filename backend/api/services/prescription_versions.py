@@ -81,7 +81,20 @@ def merge_version(
 ) -> Dict[str, Any]:
     """Apply a per-version write to the prescription doc. Returns the
     NEW doc (immutably — useful for tests). Caller persists via the
-    repository."""
+    repository.
+
+    CONTRACT: `version_payload` REPLACES the named slot wholesale — this
+    function does no merging. A partial (PATCH-style) caller must therefore
+    hand in an ALREADY-MERGED slot; the router does that with
+    `prescriptions._merge_version_slot`, and validates the merged slot before
+    calling here. Kept as a plain replace on purpose: the merge needs the
+    router's eye-alias handling, and a function named "merge" that silently
+    resurrected a power the clinician deliberately cleared would be worse than
+    an honest overwrite.
+
+    `captured_at` / `captured_by` are stamped here from THIS write, so the
+    caller must not carry the stored slot's provenance into the payload.
+    """
     if version_name not in VALID_VERSION_NAMES:
         raise ValueError(f"version_name must be one of {VALID_VERSION_NAMES}")
     if doc.get("status") == "finalized":
