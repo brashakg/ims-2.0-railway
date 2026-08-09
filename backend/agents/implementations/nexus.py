@@ -34,6 +34,7 @@ from api.utils.ist import now_ist
 from ..nexus_providers import (
     SyncResult,
     TallyExportError,
+    order_identity,
     shopify_pull_orders,
     razorpay_list_payments,
     shiprocket_track_awb,
@@ -341,18 +342,30 @@ class NexusAgent(JarvisAgent):
                     "store_id": sid,
                 }))
             except Exception as e:
-                logger.warning(f"[NEXUS] orders query failed for store {sid}: {e}")
+                # A store whose orders could not be READ must not leave last
+                # night's row downloadable and green -- that is the same stale
+                # -row hole the poison upsert exists to close.
+                logger.error(f"[NEXUS] orders query failed for store {sid}: {e}")
+                gate_failures.append(f"{sid}: orders query failed: {e}")
+                self._write_poison_export_row(
+                    export_coll, export_date_iso, sid,
+                    self._store_meta(store, sid),
+                    f"orders query failed: {e}",
+                )
                 continue
 
+            store_meta = self._store_meta(store, sid)
+
             if not orders:
+                # No qualifying orders today. If a PRIOR row exists for this
+                # (date, store) it is now superseded -- the day's only order may
+                # have been cancelled since -- so it must not keep downloading
+                # as a healthy export. Invariant: after a tick, every
+                # (date, active store) has a freshly-written row or no row.
+                self._supersede_stale_export_row(export_coll, export_date_iso, sid, store_meta)
                 continue
 
             balance = validate_voucher_balance(orders)
-            store_meta = {
-                "store_id": sid,
-                "store_code": store.get("store_code") or sid,
-                "store_name": store.get("store_name") or sid,
-            }
             try:
                 xml, priced, rejected = tally_build_day_voucher_xml_checked(
                     self.db, orders, store_meta=store_meta,
@@ -389,6 +402,20 @@ class NexusAgent(JarvisAgent):
                     f"({', '.join(r['order_id'] for r in rejected[:5])})"
                 )
 
+            # The row must describe the FILE, not the day. `balance` above is
+            # computed over every order considered; scoring the row with it made
+            # a row claim Rs 4,180 / 4 orders while the XML the CA actually
+            # imports held Rs 3,000 / 3 vouchers with mismatch_count 0.
+            priced_balance = validate_voucher_balance(priced) if rejected else balance
+            skipped_totals = (
+                validate_voucher_balance(
+                    [o for o in orders if order_identity(o) in
+                     {r["order_id"] for r in rejected}]
+                )["totals"]
+                if rejected
+                else {}
+            )
+
             row = {
                 "agent_id": self.agent_id,
                 "export_date": export_date_iso,
@@ -400,9 +427,13 @@ class NexusAgent(JarvisAgent):
                 # A quarantined order means the file is INCOMPLETE, so it must
                 # download as *_UNBALANCED.xml even when the vouchers that DID
                 # make it are individually perfect.
-                "balanced": bool(balance["ok"]) and not rejected,
-                "balance_check": balance,
-                "unverified_count": balance.get("unverified_count", 0),
+                "balanced": bool(priced_balance["ok"]) and not rejected,
+                # Scoped to the vouchers actually in the XML.
+                "balance_check": priced_balance,
+                # What the file is MISSING, so the gap is legible without
+                # re-deriving it from the order collection.
+                "skipped_totals": skipped_totals,
+                "unverified_count": priced_balance.get("unverified_count", 0),
                 "gate_skipped_orders": [r["order_id"] for r in rejected],
                 "gate_skipped_reasons": rejected[:20],
                 "gate_error": "",
@@ -477,6 +508,40 @@ class NexusAgent(JarvisAgent):
             notes=notes,
         )
 
+    @staticmethod
+    def _store_meta(store: Dict[str, Any], sid: str) -> Dict[str, Any]:
+        return {
+            "store_id": sid,
+            "store_code": store.get("store_code") or sid,
+            "store_name": store.get("store_name") or sid,
+        }
+
+    def _supersede_stale_export_row(self, export_coll, export_date_iso, sid,
+                                    store_meta) -> None:
+        """A store with NO qualifying orders today must not keep serving an
+        earlier row for the same date (the day's only order may since have been
+        cancelled, or an earlier /regenerate may have written a fuller file).
+        Only touches the row if one already exists -- a store that simply had no
+        sales still gets no row at all."""
+        try:
+            existing = export_coll.find_one(
+                {"export_date": export_date_iso, "store_id": sid}
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] tally_exports lookup failed for {sid}: {e}")
+            return
+        if not existing:
+            return
+        logger.error(
+            "[NEXUS] Tally export for store %s on %s SUPERSEDED: no qualifying "
+            "orders now, but a prior row existed",
+            sid, export_date_iso,
+        )
+        self._write_poison_export_row(
+            export_coll, export_date_iso, sid, store_meta,
+            "no qualifying orders -- prior export superseded",
+        )
+
     def _write_poison_export_row(self, export_coll, export_date_iso, sid,
                                  store_meta, error: str) -> None:
         """Upsert a VISIBLE failure row for a store whose export was rejected.
@@ -502,6 +567,13 @@ class NexusAgent(JarvisAgent):
                     "balanced": False,
                     "gate_error": error,
                     "gate_skipped_orders": [],
+                    # CLEAR the previous run's assertions. Leaving them meant a
+                    # 0-byte *_UNBALANCED.xml sat next to totals still claiming
+                    # a clean Rs 4.7L day.
+                    "balance_check": {},
+                    "gate_skipped_reasons": [],
+                    "skipped_totals": {},
+                    "unverified_count": 0,
                     "builder_version": 2,
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "consumed": False,
@@ -536,14 +608,19 @@ class NexusAgent(JarvisAgent):
             return SyncResult(ok=True, provider="tally", kind="export",
                               notes="No completed orders today (legacy path)")
 
-        balance = validate_voucher_balance(todays_orders)
+        export_date_iso = day_start.isoformat()
+        legacy_meta = {"store_id": None, "store_code": "CHAIN", "store_name": "CHAIN"}
         try:
             xml, priced, rejected = tally_build_day_voucher_xml_checked(
                 self.db, todays_orders
             )
         except (TallyExportError, ValueError, TypeError) as e:
-            # Same money gate as the per-store path: emit nothing, fail loud.
+            # Same money gate as the per-store path: emit nothing, fail loud --
+            # and POISON any prior row so it cannot keep downloading green.
             logger.error("[NEXUS] Tally legacy export ABORTED: %s", e)
+            self._write_poison_export_row(
+                export_coll, export_date_iso, None, legacy_meta, str(e)
+            )
             return SyncResult(ok=False, provider="tally", kind="export",
                               error=f"Tally voucher gate rejected the export: {e}")
         if rejected:
@@ -552,21 +629,31 @@ class NexusAgent(JarvisAgent):
                 len(rejected),
                 "; ".join(f"{r['order_id']}: {r['reason']}" for r in rejected[:5]),
             )
+        # Scoped to the vouchers actually in the file, not to every order looked at.
+        balance = validate_voucher_balance(priced)
         try:
-            export_coll.insert_one({
-                "agent_id": self.agent_id,
-                "export_date": day_start.isoformat(),
-                "voucher_count": len(priced),
-                "xml": xml,
-                "unverified_count": balance.get("unverified_count", 0),
-                "gate_skipped_orders": [r["order_id"] for r in rejected],
-                "gate_skipped_reasons": rejected[:20],
-                "builder_version": 2,
-                "balanced": bool(balance["ok"]) and not rejected,
-                "balance_check": balance,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "consumed": False,
-            })
+            # UPSERT on (export_date, store_id=None): `insert_one` accumulated a
+            # duplicate chain-wide row for the same day on every re-run.
+            export_coll.update_one(
+                {"export_date": export_date_iso, "store_id": None},
+                {"$set": {
+                    "agent_id": self.agent_id,
+                    "export_date": export_date_iso,
+                    "store_id": None,
+                    "voucher_count": len(priced),
+                    "xml": xml,
+                    "unverified_count": balance.get("unverified_count", 0),
+                    "gate_skipped_orders": [r["order_id"] for r in rejected],
+                    "gate_skipped_reasons": rejected[:20],
+                    "gate_error": "",
+                    "builder_version": 2,
+                    "balanced": bool(balance["ok"]) and not rejected,
+                    "balance_check": balance,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "consumed": False,
+                }},
+                upsert=True,
+            )
         except Exception as e:
             return SyncResult(ok=False, provider="tally", kind="export",
                               error=f"tally_exports write failed: {e}")

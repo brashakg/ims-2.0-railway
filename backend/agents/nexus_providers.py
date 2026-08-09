@@ -593,7 +593,10 @@ def tally_build_day_voucher_xml(
 
     vouchers = []
     for o in orders:
-        order_id = escape(str(o.get("order_id", "")))
+        # VOUCHERNUMBER via the same identity chain the quarantine reports use:
+        # an imported order carries `order_number`, never `order_id`, and an
+        # empty <VOUCHERNUMBER> is unusable to the accountant.
+        order_id = escape(_order_identity(o))
         order_date = to_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
         party = escape(o.get("customer_name") or "Walk-in Customer")
         subtotal = float(o.get("subtotal", 0) or 0)
@@ -700,16 +703,26 @@ _TALLY_TAX_TOLERANCE = 0.50
 # a document the gate could READ but the reshape could not PRICE emitted the
 # original zero-GST defect with a passed-the-gate stamp.
 #
-# SUPERSET, NOT A FORK of finance.get_tally_sales_jv: the canonical keys come
-# FIRST in the canonical order (`tax_amount` -> `tax_total`, `grand_total` ->
-# `total`), so any document the canonical human export can price is priced
-# BYTE-IDENTICALLY here. The extra keys are consulted only when the canonical
-# chain yields nothing -- which is precisely the case where the canonical path
-# would silently book zero.
-#   total_tax   -- reports.py:218 _order_tax reads it, so the shape exists
-#   tax / gst_amount, total_amount -- ONDC (ondc_seller.py:863-865) writes
-#                  total_amount + gst_amount and no grand_total/tax_amount
-_TAX_FIELD_CHAIN = ("tax_amount", "tax_total", "total_tax", "tax", "gst_amount")
+# SUPERSET of finance.get_tally_sales_jv, NOT a fork of its rules: the canonical
+# keys come FIRST in the canonical order (`tax_amount` -> `tax_total`,
+# `grand_total` -> `total`), and the extra keys are consulted only when the
+# canonical chain yields nothing -- precisely the case where the canonical path
+# silently books zero.
+#   total_tax    -- reports.py:218 _order_tax reads it, so the shape exists
+#   total_amount -- ONDC (ondc_seller.py) writes it instead of grand_total
+#
+# NOT byte-identical to the human export: on a document the canonical chain
+# cannot price, the nightly is MORE correct (it prices it, or refuses loudly)
+# while /finance/tally/sales-jv still books zero GST. The two Tally files for the
+# same date can therefore differ on such documents. Lifting these chains into
+# finance.get_tally_sales_jv is the durable fix; that file is owned elsewhere.
+#
+# `gst_amount` is DELIBERATELY ABSENT from the tax chain. ONDC's `gst_amount`
+# (ondc_seller.py) is a CHARGES RESIDUAL -- total charged minus line subtotal --
+# not a computed tax: ONDC lines never run through the IMS GST engine at ingest.
+# Reading it as tax booked delivery revenue as an output-GST liability that was
+# never collected. An ONDC order is quarantined loudly instead.
+_TAX_FIELD_CHAIN = ("tax_amount", "tax_total", "total_tax", "tax")
 _GROSS_FIELD_CHAIN = ("grand_total", "total", "total_amount")
 
 
@@ -719,8 +732,11 @@ def _first_present_amount(order: Dict[str, Any], keys) -> tuple:
     PRESENT (even as an explicit zero).
 
     The distinction matters: an explicit `tax_amount: 0.0` is an affirmative
-    "this sale carried no GST" (exempt), whereas no tax key at all means the
-    document is unclassifiable and must not be booked as 100% Sales.
+    "this sale carried no GST" -- optical really does sell 0%-rated lines (eye
+    tests, hearing aids) and those must keep shipping -- whereas no tax key at
+    all means the document is unclassifiable and must not be booked as 100%
+    Sales. A key present with the value None counts as ABSENT: the writers now
+    persist None rather than a manufactured 0.0 when the source said nothing.
 
     Raises TallyExportError (never ValueError) on a non-numeric amount so one
     junk document can only ever fail its own store, not the whole chain.
@@ -738,12 +754,32 @@ def _first_present_amount(order: Dict[str, Any], keys) -> tuple:
             value = float(raw or 0)
         except (TypeError, ValueError) as e:
             raise TallyExportError(
-                f"order {order.get('order_id', '?')!r}: field {key!r} is not a "
+                f"order {_order_identity(order)!r}: field {key!r} is not a "
                 f"number ({raw!r}) -- refusing to price the voucher"
             ) from e
         if value:
             return round(value, 2), key
     return 0.0, present_key
+
+
+# Identifier chain for quarantine reporting + the Tally VOUCHERNUMBER.
+# techcherry_import._map_order persists `order_number` and NEVER `order_id`, so
+# reading only `order_id` reported quarantined live imports as '?' and the owner
+# could not tell which invoices were missing from the books.
+_ORDER_ID_FIELDS = ("order_id", "order_number", "invoice_number", "external_order_id")
+
+
+def order_identity(order: Dict[str, Any]) -> str:
+    """The best human-usable identifier the document actually carries."""
+    for key in _ORDER_ID_FIELDS:
+        value = order.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return "?"
+
+
+# Internal alias kept so the module reads consistently at its own call sites.
+_order_identity = order_identity
 
 
 def _amounts_or_zero(order: Dict[str, Any], keys) -> tuple:
@@ -784,6 +820,37 @@ def _order_line_tax(order: Dict[str, Any]) -> Optional[float]:
     return round(total, 2) if seen else None
 
 
+def _lines_prove_zero_rated(order: Dict[str, Any]) -> bool:
+    """True only when EVERY line positively proves a 0% rate.
+
+    A line proves it by carrying `gst_rate == 0` together with a
+    `taxable_value` that equals its `item_total` -- i.e. the pricing engine
+    itself concluded there was no tax component. Absence of evidence (no items,
+    or lines with no rate stamped) is NOT proof and returns False.
+    """
+    items = order.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    for it in items:
+        if not isinstance(it, dict):
+            return False
+        rate = it.get("gst_rate")
+        taxable = it.get("taxable_value")
+        gross = it.get("item_total")
+        if rate is None or taxable is None or gross is None:
+            return False
+        try:
+            if float(rate) != 0.0:
+                return False
+            if abs(float(taxable) - float(gross)) > 0.01:
+                return False
+            if abs(float(it.get("tax_amount") or 0)) > 0.01:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _order_declared_tax(order: Dict[str, Any]) -> float:
     """The LARGEST total-GST figure the order document itself claims.
 
@@ -791,7 +858,8 @@ def _order_declared_tax(order: Dict[str, Any]) -> float:
     per-line sum as an independent second opinion. If any of those says the
     sale carried output GST but the voucher we are about to emit books less,
     that is the zero-GST defect -- take the max so the gate can only ever
-    over-demand, never under-demand.
+    over-demand, never under-demand. `_order_tax_statements_disagree` covers
+    the OTHER direction, which max() alone cannot see.
     """
     candidates: List[float] = []
     for key in _TAX_FIELD_CHAIN:
@@ -806,6 +874,33 @@ def _order_declared_tax(order: Dict[str, Any]) -> float:
     if line_tax is not None:
         candidates.append(line_tax)
     return round(max(candidates), 2) if candidates else 0.0
+
+
+def _order_tax_statements_disagree(order: Dict[str, Any]) -> Optional[str]:
+    """A description of the disagreement between the order's TWO tax statements,
+    or None when they agree (or only one exists).
+
+    `max()` in `_order_declared_tax` is ONE-SIDED: it quarantines lines-over-
+    header (the under-booking direction) but blesses header-over-lines. A
+    Rs 1,180 order whose header says Rs 300 while its lines say Rs 180 emits
+    Sales 880.00 / CGST 150.00 / SGST 150.00 -- Rs 120 of PHANTOM output-GST
+    liability with Sales understated by the same Rs 120, and it passes every
+    other gate because the legs still net to zero. A document whose own two tax
+    statements differ by more than 50 paise is unpriceable in EITHER direction.
+    """
+    header_tax, header_key = _amounts_or_zero(order, _TAX_FIELD_CHAIN)
+    if header_key is None:
+        return None
+    line_tax = _order_line_tax(order)
+    if line_tax is None:
+        return None
+    if abs(header_tax - line_tax) <= _TALLY_TAX_TOLERANCE:
+        return None
+    return (
+        f"the order's header declares Rs {header_tax:.2f} GST ({header_key}) "
+        f"while its lines sum to Rs {line_tax:.2f} -- the document disagrees "
+        "with itself and is unpriceable in either direction"
+    )
 
 
 def tally_resolve_state_maps(db) -> tuple:
@@ -907,48 +1002,90 @@ def _reshape_one_order(
     quarantine that single row instead of losing the whole store's night."""
     is_interstate, jv_split = rules
     row = dict(order)
-    oid = row.get("order_id", "?")
+    oid = _order_identity(row)
     tax, tax_key = _first_present_amount(row, _TAX_FIELD_CHAIN)
     grand, _gross_key = _first_present_amount(row, _GROSS_FIELD_CHAIN)
     line_tax = _order_line_tax(row)
+    declared_net, net_key = _first_present_amount(row, ("subtotal",))
 
-    # HARD STOP 0 -- a negative gross cannot be a Sales voucher (the formatter
-    # would emit an unparseable amount and there is no credit-note path here).
+    # A document whose ONLY tax evidence is per-line is fully priceable -- the
+    # line sum IS the order's output GST. Refusing it would drop a real, named
+    # sale from the accountant's file for no reason.
+    if tax_key is None and line_tax is not None:
+        tax, tax_key = line_tax, "items[].tax_amount"
+
+    # HARD STOP 0 -- a Sales voucher cannot carry a negative gross (the
+    # formatter would emit an unparseable amount and there is no credit-note
+    # path here), and a zero/absent gross alongside a declared tax or taxable
+    # is a broken document, not a sale.
     if grand < 0:
         raise TallyExportError(
             f"order {oid!r}: negative gross Rs {grand:.2f} -- a Sales voucher "
             "cannot carry it (credit notes are a separate voucher type)"
         )
+    if grand <= 0 and (tax or declared_net or line_tax):
+        raise TallyExportError(
+            f"order {oid!r}: gross resolves to Rs {grand:.2f} but the document "
+            f"declares tax Rs {tax:.2f} / taxable Rs {declared_net:.2f} -- the "
+            "gross could not be read, refusing to emit a zero voucher"
+        )
 
     # HARD STOP 1 -- unclassifiable. A non-zero sale whose document carries no
     # tax figure under ANY known key and no per-line tax cannot be priced;
-    # booking it as 100% Sales is the zero-GST defect. An EXPLICIT zero
-    # (tax_key is not None) is an affirmative "exempt" and is allowed through.
-    if grand > 0 and tax_key is None and line_tax is None:
+    # booking it as 100% Sales is the zero-GST defect. An EXPLICIT zero is an
+    # affirmative "exempt" and IS allowed through -- optical genuinely sells
+    # 0%-rated lines (eye tests, hearing aids) and a blanket
+    # "gross > 0 and tax == 0 -> refuse" would drop those real sales from the
+    # books. The writers now persist None, not a manufactured 0.0, when the
+    # source said nothing, which is what makes the two cases distinguishable.
+    if grand > 0 and tax_key is None:
         raise TallyExportError(
             f"order {oid!r}: gross Rs {grand:.2f} but the document declares no "
             f"GST under any known key {list(_TAX_FIELD_CHAIN)} and no per-line "
             "tax -- refusing to book it as 100% Sales"
         )
 
-    # HARD STOP 2 -- the document contradicts the price we are about to emit.
-    # `subtotal` is only meaningful here when it looks like a NET figure (below
-    # the gross): a POS order's `subtotal` is the pre-cart-discount
-    # tax-INCLUSIVE gross and is therefore >= grand, so a discounted POS bill
-    # can never trip this. The TechCherry importer writes
-    # subtotal=TaxableAmount with tax_amount=0.0 on a blank tax column -- the
-    # document itself says Rs 1,000 taxable on a Rs 1,180 sale while the split
-    # would emit Sales Rs 1,180.
-    declared_net, _ = _first_present_amount(row, ("subtotal",))
     emitted_net = round(grand - tax, 2)
-    if (
-        0 < declared_net < grand
-        and (emitted_net - declared_net) > _TALLY_TAX_TOLERANCE
-    ):
+
+    # HARD STOP 2 -- the document's own taxable contradicts the Sales figure we
+    # would emit. Two arrangements, both live:
+    #   (a) declared_net BELOW the gross: the doc says Rs 1,000 taxable on a
+    #       Rs 1,180 sale while the split would emit Sales Rs 1,180.
+    #   (b) declared_net EQUAL to the gross with zero tax: a tax-inclusive gross
+    #       standing in for the taxable. Only a per-line 0-rate PROOF (every
+    #       line taxable_value == item_total at gst_rate 0) makes that honest.
+    # A POS order's `subtotal` is the pre-cart-discount tax-INCLUSIVE gross and
+    # is therefore >= grand, so a discounted POS bill can never trip (a); (b) is
+    # exactly the shape a genuine exempt sale has, hence the per-line proof.
+    if 0 < declared_net < grand and (emitted_net - declared_net) > _TALLY_TAX_TOLERANCE:
         raise TallyExportError(
             f"order {oid!r}: voucher would book Sales Rs {emitted_net:.2f} but "
             f"the document's own subtotal declares Rs {declared_net:.2f} taxable "
             f"on a Rs {grand:.2f} sale -- unresolved output GST"
+        )
+    if (
+        grand > 0
+        and tax == 0
+        and net_key is not None
+        and abs(declared_net - grand) <= _TALLY_TAX_TOLERANCE
+        and not _lines_prove_zero_rated(row)
+    ):
+        raise TallyExportError(
+            f"order {oid!r}: gross Rs {grand:.2f} equals the declared taxable "
+            f"Rs {declared_net:.2f} with Rs 0.00 GST, and no line proves a 0% "
+            "rate -- the tax is unresolved, not exempt"
+        )
+
+    # HARD STOP 3 -- an arithmetically impossible voucher. These all BALANCE
+    # (the legs net to zero) and pass the coverage gate, so nothing else catches
+    # them: {grand 100, tax 180} books Sales -80.00; {grand 1000, tax -180}
+    # books CGST/SGST -90.00 each. A negative Sales or output-GST leg is a
+    # credit note in disguise reaching GSTR-1 through the SALES path.
+    if tax < 0 or emitted_net < 0:
+        raise TallyExportError(
+            f"order {oid!r}: would emit Sales Rs {emitted_net:.2f} and GST "
+            f"Rs {tax:.2f} -- a Sales voucher cannot carry a negative leg "
+            "(tax exceeds the gross, or the tax itself is negative)"
         )
 
     if is_interstate(row, store_states, customer_states):
@@ -1005,16 +1142,24 @@ def tally_build_day_voucher_xml_checked(
 
     Three gates run per order BEFORE a single byte of that order's XML exists:
 
-      0. PRICEABILITY -- `_reshape_one_order`: a negative gross, an
-         unclassifiable document (no GST under any known key and no per-line
-         tax), or a document whose own `subtotal` contradicts the Sales figure
-         we would emit.
-      1. BALANCE -- `assert_voucher_balanced` (api.services.tender_routing) on
+      0. SELF-CONSISTENCY -- `_order_tax_statements_disagree`: a header tax and
+         a per-line tax sum that differ by more than 50 paise, in EITHER
+         direction (over-stating fabricates liability; under-stating hides it).
+      1. PRICEABILITY -- `_reshape_one_order`: a negative or unreadable gross;
+         an unclassifiable document (no GST under any known key AND no per-line
+         tax); a document whose own `subtotal` contradicts the Sales figure we
+         would emit, including a tax-inclusive gross standing in for the taxable
+         with no per-line 0-rate proof; or legs that would go negative.
+      2. BALANCE -- `assert_voucher_balanced` (api.services.tender_routing) on
          the legs `_voucher_legs` says the formatter will actually write.
          Debits must equal credits or Tally rejects the whole import.
-      2. TAX COVERAGE -- the emitted output-tax legs must cover the GST the
+      3. TAX COVERAGE -- the emitted output-tax legs must cover the GST the
          order document itself declares. This catches the original defect
          shape: a voucher whose legs balance because Sales absorbed the tax.
+
+    An EXPLICIT `tax_amount: 0.0` is honoured as a genuine 0%-rated sale (eye
+    tests, hearing aids) and ships. The gates rely on the writers persisting
+    None -- never a coerced 0.0 -- when the source document said nothing.
 
     WHAT THE GATES DO **NOT** VERIFY: the HEAD. They check the TOTAL output GST,
     never whether it belongs on CGST+SGST or on IGST. A Jharkhand store billing
@@ -1055,7 +1200,16 @@ def tally_build_day_voucher_xml_checked(
     rejected: List[Dict[str, Any]] = []
 
     for original in orders or []:
-        oid = str(original.get("order_id") or "?")
+        oid = _order_identity(original)
+
+        # TWO-SIDED tax-statement check, BEFORE pricing: max() below only sees
+        # under-booking, so a header that OVER-states the lines fabricates
+        # output-GST liability and passes every other gate.
+        disagreement = _order_tax_statements_disagree(original)
+        if disagreement:
+            rejected.append({"order_id": oid, "reason": disagreement})
+            continue
+
         try:
             row = _reshape_one_order(original, store_states, customer_states, rules)
         except TallyExportError as e:
@@ -1171,7 +1325,13 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         # taxable + tax should land within 50 paise of grand_total.
         # An order with no resolvable taxable (legacy rows that predate the
         # per-category GST split) is counted as UNVERIFIED, not as a pass.
+        # EXCEPTION: a legitimate Rs 0 order (a fully-approved 100%-discount
+        # bill) has nothing to verify and nothing at risk -- counting it would
+        # flip a whole store's file to _UNBALANCED and blunt the one flag still
+        # guarding the zero-GST class.
         if not taxable or taxable <= 0:
+            if grand == 0 and tax == 0:
+                continue
             unverified += 1
             continue
 

@@ -60,12 +60,19 @@ def _raw_order(
     interstate=None,
     created=None,
     with_items: bool = True,
+    with_subtotal: bool = True,
 ):
     """A RAW order as `orders.py` writes it.
 
     Note what is DELIBERATELY absent: no `taxable`, no `cgst_amount`, no
     `sgst_amount`, no `igst_amount`. And `subtotal` is the tax-INCLUSIVE gross
     before the cart discount, NOT the taxable value.
+
+    `gst_rate` on the line is DERIVED from the tax, exactly as
+    orders._compute_per_category_gst stamps it -- a zero-tax order is a
+    0%-RATED line, not an 18% line that happens to carry no tax. That
+    distinction is what lets the export tell a genuine exempt sale (eye test,
+    hearing aid) from a document whose tax was never resolved.
     """
     doc = {
         "order_id": order_id,
@@ -77,13 +84,14 @@ def _raw_order(
         ),
         "customer_name": "Walk-in Customer",
         "customer_id": None,
-        "subtotal": gross_subtotal,
-        "tax_rate": 18.0,
+        "tax_rate": 18.0 if tax_amount else 0.0,
         "tax_amount": tax_amount,
         "total_discount": 0.0,
         "grand_total": grand_total,
         "pricing_model": "inclusive",
     }
+    if with_subtotal:
+        doc["subtotal"] = gross_subtotal
     if interstate is not None:
         doc["interstate"] = interstate
     if with_items:
@@ -91,7 +99,7 @@ def _raw_order(
             {
                 "item_id": "L1",
                 "item_total": gross_subtotal,
-                "gst_rate": 18.0,
+                "gst_rate": 18.0 if tax_amount else 0.0,
                 "taxable_value": round(grand_total - tax_amount, 2),
                 "tax_amount": tax_amount,
             }
@@ -211,6 +219,10 @@ def test_voucher_balances_across_every_odd_paise_tax():
             tax_amount=round(paise / 100.0, 2),
             gross_subtotal=1000.0,
             with_items=False,
+            # No `subtotal` key: this sweep is about the CGST/SGST split only.
+            # A tax-inclusive gross standing in for the taxable is its own
+            # (separately tested) hard stop.
+            with_subtotal=False,
         )
         for paise in range(0, 1000)
     ]
@@ -297,48 +309,133 @@ def test_legacy_total_tax_header_key_is_priced_not_ignored():
     assert round(sum(legs.values()), 2) == 0.00
 
 
-def test_ondc_shape_books_real_money_not_a_zero_voucher():
-    """ondc_seller.py:851-885 writes `total_amount` + `gst_amount` and NO
-    grand_total / tax_amount, with status DELIVERED (inside NEXUS's filter).
-    Reading only `grand_total`/`total` resolved a gross of Rs 0.00 and emitted
-    an entirely zero voucher for a Rs 1,180 sale -- and it passed the gate."""
-    order = {
-        "order_id": "ORD-ONDC",
-        "created_at": "2026-08-09T10:00:00+00:00",
-        "customer_name": "ONDC Buyer",
-        "subtotal": 1000.0,
-        "total_amount": 1180.0,
-        "gst_amount": 180.0,
-        "items": [],
-    }
-    xml, _p, rejected = tally_build_day_voucher_xml_checked(None, [order])
+# --- REAL writer output, not hand-written dicts -------------------------------
+# Hand-writing these documents is what hid both the identity bug (`order_id` was
+# fabricated; the real importer only ever persists `order_number`) and the
+# subtotal-coerced-to-0.0 escape. Every case below drives the ACTUAL writer.
+
+
+def _techcherry_doc(**row):
+    """The document `techcherry_import._map_order` really persists."""
+    from api.routers.techcherry_import import _map_order
+
+    doc = _map_order(row, store_id="BV-GK1", source="test.xlsx")
+    assert doc is not None
+    assert "order_id" not in doc, "the real importer never persists order_id"
+    return doc
+
+
+def _ondc_doc(items, payment_amount=None):
+    """The document `ondc_seller.ingest_ondc_order` really persists (db=None ->
+    SIMULATED, so nothing is written anywhere)."""
+    from api.services.ondc_seller import ingest_ondc_order
+
+    payment = {"type": "PRE-PAID", "params": {}}
+    if payment_amount is not None:
+        payment["params"]["amount"] = payment_amount
+    result = ingest_ondc_order(
+        None,
+        {
+            "context": {"bap_id": "buyer.app", "transaction_id": "T1"},
+            "message": {
+                "order": {
+                    "id": "ONDC-ORDER-1",
+                    "state": "Completed",
+                    "items": items,
+                    "payment": payment,
+                    "fulfillments": [{}],
+                }
+            },
+        },
+    )
+    return result["ims_order"]
+
+
+def test_real_ondc_writer_output_is_quarantined_not_booked_with_zero_gst():
+    """ONDC lines NEVER run through the IMS GST engine at ingest, so its
+    `gst_amount` is a CHARGES residual (total charged minus line subtotal), not
+    a tax. Reading it as tax booked delivery revenue as an output-GST liability
+    that was never collected; ignoring it booked the gross as Sales with zero
+    GST. Quarantining the order -- loudly, by id -- is the honest outcome.
+
+    Status "Completed" maps to DELIVERED, which is inside NEXUS's nightly
+    filter, so this is a live path, not a latent one.
+    """
+    doc = _ondc_doc(
+        [{"id": "SKU1", "quantity": {"count": 1}, "price": {"value": "1180"}}],
+        payment_amount="1180",
+    )
+    assert doc["status"] == "DELIVERED"
+    assert "tax_amount" not in doc and "grand_total" not in doc
+
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [doc])
+    assert doc["order_id"] in str(exc.value)
+
+
+def test_real_ondc_writer_no_declared_payment_does_not_assert_zero_gst():
+    """When the BAP omits payment.params.amount the writer used to persist
+    `gst_amount: 0.00` -- a manufactured figure the export read as an
+    affirmative 'this sale was exempt'. It must now be None."""
+    doc = _ondc_doc(
+        [{"id": "SKU1", "quantity": {"count": 1}, "price": {"value": "1180"}}]
+    )
+    assert doc["gst_amount"] is None, "no charge declared means NO assertion"
+    with pytest.raises(TallyExportError):
+        tally_build_day_voucher_xml_checked(None, [doc])
+
+
+def test_real_techcherry_blank_tax_column_is_REFUSED():
+    """A blank TaxAmount column used to be coerced to 0.0, which the export read
+    as 'exempt' and booked the whole Rs 1,180 as Sales with Rs 0.00 GST. It must
+    now be None so the document is unclassifiable and refused by name."""
+    doc = _techcherry_doc(
+        InvoiceNo="TC-1001", GrandTotal="1180", TaxableAmount="", TaxAmount=""
+    )
+    assert doc["tax_amount"] is None and doc["subtotal"] is None
+    assert doc["status"] == "DELIVERED"
+
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [doc])
+    msg = str(exc.value)
+    assert "TC-1001" in msg, "the owner must be told WHICH invoice was refused"
+
+
+def test_real_techcherry_taxable_equal_to_gross_is_REFUSED():
+    """The second live escape: TaxableAmount == GrandTotal with a blank tax
+    column. Both figures agree, the legs balance, and the voucher would still
+    book Rs 1,180 of Sales with Rs 0.00 GST."""
+    doc = _techcherry_doc(
+        InvoiceNo="TC-1002", GrandTotal="1180", TaxableAmount="1180", TaxAmount=""
+    )
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [doc])
+    assert "TC-1002" in str(exc.value)
+
+
+def test_real_techcherry_with_a_declared_tax_prices_correctly():
+    """A COMPLETE TechCherry row must still export -- the fix must not blanket
+    -reject the importer."""
+    doc = _techcherry_doc(
+        InvoiceNo="TC-1003", GrandTotal="1180", TaxableAmount="1000", TaxAmount="180"
+    )
+    xml, priced, rejected = tally_build_day_voucher_xml_checked(None, [doc])
     legs = _ledger_amounts(xml)
     assert rejected == []
-    assert legs["ONDC Buyer"] == -1180.00
     assert legs["Sales A/c"] == 1000.00
     assert legs["CGST Output"] == 90.00 and legs["SGST Output"] == 90.00
+    assert priced[0]["order_number"] == "TC-1003"
+    # The VOUCHERNUMBER must carry the invoice, not an empty string.
+    assert "<VOUCHERNUMBER>TC-1003</VOUCHERNUMBER>" in xml
 
 
-def test_techcherry_blank_tax_column_is_REFUSED_not_booked_as_all_sales():
-    """techcherry_import.py:335-343 -- a blank TaxAmount column yields
-    tax_amount 0.0 while `subtotal` still carries the taxable Rs 1,000, status
-    is hardcoded DELIVERED and created_at falls back to now(), so the row lands
-    in TONIGHT's window. The document contradicts itself; booking Rs 1,180 as
-    Sales with Rs 0.00 GST is the defect this module exists to kill."""
-    order = {
-        "order_id": "ORD-TC",
-        "created_at": "2026-08-09T10:00:00+00:00",
-        "customer_name": "Walk-in Customer",
-        "grand_total": 1180.0,
-        "subtotal": 1000.0,
-        "tax_amount": 0.0,
-        "items": [],
-        "status": "DELIVERED",
-    }
-    with pytest.raises(TallyExportError) as exc:
-        tally_build_day_voucher_xml_checked(None, [order])
-    msg = str(exc.value)
-    assert "ORD-TC" in msg and "1000.00" in msg and "1180.00" in msg
+def test_quarantined_import_is_named_by_its_real_identifier():
+    """`gate_skipped_orders: ['?', '?']` told the owner nothing about which
+    invoices went missing from the books."""
+    bad = _techcherry_doc(InvoiceNo="TC-2001", GrandTotal="1180", TaxAmount="")
+    good = _raw_order(order_id="ORD-OK")
+    _xml, _priced, rejected = tally_build_day_voucher_xml_checked(None, [good, bad])
+    assert [r["order_id"] for r in rejected] == ["TC-2001"]
 
 
 def test_discounted_pos_order_is_NOT_caught_by_the_subtotal_cross_check():
@@ -393,11 +490,39 @@ def test_unclassifiable_order_is_refused_rather_than_booked_as_all_sales():
     assert "ORD-OPAQUE" in str(exc.value)
 
 
-def test_explicit_zero_tax_is_still_allowed_as_exempt():
-    """An affirmative `tax_amount: 0.0` with no contradicting subtotal is an
-    exempt sale, not an unclassifiable one."""
+def test_genuine_zero_rated_sale_still_ships():
+    """A Rs 500 EYE TEST: real 0%-rated optical supply. Its lines positively
+    prove the rate (`gst_rate: 0`, `taxable_value == item_total`), so it must
+    keep exporting. A blanket 'gross > 0 and tax == 0 -> refuse' would have
+    quietly dropped real sales out of the accountant's file."""
     order = {
-        "order_id": "ORD-EXEMPT2",
+        "order_id": "ORD-EYETEST",
+        "created_at": "2026-08-09T10:00:00+00:00",
+        "customer_name": "Walk-in Customer",
+        "grand_total": 500.0,
+        "subtotal": 500.0,
+        "tax_amount": 0.0,
+        "items": [
+            {
+                "item_total": 500.0,
+                "gst_rate": 0.0,
+                "taxable_value": 500.0,
+                "tax_amount": 0.0,
+            }
+        ],
+    }
+    xml, _p, rejected = tally_build_day_voucher_xml_checked(None, [order])
+    legs = _ledger_amounts(xml)
+    assert rejected == []
+    assert legs["Sales A/c"] == 500.00 and legs["CGST Output"] == 0.00
+    assert legs["Walk-in Customer"] == -500.00
+
+
+def test_tax_inclusive_gross_posing_as_the_taxable_is_REFUSED():
+    """Same rupees as the eye test, but NOTHING proves the 0% rate. This is the
+    TechCherry 'taxable == gross' shape; absence of evidence is not exemption."""
+    order = {
+        "order_id": "ORD-NOPROOF",
         "created_at": "2026-08-09T10:00:00+00:00",
         "customer_name": "Walk-in Customer",
         "grand_total": 500.0,
@@ -405,10 +530,73 @@ def test_explicit_zero_tax_is_still_allowed_as_exempt():
         "tax_amount": 0.0,
         "items": [],
     }
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [order])
+    assert "ORD-NOPROOF" in str(exc.value)
+
+
+def test_order_priced_from_its_lines_when_the_header_carries_no_tax_key():
+    """Line-only tax evidence is complete evidence -- refusing it would drop a
+    real, fully-derivable sale from the file."""
+    order = {
+        "order_id": "ORD-LINESONLY",
+        "created_at": "2026-08-09T10:00:00+00:00",
+        "customer_name": "Walk-in Customer",
+        "grand_total": 1050.0,
+        "items": [
+            {
+                "item_total": 1050.0,
+                "gst_rate": 5.0,
+                "taxable_value": 1000.0,
+                "tax_amount": 50.0,
+            }
+        ],
+    }
     xml, _p, rejected = tally_build_day_voucher_xml_checked(None, [order])
     legs = _ledger_amounts(xml)
     assert rejected == []
-    assert legs["Sales A/c"] == 500.00 and legs["CGST Output"] == 0.00
+    assert legs["Sales A/c"] == 1000.00
+    assert legs["CGST Output"] == 25.00 and legs["SGST Output"] == 25.00
+
+
+def test_header_over_lines_disagreement_is_quarantined_too():
+    """max() is ONE-SIDED. A header claiming Rs 300 against lines summing to
+    Rs 180 emitted Sales 880.00 / CGST 150.00 / SGST 150.00 -- Rs 120 of PHANTOM
+    output-GST liability with Sales understated by the same Rs 120 -- and it
+    passed every other gate because the legs still net to zero."""
+    order = _raw_order(order_id="ORD-OVERSTATED")
+    order["tax_amount"] = 300.0  # lines still say 180
+    _xml, priced, rejected = tally_build_day_voucher_xml_checked(
+        None, [order, _raw_order(order_id="ORD-FINE")]
+    )
+    assert [r["order_id"] for r in rejected] == ["ORD-OVERSTATED"]
+    assert "300.00" in rejected[0]["reason"] and "180.00" in rejected[0]["reason"]
+    assert [p["order_id"] for p in priced] == ["ORD-FINE"]
+
+
+@pytest.mark.parametrize(
+    "grand,tax,label",
+    [
+        (100.0, 180.0, "tax exceeds the gross -> Sales A/c -80.00"),
+        (0.0, 180.0, "zero gross with tax -> Sales A/c -180.00"),
+        (1000.0, -180.0, "negative tax -> CGST/SGST -90.00 each"),
+    ],
+)
+def test_impossible_vouchers_with_negative_legs_are_REFUSED(grand, tax, label):
+    """All three BALANCE (the signed legs net to zero) and pass the coverage
+    gate, so nothing else catches them. A negative Sales or output-GST leg is a
+    credit note in disguise reaching GSTR-1 through the SALES path."""
+    order = {
+        "order_id": "ORD-IMPOSSIBLE",
+        "created_at": "2026-08-09T10:00:00+00:00",
+        "customer_name": "Walk-in Customer",
+        "grand_total": grand,
+        "tax_amount": tax,
+        "items": [],
+    }
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [order])
+    assert "ORD-IMPOSSIBLE" in str(exc.value), label
 
 
 def test_non_numeric_amount_is_scoped_to_its_own_order_not_the_whole_chain():
@@ -903,3 +1091,121 @@ async def test_a_day_of_unverifiable_orders_is_flagged_not_blessed(nexus_and_db)
     row = db.get_collection("tally_exports").docs[0]
     assert row["unverified_count"] == 1
     assert row["balanced"] is False, "nothing verified must not read as verified"
+
+
+# ===========================================================================
+# 8b. The row must describe the FILE, and no exit path may leave a stale row
+# ===========================================================================
+
+
+def _seed_prior_row(db, sid="BV-GK1"):
+    """A healthy-looking row from an earlier run of the SAME day."""
+    export_date = (
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .isoformat()
+    )
+    db.get_collection("tally_exports").insert_one(
+        {
+            "export_date": export_date,
+            "store_id": sid,
+            "store_code": "GK1",
+            "voucher_count": 40,
+            "xml": "<ENVELOPE><BODY>earlier, fuller export</BODY></ENVELOPE>",
+            "balanced": True,
+            "balance_check": {"ok": True, "totals": {"grand_total": 472000.0}},
+            "unverified_count": 0,
+        }
+    )
+    return export_date
+
+
+@pytest.mark.asyncio
+async def test_row_totals_describe_the_shipped_file_not_the_whole_day(nexus_and_db):
+    """balance_check was computed over ALL orders while voucher_count counted
+    only the priced ones, so a row asserted totals the shipped XML contradicts
+    (row: Rs 4,180 / 4 orders; file: Rs 3,000 / 3 vouchers; mismatch_count 0)."""
+    agent, db = nexus_and_db
+    orders = db.get_collection("orders")
+    for i in range(3):
+        orders.insert_one(_raw_order(order_id=f"ORD-P{i}"))
+    orders.insert_one(_broken_order("ORD-SKIPPED"))
+
+    await agent._build_tally_export()
+
+    row = db.get_collection("tally_exports").docs[0]
+    assert row["voucher_count"] == 3
+    totals = row["balance_check"]["totals"]
+    assert totals["order_count"] == 3, "the row must count what the FILE holds"
+    assert totals["grand_total"] == 3540.00  # 3 x 1180, NOT 4 x 1180
+    # ...and what is MISSING is stated, not left to be re-derived.
+    assert row["skipped_totals"]["grand_total"] == 1180.00
+    assert row["gate_skipped_orders"] == ["ORD-SKIPPED"]
+
+
+@pytest.mark.asyncio
+async def test_poison_row_clears_the_previous_runs_assertions(nexus_and_db):
+    """A 0-byte *_UNBALANCED.xml sat next to totals still claiming a clean
+    Rs 4.7L day, because the poison $set never overwrote balance_check."""
+    agent, db = nexus_and_db
+    _seed_prior_row(db)
+    db.get_collection("orders").insert_one(_broken_order())
+
+    await agent._build_tally_export()
+
+    row = db.get_collection("tally_exports").docs[0]
+    assert row["balance_check"] == {}, "stale totals must not survive"
+    assert row["unverified_count"] == 0
+    assert row["gate_skipped_reasons"] == []
+    assert row["voucher_count"] == 0 and row["xml"] == ""
+
+
+@pytest.mark.asyncio
+async def test_unreadable_store_poisons_its_row_instead_of_serving_yesterdays(
+    nexus_and_db,
+):
+    """The orders-query `continue` was the second of three exit paths that left
+    a pre-existing row downloadable and green."""
+    agent, db = nexus_and_db
+    _seed_prior_row(db)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("mongo unreachable")
+
+    db.get_collection("orders").find = _boom
+
+    result = await agent._build_tally_export()
+
+    assert result.ok is False
+    assert "orders query failed" in (result.error or "")
+    row = db.get_collection("tally_exports").docs[0]
+    assert row["balanced"] is False and row["xml"] == ""
+    assert "mongo unreachable" in row["gate_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_day_that_lost_its_only_order_supersedes_the_prior_row(nexus_and_db):
+    """The empty-orders `continue` was the third path: the day's only sale is
+    cancelled after an earlier /regenerate, and yesterday's fuller file keeps
+    downloading as this date's healthy export."""
+    agent, db = nexus_and_db
+    _seed_prior_row(db)  # no orders inserted -> nothing qualifies now
+
+    await agent._build_tally_export()
+
+    row = db.get_collection("tally_exports").docs[0]
+    assert row["balanced"] is False
+    assert row["xml"] == "" and row["voucher_count"] == 0
+    assert "superseded" in row["gate_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_store_with_no_orders_and_no_prior_row_still_writes_nothing(
+    nexus_and_db,
+):
+    """The invariant is 'a freshly-written row or NO row' -- not a poison row
+    for every quiet store."""
+    agent, db = nexus_and_db
+    result = await agent._build_tally_export()
+    assert db.get_collection("tally_exports").docs == []
+    assert result.ok is True
