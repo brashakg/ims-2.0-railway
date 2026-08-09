@@ -698,7 +698,19 @@ INDEXES = {
         # FEFO dispense: claim_one_available filters product+store+status and
         # sorts dated units by expiry_date ascending (earliest expiry first),
         # so the atomic claim can walk this index instead of scanning.
-        {"keys": [("product_id", 1), ("store_id", 1), ("status", 1), ("expiry_date", 1)]}
+        {"keys": [("product_id", 1), ("store_id", 1), ("status", 1), ("expiry_date", 1)]},
+        # Transfer guards (cancel stock-move guard + receive-pool fallback) look up
+        # {transfer_id, status: "TRANSFERRED"}. PARTIAL on status == "TRANSFERRED"
+        # (NOT sparse -- status is always present) so only the small transient set
+        # of in-transit units is indexed; both queries pin that status so they are
+        # a provable subset and always use it. Built at startup by
+        # connection.ensure_indexes; declared here with the SAME name/options for
+        # documentation + migrations parity.
+        {
+            "keys": [("transfer_id", 1), ("status", 1)],
+            "partialFilterExpression": {"status": "TRANSFERRED"},
+            "name": "stock_units_transfer_in_transit",
+        }
     ],
     "customers": [
         {"keys": [("mobile", 1)], "unique": True},
