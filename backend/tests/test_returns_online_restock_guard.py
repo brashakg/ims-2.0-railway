@@ -1074,6 +1074,289 @@ def test_webhook_door_routes_each_product_to_its_own_shop(monkeypatch):
     assert doc["restock_store_redirected_from"] == ONLINE_STORE
 
 
+@pytest.mark.parametrize("mode", ["returns_none", "raises"])
+def test_confirm_door_refuses_to_guess_when_the_order_cannot_be_read(
+    monkeypatch, mode
+):
+    """THE FAIL-SOFT PATH. `_merge_fulfilment_context` used to return the
+    rebuilt dict UNTOUCHED when the real order could not be read -- and because
+    that dict is non-None it suppressed the router's own re-load, so tier-1 saw
+    no stamps and the alphabetically-first fallback won for every unit: one
+    shop's real unit stranded SOLD while a phantom was minted on another shop's
+    LIVE shelf, reported as restock_applied=True with a green toast.
+
+    There is no safe single-store fallback here -- only a guess that looks like
+    an answer. So: restock NOTHING, report failure, raise the blocked task, and
+    keep it on the /returns/{id}/restock retry surface. The credit note (money +
+    GST) still posts.
+
+    NOTE on the acceptance wording: under this preferred shape STK-B is
+    deliberately left SOLD, because nothing is restocked at all. The harm the
+    round-3 panel measured was STK-B stranded SOLD *while the call claimed
+    success*; that exact pairing is what is asserted impossible below."""
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        fulfillment_stores=sorted([PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]),
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    returns_coll = ctx["returns_coll"]
+
+    # The order is UNREADABLE: the loader returns None, or blows up.
+    if mode == "returns_none":
+        monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda oid: None)
+    else:
+
+        def _boom(_oid):
+            raise RuntimeError("mongo down mid-confirm")
+
+        monkeypatch.setattr(returns_router, "_load_order_for_restock", _boom)
+
+    raised: list = []
+    import api.services.task_triggers as tt
+
+    class _FakeTaskRepo:
+        def find_many(self, _q):
+            return []
+
+        def create(self, doc):
+            return doc
+
+    monkeypatch.setattr(
+        "api.dependencies.get_task_repository", lambda: _FakeTaskRepo(), raising=False
+    )
+    monkeypatch.setattr(
+        tt, "create_system_task", lambda repo, **kw: raised.append(kw) or kw
+    )
+
+    class _ConfirmDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    out = sr.post_from_review(
+        _ConfirmDB(),
+        {
+            "review_id": "rev-9",
+            "shopify_refund_id": "RF-9009",
+            "order_id": "ORD-ONL-9",
+            "store_id": ONLINE_STORE,
+            # The alphabetically-first shop -- the value that used to win.
+            "proposed_restock_store_id": sorted(
+                [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+            )[0],
+            "credit_note": {"gross_refund": 0.0, "net_refund": 0.0,
+                            "gst_breakup": {}, "lines": []},
+            "proposed_restock": [
+                {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+                 "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+                 "condition": "GOOD"},
+                {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+                 "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+                 "condition": "GOOD"},
+            ],
+        },
+    )
+
+    # 1. NO phantom anywhere -- not on a physical shelf, not on the online store.
+    minted = [u for u in ctx["stock_repo"].units if u["stock_id"].startswith("NEW-")]
+    assert minted == [], f"phantom minted against an unverifiable order: {minted}"
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+
+    # 2. NO silent success. This is the exact round-3 pairing that must be
+    #    impossible: a unit left SOLD while the call reports it was restocked.
+    assert out["restock_applied"] is False
+    assert out["restock_store_id"] is None
+    assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+    stk_b = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-B"][0]
+    assert not (stk_b["status"] == "SOLD" and out["restock_applied"]), (
+        "STK-B stranded SOLD while the call claimed success -- the round-3 bug"
+    )
+
+    # 3. It is VISIBLE and recoverable: a blocked task fires and the persisted
+    #    doc keeps the retry surface alive.
+    assert len(raised) == 1
+    assert raised[0]["dedupe_ref"].startswith("return_restock_blocked:")
+    doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-9009"][0]
+    assert doc["restock_applied"] is False
+    assert doc["restock_store_id"] is None
+
+
+def test_unverified_order_is_not_guessed_at_even_when_a_fallback_store_exists(
+    monkeypatch,
+):
+    """Isolates the `restock_unverified` guard itself.
+
+    The other half of this fix (not handing the review's stored proposal to the
+    router as a fallback) already blocks the two-shop fixture on its own, so
+    that fixture cannot tell the two apart. Here ONLINE_FULFILLMENT_STORE_ID is
+    configured, giving the router a perfectly good physical store to fall back
+    to -- so ONLY the unverified guard can stop it. Without the guard both units
+    are routed to the configured shop: STK-B is left SOLD at its own shop and a
+    phantom is minted at the configured one.
+
+    An unreadable order means we do not know which shop shipped which unit. A
+    fallback store is an answer to a different question."""
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    # A configured physical fallback the router would happily use.
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", PHYSICAL_FULFILMENT_STORE)
+    monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda oid: None)
+    monkeypatch.setattr(
+        "api.dependencies.get_task_repository", lambda: None, raising=False
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _ConfirmDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    out = sr.post_from_review(
+        _ConfirmDB(),
+        {
+            "review_id": "rev-9",
+            "shopify_refund_id": "RF-9011",
+            "order_id": "ORD-ONL-9",
+            "store_id": ONLINE_STORE,
+            "credit_note": {"gross_refund": 0.0, "net_refund": 0.0,
+                            "gst_breakup": {}, "lines": []},
+            "proposed_restock": [
+                {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+                 "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+                 "condition": "GOOD"},
+                {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+                 "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+                 "condition": "GOOD"},
+            ],
+        },
+    )
+
+    minted = [u for u in ctx["stock_repo"].units if u["stock_id"].startswith("NEW-")]
+    assert minted == [], (
+        "a phantom was minted at the configured fallback shop for a unit that "
+        "shipped from somewhere else"
+    )
+    assert out["restock_applied"] is False
+    assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+
+def test_confirm_door_does_not_restock_twice_on_a_re_confirm(monkeypatch):
+    """A guest confirm restocks but finalizes CREDIT_FAILED, which IS
+    confirmable again. The re-confirm must repair the CREDIT NOTE without
+    re-driving the restock -- otherwise two physical frames become four
+    AVAILABLE rows spread across live shelves."""
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _Dup(Exception):
+        pass
+
+    real_insert = returns_coll.insert_one
+
+    def _insert(doc):
+        if any(
+            d.get("shopify_refund_id") == doc.get("shopify_refund_id")
+            for d in returns_coll.docs
+        ):
+            raise _Dup("E11000 duplicate key")
+        return real_insert(doc)
+
+    returns_coll.insert_one = _insert
+    monkeypatch.setattr(sr, "_is_dup_key", lambda exc: isinstance(exc, _Dup))
+
+    class _ConfirmDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    review = {
+        "review_id": "rev-9",
+        "shopify_refund_id": "RF-9010",
+        "order_id": "ORD-ONL-9",
+        "store_id": ONLINE_STORE,
+        "credit_note": {"gross_refund": 0.0, "net_refund": 0.0, "gst_breakup": {},
+                        "lines": []},
+        "proposed_restock": [
+            {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+             "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+             "condition": "GOOD"},
+            {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+             "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+             "condition": "GOOD"},
+        ],
+    }
+
+    sr.post_from_review(_ConfirmDB(), dict(review))
+    sr.post_from_review(_ConfirmDB(), dict(review))
+
+    available = [u for u in ctx["stock_repo"].units if u["status"] == "AVAILABLE"]
+    assert len(available) == 2, (
+        f"two physical frames became {len(available)} AVAILABLE rows"
+    )
+    assert all(
+        not u["stock_id"].startswith("NEW-") for u in ctx["stock_repo"].units
+    )
+
+
 def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monkeypatch):
     """Historical import (no fulfilment stamp) + SYSTEM caller (no processing
     store) + no configured fallback -> restock NOTHING, and the persisted doc

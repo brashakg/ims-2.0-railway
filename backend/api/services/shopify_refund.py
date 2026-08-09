@@ -812,6 +812,7 @@ def _post_credit_and_restock(
     credit_note: Dict[str, Any],
     restock_store: Optional[str],
     settled_externally: bool = False,
+    restock_unverified: bool = False,
 ) -> Dict[str, Any]:
     """Post the GST credit note to `credit_note_ledger` (via the SAME returns.py
     `_issue_store_credit` an in-store CREDIT_NOTE uses, so the output-tax reversal
@@ -881,6 +882,10 @@ def _post_credit_and_restock(
     }
     returns_coll = None
     claimed = False
+    # The already-finalized doc when this call is a RE-drive of a never-credited
+    # refund (e.g. a guest confirm that finished CREDIT_FAILED). Its restock may
+    # already have happened -- re-running it would mint a SECOND set of units.
+    prior_doc: Optional[Dict[str, Any]] = None
     try:
         returns_coll = db.get_collection(_RETURNS_COLLECTION)
     except Exception:  # noqa: BLE001
@@ -900,6 +905,7 @@ def _post_credit_and_restock(
                 # duplicate but an unposted one gets re-driven (not silently
                 # swallowed while the GST reversal is lost).
                 existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+                prior_doc = existing
                 if existing is None:
                     logger.info(
                         "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
@@ -959,36 +965,101 @@ def _post_credit_and_restock(
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
-    try:
-        from ..routers.returns import _restock_good_items
-
-        # Hand the guard the ORDER's own store (the ONLINE billing bucket) and
-        # the order dict, and let the SINGLE F9 router decide where each unit
-        # goes. Pre-resolving a physical store here (what this door used to do)
-        # made is_online_store False, so the guard short-circuited "already
-        # physical" and its per-unit narrowing NEVER ran on the dominant
-        # automated door -- booking every unit of a two-shop order to the
-        # alphabetically-first shop. Passing `order` also spares the guard a
-        # refetch (a failed refetch silently degrades the routing).
-        restock_result = _restock_good_items(
-            return_lines,
-            billing_store,
-            return_id or refund_id,
-            order_id=order_id,
-            user_id="SYSTEM_SHOPIFY_REFUND",
-            # There is no human counter on this door (the webhook runs as
-            # SYSTEM), but a STORED review row may carry a physical store an
-            # accountant was shown. Hand it over as the caller-supplied FALLBACK
-            # only: the guard ranks the order's per-unit fulfilment breakdown
-            # above it and rejects it outright if it is an online store. Now
-            # that post_from_review merges the real fulfilment stamps back on,
-            # this hint is correctly INERT whenever the order carries them --
-            # it only decides anything for an order with no stamps at all.
-            processing_store_id=restock_store,
-            order=order,
+    # IDEMPOTENT RESTOCK. This call can be a RE-drive of a refund that already
+    # finalized without a credit note (a guest confirm -> CREDIT_FAILED, which is
+    # confirmable again). The credit note must be retried; the RESTOCK must NOT
+    # -- re-running it mints a SECOND set of units, so two physical frames end up
+    # as four AVAILABLE rows across live shelves.
+    prior_restocked = bool((prior_doc or {}).get("restock_applied"))
+    if prior_restocked:
+        logger.info(
+            "[SHOPIFY_REFUND] refund=%s already restocked on an earlier attempt "
+            "-- re-driving the credit note ONLY (no second restock)",
+            refund_id,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc)
+        restock_result = {
+            "restocked": (prior_doc or {}).get("restocked", []),
+            "restock_stock_ids": (prior_doc or {}).get("restock_stock_ids", []),
+            "applied": True,
+            "skipped": [],
+            "restock_store_id": (prior_doc or {}).get("restock_store_id"),
+            "restock_store_ids": (prior_doc or {}).get("restock_store_ids", []),
+            "restock_store_redirected_from": (prior_doc or {}).get(
+                "restock_store_redirected_from"
+            ),
+            "restock_store_reason": (prior_doc or {}).get("restock_store_reason"),
+        }
+    elif restock_unverified:
+        # We could not read the real order, so we do NOT know which shop shipped
+        # which unit. There is no safe fallback -- a single-store guess strands
+        # the other shop's real unit SOLD forever and mints a phantom on a live
+        # shelf, while reporting success. Restock NOTHING, fail loud, and let the
+        # blocked units surface as a task + the /returns/{id}/restock retry.
+        # The credit note (the money + GST leg) still posts below.
+        from ..routers.returns import (
+            _RESTOCK_ROUTE_UNRESOLVED,
+            _raise_restock_blocked_task,
+            _restock_intent_rows,
+        )
+
+        logger.error(
+            "[SHOPIFY_REFUND] restock BLOCKED for refund=%s order=%s: the order "
+            "could not be read, so the fulfilling shop for each unit is unknown. "
+            "Nothing restocked (a single-store guess would strand one shop's "
+            "unit and mint a phantom on another). Credit note still posted.",
+            refund_id,
+            order_id,
+        )
+        units = [
+            {
+                "product_id": getattr(line, "product_id", None),
+                "sku": getattr(line, "sku", ""),
+                "product_name": getattr(line, "product_name", ""),
+            }
+            for line in (return_lines or [])
+        ]
+        restock_result = {
+            "restocked": _restock_intent_rows(units),
+            "restock_stock_ids": [],
+            "applied": False,
+            "skipped": [],
+            "restock_store_id": None,
+            "restock_store_ids": [],
+            "restock_store_redirected_from": billing_store,
+            "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
+        _raise_restock_blocked_task(
+            return_id or refund_id, order_id, billing_store, units, None
+        )
+    else:
+        try:
+            from ..routers.returns import _restock_good_items
+
+            # Hand the guard the ORDER's own store (the ONLINE billing bucket)
+            # and the VERIFIED order dict, and let the SINGLE F9 router decide
+            # where each unit goes. Pre-resolving a physical store here (what
+            # this door used to do) made is_online_store False, so the guard
+            # short-circuited "already physical" and its per-unit narrowing
+            # NEVER ran on the dominant automated door -- booking every unit of
+            # a two-shop order to the alphabetically-first shop.
+            restock_result = _restock_good_items(
+                return_lines,
+                billing_store,
+                return_id or refund_id,
+                order_id=order_id,
+                user_id="SYSTEM_SHOPIFY_REFUND",
+                # No human counter on this door (it runs as SYSTEM), and the
+                # stored review-row proposal is NOT a routing signal: it is
+                # derived from the same stamps as tier-1, so it is either
+                # redundant or -- when the stamps are missing -- baseless. The
+                # counter door still supplies the operator's real store here.
+                processing_store_id=None,
+                order=order,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc
+            )
 
     # Finalize: a credit note that SHOULD have issued (gross>0) but didn't must NOT
     # be marked COMPLETED (finding #6) -> CREDIT_FAILED, so the accountant gets a
@@ -1079,34 +1150,40 @@ _FULFILMENT_CONTEXT_KEYS = (
 )
 
 
-def _merge_fulfilment_context(order: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_fulfilment_context(order: Dict[str, Any]) -> bool:
     """Copy the REAL order's fulfilment stamps onto a rebuilt order dict.
 
     `fulfillment_stores` / `fulfillment_breakdown` are the ONLY record of which
     physical shop shipped each unit, and the restock router needs them to send
     each returned unit back to the shop it left. A review row does not store
-    them, so a dict rebuilt from the row must be topped up here -- otherwise the
-    router sees an order with no stamps and falls back to a single store for
-    every unit.
+    them, so a dict rebuilt from the row must be topped up here.
 
-    Mutates and returns ``order``. Fail-soft: an unreadable order leaves the
-    dict untouched (the router then re-loads for itself, and worst case falls
-    back exactly as before). Never raises."""
+    Mutates ``order``. Returns True only when the real order was actually READ
+    -- i.e. the routing evidence is VERIFIED.
+
+    Returning a bool is load-bearing, not cosmetic. This used to return the
+    (untouched) dict on failure, and because that dict is non-None it SUPPRESSED
+    the router's own re-load at returns.py `if order is None` -- so an
+    unreadable order silently fell through to a single-store fallback and landed
+    every unit of a multi-shop order on one shop: the other shop's real unit
+    stranded SOLD forever and a phantom minted on a live shelf, reported as a
+    success. The caller MUST NOT restock against an unverified order; there is
+    no safe fallback here, only a guess that looks like an answer."""
     if not order.get("order_id"):
-        return order
+        return False
     try:
         from ..routers.returns import _load_order_for_restock
 
         real = _load_order_for_restock(order.get("order_id"))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] fulfilment-context load skipped: %s", exc)
+        logger.warning("[SHOPIFY_REFUND] fulfilment-context load failed: %s", exc)
         real = None
     if not isinstance(real, dict):
-        return order
+        return False
     for key in _FULFILMENT_CONTEXT_KEYS:
         if real.get(key) is not None and order.get(key) is None:
             order[key] = real[key]
-    return order
+    return True
 
 
 def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
@@ -1137,7 +1214,13 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
     # every confirm fell through to the alphabetically-first fallback store,
     # stranding the other shop's real unit SOLD forever and minting a phantom on
     # a live physical shelf. Merge the REAL order's fulfilment stamps back on.
-    _merge_fulfilment_context(order)
+    # A review row with no order_id cannot be verified at all. Today that shape
+    # is kept out by the _CONFIRMABLE allow-list in
+    # routers/online_store_refund_reviews.py (an UNMATCHED row is not
+    # confirmable) -- a guard in a DIFFERENT file with nothing linking the two.
+    # _merge_fulfilment_context returning False covers it here as well, so this
+    # function is safe on its own terms.
+    verified = _merge_fulfilment_context(order)
     return_lines = _return_lines_from_proposed(review.get("proposed_restock") or [])
     settled_externally = bool(
         review.get("settled_externally") or credit_note.get("settled_externally")
@@ -1155,4 +1238,8 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
             or review.get("restock_store_id")
         ),
         settled_externally=settled_externally,
+        # Could not read the real order -> we do NOT know which shop shipped
+        # which unit. Refuse to restock rather than guess; the credit note still
+        # posts and the blocked units become a visible, retryable task.
+        restock_unverified=not verified,
     )
