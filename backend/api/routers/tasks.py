@@ -1203,6 +1203,64 @@ async def escalate_task(
     }
 
 
+# ---------------------------------------------------------------------------
+# SLA auto-escalation scan bounds (F14)
+# ---------------------------------------------------------------------------
+# The scan used to read ONE UNORDERED slice (limit=500 here, .limit(200) in the
+# TASKMASTER tick), so at scale a genuinely SLA-breached P0/P1 that happened to
+# sit outside that arbitrary slice NEVER escalated -- the ladder managers rely
+# on silently stopped working for exactly the busiest stores. It is now ordered
+# (most-overdue first) and PAGED through the whole candidate set:
+#   * PAGE_SIZE   -- candidate docs held in memory at once (bounded memory),
+#   * MAX_PAGES   -- hard stop so a pathological collection can't spin forever,
+#   * MAX_ACTIONS -- hard stop on escalations per run (notification-storm guard).
+# TASKMASTER mirrors these values (agents/implementations/taskmaster.py) so the
+# 5-minute tick and this endpoint scan identically.
+ESCALATION_SCAN_PAGE_SIZE = 500
+ESCALATION_SCAN_MAX_PAGES = 40  # 40 * 500 = 20,000 candidates per run
+ESCALATION_SCAN_MAX_ACTIONS = 1000
+
+# Ordering for the candidate scan: most-overdue first. A task with no due_at
+# sorts first (Mongo orders missing/null before values) -- correct, because
+# those are ack-clock candidates whose breach is measured from created_at, and
+# the secondary key puts the oldest of them first.
+ESCALATION_SCAN_SORT = [("due_at", 1), ("created_at", 1)]
+
+
+def build_escalation_candidate_filter(store_id: Optional[str] = None) -> dict:
+    """Server-side candidate filter for the SLA scan (shared shape with
+    TASKMASTER).
+
+    Every NON-TERMINAL task, including already-ESCALATED ones (an ignored task
+    climbs the ladder again on each fresh breach), but EXCLUDING tasks that have
+    topped out the ladder: should_escalate() always returns False at/above
+    MAX_ESCALATION_LEVEL, so those are pure scan ballast that accumulates
+    forever and would crowd live breaches out of the page window. ``$not/$gte``
+    (rather than ``$lt``) so a doc with no escalation_level field still matches.
+
+    We deliberately do NOT pre-filter on a date: a task can breach its ACK clock
+    long before it is ever past due, and created_at/due_at are string-typed on
+    legacy rows (Mongo type-bracketing would silently drop them from a
+    Date-bounded query -- the same class of bug as F13 above). The precise
+    decision stays with the pure should_escalate()."""
+    filters: dict = {
+        "status": {
+            "$in": [
+                "OPEN",
+                "IN_PROGRESS",
+                "ESCALATED",
+                "open",
+                "in_progress",
+                "escalated",
+            ]
+        },
+        "escalation_level": {"$not": {"$gte": MAX_ESCALATION_LEVEL}},
+    }
+    if store_id:
+        filters["store_id"] = store_id
+    return filters
+
+
 @router.post("/auto-escalate-overdue")
 async def auto_escalate_overdue_tasks(
     store_id: Optional[str] = Query(None),
@@ -1216,41 +1274,54 @@ async def auto_escalate_overdue_tasks(
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
-    # Candidate set: every non-terminal task (incl. already-ESCALATED, which
-    # may climb the ladder again on a fresh breach). The precise decision (ack
-    # clock + overdue grace + re-escalation cadence, per priority) is made by
-    # the pure should_escalate() below -- a task can breach its ack SLA before
-    # it is even past due, so we can't pre-filter on due date alone.
-    filters: dict = {
-        "status": {
-            "$in": [
-                "OPEN",
-                "IN_PROGRESS",
-                "ESCALATED",
-                "open",
-                "in_progress",
-                "escalated",
-            ]
-        },
-    }
-    if active_store:
-        filters["store_id"] = active_store
-
-    candidates = repo.find_many(filters, limit=500)
+    filters = build_escalation_candidate_filter(active_store)
     now = datetime.now()
     sla_cfg = _load_sla_config()
-    escalated_count = 0
 
-    for task in candidates:
-        flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
-        if not flag:
-            continue
+    # Pass 1 -- READ-ONLY. Page through the WHOLE candidate set (most-overdue
+    # first) and keep only the tasks that actually breached. Nothing is written
+    # here on purpose: escalating mid-scan would move documents relative to the
+    # skip window and could push an un-scanned breach past the cursor.
+    breached: List[tuple] = []
+    scanned = 0
+    truncated = False
+    for page in range(ESCALATION_SCAN_MAX_PAGES):
+        batch = (
+            repo.find_many(
+                filters,
+                sort=ESCALATION_SCAN_SORT,
+                skip=page * ESCALATION_SCAN_PAGE_SIZE,
+                limit=ESCALATION_SCAN_PAGE_SIZE,
+            )
+            or []
+        )
+        if not batch:
+            break
+        scanned += len(batch)
+        for task in batch:
+            flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
+            if flag:
+                breached.append((task, reason))
+        if len(breached) >= ESCALATION_SCAN_MAX_ACTIONS:
+            breached = breached[:ESCALATION_SCAN_MAX_ACTIONS]
+            truncated = True
+            break
+        if len(batch) < ESCALATION_SCAN_PAGE_SIZE:
+            break
+    else:
+        # Ran out of pages with a full last page -- more candidates remain.
+        truncated = True
+
+    escalated_count = 0
+    for task, reason in breached:
         # Resolve the next owner up the role ladder + reassign + notify.
         await _escalate_reassign_notify(repo, task, reason=reason, by="system", now=now)
         escalated_count += 1
 
     return {
         "escalated": escalated_count,
+        "scanned": scanned,
+        "truncated": truncated,
         "message": f"Auto-escalated {escalated_count} overdue tasks",
     }
 
@@ -1278,13 +1349,33 @@ async def scan_payment_variance(
         return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    filters: dict = {"created_at": {"$gte": cutoff}}
+    # BUG-031 dual window. `orders.created_at` is a BSON Date on every live
+    # write path (BaseRepository._add_timestamps stamps datetime.now();
+    # shopify_ingest persists naive-UTC datetimes), and Mongo type-bracketing
+    # means a STRING $gte bound NEVER compares against a Date field -- so the
+    # ISO-string cutoff this used matched ZERO orders and the whole
+    # payment-variance scan silently reported a permanently clean "no variances
+    # found". Match BOTH a datetime window (today's Date-typed rows) AND a
+    # string window (any legacy ISO-string created_at, e.g. migrated rows) via
+    # $or, mirroring finance._cash_sales_for_window.
+    cutoff_dt = datetime.now() - timedelta(days=days)
+    cutoff_iso = cutoff_dt.isoformat()
+    filters: dict = {
+        "$or": [
+            {"created_at": {"$gte": cutoff_dt}},
+            {"created_at": {"$gte": cutoff_iso}},
+        ]
+    }
     if active_store:
         filters["store_id"] = active_store
 
     try:
-        orders = order_repo.find_many(filters, limit=2000) or []
+        # Newest-first: now that the window can actually match rows, the 2000
+        # cap truncates the OLDEST tail of the window instead of an arbitrary
+        # unordered slice.
+        orders = (
+            order_repo.find_many(filters, sort=[("created_at", -1)], limit=2000) or []
+        )
     except Exception:  # noqa: BLE001
         orders = []
 
