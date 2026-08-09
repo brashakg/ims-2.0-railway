@@ -1751,6 +1751,27 @@ async def cancel_transfer(
     )
 
     _save_transfer(transfer)
+
+    # Back-sync a linked endless-aisle request (feature #38). Cancelling the
+    # transfer must not strand its EA request at TRANSFER_CREATED, from which the
+    # decorative EA ship/deliver endpoints could still march it to DELIVERED. The
+    # EA service flips the request ONLY when CANCELLED is a legal transition
+    # (pre-ship states) and NEVER raises, so this is a pure, fail-soft status
+    # back-sync -- it moves no stock and books no GST. Lazy import avoids an
+    # endless_aisle <-> transfers import cycle. Best-effort: a failure here must
+    # NOT turn a committed cancel into an error.
+    ea_request_id = transfer.get("endless_aisle_request_id")
+    if ea_request_id:
+        try:
+            from ..services import endless_aisle as _ea
+
+            _ea.cancel_linked_request(_get_db(), ea_request_id, actor=current_user)
+        except Exception:  # noqa: BLE001 - back-sync is non-blocking
+            logger.warning(
+                "[TRANSFER] endless-aisle back-sync failed for request %s",
+                ea_request_id,
+            )
+
     return {"transfer": transfer, "message": "Transfer cancelled"}
 
 
