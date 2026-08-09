@@ -39,8 +39,12 @@ export interface ReplacementLinePayload {
 // nets off THIS breakdown (never the inferred original-sale tender). Codes:
 // CASH / UPI / CARD / BANK. Sum must equal the net refund.
 export type RefundTenderCode = 'CASH' | 'UPI' | 'CARD' | 'BANK';
+// STORE_CREDIT is the refundable substitute for the part of a sale paid with an
+// instrument that cannot come back as cash (gift voucher / loyalty / EMI /
+// credit). It is RECORDED on the breakdown but never netted into a drawer.
+export type RefundTenderMethod = RefundTenderCode | 'STORE_CREDIT';
 export interface RefundTenderLinePayload {
-  method: RefundTenderCode;
+  method: RefundTenderMethod;
   amount: number;
 }
 
@@ -61,6 +65,9 @@ export interface CreateReturnPayload {
   refund_tenders?: RefundTenderLinePayload[];
   // EXCHANGE COLLECT only: the tender the price difference was collected in.
   collect_method?: RefundTenderCode;
+  // NOTE: replacement_items[].unit_price is IGNORED by the server — the
+  // exchange price is resolved from the product master (a typed price would be
+  // a cash-drawer input). The quote echoes the resolved lines.
   // Optional absolute Rs deduction for damaged / opened goods. 0 = full
   // refund. Net refund = gross - restocking_fee.
   restocking_fee?: number;
@@ -89,10 +96,16 @@ export interface ReturnQuote {
   settlement?: { direction: 'COLLECT' | 'REFUND' | 'EVEN'; difference: number } | null;
   /** What each tender actually collected on the source order. */
   captured_tenders: Record<string, number>;
+  /** What the sale took on instruments that cannot come back as cash. */
+  non_refundable_tenders?: Record<string, number>;
   prior_refunds_by_tender: Record<string, number>;
-  /** captured − prior: what may still be refunded to each tender. */
+  /** What may still be refunded per tender (includes a STORE_CREDIT allowance). */
   refundable_by_tender: Record<string, number>;
-  /** True when the server cannot verify tenders (order has no captured payments). */
+  /** True when cash-in tenders alone cannot reach the net refund. */
+  cash_in_shortfall?: boolean;
+  /** Catalog-resolved replacement lines the settlement was computed from. */
+  replacement_items_priced?: Array<{ name?: string; sku?: string; quantity?: number; unit_price: number }>;
+  /** True when the server cannot certify a complete refundable split. */
   tenders_unverifiable: boolean;
 }
 

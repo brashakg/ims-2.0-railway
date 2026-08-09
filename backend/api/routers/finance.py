@@ -4082,9 +4082,17 @@ async def close_cash_register(
     # build_close_summary uses the denoms total for counted; honour an override.
     summary["counted"] = counted
     summary["variance"] = cash_register.compute_variance(counted, summary["expected"])
-    summary["variance_status"] = cash_register.variance_status(
-        summary["variance"], body.tolerance
-    )
+    # RECOMPUTE THE VERDICT -- but NEVER resurrect an over/short verdict that
+    # build_close_summary deliberately withheld. A negative expected drawer means
+    # a cash-in is missing; re-deriving the status here overwrote
+    # NEGATIVE_EXPECTED with a phantom OVERAGE and persisted it next to its own
+    # amber note saying the verdict was withheld.
+    if summary.get("negative_expected_advisory"):
+        summary["variance_status"] = cash_register.NEGATIVE_EXPECTED
+    else:
+        summary["variance_status"] = cash_register.variance_status(
+            summary["variance"], body.tolerance
+        )
 
     # E5 (ADDITIVE): by-mode reconciliation over the same session window. This
     # does NOT touch the CASH-only variance above (build_close_summary is
@@ -4426,7 +4434,17 @@ async def cash_reconciliation_summary(
                 "counted_cash": counted,
                 "blind": False,
                 "variance": variance,
-                "variance_status": _recon_status(variance, tol),
+                # Same guard as the close handler: a withheld NEGATIVE_EXPECTED
+                # verdict must not be re-derived into a phantom OVERAGE here.
+                # (Otherwise _recon_status is authoritative for this grid -- it
+                # emits the grid's OVERAGE/SHORTAGE vocabulary, which the totals
+                # below bucket on; the session's own OVER/SHORT wording is not
+                # interchangeable with it.)
+                "variance_status": (
+                    cash_register.NEGATIVE_EXPECTED
+                    if s.get("negative_expected_advisory")
+                    else _recon_status(variance, tol)
+                ),
                 "tolerance": round(abs(tol), 2),
                 "by_mode": _norm_by_mode(s.get("by_mode_breakdown")),
                 # Both row kinds are now on ONE basis so the grid's tender

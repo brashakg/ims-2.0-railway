@@ -651,9 +651,27 @@ def _order_payment_method(order: Optional[Dict[str, Any]]) -> str:
 
 
 # Cash-in tenders a refund/collect leg may be recorded against (canonical form).
-# STORE_CREDIT / vouchers / loyalty are not drawer-or-gateway money and are
-# handled by the store-credit ledger, never by refund_tenders.
+# ONLY these ever move a drawer or a gateway, so ONLY these are netted by the
+# Day-End readers.
 _REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
+
+# Instruments a customer can PAY with that cannot be refunded back to
+# themselves as drawer/gateway money (a gift voucher cannot be un-spent, loyalty
+# points and EMI/credit settle elsewhere). A sale part-paid with one of these
+# used to be UN-REFUNDABLE: the cash-in legs could never sum to the net refund,
+# every payload 400'd or 422'd, and the only way out was a second same-tender
+# CASH row -- which (before the aggregation fix) silently over-netted the
+# drawer. The refundable substitute is STORE_CREDIT, which is RECORDED on the
+# breakdown but NEVER netted into a drawer.
+_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "LOYALTY", "EMI", "CREDIT")
+
+# Non-drawer tenders a refund leg may legitimately name. STORE_CREDIT is the
+# standard substitute for any non-refundable instrument; the instrument itself
+# is accepted too (a voucher reissued as a voucher).
+_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
+
+# Every tender a refund leg may name.
+_REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
 
 
 def _normalize_refund_tenders(
@@ -670,17 +688,24 @@ def _normalize_refund_tenders(
     a fabricated or unbalanced breakdown must never reach a money reader)."""
     if not raw:
         return None, False
-    out: List[Dict[str, Any]] = []
-    total = 0.0
+    # FOLD same-method legs into ONE canonical row. Two {CASH, 2950} legs are
+    # the same Rs 5,900 of cash as one {CASH, 5900} leg, and must be capped as
+    # such: a per-leg cap gave EACH leg the full allowance, so splitting a
+    # refund across rows bought a fresh allowance every time and let a cashier
+    # over-net the drawer by the difference (a cash skim that reconciles clean).
+    # Folding here also makes the PERSISTED breakdown canonical for the readers.
+    folded: Dict[str, float] = {}
+    order_seen: List[str] = []
     for t in raw:
         method = str(getattr(t, "method", "") or "").strip().upper()
         canon = canonicalize_tender(method)
-        if canon not in _REFUND_CASH_IN:
+        if canon not in _REFUND_ALLOWED:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Unrecognized refund tender '{method}'. "
-                    "Use CASH / UPI / CARD / BANK."
+                    f"Unrecognized refund tender '{method}'. Use CASH / UPI / "
+                    "CARD / BANK, or STORE_CREDIT for the part of the sale paid "
+                    "with a gift voucher / loyalty / EMI / credit."
                 ),
             )
         try:
@@ -689,8 +714,13 @@ def _normalize_refund_tenders(
             amt = 0.0
         if amt <= 0:
             continue
-        out.append({"method": canon, "amount": amt})
-        total += amt
+        if canon not in folded:
+            order_seen.append(canon)
+        folded[canon] = round(folded.get(canon, 0.0) + amt, 2)
+    out: List[Dict[str, Any]] = [
+        {"method": m, "amount": folded[m]} for m in order_seen
+    ]
+    total = round(sum(folded.values()), 2)
     if not out:
         return None, False
     # Paise-exact, with a float-noise guard so a legitimate 1-paisa rounding
@@ -727,19 +757,43 @@ def _normalize_collect_method(raw: Optional[str]) -> Optional[str]:
 
 
 def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]:
-    """What each canonical tender ACTUALLY collected on the source order.
+    """What each CASH-IN tender ACTUALLY collected on the source order.
 
     Sums ``order.payments[]`` by canonical tender (a negative row -- a legacy
-    captured reversal -- reduces that tender). Only cash-in tenders are kept;
-    GIFT_VOUCHER / LOYALTY / CREDIT / STORE_CREDIT are not refundable drawer or
-    gateway money. An order with NO payments[] (legacy / imported) yields {} --
-    the caller then treats the refund tender as UNVERIFIABLE."""
+    captured reversal -- reduces that tender). Only cash-in tenders are kept:
+    they are the only ones that can be refunded back as drawer/gateway money.
+    An order with NO payments[] (legacy / imported) yields {} -- the caller then
+    treats the refund tender as UNVERIFIABLE."""
     out: Dict[str, float] = {}
     for p in (order or {}).get("payments") or []:
         if not isinstance(p, dict):
             continue
         canon = canonicalize_tender(p.get("method"), p.get("mode"))
         if canon not in _REFUND_CASH_IN:
+            continue
+        try:
+            amt = float(p.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    return {k: v for k, v in out.items() if v > 0}
+
+
+def _order_non_refundable_tenders(
+    order: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    """What the order collected on instruments that CANNOT be refunded back to
+    themselves as drawer/gateway money (gift voucher / loyalty / EMI / credit).
+
+    This portion is legitimately refundable only as STORE_CREDIT (or a reissued
+    instrument), and it is what makes an otherwise-DOA refund completable on a
+    part-voucher sale."""
+    out: Dict[str, float] = {}
+    for p in (order or {}).get("payments") or []:
+        if not isinstance(p, dict):
+            continue
+        canon = canonicalize_tender(p.get("method"), p.get("mode"))
+        if canon not in _ORDER_NON_REFUNDABLE:
             continue
         try:
             amt = float(p.get("amount", 0) or 0)
@@ -779,6 +833,90 @@ def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
     return out
 
 
+def _resolve_replacement_prices(
+    replacement_dump: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Re-price EXCHANGE replacement lines from the PRODUCT MASTER.
+
+    The exchange settlement (replacement total - returned value) now drives real
+    money: a COLLECT feeds the expected drawer. A client-typed replacement price
+    is therefore a drawer input, and a single fat-finger manufactures a phantom
+    shortage against the closing cashier -- a Rs 59,000 replacement typed against
+    a Rs 5,900 return produced a Rs 53,100 COLLECT and moved the drawer by it.
+    So the server resolves the price exactly as it resolves the refund side:
+    ``product_id`` -> catalog ``offer_price``/``price``/``mrp``.
+
+    A line whose product cannot be resolved is REJECTED (400) rather than
+    trusted: an exchange swaps for a real catalogued item, and the alternative
+    is letting an unverifiable number reach a till figure. Returns a NEW list;
+    the caller's input is not mutated."""
+    if not replacement_dump:
+        return replacement_dump
+    repo = None
+    try:
+        repo = get_product_repository()
+    except Exception:  # noqa: BLE001
+        repo = None
+    if repo is None:
+        # No catalog available (mock / degraded): do NOT silently trust the
+        # client price for a drawer figure.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Product catalog unavailable - an exchange cannot be priced "
+                "right now. Try again shortly."
+            ),
+        )
+    out: List[Dict[str, Any]] = []
+    for line in replacement_dump:
+        row = dict(line)
+        pid = str(row.get("product_id") or "").strip()
+        name = row.get("name") or pid or "replacement item"
+        product = None
+        if pid:
+            try:
+                product = repo.find_by_id(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if product is None and row.get("sku"):
+            try:
+                product = repo.find_by_sku(str(row.get("sku")).strip())
+            except Exception:  # noqa: BLE001
+                product = None
+        if product is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' is not in the catalog, so its "
+                    "price cannot be verified. Pick the replacement from the "
+                    "product search (a typed price cannot be used for an "
+                    "exchange - it would move the cash drawer)."
+                ),
+            )
+        catalog_price = None
+        for key in ("offer_price", "price", "mrp"):
+            val = product.get(key)
+            if val not in (None, ""):
+                try:
+                    catalog_price = round(float(val), 2)
+                except (TypeError, ValueError):
+                    catalog_price = None
+                if catalog_price is not None:
+                    break
+        if catalog_price is None or catalog_price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' has no price in the catalog, so "
+                    "the exchange difference cannot be computed."
+                ),
+            )
+        row["unit_price"] = catalog_price
+        row["price_source"] = "CATALOG"
+        out.append(row)
+    return out
+
+
 def _gate_refund_tenders_against_order(
     refund_tenders: Optional[List[Dict[str, Any]]],
     *,
@@ -796,6 +934,11 @@ def _gate_refund_tenders_against_order(
     remaining captured amount, is rejected 422 TENDER_MISMATCH (the same shape
     the F27 original-tender lock already uses).
 
+    NON-DRAWER legs (STORE_CREDIT, or a reissued gift voucher / loyalty / EMI /
+    credit) are capped against what the order took on those NON-REFUNDABLE
+    instruments -- that is the portion which legitimately cannot come back as
+    cash. They are recorded but never netted into a drawer by the readers.
+
     UNVERIFIABLE orders (no captured payments[] at all -- legacy / imported)
     are NOT blocked (that would break legitimate legacy refunds) but are
     DOWNGRADED to UNKNOWN: the breakdown is dropped so no drawer or gateway
@@ -805,7 +948,8 @@ def _gate_refund_tenders_against_order(
     if not refund_tenders:
         return None, False
     captured = _order_captured_tenders(order)
-    if not captured:
+    non_refundable = _order_non_refundable_tenders(order)
+    if not captured and not non_refundable:
         # Cannot verify -> record the refund but never auto-net it.
         logger.info(
             "[RETURNS] refund tender unverifiable (order %s has no captured "
@@ -814,10 +958,37 @@ def _gate_refund_tenders_against_order(
         )
         return None, False
     prior = _prior_refund_tenders(order_id)
+    # AGGREGATE THE WHOLE REQUEST PER TENDER BEFORE CAPPING. Capping per LEG
+    # handed every leg the full allowance, so N legs of the same tender bought N
+    # allowances: [{CASH,2950},{CASH,2950}] passed on an order that only ever
+    # took Rs 3,000 in cash, dropping the expected drawer Rs 2,900 below what
+    # the till received -- the cashier refunds the customer on UPI, lifts the
+    # notes, and still closes BALANCED. Callers fold same-method legs upstream;
+    # this re-aggregation is the belt-and-braces that makes the cap correct for
+    # ANY caller, including a future one that skips the fold.
+    requested: Dict[str, float] = {}
     for leg in refund_tenders:
         method = str(leg.get("method") or "")
-        amount = float(leg.get("amount") or 0)
-        remaining = round(captured.get(method, 0.0) - prior.get(method, 0.0), 2)
+        try:
+            amount = float(leg.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        requested[method] = round(requested.get(method, 0.0) + amount, 2)
+
+    # The non-drawer pool: the part of the sale paid with an instrument that
+    # cannot come back as cash. STORE_CREDIT draws on the WHOLE pool (it is the
+    # standard substitute); a reissued instrument draws on its own bucket.
+    non_refundable_total = round(sum(non_refundable.values()), 2)
+
+    def _allowance(method: str) -> float:
+        if method == "STORE_CREDIT":
+            return non_refundable_total
+        if method in _ORDER_NON_REFUNDABLE:
+            return non_refundable.get(method, 0.0)
+        return captured.get(method, 0.0)
+
+    for method, amount in requested.items():
+        remaining = round(_allowance(method) - prior.get(method, 0.0), 2)
         if remaining <= 0 or amount > remaining + 0.01:
             raise HTTPException(
                 status_code=422,
@@ -825,15 +996,15 @@ def _gate_refund_tenders_against_order(
                     "reason": "TENDER_MISMATCH",
                     "requested_method": method,
                     "requested_amount": round(amount, 2),
-                    "captured_on_tender": round(captured.get(method, 0.0), 2),
+                    "captured_on_tender": round(_allowance(method), 2),
                     "already_refunded_on_tender": round(prior.get(method, 0.0), 2),
                     "refundable_on_tender": max(remaining, 0.0),
                     "message": (
                         f"Cannot refund Rs {amount:.2f} to {method}: this order "
-                        f"collected Rs {captured.get(method, 0.0):.2f} on that "
-                        f"tender and Rs {prior.get(method, 0.0):.2f} has already "
-                        "been refunded to it. A refund can only go back to a "
-                        "tender the customer actually paid with."
+                        f"allows Rs {_allowance(method):.2f} on that tender and "
+                        f"Rs {prior.get(method, 0.0):.2f} has already been "
+                        "refunded to it. A refund can only go back to a tender "
+                        "the customer actually paid with."
                     ),
                 },
             )
@@ -1627,20 +1798,45 @@ async def quote_return(
         raise HTTPException(status_code=422, detail=str(exc))
 
     settlement = None
+    replacement_priced: List[Dict[str, Any]] = []
     if body.return_type == "EXCHANGE":
+        # Server-resolved replacement prices (never the client's) -- the same
+        # rule as the refund side, because a COLLECT feeds the cash drawer.
+        replacement_priced = _resolve_replacement_prices(
+            [r.model_dump() for r in body.replacement_items]
+        )
         try:
-            settlement = engine.exchange_settlement(
-                gross_refund, [r.model_dump() for r in body.replacement_items]
-            )
+            settlement = engine.exchange_settlement(gross_refund, replacement_priced)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
     captured = _order_captured_tenders(order)
+    non_refundable = _order_non_refundable_tenders(order)
     prior = _prior_refund_tenders(resolved_order_id)
     refundable = {
         t: round(max(captured.get(t, 0.0) - prior.get(t, 0.0), 0.0), 2)
         for t in captured
     }
+    # STORE_CREDIT is the substitute for the whole non-refundable pool (gift
+    # voucher / loyalty / EMI / credit). Offering it is what makes a part-voucher
+    # sale refundable at all -- without it every payload a cashier can build is
+    # rejected and the refund is un-completable.
+    store_credit_allowance = round(
+        max(sum(non_refundable.values()) - prior.get("STORE_CREDIT", 0.0), 0.0), 2
+    )
+    if store_credit_allowance > 0:
+        refundable["STORE_CREDIT"] = store_credit_allowance
+    cash_in_refundable_total = round(
+        sum(v for k, v in refundable.items() if k in _REFUND_CASH_IN), 2
+    )
+    # TRUE when a split made only of cash-in tenders CANNOT reach the net refund
+    # (a part-voucher sale), so the till must surface WHY and offer the
+    # STORE_CREDIT leg / the un-netted escape instead of dead-ending the cashier.
+    cash_in_shortfall = (
+        body.return_type == "RETURN"
+        and net_amount > 0
+        and cash_in_refundable_total + 0.01 < net_amount
+    )
     return {
         "order_id": resolved_order_id,
         "return_type": body.return_type,
@@ -1652,13 +1848,22 @@ async def quote_return(
             gross_refund, engine.dominant_gst_rate(priced_lines)
         ),
         "settlement": settlement,
+        # Catalog-resolved replacement lines so the till shows (and the cashier
+        # confirms) the SAME prices the settlement was computed from.
+        "replacement_items_priced": replacement_priced,
         # Per-tender truth for the picker (and what the POST gate enforces).
         "captured_tenders": captured,
+        # What the sale took on instruments that cannot come back as cash.
+        "non_refundable_tenders": non_refundable,
         "prior_refunds_by_tender": prior,
         "refundable_by_tender": refundable,
-        # True when the server cannot verify tenders (no captured payments):
-        # the till must not present a confident prefill in that case.
-        "tenders_unverifiable": not captured,
+        "cash_in_shortfall": cash_in_shortfall,
+        # TRUE when the server cannot certify a complete refundable split: no
+        # captured payments at all (legacy / imported), OR the cash-in tenders
+        # alone cannot reach the net refund. Either way the till shows the
+        # escape banner rather than disabling the button with no explanation.
+        "tenders_unverifiable": (not captured and not non_refundable)
+        or cash_in_shortfall,
     }
 
 
@@ -1908,6 +2113,10 @@ async def create_return(
     replacement_dump = [r.model_dump() for r in body.replacement_items]
     settlement: Optional[Dict[str, Any]] = None
     if body.return_type == "EXCHANGE":
+        # AUTHORITATIVE replacement pricing from the catalog. The client's
+        # unit_price is NOT trusted: the settlement difference drives a real
+        # cash collection, so a typed number would be a drawer input.
+        replacement_dump = _resolve_replacement_prices(replacement_dump)
         try:
             settlement = engine.exchange_settlement(gross_refund, replacement_dump)
         except ValueError as exc:

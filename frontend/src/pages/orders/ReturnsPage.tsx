@@ -8,6 +8,7 @@ import {
   returnsApi,
   type CreateReturnPayload,
   type RefundTenderCode,
+  type RefundTenderMethod,
   type ReturnQuote,
 } from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
@@ -109,7 +110,7 @@ export default function ReturnsPage() {
   // Refund-tender capture (drawer-truth): how the money is actually handed back.
   // The Day-End drawer nets off THIS, never a guessed original-sale tender.
   // `method: ''` = not yet chosen; it is NEVER defaulted to CASH.
-  const [refundTenders, setRefundTenders] = useState<{ method: RefundTenderCode | ''; amount: number }[]>([]);
+  const [refundTenders, setRefundTenders] = useState<{ method: RefundTenderMethod | ''; amount: number }[]>([]);
   // EXCHANGE COLLECT: the tender the price difference is taken in at the till.
   // Starts UNSET — an untouched dropdown must never stamp phantom drawer cash.
   const [collectMethod, setCollectMethod] = useState<RefundTenderCode | '' | 'NOT_AT_TILL'>('');
@@ -210,7 +211,16 @@ export default function ReturnsPage() {
   const netRefund = quote ? quote.net_refund : Math.max(0, estimatedGross - safeFee);
 
   // Exchange settlement: server-computed when quoted, local estimate otherwise.
-  const replacementTotal = replacementItems.reduce((sum, r) => sum + r.quantity * r.unitPrice, 0);
+  // The SERVER re-prices replacement lines from the product master (a typed
+  // price would be a cash-drawer input via the COLLECT). Show the resolved
+  // figures once the quote lands; the local sum is a pre-quote estimate only.
+  const replacementTotal = quote?.replacement_items_priced?.length
+    ? Math.round(
+        quote.replacement_items_priced.reduce(
+          (sum, r) => sum + (Number(r.quantity) || 1) * (Number(r.unit_price) || 0), 0,
+        ) * 100,
+      ) / 100
+    : replacementItems.reduce((sum, r) => sum + r.quantity * r.unitPrice, 0);
   const exchangeDiff = quote?.settlement
     ? (quote.settlement.direction === 'REFUND'
         ? -Math.abs(quote.settlement.difference)
@@ -263,13 +273,22 @@ export default function ReturnsPage() {
   // days, so the cashier records how the refund is ACTUALLY returned — and the
   // server independently enforces that a tender may only be refunded up to what
   // it collected on this order (a UI rule is not a control).
-  const TENDER_CODES: RefundTenderCode[] = ['CASH', 'UPI', 'CARD', 'BANK'];
+  const TENDER_CODES: RefundTenderMethod[] = ['CASH', 'UPI', 'CARD', 'BANK'];
 
   // Tenders the SERVER says this order captured (authoritative). Only these can
   // legitimately receive a refund; anything else is refused server-side.
   const capturedTenders = quote?.captured_tenders ?? {};
   const refundableByTender = quote?.refundable_by_tender ?? {};
-  const sourceTenders = Object.keys(capturedTenders) as RefundTenderCode[];
+  const nonRefundableTenders = quote?.non_refundable_tenders ?? {};
+  // Offerable tenders = the captured cash-in ones, plus STORE_CREDIT when the
+  // sale was part-paid with an instrument that cannot come back as cash. Without
+  // that option a part-voucher refund is UN-COMPLETABLE: every cash-in-only
+  // split is rejected and the cashier's next instinct (a second CASH row) used
+  // to over-net the drawer.
+  const sourceTenders = Object.keys(refundableByTender).filter(
+    (t) => (refundableByTender[t] ?? 0) > 0,
+  ) as RefundTenderMethod[];
+  const cashInShortfall = quote?.cash_in_shortfall ?? false;
   // SPLIT is judged on the RAW captured payment legs, not on the mappable
   // subset: a GIFT_VOUCHER / LOYALTY / EMI leg (or an empty payments[]) must
   // never look like a clean single-tender sale and silently prefill CASH.
@@ -320,7 +339,7 @@ export default function ReturnsPage() {
     setRefundTenders((prev) => prev.filter((_, idx) => idx !== i));
   const updateRefundTenderRow = (
     i: number,
-    patch: Partial<{ method: RefundTenderCode; amount: number }>,
+    patch: Partial<{ method: RefundTenderMethod; amount: number }>,
   ) => setRefundTenders((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
   // ----- Replacement product picker (EXCHANGE only) -----
@@ -412,7 +431,7 @@ export default function ReturnsPage() {
     refund_tenders:
       returnType === 'RETURN' && roundedNet > 0 && refundTenders.every(t => t.method !== '')
         ? refundTenders.map((t) => ({
-            method: t.method as RefundTenderCode,
+            method: t.method as RefundTenderMethod,
             amount: Math.round((Number(t.amount) || 0) * 100) / 100,
           }))
         : undefined,
@@ -833,10 +852,10 @@ export default function ReturnsPage() {
                       {/* The original sale's captured tenders, straight from the
                           server — so the prefill is checkable and the cashier can
                           see what is legitimately refundable per tender. */}
-                      {sourceTenders.length > 0 && (
+                      {Object.keys(capturedTenders).length > 0 && (
                         <p className="text-xs text-gray-500 mb-2">
                           Paid on this order:{' '}
-                          {sourceTenders.map((t, i) => (
+                          {Object.keys(capturedTenders).map((t, i) => (
                             <span key={t}>
                               {i > 0 && ' · '}
                               <span className="font-medium text-gray-700">{t} {fp(capturedTenders[t] || 0)}</span>
@@ -844,9 +863,25 @@ export default function ReturnsPage() {
                                 ` (refundable ${fp(refundableByTender[t] || 0)})`}
                             </span>
                           ))}
+                          {Object.keys(nonRefundableTenders).map((t) => (
+                            <span key={t}>
+                              {' · '}
+                              <span className="font-medium text-gray-700">{t} {fp(nonRefundableTenders[t] || 0)}</span>
+                            </span>
+                          ))}
                         </p>
                       )}
-                      {tendersUnverifiable && (
+                      {/* WHY a cash-in-only split cannot balance — without this
+                          the cashier hits a dead end with no explanation. */}
+                      {cashInShortfall && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-2">
+                          Part of this sale was paid with{' '}
+                          {Object.keys(nonRefundableTenders).join(' / ') || 'a non-refundable instrument'},
+                          which cannot be handed back as cash. Refund that portion as{' '}
+                          <span className="font-semibold">STORE_CREDIT</span> (it is recorded but not deducted from the drawer).
+                        </p>
+                      )}
+                      {tendersUnverifiable && !cashInShortfall && (
                         <p className="text-xs text-amber-600 mb-2">
                           This order has no recorded payment tenders, so the refund cannot be auto-deducted from the drawer. Record it as cash paid out at day-end if you hand back cash.
                         </p>
@@ -859,7 +894,7 @@ export default function ReturnsPage() {
                           <div key={i} className="flex items-center gap-2">
                             <select
                               value={t.method}
-                              onChange={e => updateRefundTenderRow(i, { method: e.target.value as RefundTenderCode })}
+                              onChange={e => updateRefundTenderRow(i, { method: e.target.value as RefundTenderMethod })}
                               className={clsx('w-32 px-2 py-1.5 border rounded text-sm',
                                 t.method === '' ? 'border-amber-400 text-gray-500' : 'border-gray-300')}
                             >
