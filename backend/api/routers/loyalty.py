@@ -1123,24 +1123,46 @@ def earn_for_order_internal(
         return {"awarded": 0, "skipped_reason": "error", "error": str(exc)}
 
 
-def reverse_for_return(
-    return_id: str, order_id: str, customer_id: str
+# Ledger fields that tag an ADJUST row as "this row already reversed the
+# loyalty of some order". `return_id` is the returns flow (BUG-099);
+# `cancel_of_order_id` is the order-cancel flow (F4). The cancel path checks
+# BOTH so a return and a cancel can never claw back the SAME order twice.
+_REVERSAL_MARKER_FIELDS = ("return_id", "cancel_of_order_id")
+
+
+def _reverse_order_loyalty(
+    *,
+    order_id: str,
+    customer_id: str,
+    marker_field: str,
+    marker_value: str,
+    reason_prefix: str,
+    extra_marker: Optional[Dict[str, Any]] = None,
+    block_on_any_prior_reversal: bool = False,
 ) -> Dict[str, Any]:
-    """Reverse loyalty when goods are returned (BUG-099): claw back the points
-    EARNED on the original order and restore the points REDEEMED on it.
+    """Shared engine behind reverse_for_return (returns) and reverse_for_cancel
+    (order cancel): claw back the points EARNED on `order_id` and restore the
+    points REDEEMED on it.
 
-    Called by returns.create_return after the atomic qty claim. Idempotent on
-    return_id (an ADJUST ledger row tagged with the return_id is the guard, so a
-    retried / duplicate return never double-reverses). The balance + both lifetime
-    counters move in a SINGLE atomic adjust_balance ($inc). Never raises -- always
-    returns a dict; the caller decides how to surface a failure.
+    The balance + both lifetime counters move in a SINGLE atomic adjust_balance
+    ($inc). Never raises -- always returns a dict; the caller decides how to
+    surface a failure.
 
-    buy -> earn 100 / redeem 50, then return:
+    IDEMPOTENCY (the whole point): an ADJUST ledger row tagged
+    ``{marker_field: marker_value}`` is written FIRST and IS the claim. A retried
+    call finds it and returns ``already_reversed`` without touching the balance.
+    Marker-before-balance means the only possible partial failure is "marker
+    written, balance not moved" -- i.e. we fail toward NOT clawing (the customer
+    keeps their points) and the caller flags the doc for reconciliation. We never
+    double-claw.
+
+    ``block_on_any_prior_reversal`` additionally treats a reversal written by the
+    OTHER flow as done, so cancel-after-return cannot claw the same points twice.
+
+    buy -> earn 100 / redeem 50, then reverse:
       net balance delta = redeemed(50) - earned(100) = -50 (claw 50 net),
       lifetime_earned -= 100, lifetime_redeemed -= 50.
     """
-    if not customer_id or not order_id or not return_id:
-        return {"ok": False, "reason": "missing_ids"}
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
@@ -1148,13 +1170,29 @@ def reverse_for_return(
     try:
         ledger = txns.find_for_customer(customer_id, limit=1000)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("reverse_for_return ledger read failed: %s", exc)
+        logger.warning("%s ledger read failed: %s", reason_prefix, exc)
         return {"ok": False, "reason": "ledger_read_failed"}
 
-    # Idempotency: an ADJUST row already tagged with THIS return_id == done.
+    # Idempotency: an ADJUST row already tagged with THIS marker == done.
     for row in ledger:
-        if row.get("type") == "ADJUST" and row.get("return_id") == return_id:
+        if row.get("type") != "ADJUST":
+            continue
+        if row.get(marker_field) == marker_value:
             return {"ok": True, "already_reversed": True}
+        if (
+            block_on_any_prior_reversal
+            and row.get("order_id") == order_id
+            and any(row.get(f) for f in _REVERSAL_MARKER_FIELDS)
+        ):
+            # This order's loyalty was already reversed by the other flow
+            # (e.g. a return). Reversing again would DOUBLE-claw.
+            return {
+                "ok": True,
+                "already_reversed": True,
+                "reversed_by": next(
+                    f for f in _REVERSAL_MARKER_FIELDS if row.get(f)
+                ),
+            }
 
     earned = sum(
         int(t.get("points") or 0)
@@ -1175,11 +1213,11 @@ def reverse_for_return(
     if balance_before + net_delta < 0:
         # The clawback would drive the balance negative (the earned points were
         # already spent on a LATER order). Do NOT silently clamp -- escalate so a
-        # human reconciles; the caller flags the return for retry.
+        # human reconciles; the caller flags the doc for retry.
         logger.error(
-            "reverse_for_return BALANCE UNDERFLOW cust=%s order=%s return=%s "
-            "balance=%s net_delta=%s",
-            customer_id, order_id, return_id, balance_before, net_delta,
+            "%s BALANCE UNDERFLOW cust=%s order=%s ref=%s balance=%s net_delta=%s",
+            reason_prefix, customer_id, order_id, marker_value,
+            balance_before, net_delta,
         )
         return {"ok": False, "reason": "balance_underflow",
                 "balance": balance_before, "net_delta": net_delta}
@@ -1189,22 +1227,25 @@ def reverse_for_return(
     # and the caller flags loyalty_reversal_failed for reconciliation -- we fail
     # toward NOT-clawing (customer keeps points) rather than double-clawing.
     txn_id = str(uuid.uuid4())
+    marker: Dict[str, Any] = {
+        "txn_id": txn_id,
+        "customer_id": customer_id,
+        "type": "ADJUST",
+        "points": net_delta,
+        "order_id": order_id,
+        marker_field: marker_value,
+        "reason": (
+            f"{reason_prefix}: claw {earned} earned + restore {redeemed} "
+            f"redeemed on order {order_id}"
+        ),
+        "created_at": datetime.now(),
+    }
+    if extra_marker:
+        marker.update(extra_marker)
     try:
-        txns.create({
-            "txn_id": txn_id,
-            "customer_id": customer_id,
-            "type": "ADJUST",
-            "points": net_delta,
-            "order_id": order_id,
-            "return_id": return_id,
-            "reason": (
-                f"Return {return_id}: claw {earned} earned + restore {redeemed} "
-                f"redeemed on order {order_id}"
-            ),
-            "created_at": datetime.now(),
-        })
+        txns.create(marker)
     except Exception as exc:  # noqa: BLE001
-        logger.error("reverse_for_return marker write failed: %s", exc)
+        logger.error("%s marker write failed: %s", reason_prefix, exc)
         return {"ok": False, "reason": "marker_write_failed", "error": str(exc)}
     try:
         accounts.adjust_balance(
@@ -1215,8 +1256,8 @@ def reverse_for_return(
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "reverse_for_return balance update FAILED (marker %s written) cust=%s: %s",
-            txn_id, customer_id, exc,
+            "%s balance update FAILED (marker %s written) cust=%s: %s",
+            reason_prefix, txn_id, customer_id, exc,
         )
         return {"ok": False, "reason": "balance_update_failed", "error": str(exc)}
 
@@ -1227,3 +1268,65 @@ def reverse_for_return(
         "net_delta": net_delta,
         "txn_id": txn_id,
     }
+
+
+def reverse_for_return(
+    return_id: str, order_id: str, customer_id: str
+) -> Dict[str, Any]:
+    """Reverse loyalty when goods are returned (BUG-099): claw back the points
+    EARNED on the original order and restore the points REDEEMED on it.
+
+    Called by returns.create_return after the atomic qty claim. Idempotent on
+    return_id (an ADJUST ledger row tagged with the return_id is the guard, so a
+    retried / duplicate return never double-reverses). Semantics are UNCHANGED --
+    the mechanics simply moved into the shared _reverse_order_loyalty engine that
+    the order-cancel reversal (F4) also uses.
+    """
+    if not customer_id or not order_id or not return_id:
+        return {"ok": False, "reason": "missing_ids"}
+    return _reverse_order_loyalty(
+        order_id=order_id,
+        customer_id=customer_id,
+        marker_field="return_id",
+        marker_value=return_id,
+        reason_prefix=f"Return {return_id}",
+    )
+
+
+def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, Any]:
+    """F4: reverse loyalty when an ORDER IS CANCELLED.
+
+    orders.create_order awards points at CREATE (even on a DRAFT) and cancel had
+    NO reversal at all, so a cancelled order left redeemable points behind
+    (unfunded discounts, plus a farm-and-cancel vector: big order -> points ->
+    cancel -> redeem), while any points the customer REDEEMED against that order
+    were silently burned. This claws back the EARN and restores the REDEEM.
+
+    IDEMPOTENT ON THE ORDER: the marker is `cancel_of_order_id == order_id`, so a
+    retried cancel (or a cancel racing itself) reverses EXACTLY once -- there is
+    no per-cancel id to key on, and the order id is the natural key. It also
+    stands down when a RETURN already reversed this order, so the two flows can
+    never both claw the same points.
+
+    Walk-in pseudo-customers never earn, so they are skipped. Never raises.
+    """
+    if not order_id:
+        return {"ok": False, "reason": "missing_ids"}
+    cid = str(customer_id or "").strip()
+    if not cid:
+        return {"ok": False, "reason": "missing_ids"}
+    if cid.startswith(("walkin-", "walk-in")):
+        return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
+    try:
+        return _reverse_order_loyalty(
+            order_id=order_id,
+            customer_id=cid,
+            marker_field="cancel_of_order_id",
+            marker_value=order_id,
+            reason_prefix=f"Cancel {order_id}",
+            extra_marker={"source": "ORDER_CANCEL"},
+            block_on_any_prior_reversal=True,
+        )
+    except Exception as exc:  # noqa: BLE001 -- must never break a cancel
+        logger.error("reverse_for_cancel failed for order %s: %s", order_id, exc)
+        return {"ok": False, "reason": "error", "error": str(exc)}

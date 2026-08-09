@@ -5,33 +5,86 @@ StockRepository.claim_one_available must claim exactly one AVAILABLE unit per
 call via find_one_and_update(status="AVAILABLE"), flip it SOLD, and never hand
 the SAME unit to two callers. This is the data-integrity guard behind the POS
 _mark_units_sold FIFO path (replacing the prior find-then-mark check-then-act).
+
+F2 (2026-08 audit) updated this harness twice over:
+  * the FEFO fixtures used HARD-CODED expiry dates that have since gone past,
+    so they were silently asserting "the most-expired unit is dispensed first" --
+    the very defect F2 fixes. Every expiry is now RELATIVE to IST today, so the
+    intent (earliest-expiry-first among IN-DATE units) is what is actually
+    tested, forever;
+  * the fake matcher now models $in / $gte / $or / $not+$type with Mongo's BSON
+    type-bracketing, because the expiry floor relies on it.
 """
 from __future__ import annotations
 
 import os
 import sys
+from datetime import date, datetime, timedelta
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from api.utils.ist import ist_today  # noqa: E402
+
+_MISSING = object()
+
+
+def _iso(delta_days: int) -> str:
+    """An ISO expiry date relative to IST today (negative == already expired)."""
+    return (ist_today() + timedelta(days=delta_days)).isoformat()
+
+
+def _same_bson_type(a, b) -> bool:
+    """Mongo compares only values of the same BSON type ('type bracketing')."""
+    if isinstance(a, str) and isinstance(b, str):
+        return True
+    if isinstance(a, (datetime, date)) and isinstance(b, (datetime, date)):
+        return True
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool)
+    return isinstance(a, (int, float)) and isinstance(b, (int, float))
+
+
+def _op(val, op, arg) -> bool:
+    if op == "$in":
+        return (None if val is _MISSING else val) in arg
+    if op == "$nin":
+        return (None if val is _MISSING else val) not in arg
+    if op == "$ne":
+        return not (val is not _MISSING and val == arg)
+    if op == "$gte":
+        return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
+    if op == "$type":
+        return isinstance(val, str) if arg == "string" else False
+    raise AssertionError("fake collection: unsupported operator " + op)
+
 
 def _matches(doc, flt):
-    for k, v in flt.items():
-        if isinstance(v, dict):
-            if "$nin" in v and doc.get(k) in v["$nin"]:
+    for k, v in (flt or {}).items():
+        if k == "$or":
+            if not any(_matches(doc, c) for c in v):
                 return False
-            if "$exists" in v and bool(v["$exists"]) != (k in doc):
-                return False
-            if "$ne" in v and k in doc and doc.get(k) == v["$ne"]:
-                return False
-        elif doc.get(k) != v:
+            continue
+        if isinstance(v, dict) and any(str(o).startswith("$") for o in v):
+            val = doc.get(k, _MISSING)
+            for op, arg in v.items():
+                if op == "$exists":
+                    if bool(arg) != (k in doc):
+                        return False
+                elif op == "$not":
+                    if all(_op(val, o2, a2) for o2, a2 in arg.items()):
+                        return False
+                elif not _op(val, op, arg):
+                    return False
+            continue
+        if doc.get(k) != v:
             return False
     return True
 
 
 class _FakeColl:
-    """Minimal find_one_and_update with $set + $nin/$exists/$ne + sort,
-    mutating in place (mirrors the pymongo surface the FEFO claim uses)."""
+    """Minimal find_one_and_update with $set + the operators the claim uses,
+    mutating in place (mirrors the pymongo surface the FEFO claim relies on)."""
 
     def __init__(self, docs):
         self.docs = docs
@@ -41,7 +94,7 @@ class _FakeColl:
         if sort:
             for key, direction in reversed(list(sort)):
                 candidates.sort(
-                    key=lambda d, k=key: d.get(k), reverse=direction == -1
+                    key=lambda d, k=key: str(d.get(k)), reverse=direction == -1
                 )
         if not candidates:
             return None
@@ -112,9 +165,9 @@ def _unit(sid, expiry=..., status="AVAILABLE"):
 def test_fefo_dated_units_claimed_earliest_expiry_first():
     # Natural (insertion) order deliberately NOT the expiry order.
     docs = [
-        _unit("U-LATE", "2027-01-01"),
-        _unit("U-EARLY", "2026-08-01"),
-        _unit("U-MID", "2026-12-15"),
+        _unit("U-LATE", _iso(365)),
+        _unit("U-EARLY", _iso(20)),
+        _unit("U-MID", _iso(120)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-EARLY"
@@ -127,7 +180,7 @@ def test_fefo_undated_claimed_only_after_dated_exhausted():
     # Undated unit sits FIRST in natural order; the dated one must still win.
     docs = [
         _unit("U-UNDATED"),
-        _unit("U-DATED", "2026-09-30"),
+        _unit("U-DATED", _iso(60)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-DATED"
@@ -140,7 +193,7 @@ def test_fefo_null_expiry_treated_as_undated():
     # claim avoids.
     docs = [
         _unit("U-NULL", None),
-        _unit("U-DATED", "2026-09-30"),
+        _unit("U-DATED", _iso(60)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-DATED"
@@ -151,8 +204,8 @@ def test_fefo_exclude_ids_applies_to_dated_units():
     # The used-set exclusion must hold in the FEFO phase too: two lines of the
     # same order never grab the same dated unit.
     docs = [
-        _unit("U-EARLY", "2026-08-01"),
-        _unit("U-LATE", "2027-01-01"),
+        _unit("U-EARLY", _iso(20)),
+        _unit("U-LATE", _iso(365)),
     ]
     repo = _repo(docs)
     sid = repo.claim_one_available("P", "S", "O1", exclude_ids={"U-EARLY"})
@@ -223,11 +276,11 @@ def test_fefo_works_over_real_mock_collection_no_mongo():
     )
     coll.insert_one(
         {"_id": "D-LATE", "stock_id": "D-LATE", "product_id": "P", "store_id": "S",
-         "status": "AVAILABLE", "expiry_date": "2027-03-01"}
+         "status": "AVAILABLE", "expiry_date": _iso(365)}
     )
     coll.insert_one(
         {"_id": "D-EARLY", "stock_id": "D-EARLY", "product_id": "P", "store_id": "S",
-         "status": "AVAILABLE", "expiry_date": "2026-08-01"}
+         "status": "AVAILABLE", "expiry_date": _iso(20)}
     )
     repo = StockRepository(coll)
 

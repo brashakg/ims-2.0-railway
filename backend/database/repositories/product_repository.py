@@ -4,10 +4,16 @@ IMS 2.0 - Product Repository
 Product and Stock data access operations
 """
 
+import logging
 import re
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
+
+from api.utils.ist import ist_today
+
 from .base_repository import BaseRepository
+
+logger = logging.getLogger(__name__)
 
 # Sentinel for "caller did not pass is_active" so the legacy active_only
 # behaviour of find_by_category is preserved byte-for-byte while new callers
@@ -289,6 +295,71 @@ class StockRepository(BaseRepository):
         "RTV",
     ]
 
+    # ======================================================================
+    # F2 (patient-safety / compliance): the EXPIRY FLOOR
+    # ======================================================================
+    # Contact lenses / solutions carry `expiry_date`, stamped at GRN and
+    # persisted by add_stock as an ISO date STRING (date.isoformat(), e.g.
+    # "2026-05-30") -- see find_expiring below. EVERY other unit (frames,
+    # sunglasses, accessories, watches...) carries NO expiry_date at all.
+    #
+    # Before this guard a past-dated unit was fully sellable AND, because the
+    # FEFO claim sorted expiry ASCENDING with no floor, it was dispensed FIRST:
+    # POS handed out the MOST-expired lens on the shelf, silently.
+    #
+    # THE ONE INVARIANT THAT MATTERS HERE: a unit that does not carry an
+    # expiry_date must be COMPLETELY UNAFFECTED. Hence every filter below is
+    # built as an $or whose FIRST branch is "undated" -- a frame matches that
+    # branch and is never hidden, never re-sorted, never re-counted.
+    #
+    # Comparisons are STRING-vs-STRING only (matching how the value is stored).
+    # A legacy row holding a non-string expiry (a BSON datetime from an old
+    # import) can NOT be compared against an ISO string in Mongo -- rather than
+    # silently hide it we let it through via the explicit non-string branch:
+    # when we cannot reason about the value we err toward SELLING, never toward
+    # hiding stock. Genuinely past-dated ISO rows -- the real-world case -- are
+    # excluded, and surfaced by count_expired() so nothing vanishes untraced.
+
+    @staticmethod
+    def _expiry_floor_iso() -> str:
+        """IST calendar 'today' as an ISO date string.
+
+        IST (not UTC): the box runs UTC, so between 00:00-05:30 IST a naive
+        date.today() is still YESTERDAY -- a lens would stay sellable for the
+        first 5.5 hours of the day it expired.
+        """
+        try:
+            return ist_today().isoformat()
+        except Exception:  # noqa: BLE001 -- clock helper must never break a sale
+            return date.today().isoformat()
+
+    @classmethod
+    def _not_expired_or(cls) -> List[Dict]:
+        """$or branches selecting every unit that is NOT past its expiry.
+
+        Branch order is deliberate (mock/`$or` matchers short-circuit on the
+        first true branch, and the undated branch is the hot path):
+          1. undated  -- field missing, null, or blank  -> ALWAYS sellable
+          2. ISO-string expiry on/after IST today       -> still in date
+          3. expiry present but NOT a string (legacy)   -> cannot be compared,
+             so it is allowed through rather than silently hidden
+        """
+        return [
+            {"expiry_date": {"$in": [None, ""]}},
+            {"expiry_date": {"$gte": cls._expiry_floor_iso()}},
+            {"expiry_date": {"$not": {"$type": "string"}}},
+        ]
+
+    def sellable_filter(self, product_id: str, store_id: str) -> Dict:
+        """Canonical 'what POS may actually sell' query for one product+store:
+        AVAILABLE status AND not past its expiry date."""
+        return {
+            "product_id": product_id,
+            "store_id": store_id,
+            "status": "AVAILABLE",
+            "$or": self._not_expired_or(),
+        }
+
     def find_available(self, product_id: str, store_id: str) -> int:
         # The sellable-stock count for the POS path. The positive AVAILABLE match
         # already excludes every E3 non-sellable status (QUARANTINED /
@@ -296,9 +367,29 @@ class StockRepository(BaseRepository):
         # since none of those equals "AVAILABLE" -- this is the E3 rollup-
         # exclusion guarantee (intent #4 / #12). A quarantined or under-audit
         # unit therefore drops out of POS sellable on-hand immediately.
-        return self.count(
-            {"product_id": product_id, "store_id": store_id, "status": "AVAILABLE"}
-        )
+        #
+        # F2: an EXPIRED dated unit is likewise not sellable on-hand. Units with
+        # no expiry_date (frames etc.) match the undated $or branch and are
+        # counted exactly as before.
+        return self.count(self.sellable_filter(product_id, store_id))
+
+    def count_expired(self, product_id: str, store_id: str) -> int:
+        """How many AVAILABLE units for this product+store the expiry floor is
+        holding back (F2's visible bucket -- expired stock is QUARANTINED FROM
+        SALE, never silently deleted).
+
+        Derived as (AVAILABLE total) - (sellable) rather than as its own query,
+        so the two buckets ALWAYS reconcile: any AVAILABLE unit that find_available
+        does not count shows up here. A product with no dated units always
+        returns 0.
+        """
+        try:
+            total = self.count(
+                {"product_id": product_id, "store_id": store_id, "status": "AVAILABLE"}
+            )
+        except Exception:  # noqa: BLE001
+            return 0
+        return max(total - self.find_available(product_id, store_id), 0)
 
     def find_low_stock(self, store_id: str, threshold: int = 5) -> List[Dict]:
         # One stock_units row == one physical unit. Legacy rows have no
@@ -346,10 +437,105 @@ class StockRepository(BaseRepository):
         return self.update(stock_id, {"status": "AVAILABLE", "reserved_at": None})
 
     def mark_sold(self, stock_id: str, order_id: str) -> bool:
-        return self.update(
-            stock_id,
-            {"status": "SOLD", "sold_at": datetime.now(), "order_id": order_id},
-        )
+        """Flip ONE SPECIFIC unit AVAILABLE -> SOLD (barcode-scan POS path).
+
+        F7: this used to be an UNGUARDED update() -- it happily re-sold a unit
+        that was already SOLD / TRANSFERRED / QUARANTINED / DAMAGED / RTV / VOID
+        and OVERWROTE its prior sale lineage (order_id / sold_at), so the earlier
+        sale's unit could never be traced or returned. It is now an ATOMIC
+        GUARDED update keyed on status (same pattern as claim_for_transfer):
+        the unit must still be AVAILABLE **and** not past its expiry date, else
+        NOTHING is written and False is returned. The caller (POS) must surface
+        that as a real error -- never a silent success.
+        """
+        flt: Dict = {
+            "stock_id": stock_id,
+            "status": "AVAILABLE",
+            "$or": self._not_expired_or(),
+        }
+        try:
+            doc = self.collection.find_one_and_update(
+                flt,
+                {
+                    "$set": {
+                        "status": "SOLD",
+                        "sold_at": datetime.now(),
+                        "order_id": order_id,
+                    }
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK] mark_sold(%s) failed: %s", stock_id, exc)
+            return False
+        return doc is not None
+
+    def release_sold_units_for_order(
+        self,
+        order_id: str,
+        *,
+        product_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        reason: str = "ORDER_CANCELLED",
+    ) -> List[str]:
+        """Flip every unit still SOLD against `order_id` back to AVAILABLE and
+        return the stock_ids reactivated. The stock-side UNDO of a sale that
+        never happened (order cancelled / a DRAFT line removed).
+
+        IDEMPOTENT BY CONSTRUCTION: each unit is claimed with an ATOMIC
+        find_one_and_update whose filter requires status=="SOLD" AND
+        order_id==this order. The very same write clears `order_id`, so the
+        unit can never match again -- a retried / double cancel reactivates
+        NOTHING (and a concurrent return-restock can never double-count it).
+
+        Lineage is preserved, not overwritten: the stale sale attribution
+        (order_id / sold_at / sold_to_customer_id) is CLEARED so an AVAILABLE
+        unit no longer "answers to" a cancelled order, while
+        prior_sold_order_id / released_from_order_id keep the audit trail
+        (mirrors returns._reactivate_original_unit).
+
+        `product_id` + `limit` narrow the release to ONE line's worth of units
+        (a single removed DRAFT line); omitted -> the whole order.
+        """
+        released: List[str] = []
+        if not order_id:
+            return released
+        flt: Dict = {"order_id": order_id, "status": "SOLD"}
+        if product_id:
+            flt["product_id"] = product_id
+        # Hard bound so a misbehaving collection can never spin forever; no real
+        # order has 500 serialized units.
+        max_units = 500 if limit is None else max(int(limit), 0)
+        for _ in range(min(max_units, 500)):
+            try:
+                doc = self.collection.find_one_and_update(
+                    dict(flt),
+                    {
+                        "$set": {
+                            "status": "AVAILABLE",
+                            "order_id": None,
+                            "sold_at": None,
+                            "sold_to_customer_id": None,
+                            "reserved_at": None,
+                            "prior_sold_order_id": order_id,
+                            "released_from_order_id": order_id,
+                            "release_reason": reason,
+                            "released_at": datetime.now().isoformat(),
+                        }
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[STOCK] release_sold_units_for_order(%s) write failed: %s",
+                    order_id,
+                    exc,
+                )
+                break
+            if not doc:
+                break
+            sid = doc.get("stock_id") or doc.get("_id")
+            if sid:
+                released.append(str(sid))
+        return released
 
     def claim_one_available(
         self,
@@ -369,16 +555,25 @@ class StockRepository(BaseRepository):
 
         FEFO (First-Expiry-First-Out): expirable stock (contact lenses, solutions)
         carries expiry_date stamped at GRN. The claim is TWO-PHASE:
-          1. Among DATED units (expiry_date exists and is not null) claim the
-             EARLIEST expiry first (sort ascending). Dispensing near-expiry units
-             first is a clinical/inventory-correctness requirement.
-          2. Only when no dated unit is available, fall back to the original
-             unsorted claim for undated units -- so plain products (frames,
-             sunglasses) behave exactly as before.
+          1. Among DATED units that are STILL IN DATE (expiry_date >= IST today)
+             claim the EARLIEST expiry first (sort ascending). Dispensing
+             near-expiry units first is a clinical/inventory-correctness
+             requirement -- but ONLY down to today.
+          2. Only when no in-date dated unit is available, fall back to the
+             original unsorted claim, now restricted to units the expiry floor
+             allows (undated units -- frames, sunglasses -- plus any legacy
+             non-string expiry). Plain undated products behave EXACTLY as before:
+             they match the first $or branch, in natural order, unsorted.
         A naive single ascending sort would pick null/undated units FIRST under
         BSON ordering (null sorts before dates), hence the two phases. Each phase
         is still one atomic find_one_and_update, so the no-double-claim contract
         is unchanged.
+
+        F2 (patient safety): phase 1 previously had NO date floor, so the claim
+        sorted expiry ASCENDING across ALL dated units and handed POS the
+        MOST-EXPIRED unit first. A past-dated unit is now claimable by NEITHER
+        phase -- it stays AVAILABLE-but-unsellable and is reported by
+        count_expired() so staff can quarantine it.
         """
         flt = {
             "product_id": product_id,
@@ -394,9 +589,9 @@ class StockRepository(BaseRepository):
                 "order_id": order_id,
             }
         }
-        # Phase 1 (FEFO): earliest-expiring DATED unit first.
+        # Phase 1 (FEFO): earliest-expiring IN-DATE unit first.
         dated_flt = dict(flt)
-        dated_flt["expiry_date"] = {"$exists": True, "$ne": None}
+        dated_flt["expiry_date"] = {"$gte": self._expiry_floor_iso()}
         try:
             doc = self.collection.find_one_and_update(
                 dated_flt, update, sort=[("expiry_date", 1)]
@@ -404,10 +599,12 @@ class StockRepository(BaseRepository):
         except Exception:
             doc = None
         if not doc:
-            # Phase 2: no dated unit available -> claim any undated unit
-            # (identical to the pre-FEFO behaviour).
+            # Phase 2: no in-date dated unit available -> claim any unit the
+            # expiry floor still permits (undated / legacy-typed).
+            undated_flt = dict(flt)
+            undated_flt["$or"] = self._not_expired_or()
             try:
-                doc = self.collection.find_one_and_update(flt, update)
+                doc = self.collection.find_one_and_update(undated_flt, update)
             except Exception:
                 return None
         if not doc:
