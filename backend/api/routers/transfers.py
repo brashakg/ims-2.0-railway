@@ -1616,6 +1616,47 @@ async def complete_transfer(
     return {"transfer": transfer, "message": "Transfer completed"}
 
 
+def _transfer_has_moved_stock(transfer: Dict) -> bool:
+    """Ground-truth check: has this transfer ALREADY moved real units OUT?
+
+    Returns True iff the stock_units collection holds at least one unit stamped
+    with this transfer's id and parked in TRANSFERRED status -- the exact stamp
+    `claim_for_transfer` writes per unit at ship time (see _apply_ship_stock_move
+    -> claim_for_transfer, which sets {status: TRANSFERRED, transfer_id: <id>}).
+
+    Why this and not the transfer doc's own fields: ship flips units to
+    TRANSFERRED and only THEN sets `stock_shipped` / `shipped_stock_ids` in memory
+    and persists the doc. If the process dies between the per-unit claim writes
+    (already committed to stock_units) and _save_transfer, the persisted doc is
+    left at a PRE-SHIP status with NO stock_shipped flag and NO shipped_stock_ids
+    -- so those doc fields cannot detect the orphan. The stock_units rows are the
+    only durable evidence, so we query them directly.
+
+    Fail-soft: no stock repo (DB down / no stock backend) or any query error ->
+    False, so a normal cancel is never blocked when we can't positively SEE moved
+    units (preserves the pre-existing no-stock-backend behavior). The guard only
+    bites when it can prove units already left the floor. Pure read -- writes
+    nothing.
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        return False
+    tid = transfer.get("id")
+    if not tid:
+        return False
+    query = {"transfer_id": tid, "status": STOCK_STATUS_TRANSFERRED}
+    try:
+        try:
+            rows = stock_repo.find_many(query, limit=1)
+        except TypeError:
+            # Some repo/mocks don't accept limit= -> call without it.
+            rows = stock_repo.find_many(query)
+    except Exception as exc:  # noqa: BLE001 - fail-soft, never block on a read error
+        logger.warning("[TRANSFER] cancel stock-move guard lookup failed: %s", exc)
+        return False
+    return bool(rows)
+
+
 @router.post("/{transfer_id}/cancel")
 async def cancel_transfer(
     transfer_id: str, reason: str, current_user: dict = Depends(get_current_user)
@@ -1662,6 +1703,34 @@ async def cancel_transfer(
                 "units have already moved. Receive and complete it, then move "
                 "the goods back with a reverse transfer if needed."
             ),
+        )
+
+    # DEFENSE-IN-DEPTH (crash-window stock integrity): the allowlist above trusts
+    # the persisted transfer STATUS, but ship moves real stock_units OUT *before*
+    # it persists status=IN_TRANSIT / stock_shipped (ship_transfer ->
+    # _apply_ship_stock_move claims units, THEN _save_transfer). If the process
+    # dies in that window, the doc is left at a pre-ship status (packed/approved)
+    # with NO stock_shipped flag -- yet those units are already TRANSFERRED in the
+    # stock_units collection. The allowlist would then WRONGLY accept a cancel,
+    # which does NO stock reversal and skips the GST deemed-supply mirror,
+    # stranding the units as TRANSFERRED forever. The doc fields we'd normally
+    # trust are the exact ones lost in the crash, so we consult the stock_units
+    # GROUND TRUTH instead. If any unit already moved, refuse LOUDLY -- do not
+    # self-heal by reversing stock in the cancel path (higher blast radius; "fail
+    # loudly" and surface for reconciliation). Raised BEFORE any mutation/save, so
+    # a blocked cancel writes nothing. Fail-soft when no stock backend is visible.
+    if _transfer_has_moved_stock(transfer):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "transfer_stock_already_moved",
+                "message": (
+                    "Stock has already left the source store for this transfer "
+                    "(units are marked TRANSFERRED). It cannot be cancelled -- "
+                    "receive and complete it, or reconcile the moved units, then "
+                    "reverse with a new transfer if needed."
+                ),
+            },
         )
 
     transfer["status"] = TransferStatus.CANCELLED
