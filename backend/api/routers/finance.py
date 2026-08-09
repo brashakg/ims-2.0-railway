@@ -3617,6 +3617,19 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     Sums order.payments[] where method == 'CASH' (the canonical tender field;
     `mode` tolerated as a legacy alias). Negative CASH tenders (refunds) are
     returned separately so the reconciliation can show sales vs refunds.
+
+    MONEY-LEAK FIX: a money refund is recorded ONLY as a `returns` doc
+    (returns.py create_return) -- POS never writes a negative payments[] row --
+    so cash_refunds stayed 0 and Day-End showed a false SHORT every time cash
+    was refunded. Refunds are therefore ALSO netted from the RETURNS collection,
+    windowed on the RETURN's OWN created_at (= the refund date; the original
+    sale's day-window would book the refund into the wrong day). Deliberately
+    NOT modelled as negative payments[] rows: that would corrupt the
+    payment_status ladder, the online-mapper staff_sum floor, the cumulative
+    refund cap, Tally receipt vouchers and stamp_payment_ledgers.
+    A COLLECT-direction EXCHANGE (customer pays the price difference at the
+    till; recorded only as collect_amount on the return doc, never in
+    payments[]) is symmetric cash-IN and is added to cash_sales.
     Returns (cash_sales, cash_refunds) as positive magnitudes."""
     if db is None:
         return 0.0, 0.0
@@ -3656,6 +3669,65 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
                     cash_refunds += -amt
     except Exception:
         return 0.0, 0.0
+
+    # Returns-collection netting (see docstring). created_at on returns docs is
+    # an ISO STRING (datetime.now().isoformat()); reuse the same dual
+    # string/datetime $or window (BUG-031 pattern) for safety. historical:True
+    # docs (Shopify-era imports) settled OUTSIDE the drawer and are excluded.
+    # Fail-soft: an error here must never zero the sales figure above.
+    try:
+        from ..services.tender_routing import canonicalize_tender
+
+        ret_match: Dict = {
+            "store_id": store_id,
+            "status": "COMPLETED",
+            "historical": {"$ne": True},
+            "$or": or_clauses,
+        }
+        rcursor = db.get_collection("returns").find(
+            ret_match,
+            {
+                "_id": 0,
+                "return_type": 1,
+                "status": 1,
+                "historical": 1,
+                "refund_method": 1,
+                "refund_amount": 1,
+                "collect_amount": 1,
+                "settlement": 1,
+            },
+        )
+        for r in rcursor:
+            # Belt-and-braces re-checks (a stub collection may ignore the
+            # filter; dirty data must never move the drawer figure).
+            if str(r.get("status") or "").upper() != "COMPLETED":
+                continue
+            if r.get("historical") is True:
+                continue
+            if canonicalize_tender(r.get("refund_method")) != "CASH":
+                continue
+            rtype = str(r.get("return_type") or "").upper()
+            if rtype == "RETURN":
+                try:
+                    amt = float(r.get("refund_amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt > 0:
+                    cash_refunds += amt
+            elif rtype == "EXCHANGE":
+                direction = str(
+                    (r.get("settlement") or {}).get("direction") or ""
+                ).upper()
+                try:
+                    coll_amt = float(r.get("collect_amount") or 0)
+                except (TypeError, ValueError):
+                    coll_amt = 0.0
+                if direction == "COLLECT" and coll_amt > 0:
+                    cash_sales += coll_amt
+            # CREDIT_NOTE / EXCHANGE-refund issue STORE CREDIT (no drawer cash
+            # moves) -- refund_amount is None on those docs by construction.
+    except Exception:
+        pass
     return round(cash_sales, 2), round(cash_refunds, 2)
 
 

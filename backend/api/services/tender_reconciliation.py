@@ -251,7 +251,20 @@ def reconcile_window(
     Returns ``{store_id, window_start, window_end, by_mode: {<tender>:
     {collected, refunded, net, count, ledger}}, total_net}``. Each by-mode row
     carries its resolved ledger so the snapshot is self-describing. DB absent ->
-    an empty by-mode envelope (never raises)."""
+    an empty by-mode envelope (never raises).
+
+    MONEY-LEAK FIX: a money refund is recorded ONLY as a ``returns`` doc
+    (returns.py create_return) -- POS never writes a negative payments[] row --
+    so the by-mode nets (and the F23 blind Z-Read expected drawer figure that
+    eod_tally.compute_expected derives from CASH.net) never saw refunds: a
+    false SHORT every time cash was refunded. COMPLETED, non-historical
+    returns are therefore netted into the by-mode rows, windowed on the
+    RETURN's OWN created_at (= the refund date). CASH refunds reduce the
+    expected drawer; UPI/CARD refunds reduce those tenders' nets. A
+    COLLECT-direction EXCHANGE (difference collected at the till; recorded
+    only on the return doc, never in payments[]) is symmetric cash-IN.
+    ``count`` stays the number of payments[] rows -- returns docs do not
+    increment it."""
     if tender_map is None:
         tender_map = get_effective_tender_map(db, store_id=store_id)
 
@@ -266,6 +279,7 @@ def reconcile_window(
             all_payments = []
 
     by_mode = split_payments_by_mode(all_payments)
+    _net_returns_into_by_mode(db, by_mode, store_id, window_start, window_end)
     total_net = 0.0
     for tender, agg in by_mode.items():
         agg["ledger"] = resolve_ledger(tender, tender_map)
@@ -277,6 +291,86 @@ def reconcile_window(
         "by_mode": by_mode,
         "total_net": round(total_net, 2),
     }
+
+
+def _net_returns_into_by_mode(
+    db,
+    by_mode: Dict[str, Dict[str, Any]],
+    store_id: str,
+    window_start: Any,
+    window_end: Any,
+) -> None:
+    """Net COMPLETED, non-historical ``returns`` docs into the by-mode rows
+    (in place). See reconcile_window's docstring for the why.
+
+    RETURN docs subtract ``refund_amount`` from their normalized
+    ``refund_method`` tender (refunded up, net down). COLLECT-direction
+    EXCHANGE docs add ``collect_amount`` (collected up, net up). CREDIT_NOTE /
+    EXCHANGE-refund issue store credit -- no tender money moves, and their
+    ``refund_amount`` is None by construction. ``created_at`` on returns docs
+    is an ISO STRING (datetime.now().isoformat()); ``_window_match`` already
+    emits the dual string/datetime $or window (BUG-031 pattern).
+    ``historical: True`` docs (Shopify-era imports) settled outside the till
+    and are excluded. Fail-soft: never disturbs the payments[] aggregation."""
+    if db is None:
+        return
+    try:
+        ret_match = _window_match(store_id, window_start, window_end)
+        ret_match["status"] = "COMPLETED"
+        ret_match["historical"] = {"$ne": True}
+        cursor = db.get_collection("returns").find(
+            ret_match,
+            {
+                "_id": 0,
+                "return_type": 1,
+                "status": 1,
+                "historical": 1,
+                "refund_method": 1,
+                "refund_amount": 1,
+                "collect_amount": 1,
+                "settlement": 1,
+            },
+        )
+        for r in cursor:
+            # Belt-and-braces re-checks (a stub collection may ignore the
+            # filter; dirty data must never move a money figure).
+            if str(r.get("status") or "").upper() != "COMPLETED":
+                continue
+            if r.get("historical") is True:
+                continue
+            tender = canonicalize_tender(r.get("refund_method"))
+            rtype = str(r.get("return_type") or "").upper()
+            if rtype == "RETURN":
+                try:
+                    amt = float(r.get("refund_amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt <= 0:
+                    continue
+                row = by_mode.setdefault(
+                    tender,
+                    {"collected": 0.0, "refunded": 0.0, "net": 0.0, "count": 0},
+                )
+                row["refunded"] = round(row["refunded"] + amt, 2)
+                row["net"] = round(row["net"] - amt, 2)
+            elif rtype == "EXCHANGE":
+                direction = str(
+                    (r.get("settlement") or {}).get("direction") or ""
+                ).upper()
+                try:
+                    coll_amt = float(r.get("collect_amount") or 0)
+                except (TypeError, ValueError):
+                    coll_amt = 0.0
+                if direction != "COLLECT" or coll_amt <= 0:
+                    continue
+                row = by_mode.setdefault(
+                    tender,
+                    {"collected": 0.0, "refunded": 0.0, "net": 0.0, "count": 0},
+                )
+                row["collected"] = round(row["collected"] + coll_amt, 2)
+                row["net"] = round(row["net"] + coll_amt, 2)
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _window_match(store_id: str, start: Any, end: Any) -> Dict[str, Any]:
