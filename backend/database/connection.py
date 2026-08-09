@@ -308,6 +308,26 @@ class DatabaseConnection:
             name="uniq_stock_unit_serial",
             background=True,
         )
+        # Transfer guards: the cancel stock-move guard (transfers.py
+        # _transfer_has_moved_stock) and the receive-pool fallback
+        # (_transferred_pool) both look up stock_units by
+        # {transfer_id, status: "TRANSFERRED"}. Without this the common legitimate
+        # pre-ship cancel (zero matching units) can't short-circuit and full-scans
+        # the whole (large) collection. PARTIAL on status == "TRANSFERRED" (NOT
+        # sparse -- every unit carries a status, so a sparse compound would index
+        # everything) so the index holds ONLY the tiny transient set of in-transit
+        # units and each unit auto-drops out when receive flips it off TRANSFERRED;
+        # both queries pin status == "TRANSFERRED" so they are provably a subset
+        # and the planner always uses it. Literal "TRANSFERRED" mirrors
+        # transfers.STOCK_STATUS_TRANSFERRED (kept as a literal here to avoid a
+        # router import from this low-level DB module).
+        _idx(
+            "stock_units",
+            [("transfer_id", 1), ("status", 1)],
+            partialFilterExpression={"status": "TRANSFERRED"},
+            name="stock_units_transfer_in_transit",
+            background=True,
+        )
 
         # Users
         _idx("users", "user_id", unique=True, background=True)
