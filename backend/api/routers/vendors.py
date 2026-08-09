@@ -2426,62 +2426,97 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
 # The claim writes a LOCK FIELD and deliberately does NOT touch `status`: the
 # status vocabulary is read by the receiving cockpit, the PO math, the DC/bulk
 # invoice screens and the frontend, so a transient in-flight status would leak
-# into all of them. The lock is invisible to every existing reader.
+# into all of them. (The accept_lock_* keys DO ride along in the raw GRN JSON;
+# no reader interprets them, but they are not literally invisible.)
 _GRN_ACCEPTABLE_STATUSES = ("PENDING", "PARTIALLY_ACCEPTED")
 
-# A crashed / killed worker must not freeze a receipt forever: a lock older than
-# this is stale and can be taken over. Safe because the per-(grn, line) mint
-# guard below makes a takeover's re-run idempotent -- it re-mints nothing.
-_GRN_ACCEPT_LOCK_STALE_SECONDS = 180
+# A crashed / KILLED worker (SIGKILL, OOM, Railway redeploy -- nothing that any
+# except/finally can catch) must not freeze a receipt forever, so a lock older
+# than this may be taken over. Deliberately set FAR above any plausible accept:
+# a live accept heartbeats its lock (below), so the only way to reach this age is
+# a worker that is genuinely gone -- or one wedged inside a single pymongo call
+# for half an hour, which the heartbeat's abort then catches on the way out.
+# (Was 180s in the first round: with no heartbeat, a merely SLOW accept -- prod
+# has no socketTimeoutMS, so a blackholed socket parks a request indefinitely --
+# could be declared stale while it was still minting, and the takeover then
+# double-minted the remainder of the receipt.)
+_GRN_ACCEPT_LOCK_STALE_SECONDS = 1800
+
+# Heartbeat cadence for a long accept: re-stamp the lock at least this often, in
+# units minted or in wall-clock seconds, whichever comes first. The seconds arm
+# is the one that matters after a stall: the very next unit past a multi-minute
+# block is overdue, so the abort check fires before another unit is minted.
+_GRN_ACCEPT_HEARTBEAT_UNITS = 25
+_GRN_ACCEPT_HEARTBEAT_SECONDS = 10
+
+# Distinct outcome for "an atomic primitive EXISTS but the write raised". It is
+# NOT the same as "this repo exposes no atomic primitive" (a minimal mock): a
+# raising primitive means the state is UNKNOWN and Mongo is unhappy, so callers
+# must fail CLOSED. Collapsing the two into None let a replica-set stepdown hand
+# a claim token to BOTH racing double-click POSTs -- the exact double-mint F8
+# exists to prevent, with no stale window involved.
+_GRN_WRITE_ERROR = object()
 
 
-def _grn_atomic_targets(grn_repo):
-    """Objects that may carry an atomic single-document primitive, best first.
+def _grn_atomic_primitive(grn_repo):
+    """The ONE guarded single-document primitive to use, or None when this repo
+    exposes none at all.
+
+    Chosen by ATTRIBUTE PRESENCE, never by catching an exception, and exactly
+    one is used -- falling through from a raised find_one_and_update to
+    update_one would re-test the same filter that our own partially-applied
+    write may already have invalidated (and self-409 the only caller).
 
     The real GRNRepository wraps the pymongo `grns` collection (`.collection`);
     some minimal test/mock repos expose the primitive on themselves instead."""
-    targets = []
-    coll = getattr(grn_repo, "collection", None)
-    if coll is not None:
-        targets.append(coll)
-    targets.append(grn_repo)
-    return targets
-
-
-def _guarded_grn_write(grn_repo, flt: dict, patch: dict):
-    """Run ONE guarded single-document write; report whether it matched.
-
-    Returns True (won), False (lost -- filter matched nothing) or None (no
-    atomic primitive available on this repo at all)."""
-    for target in _grn_atomic_targets(grn_repo):
-        fou = getattr(target, "find_one_and_update", None)
-        if callable(fou):
-            try:
-                return fou(flt, patch) is not None
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[VENDOR] GRN guarded find_one_and_update failed: %s", exc
-                )
-        upd = getattr(target, "update_one", None)
-        if callable(upd):
-            try:
-                res = upd(flt, patch)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[VENDOR] GRN guarded update_one failed: %s", exc)
-                continue
-            return bool(
-                getattr(res, "modified_count", 0) or getattr(res, "matched_count", 0)
-            )
+    for target in (getattr(grn_repo, "collection", None), grn_repo):
+        if target is None:
+            continue
+        for name in ("find_one_and_update", "update_one"):
+            fn = getattr(target, name, None)
+            if callable(fn):
+                return name, fn
     return None
+
+
+def _guarded_grn_write(grn_repo, flt: dict, patch: dict, pre_image: dict = None):
+    """Run ONE guarded single-document write and report the outcome.
+
+    Returns True (won), False (lost -- the filter matched nothing), None (this
+    repo exposes NO atomic primitive: a minimal mock, callers may fail open) or
+    ``_GRN_WRITE_ERROR`` (a primitive existed but the write raised: UNKNOWN,
+    callers must fail closed).
+
+    ``pre_image``, when given, receives the pre-update document under key "doc"
+    (find_one_and_update only) so a caller can tell a fresh claim from a
+    stale-lock takeover."""
+    primitive = _grn_atomic_primitive(grn_repo)
+    if primitive is None:
+        return None
+    name, fn = primitive
+    try:
+        res = fn(flt, patch)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[VENDOR] GRN guarded %s failed (failing CLOSED): %s", name, exc)
+        return _GRN_WRITE_ERROR
+    if name == "find_one_and_update":
+        if pre_image is not None and isinstance(res, dict):
+            pre_image["doc"] = res
+        return res is not None
+    return bool(getattr(res, "modified_count", 0) or getattr(res, "matched_count", 0))
 
 
 def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     """Atomically claim a GRN for acceptance. Returns the claim token, or None
     when another caller holds the claim / the GRN is no longer acceptable.
 
-    Fail-open on a repo with no atomic primitive (minimal mock): receiving must
-    never be blocked by an infrastructure gap -- same convention as
-    is_online_store and the marketing.py claim fallback."""
+    Raises 503 when the claim write itself errored: if Mongo cannot answer
+    "did I get the lock?", minting stock next is the wrong move. Nothing has
+    been minted and no lock was written, so a 503 strands nothing.
+
+    Fail-open ONLY for a repo with no atomic primitive at all (minimal mock):
+    receiving must never be blocked by an infrastructure gap -- same convention
+    as is_online_store and the marketing.py claim fallback."""
     token = "GACC-" + uuid.uuid4().hex[:16]
     stale_cutoff = (
         datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
@@ -2502,10 +2537,32 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
             "accept_lock_by": user_id or "",
         }
     }
-    won = _guarded_grn_write(grn_repo, flt, patch)
+    pre_image: dict = {}
+    won = _guarded_grn_write(grn_repo, flt, patch, pre_image=pre_image)
+    if won is _GRN_WRITE_ERROR:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not reserve this goods receipt -- try again. Nothing was "
+                "added to stock."
+            ),
+        )
     if won is None:
         return token
-    return token if won else None
+    if not won:
+        return None
+    prior = (pre_image.get("doc") or {}).get("accept_lock_at")
+    if prior:
+        # A takeover should be RARE (only a genuinely dead worker gets this far).
+        # Log loudly: it is the one path where two workers could ever overlap.
+        logger.error(
+            "[VENDOR] GRN %s accept claim TAKEN OVER from a stale lock "
+            "(locked at %s by %s) -- previous worker presumed dead",
+            grn_id,
+            prior,
+            (pre_image.get("doc") or {}).get("accept_lock_by"),
+        )
+    return token
 
 
 def _release_grn_accept_claim(grn_repo, grn_id: str, token: Optional[str]) -> None:
@@ -2518,7 +2575,13 @@ def _release_grn_accept_claim(grn_repo, grn_id: str, token: Optional[str]) -> No
         _guarded_grn_write(
             grn_repo,
             {"grn_id": grn_id, "accept_lock_token": token},
-            {"$set": {"accept_lock_at": None, "accept_lock_token": None}},
+            {
+                "$set": {
+                    "accept_lock_at": None,
+                    "accept_lock_token": None,
+                    "accept_lock_by": None,
+                }
+            },
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -2526,15 +2589,113 @@ def _release_grn_accept_claim(grn_repo, grn_id: str, token: Optional[str]) -> No
         )
 
 
+def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> None:
+    """Called once per unit ABOUT to be minted: keep this claim fresh, and ABORT
+    the moment it is no longer ours.
+
+    Two jobs, both needed to make the stale-lock valve safe:
+      * re-stamp `accept_lock_at` so a long-but-live accept is never declared
+        stale and stolen while it is still minting;
+      * detect (token-guarded, so only OUR claim matches) that a takeover HAS
+        happened and stop this worker immediately -- otherwise the wedged worker
+        would resume against a `to_mint` it computed before the takeover and
+        mint the same units the takeover holder is already minting.
+
+    Raises 409 on a lost claim. Whatever was already minted stays (it is real
+    stock and the per-line count guard makes the takeover's own arithmetic see
+    it); the takeover holder owns the receipt from here."""
+    if not token:
+        return
+    state["units"] += 1
+    due = (
+        state["units"] >= _GRN_ACCEPT_HEARTBEAT_UNITS
+        or (datetime.now() - state["at"]).total_seconds()
+        >= _GRN_ACCEPT_HEARTBEAT_SECONDS
+    )
+    if not due:
+        return
+    state["units"] = 0
+    state["at"] = datetime.now()
+    res = _guarded_grn_write(
+        grn_repo,
+        {"grn_id": grn_id, "accept_lock_token": token},
+        {"$set": {"accept_lock_at": datetime.now().isoformat()}},
+    )
+    if res is None:
+        return  # no atomic primitive (mock) -- never block receiving
+    if res is _GRN_WRITE_ERROR:
+        # Unknown, not lost. Do NOT abandon a mint already in flight over a
+        # transient error; the stale window is long enough to ride it out.
+        logger.warning(
+            "[VENDOR] GRN %s accept heartbeat could not be written -- "
+            "continuing the mint already in flight",
+            grn_id,
+        )
+        return
+    if not res:
+        logger.error(
+            "[VENDOR] GRN %s accept claim was TAKEN OVER mid-mint -- aborting "
+            "this worker's remaining units to avoid a double mint",
+            grn_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Accepting this goods receipt took too long and was taken over "
+                "by another attempt. Refresh -- the units already received are "
+                "safe and will not be counted twice."
+            ),
+        )
+
+
+def _grn_already_minted(stock_repo, flt: dict) -> int:
+    """How many units this GRN LINE has already put into stock_units.
+
+    Counts through the RAW collection when one is available, because
+    BaseRepository.count swallows driver errors and returns 0
+    (base_repository.py:230-243) -- and a silent 0 here is a licence to mint an
+    entire receipt a second time. There is no unique index behind
+    (source_id, grn_line_index), so this read is the ONLY defence on the re-run
+    paths; a failure must reach the caller, which aborts. Falls back to
+    repo.count only for minimal mocks that expose no collection."""
+    coll = getattr(stock_repo, "collection", None)
+    counter = getattr(coll, "count_documents", None)
+    if callable(counter):
+        return int(counter(flt) or 0)
+    repo_count = getattr(stock_repo, "count", None)
+    if callable(repo_count):
+        return int(repo_count(flt) or 0)
+    raise RuntimeError("stock repository exposes no way to count minted units")
+
+
+def _grn_accept_lock_minutes_left(locked_at) -> Optional[int]:
+    """Whole minutes until a held lock goes stale, or None if it cannot be
+    computed. Used to make the 409 HONEST: after a hard process kill (SIGKILL /
+    OOM / redeploy -- nothing any except/finally can catch) the wait really is
+    the stale window, so "wait a moment" would be a lie."""
+    if not locked_at:
+        return None
+    try:
+        held_for = (
+            datetime.now() - datetime.fromisoformat(str(locked_at))
+        ).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    remaining = _GRN_ACCEPT_LOCK_STALE_SECONDS - held_for
+    if remaining <= 0:
+        return None
+    return max(1, int(remaining // 60) + (1 if remaining % 60 else 0))
+
+
 def _grn_accept_conflict(grn_repo, grn_id: str) -> HTTPException:
     """The 409 the LOSER of the accept claim gets. Re-reads the GRN so the
     message tells the operator which of the two races they lost."""
-    status = None
+    current = None
     try:
         current = grn_repo.find_by_id(grn_id)
-        status = (current or {}).get("status")
     except Exception:  # noqa: BLE001
-        status = None
+        current = None
+    status = (current or {}).get("status")
     if status and status not in _GRN_ACCEPTABLE_STATUSES:
         detail = (
             "This goods receipt was already accepted -- its stock is on the "
@@ -2542,9 +2703,15 @@ def _grn_accept_conflict(grn_repo, grn_id: str) -> HTTPException:
         )
     else:
         detail = (
-            "This goods receipt is already being accepted right now. Wait a "
-            "moment and refresh -- do not submit it twice."
+            "This goods receipt is already being accepted right now. Do not "
+            "submit it twice."
         )
+        mins = _grn_accept_lock_minutes_left((current or {}).get("accept_lock_at"))
+        if mins:
+            detail += (
+                f" If the first attempt has died, this clears automatically in "
+                f"about {mins} minute(s)."
+            )
     return HTTPException(status_code=409, detail=detail)
 
 
@@ -2561,13 +2728,15 @@ async def accept_grn(
     a GRN-received unit is a first-class sellable unit. There is NO parallel
     stock write.
 
-    Double-click safe (F8): acceptance is CLAIMED with one guarded
-    single-document update (status-keyed + lock field) before any stock is
-    minted, so of two concurrent POSTs exactly one mints and the other gets a
-    409. Sequential re-POSTs are additionally idempotent -- the minting loop
-    skips any (grn_id, product_id, grn_line_index) that already has units in
-    stock_units, so a partially-failed accept can be safely retried without
-    double-counting.
+    Double-click safe FOR THIS ENDPOINT (F8): acceptance is CLAIMED with one
+    guarded single-document update (status-keyed + lock field) before any stock
+    is minted, so of two concurrent POSTs on the SAME grn_id exactly one mints
+    and the other gets a 409. (POST /grn/express is NOT covered: each click
+    creates a NEW grn_id, so the per-GRN claim never engages -- that needs a
+    create-time duplicate guard, tracked separately.) Sequential re-POSTs are
+    additionally idempotent -- the minting loop skips any (grn_id, product_id,
+    grn_line_index) that already has units in stock_units, so a partially-failed
+    accept can be safely retried without double-counting.
 
     Fail-soft ordering: the stock write happens first; the GRN status flip, the
     PO state update, and the per-unit stock_audit rows all follow and are each
@@ -2636,7 +2805,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
 
     try:
         return _accept_grn_claimed(
-            grn_id, grn, current_user, grn_repo, stock_repo, po_repo
+            grn_id, grn, current_user, grn_repo, stock_repo, po_repo, claim_token
         )
     except Exception:
         # Nothing was committed we can attribute to this call, or the accept
@@ -2654,6 +2823,7 @@ def _accept_grn_claimed(
     grn_repo,
     stock_repo,
     po_repo,
+    claim_token: Optional[str] = None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
 
@@ -2697,6 +2867,9 @@ def _accept_grn_claimed(
     # a "Catalog now" affordance; re-accepting after cataloguing mints them.
     unresolved_lines: List[dict] = []
     product_repo = get_product_repository()
+    # F8 round 2: heartbeat state for the whole mint (across every line), so a
+    # long accept keeps its claim fresh and stops dead if the claim is stolen.
+    heartbeat_state = {"units": 0, "at": datetime.now()}
 
     if stock_repo is not None:
         for line_index, item in enumerate(grn.get("items", []) or []):
@@ -2729,17 +2902,40 @@ def _accept_grn_claimed(
             # B see line A's units and skip minting -> silent first-accept stock
             # loss. Keying on the line index makes each line mint its own qty and
             # still makes a re-accept idempotent.
+            #
+            # This read FAILS CLOSED. It used to swallow errors into
+            # `already = 0`, which disarmed the two re-run paths this claim
+            # machinery depends on (the token-guarded release retry and the
+            # stale takeover): one transient error on a retry and an entire
+            # 200-unit receipt mints a second time. There is no unique index
+            # behind (source_id, grn_line_index) to catch that at the database,
+            # so if we cannot verify what is already received, we STOP.
             try:
-                already = stock_repo.count(
+                already = _grn_already_minted(
+                    stock_repo,
                     {
                         "source_type": "GRN",
                         "source_id": grn_id,
                         "product_id": product_id,
                         "grn_line_index": line_index,
-                    }
+                    },
                 )
-            except Exception:  # noqa: BLE001
-                already = 0
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[VENDOR] GRN %s line %s: could not count already-minted "
+                    "units (%s) -- aborting rather than risking a double mint",
+                    grn_id,
+                    line_index,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not verify what has already been received for "
+                        "this goods receipt, so nothing further was added. Try "
+                        "again in a moment."
+                    ),
+                ) from exc
             if already >= accepted_qty:
                 continue
             to_mint = accepted_qty - already
@@ -2828,6 +3024,14 @@ def _accept_grn_claimed(
                 batch_fields["expiry_date"] = item.get("expiry_date")
 
             for _ in range(to_mint):
+                # Keep the claim alive while we work, and STOP immediately if it
+                # was taken over (raises 409). `to_mint` was computed before this
+                # loop started, so without this check a worker that was wedged
+                # long enough to be declared stale would resume and mint the same
+                # units the takeover holder is already minting.
+                _grn_accept_heartbeat_tick(
+                    grn_repo, grn_id, claim_token, heartbeat_state
+                )
                 created = stock_repo.create(
                     {
                         "store_id": store_id,
@@ -2895,6 +3099,9 @@ def _accept_grn_claimed(
     # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN
     # is re-acceptable after "Catalog now" to mint the now-resolved lines.
     grn_status = "PARTIALLY_ACCEPTED" if unresolved_lines else "ACCEPTED"
+    # (a) The status flip is UNGUARDED and must never be skipped: the stock is
+    #     already minted, and losing this write would strand real units behind a
+    #     still-PENDING receipt.
     grn_repo.update(
         grn_id,
         {
@@ -2903,16 +3110,19 @@ def _accept_grn_claimed(
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,
-            # F8: release the accept claim in the SAME write that flips the
-            # status, so a PARTIALLY_ACCEPTED receipt is immediately
-            # re-acceptable after "Catalog now". Deliberately UNGUARDED (no
-            # token filter): the stock is already minted, so this status flip
-            # must never be skipped -- losing it would strand real stock behind
-            # a still-PENDING receipt.
-            "accept_lock_at": None,
-            "accept_lock_token": None,
         },
     )
+    # (b) The lock release is a SEPARATE, TOKEN-GUARDED write. It used to ride
+    #     along in (a) with no token filter, which meant a worker whose claim had
+    #     been stolen erased the takeover holder's LIVE lock on its way out --
+    #     and because the status it writes when a line is held is
+    #     PARTIALLY_ACCEPTED (an acceptable status), a third POST a second later
+    #     saw an acceptable status AND a null lock, claimed cleanly and minted
+    #     again. That was the amplifier turning one takeover into unbounded
+    #     re-entry. The legitimate winner always matches its own token here, so
+    #     a PARTIALLY_ACCEPTED receipt is still immediately re-acceptable after
+    #     "Catalog now".
+    _release_grn_accept_claim(grn_repo, grn_id, claim_token)
 
     # Advance the PO received state. Sum the accepted qty across EVERY accepted
     # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
