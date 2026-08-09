@@ -41,6 +41,13 @@ import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import {
+  hasQcOnFile,
+  awaitingHandoverQc,
+  QC_ACTIONABLE_STATUSES,
+  resolveItemPrescriptionId,
+  backendMessage,
+} from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 
 // Job type
@@ -83,7 +90,8 @@ interface Job {
 // not just -> READY. Both fields are absent on a job that was never QC'd, so an
 // absent field reads as "not recorded". Used only to steer the UI toward the
 // right next action; the backend remains the authority.
-const hasQcOnFile = (job: Job) => job.qc_passed === true || job.qc_waived === true;
+// Pure QC-handover helpers live in ./qcHandover so they can be unit tested
+// without mounting this page. See that module for the reasoning behind each.
 
 // Lens-order lifecycle: forward-only NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED.
 type LensStatus = 'NOT_ORDERED' | 'ORDERED' | 'RECEIVED' | 'MOUNTED';
@@ -336,7 +344,7 @@ const loadJobs = async () => {
         order_id: createSelectedOrder.id,
         frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category))) },
         lens_details: rxItem?.lens_details || { type: 'STANDARD' },
-        prescription_id: rxItem?.prescription_id || '',
+        prescription_id: resolveItemPrescriptionId(rxItem),
         fitting_instructions: createFitting || undefined,
         special_notes: createNotes || undefined,
         expected_date: createExpectedDate,
@@ -368,7 +376,11 @@ const loadJobs = async () => {
             'No Delivery Challan logged for this lens.',
         );
       } else {
-        toast.error('Failed to create workshop job');
+        // The create-time Rx 422s (unknown / WRONG-PATIENT / expired) return a
+        // plain-string detail. The wrong-patient sentence and the "a Store
+        // Manager must approve" instruction are the most important strings this
+        // screen can show — a generic toast hid both and left staff retrying.
+        toast.error(typeof detail === 'string' ? detail : 'Failed to create workshop job');
       }
     } finally {
       setCreateLoading(false);
@@ -403,8 +415,15 @@ const loadJobs = async () => {
           /* settings unavailable -> skip auto-print, never block */
         }
       }
-    } catch {
-      toast.error('Failed to update job status');
+    } catch (err) {
+      // Surface the BACKEND's sentence. The QC handover gate deliberately leaves
+      // "Mark Delivered" enabled on the reasoning that the server returns a
+      // plain-English 400 naming the remedy ("...run QC on it (or record an
+      // audited waiver) before handing it to the customer") — that reasoning is
+      // only true if we actually render it. A bare catch turned every refusal
+      // into "Failed to update job status", which reads like a server fault and
+      // sends staff hunting for a manager instead of running QC.
+      toast.error(backendMessage(err, 'Failed to update job status'));
     }
   };
 
@@ -451,7 +470,10 @@ const loadJobs = async () => {
             : 'QC passed — job ready for pickup',
         );
       } else {
-        toast.success(
+        // A FAILURE is not a success: at a busy counter colour is read before
+        // text, and a green flash after a QC fail reads as "done, all good" —
+        // exactly backwards for a job that just left the pickup shelf.
+        toast.error(
           wasAlreadyReady
             ? 'QC failed — job pulled off the pickup shelf for rework'
             : 'QC failed — job flagged for rework',
@@ -1092,14 +1114,20 @@ const loadJobs = async () => {
                     </>
                   )}
                   {/* PATIENT SAFETY: the backend blocks -> DELIVERED without a
-                      QC pass/waiver, so QC on a job that is ALREADY on the
-                      pickup shelf is ongoing workflow, not a legacy shim: a job
-                      routinely reaches READY with no QC record. Same canRunQc
-                      role gate, same modal + submit path as COMPLETED /
-                      QC_FAILED. When QC is already on file this is a secondary
-                      (re-run / waive) action, so it steps back to btn-outline
-                      and Mark Delivered stays the primary green action. */}
-                  {selectedJob.status === 'READY' && canRunQc && (
+                      QC pass/waiver, so QC late in the lifecycle is ongoing
+                      workflow, not a legacy shim. Crucially this is NOT limited
+                      to READY: no station in the scan flow ever sets COMPLETED,
+                      so a job whose DISPATCH -> READY leg is HELD for missing QC
+                      keeps the IN_PROGRESS it got at INTAKE and walks on to the
+                      PICKUP station. That held job is the state this gate
+                      actually produces, and offering the remedy only at READY
+                      left the counter with no visible action for it.
+                      Same canRunQc role gate, same modal + submit path as the
+                      COMPLETED / QC_FAILED buttons above (which keep their own
+                      labels). When QC is already on file this is a secondary
+                      re-run, so it steps back to btn-outline and Mark Delivered
+                      stays the primary green action. */}
+                  {QC_ACTIONABLE_STATUSES.includes(selectedJob.status) && canRunQc && (
                     <button
                       onClick={() => setQcModalJob(selectedJob)}
                       className={`${hasQcOnFile(selectedJob) ? 'btn-outline' : 'btn-primary'} text-sm flex items-center gap-1`}
@@ -1125,7 +1153,7 @@ const loadJobs = async () => {
                       <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
                     </div>
                   )}
-                  {selectedJob.status === 'READY' && !hasQcOnFile(selectedJob) && (
+                  {awaitingHandoverQc(selectedJob) && (
                     <p className="text-xs text-amber-700 w-full">
                       No QC recorded for this job — run QC before handing it over.
                     </p>

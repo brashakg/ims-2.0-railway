@@ -3949,6 +3949,12 @@ async def add_payment(
 @router.post("/{order_id}/ready")
 async def mark_ready(order_id: str, current_user: dict = Depends(get_current_user)):
     """Mark order as ready for delivery"""
+    # RBAC: marking an order ready is a POS-tier action, same tier as
+    # create/confirm/cancel. Previously ANY authenticated role could do it.
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to mark orders ready."
+        )
     repo = get_order_repository()
 
     if repo is not None:
@@ -3963,6 +3969,13 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
         # Clinical Rx FLAG-AND-HOLD: a held spectacle order (missing Rx) may not
         # advance to READY until an admin clears the hold (400 otherwise).
         assert_no_active_rx_hold(order)
+
+        # PATIENT SAFETY: an order whose linked workshop job has no QC record may
+        # not be advertised to the customer as ready. Imports the SAME predicate
+        # the workshop gate uses -- never re-derive it here.
+        from .workshop import assert_linked_job_qc_cleared
+
+        assert_linked_job_qc_cleared(order)
 
         if not validate_status_transition(order.get("status", ""), "READY"):
             raise HTTPException(
@@ -3985,6 +3998,12 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
 @router.post("/{order_id}/deliver")
 async def deliver_order(order_id: str, current_user: dict = Depends(get_current_user)):
     """Deliver order to customer"""
+    # RBAC: handing goods to a customer is a POS-tier action, same tier as
+    # create/confirm/cancel. Previously ANY authenticated role could deliver.
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to deliver orders."
+        )
     repo = get_order_repository()
 
     if repo is not None:
@@ -3999,6 +4018,15 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         # Clinical Rx FLAG-AND-HOLD: a held spectacle order (missing Rx) may not
         # be delivered until an admin clears the hold (400 otherwise).
         assert_no_active_rx_hold(order)
+
+        # PATIENT SAFETY: THIS is the handover door the counter actually uses --
+        # payment and invoice live on the Orders screen, so its green "Mark
+        # Delivered" is the likelier of the two. Gating only the Workshop screen
+        # let a job the workshop gate was actively holding walk out in one click.
+        # Imports the SAME predicate the workshop gate uses -- never re-derive it.
+        from .workshop import assert_linked_job_qc_cleared
+
+        assert_linked_job_qc_cleared(order)
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(

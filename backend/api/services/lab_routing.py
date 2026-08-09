@@ -89,6 +89,25 @@ DEFAULT_STATIONS: List[dict] = [
 # Status values that mean the job can no longer be routed (terminal / branch).
 _TERMINAL_JOB_STATUSES = {"DELIVERED", "CANCELLED"}
 
+# PATIENT SAFETY: the ONLY statuses a station may be configured to advance a job
+# to. `advances_job_status` is written straight into workshop_jobs.status by a
+# scan, so an unvalidated value was a fail-open on two fronts:
+#   * an arbitrary string (e.g. "COLLECTED") landed in workshop_jobs.status,
+#     which is outside VALID_JOB_TRANSITIONS -- the job became unmovable by the
+#     PATCH (empty allowed-set) AND sailed past the QC handover gate, which only
+#     recognised the two canonical patient-facing names; and
+#   * it is editable at STORE_MANAGER tier, so a patient-safety gate could be
+#     configured away with no audit trail.
+# A safety gate must not be switchable off by config. PENDING / QC_FAILED /
+# CANCELLED are deliberately NOT here: a forward bench scan never moves a job
+# backwards or onto the QC-fail branch (that is the QC endpoints' job).
+VALID_ADVANCES_JOB_STATUS = (
+    "IN_PROGRESS",
+    "COMPLETED",
+    "READY",
+    "DELIVERED",
+)
+
 
 # ---------------------------------------------------------------------------
 # Station registry (lab_stations collection)
@@ -199,7 +218,9 @@ def upsert_station(
     """Create or update a single station config (keyed on store_id+code).
 
     Returns (ok, station_doc, error_reason). Validates `code` against the
-    canonical vocabulary -> UNKNOWN_STATION on a bad code. Fail-soft on no DB.
+    canonical vocabulary -> UNKNOWN_STATION on a bad code, and
+    `advances_job_status` against VALID_ADVANCES_JOB_STATUS ->
+    INVALID_ADVANCE_STATUS. Fail-soft on no DB.
     """
     coll = _stations_collection(db)
     if coll is None or not store_id:
@@ -207,6 +228,16 @@ def upsert_station(
     code_u = (code or "").strip().upper()
     if code_u not in VALID_STATION_CODES:
         return False, None, "UNKNOWN_STATION"
+
+    # PATIENT SAFETY: reject a status this station may not advance a job to
+    # BEFORE anything is written. An empty string still clears the flag (that is
+    # the documented way to make a station status-neutral), but an arbitrary
+    # value can no longer be persisted into workshop_jobs.status -- see
+    # VALID_ADVANCES_JOB_STATUS.
+    if advances_job_status is not None:
+        wanted = (advances_job_status or "").strip().upper()
+        if wanted and wanted not in VALID_ADVANCES_JOB_STATUS:
+            return False, None, "INVALID_ADVANCE_STATUS"
 
     # Ensure the store has its full default sequence BEFORE editing one station,
     # so a manager deactivating (say) COATING on a never-configured store does

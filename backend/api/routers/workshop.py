@@ -4,7 +4,7 @@ IMS 2.0 - Workshop Router
 Workshop job management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date, datetime, timedelta
@@ -245,6 +245,35 @@ VALID_JOB_TRANSITIONS = {
 MAX_REWORK = 2
 _REWORK_OVERRIDE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
 
+# ---------------------------------------------------------------------------
+# WHICH JOB STATES QC MAY BE RUN ON
+# ---------------------------------------------------------------------------
+# QC has to be runnable on every state the QC handover gate can strand a job in,
+# or the gate becomes a dead end at a live counter.
+#
+#   IN_PROGRESS  is the state the SCAN flow actually parks a held job in. No
+#                station in lab_routing.DEFAULT_STATIONS ever sets COMPLETED
+#                (INTAKE -> IN_PROGRESS, EDGING/COATING/QC_LAB -> None,
+#                DISPATCH -> READY, PICKUP -> DELIVERED), so a job whose
+#                DISPATCH -> READY leg is HELD for missing QC keeps the status
+#                it had at INTAKE. Refusing QC there made the one state the
+#                gate produces the one state QC would not accept.
+#   COMPLETED    the bench-finished state (the manual Workshop-page route).
+#   QC_FAILED    a re-check after rework.
+#   READY        a job already on the pickup shelf with no QC record; QC in
+#                place is what clears it for handover.
+#
+# PENDING stays EXCLUDED on purpose: a QC pass routes the job to READY, which
+# would let an unstarted job skip the sales-confirm gate and the F9 DC hardlock
+# that guard the -> IN_PROGRESS leg. DELIVERED / CANCELLED stay excluded because
+# the job is gone -- retro-QC'ing a handed-over job would rewrite history.
+# (All three exclusions are pinned by tests in test_workshop_qc_checklist.py.)
+_QC_INPUT_STATUSES = ("IN_PROGRESS", "COMPLETED", "QC_FAILED", "READY")
+_QC_INPUT_STATUS_MESSAGE = (
+    "QC can only be recorded while the job is in progress, completed, QC-failed "
+    "or ready for pickup (current: {status})."
+)
+
 
 # ---------------------------------------------------------------------------
 # SHARED SCAN-ADVANCE SAFETY GATE
@@ -306,6 +335,36 @@ SCAN_GATE_MESSAGES = {
 # patient with zero QC record. The handover itself must be gated too.
 _QC_REQUIRED_TARGETS = frozenset({"READY", "DELIVERED"})
 
+# ...but the gate does NOT test membership of the set above, because that would
+# fail OPEN on anything unforeseen. A station's advances_job_status is written
+# straight into workshop_jobs.status by a scan, and was (until the companion fix
+# in lab_routing.upsert_station) an unvalidated STORE_MANAGER-editable string --
+# so pointing PICKUP at "COLLECTED" produced a target the named-pair check did
+# not recognise, and the handover sailed through un-QC'd.
+#
+# So the gate INVERTS the test: it enumerates the statuses that are provably NOT
+# patient-facing (bench-internal work states, the QC-fail branch, and the
+# negative terminal) and treats EVERYTHING ELSE as putting the job in front of
+# the patient. A new or malformed status is therefore gated by default.
+# QC_FAILED must stay exempt -- it is the QC failure route itself, and requiring
+# QC to record a QC failure would be circular (pinned by
+# test_workshop_qc_gate.py::test_qc_failed_path_open_without_qc).
+_NON_PATIENT_FACING_STATUSES = frozenset(
+    {"PENDING", "IN_PROGRESS", "COMPLETED", "QC_FAILED", "CANCELLED"}
+)
+
+
+def _is_patient_facing(target_status: str) -> bool:
+    """True when advancing a job to `target_status` puts it in front of the
+    patient, and therefore requires QC. Fails CLOSED: an unknown / malformed /
+    maliciously-configured status is patient-facing.
+
+    The canonical members are _QC_REQUIRED_TARGETS (READY, DELIVERED); this
+    helper is what the gates actually call so nothing can slip past by simply
+    not being one of those two strings.
+    """
+    return (target_status or "").strip().upper() not in _NON_PATIENT_FACING_STATUSES
+
 
 def _qc_cleared(job: dict) -> bool:
     """True when a job carries a QC pass or an explicit, audited QC waiver.
@@ -317,6 +376,78 @@ def _qc_cleared(job: dict) -> bool:
     audit row, so a waiver reaching this check is always an audited one.
     """
     return job.get("qc_passed") is True or job.get("qc_waived") is True
+
+
+# PUBLIC ALIAS. orders.deliver_order / mark_ready import THIS rather than
+# re-deriving the rule, so the two handover doors (Workshop screen and Orders
+# screen) can never disagree about what "QC done" means. Do not inline a copy.
+qc_cleared = _qc_cleared
+
+# The counter-facing sentence for a blocked handover. Shared by the workshop
+# status PATCH and the order-side deliver/ready gates so the person standing in
+# front of the patient reads the SAME instruction whichever screen they used.
+QC_HANDOVER_BLOCKED_MESSAGE = (
+    "Lens QC has not been recorded for workshop job {job}. Ask workshop staff or "
+    "the store manager to run QC on it (or record an audited waiver) before "
+    "handing it to the customer."
+)
+
+
+def assert_linked_job_qc_cleared(order: dict) -> None:
+    """PATIENT SAFETY: raise 400 when an order's linked workshop job has not
+    passed (or been granted an audited waiver for) lens QC.
+
+    The Orders screen carries its own green "Mark Delivered", and that is the
+    screen the counter actually uses -- payment and invoice live there. Gating
+    only the Workshop screen left the likelier handover door wide open, so this
+    is called from orders.deliver_order and orders.mark_ready.
+
+    Resolution order mirrors how the link is written: the order's own
+    workshop_job_id reverse pointer first, then a find_by_order sweep for orders
+    predating the pointer. An order with NO workshop job (a frame-only or
+    accessory sale) has nothing to check and passes.
+
+    Fail-SOFT on infrastructure only -- no workshop repo, or a lookup error,
+    passes through rather than blocking a paid customer on an outage. A job that
+    IS found and is not QC-cleared is a hard 400. A CANCELLED job is skipped (it
+    is not being handed over).
+    """
+    if not isinstance(order, dict):
+        return
+    try:
+        repo = get_workshop_repository()
+    except Exception:  # noqa: BLE001 -- infrastructure fail-soft
+        repo = None
+    if repo is None:
+        return
+
+    jobs: List[dict] = []
+    job_id = order.get("workshop_job_id")
+    if job_id:
+        try:
+            linked = repo.find_by_id(job_id)
+            if linked:
+                jobs = [linked]
+        except Exception:  # noqa: BLE001
+            return
+    if not jobs:
+        try:
+            jobs = list(repo.find_by_order(order.get("order_id")) or [])
+        except Exception:  # noqa: BLE001
+            return
+
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if (job.get("status") or "").strip().upper() == "CANCELLED":
+            continue
+        if not _qc_cleared(job):
+            raise HTTPException(
+                status_code=400,
+                detail=QC_HANDOVER_BLOCKED_MESSAGE.format(
+                    job=job.get("job_number") or job.get("job_id") or "linked"
+                ),
+            )
 
 
 def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional[str]:
@@ -363,7 +494,7 @@ def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional
     # the READY pickup shelf nor the DELIVERED handover -- without a QC pass or an
     # explicit, audited waiver. See _QC_REQUIRED_TARGETS for why DELIVERED (the
     # PICKUP station's target) has to be in this set.
-    if target in _QC_REQUIRED_TARGETS and not _qc_cleared(job):
+    if _is_patient_facing(target) and not _qc_cleared(job):
         return "QC_REQUIRED"
 
     return None
@@ -617,6 +748,36 @@ def _assert_job_store_access(job: dict, current_user: dict) -> None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
 
+def _order_has_rx_required_line(order) -> bool:
+    """True when ANY line on `order` is a spectacle-lens line that the POS Rx
+    gate would have enforced expiry on.
+
+    Deliberately reuses rx_validation.is_rx_required_line -- the SAME classifier
+    the order path uses (orders._validate_order_line_rx), applied to the SAME
+    item docs -- so the workshop gate cannot drift into a different opinion about
+    which sales are Rx-required. Frames, sunglasses, accessories and CONTACT
+    LENSES classify False (owner decision 2026-06-18).
+
+    Fail-SAFE: an order we cannot read (None / no items) returns True, so a job
+    we cannot classify is still expiry-checked rather than silently exempted.
+    """
+    if not isinstance(order, dict):
+        return True
+    items = order.get("items")
+    if not isinstance(items, list) or not items:
+        return True
+    try:
+        from ..services.rx_validation import is_rx_required_line
+    except Exception:  # noqa: BLE001 -- classifier unavailable -> fail safe
+        return True
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if is_rx_required_line(item.get("item_type"), item.get("category")):
+            return True
+    return False
+
+
 def _verify_job_prescription(prescription_id, order, current_user) -> None:
     """Verify the prescription a workshop job is about to be created against.
 
@@ -634,6 +795,21 @@ def _verify_job_prescription(prescription_id, order, current_user) -> None:
       * EXPIRED Rx -> 422 unless the caller is Store-Manager+ (the SAME
         _RX_EXPIRY_OVERRIDE_ROLES the order path uses); a deliberate, senior
         clinical decision, never a silent pass.
+
+    SCOPE (this is where the mirror has to be exact, not approximate). The order
+    path does not run the Rx block at all for a line that is not Rx-required --
+    is_rx_required_line exempts FRAMES and CONTACT LENSES per the owner's
+    2026-06-18 "block Rx lenses, allow contacts" decision. Running the EXPIRY
+    branch unconditionally here therefore 422'd a frame-only or contact-lens job
+    that the order path had deliberately let through -- and it fired AFTER the
+    money was taken, at job-create. So the expiry branch is now gated on the SAME
+    classifier applied to the SAME data: the order's own item lines. If no line
+    on the order is an Rx-required (spectacle-lens) line, the expiry check is
+    skipped exactly as it was at billing.
+    Existence and wrong-customer stay UNCONDITIONAL: a supplied Rx that does not
+    exist, or belongs to somebody else, is wrong for a contact-lens job too, and
+    enforcing it cannot false-block a correct one. Fail-SAFE on an unresolvable
+    order (no order doc -> treat as Rx-required so expiry is still enforced).
 
     Fail-SOFT only where the order path already fails soft: no prescription repo
     or a repo/lookup error passes through (a clinical-store outage must not 500
@@ -687,7 +863,10 @@ def _verify_job_prescription(prescription_id, order, current_user) -> None:
             ),
         )
 
-    # Expiry: SAME policy + SAME role list as the POS order path.
+    # Expiry: SAME policy, SAME role list AND SAME scope as the POS order path.
+    if not _order_has_rx_required_line(order):
+        return
+
     try:
         from .prescriptions import _rx_validity
 
@@ -1133,9 +1312,15 @@ async def list_jobs(
 
 @router.post("/jobs", status_code=201)
 async def create_job(
-    job: WorkshopJobCreate, current_user: dict = Depends(get_current_user)
+    job: WorkshopJobCreate,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Create a new workshop job"""
+    """Create a new workshop job -- IDEMPOTENT per order.
+
+    An order gets exactly ONE lab job. Returns 201 with the new job, or 200 with
+    the EXISTING job when one already covers this order (see the dedup below).
+    """
     repo = get_workshop_repository()
     order_repo = get_order_repository()
 
@@ -1146,6 +1331,80 @@ async def create_job(
             order = order_repo.find_by_id(job.order_id)
             if order is None:
                 raise HTTPException(status_code=404, detail="Order not found")
+
+        # ------------------------------------------------------------------
+        # DEDUP: one order, one lab job. MUST come before every other check.
+        # ------------------------------------------------------------------
+        # This door had no dedup at all, while the confirm/payment safety net
+        # (orders._ensure_workshop_job_for_order) does. On the DEFAULT POS
+        # prescription-sale path those two race deterministically, not rarely:
+        # the client awaits addPayment, the payment flips DRAFT -> CONFIRMED and
+        # the safety net creates job #1 (its find_by_order is empty because the
+        # client has not called yet) and stamps order.workshop_job_id; the client
+        # then calls THIS endpoint, which happily created job #2. Every such sale
+        # produced two PENDING lab jobs, and the fitting-details modal wrote the
+        # Rx onto job #2 while the order pointed at job #1 -- a duplicate lens
+        # grind and a duplicate external-lab order, in real rupees.
+        #
+        # We mirror the safety net's lookup exactly (find_by_order + reverse
+        # pointer backfill) so the two cannot drift, and we deliberately return
+        # THE JOB THE ORDER POINTS AT when the pointer is set -- that is the job
+        # the client writes fitting details onto, so the Rx has to land there.
+        #
+        # ORDERING NOTE (deliberate): this runs BEFORE _verify_job_prescription
+        # and before the F9 DC hardlock. A second call for an order that already
+        # has a job is a duplicate REQUEST, not a new clinical decision -- if it
+        # arrived with a blank or mismatched prescription_id it must harmlessly
+        # return the existing job, never 422. Verification still guards the call
+        # that actually creates the job.
+        existing_jobs = []
+        try:
+            existing_jobs = list(repo.find_by_order(job.order_id) or [])
+        except Exception as _dedup_exc:  # noqa: BLE001
+            # A lookup failure must not block a real create; worst case we fall
+            # through to the pre-existing behaviour.
+            logger.warning("[WORKSHOP] create dedup lookup failed: %s", _dedup_exc)
+            existing_jobs = []
+        if existing_jobs:
+            # WHICH job to return when more than one already exists. This is not
+            # hypothetical: a read-only prod query found 1 of 4 live jobs is
+            # already a duplicate pair, created before this dedup existed. The
+            # rule is deliberate, because returning an arbitrary one would hand
+            # the client a job the ORDER does not reference -- the exact harm
+            # being fixed:
+            #   1. the job order.workshop_job_id points at, when that pointer is
+            #      set AND still resolves to one of this order's jobs; else
+            #   2. the OLDEST job (find_by_order does not sort, so sort here --
+            #      Mongo natural order is not a guarantee).
+            pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
+            oldest = sorted(
+                existing_jobs, key=lambda j: str(j.get("created_at") or "")
+            )[0]
+            chosen = next(
+                (j for j in existing_jobs if j.get("job_id") == pointed_id),
+                oldest,
+            )
+            # Backfill the reverse pointer when the order has none, so the order
+            # and the client agree on which job carries the Rx.
+            if order_repo is not None and isinstance(order, dict) and not pointed_id:
+                try:
+                    order_repo.update(
+                        job.order_id,
+                        {
+                            "workshop_job_id": chosen.get("job_id"),
+                            "workshop_job_number": chosen.get("job_number"),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 -- best effort
+                    pass
+            response.status_code = 200
+            return {
+                "job_id": chosen.get("job_id"),
+                "job_number": chosen.get("job_number"),
+                "dc_hardlock_override": False,
+                "existing": True,
+                "message": "Workshop job already exists for this order",
+            }
 
         # PATIENT SAFETY: the prescription_id stored on the job is what the bench
         # grinds -- verify it EXISTS, belongs to THIS order's customer, and is not
@@ -1472,7 +1731,7 @@ async def update_job_status(
         # NOTE: the barcode-scan paths mirror THIS gate (and the IN_PROGRESS
         # sales-confirm + DC gates above) via evaluate_scan_transition_gate --
         # both now read _QC_REQUIRED_TARGETS / _qc_cleared, so they cannot drift.
-        if status in _QC_REQUIRED_TARGETS and not _qc_cleared(job):
+        if _is_patient_facing(status) and not _qc_cleared(job):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1663,13 +1922,7 @@ async def qc_job(
     + implicit SUPERADMIN). Sales staff cannot run QC.
 
     A job with passed=True advances to READY; passed=False advances to QC_FAILED.
-    The job must be in COMPLETED, QC_FAILED or READY state; any other state
-    returns 400.
-
-    READY is accepted so a job that reached the pickup shelf with NO QC record
-    (rows created before the QC gates existed) can still be QC'd: it is the only
-    way to clear the -> DELIVERED QC gate for such a job, and a FAIL correctly
-    pulls it back off the shelf into QC_FAILED for rework.
+    The job must be in one of _QC_INPUT_STATUSES; any other state returns 400.
     """
     repo = get_workshop_repository()
 
@@ -1679,10 +1932,10 @@ async def qc_job(
             raise HTTPException(status_code=404, detail="Workshop job not found")
         _assert_job_store_access(job, current_user)
 
-        if job.get("status") not in ["COMPLETED", "QC_FAILED", "READY"]:
+        if job.get("status") not in _QC_INPUT_STATUSES:
             raise HTTPException(
                 status_code=400,
-                detail="Job must be COMPLETED, QC_FAILED or READY for QC",
+                detail=_QC_INPUT_STATUS_MESSAGE.format(status=job.get("status")),
             )
 
         if repo.add_qc_result(
@@ -1722,11 +1975,10 @@ async def qc_checklist(
     A job MUST NOT reach READY status via any other path unless QC passed or
     was explicitly waived here. This endpoint enforces that invariant.
 
-    Accepted input states: COMPLETED, QC_FAILED and READY. READY is accepted so a
-    job that reached the pickup shelf with NO QC record (rows created before the
-    QC gates existed) can still be QC'd or given an audited waiver -- otherwise
-    such a job could never clear the -> DELIVERED gate. A FAIL on a READY job
-    correctly pulls it back off the shelf into QC_FAILED for rework.
+    Accepted input states: _QC_INPUT_STATUSES (see its comment -- it covers every
+    state the QC handover gate can strand a job in, including the IN_PROGRESS the
+    scan flow actually parks a held job in). A FAIL on a job already on the
+    pickup shelf correctly pulls it back off into QC_FAILED for rework.
 
     Gate: WORKSHOP_STAFF / STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN.
     Sales staff and cashiers cannot run QC.
@@ -1740,13 +1992,10 @@ async def qc_checklist(
         raise HTTPException(status_code=404, detail="Workshop job not found")
     _assert_job_store_access(job, current_user)
 
-    if job.get("status") not in ["COMPLETED", "QC_FAILED", "READY"]:
+    if job.get("status") not in _QC_INPUT_STATUSES:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "QC checklist can only be submitted when the job is in COMPLETED, "
-                "QC_FAILED or READY state (current: {})".format(job.get("status"))
-            ),
+            detail=_QC_INPUT_STATUS_MESSAGE.format(status=job.get("status")),
         )
 
     # Validate waiver: waived=True requires a waive_reason
@@ -2467,7 +2716,46 @@ async def upsert_lab_station(
                 status_code=400,
                 detail={"code": "unknown_station", "message": f"Unknown station {body.code}."},
             )
+        if reason == "INVALID_ADVANCE_STATUS":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_advance_status",
+                    "message": (
+                        "A station may only advance a job to one of: "
+                        + ", ".join(lab_routing.VALID_ADVANCES_JOB_STATUS)
+                        + " (or blank to leave the status unchanged)."
+                    ),
+                },
+            )
         raise HTTPException(status_code=503, detail="Failed to save station config")
+
+    # PATIENT SAFETY: station config decides which scan hands a job to a patient
+    # (advances_job_status) and whether the customer is auto-notified, so every
+    # edit is an auditable control change. Fail-soft -- an audit failure must not
+    # lose the operator's config change.
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "workshop.station_config_upsert",
+                    "entity_type": "lab_station",
+                    "entity_id": (station or {}).get("station_id") or body.code,
+                    "store_id": active_store,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "code": body.code,
+                        "advances_job_status": (station or {}).get("advances_job_status"),
+                        "auto_notify_customer": (station or {}).get("auto_notify_customer"),
+                        "is_active": (station or {}).get("is_active"),
+                        "sequence_order": (station or {}).get("sequence_order"),
+                    },
+                }
+            )
+    except Exception as _audit_exc:  # noqa: BLE001
+        logger.warning("[WORKSHOP] station config audit failed: %s", _audit_exc)
+
     return {"ok": True, "station": station}
 
 

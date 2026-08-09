@@ -239,6 +239,12 @@ class _WorkshopRepo:
                 return dict(j)
         return None
 
+    def find_by_order(self, order_id):
+        # create_job is idempotent per order (one order -> one lab job), so the
+        # fake must model this lookup or the tests below would silently exercise
+        # the fall-through path instead of the real one.
+        return [dict(j) for j in self._jobs if j.get("order_id") == order_id]
+
     def update_status(self, job_id, status, by_user=None, notes=None):
         for j in self._jobs:
             if j.get("job_id") == job_id:
@@ -606,9 +612,9 @@ class TestDcLogging:
 # ===========================================================================
 
 
-def _job_body(lens_status, product_id="L1", **over):
+def _job_body(lens_status, product_id="L1", order_id="O1", **over):
     body = {
-        "order_id": "O1",
+        "order_id": order_id,
         "frame_details": {},
         "lens_details": {"lens_status": lens_status, "product_id": product_id},
         "prescription_id": "RX1",
@@ -629,8 +635,10 @@ class TestWorkshopHardlock:
         assert r.status_code == 422
         assert r.json()["detail"]["code"] == "DC_HARDLOCK"
 
-        # In-house lens (NOT ORDERED) -> 201 (exempt).
-        r2 = c.post("/api/v1/workshop/jobs", json=_job_body("RECEIVED"))
+        # In-house lens (NOT ORDERED) -> 201 (exempt). A DIFFERENT order, because
+        # create_job is now idempotent per order and would otherwise return the
+        # first order's job instead of exercising the exemption.
+        r2 = c.post("/api/v1/workshop/jobs", json=_job_body("RECEIVED", order_id="O2"))
         assert r2.status_code == 201, r2.text
 
     def test_external_lens_with_dc_passes(self, monkeypatch):
@@ -694,10 +702,14 @@ class TestWorkshopHardlock:
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
 
-        # Restore flag to true -> blocked again.
+        # Restore flag to true -> blocked again. Uses a DIFFERENT order because
+        # create_job is idempotent per order (the first post created O1's job).
         db.collections["purchase_settings"][0]["require_dc_for_workshop"] = True
-        r2 = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
+        r2 = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED", order_id="O2"))
         assert r2.status_code == 422
+        # Pin WHICH control refused it: the Rx gate also returns 422 and runs
+        # first, so a bare status assertion could not tell the two apart.
+        assert r2.json()["detail"]["code"] == "DC_HARDLOCK"
 
     # --- P1 regression: the REAL gate fires when an external-lab lens job advances
     #     to IN_PROGRESS, reading the TOP-LEVEL lens_status (the production lifecycle
