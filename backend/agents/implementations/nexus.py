@@ -33,10 +33,11 @@ from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from api.utils.ist import now_ist
 from ..nexus_providers import (
     SyncResult,
+    TallyExportError,
     shopify_pull_orders,
     razorpay_list_payments,
     shiprocket_track_awb,
-    tally_build_day_voucher_xml,
+    tally_build_day_voucher_xml_checked,
     validate_voucher_balance,
 )
 
@@ -245,6 +246,15 @@ class NexusAgent(JarvisAgent):
         with `balanced=False`, `balance_issues`, and an `_UNBALANCED`
         XML filename suffix. An `agent.event("tally.unbalanced", ...)`
         is emitted so SENTINEL can flag it.
+
+        MONEY GATE: the XML itself is built through
+        `tally_build_day_voucher_xml_checked`, which applies the CANONICAL
+        finance sales-JV tax reshape (taxable vs CGST/SGST vs IGST) and then
+        refuses to emit a voucher that does not balance or that under-books
+        output GST. A store that trips that gate gets NO row written at all --
+        an importable XML that overstates Sales and understates GST is far
+        worse than a missing file -- and the whole export returns ok=False so
+        the failure lands in `sync_runs` and fires a `sync.failed` event.
         """
         orders_coll = self.get_collection("orders")
         export_coll = self.get_collection("tally_exports")
@@ -294,6 +304,7 @@ class NexusAgent(JarvisAgent):
 
         rows_written = 0
         unbalanced_stores: List[str] = []
+        gate_failures: List[str] = []
         total_vouchers = 0
 
         for store in stores:
@@ -319,7 +330,20 @@ class NexusAgent(JarvisAgent):
                 "store_code": store.get("store_code") or sid,
                 "store_name": store.get("store_name") or sid,
             }
-            xml = tally_build_day_voucher_xml(orders, store_meta=store_meta)
+            try:
+                xml, _priced = tally_build_day_voucher_xml_checked(
+                    self.db, orders, store_meta=store_meta
+                )
+            except TallyExportError as e:
+                # FAIL LOUD, emit NOTHING. Writing the row anyway would put a
+                # downloadable, importable voucher in the accountant's hands
+                # that books gross-as-Sales with zero output GST.
+                logger.error(
+                    "[NEXUS] Tally export ABORTED for store %s on %s: %s",
+                    sid, export_date_iso, e,
+                )
+                gate_failures.append(f"{sid}: {e}")
+                continue
 
             row = {
                 "agent_id": self.agent_id,
@@ -359,6 +383,25 @@ class NexusAgent(JarvisAgent):
                 )
             except Exception:
                 pass  # event bus is fail-soft
+
+        # A gate failure is a HARD failure of the export even if other stores
+        # succeeded: ok=False makes _run_integration_sync record it in
+        # sync_runs and _do_background_work dispatch `sync.failed`, and the
+        # SUPERADMIN /regenerate endpoint surfaces the error text verbatim.
+        if gate_failures:
+            shown = " | ".join(gate_failures[:3])
+            more = f" (+{len(gate_failures) - 3} more)" if len(gate_failures) > 3 else ""
+            return SyncResult(
+                ok=False,
+                provider="tally",
+                kind="export",
+                items_synced=total_vouchers,
+                error=(
+                    f"Tally voucher gate rejected {len(gate_failures)} store(s); "
+                    f"NO export written for them: {shown}{more}"
+                ),
+                notes=f"{rows_written} store row(s) written before the gate tripped",
+            )
 
         if rows_written == 0:
             return SyncResult(ok=True, provider="tally", kind="export",
@@ -401,7 +444,13 @@ class NexusAgent(JarvisAgent):
                               notes="No completed orders today (legacy path)")
 
         balance = validate_voucher_balance(todays_orders)
-        xml = tally_build_day_voucher_xml(todays_orders)
+        try:
+            xml, _priced = tally_build_day_voucher_xml_checked(self.db, todays_orders)
+        except TallyExportError as e:
+            # Same money gate as the per-store path: emit nothing, fail loud.
+            logger.error("[NEXUS] Tally legacy export ABORTED: %s", e)
+            return SyncResult(ok=False, provider="tally", kind="export",
+                              error=f"Tally voucher gate rejected the export: {e}")
         try:
             export_coll.insert_one({
                 "agent_id": self.agent_id,

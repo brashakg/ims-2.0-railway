@@ -6,7 +6,11 @@ One module, four thin async clients:
 - shopify_push_product / shopify_pull_orders — bidirectional catalog + order sync
 - razorpay_list_payments — pull recent payments to reconcile against orders
 - shiprocket_track_awb — fetch current status for a shipped order
-- tally_build_day_voucher_xml — build the nightly sales-voucher XML
+- tally_build_day_voucher_xml — format the sales-voucher XML (dumb formatter:
+  it reads already-reshaped subtotal/cgst/sgst/igst fields off each order)
+- tally_build_day_voucher_xml_checked — reshape (via the CANONICAL finance
+  sales-JV tax rules) + balance/tax gates + build. The ONLY entry point an
+  UNATTENDED caller (the NEXUS nightly tick) may use
 
 Shared patterns from claude_client / providers.py:
 - Every call is async, uses httpx, and fails soft.
@@ -667,16 +671,255 @@ def tally_build_day_voucher_xml(
     return wrapper
 
 
+class TallyExportError(RuntimeError):
+    """A Tally voucher could not be built CORRECTLY -- nothing was emitted.
+
+    Money/GST rule: it is always safer to emit NOTHING and shout than to hand
+    the accountant a voucher that books the gross order value as Sales with
+    ZERO output GST (sales overstated, GST liability understated, books that
+    never tie to the filed GSTR-1). Callers MUST let this surface as a visible
+    failure (a failed sync_run row + a `sync.failed` event) instead of writing
+    a `tally_exports` row the CA could download and import.
+    """
+
+
+# Paise-rounding slack, same convention as validate_voucher_balance's per-order
+# tolerance. Used by the tax-coverage gate below.
+_TALLY_TAX_TOLERANCE = 0.50
+
+
+def _order_line_tax(order: Dict[str, Any]) -> Optional[float]:
+    """Sum of the per-line `tax_amount` stamped by orders._compute_per_category_gst.
+
+    Returns None when no line carries a tax figure at all (nothing to
+    cross-check against). Used ONLY as an independent second opinion on how
+    much output GST the voucher must carry -- never to compute the split.
+    """
+    items = order.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    total = 0.0
+    seen = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        raw = it.get("tax_amount")
+        if raw is None:
+            continue
+        try:
+            total += float(raw or 0)
+            seen = True
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2) if seen else None
+
+
+def _order_declared_tax(order: Dict[str, Any]) -> float:
+    """The LARGEST total-GST figure the order document itself claims.
+
+    Deliberately wider than the canonical split's field chain
+    (`tax_amount` / `tax_total`): it also considers a bare `tax` key and the
+    per-line sum. If ANY of those says the sale carried output GST but the
+    voucher we are about to emit books less, that is exactly the zero-GST
+    defect -- so we take the max and let the gate raise rather than quietly
+    under-book the GST liability.
+    """
+    candidates: List[float] = []
+    for key in ("tax_amount", "tax_total", "tax"):
+        raw = order.get(key)
+        if raw is None:
+            continue
+        try:
+            candidates.append(float(raw or 0))
+        except (TypeError, ValueError):
+            continue
+    line_tax = _order_line_tax(order)
+    if line_tax is not None:
+        candidates.append(line_tax)
+    return round(max(candidates), 2) if candidates else 0.0
+
+
+def tally_reshape_orders_for_voucher(
+    db, orders: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Apply the CANONICAL sales-JV tax reshape to RAW order documents.
+
+    `tally_build_day_voucher_xml` is a dumb formatter: it reads `subtotal`,
+    `cgst_amount`, `sgst_amount`, `igst_amount` straight off each order dict.
+    A raw IMS order carries NONE of those -- its `subtotal` is the pre-cart-
+    discount, tax-INCLUSIVE gross and it has no per-head GST fields at all.
+    Feeding raw orders to the formatter therefore books the gross as Sales
+    with ZERO output GST. Every human-driven Tally path reshapes first
+    (finance.get_tally_sales_jv, finance._b2b_fetch_orders); this function is
+    that same reshape for the autonomous NEXUS nightly export.
+
+    The tax RULES are NOT re-implemented here -- they are imported from the
+    canonical finance module so a second copy can never drift:
+      * `_order_is_interstate` -- OS-008 order-carried `interstate` flag first,
+        store-state vs customer-state (GST-code normalised) as the fallback.
+      * `_jv_cgst_sgst_split`  -- CGST/SGST halves whose residual lands on SGST
+        so cgst + sgst == tax to the paisa (an off-by-a-paisa split imbalances
+        the voucher and Tally rejects the import).
+
+    Returns SHALLOW COPIES -- the caller's order documents are never mutated
+    (the balance validator must still see the order's own untouched fields).
+
+    Raises TallyExportError if the canonical helpers cannot be imported: the
+    only alternative would be to fall back to a local copy of the GST maths,
+    which is the drift this whole function exists to prevent.
+    """
+    try:
+        from api.routers.finance import (  # noqa: WPS433 - lazy: avoids an import cycle
+            _customer_state_map,
+            _jv_cgst_sgst_split,
+            _order_is_interstate,
+            _store_state_map,
+        )
+    except Exception as e:  # noqa: BLE001 - any import failure is fatal here
+        raise TallyExportError(
+            "Canonical Tally sales-JV helpers (api.routers.finance) are "
+            f"unavailable: {e}. Refusing to build a voucher -- an un-reshaped "
+            "export books the gross as Sales with ZERO output GST."
+        ) from e
+
+    store_states = _store_state_map(db)
+    customer_states = _customer_state_map(db)
+
+    reshaped: List[Dict[str, Any]] = []
+    for o in orders or []:
+        row = dict(o)
+        # Field chain kept byte-identical to finance.get_tally_sales_jv.
+        tax = float(row.get("tax_amount") or row.get("tax_total") or 0)
+        grand = float(row.get("grand_total") or row.get("total") or 0)
+        if _order_is_interstate(row, store_states, customer_states):
+            row["igst_amount"] = round(tax, 2)
+            row["cgst_amount"] = 0.0
+            row["sgst_amount"] = 0.0
+        else:
+            cgst, sgst = _jv_cgst_sgst_split(tax)
+            row["igst_amount"] = 0.0
+            row["cgst_amount"] = cgst
+            row["sgst_amount"] = sgst
+        # Sales A/c must carry the TAXABLE value, never the gross.
+        row["subtotal"] = round(grand - tax, 2)
+        row["grand_total"] = grand
+        reshaped.append(row)
+    return reshaped
+
+
+def _voucher_legs(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The signed ledger legs `tally_build_day_voucher_xml` will ACTUALLY emit.
+
+    This MIRRORS the formatter's own branch (`if igst > 0` -> the IGST head,
+    else CGST + SGST) rather than blindly summing all three GST fields, so the
+    gate can never bless a set of legs different from the ones written into the
+    XML. Sign convention is the XML's own: the party leg is written as
+    `-{total}`, the Sales + output-tax legs positive. A correct Sales voucher
+    nets to zero.
+    """
+    grand = float(row.get("grand_total", 0) or 0)
+    igst = float(row.get("igst_amount", 0) or 0)
+    legs: List[Dict[str, Any]] = [
+        {"ledger": "party", "amount": -round(grand, 2)},
+        {"ledger": "Sales A/c", "amount": float(row.get("subtotal", 0) or 0)},
+    ]
+    if igst > 0:
+        legs.append({"ledger": "IGST Output", "amount": igst})
+    else:
+        legs.append(
+            {"ledger": "CGST Output", "amount": float(row.get("cgst_amount", 0) or 0)}
+        )
+        legs.append(
+            {"ledger": "SGST Output", "amount": float(row.get("sgst_amount", 0) or 0)}
+        )
+    return legs
+
+
+def tally_build_day_voucher_xml_checked(
+    db,
+    orders: List[Dict[str, Any]],
+    store_meta: Optional[Dict[str, Any]] = None,
+) -> tuple:
+    """Reshape -> GATE -> build. The ONLY entry point an unattended caller may use.
+
+    Two gates run per order BEFORE a single byte of XML is produced; either one
+    raises TallyExportError so a malformed voucher is never written to
+    `tally_exports` (and so can never be downloaded and imported into Tally):
+
+      1. BALANCE -- `assert_voucher_balanced` (api.services.tender_routing) on
+         the signed legs. Debits must equal credits or Tally rejects the import.
+      2. TAX COVERAGE -- the emitted CGST+SGST+IGST must cover the output GST
+         the order document itself declares (widest field chain + the per-line
+         sum). This is what catches the original defect shape: a voucher whose
+         legs happen to balance because Sales absorbed the tax.
+
+    Returns `(xml, reshaped_orders)`.
+    """
+    reshaped = tally_reshape_orders_for_voucher(db, orders)
+
+    try:
+        from api.services.tender_routing import assert_voucher_balanced
+    except Exception as e:  # noqa: BLE001
+        raise TallyExportError(
+            f"Voucher balance gate (api.services.tender_routing) unavailable: {e}. "
+            "Refusing to emit an unverified Tally voucher."
+        ) from e
+
+    problems: List[str] = []
+    for original, row in zip(orders or [], reshaped):
+        oid = str(row.get("order_id") or original.get("order_id") or "?")
+        legs = _voucher_legs(row)
+        try:
+            assert_voucher_balanced(legs)
+        except ValueError as e:
+            problems.append(f"{oid}: {e}")
+            continue
+        # Sum the tax legs that will REALLY be written, not the raw fields.
+        emitted_tax = round(
+            sum(
+                leg["amount"]
+                for leg in legs
+                if str(leg["ledger"]).endswith("Output")
+            ),
+            2,
+        )
+        declared_tax = _order_declared_tax(original)
+        if declared_tax - emitted_tax > _TALLY_TAX_TOLERANCE:
+            problems.append(
+                f"{oid}: voucher books Rs {emitted_tax:.2f} output GST but the "
+                f"order declares Rs {declared_tax:.2f} -- Sales would be "
+                f"overstated and the GST liability understated"
+            )
+
+    if problems:
+        shown = "; ".join(problems[:5])
+        more = f" (+{len(problems) - 5} more)" if len(problems) > 5 else ""
+        raise TallyExportError(
+            f"{len(problems)} order(s) failed the Tally voucher gate: {shown}{more}"
+        )
+
+    return tally_build_day_voucher_xml(reshaped, store_meta=store_meta), reshaped
+
+
 def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Pre-export sanity check on a day's orders.
+    Pre-export sanity check on a day's orders (the ORDER DATA, not the voucher).
 
     Per-order assertion: `abs(taxable + tax - grand_total) < 0.50`
     (50-paise tolerance for half-up rounding across line items).
 
-    Per-batch assertion: `sum(grand_total) - sum(total_discount) ≈
-    sum(taxable) + sum(tax)` within ₹1 (cumulative rounding can be
-    larger than the per-row tolerance).
+    `taxable` is resolved from the order-level field first and then from the
+    sum of the per-line `taxable_value` that orders._compute_per_category_gst
+    stamps -- a POS/online order does NOT persist an order-level `taxable`, so
+    reading only that field made this check silently vacuous on every real
+    order. An order with neither is reported as UNVERIFIED (it is excluded from
+    the batch identity instead of being scored as if it were fine).
+
+    Per-batch assertion, over the VERIFIED orders only:
+    `sum(grand_total) ≈ sum(taxable) + sum(tax)` within ₹1 (cumulative rounding
+    can exceed the per-row tolerance). `total_discount` is NOT subtracted:
+    grand_total is already net of every item + cart discount, so subtracting it
+    again failed the batch check for any day that had a single discount.
 
     Returns a structured report so the orchestrator can decide whether
     to flag the row as `balanced=False` and suffix the XML filename
@@ -688,25 +931,36 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     sum_taxable = 0.0
     sum_tax = 0.0
     sum_discount = 0.0
+    # Batch identity accumulators -- verified orders only.
+    batch_grand = 0.0
+    batch_taxable = 0.0
+    batch_tax = 0.0
+    unverified = 0
 
     for o in orders:
         grand = float(o.get("grand_total", 0) or 0)
-        taxable = float(o.get("taxable", 0) or 0)
+        taxable = _resolve_order_taxable(o)
         tax = float(o.get("tax", o.get("tax_amount", 0)) or 0)
         subtotal = float(o.get("subtotal", 0) or 0)
         discount = float(o.get("total_discount", 0) or 0)
 
         sum_grand += grand
         sum_subtotal += subtotal
-        sum_taxable += taxable
+        sum_taxable += taxable or 0.0
         sum_tax += tax
         sum_discount += discount
 
         # taxable + tax should land within 50 paise of grand_total.
-        # Skip the check when taxable is zero (e.g. legacy orders that
-        # predate the per-category GST split): it would always fail.
-        if taxable <= 0:
+        # An order with no resolvable taxable (legacy rows that predate the
+        # per-category GST split) is counted as UNVERIFIED, not as a pass.
+        if not taxable or taxable <= 0:
+            unverified += 1
             continue
+
+        batch_grand += grand
+        batch_taxable += taxable
+        batch_tax += tax
+
         expected = round(taxable + tax, 2)
         delta = round(grand - expected, 2)
         if abs(delta) >= 0.5:
@@ -719,8 +973,8 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 }
             )
 
-    batch_check_lhs = round(sum_grand - sum_discount, 2)
-    batch_check_rhs = round(sum_taxable + sum_tax, 2)
+    batch_check_lhs = round(batch_grand, 2)
+    batch_check_rhs = round(batch_taxable + batch_tax, 2)
     batch_delta = round(batch_check_lhs - batch_check_rhs, 2)
     batch_ok = abs(batch_delta) < 1.00
 
@@ -739,5 +993,39 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             "tax": round(sum_tax, 2),
             "total_discount": round(sum_discount, 2),
             "order_count": len(orders),
+            # Orders whose taxable could not be resolved at all -- reported so
+            # "0 mismatches" is never mistaken for "everything was checked".
+            "unverified_count": unverified,
         },
     }
+
+
+def _resolve_order_taxable(order: Dict[str, Any]) -> Optional[float]:
+    """Order-level `taxable` if present, else the sum of the per-line
+    `taxable_value` stamped by orders._compute_per_category_gst. None when the
+    document carries neither (the order cannot be verified)."""
+    raw = order.get("taxable")
+    if raw is not None:
+        try:
+            value = float(raw or 0)
+            if value:
+                return round(value, 2)
+        except (TypeError, ValueError):
+            pass
+    items = order.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    total = 0.0
+    seen = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        line = it.get("taxable_value")
+        if line is None:
+            continue
+        try:
+            total += float(line or 0)
+            seen = True
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2) if seen else None

@@ -60,6 +60,11 @@ def _make_order(
         "grand_total": grand_total,
         "taxable": taxable,
         "tax": tax,
+        # A REAL order document persists its total GST under `tax_amount` -- the
+        # field the canonical finance sales-JV reshape reads. The fixture used
+        # to carry only `tax`, which is why the zero-output-GST NEXUS export
+        # went unnoticed for so long.
+        "tax_amount": tax,
         "subtotal": subtotal,
         "total_discount": discount,
         "cgst_amount": cgst,
