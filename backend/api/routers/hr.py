@@ -130,11 +130,16 @@ def _store_scope_filter(current_user: dict):
     account legitimately needs org-wide attendance the remedy is assigning its
     stores (or a deliberate change to ``user_store_scope``), not a silent
     org-wide read.
+
+    The ``isinstance`` filter is load-bearing, not tidiness: ``store_ids`` is
+    unvalidated user data, and a token carrying ``[None, "S1"]`` / ``["S1", 7]``
+    / ``[{"a": 1}, "S1"]`` makes a bare ``sorted()`` raise TypeError and 500 the
+    screen. Same guard as users._store_scope_filter (PR #967).
     """
     is_cross, stores = user_store_scope(current_user)
     if is_cross:
         return None
-    return {"$in": sorted(stores)}
+    return {"$in": sorted({s for s in stores if isinstance(s, str) and s})}
 
 
 def _scope_for_request(store_id: Optional[str], current_user: dict):
@@ -154,11 +159,35 @@ def _scope_for_request(store_id: Optional[str], current_user: dict):
 def _single_store(scope) -> Optional[str]:
     """The scope as a plain store id when it IS one, else None.
 
-    The grid/summary roster rows are pinned to a single store id for display;
-    a multi-store ``$in`` clause has no single value to pin, so the roster then
-    falls back to each employee's own store (``_roster_from_users``).
+    Only an explicitly named ?store_id yields a scalar scope, and only then does
+    every roster row belong to that one store. For an ``$in`` clause the row is
+    pinned per-employee instead -- see ``_scope_store_set`` and the
+    ``allowed_stores`` argument of ``_roster_from_users``.
     """
     return scope if isinstance(scope, str) and scope else None
+
+
+def _scope_store_set(scope):
+    """The set of stores an ``$in`` scope covers, else ``None``.
+
+    ``None`` means "do not constrain the roster row's label": either the caller
+    is cross-store (scope None) or a single store was named (scalar scope, which
+    ``_single_store`` already pins).
+
+    This exists because of a regression the panel caught in the first cut of
+    this PR. ``_store_scope_filter`` returns an ``$in`` clause for EVERY
+    non-cross-store role -- including a manager with exactly one store -- so
+    ``_single_store`` returned None universally and ``_roster_from_users`` fell
+    back to ``store_ids[0]``. A single-store Ranchi manager then saw a summary
+    row labelled ``WO-MUM-01`` (another city, another legal entity) and Ranchi's
+    own headcount read 2 instead of 3, because a multi-store employee was
+    counted under a store the caller cannot even see.
+    """
+    if isinstance(scope, dict):
+        values = scope.get("$in")
+        if isinstance(values, (list, tuple, set)):
+            return {s for s in values if isinstance(s, str) and s}
+    return None
 
 
 # ============================================================================
@@ -459,17 +488,37 @@ def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
     }
 
 
-def _roster_from_users(users: list, store_id: Optional[str]) -> list:
-    """Normalise user docs into the grid roster shape, sorted by name."""
+def _roster_from_users(
+    users: list, store_id: Optional[str], allowed_stores=None
+) -> list:
+    """Normalise user docs into the grid roster shape, sorted by name.
+
+    ``store_id``      -- an explicitly resolved single store; every row is
+                         pinned to it (unchanged behaviour).
+    ``allowed_stores`` -- the caller's store reach when the scope was an ``$in``
+                         clause. A multi-store employee is then labelled with the
+                         first of THEIR stores that the caller can actually see,
+                         instead of ``store_ids[0]``, which could be a store
+                         outside the caller's reach (wrong city, wrong legal
+                         entity) and would move that employee's headcount into a
+                         bucket the caller should not have. ``None`` keeps the
+                         legacy fallback, which is correct for cross-store
+                         callers (they can see every store anyway).
+    """
     roster = []
     for u in users or []:
         uid = u.get("user_id") or u.get("_id")
         if not uid:
             continue
         # A user may belong to multiple stores; pin the row to the requested
-        # store when one was resolved, else fall back to the user's first store.
+        # store when one was resolved, else to a store the caller can see, else
+        # fall back to the user's first store.
         store_ids = u.get("store_ids") or []
-        row_store = store_id or (store_ids[0] if store_ids else u.get("store_id", ""))
+        row_store = store_id
+        if not row_store and allowed_stores is not None:
+            row_store = next((s for s in store_ids if s in allowed_stores), "")
+        if not row_store and allowed_stores is None:
+            row_store = store_ids[0] if store_ids else u.get("store_id", "")
         roster.append(
             {
                 "employee_id": uid,
@@ -657,6 +706,8 @@ async def get_attendance_grid(
     # Resolve + authorise the store scope (str | {"$in": [...]} | None).
     scope = _scope_for_request(store_id, current_user)
     pinned_store = _single_store(scope)
+    # Per-employee label bound for an $in scope (see _scope_store_set).
+    reachable_stores = _scope_store_set(scope)
 
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
@@ -673,7 +724,7 @@ async def get_attendance_grid(
             users = user_repo.find_many(roster_filter, limit=1000)
         except Exception:
             users = []
-        employees = _roster_from_users(users, pinned_store)
+        employees = _roster_from_users(users, pinned_store, reachable_stores)
 
     # Pull the month's attendance records (string date range mirrors the actual
     # write path in POST /attendance/mark and payroll/generate).
@@ -711,6 +762,8 @@ async def get_attendance_summary(
     year, mon = _parse_month(month)
     scope = _scope_for_request(store_id, current_user)
     pinned_store = _single_store(scope)
+    # Per-employee label bound for an $in scope (see _scope_store_set).
+    reachable_stores = _scope_store_set(scope)
 
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
@@ -724,7 +777,7 @@ async def get_attendance_summary(
             users = user_repo.find_many(roster_filter, limit=1000)
         except Exception:
             users = []
-        employees = _roster_from_users(users, pinned_store)
+        employees = _roster_from_users(users, pinned_store, reachable_stores)
 
     records = []
     if attendance_repo is not None:

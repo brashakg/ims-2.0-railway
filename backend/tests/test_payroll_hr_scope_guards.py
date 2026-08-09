@@ -1,32 +1,41 @@
 """
-IMS 2.0 - Payroll payslip IDOR + HR attendance falsy-scope fail-open
-====================================================================
-Regression locks for two P1 findings raised by the PR #967 security panel,
-both in routers OUTSIDE that PR's scope:
+IMS 2.0 - Payslip admin-only rule + HR attendance store scoping
+===============================================================
+Locks two access-control rules and one regression the adversarial panel caught.
 
-  F-A (payroll.py, payslip x3) -- GET /payroll/payslip/{employee_id},
-      GET /payroll/payslip/{employee_id}/{month}/{year} and its /print sibling
-      took the employee id as a FREE path parameter with Depends(get_current_user)
-      only: no route-level authorization at all, so the handler returned another
-      employee's NET PAY, full CTC breakdown and BANK ACCOUNT. Now gated by
-      payroll._assert_self_or_pay_manager (SELF always; manager tier for anyone),
-      mirroring the self-or-manager gate the commission ledger in the same file
-      already used.
+  A. PAYSLIP (payroll.py) -- OWNER RULING 2026-08-09, verbatim: "nobody except
+     admin/superadmin should see anyone elses salary." The three payslip routes
+     (GET /payroll/payslip/{employee_id}, .../{month}/{year}, and .../print) had
+     no gate of their own, so every role the router mount admits -- ADMIN,
+     AREA_MANAGER, STORE_MANAGER, ACCOUNTANT (+ SUPERADMIN) -- could read
+     anyone's NET PAY, CTC and BANK ACCOUNT by typing an id. Now
+     payroll._assert_self_or_salary_admin: SELF always, anyone else ADMIN /
+     SUPERADMIN only.
 
-  F-B (hr.py, attendance x3) -- GET /hr/attendance, /attendance/grid and
-      /attendance/summary resolved their store scope with
-      ``validate_store_access(...) or active_store_id`` and then applied it under
-      ``if active_store:``. A falsy scope meant NO FILTER (org-wide reads) instead
-      of NO ACCESS, and an AREA_MANAGER holding several stores was silently
-      narrowed to one. Now hr._scope_for_request / hr._store_scope_filter, the
-      same canonical ``user_store_scope`` helper users.py adopted in PR #967:
-      an empty reach yields {"$in": []} -> an EMPTY list, never org-wide and
-      never a 403 lockout.
+  B. HR ATTENDANCE (hr.py) -- GET /hr/attendance, /attendance/grid and
+     /attendance/summary resolved scope as "validate_store_access(...) or
+     active_store_id" applied under "if active_store:". A falsy scope meant NO
+     FILTER (org-wide) instead of NO ACCESS, and a multi-store AREA_MANAGER was
+     silently narrowed to one store. Now hr._scope_for_request /
+     _store_scope_filter, reusing the canonical user_store_scope (the same
+     helper users.py adopted in PR #967): an empty reach yields {"$in": []} ->
+     an EMPTY list, never org-wide and never a 403.
 
-Harness mirrors test_hr_attendance_grid.py: FastAPI TestClient over the real
-routers with monkeypatched repos / db. The fakes implement Mongo semantics for
-the operators these routes actually issue ($in, $gte, $lte, array containment),
-so ``{"$in": []}`` matches NOTHING here exactly as it does in Mongo.
+  C. ROSTER LABELS (hr.py, PR-introduced regression) -- because (B) returns an
+     $in clause for EVERY non-cross-store role, _single_store returned None
+     universally and _roster_from_users fell back to store_ids[0]. A single-store
+     Ranchi manager saw a summary row labelled WO-MUM-01 (another city, another
+     legal entity) and Ranchi's headcount was short by the multi-store employee.
+     Now _scope_store_set + the allowed_stores argument pin each row to a store
+     the caller can actually see. E4/E5 below are the multi-store employees whose
+     store_ids[0] sits OUTSIDE the caller's reach -- they are the whole point of
+     these fixtures, and they are what the first cut of this suite lacked.
+
+FIDELITY: both routers are mounted here exactly as api/main.py mounts them --
+with dependencies=[Depends(require_roles(*_FINANCE_ROLES))] (main.py:1417 for
+hr, main.py:1509 for payroll). Driving a BARE router hid the fact that floor
+roles never reach these paths at all, which is why the first cut of this file
+asserted a CASHIER self-service flow that cannot happen in the real app.
 """
 
 from __future__ import annotations
@@ -40,23 +49,32 @@ os.environ.setdefault("MONGODB_URI", "")
 
 import jwt  # noqa: E402
 import pytest  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from api.main import _FINANCE_ROLES  # noqa: E402  - the REAL mount gate
 from api.routers import hr as hr_mod  # noqa: E402
 from api.routers import payroll as payroll_mod  # noqa: E402
+from api.routers.auth import require_roles  # noqa: E402
 from api.services import rbac_policy  # noqa: E402
 
 SECRET = os.environ["JWT_SECRET_KEY"]
 
 STORE_A = "BV-PUN-01"
-STORE_B = "BV-BOK-01"
-STORE_C = "BV-RAN-01"
+STORE_B = "BV-RAN-01"
+# Deliberately a different chain / city / legal entity: a label that leaking into
+# a BV manager's summary is the exact bug the panel reproduced.
+STORE_C = "WO-MUM-01"
 
-SELF_ID = "u-cashier"
+SELF_ID = "u-self"
 OTHER_ID = "u-colleague"
+
+# Roles the router mount admits (main.py _FINANCE_ROLES) that are NOT allowed to
+# read someone else's salary under the owner ruling.
+NON_ADMIN_PAY_ROLES = ("ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER")
+ADMIN_PAY_ROLES = ("ADMIN", "SUPERADMIN")
 
 
 def _token(roles, user_id="u-test", store_ids=None, active_store=STORE_A):
@@ -78,6 +96,17 @@ def _token(roles, user_id="u-test", store_ids=None, active_store=STORE_A):
 
 def _auth(tok):
     return {"Authorization": f"Bearer {tok}"}
+
+
+def _mounted(router, prefix):
+    """Mount a router the way api/main.py mounts it -- gate included."""
+    app = FastAPI()
+    app.include_router(
+        router,
+        prefix=prefix,
+        dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
+    )
+    return app
 
 
 # ===========================================================================
@@ -220,7 +249,7 @@ def _payroll_db():
             ),
             "users": _FakeColl(
                 [
-                    {"user_id": SELF_ID, "full_name": "Own Cashier"},
+                    {"user_id": SELF_ID, "full_name": "Own Staffer"},
                     {"user_id": OTHER_ID, "full_name": "Colleague"},
                 ]
             ),
@@ -231,15 +260,13 @@ def _payroll_db():
 
 @pytest.fixture()
 def payroll_client(monkeypatch):
-    app = FastAPI()
-    app.include_router(payroll_mod.router, prefix="/payroll")
     db = _payroll_db()
     monkeypatch.setattr(payroll_mod, "_get_db", lambda: db)
-    return TestClient(app)
+    return TestClient(_mounted(payroll_mod.router, "/payroll"))
 
 
 # ===========================================================================
-# F-A  payslip self-or-manager gate
+# A. payslip -- owner ruling: self, or ADMIN/SUPERADMIN
 # ===========================================================================
 
 _PAYSLIP_PATHS = (
@@ -250,38 +277,37 @@ _PAYSLIP_PATHS = (
 
 
 @pytest.mark.parametrize("template", _PAYSLIP_PATHS)
-def test_cashier_cannot_read_a_colleagues_payslip(payroll_client, template):
-    """P1: the whole point -- a non-manager is refused someone else's slip."""
-    tok = _token(["CASHIER"], user_id=SELF_ID, store_ids=[STORE_A])
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_non_admin_cannot_read_a_colleagues_payslip(payroll_client, template, role):
+    """OWNER RULE: ACCOUNTANT / AREA_MANAGER / STORE_MANAGER are refused another
+    employee's slip even though the router mount admits them."""
+    tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
     r = payroll_client.get(template.format(eid=OTHER_ID), headers=_auth(tok))
     assert r.status_code == 403, r.text
-    # And nothing of the colleague's pay data leaked into the refusal body.
     assert "99000" not in r.text
     assert "SECRET-222" not in r.text
 
 
 @pytest.mark.parametrize("template", _PAYSLIP_PATHS)
-def test_cashier_can_still_read_their_own_payslip(payroll_client, template):
-    """Availability half of the fix: self-service must keep working."""
-    tok = _token(["CASHIER"], user_id=SELF_ID, store_ids=[STORE_A])
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_non_admin_can_still_read_their_own_payslip(payroll_client, template, role):
+    """Availability half of the owner rule: own slip must keep working."""
+    tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
     r = payroll_client.get(template.format(eid=SELF_ID), headers=_auth(tok))
     assert r.status_code == 200, r.text
 
 
 @pytest.mark.parametrize("template", _PAYSLIP_PATHS)
-@pytest.mark.parametrize(
-    "role", ["ACCOUNTANT", "ADMIN", "SUPERADMIN", "STORE_MANAGER", "AREA_MANAGER"]
-)
-def test_manager_tier_reach_is_unchanged(payroll_client, template, role):
-    """No false 403 on payroll day: every role the RBAC policy admits still passes."""
-    tok = _token([role], user_id="u-mgr", store_ids=[STORE_A])
+@pytest.mark.parametrize("role", ADMIN_PAY_ROLES)
+def test_admin_and_superadmin_keep_full_reach(payroll_client, template, role):
+    tok = _token([role], user_id="u-admin", store_ids=[])
     r = payroll_client.get(template.format(eid=OTHER_ID), headers=_auth(tok))
     assert r.status_code == 200, r.text
 
 
-def test_manager_actually_receives_the_pay_data(payroll_client):
+def test_admin_actually_receives_the_pay_data(payroll_client):
     """The 200 above is a real payslip, not an empty shell."""
-    tok = _token(["ACCOUNTANT"], user_id="u-acct", store_ids=[STORE_A])
+    tok = _token(["ADMIN"], user_id="u-admin", store_ids=[])
     r = payroll_client.get(f"/payroll/payslip/{OTHER_ID}/5/2026", headers=_auth(tok))
     assert r.status_code == 200
     slip = r.json()["payslip"]
@@ -290,17 +316,27 @@ def test_manager_actually_receives_the_pay_data(payroll_client):
     assert slip["bank_account"] == "SECRET-222"
 
 
-def test_payslip_gate_applies_before_the_db_is_touched(monkeypatch):
-    """With Mongo down the routes fail soft (200/None). The gate must still be
-    the answer for an unauthorised caller -- authorization cannot depend on the
-    database being up."""
-    app = FastAPI()
-    app.include_router(payroll_mod.router, prefix="/payroll")
-    monkeypatch.setattr(payroll_mod, "_get_db", lambda: None)
-    c = TestClient(app)
+@pytest.mark.parametrize("template", _PAYSLIP_PATHS)
+def test_floor_roles_never_reach_these_routes_at_all(payroll_client, template):
+    """Documents WHERE the floor-staff refusal comes from: the router mount
+    (require_roles(*_FINANCE_ROLES)), not the payslip gate. A CASHIER is refused
+    even for their OWN id here -- their self-service path is /hr/me/payslip."""
     tok = _token(["CASHIER"], user_id=SELF_ID, store_ids=[STORE_A])
+    assert payroll_client.get(
+        template.format(eid=OTHER_ID), headers=_auth(tok)
+    ).status_code == 403
+    assert payroll_client.get(
+        template.format(eid=SELF_ID), headers=_auth(tok)
+    ).status_code == 403
+
+
+def test_payslip_gate_applies_before_the_db_is_touched(monkeypatch):
+    """With Mongo down the routes fail soft (200/None). Authorization must not
+    depend on the database being up."""
+    monkeypatch.setattr(payroll_mod, "_get_db", lambda: None)
+    c = TestClient(_mounted(payroll_mod.router, "/payroll"))
+    tok = _token(["ACCOUNTANT"], user_id=SELF_ID, store_ids=[STORE_A])
     assert c.get(f"/payroll/payslip/{OTHER_ID}", headers=_auth(tok)).status_code == 403
-    # ... and the caller's own read still fails SOFT rather than 403ing.
     own = c.get(f"/payroll/payslip/{SELF_ID}", headers=_auth(tok))
     assert own.status_code == 200 and own.json() == {"payslip": None}
 
@@ -309,13 +345,12 @@ def test_unauthenticated_still_401(payroll_client):
     assert payroll_client.get(f"/payroll/payslip/{OTHER_ID}").status_code == 401
 
 
-def test_payslip_gate_admits_every_role_the_rbac_policy_admits():
-    """Anti-lockout + anti-drift lock.
+def test_salary_gate_is_deliberately_stricter_than_the_rbac_policy_rows():
+    """The gate is STRICTER than the declared policy, on the owner's ruling.
 
-    The gate must never be STRICTER than the declared policy rows for these
-    paths, or the request-time middleware would allow a caller the handler then
-    403s -- a false lockout on a live screen. SUPERADMIN is allowed by
-    check_access itself, so it is asserted separately.
+    The policy rows still list the manager tier, so the middleware admits them
+    one layer earlier and this handler refuses them. ADMIN must remain in the
+    rows, otherwise the middleware would block the only role that may read.
     """
     for path in (
         "/api/v1/payroll/payslip/emp-1",
@@ -324,30 +359,38 @@ def test_payslip_gate_admits_every_role_the_rbac_policy_admits():
     ):
         policy = rbac_policy.policy_for("GET", path)
         assert policy is not None, f"{path} must stay catalogued"
-        for role in policy["allowed"]:
-            assert payroll_mod._is_pay_data_manager({"roles": [role]}), (
-                f"{role} is allowed by rbac_policy for {path} but rejected by the "
-                "payslip gate -- that is a lockout"
-            )
-    assert payroll_mod._is_pay_data_manager({"roles": ["SUPERADMIN"]})
+        assert "ADMIN" in policy["allowed"]
+        assert rbac_policy.check_access("GET", path, ["SUPERADMIN"])
+        for role in NON_ADMIN_PAY_ROLES:
+            assert role in policy["allowed"] or role == "AREA_MANAGER"
 
 
-def test_commission_gate_uses_the_same_definition():
-    """The commission ledger's self-or-manager gate and the payslip gate read
-    ONE tuple, so they cannot drift apart (the whole reason this helper exists)."""
-    assert payroll_mod._PAY_DATA_MANAGER_ROLES == (
+def test_salary_and_commission_rules_are_separate_constants():
+    """The salary rule moved to admin-only; commission deliberately did NOT."""
+    assert payroll_mod._SALARY_CROSS_EMPLOYEE_ROLES == ("SUPERADMIN", "ADMIN")
+    assert payroll_mod._COMMISSION_MANAGER_ROLES == (
         "SUPERADMIN",
         "ADMIN",
         "AREA_MANAGER",
         "STORE_MANAGER",
         "ACCOUNTANT",
     )
-    assert not payroll_mod._is_pay_data_manager({"roles": ["CASHIER", "SALES_STAFF"]})
-    assert not payroll_mod._is_pay_data_manager({})
+    # Commission behaviour is unchanged for the manager tier ...
+    assert payroll_mod._is_commission_manager({"roles": ["STORE_MANAGER"]})
+    assert payroll_mod._is_commission_manager({"roles": ["ACCOUNTANT"]})
+    # ... while the same roles are refused someone else's salary.
+    for role in NON_ADMIN_PAY_ROLES:
+        with pytest.raises(Exception) as exc:
+            payroll_mod._assert_self_or_salary_admin(
+                OTHER_ID, {"user_id": SELF_ID, "roles": [role]}
+            )
+        assert getattr(exc.value, "status_code", None) == 403
+    assert not payroll_mod._is_commission_manager({"roles": ["CASHIER"]})
+    assert not payroll_mod._is_commission_manager({})
 
 
 # ===========================================================================
-# F-B  HR attendance store scope
+# B + C. HR attendance store scope and roster labels
 # ===========================================================================
 
 
@@ -367,10 +410,25 @@ class _FakeAttendanceRepo:
         return [dict(r) for r in self._records if _matches(r, filter or {})][:limit]
 
 
+# E4 and E5 are MULTI-STORE employees whose store_ids[0] is OUTSIDE a BV
+# manager's reach -- the shape that produced the mislabelled WO-MUM-01 summary
+# row. Keep them: without a multi-store employee this suite cannot see the bug.
 _USERS = [
     {"user_id": "E1", "full_name": "Asha", "store_ids": [STORE_A], "is_active": True},
     {"user_id": "E2", "full_name": "Bina", "store_ids": [STORE_B], "is_active": True},
     {"user_id": "E3", "full_name": "Chan", "store_ids": [STORE_C], "is_active": True},
+    {
+        "user_id": "E4",
+        "full_name": "Dev",
+        "store_ids": [STORE_C, STORE_A],
+        "is_active": True,
+    },
+    {
+        "user_id": "E5",
+        "full_name": "Esha",
+        "store_ids": [STORE_C, STORE_B],
+        "is_active": True,
+    },
 ]
 _RECORDS = [
     {
@@ -394,28 +452,36 @@ _RECORDS = [
         "status": "PRESENT",
         "store_id": STORE_C,
     },
+    {
+        "attendance_id": "a4",
+        "employee_id": "E4",
+        "date": "2026-05-04",
+        "status": "PRESENT",
+        "store_id": STORE_A,
+    },
 ]
 
 
 @pytest.fixture()
 def hr_client(monkeypatch):
-    app = FastAPI()
-    app.include_router(hr_mod.router, prefix="/hr")
     monkeypatch.setattr(hr_mod, "get_user_repository", lambda: _FakeUserRepo(_USERS))
     monkeypatch.setattr(
         hr_mod, "get_attendance_repository", lambda: _FakeAttendanceRepo(_RECORDS)
     )
-    return TestClient(app)
+    return TestClient(_mounted(hr_mod.router, "/hr"))
 
 
 def _stores_in(records_json):
     return {r["storeId"] for r in records_json["records"]}
 
 
+def _roster_pins(grid_json):
+    return {e["employee_id"]: e["store_id"] for e in grid_json["employees"]}
+
+
 def test_storeless_manager_gets_empty_attendance_not_org_wide(hr_client):
-    """P1: the fail-open. A manager with NO store_ids and NO active store used to
-    get every store's attendance; they must now get an empty list -- and a 200,
-    not a 403 (a lockout would be its own outage)."""
+    """The fail-open. A manager with NO store_ids and NO active store used to get
+    every store's attendance; now an empty list -- and a 200, not a 403."""
     tok = _token(["STORE_MANAGER"], user_id="u-mgr", store_ids=[], active_store=None)
     r = hr_client.get("/hr/attendance", headers=_auth(tok))
     assert r.status_code == 200, r.text
@@ -465,8 +531,75 @@ def test_area_manager_grid_covers_all_their_stores(hr_client):
         "/hr/attendance/grid", params={"month": "2026-05"}, headers=_auth(tok)
     )
     assert r.status_code == 200, r.text
-    ids = {e["employee_id"] for e in r.json()["employees"]}
-    assert ids == {"E1", "E2"}  # E3 belongs to a store outside their reach
+    # E3 is WizOpt-only and stays out; E4/E5 are in via their second store.
+    assert set(_roster_pins(r.json())) == {"E1", "E2", "E4", "E5"}
+
+
+def test_single_store_manager_roster_is_labelled_with_their_own_store(hr_client):
+    """REGRESSION (panel MUST-FIX 1). E4's store_ids[0] is WO-MUM-01, a different
+    chain / city / legal entity. A Pune-only STORE_MANAGER must never see that
+    label -- pre-fix the roster row said WO-MUM-01 and Pune's headcount was
+    short by one."""
+    tok = _token(
+        ["STORE_MANAGER"], user_id="u-sm", store_ids=[STORE_A], active_store=STORE_A
+    )
+    r = hr_client.get(
+        "/hr/attendance/grid", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert r.status_code == 200, r.text
+    pins = _roster_pins(r.json())
+    assert pins == {"E1": STORE_A, "E4": STORE_A}
+    assert STORE_C not in set(pins.values())
+
+
+def test_multi_store_manager_roster_labels_each_row_within_reach(hr_client):
+    """Same regression for a multi-store caller: each employee is labelled with
+    the store THIS caller shares with them, not store_ids[0]."""
+    tok = _token(
+        ["AREA_MANAGER"],
+        user_id="u-am",
+        store_ids=[STORE_A, STORE_B],
+        active_store=STORE_A,
+    )
+    r = hr_client.get(
+        "/hr/attendance/grid", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert _roster_pins(r.json()) == {
+        "E1": STORE_A,
+        "E2": STORE_B,
+        "E4": STORE_A,
+        "E5": STORE_B,
+    }
+
+
+def test_summary_store_buckets_carry_no_out_of_reach_store(hr_client):
+    """The panel's reproduction, as a rollup assertion: a single-store manager's
+    summary must contain exactly ONE store row, with the right headcount."""
+    tok = _token(
+        ["STORE_MANAGER"], user_id="u-sm", store_ids=[STORE_A], active_store=STORE_A
+    )
+    r = hr_client.get(
+        "/hr/attendance/summary", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert r.status_code == 200, r.text
+    buckets = {s["store_id"]: s["employees"] for s in r.json()["stores"]}
+    assert buckets == {STORE_A: 2}
+
+
+def test_admin_roster_keeps_the_legacy_first_store_label(hr_client):
+    """Cross-store callers are unconstrained, so the legacy store_ids[0] label
+    is still correct for them -- the fix must not move ADMIN's behaviour."""
+    tok = _token(["ADMIN"], user_id="u-admin", store_ids=[], active_store=None)
+    r = hr_client.get(
+        "/hr/attendance/grid", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert _roster_pins(r.json()) == {
+        "E1": STORE_A,
+        "E2": STORE_B,
+        "E3": STORE_C,
+        "E4": STORE_C,
+        "E5": STORE_C,
+    }
 
 
 def test_store_manager_is_confined_to_own_store(hr_client):
@@ -491,20 +624,14 @@ def test_explicit_cross_store_request_still_403(hr_client):
 
 
 def test_admin_keeps_org_wide_reach(hr_client):
-    """Cross-store roles are cross-store by design -- user_store_scope says so."""
     tok = _token(["ADMIN"], user_id="u-admin", store_ids=[], active_store=None)
     r = hr_client.get("/hr/attendance", headers=_auth(tok))
     assert r.status_code == 200
     assert _stores_in(r.json()) == {STORE_A, STORE_B, STORE_C}
 
-    grid = hr_client.get(
-        "/hr/attendance/grid", params={"month": "2026-05"}, headers=_auth(tok)
-    )
-    assert {e["employee_id"] for e in grid.json()["employees"]} == {"E1", "E2", "E3"}
 
-
-def test_explicit_own_store_still_pins_the_roster_rows(hr_client):
-    """A single named store keeps the scalar path (roster rows pinned to it)."""
+def test_explicit_own_store_still_pins_every_roster_row(hr_client):
+    """A single named store keeps the scalar path (all rows pinned to it)."""
     tok = _token(
         ["STORE_MANAGER"], user_id="u-sm", store_ids=[STORE_A], active_store=STORE_A
     )
@@ -514,14 +641,11 @@ def test_explicit_own_store_still_pins_the_roster_rows(hr_client):
         headers=_auth(tok),
     )
     assert r.status_code == 200
-    employees = r.json()["employees"]
-    assert {e["employee_id"] for e in employees} == {"E1"}
-    assert {e["store_id"] for e in employees} == {STORE_A}
+    assert _roster_pins(r.json()) == {"E1": STORE_A, "E4": STORE_A}
 
 
 def test_store_scope_filter_shape():
-    """The helper itself: cross-store -> None; empty reach -> a clause that
-    matches NOTHING (never an absent filter)."""
+    """Cross-store -> None; empty reach -> a clause that matches NOTHING."""
     assert hr_mod._store_scope_filter({"roles": ["ADMIN"]}) is None
     assert hr_mod._store_scope_filter({"roles": ["SUPERADMIN"]}) is None
     assert hr_mod._store_scope_filter(
@@ -530,6 +654,57 @@ def test_store_scope_filter_shape():
     assert hr_mod._store_scope_filter(
         {"roles": ["AREA_MANAGER"], "store_ids": [STORE_B], "active_store_id": STORE_A}
     ) == {"$in": sorted([STORE_A, STORE_B])}
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        [None, STORE_A],
+        [STORE_A, 7],
+        [STORE_A, ""],
+        [STORE_A, STORE_A],
+    ],
+)
+def test_store_scope_filter_survives_junk_store_ids(junk):
+    """MUST-FIX 3: store_ids is unvalidated data. A bare ``sorted()`` raises
+    TypeError on a mixed-type list and 500s the attendance screen."""
+    scope = hr_mod._store_scope_filter(
+        {"roles": ["STORE_MANAGER"], "store_ids": junk, "active_store_id": None}
+    )
+    assert scope == {"$in": [STORE_A]}
+
+
+@pytest.mark.parametrize("junk", [[{"a": 1}, STORE_A], [["nested"], STORE_A]])
+def test_unhashable_store_ids_still_crash_UPSTREAM_not_in_this_router(junk):
+    """HONEST LIMIT, recorded rather than implied by a green suite.
+
+    An UNHASHABLE element dies one level up, in ``dependencies.user_store_scope``
+    (``set(current_user.get("store_ids") or [])``), before this router's
+    isinstance filter can run. That helper is shared -- users._store_scope_filter
+    from PR #967 sits behind exactly the same call -- and it is outside this PR's
+    file ownership, so it is reported instead of patched here. The filter in this
+    router still fixes every shape that reaches it.
+    """
+    with pytest.raises(TypeError):
+        hr_mod._store_scope_filter(
+            {"roles": ["STORE_MANAGER"], "store_ids": junk, "active_store_id": None}
+        )
+
+
+def test_junk_store_ids_do_not_500_the_live_route(hr_client):
+    tok = _token(
+        ["STORE_MANAGER"], user_id="u-sm", store_ids=[None, STORE_A], active_store=None
+    )
+    r = hr_client.get("/hr/attendance", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    assert _stores_in(r.json()) == {STORE_A}
+
+
+def test_scope_store_set_shape():
+    assert hr_mod._scope_store_set({"$in": [STORE_A, STORE_B]}) == {STORE_A, STORE_B}
+    assert hr_mod._scope_store_set({"$in": []}) == set()
+    assert hr_mod._scope_store_set(STORE_A) is None
+    assert hr_mod._scope_store_set(None) is None
 
 
 def test_hr_attendance_unauthenticated_still_401(hr_client):
