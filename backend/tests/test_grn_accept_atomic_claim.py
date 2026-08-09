@@ -1694,3 +1694,195 @@ def test_void_fail_closed_on_the_production_count_branch(wired, monkeypatch):
     assert err.value.status_code == 503
     assert grn_repo.doc["status"] == "PENDING"
     assert grn_repo.doc["accept_lock_token"] is None, "claim handed back"
+
+
+# ===========================================================================
+# ROUND 6 -- the TAKEOVER shapes of the accept/void race.
+# Round 5 gave void the claim but not the guarded WRITES, and stamped the
+# heartbeat clock after the PO fetch. Both let real units end up behind a VOID
+# receipt with no in-app recovery (accept refuses VOID, PO math sums ACCEPTED
+# only). test_units_never_end_up_behind_a_void_receipt asserted the invariant
+# but only drove the sub-second concurrent shape, so it passed over both.
+# ===========================================================================
+
+
+def test_void_whose_stock_count_parked_cannot_void_an_accepted_receipt(
+    wired, monkeypatch
+):
+    """TAKEOVER SHAPE (a). Void claims, then its already-minted count parks on a
+    blackholed socket -- the exact premise the stale window exists for. The lock
+    ages, an accept takes it over, mints all 5 units, flips ACCEPTED and
+    releases. Void's stale reply finally lands carrying 0.
+
+    Measured on the previous build: doc status VOID with 5 sellable rows behind
+    it. The token filter on void's terminal write is what refuses it now."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    state = {"parked": False}
+    real_count = stock_repo.count
+
+    def _parking_count(flt):
+        if not state["parked"]:
+            state["parked"] = True
+            grn_repo.doc["accept_lock_at"] = _aged_lock()
+            _run(vd.accept_grn("GRN-1", _ADMIN))
+            return 0  # the STALE reply, from before the accept ran
+        return real_count(flt)
+
+    stock_repo.count = _parking_count
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.void_grn("GRN-1", _ADMIN))
+
+    assert err.value.status_code == 409
+    assert grn_repo.doc["status"] == "ACCEPTED", "must NOT be voided"
+    assert len(stock_repo.rows) == 5
+    assert "cannot be voided" in err.value.detail
+
+
+class _Clock:
+    """Controllable stand-in for the router's `datetime`, so a test can make a
+    wedged pymongo read genuinely consume wall-clock time instead of faking its
+    side effects. Everything except now() delegates to the real class."""
+
+    def __init__(self):
+        self.offset = timedelta(0)
+
+    def now(self, tz=None):
+        return datetime.now(tz) + self.offset
+
+    def __getattr__(self, name):
+        return getattr(datetime, name)
+
+
+def test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover(
+    wired, monkeypatch
+):
+    """TAKEOVER SHAPE (b). The accept claims and then wedges inside
+    po_repo.find_by_id -- one pymongo read, and prod sets no socketTimeoutMS, so
+    it can park for minutes. Real time passes: the lock goes stale on its own, a
+    void takes it over and voids the receipt. Then the accept wakes up.
+
+    Measured on the previous build: 24 real sellable units minted onto the VOID
+    receipt, because the heartbeat clock was stamped AFTER the PO fetch -- the
+    woken worker started with a fresh clock, so the first tick was not due and
+    it never re-proved ownership. Seeded at CLAIM time, the first tick is
+    overdue by the whole wedge and the worker stops before minting anything.
+
+    The clock is advanced rather than the lock hand-aged, so the takeover
+    happens through the real staleness rule."""
+    clock = _Clock()
+    monkeypatch.setattr(vd, "datetime", clock)
+
+    grn_repo, stock_repo = wired(_grn(qty=24))
+    grn_repo.doc["po_id"] = "PO-1"
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    state = {"wedged": False}
+    voided = {}
+
+    class _WedgingPoRepo:
+        def find_by_id(self, _pid):
+            if not state["wedged"]:
+                state["wedged"] = True
+                # The read parks for longer than the stale window.
+                clock.offset += timedelta(
+                    seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 100
+                )
+                voided["out"] = _run(vd.void_grn("GRN-1", _ADMIN))
+            return {"po_id": "PO-1", "items": []}
+
+        def update(self, *a, **k):
+            return True
+
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _WedgingPoRepo())
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert err.value.status_code == 409
+    assert "taken over" in err.value.detail
+    assert stock_repo.rows == [], "not one unit may be minted onto a VOID receipt"
+    assert voided["out"]["grn_status"] == "VOID"
+    assert grn_repo.doc["status"] == "VOID"
+
+
+def test_a_partially_accepted_receipt_cannot_be_voided_by_a_stale_read(
+    wired, monkeypatch
+):
+    """No stall at all, just two clerks. Void's PENDING assertion reads the doc
+    fetched BEFORE the claim, while the claim itself admits PARTIALLY_ACCEPTED.
+    A colleague's accept landing in that gap used to let the delivery record be
+    destroyed with a green 200. The status filter on the terminal write refuses
+    it."""
+    grn_repo, stock_repo = wired(_grn(qty=4))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    real_claim = vd._claim_grn_for_accept
+
+    def _claim_after_an_accept_landed(grn_repo_, grn_id, user_id):
+        if grn_repo.doc["status"] == "PENDING":
+            grn_repo.doc["status"] = "PARTIALLY_ACCEPTED"
+        return real_claim(grn_repo_, grn_id, user_id)
+
+    monkeypatch.setattr(vd, "_claim_grn_for_accept", _claim_after_an_accept_landed)
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.void_grn("GRN-1", _ADMIN))
+
+    assert err.value.status_code == 409
+    assert grn_repo.doc["status"] == "PARTIALLY_ACCEPTED"
+    assert "cannot be voided" in err.value.detail
+
+
+def test_a_failed_void_write_is_never_reported_as_success(wired, monkeypatch):
+    """BaseRepository.update swallows driver errors into False. Round 5
+    discarded that return, so a failed VOID answered a green 'GRN voided' over
+    an unchanged PENDING doc -- the clerk closes the panel believing the
+    duplicate receipt is gone while it is still in the pending list."""
+    grn_repo, stock_repo = wired(_grn(qty=3))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    def _swallowing_update(_gid, _patch):
+        return False
+
+    monkeypatch.setattr(grn_repo, "update", _swallowing_update)
+
+    def _no_primitive(*_a, **_k):
+        return None  # force the minimal-mock fallback onto repo.update
+
+    monkeypatch.setattr(vd, "_guarded_grn_write", _no_primitive)
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.void_grn("GRN-1", _ADMIN))
+    assert err.value.status_code == 503
+    assert grn_repo.doc["status"] == "PENDING"
+
+
+def test_the_heartbeat_clock_is_seeded_at_claim_time_not_after_the_po_fetch(wired):
+    """The mechanism behind shape (b), asserted directly: a claim time older
+    than the heartbeat cadence must make the FIRST tick due."""
+    grn_repo, stock_repo = wired(_grn(qty=2))
+    grn_repo.doc["po_id"] = "PO-1"
+    token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
+    stale_claim = datetime.now() - timedelta(
+        seconds=vd._GRN_ACCEPT_HEARTBEAT_SECONDS + 5
+    )
+    # Somebody else has since taken the claim, so the first tick must 409.
+    grn_repo.doc["accept_lock_token"] = "SOMEONE-ELSE"
+    state = {"units": 0, "at": stale_claim, "errors": 0, "confirmed_at": stale_claim}
+    with pytest.raises(HTTPException) as err:
+        vd._grn_accept_heartbeat_tick(grn_repo, "GRN-1", token, state)
+    assert err.value.status_code == 409
+
+
+def test_a_normal_accept_still_makes_no_extra_heartbeat_write(wired):
+    """Zero happy-path cost: the first unit is milliseconds from the claim, so
+    seeding the clock at claim time must not add a write."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    before = grn_repo.collection.calls
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert out["units_added"] == 5
+    # claim + terminal status flip + metadata/release == 3 guarded writes.
+    assert grn_repo.collection.calls - before == 3

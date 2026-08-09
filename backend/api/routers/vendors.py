@@ -3120,13 +3120,29 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # update is the authority. Exactly one of two racing double-click POSTs
     # matches the filter, so exactly one runs the minting loop; the loser 409s
     # without touching stock, the PO or the audit trail.
+    # The claim time is captured HERE, not inside the mint body. Everything
+    # between this line and the first unit -- the PO fetch, the product lookup,
+    # the cost backfill write -- is a round trip that can park on a blackholed
+    # socket for minutes (prod sets no socketTimeoutMS). Seeding the heartbeat
+    # clock after those reads let a woken worker start with a FRESH clock, so
+    # the first tick was not due and it minted the whole delivery without ever
+    # re-proving ownership. Measured on the previous build: 24 real sellable
+    # units behind a receipt that had been VOIDed in the meantime.
+    claimed_at = datetime.now()
     claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
     if claim_token is None:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
     try:
         return _accept_grn_claimed(
-            grn_id, grn, current_user, grn_repo, stock_repo, po_repo, claim_token
+            grn_id,
+            grn,
+            current_user,
+            grn_repo,
+            stock_repo,
+            po_repo,
+            claim_token,
+            claimed_at,
         )
     except Exception:
         # Nothing was committed we can attribute to this call, or the accept
@@ -3145,6 +3161,7 @@ def _accept_grn_claimed(
     stock_repo,
     po_repo,
     claim_token: Optional[str] = None,
+    claimed_at=None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
 
@@ -3192,7 +3209,16 @@ def _accept_grn_claimed(
     # long accept keeps its claim fresh and stops dead if the claim is stolen.
     # `confirmed_at` starts at the claim (the claim IS proof of ownership) and
     # only advances on a heartbeat that came back with a definite answer.
-    _now = datetime.now()
+    #
+    # The clock comes from the CALLER, stamped at claim time -- NOT from here.
+    # Stamping it here (after the PO fetch above) erased however long that read
+    # had parked, so a worker wedged inside it woke with a fresh clock, found
+    # the first tick not due (units < 25, elapsed < 10s) and minted with no
+    # token check at all. With the claim time, any gap longer than
+    # _GRN_ACCEPT_HEARTBEAT_SECONDS makes the FIRST tick due, so a woken worker
+    # re-proves ownership before minting a single unit. Zero cost on the happy
+    # path: the first unit is milliseconds from the claim, so no extra write.
+    _now = claimed_at or datetime.now()
     heartbeat_state = {"units": 0, "at": _now, "errors": 0, "confirmed_at": _now}
     # Probed ONCE per accept, not per unit.
     mint_raises_on_duplicate = _stock_create_raises_on_duplicate(stock_repo)
@@ -3425,10 +3451,17 @@ def _accept_grn_claimed(
                     raise HTTPException(
                         status_code=503,
                         detail=(
-                            f"{units_added} unit(s) were received before the "
-                            "stock store stopped responding. Open the receiving "
-                            "screen and accept it again -- the units already "
-                            "received are safe and will not be counted twice."
+                            # Deliberately NO count. `units_added` is THIS
+                            # attempt's tally and the client silently retries a
+                            # 5xx three times, so after a retry that failed on
+                            # its first unit the number reads "0 unit(s)" with
+                            # real stock already on the shelf -- which is exactly
+                            # the recount-and-hand-add this sentence exists to
+                            # prevent.
+                            "Some units were received before the stock store "
+                            "stopped responding. Open the receiving screen and "
+                            "accept it again -- the units already received are "
+                            "safe and will not be counted twice."
                         ),
                     )
                 if created:
@@ -3626,7 +3659,7 @@ async def express_receive_grn(
 
     Failure atomicity: an HTTPException BEFORE the GRN row exists propagates
     unchanged (nothing was persisted). If accept fails AFTER the GRN was
-    created, a 500 with code EXPRESS_PARTIAL carrying the grn_id is returned
+    created, a 409 with code EXPRESS_PARTIAL carrying the grn_id is returned
     so the FE can point the user at the pending-receipts panel to accept or
     void it -- never a silently stranded PENDING GRN.
     """
@@ -3968,14 +4001,81 @@ async def void_grn(
                     ),
                 )
 
-        grn_repo.update(
-            grn_id,
+        # TERMINAL WRITE -- guarded exactly like the accept path's, because
+        # holding the claim is NOT the same as writing under it. Each filter
+        # closes a defect measured on the previous build:
+        #   * status PENDING -- the PENDING assertion above read the doc BEFORE
+        #     the claim, and the claim admits PARTIALLY_ACCEPTED as well, so
+        #     without this a colleague's accept landing in between let a
+        #     PARTIALLY_ACCEPTED receipt be voided with a green 200. No stall
+        #     required, just two clerks.
+        #   * accept_lock_token -- this handler may have been parked (its stock
+        #     count on a blackholed socket, the very premise the stale window
+        #     exists for) while an accept took the claim over, minted the whole
+        #     delivery and flipped it ACCEPTED. A takeover invalidates our token,
+        #     so a stale reply can no longer void a receipt that now holds stock.
+        # And branching on the RESULT is what stops a swallowed write answering
+        # a green "GRN voided" over a doc that is still PENDING.
+        void_patch = {
+            "status": "VOID",
+            "voided_at": datetime.now().isoformat(),
+            "voided_by": current_user.get("user_id"),
+        }
+        written = _guarded_grn_write(
+            grn_repo,
             {
-                "status": "VOID",
-                "voided_at": datetime.now().isoformat(),
-                "voided_by": current_user.get("user_id"),
+                "grn_id": grn_id,
+                "status": "PENDING",
+                "accept_lock_token": claim_token,
             },
+            {"$set": void_patch},
         )
+        if written is _GRN_WRITE_ERROR:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The goods receipt could not be voided -- the database did "
+                    "not confirm the change. Refresh and try again; nothing was "
+                    "voided."
+                ),
+            )
+        if written is None:
+            # Minimal mock with no atomic primitive: plain write, but still
+            # check it landed rather than assuming it did.
+            if not grn_repo.update(grn_id, void_patch):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The goods receipt could not be voided. Refresh and try "
+                        "again; nothing was voided."
+                    ),
+                )
+        elif not written:
+            try:
+                current = grn_repo.find_by_id(grn_id)
+            except Exception:  # noqa: BLE001
+                current = None
+            status_now = (current or {}).get("status") or "unknown"
+            logger.error(
+                "[VENDOR] GRN %s: void did NOT apply -- the receipt is now %s "
+                "(it changed while this void was in flight)",
+                grn_id,
+                status_now,
+            )
+            if status_now in _GRN_TERMINAL_ACCEPT_STATUSES:
+                detail = (
+                    f"This goods receipt is now {status_now} and holds stock, "
+                    "so it cannot be voided -- accepted stock must be corrected "
+                    "via a vendor return. Refresh to see its current state."
+                )
+            else:
+                detail = (
+                    "This goods receipt changed while it was being voided (it "
+                    f"is now {status_now}), so nothing was voided. Refresh and "
+                    "check its current state before trying again."
+                )
+            raise HTTPException(status_code=409, detail=detail)
+
         # Fail-soft audit trail (same contract as the other GRN mutations).
         try:
             audit = get_audit_repository()

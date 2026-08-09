@@ -267,6 +267,17 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
       message = rawDetail;
     } else if (Array.isArray(rawDetail) && rawDetail.length > 0) {
       message = rawDetail.map((d: Record<string, unknown>) => (d.msg as string) || String(d)).join('. ');
+    } else if (
+      rawDetail &&
+      typeof rawDetail === 'object' &&
+      !Array.isArray(rawDetail) &&
+      typeof (rawDetail as unknown as { message?: unknown }).message === 'string'
+    ) {
+      // Structured detail: FastAPI nests everything under `detail`, so a dict
+      // detail used to fall through to axios's bare "Request failed with status
+      // code 409". Goods-receipt express deliberately sends recovery guidance
+      // that way for a receipt which may already hold real stock.
+      message = (rawDetail as unknown as { message: string }).message;
     } else {
       message = error.response?.data?.message || error.message || 'An error occurred';
     }

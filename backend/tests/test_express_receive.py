@@ -20,7 +20,9 @@ tests assert every existing receiving control is PRESERVED, not re-implemented:
     path re-asserts it via _load_standard_grn) -- express stops at a DRAFT
     (no vendor_bills write, no AP booking).
   * Failure atomicity: an accept failure AFTER the GRN exists surfaces as
-    500 EXPRESS_PARTIAL carrying the grn_id (the pending panel recovers it).
+    409 EXPRESS_PARTIAL carrying the grn_id (the pending panel recovers it).
+    409, not 5xx: the api client auto-retries every 5xx POST, and each retry
+    creates a NEW grn_id that mints the whole delivery again.
   * RBAC: gated to the SAME receiving roles as create/accept GRN, with a
     matching rbac_policy row.
 
