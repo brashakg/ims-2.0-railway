@@ -21,13 +21,25 @@ POS-11 cancelOrder sends reason as raw body -- should be a query param.
        backend schema does NOT have a Pydantic body model for the reason.
 
 POS-12 Order status timeline/history with timestamps.
-       The initial DRAFT status_history entry is seeded at order_data build
-       time. OrderRepository.update_status appends subsequent entries via $push.
-       The order_to_frontend mapper already converts status_history to camelCase.
+       BEHAVIOURAL: creating an order through the real handler stores a
+       status_history whose first entry is DRAFT; OrderRepository.update_status
+       APPENDS one well-formed entry per transition (asserted on the stored
+       document, not on the source text).
 
 POS-14 Extend Idempotency-Key to payments / returns / expense-create.
-       add_payment, create_return, and create_expense all accept the header
-       (verified via function signature inspection).
+       Signature-level: all three accept the header.
+       BEHAVIOURAL: posting the same payment / expense twice with one
+       Idempotency-Key records exactly ONE money row, stamps the key on it and
+       replays the original id; distinct keys (and no key at all) still record
+       two. For returns the REPLAY half is behavioural; the stamping half stays
+       textual and is justified inline.
+
+NOTE ON SOURCE-TEXT ASSERTIONS
+       Several checks in this file used to grep handler source for a substring.
+       That cannot distinguish "the line exists" from "the line RUNS", and it
+       silently pointed at the WRONG function when inspect.getsource
+       desynchronised during a full-suite run. See tests/source_guard.py for the
+       mechanism and the fail-loud wrapper the few surviving textual checks use.
 """
 
 from __future__ import annotations
@@ -43,6 +55,95 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 os.environ.setdefault("ENVIRONMENT", "test")
+
+
+# ---------------------------------------------------------------------------
+# Behavioural fixtures
+# ---------------------------------------------------------------------------
+# These wire the REAL routers/repositories to strict in-memory collections
+# (tests/strict_fakes.py) so the handlers can be driven end-to-end through the
+# TestClient with no MongoDB, and the assertion can be made against what was
+# actually STORED rather than against the handler's source text.
+
+
+@pytest.fixture
+def payment_order(monkeypatch):
+    """A CONFIRMED order wired into the orders router via the real repository."""
+    from api.routers import orders as orders_module
+    from database.repositories.order_repository import OrderRepository
+    from strict_fakes import StrictCollection
+
+    order = {
+        "order_id": "ord-idem-pay",
+        "store_id": "BV-TEST-01",
+        "customer_id": "walkin-idem",
+        "status": "CONFIRMED",
+        "grand_total": 1000.0,
+        "balance_due": 1000.0,
+        "amount_paid": 0.0,
+        "payments": [],
+        "items": [],
+    }
+    coll = StrictCollection("orders", [order])
+    repo = OrderRepository(coll)
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
+    # The order is a walk-in, so the credit-limit path is never entered; keep
+    # the customer repo absent so nothing silently reaches for a real DB.
+    monkeypatch.setattr(orders_module, "get_customer_repository", lambda: None)
+    return {"collection": coll, "repo": repo, "order": coll.docs[0]}
+
+
+@pytest.fixture
+def expense_env(monkeypatch):
+    """Real ExpenseRepository over a strict collection, wired into the router."""
+    from api.routers import expenses as expenses_module
+    from database.repositories.expense_repository import ExpenseRepository
+    from strict_fakes import StrictCollection
+
+    coll = StrictCollection("expenses")
+    repo = ExpenseRepository(coll)
+    monkeypatch.setattr(expenses_module, "get_expense_repository", lambda: repo)
+    return {"expenses": coll, "repo": repo}
+
+
+@pytest.fixture
+def returns_collection(monkeypatch):
+    """Strict `returns` collection behind the returns router's _get_db()."""
+    from api.routers import returns as returns_module
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    monkeypatch.setattr(returns_module, "_get_db", lambda: db)
+    return db.get_collection("returns")
+
+
+@pytest.fixture
+def order_create_env(monkeypatch):
+    """Wire POST /api/v1/orders to strict collections + real repositories."""
+    from api.routers import orders as orders_module
+    from api.routers import payout as payout_module
+    from database.repositories.customer_repository import CustomerRepository
+    from database.repositories.order_repository import OrderRepository
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    order_repo = OrderRepository(db.get_collection("orders"))
+    customer_repo = CustomerRepository(db.get_collection("customers"))
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
+    monkeypatch.setattr(orders_module, "get_product_repository", lambda: None)
+    monkeypatch.setattr(orders_module, "get_walkin_counter_repository", lambda: None)
+    monkeypatch.setattr(payout_module, "get_db", lambda: db)
+    monkeypatch.setattr(payout_module, "get_user_repository", lambda: None)
+    customer_repo.create(
+        {
+            "customer_id": "cust-hist",
+            "name": "History Test",
+            "mobile": "9100000042",
+            "phone": "9100000042",
+        }
+    )
+    return {"db": db, "orders": db.get_collection("orders"), "order_repo": order_repo}
 
 
 # ---------------------------------------------------------------------------
@@ -331,20 +432,48 @@ class TestPOS11CancelContract:
 class TestPOS12StatusHistory:
     """status_history is initialized with the DRAFT entry on order create."""
 
-    def test_order_create_data_includes_status_history(self):
-        """The order_data dict built in create_order seeds a status_history
-        list with a DRAFT entry. Verified by inspecting the source."""
-        import ast
-        import pathlib
+    def test_order_create_seeds_a_draft_status_history_entry(
+        self, client, auth_headers, order_create_env
+    ):
+        """BEHAVIOURAL: POST an order through the real handler and assert the
+        STORED document carries a status_history whose first entry is DRAFT.
 
-        orders_src = pathlib.Path(__file__).parent.parent / "api" / "routers" / "orders.py"
-        source = orders_src.read_text(encoding="utf-8")
-        # The source must reference 'status_history' in the order_data block.
-        assert '"status_history"' in source or "'status_history'" in source, (
-            "orders.py order_data must include a status_history key"
+        Replaces a source-text check that merely grepped the 4,600-line
+        orders.py for the strings "status_history" and "DRAFT" -- both of which
+        appear dozens of times in unrelated code, so the old assertion could
+        never have failed even if the seeding were deleted outright.
+        """
+        resp = client.post(
+            "/api/v1/orders",
+            headers=auth_headers,
+            json={
+                "customer_id": "cust-hist",
+                "items": [
+                    {
+                        "item_type": "FRAME",
+                        "product_id": "p-hist",
+                        "product_name": "Frame",
+                        "sku": "SKU-HIST",
+                        "quantity": 1,
+                        "unit_price": 1000.0,
+                        "category": "FRAME",
+                    }
+                ],
+            },
         )
-        # And it should include DRAFT as the initial status.
-        assert "DRAFT" in source, "orders.py must mention DRAFT status"
+        assert resp.status_code == 201, resp.text
+
+        stored = order_create_env["orders"].docs
+        assert len(stored) == 1, f"expected exactly one stored order, got {len(stored)}"
+        history = stored[0].get("status_history")
+        assert isinstance(history, list) and history, (
+            "create_order must seed status_history on the stored order document; "
+            f"got {history!r}"
+        )
+        assert history[0].get("status") == "DRAFT", (
+            f"first status_history entry must be DRAFT, got {history[0]!r}"
+        )
+        assert history[0].get("timestamp"), "seeded entry must carry a timestamp"
 
     def test_order_to_frontend_maps_status_history(self):
         """order_to_frontend converts status_history (snake) to statusHistory (camel)."""
@@ -376,23 +505,47 @@ class TestPOS12StatusHistory:
         assert hist[0]["changedBy"] == "user-1"
         assert hist[1]["status"] == "CONFIRMED"
 
-    def test_update_status_pushes_to_history(self):
-        """OrderRepository.update_status builds a status_history_entry dict
-        with status/timestamp/changed_by keys."""
-        import inspect as _inspect
-        from database.repositories.order_repository import OrderRepository
+    def test_update_status_appends_an_entry_per_transition(self):
+        """BEHAVIOURAL: run the real OrderRepository.update_status against a
+        strict in-memory collection and assert the stored document.
 
-        src = _inspect.getsource(OrderRepository.update_status)
-        assert "status_history_entry" in src, (
-            "update_status must build a status_history_entry"
-        )
-        assert '"timestamp"' in src or "'timestamp'" in src, (
-            "status_history_entry must include a timestamp key"
-        )
-        assert '"changed_by"' in src or "'changed_by'" in src, (
-            "status_history_entry must include a changed_by key"
-        )
-        assert "$push" in src, "update_status must $push to status_history"
+        Replaces a source-text check for the substrings "status_history_entry",
+        "timestamp", "changed_by" and "$push" -- which proved only that those
+        characters occur somewhere in the function, not that a transition
+        actually appends a well-formed entry (nor that a second transition
+        appends rather than overwrites).
+        """
+        from database.repositories.order_repository import OrderRepository
+        from strict_fakes import StrictCollection
+
+        coll = StrictCollection("orders", [{"order_id": "ord-1", "status": "DRAFT"}])
+        repo = OrderRepository(coll)
+
+        assert repo.update_status("ord-1", "CONFIRMED", "user-7") is True
+        doc = coll.docs[0]
+        assert doc["status"] == "CONFIRMED"
+        history = doc.get("status_history")
+        assert isinstance(history, list) and len(history) == 1, history
+        assert history[0]["status"] == "CONFIRMED"
+        assert history[0]["changed_by"] == "user-7"
+        assert history[0]["timestamp"], "entry must carry a timestamp"
+
+        # A second transition APPENDS -- it must not replace the first entry
+        # (a `$set` instead of `$push` would still contain every substring the
+        # old source-text assertion looked for).
+        assert repo.update_status("ord-1", "DELIVERED", "user-8") is True
+        history = coll.docs[0]["status_history"]
+        assert [h["status"] for h in history] == ["CONFIRMED", "DELIVERED"], history
+        assert history[1]["changed_by"] == "user-8"
+
+    def test_update_status_records_system_when_no_user_given(self):
+        """An unattributed transition is stamped 'system', never dropped."""
+        from database.repositories.order_repository import OrderRepository
+        from strict_fakes import StrictCollection
+
+        coll = StrictCollection("orders", [{"order_id": "ord-2", "status": "DRAFT"}])
+        OrderRepository(coll).update_status("ord-2", "CANCELLED")
+        assert coll.docs[0]["status_history"][0]["changed_by"] == "system"
 
 
 # ---------------------------------------------------------------------------
@@ -456,33 +609,196 @@ class TestPOS14IdempotencyExtension:
             "create_order must retain its idempotency_key Header parameter"
         )
 
-    def test_payment_data_persists_idempotency_key(self):
-        """The add_payment handler stamps idempotency_key on the payment_data
-        dict so future lookups can find it. Verify via source inspection."""
-        import inspect as _inspect
-        from api.routers.orders import add_payment
 
-        src = _inspect.getsource(add_payment)
-        assert '"idempotency_key"' in src or "'idempotency_key'" in src, (
-            "add_payment must persist idempotency_key on the payment_data dict"
+# ---------------------------------------------------------------------------
+# POS-14 (behavioural): a replayed request must not duplicate the money row
+# ---------------------------------------------------------------------------
+# These replace three source-text assertions that only checked the literal
+# "idempotency_key" appeared somewhere in the handler's source. That cannot
+# distinguish "the line exists" from "the line RUNS" -- and it is exactly the
+# assertion that silently pointed at the WRONG function when inspect.getsource
+# desynchronised mid-suite (see tests/source_guard.py). Each test below drives
+# the real handler twice through the TestClient and asserts the observable
+# outcome: ONE stored row, the key stamped on it, and the replay returning the
+# original id.
+
+
+class TestPOS14PaymentIdempotencyBehaviour:
+    """POST the same payment twice with one Idempotency-Key -> one payment row."""
+
+    ORDER_ID = "ord-idem-pay"
+
+    def _post(self, client, auth_headers, key=None, amount=400.0):
+        headers = dict(auth_headers)
+        if key is not None:
+            headers["Idempotency-Key"] = key
+        return client.post(
+            f"/api/v1/orders/{self.ORDER_ID}/payments",
+            headers=headers,
+            json={"method": "CASH", "amount": amount},
+        )
+
+    def test_duplicate_post_records_exactly_one_payment(
+        self, client, auth_headers, payment_order
+    ):
+        first = self._post(client, auth_headers, key="pay-key-abc")
+        assert first.status_code == 200, first.text
+        second = self._post(client, auth_headers, key="pay-key-abc")
+        assert second.status_code == 200, second.text
+
+        payments = payment_order["order"].get("payments") or []
+        assert len(payments) == 1, (
+            f"a replayed Idempotency-Key must not record a second tender; "
+            f"stored {len(payments)} payment rows: {payments!r}"
+        )
+        assert second.json()["payment_id"] == first.json()["payment_id"]
+        assert second.json().get("_idempotent_replay") is True
+        # The money must not move twice either.
+        assert payment_order["order"]["balance_due"] == 600.0
+
+    def test_key_is_stamped_on_the_stored_payment_row(
+        self, client, auth_headers, payment_order
+    ):
+        """Without the stamp the guard above could never find the prior row,
+        so the key MUST be persisted on the tender itself."""
+        assert self._post(client, auth_headers, key="pay-key-stamp").status_code == 200
+        row = payment_order["order"]["payments"][0]
+        assert row.get("idempotency_key") == "pay-key-stamp", row
+
+    def test_distinct_keys_still_record_two_payments(
+        self, client, auth_headers, payment_order
+    ):
+        """The guard must key on the SUPPLIED value -- not dedupe blindly."""
+        assert self._post(client, auth_headers, key="k1", amount=100.0).status_code == 200
+        assert self._post(client, auth_headers, key="k2", amount=100.0).status_code == 200
+        assert len(payment_order["order"]["payments"]) == 2
+
+    def test_no_key_means_no_deduplication(self, client, auth_headers, payment_order):
+        """Two genuine part-payments with no header must both be recorded."""
+        assert self._post(client, auth_headers, amount=100.0).status_code == 200
+        assert self._post(client, auth_headers, amount=100.0).status_code == 200
+        assert len(payment_order["order"]["payments"]) == 2
+        assert all(
+            p.get("idempotency_key") is None
+            for p in payment_order["order"]["payments"]
+        )
+
+
+class TestPOS14ExpenseIdempotencyBehaviour:
+    """POST the same expense twice with one Idempotency-Key -> one expense row."""
+
+    def _post(self, client, auth_headers, key=None, amount=250.0):
+        headers = dict(auth_headers)
+        if key is not None:
+            headers["Idempotency-Key"] = key
+        return client.post(
+            "/api/v1/expenses",
+            headers=headers,
+            json={
+                "category": "utilities",
+                "amount": amount,
+                "description": "Electricity bill",
+                "expense_date": "2026-06-10",
+                "payment_mode": "CASH",
+            },
+        )
+
+    def test_duplicate_post_records_exactly_one_expense(
+        self, client, auth_headers, expense_env
+    ):
+        first = self._post(client, auth_headers, key="exp-key-abc")
+        assert first.status_code == 201, first.text
+        second = self._post(client, auth_headers, key="exp-key-abc")
+        assert second.status_code in (200, 201), second.text
+
+        rows = expense_env["expenses"].docs
+        assert len(rows) == 1, (
+            f"a replayed Idempotency-Key must not file a second claim; "
+            f"stored {len(rows)} expense rows"
+        )
+        assert second.json()["expense_id"] == first.json()["expense_id"]
+        assert second.json().get("_idempotent_replay") is True
+
+    def test_key_is_stamped_on_the_stored_expense(
+        self, client, auth_headers, expense_env
+    ):
+        assert self._post(client, auth_headers, key="exp-key-stamp").status_code == 201
+        assert expense_env["expenses"].docs[0].get("idempotency_key") == "exp-key-stamp"
+
+    def test_distinct_keys_still_record_two_expenses(
+        self, client, auth_headers, expense_env
+    ):
+        assert self._post(client, auth_headers, key="e1").status_code == 201
+        assert self._post(client, auth_headers, key="e2").status_code == 201
+        assert len(expense_env["expenses"].docs) == 2
+
+
+class TestPOS14ReturnIdempotencyBehaviour:
+    """A replayed return must not issue a second refund."""
+
+    def test_replay_returns_the_original_and_writes_nothing(
+        self, client, auth_headers, returns_collection
+    ):
+        """BEHAVIOURAL: seed a return carrying the key, then POST a create with
+        the same Idempotency-Key. The real guard at the top of create_return
+        must short-circuit: original id back, no second row written.
+
+        This is the half of the contract that actually prevents a double
+        refund. (The stamping half is covered by
+        ``test_return_doc_persists_idempotency_key`` below, which remains
+        textual -- see the comment there.)
+        """
+        returns_collection.insert_one(
+            {
+                "return_id": "RET-SEED-1",
+                "idempotency_key": "ret-key-abc",
+                "return_type": "RETURN",
+                "net_refund": 750.0,
+                "refund_amount": 750.0,
+            }
+        )
+        resp = client.post(
+            "/api/v1/returns",
+            headers={**auth_headers, "Idempotency-Key": "ret-key-abc"},
+            json={
+                # A deliberately unresolvable order: if the guard did NOT
+                # short-circuit, this request could not possibly succeed, so a
+                # 201 carrying the seeded return_id can only come from the
+                # idempotent replay path.
+                "order_id": "ord-does-not-exist",
+                "return_type": "RETURN",
+                "items": [
+                    {"product_id": "p1", "return_qty": 1, "unit_price": 500.0}
+                ],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        payload = resp.json()
+        assert payload.get("_idempotent_replay") is True, payload
+        assert payload["return_id"] == "RET-SEED-1"
+        assert payload["net_refund"] == 750.0
+        assert len(returns_collection.docs) == 1, (
+            "the replay must not write a second return row"
         )
 
     def test_return_doc_persists_idempotency_key(self):
-        """create_return stamps idempotency_key on the return doc."""
-        import inspect as _inspect
-        from api.routers.returns import create_return
+        """STILL TEXTUAL -- justified, and now guarded.
 
-        src = _inspect.getsource(create_return)
+        The complementary half of the contract (create_return STAMPS the key on
+        the row it writes) is not reachable DB-free: the write happens ~500
+        lines into a path that resolves the order, recomputes per-line GST,
+        restocks units and mints a credit note, and stubbing all of that would
+        turn the test into mock theatre that proves less than this does. The
+        stamp IS covered behaviourally on CI, where the returns E2E tests run
+        against a real MongoDB.
+
+        Meanwhile ``verified_source`` makes this check fail LOUDLY rather than
+        silently degrade if getsource ever hands back another function's body.
+        """
+        from api.routers.returns import create_return
+        from source_guard import verified_source
+
+        src = verified_source(create_return, min_lines=50)
         assert '"idempotency_key"' in src or "'idempotency_key'" in src, (
             "create_return must persist idempotency_key on the return doc"
-        )
-
-    def test_expense_doc_persists_idempotency_key(self):
-        """create_expense stamps idempotency_key on the expense doc."""
-        import inspect as _inspect
-        from api.routers.expenses import create_expense
-
-        src = _inspect.getsource(create_expense)
-        assert '"idempotency_key"' in src or "'idempotency_key'" in src, (
-            "create_expense must persist idempotency_key on the expense doc"
         )
