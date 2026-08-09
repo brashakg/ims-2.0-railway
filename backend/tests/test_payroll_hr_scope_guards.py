@@ -359,10 +359,18 @@ def test_salary_gate_is_deliberately_stricter_than_the_rbac_policy_rows():
     ):
         policy = rbac_policy.policy_for("GET", path)
         assert policy is not None, f"{path} must stay catalogued"
+        # ADMIN/SUPERADMIN must stay admitted by the middleware, or the only
+        # roles that may read would be blocked one layer earlier.
         assert "ADMIN" in policy["allowed"]
         assert rbac_policy.check_access("GET", path, ["SUPERADMIN"])
+        # The manager tier is still admitted by the policy AND by the router
+        # mount -- and is then refused by the handler. That layering is the
+        # deliberate part: if someone "aligns" the policy rows to the handler
+        # later, this assertion is where they will notice they are changing the
+        # middleware's behaviour too.
         for role in NON_ADMIN_PAY_ROLES:
-            assert role in policy["allowed"] or role == "AREA_MANAGER"
+            assert role in policy["allowed"], f"{role} missing from {path} policy row"
+            assert role in _FINANCE_ROLES
 
 
 def test_salary_and_commission_rules_are_separate_constants():
