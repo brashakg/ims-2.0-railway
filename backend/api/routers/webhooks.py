@@ -26,9 +26,11 @@ Fail-soft contract:
 - Bad signature → 401 + `{"detail":"invalid signature"}`. Vendors that
   re-attempt on 401 will be silently swallowed but the legitimate
   delivery is rejected so a leaked URL can't be abused.
-- Replayed delivery (same vendor event id already ingested) → 200 with
-  `{"status":"duplicate"}` and NO re-dispatch. Webhooks must 2xx or the
-  vendor retries forever; the original inbox row is the durable record.
+- Replayed delivery (same vendor event id, or the same signed bytes,
+  already ingested) → 200 with `{"status":"duplicate"}` and NO re-dispatch.
+  Webhooks must 2xx or the vendor retries forever; the original inbox row is
+  the durable record. This is ALSO how a vendor's retry of a delivery we
+  already stored is handled — it is acked, never double-booked.
 - Persist failure (inbox collection/DB unavailable, or a non-duplicate insert
   error) → 503. We must NEVER ack-without-persist: a 2xx tells the vendor the
   delivery is permanently handled, so Shopify/Razorpay/Shiprocket never resend
@@ -51,6 +53,8 @@ The inbox doc shape:
       "processed": false,
       "processed_at": None,
       "skipped_reason": None | str,
+      "event_id": None | str,          # vendor delivery id header, if any
+      "body_fingerprint": "sha256:..." # content-bound replay key
     }
 
 NEXUS subscribes to `webhook.received` and reads the doc by `webhook_id`
@@ -118,6 +122,9 @@ _KEEP_HEADERS = frozenset(
         "x-shopify-topic",
         "x-shopify-shop-domain",
         "x-shopify-webhook-id",
+        # Delivery clock — the ONLY timestamp the freshness check may use.
+        # Kept on the row so an operator can audit a staleness decision.
+        "x-shopify-triggered-at",
         "x-shiprocket-signature",
         "x-shiprocket-event",
     }
@@ -211,22 +218,45 @@ def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:
 
 
 # ============================================================================
-# Event-id replay dedupe
+# Replay dedupe — two keys, both backed by unique partial indexes
 # ============================================================================
-# Vendor delivery-id headers — when present we dedupe on them so a replayed,
-# correctly-signed envelope inside the timestamp window (webhook_verify.
-# is_replay allows ~5 min) can't be re-ingested as a second inbox row and
-# re-dispatched (the Razorpay reconcile hook reads the most recent unprocessed
-# inbox row, so replay duplicates would feed payment reconciliation).
-# Shiprocket sends no delivery-id header (x-shiprocket-event is the event
-# TYPE, shared by many deliveries) so it keeps timestamp-window-only cover —
-# same as today. This is receiver-level and additive: shopify_ingest keeps its
-# own order-id + webhook-id idempotency layers untouched.
+# 1. VENDOR DELIVERY ID (`_EVENT_ID_HEADERS`). Stable across a vendor's own
+#    retries of the same delivery, so it is what makes a retry idempotent:
+#    retry -> 200 duplicate, no second inbox row, no second dispatch, no
+#    double-booked order/GST invoice. Shiprocket sends no delivery-id header
+#    (x-shiprocket-event is the event TYPE, shared by many deliveries).
+#
+# 2. BODY FINGERPRINT (`webhook_verify.body_fingerprint`). SHA-256 over the
+#    exact bytes the HMAC signed, scoped by vendor + event-type header. This
+#    is the load-bearing anti-replay control, because unlike the id header it
+#    is INSIDE the signature's coverage: an attacker replaying a captured
+#    delivery cannot alter one byte without invalidating the HMAC, so the
+#    fingerprint is guaranteed to match an existing row and be rejected —
+#    even if they rotate X-Shopify-Webhook-Id to a fresh value, and
+#    regardless of how old the capture is. It also covers the vendors that
+#    send no delivery id at all (Shiprocket), which previously had NO replay
+#    cover beyond a timestamp window that never fired.
+#
+# Both are receiver-level and additive: shopify_ingest keeps its own
+# order-id + webhook-id idempotency layers untouched.
+#
+# Retention: the inbox TTL (30 days on received_at) is the dedupe window.
+# The delivery staleness cap (7 days, see webhook_verify) is deliberately
+# shorter, so a captured delivery cannot outlive its dedupe row and become
+# re-ingestible.
 # ============================================================================
 
 _EVENT_ID_HEADERS = {
     "razorpay": "x-razorpay-event-id",
     "shopify": "x-shopify-webhook-id",
+}
+
+# Vendor event-TYPE headers. Used only to scope the body fingerprint so that
+# two different topics carrying a byte-identical body are not collapsed into
+# one dedupe key (e.g. Shopify orders/paid vs orders/updated).
+_EVENT_TYPE_HEADERS = {
+    "shopify": "x-shopify-topic",
+    "shiprocket": "x-shiprocket-event",
 }
 
 
@@ -325,6 +355,22 @@ def _get_inbox_collection():
             )
         except Exception:
             pass
+        # Content-bound replay dedupe — UNIQUE partial index on
+        # (vendor, body_fingerprint). The fingerprint hashes the exact bytes
+        # the HMAC signed, so a replayed delivery physically cannot be
+        # double-inserted even if the attacker rewrites every header, and
+        # even under a multi-worker race. PARTIAL so pre-existing rows
+        # (which carry no fingerprint) are untouched and the index builds
+        # without a backfill.
+        try:
+            coll.create_index(
+                [("vendor", 1), ("body_fingerprint", 1)],
+                unique=True,
+                partialFilterExpression={"body_fingerprint": {"$type": "string"}},
+                name="uniq_webhook_body_fingerprint",
+            )
+        except Exception:
+            pass
         return coll
     except Exception as e:
         logger.warning(f"[WEBHOOKS] webhook_inbox collection unavailable: {e}")
@@ -392,10 +438,11 @@ async def _ingest(
       2. Look up secret. Missing → 200 skipped (vendor must not retry).
       3. Verify signature. Bad → 401.
       4. Parse JSON.
-      5. Replay-check via payload['event_timestamp'] (best-effort).
-      6. Event-id dedupe (vendors that send a delivery-id header).
+      5. Staleness cap on the DELIVERY's own timestamp (never on a business
+         object's created_at). No delivery clock → no cap, delivery accepted.
+      6. Replay dedupe on the vendor delivery id AND on the body fingerprint.
          Already ingested → 200 duplicate, no re-dispatch.
-      7. Persist inbox doc (unique partial index backstops the race).
+      7. Persist inbox doc (unique partial indexes backstop the race).
       8. Dispatch event. Returns webhook_id.
       9. 200.
     """
@@ -432,35 +479,67 @@ async def _ingest(
             "_unparseable_body": raw_body[:1024].decode("utf-8", errors="replace")
         }
 
-    # Replay window — purely best-effort. Vendors don't always set a
-    # consistent timestamp field; we look in three common spots.
-    ts = (
-        (payload.get("event_timestamp") if isinstance(payload, dict) else None)
-        or (payload.get("created_at") if isinstance(payload, dict) else None)
-        or (payload.get("timestamp") if isinstance(payload, dict) else None)
-        or ""
-    )
-    replay_flag = False
+    # ------------------------------------------------------------------
+    # Delivery staleness cap.
+    #
+    # P1 FIX: this used to read payload['event_timestamp'|'created_at'|
+    # 'timestamp'] — i.e. the BUSINESS OBJECT's clock. For a Shopify order
+    # `created_at` is when the CUSTOMER PLACED THE ORDER, so with the old
+    # 300 s window every payment update / fulfillment / cancellation /
+    # refund webhook about an order older than five minutes was classified
+    # a "replay" and silently dropped, as was every vendor retry. Orders
+    # placed more than 5 minutes before delivery were unprocessable.
+    #
+    # We now use the DELIVERY's own clock only (Shopify
+    # X-Shopify-Triggered-At; Razorpay's signed envelope epoch), with a cap
+    # far wider than any vendor's retry horizon. No delivery clock ->
+    # no cap: we ACCEPT and let dedupe carry the replay defence, because
+    # dropping a real GST-bearing order is the worse failure.
+    # ------------------------------------------------------------------
+    delivery_ts: Optional[str] = None
     try:
-        if ts:
-            replay_flag = webhook_verify.is_replay(str(ts))
-    except Exception:
-        replay_flag = False
-    if replay_flag:
-        logger.warning(
-            f"[WEBHOOKS] {vendor}: stale event timestamp {ts} — outside replay window"
+        delivery_ts = webhook_verify.extract_delivery_timestamp(
+            vendor, request.headers, payload
         )
-        return {"status": "skipped", "reason": "replay_window_exceeded"}
+    except Exception:  # noqa: BLE001
+        delivery_ts = None
+    stale_flag = False
+    try:
+        if delivery_ts:
+            stale_flag = webhook_verify.is_stale_delivery(str(delivery_ts))
+    except Exception:  # noqa: BLE001
+        stale_flag = False
+    if stale_flag:
+        # Loud, not silent: nothing legitimate can reach this branch (the cap
+        # is 7 days by default; the longest vendor retry horizon is ~48 h).
+        logger.error(
+            "[WEBHOOKS] %s: delivery timestamp %s is older than the staleness "
+            "cap (%ss) — refusing to ingest",
+            vendor,
+            delivery_ts,
+            webhook_verify.delivery_max_age_seconds(),
+        )
+        return {"status": "skipped", "reason": "delivery_too_old"}
 
-    # Event-id replay dedupe — only for vendors that send a delivery-id
-    # header, and only AFTER the signature verified (an attacker without the
-    # secret can't use forged ids to suppress legitimate deliveries). The
-    # find_one is the fast path; the unique partial index on
-    # (vendor, event_id) is the hard backstop under a multi-worker race.
+    # Replay dedupe keys, computed only AFTER the signature verified (an
+    # attacker without the secret can't use forged keys to suppress
+    # legitimate deliveries).
+    #   - event_id: the vendor's delivery id header, stable across the
+    #     vendor's own retries. Absent for Shiprocket.
+    #   - fingerprint: SHA-256 over the exact signed bytes — always present,
+    #     and unforgeable, so it is the control that actually holds.
+    # The find_one calls are the fast path; the unique partial indexes are
+    # the hard backstop under a multi-worker race.
     event_id_header = _EVENT_ID_HEADERS.get(vendor)
     event_id: Optional[str] = None
     if event_id_header:
         event_id = request.headers.get(event_id_header) or None
+
+    event_type_header = _EVENT_TYPE_HEADERS.get(vendor)
+    event_type = (
+        (request.headers.get(event_type_header) or "") if event_type_header else ""
+    )
+    fingerprint = webhook_verify.body_fingerprint(vendor, raw_body, scope=event_type)
 
     coll = _get_inbox_collection()
 
@@ -498,6 +577,30 @@ async def _ingest(
             )
             return {"status": "duplicate", "vendor": vendor, "event_id": event_id}
 
+    # Content-bound dedupe. Catches a verbatim replay whose delivery-id
+    # header was rotated, and gives Shiprocket (no delivery id at all) real
+    # replay cover for the first time.
+    try:
+        existing_body = coll.find_one(
+            {"vendor": vendor, "body_fingerprint": fingerprint}
+        )
+    except Exception:  # noqa: BLE001
+        existing_body = None
+    if existing_body is not None:
+        logger.warning(
+            "[WEBHOOKS] %s: duplicate delivery body fingerprint=%s ignored "
+            "(already ingested as webhook_id=%s)",
+            vendor,
+            fingerprint,
+            existing_body.get("webhook_id"),
+        )
+        return {
+            "status": "duplicate",
+            "vendor": vendor,
+            "event_id": event_id,
+            "reason": "duplicate_body",
+        }
+
     webhook_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     inbox_doc = {
@@ -511,20 +614,26 @@ async def _ingest(
         "processed_at": None,
         "skipped_reason": None,
         "event_id": event_id,
+        "body_fingerprint": fingerprint,
     }
 
     try:
         coll.insert_one(dict(inbox_doc))
     except Exception as e:
-        if event_id and _is_duplicate_key_error(e):
+        # A duplicate-key error means a concurrent worker already persisted
+        # this delivery — under EITHER unique index (event_id or
+        # body_fingerprint). Either way the winner's row is the durable
+        # record, so ACK and do not re-dispatch.
+        if _is_duplicate_key_error(e):
             # Race backstop: a concurrent worker ingested the same
             # delivery between our pre-check and this insert. ACK it and
             # do NOT re-dispatch — the winner's row is the record.
             logger.warning(
-                "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
-                "(unique index race backstop)",
+                "[WEBHOOKS] %s: duplicate delivery event_id=%s fingerprint=%s "
+                "ignored (unique index race backstop)",
                 vendor,
                 event_id,
+                fingerprint,
             )
             return {
                 "status": "duplicate",

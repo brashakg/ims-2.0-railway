@@ -17,9 +17,12 @@ Design contract:
 - Any exception (malformed header, garbage secret, encoding error) is
   swallowed and we return False. The receiver never receives a 500 from
   the verifier itself; bad input is "invalid signature".
-- The only env-aware function is `is_replay`, which reads
-  `WEBHOOK_REPLAY_WINDOW_SECONDS` (default 300) at call time. It's
-  separate so the verifiers themselves stay fully pure.
+- The env-aware functions are `is_replay` / `is_stale_delivery`, which read
+  `WEBHOOK_REPLAY_WINDOW_SECONDS` / `WEBHOOK_DELIVERY_MAX_AGE_SECONDS` at
+  call time. They're separate so the verifiers themselves stay fully pure.
+
+Replay protection lives at the bottom of this module. Read the block
+comment there before changing anything in it.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import hashlib
 import hmac
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 # ============================================================================
@@ -151,6 +154,68 @@ def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
 # ============================================================================
 # Replay protection
 # ============================================================================
+#
+# WHY THIS SECTION LOOKS THE WAY IT DOES (P1 fix, 2026-08-09)
+# ------------------------------------------------------------------------
+# The receiver used to compute its freshness check from the *business
+# object's* timestamp -- `payload["created_at"]`, which for a Shopify order
+# is WHEN THE CUSTOMER PLACED THE ORDER. Paired with a 300 s window that
+# meant:
+#   * every later-lifecycle webhook about an older order (payment update,
+#     fulfillment, cancellation, refund) was classified "replay" and
+#     silently dropped -- losing order-status changes and GST-bearing
+#     events;
+#   * every vendor RETRY of a transient failure was dropped the same way
+#     (Shopify retries with backoff for ~48 h, Razorpay for ~24 h);
+#   * and it did NOT stop the attack it existed to stop -- replaying a
+#     freshly captured new-order webhook sails through, because a new
+#     order's created_at is by definition fresh.
+#
+# So the freshness check MUST be keyed on the DELIVERY's own clock, never
+# on a business field. Two consequences shape the API below:
+#
+#   1. Delivery timestamps arrive in vendor HEADERS (Shopify:
+#      X-Shopify-Triggered-At), and headers sit OUTSIDE the HMAC -- an
+#      attacker replaying a captured body can rewrite them freely.
+#      A header-derived window is therefore a STALENESS CAP ONLY, never
+#      the load-bearing control, and its window must be wider than every
+#      vendor's retry horizon (default 7 days) so it can never eat a
+#      legitimate retry. Razorpay is the exception: its event-emission
+#      time rides INSIDE the signed envelope (top-level integer
+#      `created_at` epoch), so for Razorpay the cap is signature-bound.
+#
+#   2. The load-bearing anti-replay is CONTENT-BOUND dedupe.
+#      `body_fingerprint()` hashes the exact bytes the HMAC covers, so a
+#      replayed delivery is *cryptographically guaranteed* to produce the
+#      same fingerprint -- the attacker cannot change one byte without
+#      invalidating the signature. The receiver stores it and backs it
+#      with a unique index, so replays are rejected regardless of age and
+#      regardless of any header the attacker rewrites.
+#
+# Do not "simplify" this back into a single narrow window over a payload
+# field. That is the bug.
+# ============================================================================
+
+
+# Vendor -> header carrying the DELIVERY/trigger timestamp (lower-cased).
+# Only headers the vendor actually documents belong here; guessing a header
+# name would silently disable the staleness cap.
+DELIVERY_TIMESTAMP_HEADERS = {
+    "shopify": ("x-shopify-triggered-at",),
+    # Razorpay sends no delivery-time header; its event time is in the signed
+    # envelope instead (handled in extract_delivery_timestamp).
+    "razorpay": (),
+    # Shiprocket documents neither a delivery id nor a delivery timestamp;
+    # it relies entirely on body-fingerprint dedupe.
+    "shiprocket": (),
+}
+
+# Staleness cap default: 7 days. Deliberately far beyond every vendor's
+# retry horizon (Shopify ~48 h, Razorpay ~24 h) so a legitimate retry can
+# NEVER trip it, while still being far below the 30-day TTL on the
+# receiver's dedupe store -- i.e. no delivery can outlive the dedupe
+# records and become re-ingestible.
+_DELIVERY_MAX_AGE_DEFAULT = 7 * 24 * 3600
 
 
 def _replay_window_seconds() -> int:
@@ -163,12 +228,47 @@ def _replay_window_seconds() -> int:
         return 300
 
 
+def delivery_max_age_seconds() -> int:
+    """Staleness cap for a webhook DELIVERY timestamp, read at call time.
+
+    Env: `WEBHOOK_DELIVERY_MAX_AGE_SECONDS` (default 604800 = 7 days).
+    Garbage / non-positive values fall back to the default rather than
+    producing a zero-width window that would reject everything.
+    """
+    raw = os.getenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "")
+    if not raw:
+        return _DELIVERY_MAX_AGE_DEFAULT
+    try:
+        n = int(raw)
+        return n if n > 0 else _DELIVERY_MAX_AGE_DEFAULT
+    except (TypeError, ValueError):
+        return _DELIVERY_MAX_AGE_DEFAULT
+
+
 def _parse_iso(timestamp_str: str) -> Optional[datetime]:
-    """Tolerant ISO-8601 parse. Accepts trailing Z. Returns None on garbage."""
-    if not timestamp_str:
+    """Tolerant timestamp parse. Accepts ISO-8601 (incl. trailing Z) and
+    unix epoch in seconds (10 digits) or milliseconds (13 digits), as an int
+    or a numeric string. Returns None on garbage.
+
+    Epoch support exists because Razorpay stamps its signed envelope with an
+    integer `created_at`; without it that timestamp parsed as garbage and the
+    staleness cap silently did nothing for Razorpay.
+    """
+    if timestamp_str is None or timestamp_str == "":
         return None
     try:
+        if isinstance(timestamp_str, bool):
+            return None
+        if isinstance(timestamp_str, (int, float)):
+            return _parse_epoch_number(float(timestamp_str))
         s = str(timestamp_str).strip()
+        if not s:
+            return None
+        # Unix epoch: only unambiguous widths (10 = seconds, 13 = millis).
+        # Narrower all-digit strings such as "20260809" are ISO basic dates
+        # and must keep going through fromisoformat.
+        if s.isdigit() and len(s) in (10, 13):
+            return _parse_epoch_number(float(s))
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
@@ -176,35 +276,163 @@ def _parse_iso(timestamp_str: str) -> Optional[datetime]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
+
+
+def _parse_epoch_number(value: float) -> Optional[datetime]:
+    """Epoch seconds or milliseconds -> aware UTC datetime. None on garbage."""
+    try:
+        # >= 1e11 seconds would be the year 5138; treat that magnitude as ms.
+        seconds = value / 1000.0 if abs(value) >= 1e11 else value
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _lower_headers(headers: Optional[Mapping[str, str]]) -> dict:
+    """Lower-cased copy of a header mapping. Never raises."""
+    out: dict = {}
+    if not headers:
+        return out
+    try:
+        items = headers.items()
+    except AttributeError:
+        return out
+    for k, v in items:
+        try:
+            out[str(k).lower()] = v
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def extract_delivery_timestamp(
+    vendor: str,
+    headers: Optional[Mapping[str, str]] = None,
+    payload: Optional[Any] = None,
+) -> Optional[str]:
+    """Return the DELIVERY's own timestamp for `vendor`, or None.
+
+    NEVER returns a business-object timestamp. In particular it does not
+    look at a Shopify order's `created_at` / `updated_at`, which is what the
+    original replay check used and why every lifecycle event was dropped.
+
+    Sources, in order:
+      - the vendor's documented delivery/trigger header (Shopify:
+        `X-Shopify-Triggered-At`);
+      - Razorpay only: the top-level integer `created_at` on the *event
+        envelope*. That field is the event-emission time and it is inside
+        the HMAC-signed body, so it cannot be forged. The payment's own
+        created_at lives further down at payload.payment.entity.created_at
+        and is deliberately NOT consulted.
+
+    Returns None when the vendor sends no delivery clock at all
+    (Shiprocket, or an older Shopify payload without the header). None means
+    "no staleness cap available" -- the caller must fall through to
+    fingerprint dedupe and accept the delivery, never drop it.
+    """
+    v = (vendor or "").lower()
+    hdrs = _lower_headers(headers)
+    for name in DELIVERY_TIMESTAMP_HEADERS.get(v, ()):
+        value = hdrs.get(name)
+        if value:
+            return str(value)
+
+    if v == "razorpay" and isinstance(payload, dict):
+        # Only accept a numeric epoch. A Razorpay event envelope always
+        # carries `created_at` as an integer; anything else is not the
+        # envelope we think it is, and we refuse to guess.
+        created = payload.get("created_at")
+        if isinstance(created, bool):
+            return None
+        if isinstance(created, (int, float)):
+            return str(int(created))
+        if isinstance(created, str) and created.strip().isdigit():
+            return created.strip()
+    return None
+
+
+def body_fingerprint(vendor: str, raw_body: bytes, scope: str = "") -> str:
+    """Content-bound dedupe key over the EXACT bytes the HMAC signed.
+
+    This is the load-bearing anti-replay control: a replayed delivery is by
+    definition the same signed bytes, so it produces the same fingerprint
+    and the receiver's unique index rejects it -- for as long as the dedupe
+    store retains the row, and independently of any attacker-mutable header.
+
+    `scope` should be the vendor's event-TYPE discriminator (Shopify
+    `X-Shopify-Topic`, Shiprocket `X-Shiprocket-Event`) so that two
+    genuinely different topics that happen to carry a byte-identical body
+    are not collapsed into one. Vendor is always mixed in so two vendors
+    can never collide.
+
+    Returns "sha256:<hex>" (the prefix keeps synthetic keys visually
+    distinct from vendor-issued delivery ids in the inbox).
+    """
+    h = hashlib.sha256()
+    h.update(f"{(vendor or '').lower()}\n{scope or ''}\n".encode("utf-8"))
+    if isinstance(raw_body, (bytes, bytearray)):
+        h.update(bytes(raw_body))
+    elif raw_body:
+        h.update(str(raw_body).encode("utf-8", errors="replace"))
+    return "sha256:" + h.hexdigest()
+
+
+def _is_older_than(timestamp_str: str, window: int) -> bool:
+    parsed = _parse_iso(timestamp_str)
+    if parsed is None:
+        return False
+    age = (datetime.now(timezone.utc) - parsed).total_seconds()
+    return age > window
+
+
+def is_stale_delivery(
+    timestamp_str: str, window_seconds: Optional[int] = None
+) -> bool:
+    """True when a webhook DELIVERY timestamp is older than the staleness cap.
+
+    Call this with the value from `extract_delivery_timestamp` -- i.e. the
+    delivery's own clock. Never call it with a business object's created_at
+    (that was the bug this module now guards against).
+
+    Fail-safe: an empty, missing, or unparseable timestamp returns False
+    ("not stale"), so a delivery is never dropped just because we could not
+    read a clock. Genuine replay cover comes from fingerprint/id dedupe.
+    """
+    if not timestamp_str:
+        return False
+    window = (
+        window_seconds
+        if (window_seconds and window_seconds > 0)
+        else delivery_max_age_seconds()
+    )
+    return _is_older_than(timestamp_str, window)
 
 
 def is_replay(timestamp_str: str, window_seconds: Optional[int] = None) -> bool:
     """
-    Best-effort replay detector. Returns True when the supplied timestamp
-    is older than `window_seconds` (default 300 / 5 minutes) from now.
+    DEPRECATED for receiver use -- kept as a pure predicate + for callers
+    that genuinely have a delivery clock and want the narrow (300 s) window.
 
-    Designed to be called AFTER signature verification — its job is to
-    reject correctly-signed but stale envelopes that an attacker might
-    capture-and-resend. A False result simply means "not too old to
-    process"; receivers can decide what to do with True.
+    Returns True when the supplied timestamp is older than `window_seconds`
+    (default `WEBHOOK_REPLAY_WINDOW_SECONDS`, 300) from now.
+
+    DO NOT feed this a business object's timestamp. Passing a Shopify
+    order's `created_at` here is what made every payment/fulfillment/
+    cancellation/refund webhook about an order older than 5 minutes look
+    like a replay and get silently dropped. Receivers must use
+    `extract_delivery_timestamp` + `is_stale_delivery` instead.
 
     Tolerant of:
-      - missing / empty timestamp (returns False — caller may choose to
-        log "no timestamp, can't replay-check")
+      - missing / empty timestamp (returns False)
       - garbage timestamp (returns False on parse fail)
       - naive timestamps (assumed UTC)
     """
     if not timestamp_str:
         return False
     window = window_seconds if (window_seconds and window_seconds > 0) else _replay_window_seconds()
-    parsed = _parse_iso(timestamp_str)
-    if parsed is None:
-        return False
-    now = datetime.now(timezone.utc)
-    age = (now - parsed).total_seconds()
-    return age > window
+    return _is_older_than(timestamp_str, window)
 
 
 # Public surface
@@ -214,4 +442,9 @@ __all__ = [
     "verify_shiprocket",
     "verify_msg91",
     "is_replay",
+    "is_stale_delivery",
+    "extract_delivery_timestamp",
+    "body_fingerprint",
+    "delivery_max_age_seconds",
+    "DELIVERY_TIMESTAMP_HEADERS",
 ]
