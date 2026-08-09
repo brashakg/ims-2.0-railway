@@ -418,6 +418,204 @@ def test_online_order_return_restocks_to_fulfilment_store_not_online(monkeypatch
     assert doc["store_id"] == ONLINE_STORE
 
 
+# ---------------------------------------------------------------------------
+# MUST-FIX 1 (chair-reproduced regression): the redirected path must NEVER
+# touch a unit belonging to a DIFFERENT order.
+# ---------------------------------------------------------------------------
+
+
+def test_redirected_return_never_hijacks_another_orders_sold_unit(monkeypatch):
+    """THE CHAIR'S STK-WALKIN SCENARIO.
+
+    A historical online import carries no fulfilment stamp, so the return is
+    redirected to the PROCESSING shop. That shop happens to hold a SOLD unit of
+    the same product -- a genuine walk-in sale to a different customer, who is
+    wearing the frame. _reactivate_original_unit's order-agnostic fallback would
+    grab it: flip it to AVAILABLE, erase order_id / sold_to_customer_id, and
+    leave the frame that actually came back with no stock row at all.
+
+    The redirected path must use the ORDER-SCOPED lookup only and MINT when it
+    misses."""
+    ctx = _build_ctx(
+        monkeypatch,
+        order=dict(_ONLINE_ORDER),  # historical import: no fulfilment stamp
+        stock_units=[
+            {
+                "stock_id": "STK-WALKIN",
+                "product_id": "PRD-1",
+                "store_id": PHYSICAL_COUNTER_STORE,
+                "status": "SOLD",
+                "order_id": "ORD-WALKIN-9",
+                "sold_to_customer_id": "CUST-999",
+                "serial_number": "SN-WALKIN",
+            }
+        ],
+        active_store=PHYSICAL_COUNTER_STORE,
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload("ORD-ONL-1", ONLINE_STORE),
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+
+    # The stranger's sale is COMPLETELY untouched.
+    walkin = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-WALKIN"][0]
+    assert walkin["status"] == "SOLD"
+    assert walkin["order_id"] == "ORD-WALKIN-9"
+    assert walkin["sold_to_customer_id"] == "CUST-999"
+    assert "returned_at" not in walkin
+
+    # The frame that actually came back IS recorded -- as a fresh unit at the
+    # physical shop (the honest record when the original row is untraceable).
+    minted = [u for u in ctx["stock_repo"].units if u["stock_id"].startswith("NEW-")]
+    assert len(minted) == 1
+    assert minted[0]["store_id"] == PHYSICAL_COUNTER_STORE
+    assert minted[0]["status"] == "AVAILABLE"
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    data = r.json()
+    assert data["restock_applied"] is True
+    assert data["restocked"][0]["minted"] == 1
+    assert data["restocked"][0]["reactivated"] == 0
+
+
+def test_redirected_return_still_reactivates_its_OWN_order_unit(monkeypatch):
+    """exact_order_only must not break the good case: when the order-scoped unit
+    IS present at the redirected shop it is reactivated, not duplicated -- even
+    with a decoy SOLD unit of the same product sitting next to it."""
+    order = dict(_ONLINE_ORDER, fulfillment_stores=[PHYSICAL_FULFILMENT_STORE])
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {
+                "stock_id": "STK-DECOY",
+                "product_id": "PRD-1",
+                "store_id": PHYSICAL_FULFILMENT_STORE,
+                "status": "SOLD",
+                "order_id": "ORD-OTHER-7",
+                "sold_to_customer_id": "CUST-777",
+            },
+            {
+                "stock_id": "STK-MINE",
+                "product_id": "PRD-1",
+                "store_id": PHYSICAL_FULFILMENT_STORE,
+                "status": "SOLD",
+                "order_id": "ORD-ONL-1",
+            },
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload("ORD-ONL-1", ONLINE_STORE),
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["restock_stock_ids"] == ["STK-MINE"]
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    assert by_id["STK-MINE"]["status"] == "AVAILABLE"
+    # The decoy from another order is untouched.
+    assert by_id["STK-DECOY"]["status"] == "SOLD"
+    assert by_id["STK-DECOY"]["order_id"] == "ORD-OTHER-7"
+
+
+def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
+    """The order-agnostic fallback stays for a PHYSICAL-store return: there the
+    store IS where the sale happened, so 'some SOLD unit of this product at this
+    shop' remains a reasonable stand-in for a lost row. Byte-unchanged."""
+    order = {
+        "order_id": "ORD-1",
+        "order_number": "INV-1001",
+        "customer_id": "CUST-1",
+        "store_id": PHYSICAL_COUNTER_STORE,
+    }
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {
+                # No order_id at all -> only the store-wide fallback can find it.
+                "stock_id": "STK-LEGACY",
+                "product_id": "PRD-1",
+                "store_id": PHYSICAL_COUNTER_STORE,
+                "status": "SOLD",
+            }
+        ],
+        active_store=PHYSICAL_COUNTER_STORE,
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload("ORD-1", PHYSICAL_COUNTER_STORE),
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["restock_stock_ids"] == ["STK-LEGACY"]
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# MUST-FIX 3: routing is per-UNIT, not per-product.
+# ---------------------------------------------------------------------------
+
+
+def test_one_line_split_across_two_shops_sends_each_unit_home(monkeypatch):
+    """_claim_units_multistore splits a SINGLE line across shops when the
+    preferred one is short. Routing at product granularity booked BOTH returned
+    units to shop A -- minting a phantom there while shop B's real unit stayed
+    SOLD forever. The per-unit queue must send one unit to each."""
+    order = dict(
+        _ONLINE_ORDER,
+        items=[
+            {"item_id": "li1", "product_id": "PRD-1", "quantity": 100,
+             "returned_qty": 0},
+        ],
+        fulfillment_stores=[PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE],
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+            {"stock_id": "STK-B", "product_id": "PRD-1",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    payload = _payload("ORD-ONL-1", ONLINE_STORE)
+    payload["items"][0]["return_qty"] = 2
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=payload,
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    # BOTH real units come home; ZERO mints, zero strandings.
+    assert by_id["STK-A"]["status"] == "AVAILABLE"
+    assert by_id["STK-B"]["status"] == "AVAILABLE"
+    assert all(not sid.startswith("NEW-") for sid in by_id)
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    data = r.json()
+    assert data["restocked"][0]["reactivated"] == 2
+    assert data["restocked"][0]["minted"] == 0
+    assert sorted(data["restocked"][0]["store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
+    # A split must NOT name one shop as "the" restock store.
+    assert data["restock_store_id"] is None
+    assert sorted(data["restock_store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
+
+
 def test_multi_store_online_order_returns_each_product_to_its_own_shop(monkeypatch):
     """shopify_ingest._claim_units_multistore can fulfil one online order from
     SEVERAL shops. Each returned product must go back to the shop its own unit
@@ -675,6 +873,196 @@ def test_in_store_mint_carries_no_redirect_stamp(monkeypatch):
 
 
 # ===========================================================================
+# 2b. THE OTHER TWO DOORS, driven end to end.
+#     MUST-FIX 2: the Shopify refund webhook is the DOMINANT automated online
+#     return door and it used to pre-resolve the store itself, which made the
+#     guard short-circuit "already physical" so the per-unit narrowing never
+#     ran. Door 2 (retry_restock) had no coverage at all.
+# ===========================================================================
+
+
+def test_webhook_door_routes_each_product_to_its_own_shop(monkeypatch):
+    """Drive services.shopify_refund._post_credit_and_restock for a two-shop
+    online order. Every unit must land at the shop it left from, nothing on the
+    online store, and the PERSISTED doc must carry the guard's answer -- not the
+    pre-guard proposal."""
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        items=[
+            {"item_id": "li1", "product_id": "PRD-1", "quantity": 1, "sku": "RB-1",
+             "unit_price": 1500, "returned_qty": 0},
+            {"item_id": "li2", "product_id": "PRD-2", "quantity": 1, "sku": "OK-2",
+             "unit_price": 2000, "returned_qty": 0},
+        ],
+        # SORTED SET -> alphabetical, NOT the shop that shipped each line. This
+        # is exactly what made the old pre-resolution pick the wrong shop.
+        fulfillment_stores=sorted([PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]),
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _WebhookDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    lines = [
+        returns_router.ReturnLine(
+            order_item_id="li1", product_id="PRD-1", sku="RB-1",
+            product_name="Ray-Ban", return_qty=1, unit_price=1500, condition="GOOD",
+        ),
+        returns_router.ReturnLine(
+            order_item_id="li2", product_id="PRD-2", sku="OK-2",
+            product_name="Oakley", return_qty=1, unit_price=2000, condition="GOOD",
+        ),
+    ]
+    # The pre-guard hint must no longer be able to name the online store.
+    assert sr._proposed_restock_store_for_order(order) != ONLINE_STORE
+
+    out = sr._post_credit_and_restock(
+        _WebhookDB(),
+        refund_id="RF-9001",
+        order=order,
+        return_lines=lines,
+        credit_note={"gross_refund": 0.0, "net_refund": 0.0, "gst_breakup": {},
+                     "lines": []},
+        restock_store=sr._proposed_restock_store_for_order(order),
+    )
+
+    # Each unit came home; nothing minted, nothing on the online store.
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    assert by_id["STK-A"]["status"] == "AVAILABLE"
+    assert by_id["STK-A"]["store_id"] == PHYSICAL_FULFILMENT_STORE
+    assert by_id["STK-B"]["status"] == "AVAILABLE"
+    assert by_id["STK-B"]["store_id"] == PHYSICAL_COUNTER_STORE
+    assert all(not sid.startswith("NEW-") for sid in by_id)
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    assert out["restock_applied"] is True
+    assert sorted(out["restock_store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
+    # The PERSISTED doc carries the guard's answer, never the online store.
+    doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-9001"][0]
+    assert doc["restock_store_id"] != ONLINE_STORE
+    assert sorted(doc["restock_store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
+    assert doc["restock_store_redirected_from"] == ONLINE_STORE
+
+
+def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monkeypatch):
+    """Historical import (no fulfilment stamp) + SYSTEM caller (no processing
+    store) + no configured fallback -> restock NOTHING, and the persisted doc
+    must not claim the units went to the online store."""
+    from api.services import shopify_refund as sr
+
+    order = dict(_ONLINE_ORDER, order_id="ORD-ONL-7")
+    ctx = _build_ctx(
+        monkeypatch, order=order, stock_units=[], active_store=PHYSICAL_COUNTER_STORE
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _WebhookDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    # The hint itself must be None now (it used to fall back to order.store_id,
+    # i.e. the stockless online bucket, and the screen rendered that).
+    assert sr._proposed_restock_store_for_order(order) is None
+
+    out = sr._post_credit_and_restock(
+        _WebhookDB(),
+        refund_id="RF-7001",
+        order=order,
+        return_lines=[
+            returns_router.ReturnLine(
+                order_item_id="li1", product_id="PRD-1", sku="RB-1",
+                product_name="Ray-Ban", return_qty=1, unit_price=1500,
+                condition="GOOD",
+            )
+        ],
+        credit_note={"gross_refund": 0.0, "net_refund": 0.0, "gst_breakup": {},
+                     "lines": []},
+        restock_store=sr._proposed_restock_store_for_order(order),
+    )
+    assert ctx["stock_repo"].units == []
+    assert out["restock_applied"] is False
+    assert out["restock_store_id"] is None
+    doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-7001"][0]
+    assert doc["restock_store_id"] is None
+    assert doc["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+
+def test_retry_restock_door_redirects_off_the_online_store(monkeypatch):
+    """Door 2: POST /returns/{id}/restock on a return doc booked to the online
+    store must land the unit at the physical fulfilment shop, not mint on the
+    online store."""
+    order = dict(_ONLINE_ORDER, fulfillment_stores=[PHYSICAL_FULFILMENT_STORE])
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-ONL-1", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    ctx["returns_coll"].insert_one(
+        {
+            "return_id": "RET-PROBE-1",
+            "order_id": "ORD-ONL-1",
+            "store_id": ONLINE_STORE,
+            "restock_applied": False,
+            "restock_stock_ids": [],
+            "items": [
+                {
+                    "order_item_id": "li1",
+                    "product_id": "PRD-1",
+                    "product_name": "Ray-Ban Aviator",
+                    "sku": "RB-1",
+                    "return_qty": 1,
+                    "unit_price": 1500,
+                    "condition": "GOOD",
+                }
+            ],
+        }
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns/RET-PROBE-1/restock",
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["restock_applied"] is True
+    assert data["restock_stock_ids"] == ["STK-ONL-1"]
+    assert data["restock_store_id"] == PHYSICAL_FULFILMENT_STORE
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+    # The retry now re-pushes the recovered count to Shopify (it did not before,
+    # leaving the frame sellable in-shop but invisible online).
+    assert ctx["writeback_calls"][-1]["store_id"] == PHYSICAL_FULFILMENT_STORE
+
+
+# ===========================================================================
 # 3. The resolver itself (also the door services/shopify_refund walks in by).
 # ===========================================================================
 
@@ -906,6 +1294,185 @@ def test_online_store_ids_falls_back_to_known_ids_when_lookup_fails():
     ids = wb._online_store_ids(_BoomDB())
     assert ONLINE_STORE in ids
     assert "WO-ONLINE-01" in ids
+
+
+# ===========================================================================
+# 5. MUST-FIX 4 -- the CLAIM path. Excluding online stores from the pooled
+#    COUNT only fixes what Shopify is TOLD; this stops IMS CONSUMING a phantom.
+# ===========================================================================
+
+
+class _FakeClaimStock:
+    """stock_units stand-in for shopify_ingest._available_stores_for_product."""
+
+    def __init__(self, units):
+        self.units = units
+
+    def aggregate(self, pipeline):
+        match = pipeline[0]["$match"]
+        counts: dict = {}
+        for u in self.units:
+            if u.get("product_id") != match.get("product_id"):
+                continue
+            if u.get("status") != match.get("status"):
+                continue
+            counts[u["store_id"]] = counts.get(u["store_id"], 0) + 1
+        rows = [{"_id": s, "n": n} for s, n in counts.items()]
+        # count desc, then store_id asc -- the real pipeline's sort.
+        rows.sort(key=lambda r: (-r["n"], r["_id"]))
+        return rows
+
+
+def _claim_db(units, stores):
+    stock = _FakeClaimStock(units)
+
+    class _DB:
+        def get_collection(self, name):
+            if name == "stock_units":
+                return stock
+            if name == "stores":
+                return _FakeColl(stores)
+            return _FakeColl()
+
+    return _DB()
+
+
+def test_online_store_is_never_a_fulfilment_candidate():
+    """A phantom AVAILABLE unit on the online store must not be claimable. Note
+    'BV-ONLINE-01' sorts AHEAD of 'BV-PUN-01' on a count tie, so without the
+    exclusion it would be tried FIRST."""
+    from api.services import shopify_ingest as si
+
+    units = [
+        {"product_id": "PRD-1", "store_id": ONLINE_STORE, "status": "AVAILABLE"},
+        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
+         "status": "AVAILABLE"},
+    ]
+    db = _claim_db(units, [{"store_id": ONLINE_STORE, "store_type": "ONLINE"}])
+    out = si._available_stores_for_product(db, "PRD-1")
+    assert ONLINE_STORE not in out
+    assert out == [PHYSICAL_COUNTER_STORE]
+
+
+def test_claim_candidates_still_list_every_physical_shop():
+    """The exclusion must not shrink the real fallback list."""
+    from api.services import shopify_ingest as si
+
+    units = [
+        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
+         "status": "AVAILABLE"},
+        {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE,
+         "status": "AVAILABLE"},
+        {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE,
+         "status": "AVAILABLE"},
+    ]
+    db = _claim_db(units, [])
+    # Most stock first.
+    assert si._available_stores_for_product(db, "PRD-1") == [
+        PHYSICAL_FULFILMENT_STORE,
+        PHYSICAL_COUNTER_STORE,
+    ]
+
+
+def test_online_preferred_store_is_skipped_and_claim_falls_through(monkeypatch):
+    """An ONLINE preferred fulfilment store must never be claimed against; the
+    claim falls through to the physical shops instead of faking a fulfilment."""
+    from api.services import shopify_ingest as si
+
+    units = [
+        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
+         "status": "AVAILABLE"},
+    ]
+    db = _claim_db(units, [{"store_id": ONLINE_STORE, "store_type": "ONLINE"}])
+    tried: list = []
+
+    def _fake_mark_units_sold(order_id, lines, store_id):
+        tried.append(store_id)
+        if store_id == PHYSICAL_COUNTER_STORE:
+            return ["STK-1"]
+        return []
+
+    import api.routers.orders as orders_mod
+
+    monkeypatch.setattr(orders_mod, "_mark_units_sold", _fake_mark_units_sold)
+
+    claimed, breakdown = si._claim_units_multistore(
+        db, "ORD-X", [{"product_id": "PRD-1", "quantity": 1}], ONLINE_STORE
+    )
+    assert ONLINE_STORE not in tried
+    assert claimed == 1
+    assert breakdown == [
+        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1}
+    ]
+
+
+def test_phantom_only_stock_now_under_claims_loudly(monkeypatch):
+    """The whole point: when the ONLY AVAILABLE unit is a phantom on the online
+    store, the claim must MISS (so the under-claim fail-loud fires) instead of
+    silently succeeding against a unit nobody has."""
+    from api.services import shopify_ingest as si
+
+    units = [{"product_id": "PRD-1", "store_id": ONLINE_STORE, "status": "AVAILABLE"}]
+    db = _claim_db(units, [{"store_id": ONLINE_STORE, "store_type": "ONLINE"}])
+
+    import api.routers.orders as orders_mod
+
+    monkeypatch.setattr(
+        orders_mod, "_mark_units_sold", lambda oid, lines, s: ["X"] if s else []
+    )
+
+    claimed, breakdown = si._claim_units_multistore(
+        db, "ORD-X", [{"product_id": "PRD-1", "quantity": 1}], ONLINE_STORE
+    )
+    assert claimed == 0  # expected 1 -> the caller records an under-claim MISS
+    assert breakdown == []
+
+
+# ===========================================================================
+# 6. MUST-FIX 6 -- a blocked restock must reach a human, not just Railway logs.
+# ===========================================================================
+
+
+def test_blocked_restock_raises_a_deduped_system_task(monkeypatch):
+    ctx = _build_ctx(
+        monkeypatch,
+        order=dict(_ONLINE_ORDER),
+        stock_units=[],
+        active_store=ONLINE_STORE,
+    )
+    raised: list = []
+    import api.services.task_triggers as tt
+
+    class _FakeTaskRepo:
+        def find_many(self, _q):
+            return []
+
+        def create(self, doc):
+            return doc
+
+    monkeypatch.setattr(
+        "api.dependencies.get_task_repository", lambda: _FakeTaskRepo(), raising=False
+    )
+    monkeypatch.setattr(
+        tt, "create_system_task", lambda repo, **kw: raised.append(kw) or kw
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload("ORD-ONL-1", ONLINE_STORE),
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["restock_applied"] is False
+    assert len(raised) == 1
+    task = raised[0]
+    assert task["priority"] == "P1"
+    assert task["dedupe_ref"].startswith("return_restock_blocked:")
+    assert "RB-1" in task["description"]
+    # The intent row carries the SAME keys as an applied row, so a UI reading
+    # row["store_id"] does not blow up on exactly the failure path.
+    doc = ctx["returns_coll"].docs[0]
+    assert doc["restocked"][0]["store_id"] is None
+    assert doc["restocked"][0]["store_ids"] == []
 
 
 def test_explicit_store_scope_is_unchanged():

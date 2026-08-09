@@ -766,6 +766,7 @@ def _reactivate_original_unit(
     store_id: Optional[str],
     order_id: Optional[str],
     used_ids: set,
+    exact_order_only: bool = False,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
@@ -774,6 +775,18 @@ def _reactivate_original_unit(
       1. a unit for (product_id, store_id) tied to THIS order_id with status
          SOLD - i.e. the exact unit that was sold on this order;
       2. any SOLD unit for (product_id, store_id).
+
+    ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
+    the store the sale was booked against -- i.e. the F9 online-order redirect.
+    Step 2 is only safe when the caller's store IS the store the sale happened
+    at (an ordinary counter return): there, "some SOLD unit of this product at
+    this shop" is a reasonable stand-in for a lost row. On the redirected path
+    it is not: the sale was booked against the ONLINE store, so step 1 misses
+    for every historical import, and step 2 would then grab an UNRELATED
+    walk-in customer's SOLD unit -- flipping a frame that is on somebody's face
+    to AVAILABLE, erasing that customer's sale lineage, and still leaving the
+    frame that actually came back with no stock row. The caller mints instead,
+    which is the honest record for goods whose original row is untraceable.
 
     IMPORTANT: only status=="SOLD" units are eligible. Earlier code used
     `$ne: AVAILABLE`, which would happily resurrect DAMAGED / SCRAPPED /
@@ -798,7 +811,7 @@ def _reactivate_original_unit(
             q["order_id"] = order_id
             q.update(sold_only)
             candidates = stock_repo.find_many(q) or []
-        if not candidates:
+        if not candidates and not exact_order_only:
             q = dict(base)
             q.update(sold_only)
             candidates = stock_repo.find_many(q) or []
@@ -1035,9 +1048,12 @@ def _resolve_restock_store(
          fulfilment can span shops). Restocking here also lets
          _reactivate_original_unit find and flip the EXACT unit that left,
          instead of minting a duplicate.
-      2. the store PROCESSING the return (the operator's active store) -- the
-         counter the goods were physically handed back at. Absent on the
-         webhook path (services/shopify_refund runs as SYSTEM).
+      2. ``processing_store_id`` -- the caller-supplied physical fallback. On
+         the counter door that is the operator's active store (where the goods
+         were physically handed back); on the Shopify-refund door it is the
+         store the stored review row proposed to the accountant. Either way it
+         is only consulted when the order carries no usable fulfilment stamp,
+         and it is still rejected if it is itself an ONLINE store.
       3. ONLINE_FULFILLMENT_STORE_ID -- the configured default physical shop.
     Any candidate that is itself an ONLINE store is skipped at every step.
     """
@@ -1073,9 +1089,50 @@ def _resolve_restock_store(
     }
 
 
+def _fulfilment_unit_queue(
+    db, order: Optional[Dict[str, Any]], product_id: Optional[str]
+) -> List[str]:
+    """ONE physical store id PER UNIT this product was actually shipped from,
+    in breakdown order, honouring each row's ``qty``.
+
+    `_claim_units_multistore` splits a SINGLE order line across shops whenever
+    the preferred shop is short (fallback is ON by default), stamping one
+    `fulfillment_breakdown` row per (product, store) with its qty. Routing at
+    product granularity would send BOTH returned units of a 2-way split back to
+    one shop -- minting a phantom there while the other shop's real unit stayed
+    SOLD forever. Expanding qty into a per-unit queue mirrors how the units were
+    originally claimed, so each one goes home. Online stores are dropped.
+    """
+    out: List[str] = []
+    breakdown = (order or {}).get("fulfillment_breakdown")
+    if not isinstance(breakdown, list) or not product_id:
+        return out
+    for row in breakdown:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("product_id") or "") != str(product_id):
+            continue
+        sid = str(row.get("store_id") or "").strip()
+        if not sid or is_online_store(db, sid):
+            continue
+        # A breakdown row with no qty still means at least one unit was claimed
+        # there; an explicit 0 means none were.
+        raw_qty = row.get("qty", 1)
+        try:
+            qty = int(raw_qty)
+        except (TypeError, ValueError):
+            qty = 1
+        out.extend([sid] * max(0, qty))
+    return out
+
+
 def _restock_intent_rows(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Per-product summary rows for a restock that recorded INTENT but applied
-    nothing (no stock repo, or no physical store to restock to)."""
+    nothing (no stock repo, or no physical store to restock to).
+
+    Carries the same keys as an APPLIED row (including ``store_id``, None here)
+    so a consumer reading row["store_id"] does not blow up on exactly the
+    failure path an operator is looking at."""
     per_line: Dict[str, Dict[str, Any]] = {}
     for u in units:
         pid = u.get("product_id")
@@ -1087,10 +1144,70 @@ def _restock_intent_rows(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "product_name": u.get("product_name", ""),
                 "quantity": 0,
                 "applied": False,
+                "store_id": None,
+                "store_ids": [],
             },
         )
         row["quantity"] += 1
     return list(per_line.values())
+
+
+def _raise_restock_blocked_task(
+    return_id: str,
+    order_id: Optional[str],
+    store_id: Optional[str],
+    units: List[Dict[str, Any]],
+    processing_store_id: Optional[str] = None,
+) -> None:
+    """Put a BLOCKED restock in front of a human.
+
+    Without this the fail-loud branch is one Railway log line while real goods
+    sit on the counter with no stock row -- developer-only recovery on a live
+    system whose owner is not a developer. Deduped on the return id so a retry
+    never files a second task. Fully fail-soft: the task is a side channel and
+    must never break the return."""
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        lines = ", ".join(
+            sorted(
+                {
+                    f"{u.get('sku') or u.get('product_id')}"
+                    for u in units
+                    if u.get("sku") or u.get("product_id")
+                }
+            )
+        )
+        create_system_task(
+            get_task_repository(),
+            title=f"Return {return_id}: {len(units)} unit(s) NOT back in stock",
+            description=(
+                f"The refund for return {return_id} (order {order_id}) is "
+                f"recorded and paid, but the returned goods could NOT be put "
+                f"back into stock: the order bills to the online store "
+                f"{store_id}, which holds no stock, and no physical shop could "
+                f"be resolved to receive them. The items are physically with "
+                f"the person who processed the return and have NO stock row. "
+                f"Fix: set ONLINE_FULFILLMENT_STORE_ID, or add them at the "
+                f"receiving shop and re-run the restock for this return. "
+                f"Items: {lines or 'see the return'}."
+            ),
+            priority="P1",
+            category="Inventory",
+            store_id=processing_store_id,
+            dedupe_ref=f"return_restock_blocked:{return_id}",
+            extra={
+                "link": "/returns",
+                "payload": {"return_id": return_id, "order_id": order_id},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[RETURNS] restock-blocked task could not be raised for %s: %s",
+            return_id,
+            exc,
+        )
 
 
 def _restock_good_items(
@@ -1144,6 +1261,7 @@ def _restock_good_items(
         # F9 routing stamp -- stays None until a store is actually resolved, so
         # a return that restocked nothing never claims units landed somewhere.
         "restock_store_id": None,
+        "restock_store_ids": [],
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
@@ -1198,24 +1316,39 @@ def _restock_good_items(
             store_id,
             len(units),
         )
+        # A log line is not a listener: file a deduped P1 task so the goods
+        # surface as work in the app, not only in Railway.
+        _raise_restock_blocked_task(
+            return_id, order_id, store_id, units, processing_store_id
+        )
         result["restocked"] = _restock_intent_rows(units)
         result["applied"] = False
         return result
 
     # F9 refinement -- ONLY on the redirected (online-order) path: an online
     # order can be fulfilled from SEVERAL shops (_claim_units_multistore), so
-    # each product goes back to the shop its own unit actually left from.
-    # Resolved once per distinct product; the physical-store path never runs
-    # this loop at all.
-    per_product_store: Dict[str, str] = {}
-    if routing["redirected_from"]:
+    # each UNIT goes back to the shop it actually left from. Two layers:
+    #   * a per-UNIT queue expanded from fulfillment_breakdown's qty (so ONE
+    #     line split 1+1 across two shops sends one unit to each), and
+    #   * a per-PRODUCT default for anything the breakdown does not cover.
+    # The physical-store path never runs this block at all.
+    is_redirected = bool(routing["redirected_from"])
+    per_product_queue: Dict[str, List[str]] = {}
+    per_product_default: Dict[str, str] = {}
+    if is_redirected:
         redirect_order = (
             order if order is not None else _load_order_for_restock(order_id)
         )
+        db_handle = _get_db()
+        distinct_pids: List[str] = []
         for u in units:
             pid = u.get("product_id")
-            if not pid or pid in per_product_store:
-                continue
+            if pid and pid not in distinct_pids:
+                distinct_pids.append(pid)
+        for pid in distinct_pids:
+            per_product_queue[pid] = _fulfilment_unit_queue(
+                db_handle, redirect_order, pid
+            )
             hit = _resolve_restock_store(
                 store_id,
                 order_id,
@@ -1224,17 +1357,25 @@ def _restock_good_items(
                 product_id=pid,
             )
             if hit["store_id"]:
-                per_product_store[pid] = hit["store_id"]
+                per_product_default[pid] = hit["store_id"]
 
     # We have a stock repo - actually re-add each unit.
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
+    landed_stores: List[str] = []
     all_ok = True
     for u in units:
         pid = u.get("product_id")
-        # Never the online store: per_product_store only ever holds a physical
-        # store (_first_physical_store), and target_store is physical too.
-        unit_store = per_product_store.get(pid) or target_store
+        # Never the online store: every source here is filtered through
+        # _first_physical_store / _fulfilment_unit_queue, and target_store is
+        # physical too (an UNRESOLVED route returned early above).
+        queue = per_product_queue.get(pid) or []
+        if queue:
+            unit_store = queue.pop(0)
+        else:
+            unit_store = per_product_default.get(pid) or target_store
+        if unit_store and unit_store not in landed_stores:
+            landed_stores.append(unit_store)
         row = per_line_applied.setdefault(
             pid,
             {
@@ -1245,12 +1386,26 @@ def _restock_good_items(
                 "reactivated": 0,
                 "minted": 0,
                 "applied": True,
-                # WHICH physical store this product's units landed on.
+                # WHICH physical store(s) this product's units landed on.
                 "store_id": unit_store,
+                "store_ids": [],
             },
         )
+        if unit_store and unit_store not in row["store_ids"]:
+            row["store_ids"].append(unit_store)
         sid = _reactivate_original_unit(
-            stock_repo, pid, unit_store, order_id, used_ids
+            stock_repo,
+            pid,
+            unit_store,
+            order_id,
+            used_ids,
+            # MUST-FIX 1: on the redirected path the sale was booked against the
+            # ONLINE store, so the order-scoped lookup legitimately misses (every
+            # historical import). Without this flag the order-AGNOSTIC fallback
+            # would grab an unrelated walk-in customer's SOLD unit at this shop
+            # -- flipping a frame that is on somebody's face to AVAILABLE and
+            # erasing their sale. Mint instead; that is the honest record.
+            exact_order_only=is_redirected,
         )
         if sid:
             row["reactivated"] += 1
@@ -1312,6 +1467,15 @@ def _restock_good_items(
             row["applied"] = False
 
     result["restocked"] = list(per_line_applied.values())
+    # Where the units ACTUALLY landed. When a split sent them to more than one
+    # shop the single-valued field is set to None rather than naming one of
+    # them -- a reconciliation consumer reading it must not be told the wrong
+    # shop for the other half. `restock_store_ids` always carries the full set.
+    result["restock_store_ids"] = list(landed_stores)
+    if len(landed_stores) == 1:
+        result["restock_store_id"] = landed_stores[0]
+    elif len(landed_stores) > 1:
+        result["restock_store_id"] = None
     # Applied only if every unit landed somewhere; otherwise leave False so a
     # later retry can finish the job (the stock_ids already added are recorded).
     result["applied"] = all_ok
@@ -2065,6 +2229,7 @@ async def create_return(
         # F9 routing stamp; None until the restock actually resolves a store, so
         # a failed / blocked restock never claims the units landed anywhere.
         "restock_store_id": None,
+        "restock_store_ids": [],
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
@@ -2092,6 +2257,9 @@ async def create_return(
     # ordinary counter return; the redirected shop for an online-order return;
     # None when the restock was blocked / failed and nothing landed anywhere).
     restock_store_id = restock_result.get("restock_store_id")
+    # Full set when a multi-shop split sent units to more than one shop (the
+    # single-valued field is then None so nobody is told the wrong shop).
+    restock_store_ids = restock_result.get("restock_store_ids", [])
 
     # Online oversell guard (council B11): a GOOD-condition return puts stock
     # back on the shelf, so the online AVAILABLE count goes UP -- re-push it to
@@ -2107,7 +2275,11 @@ async def create_return(
             # F9: hand the write-back the PHYSICAL store the units landed on.
             # (Quantities are pooled all-store either way, but the summary /
             # sync_runs context must never name the stockless online store.)
-            writeback_after_restock(None, restocked_skus, restock_store_id)
+            writeback_after_restock(
+                None,
+                restocked_skus,
+                restock_store_id or (restock_store_ids[0] if restock_store_ids else None),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] online write-back skipped: %s", exc)
 
@@ -2145,6 +2317,7 @@ async def create_return(
         # -- when the order billed to a stockless ONLINE store -- what it was
         # redirected from and why.
         "restock_store_id": restock_store_id,
+        "restock_store_ids": restock_store_ids,
         "restock_store_redirected_from": restock_result.get(
             "restock_store_redirected_from"
         ),
@@ -2245,6 +2418,7 @@ async def create_return(
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
         "restock_store_id": restock_store_id,
+        "restock_store_ids": restock_store_ids,
         "restock_store_redirected_from": restock_result.get(
             "restock_store_redirected_from"
         ),
@@ -2436,6 +2610,7 @@ async def retry_restock(
         "restock_completed_at": datetime.now().isoformat(),
         # F9 audit stamp (mirrors the create path).
         "restock_store_id": restock_result.get("restock_store_id"),
+        "restock_store_ids": restock_result.get("restock_store_ids", []),
         "restock_store_redirected_from": restock_result.get(
             "restock_store_redirected_from"
         ),
@@ -2446,10 +2621,30 @@ async def retry_restock(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
 
+    # A successful retry raised the shelf count exactly like the create path
+    # did, so Shopify has to hear about it too. Without this the online path --
+    # which now routinely DEFERS recovery to this endpoint -- leaves the
+    # recovered frame sellable in-shop but invisible online. Fail-soft.
+    restocked_rows = update["restocked"]
+    if update["restock_applied"] and restocked_rows:
+        try:
+            from ..services.online_stock_writeback import writeback_after_restock
+
+            retry_skus = [
+                r.get("sku")
+                for r in restocked_rows
+                if isinstance(r, dict) and r.get("sku")
+            ]
+            writeback_after_restock(None, retry_skus, update["restock_store_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[RETURNS] retry write-back skipped: %s", exc)
+
     return {
         "return_id": return_id,
         "restock_applied": update["restock_applied"],
         "restock_stock_ids": update["restock_stock_ids"],
+        "restock_store_id": update["restock_store_id"],
+        "restock_store_ids": update["restock_store_ids"],
         "message": (
             "Restock applied"
             if update["restock_applied"]

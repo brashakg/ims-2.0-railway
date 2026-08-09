@@ -283,12 +283,23 @@ def _supersede_unmatched(db, refund_id: str) -> None:
         logger.debug("[SHOPIFY_REFUND] supersede UNMATCHED failed", exc_info=True)
 
 
-def _restock_store_for_order(order: Dict[str, Any]) -> Optional[str]:
-    """The PHYSICAL store the refunded units go back to. shopify_ingest claimed
-    the sold units at the fulfilment store(s) and stamped `fulfillment_stores` /
-    `fulfillment_breakdown`; the online billing `store_id` is a virtual bucket
-    with no serialized stock. Prefer the first fulfilment store, else the order
-    store."""
+def _proposed_restock_store_for_order(order: Dict[str, Any]) -> Optional[str]:
+    """A DISPLAY HINT for the accountant review row: roughly where the refunded
+    units are expected to go back.
+
+    NOT the routing decision. Routing is owned by ONE place -- the F9 guard in
+    returns._restock_good_items -- which resolves the physical store per UNIT
+    from the fulfilment breakdown. This function must never be used to pre-
+    resolve a store and hand it to _restock_good_items: `fulfillment_stores` is
+    a SORTED SET (shopify_ingest.py:1736), i.e. ALPHABETICAL, not the shop that
+    shipped a given line, so pre-resolving would book every unit of a two-shop
+    order to the alphabetically-first shop AND would short-circuit the guard's
+    per-unit narrowing entirely (the guard only narrows when it is the one that
+    redirected).
+
+    Deliberately returns None rather than falling back to the order's own
+    `store_id`: on an online order that is the stockless online bucket, and
+    showing "restock into BV-ONLINE-01" on the review screen is a lie."""
     stores = order.get("fulfillment_stores")
     if isinstance(stores, list) and stores:
         return _norm(stores[0]) or None
@@ -297,7 +308,7 @@ def _restock_store_for_order(order: Dict[str, Any]) -> Optional[str]:
         for row in breakdown:
             if isinstance(row, dict) and _norm(row.get("store_id")):
                 return _norm(row.get("store_id"))
-    return _norm(order.get("store_id")) or None
+    return None
 
 
 def _line_restock_flag(refund_line: Dict[str, Any], refund_level_default: bool) -> bool:
@@ -596,7 +607,9 @@ def handle_shopify_refund(
         priced = _priced_return_lines(return_lines, order)
         gross_refund = engine.returned_value(priced)
         gst_view = engine.gst_breakup_lines(priced)
-        restock_store = _restock_store_for_order(order)
+        # DISPLAY HINT ONLY -- the real routing is done by the F9 guard inside
+        # _restock_good_items (see _proposed_restock_store_for_order).
+        restock_store = _proposed_restock_store_for_order(order)
 
         # AMOUNT RECONCILIATION: what Shopify actually refunded may differ from the
         # billed gross (a partial / goodwill refund). Never auto-post a mismatch.
@@ -828,7 +841,13 @@ def _post_credit_and_restock(
         "customer_id": customer_id,
         "customer_name": order.get("customer_name"),
         "store_id": billing_store,
-        "restock_store_id": restock_store,
+        # PROPOSAL only. The authoritative `restock_store_id` is written by the
+        # finalize $set below, from the guard's actual answer -- never from this
+        # pre-guard hint (which used to be able to name the stockless online
+        # store and was then never corrected).
+        "proposed_restock_store_id": restock_store,
+        "restock_store_id": None,
+        "restock_store_ids": [],
         "return_type": "CREDIT_NOTE",
         "source": "shopify",
         "channel": "ONLINE",
@@ -920,16 +939,35 @@ def _post_credit_and_restock(
         "restock_stock_ids": [],
         "applied": False,
         "skipped": [],
+        "restock_store_id": None,
+        "restock_store_ids": [],
+        "restock_store_redirected_from": None,
+        "restock_store_reason": None,
     }
     try:
         from ..routers.returns import _restock_good_items
 
+        # Hand the guard the ORDER's own store (the ONLINE billing bucket) and
+        # the order dict, and let the SINGLE F9 router decide where each unit
+        # goes. Pre-resolving a physical store here (what this door used to do)
+        # made is_online_store False, so the guard short-circuited "already
+        # physical" and its per-unit narrowing NEVER ran on the dominant
+        # automated door -- booking every unit of a two-shop order to the
+        # alphabetically-first shop. Passing `order` also spares the guard a
+        # refetch (a failed refetch silently degrades the routing).
         restock_result = _restock_good_items(
             return_lines,
-            restock_store,
+            billing_store,
             return_id or refund_id,
             order_id=order_id,
             user_id="SYSTEM_SHOPIFY_REFUND",
+            # There is no human counter on this door (the webhook runs as
+            # SYSTEM), but a STORED review row may carry a physical store an
+            # accountant was shown. Hand it over as the caller-supplied FALLBACK
+            # only: the guard still ranks the order's per-unit fulfilment
+            # breakdown above it, and still rejects it if it is an online store.
+            processing_store_id=restock_store,
+            order=order,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc)
@@ -954,6 +992,15 @@ def _post_credit_and_restock(
         "restocked": restock_result.get("restocked", []),
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_result.get("restock_stock_ids", []),
+        # The guard's ACTUAL routing answer overwrites the pre-guard proposal,
+        # so the returns doc can never claim units went to a store they did not
+        # (this door previously wrote the proposal once and never corrected it).
+        "restock_store_id": restock_result.get("restock_store_id"),
+        "restock_store_ids": restock_result.get("restock_store_ids", []),
+        "restock_store_redirected_from": restock_result.get(
+            "restock_store_redirected_from"
+        ),
+        "restock_store_reason": restock_result.get("restock_store_reason"),
         # Release the retry claim so a legitimate later retry of a still-uncredited
         # row can re-claim it; a genuinely credited row is already guarded by
         # credit_note_issued=True, so clearing this here is safe either way.
@@ -998,7 +1045,11 @@ def _post_credit_and_restock(
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
         "restock_applied": restock_applied,
-        "restock_store_id": restock_store,
+        # Where the units ACTUALLY landed (None when the restock was blocked or
+        # a split sent them to several shops -- see restock_store_ids).
+        "restock_store_id": restock_result.get("restock_store_id"),
+        "restock_store_ids": restock_result.get("restock_store_ids", []),
+        "restock_store_reason": restock_result.get("restock_store_reason"),
     }
 
 
@@ -1033,6 +1084,11 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
         order=order,
         return_lines=return_lines,
         credit_note=credit_note,
-        restock_store=review.get("restock_store_id"),
+        # Display hint only (see _proposed_restock_store_for_order). Rows
+        # written before the rename carry it under the old key.
+        restock_store=(
+            review.get("proposed_restock_store_id")
+            or review.get("restock_store_id")
+        ),
         settled_externally=settled_externally,
     )
