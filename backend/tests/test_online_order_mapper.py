@@ -638,3 +638,171 @@ def test_order_payload_with_explicit_null_order_id_still_books(wired):
     payload["order_id"] = None
     res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
     assert res["status"] == "created"
+
+
+# ---------------------------------------------------------------------------
+# CHECKOUT payloads (PR #966 round-4 must-fix 2)
+# ---------------------------------------------------------------------------
+# The round-3 guard tested only "does this payload NAME a parent order", which
+# covers refunds/fulfillments/transactions. It does NOT cover CHECKOUTS: a
+# checkout PRECEDES the order, so it has no parent to name, yet it carries a
+# top-level id + line_items and looks order-shaped to every downstream check.
+# checkouts/create and checkouts/update are live subscribed topics, so a
+# captured validly-signed checkout body relabelled via the unsigned
+# X-Shopify-Topic header reaches the mapper -- and was proven to book a real
+# IMS order under the CHECKOUT id, consuming GST invoice serial
+# INV/BV-ONLINE-01/26-27/0001.
+
+
+def _checkout_payload(checkout_id=998877):
+    """The repo's OWN abandoned-checkout fixture shape, copied from
+    backend/tests/test_shopify_checkout_capture.py:49-62: top-level id +
+    token + line_items, and NO order_id / order_number / financial_status."""
+    return {
+        "id": checkout_id,
+        "token": "chk_tok_1",
+        "email": "buyer@example.com",
+        "phone": "+919812345678",
+        "currency": "INR",
+        "total_price": "2499.00",
+        "buyer_accepts_marketing": True,
+        "customer": {"id": 42, "first_name": "Asha", "last_name": "R"},
+        "shipping_address": {"province": "20", "province_code": "20"},
+        "line_items": [
+            {"id": 9001, "variant_id": 999001, "sku": "RB-1234", "title": "Aviator",
+             "quantity": 2, "price": "999.00", "total_discount": "0.00"},
+        ],
+        "created_at": "2026-07-22T10:00:00Z",
+        "updated_at": "2026-07-22T10:05:00Z",
+    }
+
+
+def test_checkout_payload_cannot_be_booked_as_an_order(wired):
+    """The reproduced defect: this exact shape booked a real order and burned
+    a GST invoice serial."""
+    before = len(wired["orders"].docs)
+
+    res = online_order_mapper.map_shopify_order(
+        _checkout_payload(), wired["db"], topic="orders/create"
+    )
+
+    assert res["status"] == "skipped", res
+    assert res["reason"] in ("checkout_payload", "not_order_shaped")
+    assert res.get("invoice_number") is None, "no GST invoice serial may be burned"
+    assert len(wired["orders"].docs) == before, "no phantom order"
+    assert not [d for d in wired["orders"].docs
+                if d.get("shopify_order_id") == "998877"]
+
+
+def test_checkout_refusal_names_the_checkout_id(wired):
+    """A checkout has no parent, so echoing only the parent id left the
+    operator with a refusal and nothing to chase."""
+    res = online_order_mapper.map_shopify_order(
+        _checkout_payload(998878), wired["db"], topic="orders/create"
+    )
+    assert res["child_id"] == "998878"
+
+
+def test_abandoned_checkout_url_marker_is_refused(wired):
+    payload = _checkout_payload(998879)
+    payload["abandoned_checkout_url"] = "https://bettervision.in/checkouts/abc"
+    payload["name"] = "#998879"          # checkouts DO carry `name`
+    res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
+    assert res["status"] == "skipped"
+    assert res["reason"] == "checkout_payload"
+
+
+def test_token_plus_cart_token_without_order_number_is_refused(wired):
+    payload = _checkout_payload(998880)
+    payload["cart_token"] = "cart_tok_1"
+    payload["name"] = "#998880"
+    res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
+    assert res["status"] == "skipped"
+    assert res["reason"] == "checkout_payload"
+
+
+def test_a_real_order_carrying_a_checkout_token_still_books(wired):
+    """Genuine Shopify Orders DO carry token/cart_token/checkout_token. The
+    guard must key on the ORDER markers, not merely on token presence, or it
+    would refuse real revenue."""
+    payload = _frame_order(10600)
+    payload["token"] = "chk_tok_9"
+    payload["cart_token"] = "cart_tok_9"
+    payload["order_number"] = 1600
+    payload["order_status_url"] = "https://bettervision.in/orders/xyz"
+
+    res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
+    assert res["status"] == "created", res
+    assert res["invoice_number"]
+
+
+def test_status_only_sync_is_not_refused_by_the_shape_guard(wired):
+    """A partial orders/updated body carries no line_items and cannot create
+    anything, so only the parent-reference rule applies to it -- a status sync
+    must keep working."""
+    online_order_mapper.map_shopify_order(_frame_order(10601), wired["db"],
+                                          topic="orders/create")
+    update = {"id": 10601, "fulfillment_status": "fulfilled"}
+    res = online_order_mapper.map_shopify_order(update, wired["db"], topic="orders/updated")
+    assert res["status"] == "status_synced"
+
+
+# ---------------------------------------------------------------------------
+# LAYER PARITY (PR #966 round-4 must-fix 3)
+# ---------------------------------------------------------------------------
+# shopify_ingest resolved the order id as `payload["id"] or payload["order_id"]`,
+# so the shape the mapper declares unbookable stayed bookable one layer down for
+# any caller that bypasses the mapper -- scripts/import_shopify_order_history.py
+# is such a caller, on the path that booked Rs 23.1L. Both layers now share ONE
+# classifier, so they cannot contradict each other.
+
+
+@pytest.mark.parametrize("shape,expected_refusal", [
+    ("order", None),
+    ("fulfillment", "child_resource_payload"),
+    ("checkout", "not_order_shaped"),
+])
+def test_mapper_and_ingest_classify_the_same_payload_identically(
+    wired, shape, expected_refusal
+):
+    from api.services import shopify_ingest
+
+    if shape == "order":
+        payload = _frame_order(10700)
+    elif shape == "fulfillment":
+        payload = _fulfillment_payload(88890, 10700)
+    else:
+        payload = _checkout_payload(998890)
+
+    assert shopify_ingest.order_payload_refusal(dict(payload)) == expected_refusal
+
+    mapper_res = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create"
+    )
+    ingest_res = shopify_ingest.ingest_shopify_order(
+        wired["db"], dict(payload), topic="orders/create"
+    )
+
+    if expected_refusal is None:
+        assert mapper_res["status"] == "created"
+        assert ingest_res["status"] in ("created", "duplicate", "replayed")
+    else:
+        assert mapper_res["status"] == "skipped"
+        assert mapper_res["reason"] == expected_refusal
+        assert ingest_res["status"] == "ignored", (
+            "the ingest layer must refuse exactly what the mapper refuses"
+        )
+        assert ingest_res["reason"] == expected_refusal
+
+
+def test_ingest_no_longer_falls_back_to_order_id(wired):
+    """The `or payload.get('order_id')` fallback could only ever have booked a
+    phantom order under a child id. It is gone."""
+    from api.services import shopify_ingest
+
+    child = _fulfillment_payload(88891, 10701)
+    res = shopify_ingest.ingest_shopify_order(wired["db"], child, topic="orders/create")
+    assert res["status"] == "ignored"
+    assert res["reason"] == "child_resource_payload"
+    assert not [d for d in wired["orders"].docs
+                if d.get("shopify_order_id") in ("88891", "10701")]

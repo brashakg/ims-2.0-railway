@@ -80,7 +80,7 @@ class FakeCollection:
         self.indexes: List[Any] = []
 
     def insert_one(self, doc):
-        for key in ("event_id", "body_fingerprint"):
+        for key in ("event_id", "body_fingerprint", "unverified_fingerprint"):
             value = doc.get(key)
             if isinstance(value, str) and value:
                 for existing in self.docs:
@@ -587,9 +587,19 @@ def test_arbitrary_topic_strings_cannot_mint_new_dedupe_keys(
     assert len(patched_webhooks["dispatched"]) == 1
 
 
-def test_a_junk_topic_cannot_impersonate_a_real_one(client, patched_webhooks):
-    """The 'unknown' bucket must be its OWN key — a junk topic must not
-    collide with a real topic's key and suppress a genuine delivery."""
+def test_junk_topic_cannot_pre_empt_a_real_topics_key_and_the_total_is_bounded(
+    client, patched_webhooks
+):
+    """Two claims, both asserted — the second was missing before.
+
+    (1) The 'unknown' bucket is its OWN key, so a junk topic cannot collide
+        with a real topic's key and suppress a genuine delivery.
+    (2) The number of times ONE signed body can be accepted is BOUNDED by the
+        closed scope set. The previous version of this test asserted only that
+        both deliveries were 'received', which quietly encoded the replay
+        amplification as intended behaviour — no future round could have
+        caught a regression that widened it.
+    """
     body = _old_order_body(days_old=1, order_id=934002)
 
     junk = _post_shopify(client, body, topic="orders/create-EVIL",
@@ -600,7 +610,26 @@ def test_a_junk_topic_cannot_impersonate_a_real_one(client, patched_webhooks):
     assert real.json()["status"] == "received", (
         "a junk topic must not be able to pre-empt a real topic's dedupe key"
     )
-    assert len(patched_webhooks["dispatched"]) == 2
+
+    # Now exhaust every scope this one signed body can reach, plus junk and an
+    # omitted header, and assert the TOTAL never exceeds the closed set.
+    scopes = (
+        list(webhook_verify.SHOPIFY_TOPIC_ALLOWLIST)
+        + [f + "anything" for f in webhook_verify.SHOPIFY_TOPIC_FAMILIES]
+        + ["junk-a", "junk-b", "junk-c", ""]
+    )
+    for i, topic in enumerate(scopes):
+        _post_shopify(client, body, topic=topic, webhook_id=f"wh-x{i}")
+
+    bound = len(webhook_verify.SHOPIFY_TOPIC_ALLOWLIST) + len(
+        webhook_verify.SHOPIFY_TOPIC_FAMILIES
+    ) + 1  # + the single shared 'unknown' bucket
+    rows = patched_webhooks["db"].get_collection("webhook_inbox").docs
+    assert len(rows) <= bound, (
+        f"one signed body was accepted {len(rows)} times; the closed set "
+        f"bounds it at {bound}"
+    )
+    assert len(rows) == len(patched_webhooks["dispatched"])
 
 
 def test_edit_only_families_share_one_bucket_per_family(client, patched_webhooks):
@@ -1041,9 +1070,16 @@ def test_genuinely_absent_secret_writes_a_durable_row(client, monkeypatch):
     assert row["raw_body_size"] == len(body)
 
 
-def test_unverifiable_rows_are_deduped_not_unbounded(client, monkeypatch):
-    """Anyone who learns the URL can post here while no secret is set, so the
-    row must be bounded: identical posts collapse onto one fingerprint."""
+def test_identical_unverifiable_posts_collapse_to_one_row(client, monkeypatch):
+    """Repeat posts of the SAME bytes collapse onto one row.
+
+    Renamed from '..._are_deduped_not_unbounded': that name and its docstring
+    claimed boundedness, but the assertion only ever proved collapse-of-
+    identical — varying one byte defeats it (a reviewer posted 50 varying
+    bodies and got 50 rows). The real bound while a secret is unconfigured is
+    the per-vendor+IP rate limiter, and tightening it (a short TTL for
+    signature_verified=false rows, or a per-vendor cap) is a follow-up. This
+    test now claims only what it proves."""
     fake_db = FakeDB()
     from api.routers import webhooks as wh_module
     monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
@@ -1056,6 +1092,131 @@ def test_unverifiable_rows_are_deduped_not_unbounded(client, monkeypatch):
         })
 
     assert len(fake_db.get_collection("webhook_inbox").docs) == 1
+
+
+def test_unverifiable_row_does_not_block_the_later_verified_delivery(
+    client, monkeypatch
+):
+    """REGRESSION (round-4 must-fix 1). THE THREE-STEP TIMELINE.
+
+    The skip row exists to prompt the operator to configure the missing
+    secret. Round 3 wrote its digest into `body_fingerprint` — the
+    AUTHENTICATED dedupe key — so the moment the operator did what the row
+    asks, the vendor's resend of the identical bytes matched that row and was
+    answered 200 duplicate: never dispatched, payload never stored,
+    processed=True so _is_stranded would not rescue it, blocked for the full
+    30-day TTL. Strictly worse than doing nothing, and it hit exactly the two
+    vendors with no env fallback: Razorpay (payments), Shiprocket (shipments).
+    """
+    fake_db = FakeDB()
+    integ = fake_db.get_collection("integrations")
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    dispatched: List[Any] = []
+
+    async def fake_dispatch(event, payload, source=""):
+        dispatched.append(payload)
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "dispatch_event", fake_dispatch)
+
+    body = json.dumps(
+        {"entity": "event", "event": "payment.captured",
+         "created_at": int(datetime.now(timezone.utc).timestamp()),
+         "payload": {"payment": {"entity": {"id": "pay_live_1", "amount": 499900}}}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {
+        "X-Razorpay-Signature": _hex_sig(body, RAZORPAY_SECRET),
+        "X-Razorpay-Event-Id": "evt_live_1",
+        "content-type": "application/json",
+    }
+
+    # PHASE 1 -- secret not yet configured. The delivery cannot be verified.
+    phase1 = client.post("/api/v1/webhooks/razorpay", content=body, headers=headers)
+    assert phase1.json() == {"status": "skipped", "reason": "secret_not_configured"}
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 1
+    assert rows[0]["signature_verified"] is False
+    assert rows[0].get("body_fingerprint") is None, (
+        "an unverifiable row must NOT occupy the authenticated dedupe key"
+    )
+    assert str(rows[0].get("unverified_fingerprint", "")).startswith("sha256:")
+
+    # PHASE 2 -- the operator does exactly what that row exists to prompt.
+    integ.insert_one({"type": "razorpay",
+                      "config": {"webhook_secret": RAZORPAY_SECRET},
+                      "enabled": True})
+
+    # PHASE 3 -- the vendor resends the IDENTICAL bytes, now verifiable.
+    phase3 = client.post("/api/v1/webhooks/razorpay", content=body, headers=headers)
+    assert phase3.status_code == 200, phase3.text
+    assert phase3.json()["status"] == "received", (
+        "the operator's own recovery resend must be INGESTED, not answered "
+        f"'duplicate' by the skip row (got {phase3.json()})"
+    )
+    assert len(dispatched) == 1, "the payment must be dispatched exactly once"
+
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 2, "the skip row plus the real one"
+    booked = [r for r in rows if r.get("signature_verified") is True]
+    assert len(booked) == 1
+    assert booked[0]["payload"]["payload"]["payment"]["entity"]["id"] == "pay_live_1"
+    assert booked[0]["processed"] is False, "handed to NEXUS, not pre-closed"
+
+
+def test_unverified_and_verified_fingerprints_use_separate_indexes(
+    client, monkeypatch
+):
+    """The two namespaces must be separate INDEXES too. Filtering only the
+    read would still let the unique (vendor, body_fingerprint) index raise
+    E11000 on the verified insert, and _is_duplicate_key_error would return
+    the same 200 duplicate — the trap two reviewers flagged."""
+    fake_db = FakeDB()
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    client.post("/api/v1/webhooks/razorpay", content=b'{"a":1}', headers={
+        "X-Razorpay-Signature": _hex_sig(b'{"a":1}', "x"),
+        "content-type": "application/json",
+    })
+
+    names = {
+        kwargs.get("name")
+        for (_args, kwargs) in fake_db.get_collection("webhook_inbox").indexes
+    }
+    assert "uniq_webhook_body_fingerprint" in names
+    assert "uniq_webhook_unverified_fingerprint" in names
+
+    matched = [
+        (a, k)
+        for (a, k) in fake_db.get_collection("webhook_inbox").indexes
+        if k.get("name") == "uniq_webhook_unverified_fingerprint"
+    ]
+    args, kwargs = matched[0]
+    assert args[0] == [("vendor", 1), ("unverified_fingerprint", 1)]
+    assert kwargs.get("unique") is True
+    assert kwargs.get("partialFilterExpression") == {
+        "unverified_fingerprint": {"$type": "string"}
+    }
+
+
+def test_signature_verified_is_stamped_on_every_row(client, patched_webhooks):
+    """The field must be TOTAL. Stamped only on unverifiable rows, a future
+    operator surface filtering {'signature_verified': True} would match
+    nothing and report 'no verified webhooks'."""
+    _post_shopify(client, _old_order_body(days_old=1, order_id=937001),
+                  topic="orders/paid", webhook_id="wh-sv1")
+    _post_shopify(client, _old_order_body(days_old=40, order_id=937002),
+                  topic="orders/paid", webhook_id="wh-sv2",
+                  triggered_at=_iso(datetime.now(timezone.utc) - timedelta(days=40)))
+
+    rows = patched_webhooks["db"].get_collection("webhook_inbox").docs
+    assert len(rows) == 2
+    assert all(r.get("signature_verified") is True for r in rows), (
+        "both the ingested row and the staleness skip row are signature-verified"
+    )
 
 
 # ============================================================================

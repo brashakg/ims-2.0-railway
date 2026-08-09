@@ -75,6 +75,87 @@ _DEDUPE_COLLECTION = "shopify_webhook_dedupe"
 _DEDUPE_TTL_SECONDS = 30 * 24 * 3600
 
 
+# ============================================================================
+# Order-shape guard -- THE single classifier for "may this payload be booked
+# as an IMS order?", shared by ingest_shopify_order and online_order_mapper.
+# ============================================================================
+# Lives here (the lower layer) so both callers import ONE definition and the
+# two layers can never contradict each other. A previous fix put the guard in
+# the mapper only, which left the same shape bookable one layer down for any
+# caller that bypasses the mapper -- scripts/import_shopify_order_history.py
+# is such a caller, on the path that booked Rs 23.1L.
+#
+# WHY A SHAPE GUARD AT ALL. The Shopify topic is read from the UNSIGNED
+# X-Shopify-Topic header, so a captured, validly-signed body can be relabelled
+# as orders/create and routed here. Booking a non-order payload mints a
+# phantom IMS order and burns a consecutive GST tax invoice serial on it, and
+# none of the three idempotency layers fire because that id was never booked.
+#
+# WHY A POSITIVE SHAPE TEST, not just "does it name a parent". The first cut
+# refused only payloads carrying a top-level `order_id`. That covers refunds,
+# fulfillments and transactions -- but NOT checkouts, which carry `id` +
+# `line_items` and NO `order_id`, because a checkout PRECEDES the order and so
+# has no parent to name. checkouts/create and checkouts/update are live
+# subscribed topics, and a checkout-shaped payload was proven to book a real
+# order and consume invoice serial INV/BV-ONLINE-01/26-27/0001.
+
+# Fields only a real Order carries. `name` is included because Orders always
+# have it -- but note a CHECKOUT also carries `name`, which is why the
+# checkout-marker rule below is a separate, earlier test.
+_ORDER_MARKERS = ("order_number", "name", "financial_status", "order_status_url")
+
+# Fields that identify an abandoned-checkout payload.
+_CHECKOUT_MARKERS = ("abandoned_checkout_url",)
+
+
+def order_payload_refusal(
+    payload: Dict[str, Any], *, booking: bool = True
+) -> Optional[str]:
+    """Return a refusal reason when `payload` must NOT be booked as an order.
+
+    Returns None when the payload is order-shaped and may proceed.
+
+    `booking=False` applies only the identity rule (a payload naming a parent
+    order can never be booked under its own id) and skips the create-shape
+    rules, so a legitimate status-only sync of an order we already hold -- a
+    partial orders/updated body with no line_items -- is not refused.
+
+    Reasons are stable strings; callers surface them verbatim:
+      "child_resource_payload" -- names a parent order (refund/fulfillment/...)
+      "checkout_payload"       -- an abandoned checkout, not an order
+      "not_order_shaped"       -- carries no order marker at all
+    """
+    payload = payload if isinstance(payload, dict) else {}
+
+    # 1. Explicit parent reference -> this payload's `id` is a CHILD id.
+    #    Always applied: it decides which id we would resolve.
+    parent = str(payload.get("order_id") or "").strip()
+    if parent:
+        return "child_resource_payload"
+
+    if not booking:
+        return None
+
+    # 2. Checkout markers. Checked before the order-marker test because a
+    #    checkout also carries `name` and would otherwise pass it.
+    if any(payload.get(marker) for marker in _CHECKOUT_MARKERS):
+        return "checkout_payload"
+    if (
+        payload.get("token")
+        and payload.get("cart_token")
+        and not payload.get("order_number")
+    ):
+        return "checkout_payload"
+
+    # 3. Positive assertion: a real order carries at least one order marker.
+    #    This is what catches the repo's own checkout fixture (id + token +
+    #    line_items, no order_number / financial_status / name).
+    if not any(payload.get(marker) for marker in _ORDER_MARKERS):
+        return "not_order_shaped"
+
+    return None
+
+
 def _category_hint_from_shopify(line: Dict[str, Any]) -> str:
     """Best-effort IMS GST category from a Shopify line item's product_type /
     title. Returns '' when nothing matches (resolve_gst_rate then applies the
@@ -1332,7 +1413,25 @@ def ingest_shopify_order(
     if topic and str(topic).strip().lower() not in ("orders/create", "orders/paid"):
         return {"status": "ignored", "reason": f"topic:{topic}"}
 
-    shopify_order_id = str(payload.get("id") or payload.get("order_id") or "").strip()
+    # Shape guard -- the SAME classifier the mapper uses, so a payload the
+    # mapper refuses can never be booked here by a caller that bypasses it
+    # (e.g. scripts/import_shopify_order_history.py).
+    refusal = order_payload_refusal(payload, booking=bool(payload.get("line_items")))
+    if refusal:
+        logger.warning(
+            "[SHOPIFY_INGEST] refusing to book a non-order payload: reason=%s "
+            "id=%s parent_order_id=%s",
+            refusal,
+            payload.get("id"),
+            payload.get("order_id"),
+        )
+        return {"status": "ignored", "reason": refusal}
+
+    # NOTE: the old `or payload.get("order_id")` fallback is GONE, deliberately.
+    # A top-level order_id means this is a CHILD resource, which the guard above
+    # now refuses outright -- so falling back to it could only ever have booked
+    # a phantom order under a refund/fulfillment id.
+    shopify_order_id = str(payload.get("id") or "").strip()
     if not shopify_order_id or not (payload.get("line_items")):
         return {"status": "ignored", "reason": "no_order_id_or_line_items"}
 

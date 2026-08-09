@@ -251,11 +251,22 @@ def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:
 #    is the load-bearing anti-replay control, because unlike the id header it
 #    is INSIDE the signature's coverage: an attacker replaying a captured
 #    delivery cannot alter one byte without invalidating the HMAC, so the
-#    fingerprint is guaranteed to match an existing row and be rejected —
-#    even if they rotate X-Shopify-Webhook-Id to a fresh value, and
-#    regardless of how old the capture is. It also covers the vendors that
-#    send no delivery id at all (Shiprocket), which previously had NO replay
-#    cover beyond a timestamp window that never fired.
+#    fingerprint matches an existing row and is rejected even if they rotate
+#    X-Shopify-Webhook-Id to a fresh value, and regardless of how old the
+#    capture is. It also covers the vendors that send no delivery id at all
+#    (Shiprocket), which previously had NO replay cover beyond a timestamp
+#    window that never fired.
+#
+#    SCOPED, THOUGH -- and an earlier version of this comment omitted the
+#    qualifier. The fingerprint mixes in the canonical scope, so rejection is
+#    guaranteed WITHIN A SCOPE, not absolutely: one captured signed body can
+#    still be accepted once per scope, bounded by the closed set (21 for
+#    Shopify, 1 elsewhere). That bound caps replay AMPLIFICATION. It does not
+#    make routing authenticated -- NEXUS still selects the money handler from
+#    the raw unsigned topic header, so a captured body can be relabelled into
+#    a handler it was never meant for. Binding the topic to the signature is
+#    a separate change; the shape guard in online_order_mapper is what stops
+#    the relabel from BOOKING anything.
 #
 # Both are receiver-level and additive: shopify_ingest keeps its own
 # order-id + webhook-id idempotency layers untouched.
@@ -421,6 +432,19 @@ def _get_inbox_collection():
             unique=True,
             partialFilterExpression={"body_fingerprint": {"$type": "string"}},
             name="uniq_webhook_body_fingerprint",
+        )
+        # SEPARATE namespace for rows we could not authenticate (no secret
+        # configured). It collapses repeat identical posts onto one row exactly
+        # like the index above, but it MUST NOT be the same field: an
+        # unverifiable row sharing the authenticated key would answer
+        # "duplicate" to the operator's own recovery resend once the secret is
+        # finally configured. See _record_unverifiable.
+        _ensure_index(
+            coll,
+            [("vendor", 1), ("unverified_fingerprint", 1)],
+            unique=True,
+            partialFilterExpression={"unverified_fingerprint": {"$type": "string"}},
+            name="uniq_webhook_unverified_fingerprint",
         )
         return coll
     except Exception as e:
@@ -722,7 +746,22 @@ def _record_unverifiable(
                 "skipped_reason": "secret_not_configured",
                 "signature_verified": False,
                 "event_id": None,
-                "body_fingerprint": fingerprint,
+                # DELIBERATELY *NOT* `body_fingerprint`. That field is the
+                # AUTHENTICATED dedupe key, and writing an unverifiable row
+                # into it made this row poison the very recovery it exists to
+                # prompt: operator sees the row -> pastes the secret -> the
+                # vendor resends the identical bytes, now correctly signed ->
+                # the fingerprint dedupe matched THIS row and answered 200
+                # duplicate. Never dispatched, payload never stored,
+                # processed=True so _is_stranded would not rescue it, blocked
+                # for the full 30-day TTL. Strictly worse than doing nothing,
+                # and it hit exactly the two vendors with no env fallback:
+                # Razorpay (payments) and Shiprocket (shipments).
+                #
+                # A separate field + its own unique index keeps repeats
+                # collapsed onto one row without ever answering for a
+                # verified delivery.
+                "unverified_fingerprint": fingerprint,
             }
         )
     except Exception as e:  # noqa: BLE001
@@ -770,6 +809,11 @@ def _persist_skipped(
         "skipped_reason": skipped_reason,
         "event_id": event_id,
         "body_fingerprint": fingerprint,
+        # Stamped on EVERY verified row so the field is total across the
+        # collection. It used to appear only on unverifiable rows, so a future
+        # operator surface filtering {"signature_verified": True} would have
+        # matched nothing and reported "no verified webhooks".
+        "signature_verified": True,
     }
     try:
         coll.insert_one(dict(doc))
@@ -1052,6 +1096,7 @@ async def _ingest(
         "skipped_reason": None,
         "event_id": event_id,
         "body_fingerprint": fingerprint,
+        "signature_verified": True,
     }
 
     try:

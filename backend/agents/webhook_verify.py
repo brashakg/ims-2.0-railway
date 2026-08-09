@@ -202,8 +202,22 @@ def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
 #   2. The load-bearing anti-replay is CONTENT-BOUND dedupe.
 #      `body_fingerprint()` hashes the exact bytes the HMAC covers, so an
 #      attacker cannot change one byte of the BODY without invalidating the
-#      signature. The receiver stores the digest behind a unique index, so a
-#      replay of the same signed bytes is rejected regardless of age.
+#      signature. The receiver stores the digest behind a unique index.
+#
+#      STATE THE GUARANTEE EXACTLY, because an earlier version of this
+#      comment overclaimed it: a replay of the same signed bytes is rejected
+#      REGARDLESS OF AGE, BUT ONLY WITHIN ONE SCOPE. The digest mixes in the
+#      scope, so one captured signed body can still be accepted once PER
+#      SCOPE -- up to the size of the closed set below (21 for Shopify: 16
+#      exact topics + 5 family buckets; 1 for every other vendor). It is not
+#      "accepted once, ever".
+#
+#      AND A BOUNDED KEY SPACE IS NOT AUTHENTICATED ROUTING. The topic header
+#      still selects the downstream money handler in NEXUS, and nothing here
+#      binds it to the signature; capping the key space caps replay
+#      AMPLIFICATION, it does not stop a captured body being relabelled into
+#      a handler it was never meant for. Closing that needs the topic bound
+#      to something signed, which is a different change.
 #
 #      BE PRECISE ABOUT WHAT IS AND IS NOT SIGNED. The fingerprint also mixes
 #      in a `scope` -- the vendor's event-type header -- so two genuinely
@@ -299,18 +313,24 @@ def canonical_scope(vendor: str, raw_scope: Optional[str]) -> str:
     The raw header is unsigned and attacker-chosen, so it must never reach
     `body_fingerprint` directly -- see the block comment above. Returns:
 
-      - "" when the vendor sends no event-type header at all;
       - the normalised topic when it is a recognised vendor topic;
       - "<family>*" when it belongs to a recognised edit-only family;
-      - UNKNOWN_SCOPE for everything else, including every scope value from
-        a vendor with no published topic vocabulary.
+      - UNKNOWN_SCOPE for everything else -- including an ABSENT header, and
+        including every value from a vendor with no published vocabulary.
+
+    An absent header maps to UNKNOWN_SCOPE rather than to its own "" bucket
+    on purpose. Giving "absent" a separate bucket handed an attacker a free
+    extra scope for the same signed bytes simply by STRIPPING the header
+    (Shiprocket was 2 buckets, not the 1 previously claimed here). Now the
+    closed set is exactly: 16 Shopify topics + 5 family buckets, and 1 bucket
+    for every other vendor.
 
     Pure and total: any input, including None or a 10 KB junk string, yields
     one of the values above.
     """
     normalised = (raw_scope or "").strip().lower()
     if not normalised:
-        return ""
+        return UNKNOWN_SCOPE
     exact, families = _SCOPE_ALLOWLISTS.get((vendor or "").strip().lower(), (None, ()))
     if exact and normalised in exact:
         return normalised
