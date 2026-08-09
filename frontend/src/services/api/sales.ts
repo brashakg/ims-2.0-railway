@@ -170,14 +170,23 @@ export function mapRx(rx: any): any {
 // and the _os left-eye equivalents). The backend PrescriptionCreate requires
 // NESTED right_eye / left_eye EyeData objects, with sph/cyl/add/pd as strings
 // and axis as an int. Convert here so callers can forward the form data as-is.
-function _rxStr(v: unknown): string | undefined {
-  if (v === undefined || v === null || v === '') return undefined;
+// A blank box must travel the wire as an explicit NULL, never as `undefined`.
+// PATIENT SAFETY: JSON.stringify DROPS an undefined property, so a cleared CYL
+// or AXIS used to vanish from the PUT body entirely; the backend's
+// exclude_unset then read "not sent", its deep-merge restored the STORED
+// cylinder/axis, and the API answered 200 "Prescription updated" while the
+// clinical correction was silently discarded -- the wrong toric lens stayed on
+// the Rx. `null` is the value the backend treats as "clear this field"
+// (prescriptions._merge_eye_subdoc), so a cleared power now really clears.
+// Do NOT change these back to `undefined`.
+function _rxStr(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null;
   return String(v);
 }
-function _rxAxis(v: unknown): number | undefined {
-  if (v === undefined || v === null || v === '') return undefined;
+function _rxAxis(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null;
   const n = Number(v);
-  return Number.isFinite(n) ? Math.round(n) : undefined;
+  return Number.isFinite(n) ? Math.round(n) : null;
 }
 function _buildEye(d: any, suffix: 'od' | 'os') {
   return {
@@ -192,7 +201,10 @@ function _buildEye(d: any, suffix: 'od' | 'os') {
     acuity: _rxStr(d[`va_${suffix}`]),
   };
 }
-function toPrescriptionCreatePayload(data: any): any {
+// Exported for the regression test in src/__tests__/rxClearPower.test.ts: the
+// EXACT wire body a cleared CYL/AXIS produces is what the backend contract
+// depends on, so it is pinned by a test rather than by inspection.
+export function toPrescriptionCreatePayload(data: any): any {
   if (!data || typeof data !== 'object') return data;
   // Already nested (e.g. a caller that built right_eye/left_eye directly).
   if (data.right_eye || data.rightEye) return data;

@@ -565,17 +565,55 @@ def _merge_eye_subdoc(stored, patch):
     return merged
 
 
-def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
+def _validate_cl_eye(eye_label: str, eye):
     """Validate one eye of a contact-lens Rx. Raises HTTPException(422) on a
     bad value. CL axis is 0-180 (toric); modality is checked separately at the
-    top level. All fields optional -- only present values are range-checked."""
+    top level. All fields optional -- only present values are range-checked.
+
+    `eye` may be a CLEyeData model (create door) OR a plain dict (the MERGED
+    sub-document the edit door is about to $set). Both shapes go through the
+    SAME rules: validating the model while writing the merged dict is how a
+    toric CL slipped through with no axis.
+
+    PATIENT SAFETY -- the contact-lens twin of the spectacle toric gate: a soft
+    toric CL is ORDERED by power/cyl/axis. With a cylinder and no axis the lens
+    cannot be ordered, so the counter guesses (usually 180) and the patient
+    wears a rotationally-wrong toric: blur, ghosting, a refit, a returned box.
+    NOTE the CL axis domain is 0-180 (CLEyeData.cl_axis), NOT the spectacle
+    1-180 -- do not merge the two rules.
+    """
     if eye is None:
         return
-    if eye.cl_axis is not None and (eye.cl_axis < 0 or eye.cl_axis > 180):
+
+    def _field(name):
+        if isinstance(eye, dict):
+            return eye.get(name)
+        return getattr(eye, name, None)
+
+    cl_cyl = _field("cl_cyl")
+    cl_axis = _field("cl_axis")
+
+    if _cyl_is_toric(cl_cyl) and _is_blank(cl_axis):
         raise HTTPException(
             status_code=422,
-            detail=f"{eye_label} CL AXIS must be a whole number between 0 and 180",
+            detail=(
+                f"{eye_label} has contact-lens cylinder {_fmt_power(cl_cyl)} but "
+                f"no axis - a CL axis (0-180) is required"
+            ),
         )
+    if not _is_blank(cl_axis):
+        # A merged dict can carry a string / fractional axis that never went
+        # through CLEyeData's Optional[int] coercion, so re-check it here.
+        try:
+            axis_num = float(cl_axis)
+        except (TypeError, ValueError):
+            axis_num = None
+        bad_axis = axis_num is None or not (0 <= axis_num <= 180)
+        if bad_axis or axis_num != int(axis_num):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} CL AXIS must be a whole number between 0 and 180",
+            )
     for field_name, lo, hi in (
         ("cl_power", *_CL_LIMITS["cl_power"]),
         ("cl_cyl", *_CL_LIMITS["cl_cyl"]),
@@ -583,8 +621,17 @@ def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
         ("base_curve", *_CL_LIMITS["base_curve"]),
         ("diameter", *_CL_LIMITS["diameter"]),
     ):
-        val = getattr(eye, field_name)
-        if val is not None and (val < lo or val > hi):
+        val = _field(field_name)
+        if _is_blank(val):
+            continue
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} {field_name} must be a valid number, got '{val}'",
+            )
+        if num < lo or num > hi:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -1249,10 +1296,16 @@ async def update_prescription(
             status_code=400,
             detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
         )
-    if "cl_right" in body:
-        _validate_cl_eye("Right eye", rx.cl_right)
-    if "cl_left" in body:
-        _validate_cl_eye("Left eye", rx.cl_left)
+    # PATIENT SAFETY: validate the MERGED contact-lens sub-documents, exactly
+    # like the spectacle eyes above. Validating `rx.cl_right` (the raw patch)
+    # while $setting the merged dict is how a toric CL reached storage with no
+    # axis: the patch said only {"cl_axis": null} -- clean on its own -- while
+    # the merge re-supplied the stored cl_cyl, producing a complete-looking
+    # toric CL Rx whose only missing field is the axis.
+    if "cl_right" in merged_eyes:
+        _validate_cl_eye("Right eye", merged_eyes["cl_right"])
+    if "cl_left" in merged_eyes:
+        _validate_cl_eye("Left eye", merged_eyes["cl_left"])
 
     # If validity changed, recompute expiry off the original test/created date
     # so the edit stays internally consistent (expiry = test_date + N months).

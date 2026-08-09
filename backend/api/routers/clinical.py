@@ -509,10 +509,34 @@ def _axis_for_storage(eye: dict):
     if axis is None or str(axis).strip() == "":
         return None
     try:
-        return int(float(str(axis).strip()))
+        # float(axis) -- the SAME coercion rx_validation._validate_axis uses, so
+        # anything it accepted parses here too (float(str(True)) would not).
+        return int(float(axis))
     except (TypeError, ValueError):
-        # Unreachable after validation; never fabricate a value, keep it blank.
+        # Genuinely unreachable: _validate_eye_test_rx ran float(axis) on this
+        # exact value first. Never fabricate a value; keep the cell blank.
         return None
+
+
+def _power_for_storage(eye: dict, *keys) -> str:
+    """The dioptric power / measurement to PERSIST, resolved by the SAME rule
+    the validator used.
+
+    `_validate_eye_test_rx` resolves an alias pair with `_eye_value` (first
+    NON-blank key), but the Rx write used to resolve it with an
+    `a or b or ""` chain (first TRUTHY). The two disagree whenever the winning
+    alias is a numeric zero: a payload with `cylinder: 0` plus `cyl: "-1.50"`
+    validated as non-toric (no axis demanded) and then STORED -1.50 with no
+    axis -- the exact un-grindable Rx the gate exists to stop. The truthiness
+    chain also dropped a genuine plano `0` (stored as "" = "not tested") and
+    never looked at an `addition`-keyed near-add at all.
+
+    Returns "" for a not-entered value, matching the stored blank-cell shape.
+    """
+    from .prescriptions import _eye_value
+
+    value = _eye_value(eye, *keys)
+    return "" if value is None else str(value)
 
 
 def _to_camel_case(snake_str: str) -> str:
@@ -1022,19 +1046,14 @@ async def complete_test(
                     # it blank, never fabricate a 0.00 power or a 180 axis into a
                     # billable Rx (audit P1). A genuine plano "0" is preserved.
                     "right_eye": {
-                        "sph": str(
-                            data.right_eye.get("sphere")
-                            or data.right_eye.get("sph")
-                            or ""
-                        ),
-                        "cyl": str(
-                            data.right_eye.get("cylinder")
-                            or data.right_eye.get("cyl")
-                            or ""
-                        ),
+                        "sph": _power_for_storage(data.right_eye, "sphere", "sph"),
+                        "cyl": _power_for_storage(data.right_eye, "cylinder", "cyl"),
                         "axis": _axis_for_storage(data.right_eye),
-                        "add": str(data.right_eye.get("add") or ""),
-                        "pd": str(data.right_eye.get("pd", "")),
+                        "add": _power_for_storage(data.right_eye, "add", "addition"),
+                        # str(x.get("pd", "")) stored the literal "None" when the
+                        # per-eye PD box was left blank (the key is PRESENT with a
+                        # null), which later blocked every edit of that eye.
+                        "pd": _power_for_storage(data.right_eye, "pd"),
                         "prism": (data.right_eye.get("prism") or None),
                         "base": (data.right_eye.get("base") or None),
                         "acuity": (
@@ -1044,19 +1063,11 @@ async def complete_test(
                         ),
                     },
                     "left_eye": {
-                        "sph": str(
-                            data.left_eye.get("sphere")
-                            or data.left_eye.get("sph")
-                            or ""
-                        ),
-                        "cyl": str(
-                            data.left_eye.get("cylinder")
-                            or data.left_eye.get("cyl")
-                            or ""
-                        ),
+                        "sph": _power_for_storage(data.left_eye, "sphere", "sph"),
+                        "cyl": _power_for_storage(data.left_eye, "cylinder", "cyl"),
                         "axis": _axis_for_storage(data.left_eye),
-                        "add": str(data.left_eye.get("add") or ""),
-                        "pd": str(data.left_eye.get("pd", "")),
+                        "add": _power_for_storage(data.left_eye, "add", "addition"),
+                        "pd": _power_for_storage(data.left_eye, "pd"),
                         "prism": (data.left_eye.get("prism") or None),
                         "base": (data.left_eye.get("base") or None),
                         "acuity": (

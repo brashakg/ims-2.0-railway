@@ -109,8 +109,11 @@ class _FakeRxRepo:
         return None
 
     def create(self, data):
-        self.created.append(dict(data))
-        return dict(data)
+        doc = dict(data)
+        # The real repository assigns the id when the create door omits it.
+        doc.setdefault("prescription_id", f"rx-{len(self.created) + 1}")
+        self.created.append(doc)
+        return doc
 
 
 class _FakeSingleRxRepo:
@@ -169,6 +172,8 @@ def _rx_client(monkeypatch, repo, roles=("OPTOMETRIST",)):
 
     app.dependency_overrides[get_current_user] = _fake_user
     monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: repo)
+    # No customer lookup in these tests -- the create door skips it when None.
+    monkeypatch.setattr(prescriptions, "get_customer_repository", lambda: None)
     return TestClient(app)
 
 
@@ -194,6 +199,22 @@ def _seed_rx_doc():
         },
         "created_by": "opt-1",
     }
+
+
+def _seed_cl_rx_doc():
+    """A stored CONTACT-LENS Rx whose right eye is TORIC (cyl + axis)."""
+    doc = _seed_rx_doc()
+    doc["rx_kind"] = "CONTACT_LENS"
+    doc["modality"] = "MONTHLY"
+    doc["cl_right"] = {
+        "cl_power": -3.0, "cl_cyl": -1.75, "cl_axis": 170,
+        "base_curve": 8.6, "diameter": 14.2,
+    }
+    doc["cl_left"] = {
+        "cl_power": -2.0, "cl_cyl": None, "cl_axis": None,
+        "base_curve": 8.6, "diameter": 14.2,
+    }
+    return doc
 
 
 def _eye_test_doc():
@@ -712,3 +733,290 @@ class TestF19ValidateUsesCanonicalLimits:
         )
         for stale in ("-20.0", "20.0)", "3.50", "0.75 <=", "-6.0 <="):
             assert stale not in code, f"stale limit {stale} still hardcoded"
+
+
+# ============================================================================
+# PANEL ROUND 2 - the body the SHIPPED client actually sends
+# ============================================================================
+# Every case above sends explicit nulls. The production edit form (PrescriptionForm
+# -> sales.ts toPrescriptionCreatePayload -> ClinicPrescriptionHistory, the ONLY
+# PUT /prescriptions/{id} caller) used to DROP a blanked key instead: a cleared
+# CYL/AXIS never reached the server, the deep-merge restored the stored values,
+# and the API answered 200 while the clinical correction was discarded. sales.ts
+# now emits `null` for a blank; this pins the resulting contract end-to-end.
+
+
+def _cleared_cyl_axis_body():
+    """The EXACT right_eye body toPrescriptionCreatePayload emits when an
+    optometrist blanks the CYL and AXIS boxes on a prefilled toric Rx.
+    Mirrors frontend/src/__tests__/rxClearPower.test.ts."""
+    return {
+        "right_eye": {
+            "sph": "-2",
+            "cyl": None,
+            "axis": None,
+            "add": "2",
+            "pd": "32",
+            "prism": None,
+            "base": None,
+            "acuity": None,
+        }
+    }
+
+
+class TestClearingAPowerFromTheRealClient:
+    def test_cleared_cyl_and_axis_are_actually_removed(self, monkeypatch):
+        repo = _FakeSingleRxRepo(_seed_rx_doc())
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json=_cleared_cyl_axis_body())
+        assert resp.status_code == 200, resp.text
+        eye = repo._doc["right_eye"]
+        # The mis-keyed cylinder is GONE - the patient is no longer dispensed a
+        # toric lens they do not need.
+        assert eye["cyl"] is None
+        assert eye["axis"] is None
+        # What the clinician kept is still there.
+        assert eye["sph"] == "-2"
+        assert eye["pd"] == "32"
+        assert eye["add"] == "2"
+        # The other eye was not part of the patch and is untouched.
+        assert repo._doc["left_eye"]["cyl"] == "-0.25"
+
+    def test_clearing_only_the_axis_of_a_toric_eye_is_rejected(self, monkeypatch):
+        """The safety gate still applies to the real client's body: dropping the
+        axis while the cylinder stays is the un-grindable Rx."""
+        body = _cleared_cyl_axis_body()
+        body["right_eye"]["cyl"] = "-0.50"  # cylinder kept, axis cleared
+        repo = _FakeSingleRxRepo(_seed_rx_doc())
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json=body)
+        assert resp.status_code == 400, resp.text
+        assert "no axis" in resp.json()["detail"]
+        assert repo.updates == []
+
+    def test_a_legacy_out_of_range_add_can_be_cleared_not_deadlocked(self, monkeypatch):
+        """A stored ADD below the canonical 0.75 floor must not make the record
+        permanently uneditable: clearing the box sends null, so the merged eye
+        is valid and the edit goes through."""
+        doc = _seed_rx_doc()
+        doc["right_eye"]["add"] = "0.50"  # legacy, below the canonical floor
+        repo = _FakeSingleRxRepo(doc)
+        client = _rx_client(monkeypatch, repo)
+        body = _cleared_cyl_axis_body()
+        body["right_eye"]["add"] = None
+        body["right_eye"]["cyl"] = None
+        resp = client.put("/prescriptions/rx-1", json=body)
+        assert resp.status_code == 200, resp.text
+        assert repo._doc["right_eye"]["add"] is None
+
+
+# ============================================================================
+# PANEL ROUND 2 - the toric gate on the CONTACT-LENS half of the same endpoint
+# ============================================================================
+# A soft toric CL is ORDERED by power/cyl/axis. With a cylinder and no axis the
+# lens cannot be ordered, so the counter guesses (usually 180) and the patient
+# wears a rotationally-wrong toric. The CL axis domain is 0-180 (NOT the
+# spectacle 1-180).
+
+
+class TestContactLensToricAxisGate:
+    def test_put_clearing_cl_axis_on_a_toric_cl_is_rejected(self, monkeypatch):
+        """The merged CL sub-document is what gets written, so it is what must
+        be validated: the patch alone ({cl_axis: null}) looks clean."""
+        repo = _FakeSingleRxRepo(_seed_cl_rx_doc())
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json={"cl_right": {"cl_axis": None}})
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert "contact-lens cylinder" in detail and "-1.75" in detail
+        assert "0-180" in detail
+        assert repo.updates == []
+        # The stored lens still has its axis.
+        assert repo._doc["cl_right"]["cl_axis"] == 170
+
+    def test_put_adding_a_cl_cylinder_to_an_axis_less_cl_is_rejected(self, monkeypatch):
+        repo = _FakeSingleRxRepo(_seed_cl_rx_doc())
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json={"cl_left": {"cl_cyl": -1.75}})
+        assert resp.status_code == 422, resp.text
+        assert "no axis" in resp.json()["detail"]
+        assert repo.updates == []
+
+    def test_put_partial_cl_edit_still_preserves_the_other_fit_params(self, monkeypatch):
+        """The F12 merge itself must keep working for CL eyes."""
+        repo = _FakeSingleRxRepo(_seed_cl_rx_doc())
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json={"cl_right": {"cl_power": -3.25}})
+        assert resp.status_code == 200, resp.text
+        eye = repo._doc["cl_right"]
+        assert eye["cl_power"] == -3.25
+        assert eye["cl_cyl"] == -1.75 and eye["cl_axis"] == 170
+        assert eye["base_curve"] == 8.6 and eye["diameter"] == 14.2
+
+    def test_put_merged_cl_out_of_range_fit_param_is_rejected(self, monkeypatch):
+        """A legacy/imported base_curve outside 8.0-9.5 must not be silently
+        re-persisted by an edit the endpoint reports as validated."""
+        doc = _seed_cl_rx_doc()
+        doc["cl_right"]["base_curve"] = 12.0
+        repo = _FakeSingleRxRepo(doc)
+        client = _rx_client(monkeypatch, repo)
+        resp = client.put("/prescriptions/rx-1", json={"cl_right": {"cl_power": -3.25}})
+        assert resp.status_code == 422, resp.text
+        assert "base_curve" in resp.json()["detail"]
+        assert repo.updates == []
+
+    def test_create_toric_cl_without_axis_is_rejected(self, monkeypatch):
+        rx_repo = _FakeRxRepo()
+        client = _rx_client(monkeypatch, rx_repo)
+        resp = client.post(
+            "/prescriptions",
+            json={
+                "patient_id": "pat-1",
+                "customer_id": "cust-1",
+                "optometrist_id": "u-opto",
+                "rx_kind": "CONTACT_LENS",
+                "modality": "MONTHLY",
+                "cl_right": {
+                    "cl_power": -3.0, "cl_cyl": -1.75,
+                    "base_curve": 8.6, "diameter": 14.2,
+                },
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert "no axis" in resp.json()["detail"]
+        assert rx_repo.created == []
+
+    def test_create_toric_cl_with_axis_zero_is_accepted(self, monkeypatch):
+        """CL axis 0 IS valid (the CL domain is 0-180, unlike spectacles)."""
+        rx_repo = _FakeRxRepo()
+        client = _rx_client(monkeypatch, rx_repo)
+        resp = client.post(
+            "/prescriptions",
+            json={
+                "patient_id": "pat-1",
+                "customer_id": "cust-1",
+                "optometrist_id": "u-opto",
+                "rx_kind": "CONTACT_LENS",
+                "modality": "MONTHLY",
+                "cl_right": {
+                    "cl_power": -3.0, "cl_cyl": -1.75, "cl_axis": 0,
+                    "base_curve": 8.6, "diameter": 14.2,
+                },
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert len(rx_repo.created) == 1
+        assert rx_repo.created[0]["cl_right"]["cl_axis"] == 0
+
+    def test_non_toric_cl_needs_no_axis(self, monkeypatch):
+        rx_repo = _FakeRxRepo()
+        client = _rx_client(monkeypatch, rx_repo)
+        resp = client.post(
+            "/prescriptions",
+            json={
+                "patient_id": "pat-1",
+                "customer_id": "cust-1",
+                "optometrist_id": "u-opto",
+                "rx_kind": "CONTACT_LENS",
+                "modality": "MONTHLY",
+                "cl_right": {
+                    "cl_power": -3.0, "base_curve": 8.6, "diameter": 14.2,
+                },
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert rx_repo.created[0]["cl_right"]["cl_axis"] is None
+
+    def test_validator_accepts_a_model_and_a_dict_identically(self):
+        toric_no_axis = {
+            "cl_power": -3.0, "cl_cyl": -1.75, "cl_axis": None,
+            "base_curve": 8.6, "diameter": 14.2,
+        }
+        with pytest.raises(HTTPException) as from_dict:
+            prescriptions._validate_cl_eye("Right eye", toric_no_axis)
+        with pytest.raises(HTTPException) as from_model:
+            prescriptions._validate_cl_eye(
+                "Right eye", prescriptions.CLEyeData(**toric_no_axis)
+            )
+        assert from_dict.value.status_code == from_model.value.status_code == 422
+        assert from_dict.value.detail == from_model.value.detail
+
+
+# ============================================================================
+# PANEL ROUND 2 - validation and STORAGE must resolve an alias the same way
+# ============================================================================
+
+
+class TestEyeTestStorageResolvesLikeTheValidator:
+    def test_mixed_alias_cylinder_cannot_slip_past_the_gate(self, monkeypatch):
+        """cylinder: 0 + cyl: '-1.50' used to validate as non-toric (first
+        NON-blank wins) and then STORE -1.50 (first TRUTHY wins) with no axis."""
+        test_repo = _FakeTestRepo(_eye_test_doc())
+        rx_repo = _FakeRxRepo()
+        client = _clinical_client(monkeypatch, test_repo=test_repo,
+                                  queue_repo=_FakeQueueRepo(), rx_repo=rx_repo)
+        resp = client.post(
+            "/clinical/tests/t-1/complete",
+            json={
+                "rightEye": {"sphere": "-1.00", "cylinder": 0, "cyl": "-1.50",
+                             "axis": None},
+                "leftEye": {"sphere": "-1.00", "cylinder": 0, "axis": None},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # Whatever was VALIDATED (the plano 0) is what is STORED - never the
+        # -1.50 the gate never saw.
+        assert rx_repo.created[0]["right_eye"]["cyl"] == "0"
+        assert rx_repo.created[0]["right_eye"]["axis"] is None
+
+    def test_plano_zero_is_preserved_not_blanked(self, monkeypatch):
+        test_repo = _FakeTestRepo(_eye_test_doc())
+        rx_repo = _FakeRxRepo()
+        client = _clinical_client(monkeypatch, test_repo=test_repo,
+                                  queue_repo=_FakeQueueRepo(), rx_repo=rx_repo)
+        resp = client.post(
+            "/clinical/tests/t-1/complete",
+            json={
+                "rightEye": {"sphere": 0, "cylinder": 0, "axis": None, "add": 0},
+                "leftEye": {"sphere": 0, "cylinder": 0, "axis": None},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        eye = rx_repo.created[0]["right_eye"]
+        # A genuine plano is "0" (the comment at the write site promises it),
+        # not "" ("not tested").
+        assert eye["sph"] == "0" and eye["cyl"] == "0"
+
+    def test_blank_per_eye_pd_is_stored_blank_not_the_string_none(self, monkeypatch):
+        """str(eye.get('pd', '')) stored the literal 'None' when the box was
+        blank - which then failed the merged-eye validation on every later edit."""
+        test_repo = _FakeTestRepo(_eye_test_doc())
+        rx_repo = _FakeRxRepo()
+        client = _clinical_client(monkeypatch, test_repo=test_repo,
+                                  queue_repo=_FakeQueueRepo(), rx_repo=rx_repo)
+        resp = client.post(
+            "/clinical/tests/t-1/complete",
+            json={
+                "rightEye": {"sphere": -1.0, "cylinder": 0, "axis": None, "pd": None},
+                "leftEye": {"sphere": -1.0, "cylinder": 0, "axis": None},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert rx_repo.created[0]["right_eye"]["pd"] == ""
+        assert rx_repo.created[0]["left_eye"]["pd"] == ""
+
+    def test_addition_keyed_near_add_is_not_dropped_on_storage(self, monkeypatch):
+        test_repo = _FakeTestRepo(_eye_test_doc())
+        rx_repo = _FakeRxRepo()
+        client = _clinical_client(monkeypatch, test_repo=test_repo,
+                                  queue_repo=_FakeQueueRepo(), rx_repo=rx_repo)
+        resp = client.post(
+            "/clinical/tests/t-1/complete",
+            json={
+                "rightEye": {"sphere": -1.0, "cylinder": 0, "axis": None,
+                             "addition": "2.00"},
+                "leftEye": {"sphere": -1.0, "cylinder": 0, "axis": None},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert rx_repo.created[0]["right_eye"]["add"] == "2.00"
