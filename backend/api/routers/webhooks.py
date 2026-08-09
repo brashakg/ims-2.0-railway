@@ -18,11 +18,18 @@ Fail-soft contract:
 - Over the per-vendor+IP rate limit → 429 with a generic detail (checked
   FIRST, before the body is read or any secret is looked up, so unsigned
   garbage can't be used to burn Mongo lookups + HMAC computes).
-- Secret missing in DB → return 200 with `{"status":"skipped"}` so the
-  vendor's retry queue treats this as "delivered, ignored". Returning
-  4xx/5xx would cause Razorpay/Shopify/Shiprocket to retry every minute
-  for 24 h — bad for everyone. Operators see the skip in `webhook_inbox`
-  with `processed=false, skipped_reason=secret_not_configured`.
+- Secret genuinely not configured → 200 `{"status":"skipped"}` so the vendor's
+  retry queue treats this as "delivered, ignored". Returning 4xx/5xx would
+  cause Razorpay/Shopify/Shiprocket to retry every minute for 24 h, and no
+  amount of retrying fixes a missing config value. Operators see the skip in
+  `webhook_inbox` with `processed=true, skipped_reason=secret_not_configured,
+  signature_verified=false` — metadata only, NO payload, because without a
+  secret we cannot authenticate the sender (see `_record_unverifiable`).
+- Secret LOOKUP FAILED (Mongo unreachable / raised) → 503, NOT the skip above.
+  These were indistinguishable until this PR: `_load_secret` returned a bare
+  None for both, so a Mongo blip 2xx-dropped correctly-signed Razorpay and
+  Shiprocket deliveries — real payments and their GST — with no record and no
+  resend. `_load_secret` now returns `(secret, lookup_ok)`.
 - Bad signature → 401 + `{"detail":"invalid signature"}`. Vendors that
   re-attempt on 401 will be silently swallowed but the legitimate
   delivery is rejected so a leaked URL can't be abused.
@@ -421,14 +428,39 @@ def _get_inbox_collection():
         return None
 
 
-def _load_secret(vendor: str) -> Optional[str]:
+def _load_secret(vendor: str) -> tuple[Optional[str], bool]:
+    """Pull the per-vendor `webhook_secret` from the `integrations` doc.
+
+    Returns `(secret, lookup_ok)`.
+
+    THE SECOND ELEMENT IS THE POINT. This used to return a bare Optional, so
+    "this integration genuinely has no secret configured" and "the lookup
+    BLEW UP / Mongo was unreachable" were the same value: None. The caller
+    read that None as the former and returned 200
+    {"status":"skipped","reason":"secret_not_configured"} with no inbox row —
+    so a Mongo blip lasting a second or two would 2xx-drop a correctly-signed,
+    first-time Razorpay or Shiprocket delivery (a real payment and its GST),
+    the vendor would treat it as permanently handled and never resend, and the
+    only trace was a logger.debug line. Shopify partially escaped through the
+    env fallback below; the other two had nothing. Meanwhile the SAME Mongo
+    outage a few lines later, at the inbox-collection check, correctly returned
+    503 so the vendor retries.
+
+    So: `lookup_ok=False` means "we could not determine whether a secret
+    exists" and the caller MUST 503 rather than ack. It is True only when we
+    actually reached the config (or resolved the secret from env), whether or
+    not a secret was found.
+
+    Never logs the secret value — only the vendor and, on failure, the error.
     """
-    Pull the per-vendor `webhook_secret` from the `integrations` doc.
-    Mirrors `nexus_providers._load_integration_config` shape.
-    """
-    secret: Optional[str] = None
     db = _get_db()
-    if db is not None:
+    secret: Optional[str] = None
+    lookup_ok = True
+
+    if db is None:
+        # Not "no secret" — we never got to look. Storage is down.
+        lookup_ok = False
+    else:
         try:
             coll = db.get_collection("integrations")
             doc = coll.find_one({"type": vendor.lower()})
@@ -445,20 +477,34 @@ def _load_secret(vendor: str) -> Optional[str]:
                 pass
             secret = cfg.get("webhook_secret") or None
         except Exception as e:
-            logger.debug(f"[WEBHOOKS] secret lookup failed for {vendor}: {e}")
+            # ERROR, not debug: this branch now changes the HTTP status.
+            logger.error(
+                "[WEBHOOKS] %s: webhook_secret lookup FAILED (%s) — treating as "
+                "storage-unavailable so the vendor retries, NOT as "
+                "'no secret configured'",
+                vendor,
+                e,
+            )
             secret = None
+            lookup_ok = False
+
     # Shopify env fallback: a custom app's webhook HMAC signing key IS its API
     # secret key (== the OAuth client secret used by shopify_auth). When the
     # integrations doc carries no explicit webhook_secret, use the app secret
     # already on the server so inbound HMAC verification works without anyone
     # pasting a key. Mirrors the #916 auth-fix philosophy (env-first creds).
+    # This also rescues the lookup-failure case: if the env secret is present
+    # we can verify the signature without the DB, so the lookup outcome is
+    # moot and we proceed normally.
     if not secret and vendor.lower() == "shopify":
         secret = (
             os.getenv("SHOPIFY_CLIENT_SECRET")
             or os.getenv("SHOPIFY_API_SECRET")
             or None
         )
-    return secret
+        if secret:
+            lookup_ok = True
+    return secret, lookup_ok
 
 
 # ============================================================================
@@ -469,9 +515,17 @@ def _load_secret(vendor: str) -> Optional[str]:
 async def _dispatch_webhook_received(webhook_id: str, vendor: str) -> bool:
     """Fire `webhook.received` for a durably-persisted inbox row.
 
-    Returns True when NEXUS accepted the dispatch. Never raises: the row is
-    already durable, so a dispatch hiccup must not fail the request (that
-    would make the vendor resend a delivery we already stored).
+    Returns True when THE PUBLISH CALL DID NOT RAISE — which is not the same
+    as "NEXUS processed it", and is weaker than it looks: `registry.
+    dispatch_event` catches every exception itself and never re-raises, so in
+    practice this returns True even when the bus publish and its local
+    fallback both failed. Treat `redispatched: true` as "we asked again", not
+    as proof of delivery. Making this signal honest needs a dispatch_event
+    variant that can report failure; that is its own change.
+
+    Never raises: the row is already durable, so a dispatch hiccup must not
+    fail the request (that would make the vendor resend a delivery we already
+    stored).
     """
     try:
         from agents.registry import dispatch_event
@@ -496,9 +550,28 @@ async def _dispatch_webhook_received(webhook_id: str, vendor: str) -> bool:
 
 
 # How long a row may sit processed=false before a duplicate treats it as
-# stranded rather than in-flight. The event-bus fan-out completes in
-# milliseconds; a minute is orders of magnitude of headroom, and the cost of
-# waiting is only that recovery happens on the vendor's NEXT retry.
+# stranded rather than in-flight.
+#
+# WHAT THIS WINDOW IS AND IS NOT. It is NOT what protects the money, and an
+# earlier version of this comment wrongly implied it was by claiming "the
+# event-bus fan-out completes in milliseconds" — that describes the PUBLISH.
+# The DRAIN is serialised per worker (_listen_loop awaits _dispatch_local
+# inline, behind every other bus event) and map_shopify_order is synchronous,
+# pymongo-heavy work, so a row can legitimately sit unprocessed well past a
+# minute during a flash sale or a post-redeploy backlog. The number is a
+# heuristic, not a bound.
+#
+# What actually prevents a double-booked order + GST invoice is downstream and
+# CLAIM-FIRST: shopify_ingest._webhook_already_seen takes an atomic insert-claim
+# on _id='shopify:<webhook-id>' and returns 'replayed' BEFORE any invoice serial
+# is allocated, plus the orders.find_one({shopify_order_id}) guard and the
+# unique partial index with its E11000 branch; refunds claim first on a unique
+# shopify_refund_id. A premature re-dispatch therefore resolves to 'replayed',
+# not to a second booking.
+#
+# So this window is belt-and-braces over those claims: it costs only latency of
+# rescue, and it keeps the common case from generating pointless duplicate
+# drains. Do not let anything come to depend on it as a guarantee.
 _REDISPATCH_MIN_AGE_SECONDS = 60
 
 
@@ -587,6 +660,79 @@ async def _duplicate_response(
         )
         out["redispatched"] = await _dispatch_webhook_received(webhook_id, vendor)
     return out
+
+
+def _record_unverifiable(
+    request: Request, vendor: str, raw_body: bytes
+) -> Dict[str, Any]:
+    """Record a delivery we cannot authenticate because no secret is set.
+
+    The module contract has always promised that operators see this skip in
+    `webhook_inbox` with a `skipped_reason`. Nothing ever wrote such a row —
+    the only value ever persisted was 'delivery_too_old' — so the promise was
+    false and a misconfigured integration swallowed live orders leaving only a
+    log line. This makes the promise true.
+
+    WHAT IS DELIBERATELY NOT STORED: the payload. With no secret we cannot
+    verify the sender, so anyone who learns the URL can post arbitrary bytes
+    here. Persisting those bodies would turn the inbox into an unauthenticated
+    blob store AND give the operator recovery surfaces (Re-map) a forgeable
+    source. We keep only metadata — size, headers, a fingerprint — which is
+    exactly what answers the operator's question ("deliveries ARE arriving and
+    we are dropping them; go configure the secret") and nothing an attacker
+    can weaponise. `signature_verified: False` is stamped so no future reader
+    mistakes these rows for trusted data.
+
+    Bounded: the fingerprint carries the unique index, so repeated identical
+    posts collapse to ONE row, and the per-vendor+IP rate limit caps the rest.
+
+    Fail-soft on purpose: if the inbox is unavailable we still ACK 200. A
+    missing secret is a configuration gap that no amount of vendor retrying
+    can fix, so 503-storming the vendor would be worse than a log line.
+    """
+    fingerprint = webhook_verify.body_fingerprint(
+        vendor,
+        raw_body,
+        scope=webhook_verify.canonical_scope(
+            vendor, request.headers.get(_EVENT_TYPE_HEADERS.get(vendor) or "") or ""
+        ),
+    )
+    coll = _get_inbox_collection()
+    if coll is None:
+        logger.error(
+            "[WEBHOOKS] %s: no webhook_secret configured AND the inbox is "
+            "unavailable — this delivery leaves no record at all",
+            vendor,
+        )
+        return {"status": "skipped", "reason": "secret_not_configured"}
+
+    now = datetime.now(timezone.utc)
+    try:
+        coll.insert_one(
+            {
+                "webhook_id": str(uuid.uuid4()),
+                "vendor": vendor,
+                "received_at": now,
+                "headers": _filter_headers(request),
+                # No payload: unauthenticated content is never stored.
+                "payload": None,
+                "raw_body_size": len(raw_body or b""),
+                "processed": True,
+                "processed_at": now,
+                "skipped_reason": "secret_not_configured",
+                "signature_verified": False,
+                "event_id": None,
+                "body_fingerprint": fingerprint,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        if not _is_duplicate_key_error(e):
+            logger.error(
+                "[WEBHOOKS] %s: could not record the unverifiable delivery: %s",
+                vendor,
+                e,
+            )
+    return {"status": "skipped", "reason": "secret_not_configured"}
 
 
 def _persist_skipped(
@@ -689,14 +835,31 @@ async def _ingest(
         signature_header_name.lower()
     )
 
-    secret = _load_secret(vendor)
-    if not secret:
-        # Vendor's perspective: 200 OK, don't retry. Operator's perspective:
-        # plain log line they'll grep for.
-        logger.info(
-            f"[WEBHOOKS] {vendor}: no webhook_secret configured — skipping verification"
+    secret, lookup_ok = _load_secret(vendor)
+    if not lookup_ok:
+        # We could not determine whether a secret exists — storage is down, not
+        # "unconfigured". 503 so the vendor RETRIES, exactly like the
+        # inbox-unavailable branch below. Acking here would 2xx-drop a real,
+        # correctly-signed payment with no record and no resend.
+        logger.error(
+            "[WEBHOOKS] %s: cannot resolve the webhook secret (storage "
+            "unavailable) — returning 503 so the vendor retries",
+            vendor,
         )
-        return {"status": "skipped", "reason": "secret_not_configured"}
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    if not secret:
+        # Genuinely unconfigured integration. Vendor's perspective: 200 OK,
+        # don't retry — a config gap is not something a retry storm can fix.
+        # Operator's perspective: a WARNING plus a durable inbox row, because
+        # "we silently swallowed your live orders for three days" must be
+        # discoverable in the data, not just in a log ring buffer.
+        logger.warning(
+            "[WEBHOOKS] %s: no webhook_secret configured — CANNOT verify this "
+            "delivery; recording it as skipped and processing nothing",
+            vendor,
+        )
+        return _record_unverifiable(request, vendor, raw_body)
 
     if not sig:
         raise HTTPException(status_code=401, detail="invalid signature")
@@ -733,9 +896,26 @@ async def _ingest(
         event_id = (request.headers.get(event_id_header) or "").strip() or None
 
     event_type_header = _EVENT_TYPE_HEADERS.get(vendor)
-    event_type = (
+    raw_event_type = (
         (request.headers.get(event_type_header) or "") if event_type_header else ""
     )
+    # CLOSED ALLOWLIST, not the raw header. The header is unsigned, so feeding
+    # it straight in let ONE signed body mint an unbounded number of dedupe
+    # keys (5000 random topic strings -> 5000 keys); normalising its case
+    # alone, as the first cut did, only closed the spelling axis.
+    # canonical_scope maps it onto a fixed set: real topics keep their
+    # identity, edit-only families share one bucket each, everything else
+    # becomes "unknown".
+    event_type = webhook_verify.canonical_scope(vendor, raw_event_type)
+    if raw_event_type and event_type == webhook_verify.UNKNOWN_SCOPE:
+        logger.warning(
+            "[WEBHOOKS] %s: unrecognised event-type header %r — bucketing it as "
+            "'%s' for dedupe (a real new vendor topic belongs in "
+            "webhook_verify.SHOPIFY_TOPIC_ALLOWLIST)",
+            vendor,
+            raw_event_type[:80],
+            webhook_verify.UNKNOWN_SCOPE,
+        )
     fingerprint = webhook_verify.body_fingerprint(vendor, raw_body, scope=event_type)
 
     coll = _get_inbox_collection()
@@ -746,9 +926,11 @@ async def _ingest(
     # a real inbound order would be lost forever. Return 503 so the vendor
     # RETRIES (Shopify backs off for ~48h; the others similarly). We only ever
     # ACK 200 AFTER the row is durably persisted, or when it's a verified
-    # duplicate (its original row is already the durable record). The "no secret
-    # configured -> 200 skipped" path above is a deliberate, safe skip and is
-    # unaffected; the staleness skip below persists its own durable row.
+    # duplicate (its original row is already the durable record). The two skip
+    # paths both leave a durable row of their own: "no secret configured"
+    # writes a metadata-only unverifiable row, and the staleness skip below
+    # writes a full one. A secret lookup that FAILED never reaches here — it
+    # 503s above, so a DB blip can no longer masquerade as "unconfigured".
     if coll is None:
         logger.error(
             "[WEBHOOKS] %s: inbox collection unavailable — returning 503 so the "
@@ -975,7 +1157,15 @@ async def receive_msg91_delivery(request: Request):
         "x-msg91-signature"
     )
 
-    secret = _load_secret("msg91")
+    secret, lookup_ok = _load_secret("msg91")
+    if not lookup_ok:
+        # Same rule as the vendor receivers: a lookup we could not complete is
+        # storage-unavailable, not "unconfigured". 503 so MSG91 retries.
+        logger.error(
+            "[WEBHOOKS] msg91: cannot resolve the webhook secret (storage "
+            "unavailable) -- returning 503 so the vendor retries"
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
     if not secret:
         logger.info(
             "[WEBHOOKS] msg91: no webhook_secret configured -- skipping verification"

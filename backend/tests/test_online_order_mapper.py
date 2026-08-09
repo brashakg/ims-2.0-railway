@@ -519,3 +519,122 @@ def test_w14_pos_guard_leaves_shopify_ingest_unaffected(wired):
     assert docs[0]["store_id"] == "BV-ONLINE-01"
     assert docs[0]["source"] == "shopify"
     assert docs[0]["channel"] == "ONLINE"
+
+
+# ---------------------------------------------------------------------------
+# CHILD-RESOURCE GUARD (PR #966 round-3 must-fix 2)
+# ---------------------------------------------------------------------------
+# A Shopify ORDER payload carries "id" and never "order_id". CHILD resources --
+# refunds, fulfillments, transactions -- carry BOTH their own "id" and the
+# parent's "order_id", PLUS a top-level line_items list, so they look
+# order-shaped to every downstream check. Booking one mints a phantom IMS order
+# under the child id and burns a consecutive GST tax invoice serial on it; none
+# of the three idempotency layers fire because that child id was never booked.
+#
+# This is reachable from the live webhook path: the Shopify topic is read from
+# the UNSIGNED X-Shopify-Topic header, so a captured, validly-signed
+# fulfillments/create body replayed as orders/create routes straight here.
+# online_store_orders.py:274-291 already guards its Re-map queue against
+# exactly this; these tests lock the guard onto the create path.
+
+
+def _fulfillment_payload(child_id, parent_order_id):
+    """A Shopify fulfillments/create payload: child id + parent order_id +
+    a top-level line_items list."""
+    return {
+        "id": child_id,
+        "order_id": parent_order_id,
+        "status": "success",
+        "tracking_number": "SR123456",
+        "shipping_address": {"province": "20", "province_code": "20"},
+        "line_items": [
+            {
+                "id": 9001,
+                "product_id": 7001,
+                "variant_id": 999001,
+                "title": "Ray-Ban Frame RB1234",
+                "product_type": "Frames",
+                "sku": "RB-1234",
+                "quantity": 1,
+                "price": "999.00",
+                "total_discount": "0.00",
+            }
+        ],
+    }
+
+
+def test_fulfillment_payload_cannot_be_booked_as_an_order(wired):
+    """The headline case: a fulfillment body routed to the order path must be
+    refused, not booked under its child id."""
+    res = online_order_mapper.map_shopify_order(
+        _fulfillment_payload(88881, 10001), wired["db"], topic="orders/create"
+    )
+
+    assert res["status"] == "skipped"
+    assert res["reason"] == "child_resource_payload"
+    assert not [d for d in wired["orders"].docs if d.get("shopify_order_id") == "88881"]
+
+
+def test_child_payload_burns_no_gst_invoice_serial(wired):
+    """The money assertion: no phantom order, and no consecutive GST tax
+    invoice serial consumed on one."""
+    before_orders = len(wired["orders"].docs)
+
+    res = online_order_mapper.map_shopify_order(
+        _fulfillment_payload(88882, 10002), wired["db"], topic="orders/create"
+    )
+
+    assert res.get("invoice_number") is None
+    assert res.get("order_id") is None
+    assert len(wired["orders"].docs) == before_orders, "no phantom order booked"
+
+
+def test_refund_payload_replayed_as_orders_create_is_refused(wired):
+    """The adversarial framing: capture a validly-signed refunds/create body,
+    replay it with X-Shopify-Topic: orders/create. The topic header is unsigned,
+    so the topic argument is attacker-chosen -- the guard must not depend on it."""
+    refund = {
+        "id": 77771,
+        "order_id": 10003,
+        "note": "customer return",
+        "line_items": [
+            {"id": 9001, "variant_id": 999001, "sku": "RB-1234",
+             "quantity": 1, "price": "999.00", "total_discount": "0.00"}
+        ],
+    }
+
+    for claimed_topic in ("orders/create", "orders/paid", "refunds/create", None):
+        res = online_order_mapper.map_shopify_order(
+            dict(refund), wired["db"], topic=claimed_topic
+        )
+        assert res["status"] == "skipped", claimed_topic
+        assert res["reason"] == "child_resource_payload", claimed_topic
+
+    assert not [d for d in wired["orders"].docs if d.get("shopify_order_id") == "77771"]
+
+
+def test_guard_reports_the_parent_order_id_for_diagnosis(wired):
+    res = online_order_mapper.map_shopify_order(
+        _fulfillment_payload(88883, 10004), wired["db"], topic="orders/create"
+    )
+    assert res["shopify_order_id"] == "10004", "surface the PARENT id, not the child"
+
+
+def test_genuine_order_payloads_are_unaffected_by_the_guard(wired):
+    """A real order payload carries no top-level order_id, so the guard must
+    be invisible to it -- the create path still works end to end."""
+    res = online_order_mapper.map_shopify_order(
+        _frame_order(10500), wired["db"], topic="orders/create"
+    )
+    assert res["status"] == "created"
+    assert res["invoice_number"]
+    assert len([d for d in wired["orders"].docs
+                if d.get("shopify_order_id") == "10500"]) == 1
+
+
+def test_order_payload_with_explicit_null_order_id_still_books(wired):
+    """Defensive: `order_id: null` is absence, not a child resource."""
+    payload = _frame_order(10501)
+    payload["order_id"] = None
+    res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
+    assert res["status"] == "created"

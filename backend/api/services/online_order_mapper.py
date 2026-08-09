@@ -1114,7 +1114,46 @@ def map_shopify_order(
     try:
         payload = payload if isinstance(payload, dict) else {}
 
-        shopify_order_id = _norm(payload.get("id")) or _norm(payload.get("order_id"))
+        # CHILD-RESOURCE GUARD -- must come before anything reads payload["id"].
+        #
+        # A Shopify ORDER payload carries "id" and never "order_id". CHILD
+        # resources -- refunds, fulfillments, transactions, checkouts -- carry
+        # BOTH: their own "id" plus the parent's "order_id". They also carry a
+        # top-level line_items list, so they look order-shaped to every check
+        # below, and `_norm(payload.get("id"))` would resolve to the CHILD id.
+        #
+        # Booking one mints a PHANTOM IMS order under the fulfillment/refund id
+        # and burns a consecutive GST tax invoice serial on it. None of the
+        # three downstream idempotency layers fire, because that child id was
+        # never booked before -- they are all keyed on the order id.
+        #
+        # This is reachable from the live webhook path: the Shopify topic is
+        # read from the UNSIGNED X-Shopify-Topic header, so a captured, validly
+        # signed fulfillments/create body replayed as orders/create routes
+        # straight here. online_store_orders.py:274-291 already documents and
+        # guards exactly this hazard for its Re-map queue ("whose Re-map button
+        # could book a DUPLICATE order + GST invoice under the fulfillment id");
+        # this is that guard, on the create path where it was missing.
+        #
+        # Refuse rather than re-target to the parent: no caller legitimately
+        # sends a child payload here (NEXUS routes only _SHOPIFY_ORDER_TOPICS,
+        # and Re-map filters to orders/*), and syncing order status from a
+        # child body would corrupt fields it does not own.
+        if payload.get("order_id") is not None:
+            logger.warning(
+                "[ONLINE_MAP] refusing to book a CHILD resource as an order: "
+                "id=%s parent order_id=%s (a refund/fulfillment payload reached "
+                "the order-create path)",
+                _norm(payload.get("id")),
+                _norm(payload.get("order_id")),
+            )
+            return {
+                "status": "skipped",
+                "reason": "child_resource_payload",
+                "shopify_order_id": _norm(payload.get("order_id")),
+            }
+
+        shopify_order_id = _norm(payload.get("id"))
         # A cancelled / updated webhook for an order we already booked may not carry
         # line_items; in that case we still want to SYNC status. Otherwise (no id, or
         # a create with no lines) there is nothing to do.

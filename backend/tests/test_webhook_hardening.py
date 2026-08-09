@@ -234,8 +234,16 @@ def test_over_limit_returns_429_before_secret_lookup(client, monkeypatch):
     for word in ("mongo", "redis", "cache", "integrations", "secret", "hmac", "60"):
         assert word not in detail, f"429 detail leaks internals: {word}"
 
-    # Nothing persisted either way (garbage never got past the secret gate).
-    assert len(fake_db.get_collection("webhook_inbox").docs) == 0
+    # The RATE-LIMITED request persisted nothing — it never reached storage.
+    # The first (in-budget) request now leaves a metadata-only
+    # secret_not_configured row (PR #966: the module contract promised that
+    # record and nothing wrote it). Its payload is NOT stored, so unsigned
+    # garbage still cannot put content in the inbox.
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 1, "one row for the admitted request, none for the 429"
+    assert rows[0]["skipped_reason"] == "secret_not_configured"
+    assert rows[0]["payload"] is None
+    assert rows[0]["signature_verified"] is False
 
 
 def test_limiter_isolates_vendors(client, monkeypatch):

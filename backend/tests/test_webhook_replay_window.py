@@ -30,7 +30,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -549,18 +551,136 @@ def test_case_or_whitespace_variant_of_topic_cannot_mint_a_new_dedupe_key(
     assert len(patched_webhooks["dispatched"]) == 1
 
 
+def test_arbitrary_topic_strings_cannot_mint_new_dedupe_keys(
+    client, patched_webhooks
+):
+    """REGRESSION (round-3 must-fix 1). Normalising the topic's CASE closed
+    only the spelling axis; the VALUE was still taken verbatim from an
+    unsigned header, so one signed body could mint an UNBOUNDED number of
+    dedupe keys (a reviewer generated 5000).
+
+    Every unrecognised topic now collapses to one 'unknown' bucket, so a
+    single signed body yields exactly ONE accepted delivery no matter how many
+    junk topics it is replayed under."""
+    body = _old_order_body(days_old=1, order_id=934001)
+
+    statuses = []
+    for i in range(60):
+        r = _post_shopify(
+            client,
+            body,
+            topic=f"zzz-junk-{uuid.uuid4().hex}",
+            webhook_id=f"wh-junk-{i}",
+            triggered_at=_iso(datetime.now(timezone.utc)),
+        )
+        statuses.append(r.json()["status"])
+
+    assert statuses[0] == "received"
+    assert set(statuses[1:]) == {"duplicate"}, (
+        f"unrecognised topics minted {statuses.count('received')} distinct keys"
+    )
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1
+    assert inbox.docs[0]["body_fingerprint"] == webhook_verify.body_fingerprint(
+        "shopify", body, scope=webhook_verify.UNKNOWN_SCOPE
+    )
+    assert len(patched_webhooks["dispatched"]) == 1
+
+
+def test_a_junk_topic_cannot_impersonate_a_real_one(client, patched_webhooks):
+    """The 'unknown' bucket must be its OWN key — a junk topic must not
+    collide with a real topic's key and suppress a genuine delivery."""
+    body = _old_order_body(days_old=1, order_id=934002)
+
+    junk = _post_shopify(client, body, topic="orders/create-EVIL",
+                         webhook_id="wh-j1")
+    real = _post_shopify(client, body, topic="orders/create", webhook_id="wh-r1")
+
+    assert junk.json()["status"] == "received"
+    assert real.json()["status"] == "received", (
+        "a junk topic must not be able to pre-empt a real topic's dedupe key"
+    )
+    assert len(patched_webhooks["dispatched"]) == 2
+
+
+def test_edit_only_families_share_one_bucket_per_family(client, patched_webhooks):
+    """products/* is never pulled back into IMS, so the whole family shares
+    one bucket — closed key space, no per-suffix amplification."""
+    body = b'{"id":77001,"title":"Ray-Ban Meta"}'
+    sig = _b64_sig(body, SHOPIFY_SECRET)
+
+    def _post(topic, wid):
+        return client.post("/api/v1/webhooks/shopify", content=body, headers={
+            "X-Shopify-Hmac-Sha256": sig,
+            "X-Shopify-Topic": topic,
+            "X-Shopify-Webhook-Id": wid,
+            "content-type": "application/json",
+        })
+
+    assert _post("products/update", "wh-p1").json()["status"] == "received"
+    assert _post("products/create", "wh-p2").json()["status"] == "duplicate"
+    assert _post("products/delete", "wh-p3").json()["status"] == "duplicate"
+    # A different family is still its own bucket.
+    assert _post("collections/update", "wh-c1").json()["status"] == "received"
+
+    assert len(patched_webhooks["db"].get_collection("webhook_inbox").docs) == 2
+
+
+def test_real_topics_are_still_kept_distinct(client, patched_webhooks):
+    """The allowlist must not over-collapse: every genuine order topic keeps
+    its own identity, which is the whole reason scoping exists."""
+    body = _old_order_body(days_old=1, order_id=934003)
+    for i, topic in enumerate(sorted(webhook_verify.SHOPIFY_TOPIC_ALLOWLIST)):
+        r = _post_shopify(client, body, topic=topic, webhook_id=f"wh-real-{i}")
+        assert r.json()["status"] == "received", f"{topic} was wrongly collapsed"
+
+    assert len(patched_webhooks["db"].get_collection("webhook_inbox").docs) == len(
+        webhook_verify.SHOPIFY_TOPIC_ALLOWLIST
+    )
+
+
+def test_allowlist_has_not_drifted_from_nexus_dispatch_table():
+    """DRIFT TRIPWIRE. webhook_verify keeps a COPY of NEXUS's topic sets (it
+    is a pure leaf; the receiver must not gain an import edge into the agent
+    layer). If another crew adds a topic to NEXUS and not here, that topic
+    silently falls into the 'unknown' bucket and could collide with other
+    unknowns. This test fails the moment the two drift apart."""
+    from agents.implementations.nexus import NexusAgent
+
+    nexus_topics = set(NexusAgent._SHOPIFY_ORDER_TOPICS) | set(
+        NexusAgent._SHOPIFY_TOPIC_HANDLERS.keys()
+    )
+    missing = nexus_topics - set(webhook_verify.SHOPIFY_TOPIC_ALLOWLIST)
+    assert not missing, (
+        f"NEXUS dispatches these topics but webhook_verify.SHOPIFY_TOPIC_ALLOWLIST "
+        f"does not know them: {sorted(missing)}"
+    )
+    extra = set(webhook_verify.SHOPIFY_TOPIC_ALLOWLIST) - nexus_topics
+    assert not extra, (
+        f"allowlist carries topics NEXUS no longer dispatches: {sorted(extra)}"
+    )
+    assert tuple(NexusAgent._SHOPIFY_EDIT_ONLY_PREFIXES) == tuple(
+        webhook_verify.SHOPIFY_TOPIC_FAMILIES
+    )
+
+
 def test_whitespace_padded_delivery_id_cannot_dodge_the_unique_index(
     client, patched_webhooks
 ):
-    """REGRESSION (must-fix 1). event_id is stripped before it is used as a
-    dedupe key, so ' evt_x ' and 'evt_x' are the same delivery."""
-    body = json.dumps(
-        {"entity": "event", "event": "payment.captured",
-         "payload": {"payment": {"entity": {"id": "pay_ws", "amount": 100}}}},
-        separators=(",", ":"),
-    ).encode("utf-8")
+    """REGRESSION (round-2 must-fix 1). event_id is stripped before it is used
+    as a dedupe key, so ' evt_x ' and 'evt_x' are the same delivery.
 
-    def _post(event_id: str):
+    The two posts carry DIFFERENT bodies on purpose: with identical bodies the
+    fingerprint would return 'duplicate' whether or not event_id is stripped,
+    so the test would pass for the wrong reason and prove nothing."""
+    def _body(amount: int) -> bytes:
+        return json.dumps(
+            {"entity": "event", "event": "payment.captured",
+             "payload": {"payment": {"entity": {"id": "pay_ws", "amount": amount}}}},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _post(body: bytes, event_id: str):
         return client.post(
             "/api/v1/webhooks/razorpay",
             content=body,
@@ -571,8 +691,10 @@ def test_whitespace_padded_delivery_id_cannot_dodge_the_unique_index(
             },
         )
 
-    assert _post("evt_ws_1").json()["status"] == "received"
-    assert _post("  evt_ws_1  ").json()["status"] == "duplicate"
+    assert _post(_body(100), "evt_ws_1").json()["status"] == "received"
+    # Different body -> different fingerprint, so ONLY the event_id key can
+    # catch this one.
+    assert _post(_body(999), "  evt_ws_1  ").json()["status"] == "duplicate"
 
     inbox = patched_webhooks["db"].get_collection("webhook_inbox")
     assert len(inbox.docs) == 1
@@ -681,6 +803,42 @@ def test_fast_retry_of_an_inflight_row_does_not_double_dispatch(
     assert len(patched_webhooks["dispatched"]) == 1
 
 
+@pytest.mark.parametrize("age_seconds,expect_redispatch", [
+    (59, False),
+    (61, True),
+])
+def test_redispatch_grace_window_boundary(client, patched_webhooks, monkeypatch,
+                                          age_seconds, expect_redispatch):
+    """Pin the boundary the grace window actually uses. Previous coverage was
+    ~0s and 300s, so an edit to the constant or the comparison operator would
+    not have failed CI."""
+    import agents.registry as reg
+
+    async def boom(event, payload, source=""):
+        raise RuntimeError("bus down")
+
+    monkeypatch.setattr(reg, "dispatch_event", boom)
+
+    body = _old_order_body(days_old=1, order_id=935000 + age_seconds)
+    kwargs = dict(topic="orders/paid", webhook_id=f"wh-boundary-{age_seconds}")
+    assert _post_shopify(client, body, **kwargs).json()["status"] == "received"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    inbox.docs[0]["received_at"] = datetime.now(timezone.utc) - timedelta(
+        seconds=age_seconds
+    )
+
+    async def ok(event, payload, source=""):
+        patched_webhooks["dispatched"].append(payload)
+
+    monkeypatch.setattr(reg, "dispatch_event", ok)
+
+    out = _post_shopify(client, body, **kwargs).json()
+    assert out["status"] == "duplicate"
+    assert out.get("redispatched", False) is expect_redispatch
+    assert len(patched_webhooks["dispatched"]) == (1 if expect_redispatch else 0)
+
+
 def test_duplicate_echoes_the_matched_webhook_id(client, patched_webhooks):
     """Shopify's 'Send test notification' posts a byte-stable canned payload,
     so every send after the first dedupes. Echo the matched webhook_id so an
@@ -757,6 +915,147 @@ def test_unique_index_race_backstop_on_fingerprint(client, patched_webhooks,
     assert r2.json()["status"] == "duplicate"
     assert len(inbox.docs) == 1
     assert len(patched_webhooks["dispatched"]) == 1
+
+
+# ============================================================================
+# Secret resolution: a DB blip must never masquerade as "not configured"
+# ============================================================================
+
+
+def test_secret_lookup_failure_returns_503_not_a_2xx_drop(client, monkeypatch):
+    """REGRESSION (round-3 must-fix 3). _load_secret used to swallow a Mongo
+    exception into `secret = None`, indistinguishable from "no secret
+    configured" — so a transient blip returned 200 skipped with NO inbox row,
+    and Razorpay/Shiprocket (which have no env fallback) never resent. A real
+    captured payment and its GST vanished with only a logger.debug line."""
+    fake_db = FakeDB()
+    integ = fake_db.get_collection("integrations")
+    integ.insert_one({"type": "razorpay",
+                      "config": {"webhook_secret": RAZORPAY_SECRET},
+                      "enabled": True})
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(integ, "find_one", _boom)
+
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    dispatched: List[Any] = []
+
+    async def fake_dispatch(event, payload, source=""):
+        dispatched.append(payload)
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "dispatch_event", fake_dispatch)
+
+    body = b'{"entity":"event","event":"payment.captured","payload":{"amount":499900}}'
+    r = client.post("/api/v1/webhooks/razorpay", content=body, headers={
+        "X-Razorpay-Signature": _hex_sig(body, RAZORPAY_SECRET),
+        "content-type": "application/json",
+    })
+
+    assert r.status_code == 503, (
+        "a secret-lookup failure must make the vendor RETRY, never 2xx-drop "
+        f"a signed payment (got {r.status_code} {r.text})"
+    )
+    assert dispatched == []
+
+
+def test_db_unreachable_returns_503_not_secret_not_configured(client, monkeypatch):
+    """`_get_db() is None` is also 'we never got to look', not 'unconfigured'."""
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: None)
+    monkeypatch.delenv("SHOPIFY_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("SHOPIFY_API_SECRET", raising=False)
+
+    body = b'{"awb":"AWB1","current_status":"DELIVERED"}'
+    r = client.post("/api/v1/webhooks/shiprocket", content=body, headers={
+        "X-Shiprocket-Signature": _hex_sig(body, SHIPROCKET_SECRET),
+        "content-type": "application/json",
+    })
+    assert r.status_code == 503
+
+
+def test_shopify_env_fallback_still_works_when_the_db_lookup_fails(
+    client, monkeypatch
+):
+    """The env fallback means Shopify can still verify without the DB, so that
+    path must proceed normally rather than 503 — the secret was resolved."""
+    fake_db = FakeDB()
+    integ = fake_db.get_collection("integrations")
+
+    def _boom(*a, **k):
+        raise RuntimeError("primary stepped down")
+
+    monkeypatch.setattr(integ, "find_one", _boom)
+
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+    monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", SHOPIFY_SECRET)
+
+    dispatched: List[Any] = []
+
+    async def fake_dispatch(event, payload, source=""):
+        dispatched.append(payload)
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "dispatch_event", fake_dispatch)
+
+    body = _old_order_body(days_old=1, order_id=936001)
+    r = _post_shopify(client, body, topic="orders/paid", webhook_id="wh-envfb")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "received"
+
+
+def test_genuinely_absent_secret_writes_a_durable_row(client, monkeypatch):
+    """The module contract promised operators would see this skip in
+    webhook_inbox with a skipped_reason. Nothing ever wrote such a row (the
+    only value ever persisted was 'delivery_too_old'), so a misconfigured
+    integration silently swallowed live orders. Now it leaves a record —
+    metadata only, since with no secret we cannot authenticate the sender."""
+    fake_db = FakeDB()
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    body = b'{"entity":"event","event":"payment.captured"}'
+    r = client.post("/api/v1/webhooks/razorpay", content=body, headers={
+        "X-Razorpay-Signature": _hex_sig(body, "whatever"),
+        "content-type": "application/json",
+    })
+
+    assert r.status_code == 200
+    assert r.json() == {"status": "skipped", "reason": "secret_not_configured"}
+
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 1, "the contract promises a durable record — write one"
+    row = rows[0]
+    assert row["skipped_reason"] == "secret_not_configured"
+    assert row["signature_verified"] is False
+    assert row["processed"] is True, "must never be drained as real work"
+    assert row["payload"] is None, (
+        "unauthenticated content must NOT be stored: it would make the inbox an "
+        "open blob store and give Re-map a forgeable source"
+    )
+    assert row["raw_body_size"] == len(body)
+
+
+def test_unverifiable_rows_are_deduped_not_unbounded(client, monkeypatch):
+    """Anyone who learns the URL can post here while no secret is set, so the
+    row must be bounded: identical posts collapse onto one fingerprint."""
+    fake_db = FakeDB()
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    body = b'{"entity":"event","event":"payment.captured"}'
+    for _ in range(5):
+        client.post("/api/v1/webhooks/razorpay", content=body, headers={
+            "X-Razorpay-Signature": _hex_sig(body, "whatever"),
+            "content-type": "application/json",
+        })
+
+    assert len(fake_db.get_collection("webhook_inbox").docs) == 1
 
 
 # ============================================================================
@@ -961,22 +1260,66 @@ class TestIsStaleDelivery:
         ts = _iso(datetime.now(timezone.utc) - timedelta(days=40))
         assert webhook_verify.is_stale_delivery(ts) is True
 
-    @pytest.mark.parametrize("fraction", [
-        ".320072772",   # what Shopify actually sends: 9 digits
-        ".320072",      # 6 digits
-        ".320",         # 3 digits
-        ".32",          # 2 digits
-        "",             # none
+    @pytest.mark.parametrize("fraction,expected_micros", [
+        (".320072772", 320072),   # what Shopify actually sends: 9 digits
+        (".320072", 320072),      # 6 digits
+        (".320", 320000),         # 3 digits
+        (".32", 320000),          # 2 digits
+        ("", 0),                  # none
     ])
-    def test_shopify_fractional_second_precision_is_parsed(self, fraction):
+    def test_shopify_fractional_second_precision_is_parsed(
+        self, fraction, expected_micros
+    ):
         """X-Shopify-Triggered-At carries NINE fractional digits, which
         datetime.fromisoformat before Python 3.11 (3.10 is a REQUIRED CI
         target) cannot parse. Without normalisation the cap would be a
-        permanent no-op on half the deploy matrix and nothing would notice."""
-        old = datetime.now(timezone.utc) - timedelta(days=40)
+        permanent no-op on half the deploy matrix.
+
+        Asserts the exact PARSED VALUE, not merely non-None: a non-None
+        assertion passes on 3.11+ whether or not the normaliser exists, which
+        is the same version-dependent blind spot that produced the bug."""
+        old = (datetime.now(timezone.utc) - timedelta(days=40)).replace(microsecond=0)
         ts = old.strftime("%Y-%m-%dT%H:%M:%S") + fraction + "Z"
-        assert webhook_verify._parse_iso(ts) is not None, f"unparsed: {ts}"
+        parsed = webhook_verify._parse_iso(ts)
+        assert parsed == old.replace(microsecond=expected_micros), (
+            f"{ts} parsed to {parsed}"
+        )
+        assert parsed.tzinfo is not None and parsed.utcoffset().total_seconds() == 0
         assert webhook_verify.is_stale_delivery(ts) is True
+
+
+class TestNormaliseFractionalSeconds:
+    """Version-INDEPENDENT tests on the normaliser's output shape. These fail
+    on every Python if the normaliser is removed or weakened, unlike an
+    is-not-None parse assertion."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("2026-08-09T10:15:16.320072772+00:00", "2026-08-09T10:15:16.320072+00:00"),
+        ("2026-08-09T10:15:16.3200727720+05:30", "2026-08-09T10:15:16.320072+05:30"),
+        ("2026-08-09T10:15:16.320072+00:00", "2026-08-09T10:15:16.320072+00:00"),
+        ("2026-08-09T10:15:16.32+00:00", "2026-08-09T10:15:16.320000+00:00"),
+        ("2026-08-09T10:15:16.3-05:00", "2026-08-09T10:15:16.300000-05:00"),
+        ("2026-08-09T10:15:16+00:00", "2026-08-09T10:15:16+00:00"),
+        ("2026-08-09T10:15:16", "2026-08-09T10:15:16"),
+    ])
+    def test_exact_output(self, raw, expected):
+        assert webhook_verify._normalise_fractional_seconds(raw) == expected
+
+    @pytest.mark.parametrize("digits", [1, 2, 3, 4, 6, 7, 9, 13])
+    def test_output_never_exceeds_six_fractional_digits(self, digits):
+        raw = "2026-08-09T10:15:16." + ("1" * digits) + "+00:00"
+        out = webhook_verify._normalise_fractional_seconds(raw)
+        found = re.search(r"\.(\d+)", out)
+        assert found is not None
+        assert len(found.group(1)) == 6, out
+        # And the normalised form must actually be parseable.
+        assert datetime.fromisoformat(out) is not None
+
+    def test_regex_is_anchored_to_the_seconds_field(self):
+        """An unanchored r'\\.(\\d+)' matched the first dot-digits group
+        anywhere, mangling '2026.08.09' into '2026.080000.09'."""
+        assert webhook_verify._normalise_fractional_seconds("2026.08.09") == "2026.08.09"
+        assert webhook_verify._parse_iso("2026.08.09") is None
 
     def test_fractional_seconds_with_a_numeric_offset(self):
         ts = "2026-08-09T10:15:16.320072772+05:30"

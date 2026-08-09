@@ -200,16 +200,124 @@ def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
 #      reader must not lean on the invariant.
 #
 #   2. The load-bearing anti-replay is CONTENT-BOUND dedupe.
-#      `body_fingerprint()` hashes the exact bytes the HMAC covers, so a
-#      replayed delivery is *cryptographically guaranteed* to produce the
-#      same fingerprint -- the attacker cannot change one byte without
-#      invalidating the signature. The receiver stores it and backs it
-#      with a unique index, so replays are rejected regardless of age and
-#      regardless of any header the attacker rewrites.
+#      `body_fingerprint()` hashes the exact bytes the HMAC covers, so an
+#      attacker cannot change one byte of the BODY without invalidating the
+#      signature. The receiver stores the digest behind a unique index, so a
+#      replay of the same signed bytes is rejected regardless of age.
+#
+#      BE PRECISE ABOUT WHAT IS AND IS NOT SIGNED. The fingerprint also mixes
+#      in a `scope` -- the vendor's event-type header -- so two genuinely
+#      different topics carrying a byte-identical body are not collapsed into
+#      one delivery. That header is NOT covered by the HMAC. It is
+#      attacker-mutable, and downstream it is also routing-bearing (NEXUS
+#      selects the money handler from it). Feeding it in raw therefore let ONE
+#      signed body mint an UNBOUNDED number of dedupe keys: round 1 of this
+#      fix failed on the casing axis (5 spellings -> 5 keys), and normalising
+#      case alone still left the VALUE axis open (5000 random topic strings ->
+#      5000 keys).
+#
+#      So the scope is now mapped through a CLOSED ALLOWLIST
+#      (`canonical_scope`) before it is hashed: recognised vendor topics keep
+#      their identity, whole edit-only families collapse to one bucket each,
+#      and everything else collapses to a single `unknown` bucket. The honest
+#      invariant is therefore:
+#
+#          the fingerprint is content-bound over the SIGNED bytes, and the
+#          number of distinct dedupe keys one signed body can produce is
+#          bounded by the size of that closed set -- not by what an attacker
+#          can put in a header.
 #
 # Do not "simplify" this back into a single narrow window over a payload
-# field. That is the bug.
+# field. That is the bug. And do not pass an unvalidated header into
+# body_fingerprint; that is the other bug.
 # ============================================================================
+
+
+# ============================================================================
+# Closed allowlist for the fingerprint scope
+# ============================================================================
+# Mirrors the topic sets NEXUS actually dispatches on
+# (`NexusAgent._SHOPIFY_ORDER_TOPICS`, `._SHOPIFY_TOPIC_HANDLERS`,
+# `._SHOPIFY_EDIT_ONLY_PREFIXES`). It is deliberately a COPY rather than an
+# import: this module is a pure leaf with no agent dependencies, and the
+# receiver must not gain an import edge into the agent layer. The copy is
+# kept honest by a drift tripwire in tests/test_webhook_replay_window.py,
+# which imports NEXUS's real constants and fails if either side gains a topic
+# the other does not know about.
+#
+# Vendors absent from this table (Razorpay, Shiprocket) have no published
+# topic vocabulary, so EVERY scope value they send collapses to the single
+# unknown bucket. That is the safe direction: a closed set of one.
+# ============================================================================
+
+SHOPIFY_TOPIC_ALLOWLIST = frozenset(
+    {
+        # order lifecycle -> NEXUS _SHOPIFY_ORDER_TOPICS
+        "orders/create",
+        "orders/paid",
+        "orders/updated",
+        "orders/cancelled",
+        "orders/fulfilled",
+        "orders/partially_fulfilled",
+        # non-order topics IMS owns -> NEXUS _SHOPIFY_TOPIC_HANDLERS
+        "refunds/create",
+        "fulfillments/create",
+        "fulfillments/update",
+        "customers/create",
+        "customers/update",
+        "orders/delete",
+        "customers/delete",
+        "app/uninstalled",
+        "checkouts/create",
+        "checkouts/update",
+    }
+)
+
+# Edit-only-in-IMS families -> NEXUS _SHOPIFY_EDIT_ONLY_PREFIXES. Every member
+# of a family shares ONE bucket: IMS never pulls these back, so there is no
+# per-topic behaviour to preserve, and one bucket per family keeps the key
+# space closed no matter what suffix arrives.
+SHOPIFY_TOPIC_FAMILIES = (
+    "products/",
+    "collections/",
+    "inventory_levels/",
+    "inventory_items/",
+    "product_listings/",
+)
+
+# Every unrecognised scope, for every vendor, lands here.
+UNKNOWN_SCOPE = "unknown"
+
+_SCOPE_ALLOWLISTS = {
+    "shopify": (SHOPIFY_TOPIC_ALLOWLIST, SHOPIFY_TOPIC_FAMILIES),
+}
+
+
+def canonical_scope(vendor: str, raw_scope: Optional[str]) -> str:
+    """Map a vendor event-type header onto a CLOSED set of scope values.
+
+    The raw header is unsigned and attacker-chosen, so it must never reach
+    `body_fingerprint` directly -- see the block comment above. Returns:
+
+      - "" when the vendor sends no event-type header at all;
+      - the normalised topic when it is a recognised vendor topic;
+      - "<family>*" when it belongs to a recognised edit-only family;
+      - UNKNOWN_SCOPE for everything else, including every scope value from
+        a vendor with no published topic vocabulary.
+
+    Pure and total: any input, including None or a 10 KB junk string, yields
+    one of the values above.
+    """
+    normalised = (raw_scope or "").strip().lower()
+    if not normalised:
+        return ""
+    exact, families = _SCOPE_ALLOWLISTS.get((vendor or "").strip().lower(), (None, ()))
+    if exact and normalised in exact:
+        return normalised
+    for family in families:
+        if normalised.startswith(family):
+            return family + "*"
+    return UNKNOWN_SCOPE
 
 
 # Vendor -> header carrying the DELIVERY/trigger timestamp (lower-cased).
@@ -334,7 +442,12 @@ def _parse_iso(timestamp_str: str) -> Optional[datetime]:
 
 # Matches the fractional-seconds group in an ISO-8601 timestamp, e.g. the
 # ".320072772" in "2026-08-09T10:15:16.320072772+00:00".
-_FRACTION_RE = re.compile(r"\.(\d+)")
+# ANCHORED to the seconds field: an unanchored r"\.(\d+)" matched the first
+# dot-digits group anywhere, so a dotted date like "2026.08.09" was mangled
+# into "2026.080000.09". Fail-safe today (both forms fail fromisoformat, and
+# a None parse means ACCEPT) but wrong, and a future caller feeding a dotted
+# date would inherit the bug.
+_FRACTION_RE = re.compile(r"(?<=\d{2}:\d{2}:\d{2})\.(\d+)")
 
 
 def _normalise_fractional_seconds(s: str) -> str:
@@ -445,19 +558,24 @@ def body_fingerprint(vendor: str, raw_body: bytes, scope: str = "") -> str:
     are not collapsed into one. Vendor is always mixed in so two vendors
     can never collide.
 
-    BOTH vendor and scope are NORMALISED (strip + lower-case) here, inside
-    the primitive, so no caller can get it wrong. This is not cosmetic: the
-    scope comes from an UNSIGNED, attacker-mutable header, so if it were
-    hashed verbatim an attacker would only have to vary its case or pad it
-    with a space to mint a fresh dedupe key for the exact same signed bytes
-    -- 'orders/updated' / 'Orders/Updated' / 'ORDERS/UPDATED' / ' orders/
-    updated' produced FIVE different fingerprints, i.e. thousands of
-    accepted replays of one captured delivery, while the consumer
-    (nexus.py `_handle_shopify_webhook`) lower-cases the same header and
-    routes every variant identically. Normalising cannot merge two
-    genuinely distinct topics -- vendor topic names differ by more than
-    case -- it only collapses spellings of the SAME topic, which is
-    precisely what we want.
+    THE SCOPE IS UNSIGNED. It comes from a vendor header that the HMAC does
+    not cover, so callers MUST pass it through `canonical_scope` first;
+    `body_fingerprint` additionally strips + lower-cases both arguments so a
+    caller that forgets cannot at least reopen the casing axis. Two rounds of
+    review were spent on this exact surface:
+
+      round 1 -- the scope was hashed verbatim, so 5 spellings of one topic
+        made 5 dedupe keys for identical signed bytes;
+      round 2 -- case was normalised but the VALUE was still unvalidated, so
+        5000 random topic strings made 5000 keys. Normalisation is necessary
+        and not sufficient; only the closed allowlist bounds the key space.
+
+    The honest guarantee: the digest is content-bound over the signed bytes,
+    and because `scope` is drawn from a closed set, the number of distinct
+    dedupe keys ONE signed body can produce is bounded by the number of real
+    vendor topics -- not by anything an attacker controls. Distinct topics
+    stay distinct (orders/paid vs orders/updated are separate deliveries);
+    only spellings and unrecognised junk collapse.
 
     Returns "sha256:<hex>" (the prefix keeps synthetic keys visually
     distinct from vendor-issued delivery ids in the inbox).
@@ -544,4 +662,8 @@ __all__ = [
     "delivery_max_age_seconds",
     "DELIVERY_TIMESTAMP_HEADERS",
     "DEDUPE_RETENTION_SECONDS",
+    "canonical_scope",
+    "SHOPIFY_TOPIC_ALLOWLIST",
+    "SHOPIFY_TOPIC_FAMILIES",
+    "UNKNOWN_SCOPE",
 ]
