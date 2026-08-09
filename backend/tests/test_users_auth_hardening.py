@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api import dependencies as api_dependencies  # noqa: E402
 from api.routers import auth as auth_router  # noqa: E402
+from api.routers import jarvis as jarvis_router  # noqa: E402
 from api.routers import settings as settings_router  # noqa: E402
 from api.routers import stores as stores_router  # noqa: E402
 from api.routers import users as users_router  # noqa: E402
@@ -90,12 +91,10 @@ class _FakeUserRepo:
         ]
 
     def find_by_role(self, role, store_id=None):
-        return [
-            dict(d)
-            for d in self._docs.values()
-            if role in (d.get("roles") or [])
-            and (store_id is None or store_id in (d.get("store_ids") or []))
-        ]
+        flt = {"roles": role, "is_active": True}
+        if store_id:
+            flt["store_ids"] = store_id
+        return [dict(d) for d in self._docs.values() if self._matches(d, flt)]
 
     def update(self, user_id, update_data):
         d = self._docs.get(user_id)
@@ -107,14 +106,38 @@ class _FakeUserRepo:
     def set_active(self, user_id, value):
         self._docs[user_id]["is_active"] = value
 
+    # NOTE: find_by_role / search_users / get_user_summary mirror the REAL
+    # UserRepository exactly -- they take whatever the router passes as
+    # `store_id` and drop it straight into a Mongo `store_ids` filter under an
+    # `if store_id:` truthiness test. That is what makes a `{"$in": [...]}`
+    # clause work end-to-end (and what makes `{"$in": []}` match NOTHING rather
+    # than being treated as "no filter"), so these tests exercise the real
+    # semantics instead of a friendlier fake.
     def search_users(self, q, store_id=None):
         ql = (q or "").lower()
+        extra = {"store_ids": store_id} if store_id else {}
         return [
             dict(d)
             for d in self._docs.values()
-            if ql in (d.get("username", "") + d.get("full_name", "")).lower()
-            and (store_id is None or store_id in (d.get("store_ids") or []))
+            if any(
+                ql in str(d.get(f, "")).lower()
+                for f in ("full_name", "username", "email")
+            )
+            and self._matches(d, extra)
         ]
+
+    def get_user_summary(self, store_id=None):
+        flt = {"store_ids": store_id} if store_id else {}
+        summary = {}
+        for d in self._docs.values():
+            if not self._matches(d, flt):
+                continue
+            for role in d.get("roles") or []:
+                row = summary.setdefault(role, {"total": 0, "active": 0})
+                row["total"] += 1
+                if d.get("is_active"):
+                    row["active"] += 1
+        return summary
 
     # -- Mongo-ish matcher, enough for the queries the two routers actually
     # -- issue: scalar equality with array containment, $or, $ne and $in.
@@ -577,18 +600,37 @@ def test_sanitize_user_strips_the_approval_pin_material():
     assert out["aadhaar_no"] == "111122223333"
 
 
-def test_sanitize_user_can_also_strip_govt_ids_for_picker_callers():
-    out = users_router.sanitize_user(
-        {"user_id": "u1", "full_name": "U One", "roles": ["SALES_STAFF"],
-         "aadhaar_no": "111122223333", "pan_no": "ABCDE1234F",
-         "uan_no": "1", "pf_no": "2", "esic_no": "3", "bank_account_no": "4",
-         **_PIN_MATERIAL},
-        strip_govt_ids=True,
+def test_picker_user_is_an_allow_list_not_a_deny_list():
+    """A deny-list makes every FUTURE field exposed by default -- which is how
+    approval_pin_hash got out. picker_user must return ONLY the allow-list, so
+    a field nobody has thought of yet is hidden by construction."""
+    out = users_router.picker_user(
+        {
+            "user_id": "u1",
+            "username": "u1",
+            "full_name": "U One",
+            "roles": ["SALES_STAFF"],
+            "is_active": True,
+            # everything below must NOT come out
+            "aadhaar_no": "111122223333",
+            "pan_no": "ABCDE1234F",
+            "uan_no": "1",
+            "pf_no": "2",
+            "esic_no": "3",
+            "bank_account_no": "4",
+            "email": "u1@example.com",
+            "phone": "9876543210",
+            "discount_cap": 25.0,
+            "must_change_password": True,
+            "permissions": {"grant": {"orders:write": True}},
+            "module_access": {"finance": False},
+            "store_ids": ["S1"],
+            "home_store_id": "S1",
+            "a_field_invented_next_year": "leak me",
+            **_PIN_MATERIAL,
+        }
     )
-    for field in _CREDENTIAL_FIELDS + _GOVT_ID_FIELD_NAMES:
-        assert field not in out, f"{field} survived the picker sanitiser"
-    # The picker fields the three live call sites render must survive.
-    assert out["user_id"] == "u1"
+    assert set(out) == {"user_id", "username", "full_name", "roles", "is_active"}
     assert out["full_name"] == "U One"
     assert out["roles"] == ["SALES_STAFF"]
 
@@ -697,6 +739,23 @@ def test_store_roster_still_feeds_the_pos_picker_and_the_two_modals(monkeypatch)
         assert row.get("is_active") is True
 
 
+def test_store_roster_returns_only_the_allow_listed_keys(monkeypatch):
+    """EVERY row, not just the first -- and nothing beyond the picker fields.
+    Locks out must_change_password (who is on the temporary password) and
+    discount_cap / permissions / module_access (whose override to target)."""
+    c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
+    rows = c.get("/api/v1/stores/S1/users").json()["users"]
+    assert len(rows) == 2
+    for row in rows:
+        assert set(row) == {
+            "user_id",
+            "username",
+            "full_name",
+            "roles",
+            "is_active",
+        }, f"unexpected keys on the picker row: {sorted(row)}"
+
+
 def test_store_roster_role_filter_and_active_flag_still_work(monkeypatch):
     """The strip must not disturb the query behaviour the pickers depend on."""
     c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
@@ -704,7 +763,175 @@ def test_store_roster_role_filter_and_active_flag_still_work(monkeypatch):
     assert [u["user_id"] for u in body["users"]] == ["mgr-a"]
 
 
-def test_store_roster_and_users_router_share_one_sanitiser():
-    """Two independently-maintained pop-lists are exactly how this P0 stayed
+def test_store_roster_and_users_router_share_one_projection():
+    """Two independently-maintained field lists are exactly how this P0 stayed
     open on both routers at once -- lock the single definition in place."""
-    assert stores_router.sanitize_user is users_router.sanitize_user
+    assert stores_router.picker_user is users_router.picker_user
+
+
+# ===========================================================================
+# A store-scoped manager with an EMPTY reach must see nothing, not everything
+# ===========================================================================
+# resolve_store_scope resolved to active_store_id, and the list routes applied
+# the filter only `if store_id:` -- so a falsy scope meant NO FILTER and the
+# whole org's roster came back with every statutory ID on it. Reachability is
+# ordinary: UserCreate.store_ids defaults to [], primary_store_id falls back to
+# None, and _default_active_store returns None for any role that is not
+# SUPERADMIN/ADMIN/AREA_MANAGER, so login cannot repair it.
+
+_STORELESS_MANAGER = {
+    "user_id": "mgr-none",
+    "roles": ["STORE_MANAGER"],
+    "store_ids": [],
+    "active_store_id": None,
+}
+
+_FAR_STORE_SUPERADMIN = {
+    "user_id": "su-s9",
+    "username": "su_s9",
+    "full_name": "Superadmin S9",
+    "roles": ["SUPERADMIN"],
+    "store_ids": ["S9"],
+    "primary_store_id": "S9",
+    "is_active": True,
+    "aadhaar_no": "555566667777",
+    "pan_no": "QWERT5555Y",
+    "uan_no": "555000111222",
+    "pf_no": "PF9999",
+    "esic_no": "ESIC9999",
+    "bank_account_no": "50100999888777",
+    **_PIN_MATERIAL,
+}
+
+_ALL_GOVT_ID_VALUES = (
+    "111122223333",
+    "ABCDE1234F",
+    "555566667777",
+    "QWERT5555Y",
+    "50100999888777",
+    "121212121212",
+)
+
+
+def _storeless_client(monkeypatch):
+    repo = _FakeUserRepo(seed=[_STORE_A_EMPLOYEE, _FAR_STORE_SUPERADMIN, _MANAGER_A])
+    return _users_client(_STORELESS_MANAGER, monkeypatch, repo=repo)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/users",
+        "/api/v1/users/search?q=em",
+        "/api/v1/users/role/SUPERADMIN",
+        "/api/v1/users/summary",
+    ],
+)
+def test_storeless_manager_gets_no_rows_from_the_list_routes(path, monkeypatch):
+    c, _ = _storeless_client(monkeypatch)
+    r = c.get(path)
+    # Empty result, NOT a 403 -- a misconfigured account must not be locked out.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    rows = body.get("users") if isinstance(body, dict) else body
+    if isinstance(body, dict) and "summary" in body:
+        assert body["summary"] == {}
+    else:
+        assert rows == [], f"{path} returned rows to a store-less manager"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/users",
+        "/api/v1/users/search?q=em",
+        "/api/v1/users/role/SUPERADMIN",
+    ],
+)
+def test_storeless_manager_never_sees_a_statutory_id(path, monkeypatch):
+    """The asset itself, not just the row count."""
+    c, _ = _storeless_client(monkeypatch)
+    r = c.get(path)
+    assert r.status_code == 200, r.text
+    for field in _GOVT_ID_FIELD_NAMES:
+        assert field not in r.text, f"{field} leaked to a store-less manager"
+    for value in _ALL_GOVT_ID_VALUES:
+        assert value not in r.text, "a statutory ID value leaked"
+    _assert_no_credentials(r.text)
+
+
+def test_scoped_manager_still_sees_only_their_own_store(monkeypatch):
+    repo = _FakeUserRepo(seed=[_STORE_A_EMPLOYEE, _FAR_STORE_SUPERADMIN, _MANAGER_A])
+    c, _ = _users_client(_MANAGER_A, monkeypatch, repo=repo)
+    ids = {u["user_id"] for u in c.get("/api/v1/users").json()}
+    assert ids == {"emp-a", "mgr-a"}
+    assert "su-s9" not in ids
+
+
+def test_area_manager_sees_all_of_their_stores_not_just_the_active_one(
+    monkeypatch,
+):
+    """BONUS regression: the old active_store_id resolution silently narrowed a
+    multi-store AREA_MANAGER to ONE store."""
+    repo = _FakeUserRepo(seed=[_STORE_A_EMPLOYEE, _STORE_B_EMPLOYEE, _MANAGER_A])
+    c, _ = _users_client(_AREA, monkeypatch, repo=repo)  # stores S1+S2, active S1
+    ids = {u["user_id"] for u in c.get("/api/v1/users").json()}
+    assert ids == {"emp-a", "emp-b", "mgr-a"}
+
+
+@pytest.mark.parametrize("actor", [_ADMIN, _SUPER], ids=["ADMIN", "SUPERADMIN"])
+def test_hq_roles_keep_org_wide_list_reach(actor, monkeypatch):
+    repo = _FakeUserRepo(seed=[_STORE_A_EMPLOYEE, _FAR_STORE_SUPERADMIN, _MANAGER_A])
+    c, _ = _users_client(actor, monkeypatch, repo=repo)
+    ids = {u["user_id"] for u in c.get("/api/v1/users").json()}
+    assert ids == {"emp-a", "su-s9", "mgr-a"}
+
+
+def test_explicit_store_id_is_still_authorised_on_the_list_route(monkeypatch):
+    """The explicit-?store_id path must keep its 403, not fall back to scope."""
+    c, _ = _users_client(_MANAGER_A, monkeypatch)
+    assert c.get("/api/v1/users?store_id=S2").status_code == 403
+    assert c.get("/api/v1/users?store_id=S1").status_code == 200
+
+
+def test_store_scope_filter_reuses_the_canonical_helper():
+    """Empty reach -> a filter that matches nothing, never 'no filter'."""
+    assert users_router._store_scope_filter(_SUPER) is None
+    assert users_router._store_scope_filter(_ADMIN) is None
+    assert users_router._store_scope_filter(_STORELESS_MANAGER) == {"$in": []}
+    assert users_router._store_scope_filter(_AREA) == {"$in": ["S1", "S2"]}
+
+
+# ===========================================================================
+# Third door: the Jarvis raw-collection browser
+# ===========================================================================
+# GET /api/v1/jarvis/data/users read the `users` collection with only {"_id": 0},
+# so it returned approval_pin_hash / password_hash / statutory IDs for the whole
+# org. SUPERADMIN-only, but a SUPERADMIN can be the MAKER in maker-checker, so
+# they must never hold every manager's CHECKER credential.
+
+
+def test_jarvis_users_collection_excludes_credentials_and_statutory_ids():
+    excluded = jarvis_router._COLLECTION_FIELD_EXCLUSIONS["users"]
+    for field in _CREDENTIAL_FIELDS + _GOVT_ID_FIELD_NAMES:
+        assert field in excluded, f"{field} is still readable via jarvis/data"
+
+
+def test_jarvis_builds_a_zeroed_projection_for_the_users_collection():
+    """The exclusion list must actually reach pymongo as a projection."""
+    projection = {"_id": 0}
+    for excluded in jarvis_router._COLLECTION_FIELD_EXCLUSIONS.get("users", ()):
+        projection[excluded] = 0
+    assert projection["_id"] == 0
+    assert projection["approval_pin_hash"] == 0
+    assert projection["aadhaar_no"] == 0
+    # A collection with no exclusions keeps the original shape.
+    other = {"_id": 0}
+    for excluded in jarvis_router._COLLECTION_FIELD_EXCLUSIONS.get("orders", ()):
+        other[excluded] = 0
+    assert other == {"_id": 0}
+
+
+def test_jarvis_users_is_still_queryable():
+    """The fix must be a projection, not a removal -- the browser still works."""
+    assert "users" in jarvis_router._JARVIS_QUERYABLE_COLLECTIONS

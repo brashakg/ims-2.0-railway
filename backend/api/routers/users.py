@@ -17,7 +17,6 @@ from ..dependencies import (
     can_access_store_scoped,
     get_audit_repository,
     get_user_repository,
-    resolve_store_scope,
     user_store_scope,
     validate_store_access,
 )
@@ -309,10 +308,8 @@ _CREDENTIAL_FIELDS = (
     "pin_attempts",
 )
 
-# Statutory / government identity numbers held on the employee record. They stay
-# visible on THIS router (require_manager plus the F10 store scope) but are
-# stripped for callers entitled only to a staff PICKER -- see the roster in
-# routers/stores.py, which any authenticated colleague at the store may read.
+# Statutory / government identity numbers held on the employee record. Named so
+# the PII surface of a user document is written down in ONE place.
 _GOVT_ID_FIELDS = (
     "aadhaar_no",
     "pan_no",
@@ -322,25 +319,81 @@ _GOVT_ID_FIELDS = (
     "bank_account_no",
 )
 
+# The ONLY fields a staff PICKER may receive. This is an ALLOW-LIST on purpose.
+#
+# The round-1 leak happened because both routers used deny-lists: a field added
+# to the user document later is exposed BY DEFAULT until somebody remembers to
+# add it to a pop-list, and nobody did for approval_pin_hash. With an allow-list
+# a new field is hidden by default, which is the only posture that survives
+# future edits. Derived by reading the three live callers -- POSLayout.tsx:1491,
+# NewTaskModal.tsx:143 and WalkoutIntakeModal.tsx:121 -- which between them read
+# user_id, username, name/full_name and roles[0]; is_active is kept because the
+# roster's own active_only filter is part of its contract.
+#
+# It also drops fields that are not credentials or statutory IDs but still help
+# an attacker choose a target: must_change_password names who is still on the
+# admin-issued temporary password, and discount_cap / permissions / module_access
+# name whose override authority is worth social-engineering -- the same asset the
+# approval PIN protects.
+_PICKER_FIELDS = (
+    "user_id",
+    "username",
+    "full_name",
+    "roles",
+    "is_active",
+)
 
-def sanitize_user(user: dict, strip_govt_ids: bool = False) -> dict:
+
+def sanitize_user(user: dict) -> dict:
     """Strip credential material from a user document before it leaves the API.
 
-    This is the SINGLE definition of "sanitised user". routers/stores.py's
-    roster imports it instead of keeping its own pop-list, because two
-    independently-maintained lists are exactly how approval_pin_hash stayed
-    exposed on both routers at once.
-
-    ``strip_govt_ids=True`` additionally removes the statutory identity numbers,
-    for callers entitled only to a name/role picker.
+    This is the SINGLE definition of "sanitised user" for the full-record
+    routes. It is a deny-list because those routes are meant to return the whole
+    employee record to an entitled reader; the credential fields are the ones
+    that must never appear regardless.
     """
     if user is not None:
         for field in _CREDENTIAL_FIELDS:
             user.pop(field, None)
-        if strip_govt_ids:
-            for field in _GOVT_ID_FIELDS:
-                user.pop(field, None)
     return user
+
+
+def picker_user(user: dict) -> dict:
+    """Project a user document down to the staff-picker allow-list.
+
+    Used by routers/stores.py's roster, which ANY authenticated colleague
+    assigned to the store may read (its guard bounds the store, not the role).
+    Returns a NEW dict containing only _PICKER_FIELDS, so no credential,
+    statutory ID, or future field can ride along by omission.
+    """
+    if not isinstance(user, dict):
+        return {}
+    return {field: user[field] for field in _PICKER_FIELDS if field in user}
+
+
+def _store_scope_filter(current_user: dict):
+    """The Mongo ``store_ids`` clause a LIST/SEARCH route must apply when the
+    caller did not name a store, or ``None`` when no filter belongs.
+
+    Reuses the canonical ``user_store_scope``: SUPERADMIN / ADMIN are
+    cross-store, so they get ``None`` (no filter, org-wide reach preserved).
+    Every other role gets ``{"$in": [...their stores...]}``.
+
+    This replaces a ``resolve_store_scope(...)`` + ``if store_id:`` pattern that
+    FAILED OPEN twice over. It resolved to the single ``active_store_id``, so an
+    AREA_MANAGER holding three stores was silently narrowed to one; and when
+    that value was None -- ordinary for a store-scoped account created with an
+    empty ``store_ids`` (UserCreate defaults it to []), since
+    ``_default_active_store`` returns None for such roles -- the falsy check
+    dropped the filter ENTIRELY and returned the whole org's roster with every
+    statutory ID on it. An empty reach now yields ``{"$in": []}``, which matches
+    nothing: a misconfigured manager sees an EMPTY LIST rather than everything,
+    and is never 403'd or locked out.
+    """
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return None
+    return {"$in": sorted(stores)}
 
 
 def _target_user_stores(target: dict) -> list:
@@ -557,12 +610,16 @@ async def get_users_by_role(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager),
 ):
-    """Get users by role"""
+    """Get users by role (store-scoped -- see _store_scope_filter)."""
     repo = get_user_repository()
 
     if repo is not None:
-        store_id = resolve_store_scope(store_id, current_user)
-        users = repo.find_by_role(role, store_id)
+        scope = (
+            validate_store_access(store_id, current_user)
+            if store_id
+            else _store_scope_filter(current_user)
+        )
+        users = repo.find_by_role(role, scope)
         return [sanitize_user(u) for u in users]
 
     return []
@@ -574,12 +631,16 @@ async def search_users(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager),
 ):
-    """Search users by name, username, or email"""
+    """Search users by name, username, or email (store-scoped)."""
     repo = get_user_repository()
 
     if repo is not None:
-        store_id = resolve_store_scope(store_id, current_user)
-        users = repo.search_users(q, store_id)
+        scope = (
+            validate_store_access(store_id, current_user)
+            if store_id
+            else _store_scope_filter(current_user)
+        )
+        users = repo.search_users(q, scope)
         return {"users": [sanitize_user(u) for u in users]}
 
     return {"users": []}
@@ -589,12 +650,21 @@ async def search_users(
 async def get_user_summary(
     store_id: Optional[str] = Query(None), current_user: dict = Depends(require_manager)
 ):
-    """Get user count summary by role"""
+    """Get user count summary by role (store-scoped).
+
+    Same fail-open pattern as its list siblings -- a store-less manager used to
+    get org-wide headcounts by role. No PII here, but the scope rule must be
+    the same one or the router contradicts itself.
+    """
     repo = get_user_repository()
 
     if repo is not None:
-        store_id = resolve_store_scope(store_id, current_user)
-        summary = repo.get_user_summary(store_id)
+        scope = (
+            validate_store_access(store_id, current_user)
+            if store_id
+            else _store_scope_filter(current_user)
+        )
+        summary = repo.get_user_summary(scope)
         return {"summary": summary}
 
     return {"summary": {}}
@@ -615,9 +685,15 @@ async def list_users(
 
     if repo is not None:
         filter_dict = {}
-        store_id = resolve_store_scope(store_id, current_user)
         if store_id:
-            filter_dict["store_ids"] = store_id
+            # An explicitly named store still goes through the canonical
+            # explicit-store guard (403 for a store-pinned role asking for
+            # someone else's store).
+            filter_dict["store_ids"] = validate_store_access(store_id, current_user)
+        else:
+            scope = _store_scope_filter(current_user)
+            if scope is not None:
+                filter_dict["store_ids"] = scope
         if role:
             filter_dict["roles"] = role
         if active_only:

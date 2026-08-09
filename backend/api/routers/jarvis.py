@@ -3034,7 +3034,10 @@ _JARVIS_QUERYABLE_COLLECTIONS = frozenset(
         "workshop_jobs",
         "walkouts",
         "walk_in_counters",
-        # People (own-data, no customer PII fields shown)
+        # People. NOTE: "no customer PII" is not the same as "no PII" -- the
+        # `users` documents carry STAFF credentials and statutory IDs, which are
+        # excluded by _COLLECTION_FIELD_EXCLUSIONS below, not by the customer
+        # scrubber (_CUSTOMER_PII_COLLECTIONS deliberately does not list users).
         "users",
         "stores",
         "vendors",
@@ -3097,6 +3100,33 @@ _CUSTOMER_PII_COLLECTIONS = frozenset(
         "eye_tests",
     }
 )
+
+# Per-collection EXCLUSION projections applied to the raw read below.
+#
+# The customer scrubber above never covered `users`, so this browser returned
+# every employee's approval_pin_hash -- the bcrypt of the 4-6 digit maker-checker
+# PIN written onto the user document by services/approvals.py -- plus their
+# password_hash and raw statutory IDs, for the whole org in one paginated call.
+# The route is SUPERADMIN-only, but maker-checker separation of duty means the
+# SUPERADMIN can be the MAKER, so they must never hold every manager's CHECKER
+# credential. Excluded here rather than gated, because nothing downstream reads
+# these fields: jarvis's own staff surface (get_staff_insights) uses a separate
+# INCLUSION projection that names none of them.
+_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {
+    "users": (
+        "password",
+        "password_hash",
+        "approval_pin_hash",
+        "approval_pin_set_at",
+        "pin_attempts",
+        "aadhaar_no",
+        "pan_no",
+        "uan_no",
+        "pf_no",
+        "esic_no",
+        "bank_account_no",
+    ),
+}
 
 
 def _coerce_mongo_value(s: str) -> Any:
@@ -3182,8 +3212,12 @@ async def jarvis_read_collection(
     except Exception:
         total = 0
 
+    projection: Dict[str, Any] = {"_id": 0}
+    for excluded in _COLLECTION_FIELD_EXCLUSIONS.get(collection, ()):
+        projection[excluded] = 0
+
     try:
-        cursor = col.find(flt, {"_id": 0})
+        cursor = col.find(flt, projection)
         if sort_by:
             cursor = cursor.sort(sort_by, -1 if sort_desc else 1)
         rows = list(cursor.skip(skip).limit(limit))

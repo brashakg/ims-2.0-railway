@@ -10,10 +10,10 @@ from typing import List, Optional
 
 from .auth import get_current_user, require_roles
 
-# The ONE definition of "sanitised user document" lives in the users router;
-# this router's staff roster reuses it rather than maintaining a second
-# pop-list (see the P0 note at get_store_users).
-from .users import sanitize_user
+# The ONE definition of the staff-picker projection lives in the users router;
+# this router's roster reuses it rather than maintaining a second field list
+# (see the P0 note at get_store_users).
+from .users import picker_user
 from ..dependencies import (
     get_store_repository,
     get_user_repository,
@@ -675,23 +675,23 @@ async def get_store_users(
             query["roles"] = {"$in": role_list}
 
     users = user_repo.find_many(query) or []
-    safe = []
-    for u in users:
-        # P0 fix (security panel, PR #967). The guard above bounds the STORE,
-        # never the ROLE, so ANY authenticated colleague assigned to this store
-        # -- a SALES_CASHIER -- may read this roster, and it is live traffic on
-        # every shift (POSLayout.tsx:1491 salesperson picker,
-        # NewTaskModal.tsx:143, WalkoutIntakeModal.tsx:121). It used to return
-        # the raw user document minus two password fields, which handed every
-        # caller each colleague's approval_pin_hash (bcrypt of the 4-6 digit
-        # maker-checker PIN) plus their aadhaar_no / pan_no / uan_no / pf_no /
-        # esic_no. Route it through the users router's shared sanitiser -- the
-        # ONE definition of "sanitised user" -- with the statutory IDs stripped
-        # too, so these two routers can never drift apart again. The three live
-        # callers only read user_id / username / name / full_name / roles, all
-        # of which survive untouched.
-        u.pop("_id", None)
-        safe.append(sanitize_user(u, strip_govt_ids=True))
+    # P0 fix (security panel, PR #967). The guard above bounds the STORE, never
+    # the ROLE, so ANY authenticated colleague assigned to this store -- a
+    # SALES_CASHIER -- may read this roster, and it is live traffic on every
+    # shift (POSLayout.tsx:1491 salesperson picker, NewTaskModal.tsx:143,
+    # WalkoutIntakeModal.tsx:121). It used to return the raw user document minus
+    # two password fields, which handed every caller each colleague's
+    # approval_pin_hash (bcrypt of the 4-6 digit maker-checker PIN) plus their
+    # aadhaar_no / pan_no / uan_no / pf_no / esic_no.
+    #
+    # This is now an ALLOW-LIST projection (users.picker_user), not a pop-list.
+    # A deny-list makes "exposed" the default for every field added to the user
+    # document later -- which is exactly how the PIN hash got here -- and it was
+    # still shipping must_change_password (who is on the admin-issued temporary
+    # password) and discount_cap / permissions / module_access (whose override
+    # authority is worth social-engineering). One shared definition lives in the
+    # users router so the two routers cannot drift apart again.
+    safe = [picker_user(u) for u in users]
     return {"users": safe, "total": len(safe)}
 
 
