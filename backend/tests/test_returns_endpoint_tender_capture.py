@@ -52,11 +52,11 @@ _TAX = 900.00
 _BILLED_GROSS = 5900.00
 
 
-def _inclusive_order(payments, qty=1):
+def _inclusive_order(payments, qty=1, customer_id="CUST-1"):
     return {
         "order_id": "ORD-INC-1",
         "order_number": "ORD-INC-1-2026",
-        "customer_id": "CUST-1",
+        "customer_id": customer_id,
         "customer_name": "Asha",
         "store_id": _STORE,
         "status": "DELIVERED",
@@ -210,12 +210,17 @@ def ctx(monkeypatch):
     """Wire the REAL returns router over fakes; returns a builder so each test
     picks the source order's tender composition."""
 
-    def _build(payments, qty=1, catalog_price=_CATALOG_PRICE):
-        order = _inclusive_order(payments, qty=qty)
+    def _build(payments, qty=1, catalog_price=_CATALOG_PRICE,
+               customer_id="CUST-1", ledger_down=False):
+        order = _inclusive_order(payments, qty=qty, customer_id=customer_id)
         orders_coll = _ClaimingOrdersColl(order)
         repo = _RepoWithColl(orders_coll)
         returns_coll = _QueryColl()
         ledger_coll = _QueryColl()
+        if ledger_down:
+            def _boom(_doc):
+                raise RuntimeError("credit_note_ledger insert failed")
+            ledger_coll.insert_one = _boom  # type: ignore[assignment]
         # ONE customer repo per build so a store-credit balance bump is
         # observable (a fresh repo per lookup silently swallowed it).
         customer_repo = _FakeCustomerRepo()
@@ -1104,3 +1109,367 @@ def test_backend_balance_tolerance_is_one_paisa(ctx):
         headers=_HDR,
     )
     assert bad.status_code == 400, bad.text
+
+
+# ===========================================================================
+# ROUND-6. The chair's pattern: every round-5 control was correct where it was
+# applied and absent at its sibling / opposite side. These tests pin the OTHER
+# side of each one.
+# ===========================================================================
+
+
+def _multi_line_exchange(n_lines, qty_each, collect_method="CASH",
+                         unit_price=_CATALOG_PRICE):
+    body = _payload(
+        return_type="EXCHANGE",
+        replacement_items=[
+            {
+                "product_id": "PRD-2",
+                "name": "Replacement Frame",
+                "sku": "RB-2",
+                "quantity": qty_each,
+                "unit_price": unit_price,
+            }
+            for _ in range(n_lines)
+        ],
+    )
+    body["collect_method"] = collect_method
+    return body
+
+
+def _expected_paisa(db):
+    from api.services import eod_tally
+
+    return eod_tally.compute_expected(
+        db, _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00", 0, 0
+    )["expected_cash_paisa"]
+
+
+def _voucher_ctx_walkin(ctx):
+    return ctx(
+        [{"method": "CASH", "amount": 3000.00},
+         {"method": "GIFT_VOUCHER", "amount": 2900.00}],
+        customer_id=None,
+    )
+
+
+# --- MUST-FIX 1: the qty bound was PER LINE; the ORDER total was unbounded ---
+
+
+def test_many_lines_each_under_the_per_line_cap_are_refused(ctx):
+    """50 lines x qty 1: every line passes the per-line cap of 20, but the
+    exchange collects Rs 344,100 -- and this PR routes collect_amount into the
+    REAL Day-End drawer, so that is a Rs 344,100 phantom shortage."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    before = _expected_paisa(c["db"])
+    r = c["client"].post(
+        "/api/v1/returns", json=_multi_line_exchange(50, 1), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert c["returns"].docs == []
+    assert _returned_qty(c["order"]) == 0.0
+    # THE POINT: the closing drawer figure is untouched by the rejected call.
+    assert _expected_paisa(c["db"]) == before == 0
+
+
+def test_worst_case_lines_times_qty_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    before = _expected_paisa(c["db"])
+    r = c["client"].post(
+        "/api/v1/returns", json=_multi_line_exchange(20, 20), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert _expected_paisa(c["db"]) == before == 0
+
+
+def test_duplicate_lines_of_the_same_sku_are_summed_against_the_cap(ctx):
+    """The realistic harm: repeated clicks on the same frame. The per-ORDER
+    total is what must be capped, not each row."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns", json=_multi_line_exchange(11, 2), headers=_HDR
+    )
+    assert r.status_code == 400, r.text  # 22 units > the 20-unit order cap
+
+
+def test_a_legitimate_multi_line_exchange_still_completes(ctx):
+    """The cap must not break an honest two-item swap."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns", json=_multi_line_exchange(2, 1), headers=_HDR
+    )
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["collect_amount"] == round(2 * _CATALOG_PRICE - _BILLED_GROSS, 2)
+
+
+# --- MUST-FIX 2: the price CEILING had no FLOOR, and a low price flips the
+#     settlement direction into REFUND, minting store credit invisibly. ---
+
+
+def _typed_price_exchange(price, collect_method="CASH"):
+    return _qty_payload(1, collect_method=collect_method, client_price=price)
+
+
+def test_typed_price_cannot_flip_collect_into_refund(ctx):
+    """catalog 7000, goods 5900 -> an honest exchange COLLECTS 1100. A typed
+    0.01 turned it into Rs 5,899.99 of POS-redeemable store credit while the
+    customer kept a Rs 7,000 frame -- and the drawer never moved, so Day-End
+    could not flag it."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    before = c["customers"].customers["CUST-1"]["store_credit"]
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(0.01), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert c["returns"].docs == []
+    assert c["ledger"].docs == []
+    assert c["customers"].customers["CUST-1"]["store_credit"] == before
+    assert _returned_qty(c["order"]) == 0.0
+
+
+def test_deep_discount_below_the_floor_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(100.0), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert c["ledger"].docs == []
+
+
+def test_one_rupee_price_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(1.0), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_the_legitimate_negotiated_discount_still_works(ctx):
+    """MF6's real case must survive: a modest negotiated discount is honoured."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(6500.0), headers=_HDR
+    )
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["collect_amount"] == 600.00
+    assert r.json()["credit_amount"] is None
+
+
+# --- MUST-FIX 3: the pro-rated GST split mixed bases -> zero, then NEGATIVE tax
+
+
+@pytest.mark.parametrize("fee", [0.0, 900.0, 1500.0])
+def test_store_credit_gst_split_is_honest_at_every_restocking_fee(ctx, fee):
+    """The old assertion (taxable + tax == leg) was a TAUTOLOGY: the code
+    DEFINED tax = leg - taxable. These pin both halves independently against an
+    inclusive-GST split of the CREDITED amount."""
+    c = _voucher_ctx(ctx)
+    net = round(_BILLED_GROSS - fee, 2)
+    cash_leg = min(3000.00, net)
+    credit_leg = round(net - cash_leg, 2)
+    if credit_leg <= 0:
+        pytest.skip("fee leaves no non-drawer portion")
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_payload(
+            restocking_fee=fee,
+            refund_tenders=[
+                {"method": "CASH", "amount": cash_leg},
+                {"method": "STORE_CREDIT", "amount": credit_leg},
+            ],
+        ),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    row = [d for d in c["ledger"].docs if d.get("type") == "ISSUED"][0]
+    # INDEPENDENT recomputation: back 18% out of the CREDITED amount.
+    expect_taxable = round(credit_leg / 1.18, 2)
+    expect_tax = round(credit_leg - expect_taxable, 2)
+    assert row["taxable"] == expect_taxable, (fee, row)
+    assert row["tax"] == expect_tax, (fee, row)
+    # Arithmetic sanity the tautology could never catch.
+    assert row["tax"] > 0, (fee, row)
+    assert row["taxable"] <= credit_leg, (fee, row)
+
+
+# --- MUST-FIX 4: fail-loud reached 1 of 3 credit-issuing branches ---
+
+
+def _credit_note_payload():
+    return _payload(return_type="CREDIT_NOTE")
+
+
+def _exchange_refund_payload():
+    """Replacement CHEAPER than the returned goods -> REFUND direction."""
+    return _payload(
+        return_type="EXCHANGE",
+        replacement_items=[
+            {
+                "product_id": "PRD-2",
+                "name": "Replacement Frame",
+                "sku": "RB-2",
+                "quantity": 1,
+                "unit_price": 1000.00,
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize("kind", ["RETURN", "CREDIT_NOTE", "EXCHANGE_REFUND"])
+def test_no_branch_claims_credit_without_a_ledger_row_walkin(ctx, kind):
+    """A walk-in (no customer record) is routine counter behaviour and makes
+    _issue_store_credit return None. Round 5 fail-louded the RETURN branch only:
+    CREDIT_NOTE and EXCHANGE-REFUND returned 201 claiming credit that had no
+    ledger row, AND burned the returnable quantity."""
+    if kind == "EXCHANGE_REFUND":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}],
+                catalog_price=1000.00, customer_id=None)
+        body = _exchange_refund_payload()
+    elif kind == "CREDIT_NOTE":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], customer_id=None)
+        body = _credit_note_payload()
+    else:
+        c = _voucher_ctx_walkin(ctx)
+        body = _payload(refund_tenders=[
+            {"method": "CASH", "amount": 3000.00},
+            {"method": "STORE_CREDIT", "amount": 2900.00},
+        ])
+    r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
+    assert r.status_code >= 400, (kind, r.status_code, r.text)
+    assert c["ledger"].docs == [], kind
+    assert _returned_qty(c["order"]) == 0.0, kind          # RELEASED, not burned
+    assert c["returns"].docs == [], kind
+
+
+@pytest.mark.parametrize("kind", ["RETURN", "CREDIT_NOTE", "EXCHANGE_REFUND"])
+def test_no_branch_claims_credit_when_the_ledger_is_down(ctx, kind):
+    if kind == "EXCHANGE_REFUND":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}],
+                catalog_price=1000.00, ledger_down=True)
+        body = _exchange_refund_payload()
+    elif kind == "CREDIT_NOTE":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], ledger_down=True)
+        body = _credit_note_payload()
+    else:
+        c = ctx([{"method": "CASH", "amount": 3000.00},
+                 {"method": "GIFT_VOUCHER", "amount": 2900.00}], ledger_down=True)
+        body = _payload(refund_tenders=[
+            {"method": "CASH", "amount": 3000.00},
+            {"method": "STORE_CREDIT", "amount": 2900.00},
+        ])
+    r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
+    assert r.status_code >= 400, (kind, r.status_code, r.text)
+    assert _returned_qty(c["order"]) == 0.0, kind
+    assert c["returns"].docs == [], kind
+
+
+# --- MUST-FIX 5: a walk-in part-voucher return must have SOME path to 201 ---
+
+
+def test_walkin_quote_does_not_offer_store_credit(ctx):
+    """Offering a tender the server will then 503 on is a dead end whose error
+    names an impossible remedy."""
+    c = _voucher_ctx_walkin(ctx)
+    q = c["client"].post("/api/v1/returns/quote", json=_payload(), headers=_HDR).json()
+    assert "STORE_CREDIT" not in q["refundable_by_tender"], q
+    # ... and the till is told a complete split is impossible, so it offers the
+    # un-netted escape instead of disabling the button.
+    assert q["tenders_unverifiable"] is True
+
+
+def test_walkin_part_voucher_refund_has_a_completable_path(ctx):
+    c = _voucher_ctx_walkin(ctx)
+    # The FE-buildable escape: no refund_tenders -> recorded, netted nowhere.
+    r = c["client"].post("/api/v1/returns", json=_payload(), headers=_HDR)
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["drawer_auto_netted"] is False
+    assert r.json()["credit_amount"] is None
+
+
+# --- MUST-FIX 6(b): gateway + counter cash must raise an advisory ---
+
+
+def test_gateway_plus_counter_cash_is_flagged_unverifiable(ctx):
+    """SHOPIFY 2000 + counter CASH 3900 is a real supported shape. Cash-in
+    cannot cover the Rs 5,900 net, there is no voucher pool, and BOTH advisories
+    used to stay silent -- the cashier hands back Rs 5,900 and records nothing."""
+    c = ctx([{"method": "SHOPIFY_GATEWAY", "amount": 2000.00},
+             {"method": "CASH", "amount": 3900.00}])
+    q = c["client"].post("/api/v1/returns/quote", json=_payload(), headers=_HDR).json()
+    assert q["non_refundable_tenders"] == {}
+    # No voucher pool -> the STORE_CREDIT instruction must NOT be shown ...
+    assert q["cash_in_shortfall"] is False
+    # ... but the refund is NOT fully tenderable, so the escape advisory must.
+    assert q["tenders_unverifiable"] is True
+
+
+def test_collect_ceiling_fires_even_when_unit_count_is_legal(ctx):
+    """20 lines x qty 1 = 20 units, WITHIN the unit cap -- but the difference is
+    Rs 134,100. The output ceiling is the backstop that makes any future factor
+    of the drawer figure safe by default, so it must be reachable on its own."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    before = _expected_paisa(c["db"])
+    r = c["client"].post(
+        "/api/v1/returns", json=_multi_line_exchange(20, 1), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert "collect" in r.text.lower()
+    assert _expected_paisa(c["db"]) == before == 0
+
+
+def test_price_above_the_floor_that_still_flips_direction_is_refused(ctx):
+    """catalog 7000 -> floor 3500. A typed 4000 clears the floor but is BELOW
+    the Rs 5,900 returned value, so it still flips COLLECT into a REFUND that
+    mints store credit. The floor alone does not catch this."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    before = c["customers"].customers["CUST-1"]["store_credit"]
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(4000.0), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert c["ledger"].docs == []
+    assert c["customers"].customers["CUST-1"]["store_credit"] == before
+
+
+def test_a_genuine_downgrade_exchange_still_refunds(ctx):
+    """The direction-flip guard must NOT block an honest downgrade: when the
+    CATALOG price is itself below the returned value, a REFUND is correct."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], catalog_price=4000.00)
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(4000.0), headers=_HDR
+    )
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["settlement"]["direction"] == "REFUND"
+    assert r.json()["credit_amount"] == 1900.00
+
+
+def test_unit_cap_fires_when_the_collect_ceiling_would_not(ctx):
+    """ISOLATES the per-ORDER unit cap. A cheap catalog item keeps the collected
+    difference well under the Rs 100,000 output ceiling, so only the unit cap
+    can reject 21 units. Without this the two controls masked each other and a
+    mutant that removed the unit cap still passed."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], catalog_price=1000.00)
+    before = _expected_paisa(c["db"])
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_multi_line_exchange(21, 1, unit_price=1000.00),
+        headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert "units" in r.text.lower()
+    # 21 x 1000 - 5900 = 15,100 -- far below the collect ceiling.
+    assert _expected_paisa(c["db"]) == before == 0
+
+
+def test_price_floor_fires_when_the_direction_guard_would_not(ctx):
+    """ISOLATES the negotiated-price FLOOR. With catalog 20,000 the floor is
+    10,000; a typed 9,000 is below the floor but STILL above the Rs 5,900
+    returned value, so the settlement stays COLLECT and the direction-flip guard
+    never fires. Only the floor can reject it."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], catalog_price=20000.00)
+    r = c["client"].post(
+        "/api/v1/returns", json=_typed_price_exchange(9000.0), headers=_HDR
+    )
+    assert r.status_code == 400, r.text
+    assert "below the catalog price" in r.text.lower()
+    assert c["returns"].docs == []

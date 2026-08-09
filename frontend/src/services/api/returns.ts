@@ -65,9 +65,15 @@ export interface CreateReturnPayload {
   refund_tenders?: RefundTenderLinePayload[];
   // EXCHANGE COLLECT only: the tender the price difference was collected in.
   collect_method?: RefundTenderCode;
-  // NOTE: replacement_items[].unit_price is IGNORED by the server — the
-  // exchange price is resolved from the product master (a typed price would be
-  // a cash-drawer input). The quote echoes the resolved lines.
+  // NOTE: replacement_items[].unit_price is VALIDATED, not ignored. The server
+  // treats the catalog price as a CEILING and a fixed percentage below it as a
+  // FLOOR: an at-or-below price is honoured (a real negotiated discount), an
+  // above-catalog price is refused, and a price so low it would flip the
+  // settlement from COLLECT into REFUND is refused too (that flip minted store
+  // credit while the drawer never moved). Quantity is bounded per line AND per
+  // order, and the collected difference has its own ceiling -- every factor of
+  // a drawer figure is server-checked. The quote echoes the resolved lines and
+  // a server-computed replacement_total.
   // Optional absolute Rs deduction for damaged / opened goods. 0 = full
   // refund. Net refund = gross - restocking_fee.
   restocking_fee?: number;

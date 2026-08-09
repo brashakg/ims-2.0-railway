@@ -113,6 +113,8 @@ export default function ReturnsPage() {
   const [resultDrawerNetted, setResultDrawerNetted] = useState<boolean | null>(null);
   const [resultCashRefunded, setResultCashRefunded] = useState(0);
   const [resultCreditAmount, setResultCreditAmount] = useState(0);
+  const [resultCollectAmount, setResultCollectAmount] = useState(0);
+  const [resultCollectMethod, setResultCollectMethod] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Refund-tender capture (drawer-truth): how the money is actually handed back.
@@ -333,12 +335,23 @@ export default function ReturnsPage() {
   const refundTendersBalanced =
     Math.abs(refundTenderTotal - roundedNet) <= TENDER_BALANCE_EPSILON &&
     refundTenders.every((t) => t.method !== '' && (Number(t.amount) || 0) >= 0);
-  // A RETURN with a positive net needs a balanced, fully-specified breakdown;
-  // an EXCHANGE-COLLECT needs an explicit collect tender. Nothing submits until
-  // the server quote has landed (the amounts must be the server's).
+  // THE ESCAPE. When the server says a complete verifiable split is impossible
+  // (walk-in part-voucher, gateway + counter cash, imported order), an untouched
+  // picker is a VALID submission: the refund is recorded and simply not
+  // auto-deducted. Without this the Review button stayed disabled forever and
+  // the cashier had no way to record the refund at all — which is how a
+  // Rs 5,900 payout ended up recorded nowhere and the till read short.
+  const splitUsable = refundTenders.length > 0 && refundTendersBalanced;
+  const escapeAllowed =
+    tendersUnverifiable &&
+    refundTenders.every((t) => t.method === '' || (Number(t.amount) || 0) === 0);
+  // A RETURN with a positive net needs a balanced, fully-specified breakdown (or
+  // the escape above); an EXCHANGE-COLLECT needs an explicit collect tender.
+  // Nothing submits until the server quote has landed (the amounts must be the
+  // server's).
   const refundTendersReady =
     !!quote &&
-    (returnType !== 'RETURN' || roundedNet <= 0 || (refundTenders.length > 0 && refundTendersBalanced)) &&
+    (returnType !== 'RETURN' || roundedNet <= 0 || splitUsable || escapeAllowed) &&
     (returnType !== 'EXCHANGE' || exchangeDirection !== 'COLLECT' || collectMethod !== '');
 
   const addRefundTenderRow = () =>
@@ -366,16 +379,26 @@ export default function ReturnsPage() {
   };
 
   const addReplacementFromProduct = (p: any) => {
-    setReplacementItems(prev => [
+    const pid = p.product_id || p.id || p._id;
+    // DEDUPE. Two clicks on the same frame used to append two lines, and the
+    // per-line quantity cap did not see the total, so the exchange collected
+    // double and the drawer moved with it. Bump the quantity instead.
+    setReplacementItems(prev => {
+      const at = prev.findIndex(r => r.productId && r.productId === pid);
+      if (at >= 0) {
+        return prev.map((r, i) => (i === at ? { ...r, quantity: r.quantity + 1 } : r));
+      }
+      return [
       ...prev,
       {
-        productId: p.product_id || p.id || p._id,
+        productId: pid,
         name: p.name || p.model || p.product_name || 'Item',
         sku: p.sku || '',
         quantity: 1,
         unitPrice: Math.round(p.offer_price || p.price || p.mrp || 0),
       },
-    ]);
+      ];
+    });
     setProductResults([]);
     setProductQuery('');
   };
@@ -475,6 +498,8 @@ export default function ReturnsPage() {
       ) / 100,
     );
     setResultCreditAmount(Number(result?.credit_amount) || 0);
+    setResultCollectAmount(Number(result?.collect_amount) || 0);
+    setResultCollectMethod(String(result?.collect_method || ''));
     setStep('complete');
     return true;
   };
@@ -901,7 +926,10 @@ export default function ReturnsPage() {
                       )}
                       {tendersUnverifiable && !cashInShortfall && (
                         <p className="text-xs text-amber-600 mb-2">
-                          This order has no recorded payment tenders, so the refund cannot be auto-deducted from the drawer. Record it as cash paid out at day-end if you hand back cash.
+                          {Object.keys(capturedTenders).length === 0
+                            ? 'This order has no recorded payment tenders, so the refund cannot be auto-deducted from the drawer.'
+                            : `This order was partly paid by a method the till cannot refund to, so only ${fp(Object.values(refundableByTender).reduce((a, b) => a + (b || 0), 0))} of the ${fp(roundedNet)} can be auto-deducted.`}
+                          {' '}Leave the tender rows blank to record the refund without auto-deduction, then enter it as cash paid out at day-end if you hand back cash.
                         </p>
                       )}
                       <p className="text-xs text-gray-500 mb-2">
@@ -1021,8 +1049,24 @@ export default function ReturnsPage() {
               If you handed back cash, record {fp(netRefund)} as cash paid out at day-end — otherwise the till will read short.
             </p>
           )}
+          {/* An EXCHANGE-COLLECT taken in CASH moves the SAME drawer figure as
+              a refund does. Both banners used to be gated to RETURN, so this
+              money entered the expected drawer with nothing on screen. */}
+          {returnType === 'EXCHANGE' && resultDrawerNetted === true
+            && resultCollectMethod === 'CASH' && resultCollectAmount > 0 && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              The {fp(resultCollectAmount)} you collected in cash is now expected in Day-End — do not also record it as a separate cash-in.
+            </p>
+          )}
+          {returnType === 'EXCHANGE' && resultDrawerNetted === false
+            && exchangeDirection === 'COLLECT' && (
+            <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              This collection was NOT added to the expected drawer (no tender was recorded for it).
+              If you took cash, record it at day-end — otherwise the till will read over.
+            </p>
+          )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
