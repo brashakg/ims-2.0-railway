@@ -3816,6 +3816,126 @@ def _cash_expenses_for_window(
     return round(total, 2)
 
 
+# A CASH expense whose amount matches a recorded CASH refund to within a paisa
+# is almost certainly the SAME money keyed twice (the pre-fix workaround was to
+# log a customer refund as a "cash paid out"). A bare co-occurrence check would
+# fire on any day with a refund and Rs 200 of chai money and be tuned out inside
+# a week, so the advisory requires an AMOUNT match (or an explicitly
+# refund-flavoured category) and names both figures.
+_REFUND_EXPENSE_HINTS = ("REFUND", "RETURN", "CUSTOMER REFUND")
+_DOUBLE_ENTRY_EPSILON = 0.01
+
+
+def _cash_refund_legs_for_window(
+    db, store_id: str, start_iso, end_iso
+) -> List[float]:
+    """Individual recorded CASH refund leg amounts in the window (drawer-truth
+    from returns.refund_tenders). Feeds the amount-matched double-entry
+    advisory. Fail-soft -> []."""
+    if db is None:
+        return []
+    legs: List[float] = []
+    try:
+        from ..services.tender_routing import canonicalize_tender
+
+        start_str = start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
+        win: Dict = {"$gte": start_str}
+        if end_iso:
+            win["$lte"] = end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso)
+        cursor = db.get_collection("returns").find(
+            {
+                "store_id": store_id,
+                "status": "COMPLETED",
+                "historical": {"$ne": True},
+                "created_at": win,
+            },
+            {"_id": 0, "return_type": 1, "refund_tenders": 1},
+        )
+        for r in cursor:
+            if str(r.get("return_type") or "").upper() != "RETURN":
+                continue
+            for t in r.get("refund_tenders") or []:
+                if canonicalize_tender((t or {}).get("method")) != "CASH":
+                    continue
+                try:
+                    amt = float((t or {}).get("amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt > 0:
+                    legs.append(round(amt, 2))
+    except Exception:  # noqa: BLE001
+        return []
+    return legs
+
+
+def _refund_double_entry_advisory(
+    db, store_id: str, start_iso, end_iso, cash_refunds: float
+) -> Optional[Dict]:
+    """Amount-matched double-count advisory, or None.
+
+    Returns ``{matched_amount, cash_refunds, cash_expenses_matched, message}``
+    when a CASH expense in the window matches a recorded CASH refund leg to the
+    paisa (or carries a refund-flavoured category/note). Advisory ONLY -- never
+    blocks a close and never adjusts a figure (a genuine same-day petty-cash
+    payout must stay recordable)."""
+    if db is None or not cash_refunds:
+        return None
+    legs = _cash_refund_legs_for_window(db, store_id, start_iso, end_iso)
+    if not legs:
+        return None
+    try:
+        start_day = (
+            start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
+        )[:10]
+        end_day = (
+            (end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso))
+            if end_iso
+            else now_ist().isoformat()
+        )[:10]
+        cursor = db.get_collection("expenses").find(
+            {
+                "store_id": store_id,
+                "expense_date": {"$gte": start_day, "$lte": end_day},
+            },
+            {
+                "_id": 0, "amount": 1, "payment_mode": 1, "status": 1,
+                "category": 1, "note": 1, "description": 1,
+            },
+        )
+        for e in cursor:
+            mode = str(e.get("payment_mode") or "").upper()
+            if mode and mode != "CASH":
+                continue
+            status = str(e.get("status") or "").upper()
+            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+                continue
+            try:
+                amt = round(float(e.get("amount", 0) or 0), 2)
+            except (TypeError, ValueError):
+                continue
+            blob = " ".join(
+                str(e.get(k) or "") for k in ("category", "note", "description")
+            ).upper()
+            refundish = any(h in blob for h in _REFUND_EXPENSE_HINTS)
+            match = any(abs(amt - leg) <= _DOUBLE_ENTRY_EPSILON for leg in legs)
+            if match or (refundish and amt > 0):
+                return {
+                    "matched_amount": amt,
+                    "cash_refunds": round(float(cash_refunds), 2),
+                    "reason": "AMOUNT_MATCH" if match else "REFUND_CATEGORY",
+                    "message": (
+                        f"A cash expense of Rs {amt:.2f} matches a customer cash "
+                        f"refund already auto-deducted from this drawer "
+                        f"(recorded refunds Rs {float(cash_refunds):.2f}). If it is "
+                        "the same money, remove the manual entry - otherwise "
+                        "ignore this notice."
+                    ),
+                }
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 @router.post("/cash-register/open")
 async def open_cash_register(
     body: CashRegisterOpen,
@@ -3971,20 +4091,25 @@ async def close_cash_register(
     # unchanged) -- it stores a per-tender breakdown alongside it so the close
     # screen / Tally JV can see UPI/CARD/etc. net. Fail-soft: any error leaves
     # the cash close exactly as before.
+    # include_returns=True so this breakdown is on the SAME basis as the
+    # blind-EOD rows (net of recorded refunds). The manager console renders both
+    # in one grid; mixing a payments-only figure with a returns-netted one made
+    # the same store/day/tender show two different numbers with no label.
     by_mode_breakdown = None
     try:
         from ..services.tender_reconciliation import reconcile_window
 
-        _recon = reconcile_window(db, store_id, start_iso, end_iso)
+        _recon = reconcile_window(db, store_id, start_iso, end_iso, include_returns=True)
         by_mode_breakdown = _recon.get("by_mode")
     except Exception:  # noqa: BLE001
         by_mode_breakdown = None
 
-    # Non-blocking double-count advisory: a recorded cash refund (auto-deducted
-    # from the drawer) AND a manual cash payout/expense in the same window may be
-    # the SAME money entered twice (staff used the pre-fix "cash paid out"
-    # workaround). Surface it so the closer can check; never auto-applied.
-    refund_double_entry_advisory = cash_refunds > 0 and cash_expenses > 0
+    # Non-blocking, AMOUNT-MATCHED double-count advisory: a manual CASH expense
+    # that matches a recorded cash refund to the paisa is probably the same money
+    # keyed twice (the pre-fix workaround). Never auto-applied, never blocking.
+    refund_double_entry = _refund_double_entry_advisory(
+        db, store_id, start_iso, end_iso, cash_refunds
+    )
 
     update = {
         "status": "CLOSED",
@@ -3995,8 +4120,14 @@ async def close_cash_register(
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
-        "refund_double_entry_advisory": refund_double_entry_advisory,
+        "refund_double_entry_advisory": refund_double_entry,
+        "negative_expected_advisory": summary.get("negative_expected_advisory", False),
+        "negative_expected_message": summary.get("negative_expected_message"),
+        # by_mode_breakdown is NET OF RECORDED REFUNDS (same basis as the
+        # blind-EOD rows) so the manager console never shows two definitions of
+        # the same tender figure in one grid.
         "by_mode_breakdown": by_mode_breakdown,
+        "by_mode_basis": "NET_OF_RECORDED_REFUNDS",
         "bank_deposit": summary["bank_deposit"],
         "counted": counted,
         "expected": summary["expected"],
@@ -4083,9 +4214,17 @@ async def list_cash_register_sessions(
             "cash_expenses": cash_expenses,
             "bank_deposit": 0.0,
             "expected": expected,
-            # Advisory: a recorded cash refund AND a manual cash payout/expense
-            # in the window may be double entry (pre-fix workaround). FE warns.
-            "refund_double_entry_advisory": cash_refunds > 0 and cash_expenses > 0,
+            # AMOUNT-MATCHED advisory (or None): a manual cash expense that
+            # matches a recorded cash refund is probably the same money twice.
+            "refund_double_entry_advisory": _refund_double_entry_advisory(
+                db, os_store, start_iso, None, cash_refunds
+            ),
+            # A negative expectation means a cash-in is missing -- never present
+            # the resulting "overage" as a verdict.
+            "negative_expected_advisory": expected < 0,
+            "negative_expected_message": (
+                cash_register.NEGATIVE_EXPECTED_MESSAGE if expected < 0 else None
+            ),
         }
 
     return {
@@ -4290,6 +4429,12 @@ async def cash_reconciliation_summary(
                 "variance_status": _recon_status(variance, tol),
                 "tolerance": round(abs(tol), 2),
                 "by_mode": _norm_by_mode(s.get("by_mode_breakdown")),
+                # Both row kinds are now on ONE basis so the grid's tender
+                # column means the same thing in every row. Legacy sessions
+                # closed before the change carry a payments-only breakdown.
+                "by_mode_basis": s.get("by_mode_basis") or "PAYMENTS_ONLY_LEGACY",
+                "refund_double_entry_advisory": s.get("refund_double_entry_advisory"),
+                "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": closed_by,
                 "closed_by_name": s.get("closed_by_name"),
                 "closed_at": closed_at,
@@ -4350,6 +4495,13 @@ async def cash_reconciliation_summary(
                 or _recon_status(variance, tol),
                 "tolerance": tol,
                 "by_mode": _norm_by_mode(s.get("by_mode")),
+                "by_mode_basis": "NET_OF_RECORDED_REFUNDS",
+                "refund_double_entry_advisory": (
+                    {"reason": "CO_OCCURRENCE"}
+                    if s.get("refund_double_entry_advisory")
+                    else None
+                ),
+                "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": locked_by,
                 "closed_by_name": s.get("locked_by_name"),
                 "closed_at": s.get("locked_at"),

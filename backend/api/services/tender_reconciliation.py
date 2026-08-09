@@ -634,6 +634,17 @@ def ensure_reconciliation_indexes(db) -> None:
         )
         coll.create_index([("store_id", 1), ("status", 1)], name="recon_store_status")
     except Exception:  # noqa: BLE001
+        pass
+    try:
+        # The drawer readers now scan `returns` on every close/preview poll and
+        # every Z-Read, and that collection also holds the bulk Shopify
+        # historical import. Without this the scan is a COLLSCAN at 21:00 while
+        # the store is trying to shut. Idempotent + fail-soft.
+        db.get_collection("returns").create_index(
+            [("store_id", 1), ("status", 1), ("created_at", -1)],
+            name="returns_store_status_created",
+        )
+    except Exception:  # noqa: BLE001
         return
 
 

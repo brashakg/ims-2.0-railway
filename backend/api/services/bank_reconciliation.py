@@ -208,21 +208,26 @@ class BankReconciliationEngine:
             tkey = str(tender).upper()
             if tkey == "CASH":
                 continue  # cash is the #23 trail, not a gateway settlement
-            if tkey == "UNKNOWN":
-                continue  # Suspense A/c is not a gateway settlement expectation
             net_rupees = agg.get("net", 0.0)
             gross_paise = to_paise(net_rupees)
             if gross_paise <= 0:
-                continue  # no negative "expected settlement" nonsense money
-            out.append(
-                {
-                    "kind": KIND_DIGITAL,
-                    "ref_date": end_iso,
-                    "tender": tkey,
-                    "expected_paise": gross_paise,
-                    "count": agg.get("count", 0),
-                }
-            )
+                # No negative "expected settlement" nonsense money. The bank line
+                # (if any) still surfaces as unmatched_in_bank -- nothing is lost.
+                continue
+            item: Dict[str, Any] = {
+                "kind": KIND_DIGITAL,
+                "ref_date": end_iso,
+                "tender": tkey,
+                "expected_paise": gross_paise,
+                "count": agg.get("count", 0),
+            }
+            if tkey == "UNKNOWN":
+                # WALLET / NETBANKING / a blank method all canonicalize to
+                # UNKNOWN. This is REAL digital money -- keep it visible on the
+                # expected side (a suspense row) instead of silently dropping it,
+                # flagged so the accountant reclassifies the tender.
+                item["needs_reclassification"] = True
+            out.append(item)
         return out
 
     def load_bank_lines(

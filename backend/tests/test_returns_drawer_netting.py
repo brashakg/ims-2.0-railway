@@ -420,6 +420,73 @@ def test_mdr_fee_never_negative():
     assert bankrec._mdr_fee_paise(100000, 200) == 2000  # sanity: 2% of Rs 1000
 
 
+def test_bank_recon_keeps_a_POSITIVE_unknown_tender_visible(db):
+    """WALLET / NETBANKING / a blank method all canonicalize to UNKNOWN. That is
+    REAL digital money -- it must stay on the expected side as a suspense row
+    flagged for reclassification, never be silently dropped."""
+    db.get_collection("orders").insert(
+        _order("S1", datetime(2026, 8, 9, 10, 0, 0), [_pay("WALLET", 1500.0)])
+    )
+    eng = bankrec.BankReconciliationEngine(db)
+    items = eng.build_pos_digital_expected("S1", T_START, T_END)
+    unknown = [it for it in items if it["tender"] == "UNKNOWN"]
+    assert len(unknown) == 1
+    assert unknown[0]["expected_paise"] == 150000
+    assert unknown[0]["needs_reclassification"] is True
+
+
+def test_bank_recon_drops_only_a_NON_POSITIVE_unknown(db):
+    db.get_collection("orders").insert(
+        _order("S1", datetime(2026, 8, 9, 10, 0, 0),
+               [_pay("WALLET", 1000.0), _pay("WALLET", -1500.0)])
+    )
+    eng = bankrec.BankReconciliationEngine(db)
+    items = eng.build_pos_digital_expected("S1", T_START, T_END)
+    assert not any(it["tender"] == "UNKNOWN" for it in items)
+
+
+# ============================================================================
+# NEGATIVE expected drawer: a cash-in is missing (e.g. a refund funded from the
+# safe). The over/short VERDICT is withheld rather than crediting the cashier a
+# phantom overage -- but the real figure is never clamped or hidden.
+# ============================================================================
+
+
+def test_negative_expected_suppresses_the_variance_verdict_cash_register():
+    from api.services import cash_register as cr
+
+    summary = cr.build_close_summary(
+        opening_float=0.0, cash_sales=0.0, cash_refunds=5000.0,
+        cash_expenses=0.0, bank_deposit=0.0, denominations=[], tolerance=0.0,
+    )
+    assert summary["expected"] == -5000.0          # the real number is shown
+    assert summary["variance_status"] == "NEGATIVE_EXPECTED"  # verdict withheld
+    assert summary["negative_expected_advisory"] is True
+    assert "cash-in is missing" in summary["negative_expected_message"]
+
+
+def test_positive_expected_keeps_the_normal_verdict():
+    from api.services import cash_register as cr
+
+    summary = cr.build_close_summary(
+        opening_float=1000.0, cash_sales=5000.0, cash_refunds=500.0,
+        cash_expenses=0.0, bank_deposit=0.0, denominations=[], tolerance=0.0,
+    )
+    assert summary["expected"] == 5500.0
+    assert summary["variance_status"] in ("BALANCED", "OVER", "SHORT")
+    assert summary["negative_expected_advisory"] is False
+
+
+def test_zread_negative_expected_advisory(db):
+    db.get_collection("returns").insert(
+        _return_doc("S1", "2026-08-09T15:00:00",
+                    refund_tenders=[{"method": "CASH", "amount": 4000.0}])
+    )
+    exp = eod_tally.compute_expected(db, "S1", T_START, T_END, 0, 0)
+    assert exp["expected_cash_paisa"] == -400000   # shown, not clamped
+    assert exp["negative_expected_advisory"] is True
+
+
 # ============================================================================
 # CREDIT_NOTE / EXCHANGE-credit issue store credit -> never touch cash.
 # ============================================================================

@@ -74,9 +74,36 @@ export interface CreateReturnPayload {
   refund_reason?: string;
 }
 
+// AUTHORITATIVE server-computed money preview for a return. The till MUST
+// prefill the refund-tender picker from `net_refund` rather than computing an
+// amount client-side — a client-side GST gross-up drifted from the server on
+// every inclusive-priced sale and 400'd the refund with no way to recover.
+export interface ReturnQuote {
+  order_id?: string;
+  return_type: ReturnType;
+  gross_refund: number;
+  restocking_fee: number;
+  /** THE figure the refund-tender split must sum to. */
+  net_refund: number;
+  gst_breakup?: Record<string, number>;
+  settlement?: { direction: 'COLLECT' | 'REFUND' | 'EVEN'; difference: number } | null;
+  /** What each tender actually collected on the source order. */
+  captured_tenders: Record<string, number>;
+  prior_refunds_by_tender: Record<string, number>;
+  /** captured − prior: what may still be refunded to each tender. */
+  refundable_by_tender: Record<string, number>;
+  /** True when the server cannot verify tenders (order has no captured payments). */
+  tenders_unverifiable: boolean;
+}
+
 export const returnsApi = {
   create: async (payload: CreateReturnPayload) => {
     const response = await api.post('/returns', payload);
+    return response.data;
+  },
+
+  quote: async (payload: CreateReturnPayload): Promise<ReturnQuote> => {
+    const response = await api.post('/returns/quote', payload);
     return response.data;
   },
 

@@ -4,7 +4,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { orderApi, productApi } from '../../services/api';
-import { returnsApi, type CreateReturnPayload, type RefundTenderCode } from '../../services/api/returns';
+import {
+  returnsApi,
+  type CreateReturnPayload,
+  type RefundTenderCode,
+  type ReturnQuote,
+} from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
 import { formatDateIST } from '../../utils/datetime';
 import {
@@ -23,14 +28,36 @@ interface ReturnItem {
   sku: string;
   quantity: number;
   returnQty: number;
-  // NET (pre-GST) unit price from the order line.
+  // NET (pre-GST) unit price from the order line — sent to the server as-is.
   unitPrice: number;
-  // GST rate (%) the line was billed at. Used to show the GST-inclusive gross
-  // the customer paid (refund = gross, not the net subtotal).
+  // Per-unit GST-INCLUSIVE gross actually billed, computed exactly as the
+  // backend does: (taxable_value + tax_amount) / quantity. Display only; the
+  // authoritative refund figure always comes from the server quote.
+  billedUnitGross: number;
+  // GST rate (%) the line was billed at (display + server hint).
   gstRate: number;
   reason: ReturnReason;
   notes: string;
   condition: 'GOOD' | 'DAMAGED' | 'OPENED';
+}
+
+/**
+ * Per-unit GST-INCLUSIVE gross for an order line, mirroring the backend's
+ * `_billed_unit_gross`: (taxable_value + tax_amount) / quantity. Correct for
+ * BOTH inclusive orders (taxable + tax == gross) and legacy exclusive ones.
+ * Falls back to the line's stored gross/unit price when those fields are
+ * absent — and NEVER re-applies GST to an already-inclusive price.
+ */
+function billedUnitGross(item: any): number {
+  const tv = item?.taxable_value ?? item?.taxableValue;
+  const tx = item?.tax_amount ?? item?.taxAmount;
+  const qty = Number(item?.quantity ?? 1);
+  if (tv != null && tx != null && qty > 0) {
+    return Math.round(((Number(tv) + Number(tx)) / qty) * 100) / 100;
+  }
+  const lineGross = item?.final_price ?? item?.finalPrice ?? item?.item_total ?? item?.line_total;
+  if (lineGross != null && qty > 0) return Math.round((Number(lineGross) / qty) * 100) / 100;
+  return Number(item?.unitPrice ?? item?.unit_price ?? 0);
 }
 
 interface ReplacementItem {
@@ -81,11 +108,17 @@ export default function ReturnsPage() {
 
   // Refund-tender capture (drawer-truth): how the money is actually handed back.
   // The Day-End drawer nets off THIS, never a guessed original-sale tender.
-  const [refundTenders, setRefundTenders] = useState<{ method: RefundTenderCode; amount: number }[]>([]);
+  // `method: ''` = not yet chosen; it is NEVER defaulted to CASH.
+  const [refundTenders, setRefundTenders] = useState<{ method: RefundTenderCode | ''; amount: number }[]>([]);
   // EXCHANGE COLLECT: the tender the price difference is taken in at the till.
-  const [collectMethod, setCollectMethod] = useState<RefundTenderCode>('CASH');
+  // Starts UNSET — an untouched dropdown must never stamp phantom drawer cash.
+  const [collectMethod, setCollectMethod] = useState<RefundTenderCode | '' | 'NOT_AT_TILL'>('');
   // Irreversible-refund confirmation dialog (UI P0: no submit without a confirm).
   const [showConfirm, setShowConfirm] = useState(false);
+  // AUTHORITATIVE server money quote for the current selection.
+  const [quote, setQuote] = useState<ReturnQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
 
   // EXCHANGE: replacement product picker state
   const [replacementItems, setReplacementItems] = useState<ReplacementItem[]>([]);
@@ -135,10 +168,17 @@ export default function ReturnsPage() {
         sku: item.sku || '',
         quantity: item.quantity || 1,
         returnQty: 0,
-        unitPrice: Math.round(item.unitPrice || item.unit_price || 0),
-        // Rate the line was billed at (stamped on the order item). Drives the
-        // GST-inclusive gross shown + sent so the customer is refunded what
-        // they actually paid, not the net subtotal.
+        // NET unit price as billed (sent to the server unchanged — the server
+        // re-resolves the authoritative billed gross from the original line).
+        unitPrice: Number(item.unitPrice ?? item.unit_price ?? 0),
+        // Per-unit GST-INCLUSIVE gross the customer actually paid, derived the
+        // SAME way the backend does: (taxable_value + tax_amount) / quantity.
+        // NEVER re-gross-up unit_price — under GST_PRICING_MODE=INCLUSIVE that
+        // double-applies GST (a Rs 5,900 line displayed as Rs 6,962) and the
+        // tender split then fails the server's paise-exact balance check.
+        billedUnitGross: billedUnitGross(item),
+        // Rate the line was billed at (stamped on the order item); display +
+        // hint only — the server prefers the rate on the original order line.
         gstRate: Number(item.gst_rate ?? item.gstRate ?? 0),
         reason: 'CUSTOMER_CHANGED_MIND' as ReturnReason,
         notes: '',
@@ -154,79 +194,128 @@ export default function ReturnsPage() {
   };
 
   const activeReturns = returnItems.filter(i => i.returnQty > 0);
-  // GST-INCLUSIVE gross the customer paid: net unit_price grossed up by the
-  // line's GST rate. Mirrors the backend returns_engine (refund = gross, NOT
-  // the net subtotal). gstRate 0 -> unit_price treated as already gross.
-  const totalRefund = activeReturns.reduce(
-    (sum, i) => sum + i.returnQty * i.unitPrice * (1 + (i.gstRate || 0) / 100),
-    0
-  );
-  // Net refund after an optional restocking fee for damaged / opened goods.
-  const safeFee = Math.max(0, Math.min(restockingFee || 0, totalRefund));
-  const netRefund = Math.max(0, totalRefund - safeFee);
+  // LOCAL ESTIMATE ONLY (instant feedback while the server quote is in flight).
+  // It uses the billed gross the backend itself stores — it never re-applies
+  // GST — but the AUTHORITATIVE figure is always `quote.net_refund` below.
+  const estimatedGross =
+    Math.round(activeReturns.reduce((sum, i) => sum + i.returnQty * i.billedUnitGross, 0) * 100) / 100;
+  const safeFee = Math.max(0, Math.min(restockingFee || 0, estimatedGross));
 
-  // Exchange settlement: replacement total - returned value.
+  // THE authoritative money figures come from the server (POST /returns/quote),
+  // computed by the very same code path that will price the POST. Prefilling
+  // the tender picker from a client-side amount is what made a Rs 5,900 refund
+  // display as Rs 6,962 and 400 on submit with no way for the cashier to
+  // recover; the client is no longer authoritative for any rupee figure.
+  const totalRefund = quote ? quote.gross_refund : estimatedGross;
+  const netRefund = quote ? quote.net_refund : Math.max(0, estimatedGross - safeFee);
+
+  // Exchange settlement: server-computed when quoted, local estimate otherwise.
   const replacementTotal = replacementItems.reduce((sum, r) => sum + r.quantity * r.unitPrice, 0);
-  const exchangeDiff = Math.round((replacementTotal - totalRefund) * 100) / 100;
+  const exchangeDiff = quote?.settlement
+    ? (quote.settlement.direction === 'REFUND'
+        ? -Math.abs(quote.settlement.difference)
+        : Math.abs(quote.settlement.difference))
+    : Math.round((replacementTotal - totalRefund) * 100) / 100;
   const exchangeDirection: 'COLLECT' | 'REFUND' | 'EVEN' =
-    Math.abs(exchangeDiff) < 0.005 ? 'EVEN' : exchangeDiff > 0 ? 'COLLECT' : 'REFUND';
+    quote?.settlement
+      ? quote.settlement.direction
+      : Math.abs(exchangeDiff) < 0.005 ? 'EVEN' : exchangeDiff > 0 ? 'COLLECT' : 'REFUND';
+
+  // Ask the SERVER for the authoritative amounts whenever the selection changes.
+  // Debounced so dragging a qty spinner does not spam the endpoint. The quote is
+  // read-only (no reservation, no write) and is the single source of truth for
+  // every rupee figure shown and submitted on this screen.
+  const quoteKey = JSON.stringify({
+    o: selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId,
+    t: returnType,
+    f: safeFee,
+    l: activeReturns.map(i => [i.orderItemId, i.returnQty, i.unitPrice, i.gstRate]),
+    r: returnType === 'EXCHANGE' ? replacementItems.map(r => [r.productId, r.quantity, r.unitPrice]) : null,
+  });
+  useEffect(() => {
+    if (step !== 'select' || !selectedOrder || activeReturns.length === 0) {
+      setQuote(null);
+      setQuoteError(null);
+      return;
+    }
+    let cancelled = false;
+    setQuoteLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const q = await returnsApi.quote(buildPayload());
+        if (!cancelled) { setQuote(q); setQuoteError(null); }
+      } catch (e: any) {
+        if (!cancelled) {
+          setQuote(null);
+          const d = e?.response?.data?.detail;
+          setQuoteError(typeof d === 'string' ? d : 'Could not price this return. Check the selected items.');
+        }
+      } finally {
+        if (!cancelled) setQuoteLoading(false);
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quoteKey, step]);
 
   // ----- Refund-tender capture (drawer-truth) -----
-  // The money panel proved that GUESSING the refund tender from the original
-  // sale regresses split-tender days, so the cashier records how the refund is
-  // actually returned. Single-tender source -> prefill that tender (changeable);
-  // split source -> the cashier must specify the split (no silent default).
+  // Guessing the refund tender from the original sale regresses split-tender
+  // days, so the cashier records how the refund is ACTUALLY returned — and the
+  // server independently enforces that a tender may only be refunded up to what
+  // it collected on this order (a UI rule is not a control).
   const TENDER_CODES: RefundTenderCode[] = ['CASH', 'UPI', 'CARD', 'BANK'];
-  const toTenderCode = (m?: string): RefundTenderCode | null => {
-    const k = String(m || '').toUpperCase();
-    if (k === 'CASH') return 'CASH';
-    if (['UPI', 'GPAY', 'PHONEPE', 'PAYTM', 'QR'].includes(k)) return 'UPI';
-    if (['CARD', 'DEBIT', 'DEBIT_CARD', 'CREDIT_CARD', 'EDC', 'POS'].includes(k)) return 'CARD';
-    if (['BANK', 'BANK_TRANSFER', 'NEFT', 'RTGS', 'IMPS'].includes(k)) return 'BANK';
-    return null;
-  };
-  const sourceTenders: RefundTenderCode[] = Array.from(
-    new Set(
-      ((selectedOrder?.payments as any[]) || [])
-        .map((p) => toTenderCode(p?.method || p?.mode))
-        .filter((t): t is RefundTenderCode => t !== null),
-    ),
-  );
-  const isSplitSource = sourceTenders.length > 1;
+
+  // Tenders the SERVER says this order captured (authoritative). Only these can
+  // legitimately receive a refund; anything else is refused server-side.
+  const capturedTenders = quote?.captured_tenders ?? {};
+  const refundableByTender = quote?.refundable_by_tender ?? {};
+  const sourceTenders = Object.keys(capturedTenders) as RefundTenderCode[];
+  // SPLIT is judged on the RAW captured payment legs, not on the mappable
+  // subset: a GIFT_VOUCHER / LOYALTY / EMI leg (or an empty payments[]) must
+  // never look like a clean single-tender sale and silently prefill CASH.
+  const rawPaymentLegs = ((selectedOrder?.payments as any[]) || []).length;
+  const isSingleSource = sourceTenders.length === 1 && rawPaymentLegs <= 1;
+  const tendersUnverifiable = quote?.tenders_unverifiable ?? false;
   const roundedNet = Math.round(netRefund * 100) / 100;
 
-  // (Re)prefill the refund-tender picker whenever the order / type / amount
-  // changes. Single-tender: full amount on the source tender (editable). Split
-  // or unknown source: seed ONE blank row and require the cashier to fill it so
-  // the total matches -- never a silent default that could misroute the drawer.
+  // (Re)prefill the picker from the SERVER quote. Exactly one captured tender
+  // and one payment leg -> prefill that tender with the server's net (editable).
+  // Anything else (split, unmappable legs, unverifiable order) -> seed a row
+  // with NO tender preselected so the cashier must choose. There is deliberately
+  // no `|| 'CASH'` fallback anywhere: a silent CASH default fabricates drawer
+  // movement from an untouched screen.
   useEffect(() => {
     if (returnType !== 'RETURN' || roundedNet <= 0) {
       setRefundTenders([]);
       return;
     }
-    if (!isSplitSource) {
-      setRefundTenders([{ method: sourceTenders[0] || 'CASH', amount: roundedNet }]);
+    if (isSingleSource) {
+      setRefundTenders([{ method: sourceTenders[0], amount: roundedNet }]);
     } else {
-      setRefundTenders((prev) =>
-        prev.length ? prev : [{ method: sourceTenders[0] || 'CASH', amount: 0 }],
-      );
+      setRefundTenders((prev) => (prev.length ? prev : [{ method: '', amount: 0 }]));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedOrder, returnType, roundedNet, isSplitSource]);
+  }, [selectedOrder, returnType, roundedNet, isSingleSource, quote]);
 
   const refundTenderTotal = Math.round(
     refundTenders.reduce((s, t) => s + (Number(t.amount) || 0), 0) * 100,
   ) / 100;
-  // Balanced within Re 1 (paise rounding tolerance) and every leg non-negative.
+  // PAISE-EXACT, matching the server's own 0.01 tolerance. A Re 1.00 client
+  // tolerance showed a green "balanced" split that the server then 400'd.
+  const TENDER_BALANCE_EPSILON = 0.01;
   const refundTendersBalanced =
-    Math.abs(refundTenderTotal - roundedNet) < 1 &&
-    refundTenders.every((t) => (Number(t.amount) || 0) >= 0);
-  // A RETURN with a positive net must carry a balanced breakdown before submit.
+    Math.abs(refundTenderTotal - roundedNet) <= TENDER_BALANCE_EPSILON &&
+    refundTenders.every((t) => t.method !== '' && (Number(t.amount) || 0) >= 0);
+  // A RETURN with a positive net needs a balanced, fully-specified breakdown;
+  // an EXCHANGE-COLLECT needs an explicit collect tender. Nothing submits until
+  // the server quote has landed (the amounts must be the server's).
   const refundTendersReady =
-    returnType !== 'RETURN' || roundedNet <= 0 || (refundTenders.length > 0 && refundTendersBalanced);
+    !!quote &&
+    (returnType !== 'RETURN' || roundedNet <= 0 || (refundTenders.length > 0 && refundTendersBalanced)) &&
+    (returnType !== 'EXCHANGE' || exchangeDirection !== 'COLLECT' || collectMethod !== '');
 
   const addRefundTenderRow = () =>
-    setRefundTenders((prev) => [...prev, { method: 'CASH', amount: 0 }]);
+    setRefundTenders((prev) => [...prev, { method: '', amount: 0 }]);
   const removeRefundTenderRow = (i: number) =>
     setRefundTenders((prev) => prev.filter((_, idx) => idx !== i));
   const updateRefundTenderRow = (
@@ -282,59 +371,72 @@ export default function ReturnsPage() {
     return (first && MATRIX_REASON[first]) || 'CHANGE_OF_MIND';
   };
 
+  // ONE payload builder for both the read-only quote and the real POST, so the
+  // priced preview and the submitted return can never describe different money.
+  const buildPayload = (
+    approval?: { requestId: string; approvalToken?: string },
+  ): CreateReturnPayload => ({
+    order_id: selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId,
+    order_number: selectedOrder?.orderNumber || selectedOrder?.order_number,
+    customer_id: selectedOrder?.customerId || selectedOrder?.customer_id,
+    store_id: user?.activeStoreId,
+    return_type: returnType,
+    items: activeReturns.map(i => ({
+      order_item_id: i.orderItemId,
+      product_name: i.productName,
+      sku: i.sku,
+      return_qty: i.returnQty,
+      unit_price: i.unitPrice,
+      gst_rate: i.gstRate,
+      reason: i.reason,
+      condition: i.condition,
+      notes: i.notes,
+    })),
+    replacement_items:
+      returnType === 'EXCHANGE'
+        ? replacementItems.map(r => ({
+            product_id: r.productId,
+            name: r.name,
+            sku: r.sku,
+            quantity: r.quantity,
+            unit_price: r.unitPrice,
+          }))
+        : undefined,
+    approval_note: approvalNote || undefined,
+    // Restocking fee is a refund-path concept only (EXCHANGE is settled on
+    // the difference). Send it for RETURN / CREDIT_NOTE.
+    restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
+    // DRAWER-TRUTH: the tender(s) the refund was actually returned in. Sent
+    // for a RETURN with a positive net so Day-End auto-nets the CASH leg(s).
+    // Legs are only ever sent once fully specified (never a blank method).
+    refund_tenders:
+      returnType === 'RETURN' && roundedNet > 0 && refundTenders.every(t => t.method !== '')
+        ? refundTenders.map((t) => ({
+            method: t.method as RefundTenderCode,
+            amount: Math.round((Number(t.amount) || 0) * 100) / 100,
+          }))
+        : undefined,
+    // EXCHANGE COLLECT: the tender the price difference was collected in.
+    // Omitted when unset or explicitly "not collected at this till" — the
+    // server treats absent as UNKNOWN and nets it nowhere (the safe state).
+    collect_method:
+      returnType === 'EXCHANGE' &&
+      exchangeDirection === 'COLLECT' &&
+      collectMethod !== '' &&
+      collectMethod !== 'NOT_AT_TILL'
+        ? (collectMethod as RefundTenderCode)
+        : undefined,
+    refund_reason: returnType === 'EXCHANGE' ? undefined : dominantMatrixReason(),
+    refund_approval_request_id: approval?.requestId,
+    refund_approval_token: approval?.approvalToken,
+  });
+
   // Core submit. `approval` carries the F27 token + request id when re-submitting
   // after a manager approved a gated refund. Returns true on success.
   const submitReturn = async (
     approval?: { requestId: string; approvalToken?: string },
   ): Promise<boolean> => {
-    const payload: CreateReturnPayload = {
-      order_id: selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId,
-      order_number: selectedOrder?.orderNumber || selectedOrder?.order_number,
-      customer_id: selectedOrder?.customerId || selectedOrder?.customer_id,
-      store_id: user?.activeStoreId,
-      return_type: returnType,
-      items: activeReturns.map(i => ({
-        order_item_id: i.orderItemId,
-        product_name: i.productName,
-        sku: i.sku,
-        return_qty: i.returnQty,
-        unit_price: i.unitPrice,
-        gst_rate: i.gstRate,
-        reason: i.reason,
-        condition: i.condition,
-        notes: i.notes,
-      })),
-      replacement_items:
-        returnType === 'EXCHANGE'
-          ? replacementItems.map(r => ({
-              product_id: r.productId,
-              name: r.name,
-              sku: r.sku,
-              quantity: r.quantity,
-              unit_price: r.unitPrice,
-            }))
-          : undefined,
-      approval_note: approvalNote || undefined,
-      // Restocking fee is a refund-path concept only (EXCHANGE is settled on
-      // the difference). Send it for RETURN / CREDIT_NOTE.
-      restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
-      // DRAWER-TRUTH: the tender(s) the refund was actually returned in. Sent
-      // for a RETURN with a positive net so Day-End auto-nets the CASH leg(s).
-      refund_tenders:
-        returnType === 'RETURN' && roundedNet > 0
-          ? refundTenders.map((t) => ({
-              method: t.method,
-              amount: Math.round((Number(t.amount) || 0) * 100) / 100,
-            }))
-          : undefined,
-      // EXCHANGE COLLECT: the tender the price difference was collected in.
-      collect_method:
-        returnType === 'EXCHANGE' && exchangeDirection === 'COLLECT' ? collectMethod : undefined,
-      refund_reason: returnType === 'EXCHANGE' ? undefined : dominantMatrixReason(),
-      refund_approval_request_id: approval?.requestId,
-      refund_approval_token: approval?.approvalToken,
-    };
-    const result = await returnsApi.create(payload);
+    const result = await returnsApi.create(buildPayload(approval));
     setResultId(result.return_id || null);
     setStep('complete');
     return true;
@@ -382,6 +484,14 @@ export default function ReturnsPage() {
   };
 
   const fc = (amount: number) => `₹${Math.round(amount).toLocaleString('en-IN')}`;
+  // PAISE-EXACT formatter for every figure the server balance-checks (the
+  // tender legs, the running total and the net refund). Rounding these to
+  // rupees hid the gap that made a "balanced" split 400 on submit.
+  const fp = (amount: number) =>
+    `₹${(Math.round((Number(amount) || 0) * 100) / 100).toLocaleString('en-IN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
 
   // Approval status pill for a return-history row. The return doc stamps the
   // F27 refund-approval outcome (status + approver name + request id) only when
@@ -536,7 +646,9 @@ export default function ReturnsPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
                     <p className="font-medium text-sm">{item.productName}</p>
-                    <p className="text-xs text-gray-500">{item.sku} · Purchased: {item.quantity} · {fc(item.unitPrice)} each</p>
+                    {/* Show the GST-INCLUSIVE gross actually billed per unit —
+                        the same basis the refund is computed on. */}
+                    <p className="text-xs text-gray-500">{item.sku} · Purchased: {item.quantity} · {fp(item.billedUnitGross)} each</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-gray-500">Return qty:</label>
@@ -657,15 +769,25 @@ export default function ReturnsPage() {
                     <span className="text-lg">{exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))}</span>
                   </div>
                   {exchangeDirection === 'COLLECT' && (
-                    <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-gray-200">
-                      <label className="text-sm text-gray-700">Collected via</label>
-                      <select
-                        value={collectMethod}
-                        onChange={e => setCollectMethod(e.target.value as RefundTenderCode)}
-                        className="w-40 px-2 py-1.5 border border-gray-300 rounded text-sm"
-                      >
-                        {TENDER_CODES.map(t => <option key={t} value={t}>{t}</option>)}
-                      </select>
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <div className="flex items-center justify-between gap-3">
+                        <label className="text-sm text-gray-700">Collected via</label>
+                        <select
+                          value={collectMethod}
+                          onChange={e => setCollectMethod(e.target.value as RefundTenderCode | '' | 'NOT_AT_TILL')}
+                          className={clsx('w-56 px-2 py-1.5 border rounded text-sm',
+                            collectMethod === '' ? 'border-amber-400 text-gray-500' : 'border-gray-300')}
+                        >
+                          <option value="" disabled>Select tender…</option>
+                          {TENDER_CODES.map(t => <option key={t} value={t}>{t}</option>)}
+                          <option value="NOT_AT_TILL">Not collected at this till / billed through POS</option>
+                        </select>
+                      </div>
+                      {collectMethod === '' && (
+                        <p className="text-xs text-amber-600 mt-1 text-right">
+                          Choose how the difference was collected — it is never assumed.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -694,7 +816,9 @@ export default function ReturnsPage() {
                     <span className="text-sm text-gray-700">
                       {returnType === 'CREDIT_NOTE' ? 'Net store credit' : 'Net refund'}
                     </span>
-                    <span className="font-bold text-lg text-gray-900">{fc(netRefund)}</span>
+                    <span className="font-bold text-lg text-gray-900">
+                      {quoteLoading && !quote ? 'Calculating…' : fp(netRefund)}
+                    </span>
                   </div>
 
                   {/* Refund-tender capture (RETURN only): how the cash is returned. */}
@@ -702,12 +826,33 @@ export default function ReturnsPage() {
                     <div className="mt-3 pt-3 border-t border-gray-200">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-medium text-gray-800">Refund paid via</span>
-                        {isSplitSource && (
-                          <span className="text-xs text-amber-600">Split-tender sale — specify how the refund is returned</span>
+                        {!isSingleSource && !tendersUnverifiable && (
+                          <span className="text-xs text-amber-600">Specify how the refund is returned</span>
                         )}
                       </div>
+                      {/* The original sale's captured tenders, straight from the
+                          server — so the prefill is checkable and the cashier can
+                          see what is legitimately refundable per tender. */}
+                      {sourceTenders.length > 0 && (
+                        <p className="text-xs text-gray-500 mb-2">
+                          Paid on this order:{' '}
+                          {sourceTenders.map((t, i) => (
+                            <span key={t}>
+                              {i > 0 && ' · '}
+                              <span className="font-medium text-gray-700">{t} {fp(capturedTenders[t] || 0)}</span>
+                              {(refundableByTender[t] ?? 0) !== (capturedTenders[t] ?? 0) &&
+                                ` (refundable ${fp(refundableByTender[t] || 0)})`}
+                            </span>
+                          ))}
+                        </p>
+                      )}
+                      {tendersUnverifiable && (
+                        <p className="text-xs text-amber-600 mb-2">
+                          This order has no recorded payment tenders, so the refund cannot be auto-deducted from the drawer. Record it as cash paid out at day-end if you hand back cash.
+                        </p>
+                      )}
                       <p className="text-xs text-gray-500 mb-2">
-                        Recorded in Day-End so the drawer nets it automatically — the total must equal the net refund.
+                        Recorded in Day-End so the drawer nets it automatically — the total must equal the net refund exactly.
                       </p>
                       <div className="space-y-2">
                         {refundTenders.map((t, i) => (
@@ -715,14 +860,21 @@ export default function ReturnsPage() {
                             <select
                               value={t.method}
                               onChange={e => updateRefundTenderRow(i, { method: e.target.value as RefundTenderCode })}
-                              className="w-32 px-2 py-1.5 border border-gray-300 rounded text-sm"
+                              className={clsx('w-32 px-2 py-1.5 border rounded text-sm',
+                                t.method === '' ? 'border-amber-400 text-gray-500' : 'border-gray-300')}
                             >
-                              {TENDER_CODES.map(code => <option key={code} value={code}>{code}</option>)}
+                              <option value="" disabled>Tender…</option>
+                              {(sourceTenders.length ? sourceTenders : TENDER_CODES).map(code => (
+                                <option key={code} value={code}>
+                                  {code}
+                                  {refundableByTender[code] != null ? ` (max ${fp(refundableByTender[code])})` : ''}
+                                </option>
+                              ))}
                             </select>
                             <div className="flex items-center flex-1">
                               <span className="text-gray-400 mr-1">₹</span>
                               <input
-                                type="number" min={0} value={t.amount || ''}
+                                type="number" min={0} step="0.01" value={t.amount || ''}
                                 onChange={e => updateRefundTenderRow(i, { amount: Math.max(0, Number(e.target.value)) })}
                                 className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-right tabular-nums"
                               />
@@ -741,9 +893,9 @@ export default function ReturnsPage() {
                           className="text-xs text-bv-red-600 font-medium flex items-center gap-1">
                           <Plus className="w-3 h-3" /> Add tender
                         </button>
-                        <span className={clsx('text-xs font-medium',
+                        <span className={clsx('text-xs font-medium tabular-nums',
                           refundTendersBalanced ? 'text-green-700' : 'text-amber-600')}>
-                          {fc(refundTenderTotal)} / {fc(roundedNet)}
+                          {fp(refundTenderTotal)} / {fp(roundedNet)}
                           {!refundTendersBalanced && ' — must match net refund'}
                         </span>
                       </div>
@@ -757,13 +909,21 @@ export default function ReturnsPage() {
               <div className="flex gap-3">
                 <button onClick={() => { setStep('search'); setSelectedOrder(null); }}
                   className="px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
-                <button onClick={() => setShowConfirm(true)} disabled={isSubmitting || !refundTendersReady}
+                <button onClick={() => setShowConfirm(true)} disabled={isSubmitting || quoteLoading || !refundTendersReady}
                   className="flex-1 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                  {isSubmitting ? 'Processing...' : `Review ${returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Return'} (${activeReturns.length} items)`}
+                  {isSubmitting ? 'Processing...'
+                    : quoteLoading ? 'Pricing…'
+                    : `Review ${returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Return'} (${activeReturns.length} items)`}
                 </button>
               </div>
-              {returnType === 'RETURN' && roundedNet > 0 && !refundTendersReady && (
-                <p className="text-xs text-amber-600 mt-2 text-right">Enter the refund tender split so it totals the net refund.</p>
+              {quoteError && (
+                <p className="text-xs text-bv-red-600 mt-2 text-right">{quoteError}</p>
+              )}
+              {!quoteError && returnType === 'RETURN' && roundedNet > 0 && !refundTendersReady && !quoteLoading && (
+                <p className="text-xs text-amber-600 mt-2 text-right">Enter the refund tender split so it totals the net refund exactly.</p>
+              )}
+              {!quoteError && returnType === 'EXCHANGE' && exchangeDirection === 'COLLECT' && collectMethod === '' && (
+                <p className="text-xs text-amber-600 mt-2 text-right">Choose how the difference was collected.</p>
               )}
             </div>
           )}
@@ -797,7 +957,7 @@ export default function ReturnsPage() {
             </p>
           )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod('CASH'); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
@@ -899,21 +1059,23 @@ export default function ReturnsPage() {
                 <>
                   <div className="flex justify-between"><dt className="text-gray-500">
                     {exchangeDirection === 'COLLECT' ? 'Collect from customer' : exchangeDirection === 'REFUND' ? 'Refund / store credit' : 'Even exchange'}</dt>
-                    <dd className="font-bold text-gray-900">{exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))}</dd></div>
+                    <dd className="font-bold text-gray-900 tabular-nums">{exchangeDirection === 'EVEN' ? fp(0) : fp(Math.abs(exchangeDiff))}</dd></div>
                   {exchangeDirection === 'COLLECT' && (
                     <div className="flex justify-between"><dt className="text-gray-500">Collected via</dt>
-                      <dd className="font-medium text-gray-900">{collectMethod}</dd></div>
+                      <dd className="font-medium text-gray-900">
+                        {collectMethod === 'NOT_AT_TILL' ? 'Not at this till (not drawer-netted)' : collectMethod}
+                      </dd></div>
                   )}
                 </>
               ) : (
                 <>
                   <div className="flex justify-between"><dt className="text-gray-500">
                     {returnType === 'CREDIT_NOTE' ? 'Net store credit' : 'Net refund'}</dt>
-                    <dd className="font-bold text-gray-900">{fc(netRefund)}</dd></div>
+                    <dd className="font-bold text-gray-900 tabular-nums">{fp(netRefund)}</dd></div>
                   {returnType === 'RETURN' && roundedNet > 0 && (
                     <div className="flex justify-between"><dt className="text-gray-500">Refund tender(s)</dt>
-                      <dd className="font-medium text-gray-900 text-right">
-                        {refundTenders.map((t, i) => <div key={i}>{t.method} {fc(t.amount)}</div>)}
+                      <dd className="font-medium text-gray-900 text-right tabular-nums">
+                        {refundTenders.map((t, i) => <div key={i}>{t.method} {fp(t.amount)}</div>)}
                       </dd></div>
                   )}
                 </>

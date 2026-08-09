@@ -693,7 +693,11 @@ def _normalize_refund_tenders(
         total += amt
     if not out:
         return None, False
-    if abs(round(total, 2) - round(float(net_amount or 0), 2)) > 0.01:
+    # Paise-exact, with a float-noise guard so a legitimate 1-paisa rounding
+    # (5899.99 vs 5900.00) is not rejected by binary-float representation error.
+    # The FE uses the SAME 0.01 constant, so a split the till shows as balanced
+    # is never 400'd here.
+    if abs(round(total, 2) - round(float(net_amount or 0), 2)) > 0.01 + 1e-9:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -720,6 +724,120 @@ def _normalize_collect_method(raw: Optional[str]) -> Optional[str]:
             ),
         )
     return canon
+
+
+def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    """What each canonical tender ACTUALLY collected on the source order.
+
+    Sums ``order.payments[]`` by canonical tender (a negative row -- a legacy
+    captured reversal -- reduces that tender). Only cash-in tenders are kept;
+    GIFT_VOUCHER / LOYALTY / CREDIT / STORE_CREDIT are not refundable drawer or
+    gateway money. An order with NO payments[] (legacy / imported) yields {} --
+    the caller then treats the refund tender as UNVERIFIABLE."""
+    out: Dict[str, float] = {}
+    for p in (order or {}).get("payments") or []:
+        if not isinstance(p, dict):
+            continue
+        canon = canonicalize_tender(p.get("method"), p.get("mode"))
+        if canon not in _REFUND_CASH_IN:
+            continue
+        try:
+            amt = float(p.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    return {k: v for k, v in out.items() if v > 0}
+
+
+def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
+    """Per-tender refunds ALREADY issued against an order (COMPLETED returns
+    carrying an explicit ``refund_tenders`` breakdown). Feeds the per-tender
+    refund cap so two half refunds cannot together exceed what a tender
+    collected. Fail-soft -> {}."""
+    out: Dict[str, float] = {}
+    if not order_id:
+        return out
+    coll = _returns_coll()
+    if coll is None:
+        return out
+    try:
+        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+            if doc.get("status") != "COMPLETED":
+                continue
+            for leg in doc.get("refund_tenders") or []:
+                if not isinstance(leg, dict):
+                    continue
+                canon = canonicalize_tender(leg.get("method"))
+                try:
+                    amt = float(leg.get("amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt > 0:
+                    out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[RETURNS] _prior_refund_tenders lookup failed: %s", exc)
+    return out
+
+
+def _gate_refund_tenders_against_order(
+    refund_tenders: Optional[List[Dict[str, Any]]],
+    *,
+    order: Optional[Dict[str, Any]],
+    order_id: Optional[str],
+):
+    """AUTHORITATIVE server-side cross-check of a declared refund breakdown.
+
+    A UI rule is not a control: a direct POST of ``{refund_tenders:[{CASH, 8000}]}``
+    against a 100%-CARD sale would otherwise be accepted, stamp
+    ``drawer_auto_netted`` and lower the expected drawer by Rs 8,000 -- a
+    cash-skim that reconciles clean. So a tender may only be refunded up to what
+    THAT tender actually collected on the source order, net of prior per-tender
+    refunds. A leg naming a tender the order never collected, or exceeding its
+    remaining captured amount, is rejected 422 TENDER_MISMATCH (the same shape
+    the F27 original-tender lock already uses).
+
+    UNVERIFIABLE orders (no captured payments[] at all -- legacy / imported)
+    are NOT blocked (that would break legitimate legacy refunds) but are
+    DOWNGRADED to UNKNOWN: the breakdown is dropped so no drawer or gateway
+    figure is moved by a claim the server could not verify.
+
+    Returns ``(refund_tenders_or_None, drawer_auto_netted)``."""
+    if not refund_tenders:
+        return None, False
+    captured = _order_captured_tenders(order)
+    if not captured:
+        # Cannot verify -> record the refund but never auto-net it.
+        logger.info(
+            "[RETURNS] refund tender unverifiable (order %s has no captured "
+            "payments) -- recorded as UNKNOWN, not auto-netted",
+            order_id,
+        )
+        return None, False
+    prior = _prior_refund_tenders(order_id)
+    for leg in refund_tenders:
+        method = str(leg.get("method") or "")
+        amount = float(leg.get("amount") or 0)
+        remaining = round(captured.get(method, 0.0) - prior.get(method, 0.0), 2)
+        if remaining <= 0 or amount > remaining + 0.01:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "TENDER_MISMATCH",
+                    "requested_method": method,
+                    "requested_amount": round(amount, 2),
+                    "captured_on_tender": round(captured.get(method, 0.0), 2),
+                    "already_refunded_on_tender": round(prior.get(method, 0.0), 2),
+                    "refundable_on_tender": max(remaining, 0.0),
+                    "message": (
+                        f"Cannot refund Rs {amount:.2f} to {method}: this order "
+                        f"collected Rs {captured.get(method, 0.0):.2f} on that "
+                        f"tender and Rs {prior.get(method, 0.0):.2f} has already "
+                        "been refunded to it. A refund can only go back to a "
+                        "tender the customer actually paid with."
+                    ),
+                },
+            )
+    return refund_tenders, True
 
 
 def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
@@ -1462,6 +1580,88 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
 # ============================================================================
 
 
+@router.post("/quote")
+async def quote_return(
+    body: ReturnCreate = Body(...),
+    current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
+):
+    """AUTHORITATIVE money preview for a return -- no side effects, nothing
+    reserved, nothing written.
+
+    The till MUST prefill its refund-tender picker from THIS ``net_refund``
+    rather than computing an amount client-side. A client-side gross-up drifted
+    from the server on every GST-inclusive sale (the server resolves the billed
+    gross from the ORIGINAL order line as (taxable_value + tax_amount)/qty,
+    while the till was re-applying GST to an already-inclusive price), so a
+    Rs 5,900 refund prefilled as Rs 6,962 and the tender split then 400'd with
+    no way for the cashier to recover. Deriving the figure from one server-side
+    source makes that class of drift impossible.
+
+    Also echoes the source order's CAPTURED tender breakdown (what each tender
+    actually collected, net of prior per-tender refunds) so the till can show
+    the cashier what is legitimately refundable per tender instead of guessing
+    -- the same figures ``_gate_refund_tenders_against_order`` enforces on POST.
+    """
+    order = _resolve_order(body)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Original order not found")
+    validate_store_access(order.get("store_id"), current_user)
+
+    active_lines = [ln for ln in body.items if (ln.return_qty or 0) > 0]
+    if not active_lines:
+        raise HTTPException(status_code=400, detail="No returnable lines supplied")
+
+    resolved_order_id = body.order_id or order.get("order_id")
+    priced_lines = _priced_return_lines(active_lines, order)
+    try:
+        gross_refund = engine.returned_value(priced_lines)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    restocking_fee = round(float(body.restocking_fee or 0.0), 2)
+    if body.return_type == "EXCHANGE":
+        restocking_fee = 0.0
+    try:
+        net_amount = engine.net_refund(gross_refund, restocking_fee)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    settlement = None
+    if body.return_type == "EXCHANGE":
+        try:
+            settlement = engine.exchange_settlement(
+                gross_refund, [r.model_dump() for r in body.replacement_items]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    captured = _order_captured_tenders(order)
+    prior = _prior_refund_tenders(resolved_order_id)
+    refundable = {
+        t: round(max(captured.get(t, 0.0) - prior.get(t, 0.0), 0.0), 2)
+        for t in captured
+    }
+    return {
+        "order_id": resolved_order_id,
+        "return_type": body.return_type,
+        "gross_refund": gross_refund,
+        "restocking_fee": restocking_fee,
+        # THE authoritative figure the refund-tender split must sum to.
+        "net_refund": net_amount,
+        "gst_breakup": engine.gst_breakup(
+            gross_refund, engine.dominant_gst_rate(priced_lines)
+        ),
+        "settlement": settlement,
+        # Per-tender truth for the picker (and what the POST gate enforces).
+        "captured_tenders": captured,
+        "prior_refunds_by_tender": prior,
+        "refundable_by_tender": refundable,
+        # True when the server cannot verify tenders (no captured payments):
+        # the till must not present a confident prefill in that case.
+        "tenders_unverifiable": not captured,
+    }
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_return(
@@ -1696,6 +1896,42 @@ async def create_return(
             ),
         )
 
+    # ------------------------------------------------------------------
+    # TENDER CAPTURE + SETTLEMENT VALIDATION (pre-claim).
+    # These MUST run here, in the validation phase, NOT during recording: a 400
+    # raised after the atomic returnable-qty claim below permanently burns the
+    # customer's returnable quantity and claws back their loyalty points with no
+    # return doc written, so the retry then fails with "returnable quantity 0".
+    # Keeping them here preserves the invariant this file documents at the claim:
+    # the claim is the LAST thing that can fail before side effects.
+    # ------------------------------------------------------------------
+    replacement_dump = [r.model_dump() for r in body.replacement_items]
+    settlement: Optional[Dict[str, Any]] = None
+    if body.return_type == "EXCHANGE":
+        try:
+            settlement = engine.exchange_settlement(gross_refund, replacement_dump)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    refund_tenders: Optional[List[Dict[str, Any]]] = None
+    collect_method: Optional[str] = None
+    drawer_auto_netted = False
+    if body.return_type == "RETURN":
+        refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
+            body.refund_tenders, net_amount
+        )
+        # AUTHORITATIVE cross-check: a tender may only be refunded up to what it
+        # actually collected on this order (a UI rule is not a control).
+        refund_tenders, drawer_auto_netted = _gate_refund_tenders_against_order(
+            refund_tenders, order=order, order_id=resolved_order_id
+        )
+    elif body.return_type == "EXCHANGE" and settlement is not None:
+        if settlement["direction"] == engine.COLLECT:
+            # The difference is a NEW cash-in; record the tender it was taken in
+            # (drawer-truth), not the original sale's tender. Absent -> UNKNOWN.
+            collect_method = _normalize_collect_method(body.collect_method)
+            drawer_auto_netted = collect_method is not None
+
     # F27 ORIGINAL-TENDER HARD-LOCK. Runs before recording (and before the matrix
     # gate) so a tender mismatch rejects with nothing reserved. PERMISSIVE: no-op
     # unless the cashier supplied a refund_method that differs from the order's
@@ -1743,22 +1979,13 @@ async def create_return(
 
     return_id = generate_return_id()
 
-    # 2. Type-specific recording.
+    # 2. Type-specific recording. (`settlement`, `refund_tenders`,
+    #    `collect_method` and `drawer_auto_netted` were computed + validated in
+    #    the pre-claim validation phase above -- never recomputed here.)
     refund_amount: Optional[float] = None
     credit_amount: Optional[float] = None
-    settlement: Optional[Dict[str, Any]] = None
     collect_amount: Optional[float] = None
     credit_entry: Optional[Dict[str, Any]] = None
-    replacement_dump = [r.model_dump() for r in body.replacement_items]
-
-    # For an EXCHANGE, compute (and validate) the settlement up front so its 400
-    # fires BEFORE we reserve any returnable qty -- a validation error must never
-    # leave a phantom reservation on the order line.
-    if body.return_type == "EXCHANGE":
-        try:
-            settlement = engine.exchange_settlement(ret_value, replacement_dump)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
 
     # 2b. ATOMIC QUANTITY CLAIM (the concurrency belt-and-suspenders, mirroring
     #     the voucher redeem guard). All 400/422 input validation has now passed,
@@ -1825,20 +2052,11 @@ async def create_return(
                 "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
             )
 
-    # Explicit refund/collect tender capture (drawer-truth). Validated here so a
-    # bad breakdown 400s BEFORE any store-credit / stock side effect. refund_method
-    # stays as legacy metadata; the Day-End readers use refund_tenders/collect_method.
-    refund_tenders: Optional[List[Dict[str, Any]]] = None
-    collect_method: Optional[str] = None
-    drawer_auto_netted = False
-
     if body.return_type == "RETURN":
-        # Net of any restocking fee = the cash actually given back.
+        # Net of any restocking fee = the cash actually given back. The explicit
+        # refund-tender breakdown was validated + cross-checked pre-claim.
         refund_amount = net_amount
         refund_method = body.refund_method or _order_payment_method(order)
-        refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
-            body.refund_tenders, net_amount
-        )
 
     elif body.return_type == "CREDIT_NOTE":
         credit_amount = net_amount
@@ -1865,14 +2083,10 @@ async def create_return(
             ),
         )
 
-    else:  # EXCHANGE (settlement already computed + validated above)
+    else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
         refund_method = body.refund_method or _order_payment_method(order)
         if settlement["direction"] == engine.COLLECT:
             collect_amount = settlement["difference"]
-            # The difference is a NEW cash-in; record the tender it was taken in
-            # (drawer-truth), not the original sale's tender. Absent -> UNKNOWN.
-            collect_method = _normalize_collect_method(body.collect_method)
-            drawer_auto_netted = collect_method is not None
         elif settlement["direction"] == engine.REFUND:
             # Refund the difference as store credit (recorded, not executed).
             credit_amount = settlement["difference"]

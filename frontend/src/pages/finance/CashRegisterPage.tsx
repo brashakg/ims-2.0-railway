@@ -472,9 +472,13 @@ function ReconcileView({
           {preview?.refund_double_entry_advisory && (
             <div className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>
-                Cash refunds recorded on Returns are already deducted above. Check that a manual "cash paid out" / expense is not the same refund entered twice.
-              </span>
+              <span>{preview.refund_double_entry_advisory.message}</span>
+            </div>
+          )}
+          {preview?.negative_expected_advisory && (
+            <div className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{preview.negative_expected_message}</span>
             </div>
           )}
 

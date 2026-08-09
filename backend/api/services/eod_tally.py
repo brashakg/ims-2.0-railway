@@ -51,6 +51,18 @@ STATUS_OPEN = "OPEN"
 STATUS_BLIND_SUBMITTED = "BLIND_SUBMITTED"
 STATUS_LOCKED = "LOCKED"
 
+# Variance verdict used INSTEAD of OVER/SHORT/BALANCED when the expected drawer
+# computes NEGATIVE -- cash left the drawer that it never took in (a refund
+# funded from the safe; IMS has no cash-in concept). Reporting the arithmetic
+# "overage" there would credit the cashier with money they never held. The raw
+# figures are still stored and shown; only the VERDICT is withheld.
+NEGATIVE_EXPECTED = "NEGATIVE_EXPECTED"
+NEGATIVE_EXPECTED_MESSAGE = (
+    "More cash was refunded than this drawer took in - a cash-in is missing "
+    "(e.g. a refund funded from the safe). Record the cash-in before trusting "
+    "this variance."
+)
+
 # Indian denomination ladder (paisa-exact). face is RUPEES; the count grid sums
 # face*pieces in RUPEES then we convert to paisa once at the boundary so float
 # noise never accumulates. Rs 2000 is withdrawn (kept out of the default grid,
@@ -296,6 +308,12 @@ def compute_expected(
     # cash refund in the same window may be the SAME money entered twice (staff
     # used the pre-fix "cash paid out" workaround). Surfaced, never auto-applied.
     refund_double_entry_advisory = cash_refunds_paisa > 0 and payouts > 0
+    # A NEGATIVE expected drawer is never a real expectation -- it means cash
+    # left the drawer that it never took in (a refund funded from the safe; IMS
+    # has no cash-in concept). Reporting the resulting "overage" would credit
+    # the cashier with money they never held, so the caller suppresses the
+    # verdict. The figure itself is never clamped or hidden.
+    negative_expected_advisory = expected_cash_paisa < 0
     return {
         "opening_float_paisa": opening,
         "cash_sales_paisa": cash_collected_paisa,
@@ -303,6 +321,7 @@ def compute_expected(
         "cash_payouts_paisa": payouts,
         "expected_cash_paisa": expected_cash_paisa,
         "refund_double_entry_advisory": refund_double_entry_advisory,
+        "negative_expected_advisory": negative_expected_advisory,
         "by_mode": by_mode,
         "total_net_rupees": recon.get("total_net", 0.0),
         "window_start": recon.get("window_start"),
@@ -548,7 +567,14 @@ def blind_submit(
     expected_cash_paisa = exp["expected_cash_paisa"]
     variance_paisa = counted - expected_cash_paisa
     tol = get_variance_tolerance_paisa(store_id=store_id)
-    vstatus = variance_status(variance_paisa, tol)
+    # A negative expected drawer means a cash-in is missing (see
+    # compute_expected). Suppress the variance VERDICT rather than crediting the
+    # cashier with a phantom overage; the raw variance number is still stored.
+    negative_expected = bool(exp.get("negative_expected_advisory"))
+    vstatus = (
+        NEGATIVE_EXPECTED if negative_expected
+        else variance_status(variance_paisa, tol)
+    )
 
     now = datetime.utcnow()
     # Guarded transition OPEN -> BLIND_SUBMITTED (only one count can land).
@@ -570,6 +596,7 @@ def blind_submit(
                     "refund_double_entry_advisory": exp.get(
                         "refund_double_entry_advisory", False
                     ),
+                    "negative_expected_advisory": negative_expected,
                     "variance_paisa": variance_paisa,
                     "variance_status": vstatus,
                     "by_mode": exp["by_mode"],
@@ -906,6 +933,14 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "cash_payouts_paisa": payouts,
         "refund_double_entry_advisory": bool(
             session.get("refund_double_entry_advisory")
+        ),
+        "negative_expected_advisory": bool(
+            session.get("negative_expected_advisory")
+        ),
+        "negative_expected_message": (
+            NEGATIVE_EXPECTED_MESSAGE
+            if session.get("negative_expected_advisory")
+            else None
         ),
         "expected_cash_paisa": expected,
         "counted_cash_paisa": counted,
