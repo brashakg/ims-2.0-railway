@@ -295,6 +295,73 @@ def _strip_id(doc: Optional[dict]) -> Optional[dict]:
     return doc
 
 
+# ============================================================================
+# SELF-OR-MANAGER GATE for the routes that take a FREE employee id
+# ============================================================================
+# Roles that may read pay data belonging to SOMEONE ELSE. This is the ONE
+# definition in this module: the payslip routes and the commission ledger both
+# read it, so the two rules cannot drift apart.
+#
+# The tuple is deliberately identical to the rbac_policy rows for these paths
+# (ACCOUNTANT / ADMIN / AREA_MANAGER / STORE_MANAGER) plus SUPERADMIN, which
+# ``check_access`` and ``require_roles`` both auto-pass. Keeping it identical
+# means this gate can only ever reject callers the request-time RBAC middleware
+# already rejects -- it can NOT lock out a screen that works today. The only
+# reach it ADDS is self-service (an employee reading their own slip).
+_PAY_DATA_MANAGER_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "ACCOUNTANT",
+)
+
+
+def _is_pay_data_manager(current_user: dict) -> bool:
+    """True when the caller may see pay data for employees other than self."""
+    caller_roles = current_user.get("roles") or []
+    return any(r in caller_roles for r in _PAY_DATA_MANAGER_ROLES)
+
+
+def _assert_self_or_pay_manager(employee_id: str, current_user: dict) -> None:
+    """Authorize a read of ``employee_id``'s pay data (P1, security panel).
+
+    The three payslip routes took the employee id as a FREE path parameter with
+    ``Depends(get_current_user)`` only -- no route-level authorization at all --
+    so the handler happily returned NET PAY, the full CTC breakdown and the
+    BANK ACCOUNT for any id the caller typed. The request-time RBAC middleware
+    (api/middleware/rbac_enforcement.py) does deny an ordinary CASHIER today,
+    but it is explicitly the SECOND layer: it fails OPEN for un-catalogued
+    paths, and a per-user capability GRANT of ``payroll:read`` rescues a
+    role-denied caller straight into a handler that then checks nothing. The
+    route gate is the authoritative one and it was missing.
+
+    The rule mirrors the commission ledger's gate in this same file
+    (get_commission_summary): SELF is always allowed, manager tier may read
+    anyone. ``employee_id`` IS the user_id -- ``_get_employee_details`` looks it
+    up as ``users.user_id`` -- so the self comparison is against the token's
+    user_id, exactly as the commission gate does it.
+
+    Rejects with 403 (not a silent rewrite to self): the commission route can
+    coerce its optional ``employee_id`` QUERY param to the caller, but a PATH
+    parameter names whose slip this is, and returning someone else's URL with
+    your own numbers would be a lie the FE would render as fact.
+
+    NOT store-scoped on purpose. ``user_store_scope`` treats only SUPERADMIN /
+    ADMIN as cross-store, so a can_access_store_scoped guard here would 404 the
+    ACCOUNTANT -- the very person who prints payslips on payroll day
+    (PayrollRunPage is gated to SUPERADMIN/ADMIN/ACCOUNTANT) -- whenever their
+    account carries no store_ids. Cross-store manager reach is a real residual;
+    it needs an owner decision on accountant scope, not a silent lockout.
+    """
+    caller_id = current_user.get("user_id") or current_user.get("id")
+    if employee_id and caller_id and employee_id == caller_id:
+        return
+    if _is_pay_data_manager(current_user):
+        return
+    raise HTTPException(status_code=403, detail="You may only view your own payslip")
+
+
 def _calculate_tds(gross_salary: float, month: int, year: int) -> float:
     """
     Calculate TDS as per Indian income tax slabs.
@@ -1039,7 +1106,12 @@ async def get_payslip(
     back to the legacy ``salary_records`` collection so existing data is never
     lost.  A payslip record is materialised in ``payslips`` collection only
     once; subsequent calls return the cached version.
+
+    Self-or-manager: see _assert_self_or_pay_manager.
     """
+    # Authorize BEFORE touching the DB so the answer is the same whether or not
+    # Mongo is reachable (the fail-soft branch below returns 200/None).
+    _assert_self_or_pay_manager(employee_id, current_user)
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1105,7 +1177,13 @@ async def get_latest_payslip(
 
     Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
     see their slip even before a manager has clicked 'generate payslip'.
+
+    Self-or-manager: see _assert_self_or_pay_manager. Staff self-service on the
+    /my-work page goes through GET /hr/me/payslip (already self-only), so this
+    route keeps working for the two live callers: the manager-gated payroll
+    dashboard, and the HR page's own-slip card which passes the caller's id.
     """
+    _assert_self_or_pay_manager(employee_id, current_user)
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1850,7 +1928,13 @@ async def payslip_print(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Branded, printable HTML payslip from the computed payroll row."""
+    """Branded, printable HTML payslip from the computed payroll row.
+
+    Self-or-manager: see _assert_self_or_pay_manager. The live caller is
+    PayrollRunPage's Print button (route-gated to SUPERADMIN/ADMIN/ACCOUNTANT),
+    which this gate admits unchanged.
+    """
+    _assert_self_or_pay_manager(employee_id, current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1913,10 +1997,9 @@ async def get_commission_summary(
     """
     db = _get_db()
     caller_id = current_user.get("user_id") or current_user.get("id")
-    caller_roles = current_user.get("roles") or []
 
     # Self-service gate: staff may only read their own data.
-    is_manager = any(r in caller_roles for r in ("SUPERADMIN", *_COMMISSION_ROLES))
+    is_manager = _is_pay_data_manager(current_user)
     if not is_manager:
         # Non-manager: restrict to self only.
         employee_id = caller_id

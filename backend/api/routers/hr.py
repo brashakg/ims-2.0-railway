@@ -100,6 +100,68 @@ _VALID_DOC_TYPES = frozenset(
 
 
 # ============================================================================
+# STORE SCOPE for LIST reads that take an OPTIONAL ?store_id
+# ============================================================================
+
+
+def _store_scope_filter(current_user: dict):
+    """The Mongo store clause a LIST read must apply when the caller did not
+    name a store, or ``None`` when no filter belongs.
+
+    The same rule (and the same body) as ``users._store_scope_filter`` from
+    PR #967 -- one rule, two routers, so they cannot drift. Reuses the canonical
+    ``user_store_scope`` from
+    ``api/dependencies.py``: SUPERADMIN / ADMIN are cross-store, so they get
+    ``None`` (no filter, org-wide reach preserved); every other role gets
+    ``{"$in": [...their stores...]}``.
+
+    This replaces ``validate_store_access(store_id, user) or active_store_id``
+    followed by ``if active_store:``, which FAILED OPEN. That expression
+    resolves to the single ``active_store_id``, so an AREA_MANAGER holding
+    three stores was silently narrowed to one; and when the value is None --
+    ordinary for a store-scoped account with an empty ``store_ids``, since
+    ``auth._default_active_store`` only back-fills SUPERADMIN / ADMIN /
+    AREA_MANAGER -- the truthiness test dropped the filter ENTIRELY and
+    returned every store's records.
+
+    An empty reach now yields ``{"$in": []}``, which matches NOTHING: a
+    store-less ACCOUNTANT or STORE_MANAGER sees an EMPTY list rather than the
+    whole org, and is never 403'd or locked out of the screen. If such an
+    account legitimately needs org-wide attendance the remedy is assigning its
+    stores (or a deliberate change to ``user_store_scope``), not a silent
+    org-wide read.
+    """
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return None
+    return {"$in": sorted(stores)}
+
+
+def _scope_for_request(store_id: Optional[str], current_user: dict):
+    """Resolve the store clause for a read that accepts an optional ?store_id.
+
+    An explicitly named store still goes through the canonical explicit-store
+    guard (``validate_store_access`` -> 403 for a store-pinned role asking for
+    someone else's store); an omitted store falls back to the caller's whole
+    reach. Returns a str (single store), a ``{"$in": [...]}`` clause, or None
+    (no filter -- cross-store roles only).
+    """
+    if store_id:
+        return validate_store_access(store_id, current_user)
+    return _store_scope_filter(current_user)
+
+
+def _single_store(scope) -> Optional[str]:
+    """The scope as a plain store id when it IS one, else None.
+
+    The grid/summary roster rows are pinned to a single store id for display;
+    a multi-store ``$in`` clause has no single value to pin, so the roster then
+    falls back to each employee's own store (``_roster_from_users``).
+    """
+    return scope if isinstance(scope, str) and scope else None
+
+
+# ============================================================================
 # SCHEMAS
 # ============================================================================
 
@@ -525,16 +587,22 @@ async def get_attendance(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get attendance records with optional filters"""
+    """Get attendance records with optional filters.
+
+    Store-scoped via _scope_for_request: an explicit ?store_id is authorised by
+    validate_store_access, an omitted one falls back to the caller's whole store
+    reach (org-wide only for the cross-store roles). See _store_scope_filter for
+    why the previous ``or active_store_id`` + truthiness test fell open.
+    """
     attendance_repo = get_attendance_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    scope = _scope_for_request(store_id, current_user)
 
     if attendance_repo is None:
         return {"records": [], "total": 0}
 
     filter_dict = {}
-    if active_store:
-        filter_dict["store_id"] = active_store
+    if scope is not None:
+        filter_dict["store_id"] = scope
     if employee_id:
         filter_dict["employee_id"] = employee_id
     if from_date:
@@ -577,17 +645,18 @@ async def get_attendance_grid(
     Returns a well-formed grid (days computed from the month, employees joined
     from the store roster). Read-only reporting view.
 
-    Store scoping: HQ roles (SUPERADMIN/ADMIN/AREA_MANAGER) may pass any
-    store_id; lower roles are pinned to a store they have access to via
-    validate_store_access. Fail-soft: no DB / no records => empty-but-valid grid
-    (never 500).
+    Store scoping: an explicit store_id is authorised by validate_store_access
+    (HQ roles may pass any; lower roles only their own). An OMITTED store_id
+    falls back to the caller's whole store reach via _store_scope_filter -- an
+    AREA_MANAGER sees all their stores rather than just the active one, and a
+    store-less manager sees NOTHING rather than the whole org. Fail-soft: no DB
+    / no records => empty-but-valid grid (never 500).
     """
     year, mon = _parse_month(month)
 
-    # Resolve + authorise the store. validate_store_access falls back to the
-    # user's active store when store_id is omitted and 403s on cross-store
-    # access for non-HQ roles.
-    active_store = validate_store_access(store_id, current_user)
+    # Resolve + authorise the store scope (str | {"$in": [...]} | None).
+    scope = _scope_for_request(store_id, current_user)
+    pinned_store = _single_store(scope)
 
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
@@ -596,13 +665,15 @@ async def get_attendance_grid(
     employees = []
     if user_repo is not None:
         roster_filter = {"is_active": True}
-        if active_store:
-            roster_filter["store_ids"] = active_store
+        if scope is not None:
+            # users.store_ids is an ARRAY; both a scalar and an $in clause match
+            # by containment in Mongo.
+            roster_filter["store_ids"] = scope
         try:
             users = user_repo.find_many(roster_filter, limit=1000)
         except Exception:
             users = []
-        employees = _roster_from_users(users, active_store)
+        employees = _roster_from_users(users, pinned_store)
 
     # Pull the month's attendance records (string date range mirrors the actual
     # write path in POST /attendance/mark and payroll/generate).
@@ -612,8 +683,8 @@ async def get_attendance_grid(
         start = f"{year:04d}-{mon:02d}-01"
         end = f"{year:04d}-{mon:02d}-{n_days:02d}"
         rec_filter = {"date": {"$gte": start, "$lte": end}}
-        if active_store:
-            rec_filter["store_id"] = active_store
+        if scope is not None:
+            rec_filter["store_id"] = scope
         try:
             records = attendance_repo.find_many(rec_filter, limit=5000)
         except Exception:
@@ -633,11 +704,13 @@ async def get_attendance_summary(
     Returns per-store and per-employee counts (present / absent / half_day /
     leave / holiday / late), days_present, and % present, plus company-wide
     totals. Built from the SAME roster + records as /attendance/grid (so the two
-    can never disagree), then aggregated. Store-scoped + fail-soft: no DB / no
-    records => a valid empty summary, never a 500.
+    can never disagree), then aggregated. Store-scoped the same way (see
+    _scope_for_request) + fail-soft: no DB / no records => a valid empty
+    summary, never a 500.
     """
     year, mon = _parse_month(month)
-    active_store = validate_store_access(store_id, current_user)
+    scope = _scope_for_request(store_id, current_user)
+    pinned_store = _single_store(scope)
 
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
@@ -645,13 +718,13 @@ async def get_attendance_summary(
     employees = []
     if user_repo is not None:
         roster_filter = {"is_active": True}
-        if active_store:
-            roster_filter["store_ids"] = active_store
+        if scope is not None:
+            roster_filter["store_ids"] = scope
         try:
             users = user_repo.find_many(roster_filter, limit=1000)
         except Exception:
             users = []
-        employees = _roster_from_users(users, active_store)
+        employees = _roster_from_users(users, pinned_store)
 
     records = []
     if attendance_repo is not None:
@@ -659,8 +732,8 @@ async def get_attendance_summary(
         start = f"{year:04d}-{mon:02d}-01"
         end = f"{year:04d}-{mon:02d}-{n_days:02d}"
         rec_filter = {"date": {"$gte": start, "$lte": end}}
-        if active_store:
-            rec_filter["store_id"] = active_store
+        if scope is not None:
+            rec_filter["store_id"] = scope
         try:
             records = attendance_repo.find_many(rec_filter, limit=5000)
         except Exception:
