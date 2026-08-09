@@ -1183,15 +1183,36 @@ def test_any_kind_sentinel_is_an_explicit_opt_out():
 # Every audited exception below takes its file_id from a record the caller has
 # already been authorised to read, so the record IS the authorisation. Any call
 # site not listed here must pass require_kind, or this test fails.
+#
+# EVERY entry below was re-derived from what the code ACTUALLY does, at
+# file:line, after the security panel proved the previous version of this table
+# was wrong. The earlier entries for tasks.py and vendors.py claimed the file_id
+# was "read off the record" -- it is not: both ACCEPT it from the request body
+# (TaskCreate.attachment_file_id, GRNCreate.attachment_file_id) and validated it
+# for EXISTENCE only. That made this allow-list a laundering step rather than an
+# authorisation, so both are now fixed and removed from the table.
+#
+# The remaining four are safe for one specific, checkable reason: the file_id is
+# MINTED SERVER-SIDE by store.put() inside the same handler and written onto the
+# record there. It is never accepted from a request, so there is no id for an
+# attacker to substitute.
+#
+# The value is the expected NUMBER of unscoped reads in that file. A count, not
+# a boolean, so appending a NEW unscoped door to an already-listed file fails
+# this test instead of inheriting the exemption.
 _AUDITED_UNSCOPED_FILE_GETS = {
-    # file -> why an unscoped read is correct there
-    "admin_catalog.py": "file_id read off the bulk-import job the caller fetched",
-    "expenses.py": "file_id read off the expense after _assert_expense_object_access",
-    "handoffs.py": "file_id read off the handoff after the uploader/recipient check",
-    "hr.py": "file_id read off the employee doc row behind the ADMIN-only gate",
-    "tasks.py": "file_id read off the task after _ensure_task_store_access",
-    "vendors.py": "file_id read off the GRN after can_access_store_scoped",
+    # file -> (expected unscoped reads, the line that MINTS the id server-side)
+    "admin_catalog.py": (1, "file_id = store.put(...) then job['file_id'] = it"),
+    "expenses.py": (1, "file_id = store.put(...) then expense['bill_file_id'] = it"),
+    "handoffs.py": (1, "file_id = fs.put(...) then handoff['file']['file_id'] = it"),
+    "hr.py": (1, "file_id = store.put(...) then doc_record['file_id'] = it"),
 }
+
+# Floor on DETECTED CALL SITES (not modules scanned). If a refactor makes the
+# detector stop seeing file-store reads, this trips instead of the suite going
+# quietly green -- the previous version asserted on "modules containing the
+# string get_file_store", which cannot notice detection collapsing.
+_MIN_DETECTED_FILE_GETS = 8
 
 
 def test_every_file_store_get_is_kind_scoped_or_audited():
@@ -1202,51 +1223,93 @@ def test_every_file_store_get_is_kind_scoped_or_audited():
 
     api_root = pathlib.Path(__file__).resolve().parents[1] / "api"
     offenders = []
-    scanned = 0
+    unscoped_by_file = {}
+    detected = 0
+
     for path in sorted(api_root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         if "get_file_store" not in source:
             continue
-        scanned += 1
         tree = ast.parse(source)
-        # Names bound to an actual file-store handle in THIS file, so a local
-        # variable that merely happens to be called `store` is not confused for
-        # one (dict.get / cache.get / a shop record all use the same spelling).
+
+        # 1. Resolve HANDLES, not spellings. Any name bound -- directly or
+        #    transitively -- to a get_file_store() result is a file-store
+        #    handle, however it is spelled. Iterate to a fixed point so
+        #    `s = get_file_store(); alias = s` is followed too.
         handles = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                callee = node.value.func
-                name = getattr(callee, "id", None) or getattr(callee, "attr", None)
-                if name == "get_file_store":
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            handles.add(target.id)
+        changed = True
+        while changed:
+            changed = False
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                value = node.value
+                is_handle = False
+                if isinstance(value, ast.Call):
+                    callee = value.func
+                    name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+                    is_handle = name == "get_file_store"
+                elif isinstance(value, ast.Name):
+                    is_handle = value.id in handles
+                if not is_handle:
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in handles:
+                        handles.add(target.id)
+                        changed = True
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             if not isinstance(func, ast.Attribute) or func.attr != "get":
                 continue
-            if not (isinstance(func.value, ast.Name) and func.value.id in handles):
+            # 2. A read on a handle counts however the handle is spelled --
+            #    including the un-named `get_file_store().get(...)` chain.
+            receiver = func.value
+            on_handle = isinstance(receiver, ast.Name) and receiver.id in handles
+            if not on_handle and isinstance(receiver, ast.Call):
+                callee = receiver.func
+                name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+                on_handle = name == "get_file_store"
+            if not on_handle:
                 continue
-            # ... and it must be a read BY file id (the capability), not some
-            # other .get on the same handle.
-            first_arg = node.args[0] if node.args else None
-            if first_arg is None or "file_id" not in ast.unparse(first_arg):
-                continue
+            # 3. NO filtering on how the ARGUMENT is spelled. The previous
+            #    version required the literal token "file_id" in the first
+            #    argument, so `fid = file_id; fs.get(fid)` walked straight
+            #    past it -- the panel restored the exact round-4 P0 in that
+            #    spelling and this test still passed. FileStore.get has one
+            #    purpose, so every call on a handle is a read of the bucket.
+            detected += 1
             if any(kw.arg == "require_kind" for kw in node.keywords):
                 continue
-            if path.name in _AUDITED_UNSCOPED_FILE_GETS:
-                continue
-            offenders.append(f"{path.name}:{node.lineno}")
-    # Guard the guard: if the detection stops finding the modules it audits, the
-    # test would pass vacuously.
-    assert scanned >= 8, f"file-store scan found only {scanned} modules"
+            unscoped_by_file.setdefault(path.name, []).append(node.lineno)
+
+    # 4. The floor is on DETECTED CALL SITES, so detection collapsing trips the
+    #    test instead of silently emptying it.
+    assert detected >= _MIN_DETECTED_FILE_GETS, (
+        f"file-store detector found only {detected} call sites "
+        f"(expected >= {_MIN_DETECTED_FILE_GETS}) -- detection has regressed, "
+        "so this guard would pass vacuously"
+    )
+
+    for filename, lines in sorted(unscoped_by_file.items()):
+        audited = _AUDITED_UNSCOPED_FILE_GETS.get(filename)
+        if audited is None:
+            offenders.append(f"{filename}:{lines} (not audited)")
+            continue
+        expected, _reason = audited
+        if len(lines) != expected:
+            offenders.append(
+                f"{filename}: {len(lines)} unscoped reads at {lines}, "
+                f"audit records {expected}"
+            )
+
     assert not offenders, (
         "unscoped file-store read(s) -- pass require_kind=<kind> when the "
-        "file_id comes from the request, or require_kind=ANY_KIND (and add an "
-        "entry to _AUDITED_UNSCOPED_FILE_GETS) when it comes from an "
-        f"already-authorised record: {offenders}"
+        "file_id comes from the request, or require_kind=ANY_KIND (and add a "
+        "PROVEN entry to _AUDITED_UNSCOPED_FILE_GETS naming the line that "
+        f"mints the id server-side) : {offenders}"
     )
 
 
@@ -1297,6 +1360,291 @@ def test_document_metadata_still_travels_so_the_list_ui_works(monkeypatch):
     assert docs[0]["doc_type"] == "AADHAAR"
     assert docs[0]["filename"] == "aadhaar.jpg"
     assert "file_id" not in docs[0]
+
+
+# ===========================================================================
+# The chair's two-call theft: attach someone else's file_id to your own task
+# ===========================================================================
+# POST /tasks and GET /tasks/{task_id}/file are both AUTHENTICATED, and the
+# attachment file_id is supplied by the CALLER. The create path validated only
+# that the id EXISTED -- and the bucket is shared, so "it exists" is equally
+# true of a GRN supplier invoice or an employee Aadhaar scan. As SALES_STAFF:
+# POST 201 -> GET 200 -> victim's bytes, with the victim's REAL filename in
+# Content-Disposition even when a harmless attachment_filename was declared.
+
+_THIEF = {
+    "user_id": "thief-1",
+    "username": "thief",
+    "roles": ["SALES_STAFF"],
+    "store_ids": ["S1"],
+    "active_store_id": "S1",
+}
+
+_VICTIM_FILES = {
+    "grn_supplier_invoice": (
+        {"kind": "grn_document", "uploaded_by": "acct-1", "store_id": "S1"},
+        "essilor_invoice_aug.pdf",
+        b"SUPPLIER-INVOICE cost-price Rs.1420/unit Essilor terms 90d",
+    ),
+    "employee_aadhaar_scan": (
+        {"employee_id": "emp-a", "doc_type": "AADHAAR"},
+        "rekha_aadhaar.jpg",
+        b"AADHAAR-SCAN-RAW-BYTES-1234-5678-9012",
+    ),
+    "another_users_task_file": (
+        {"kind": "task_attachment", "uploaded_by": "someone-else"},
+        "their_private_note.pdf",
+        b"ANOTHER-USERS-TASK-ATTACHMENT",
+    ),
+}
+
+
+def _tasks_client(actor, store, monkeypatch, repo=None):
+    from api.routers import tasks as tasks_router
+
+    monkeypatch.setattr(tasks_router, "get_file_store", lambda: store)
+    app = FastAPI()
+    app.include_router(tasks_router.router, prefix="/api/v1/tasks")
+
+    async def _u():
+        return dict(actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("victim", sorted(_VICTIM_FILES))
+def test_sales_staff_cannot_launder_a_foreign_file_id_through_a_task(
+    victim, monkeypatch
+):
+    """The chair's exact sequence: POST /tasks declaring the victim's file_id
+    with a harmless filename, then GET the task's file."""
+    from api.services import file_store as fs_module
+
+    metadata, real_filename, secret = _VICTIM_FILES[victim]
+    store = fs_module.InMemoryFileStore()
+    victim_id = store.put(
+        content=secret,
+        filename=real_filename,
+        mime_type="application/pdf",
+        metadata=metadata,
+    )
+    c = _tasks_client(_THIEF, store, monkeypatch)
+
+    created = c.post(
+        "/api/v1/tasks",
+        json={
+            "title": "harmless looking task",
+            "assigned_to": "thief-1",
+            "due_at": "2026-12-31T00:00:00",
+            "attachment_file_id": victim_id,
+            "attachment_filename": "harmless.jpg",
+            "attachment_mime": "image/jpeg",
+        },
+    )
+    # The theft must die at the FIRST call: the id is refused at attach time.
+    assert created.status_code == 400, created.text
+    assert secret not in created.content
+    assert real_filename not in created.text
+
+
+def test_the_victims_filename_never_appears_in_body_or_headers(monkeypatch):
+    """Even if a foreign id were somehow persisted on a task, the download must
+    not stream it -- and must not disclose the real filename via
+    Content-Disposition, which is how the chair identified the stolen file."""
+    from api.routers import tasks as tasks_router
+    from api.services import file_store as fs_module
+
+    metadata, real_filename, secret = _VICTIM_FILES["grn_supplier_invoice"]
+    store = fs_module.InMemoryFileStore()
+    victim_id = store.put(
+        content=secret,
+        filename=real_filename,
+        mime_type="application/pdf",
+        metadata=metadata,
+    )
+
+    class _Repo:
+        def find_by_id(self, task_id):
+            return {
+                "task_id": task_id,
+                "store_id": "S1",
+                "attachment": {"file_id": victim_id, "filename": "harmless.jpg"},
+            }
+
+    monkeypatch.setattr(tasks_router, "get_file_store", lambda: store)
+    monkeypatch.setattr(tasks_router, "get_task_repository", lambda: _Repo())
+    app = FastAPI()
+    app.include_router(tasks_router.router, prefix="/api/v1/tasks")
+
+    async def _u():
+        return dict(_THIEF)
+
+    app.dependency_overrides[get_current_user] = _u
+    c = TestClient(app)
+
+    r = c.get("/api/v1/tasks/T-1/file")
+    assert r.status_code == 404, r.text
+    assert secret not in r.content
+    assert real_filename not in r.text
+    for header_value in r.headers.values():
+        assert real_filename not in header_value
+
+
+def test_a_task_attachment_you_uploaded_yourself_still_works(monkeypatch):
+    """Guard against trading the P0 for an outage: the legitimate flow -- upload
+    then attach then download -- must be unaffected."""
+    from api.routers import tasks as tasks_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    mine = store.put(
+        content=b"MY-OWN-ATTACHMENT",
+        filename="mine.pdf",
+        mime_type="application/pdf",
+        metadata={"kind": "task_attachment", "uploaded_by": _THIEF["user_id"]},
+    )
+
+    class _Repo:
+        def find_by_id(self, task_id):
+            return {
+                "task_id": task_id,
+                "store_id": "S1",
+                "attachment": {"file_id": mine, "filename": "mine.pdf"},
+            }
+
+    monkeypatch.setattr(tasks_router, "get_file_store", lambda: store)
+    monkeypatch.setattr(tasks_router, "get_task_repository", lambda: _Repo())
+    app = FastAPI()
+    app.include_router(tasks_router.router, prefix="/api/v1/tasks")
+
+    async def _u():
+        return dict(_THIEF)
+
+    app.dependency_overrides[get_current_user] = _u
+    c = TestClient(app)
+
+    r = c.get("/api/v1/tasks/T-1/file")
+    assert r.status_code == 200, r.text
+    assert r.content == b"MY-OWN-ATTACHMENT"
+
+
+def _grn_doc_client(store, grn_doc, monkeypatch):
+    """Mini app over the REAL GRN download route."""
+    from api.routers import vendors as vendors_router
+
+    class _GrnRepo:
+        def find_one(self, _q):
+            return grn_doc
+
+    monkeypatch.setattr(vendors_router, "get_file_store", lambda: store)
+    monkeypatch.setattr(vendors_router, "get_grn_repository", lambda: _GrnRepo())
+    app = FastAPI()
+    app.include_router(vendors_router.router, prefix="/api/v1/vendors")
+
+    async def _u():
+        return {
+            "user_id": "acct-9",
+            "roles": ["ACCOUNTANT"],
+            "store_ids": ["S1"],
+            "active_store_id": "S1",
+        }
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+def test_grn_document_route_refuses_a_foreign_blob(monkeypatch):
+    """Route-level: even a legitimately-entitled ACCOUNTANT must not be able to
+    stream a non-GRN blob through the GRN download door."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    aadhaar = store.put(
+        content=b"AADHAAR-SCAN-RAW-BYTES",
+        filename="rekha_aadhaar.jpg",
+        mime_type="image/jpeg",
+        metadata={"employee_id": "emp-a", "doc_type": "AADHAAR"},
+    )
+    c = _grn_doc_client(
+        store,
+        {"grn_id": "G-1", "store_id": "S1", "attachment_file_id": aadhaar},
+        monkeypatch,
+    )
+    r = c.get("/api/v1/vendors/grn/G-1/document")
+    assert r.status_code == 404, r.text
+    assert b"AADHAAR-SCAN-RAW-BYTES" not in r.content
+    assert "rekha_aadhaar.jpg" not in r.text
+    for header_value in r.headers.values():
+        assert "rekha_aadhaar.jpg" not in header_value
+
+
+def test_grn_document_route_still_serves_a_real_grn_document(monkeypatch):
+    """Guard against trading the fix for an outage -- 4 of these are live."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    real_grn = store.put(
+        content=b"REAL-GRN-DOC",
+        filename="grn.pdf",
+        mime_type="application/pdf",
+        metadata={"kind": "grn_document", "uploaded_by": "acct-1"},
+    )
+    c = _grn_doc_client(
+        store,
+        {"grn_id": "G-1", "store_id": "S1", "attachment_file_id": real_grn},
+        monkeypatch,
+    )
+    r = c.get("/api/v1/vendors/grn/G-1/document")
+    assert r.status_code == 200, r.text
+    assert r.content == b"REAL-GRN-DOC"
+
+
+def test_catalogue_pdf_no_longer_falls_back_to_an_unscoped_read(monkeypatch):
+    """The explicit unscoped RETRY pulled an Aadhaar scan into a customer-facing
+    PDF once the kind-scoped read returned None."""
+    from api.services import catalogue_pdf
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    aadhaar = store.put(
+        content=b"AADHAAR-SCAN-RAW-BYTES-IN-A-PDF",
+        filename="rekha_aadhaar.jpg",
+        mime_type="image/jpeg",
+        metadata={"employee_id": "emp-a", "doc_type": "AADHAAR"},
+    )
+    monkeypatch.setattr(fs_module, "get_file_store", lambda: store)
+
+    got = catalogue_pdf._fetch_local_bytes(f"/api/v1/products/image/{aadhaar}")
+    assert got is None, "an unscoped blob was pulled into the catalogue PDF"
+
+    real_image = store.put(
+        content=b"PRODUCT-IMAGE-BYTES",
+        filename="frame.jpg",
+        mime_type="image/jpeg",
+        metadata={"kind": "product_image"},
+    )
+    assert (
+        catalogue_pdf._fetch_local_bytes(f"/api/v1/products/image/{real_image}")
+        == b"PRODUCT-IMAGE-BYTES"
+    )
+
+
+def test_file_store_exposes_metadata_for_authorisation():
+    """Existence is not authorisation -- handlers need the kind/owner to decide."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    fid = store.put(
+        content=b"B",
+        filename="f",
+        mime_type="text/plain",
+        metadata={"kind": "task_attachment", "uploaded_by": "u1"},
+    )
+    meta = store.get_metadata(fid)
+    assert meta["kind"] == "task_attachment"
+    assert meta["uploaded_by"] == "u1"
+    assert store.get_metadata("no-such-id") is None
 
 
 def test_safe_documents_is_an_allow_list():

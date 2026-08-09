@@ -57,6 +57,11 @@ logger = logging.getLogger(__name__)
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
 _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
+# The metadata.kind this router's own GRN upload stamps. Anything else in the
+# shared GridFS bucket belongs to another feature and must never be bound to,
+# or served from, a GRN.
+_GRN_DOCUMENT_KIND = "grn_document"
+
 # Tighter set for money-out / accounts-payable writes (bills, payments, debit
 # notes). Recording a payable or releasing cash is an accounting action, so it
 # is limited to ADMIN / ACCOUNTANT (SUPERADMIN auto-passes via require_roles).
@@ -2023,7 +2028,10 @@ async def download_grn_doc(
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
 
-    rec = store.get(file_id)
+    # Defence in depth behind the create-time kind check: this route only ever
+    # streams THIS router's own kind of file, so a foreign id persisted on a GRN
+    # (legacy row, future write path) reads as "no longer available", not bytes.
+    rec = store.get(file_id, require_kind=_GRN_DOCUMENT_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="Document file no longer available")
 
@@ -2099,7 +2107,18 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         store = get_file_store()
         if store is None:
             raise HTTPException(status_code=503, detail="File storage unavailable")
-        if store.get(str(grn.attachment_file_id).strip()) is None:
+        # P0 (security panel): existence is NOT authorisation. The id is
+        # supplied by the CALLER (GRNCreate.attachment_file_id) and ONE bucket
+        # holds every binary in the app, so an existence check passes just as
+        # happily for a task attachment or an employee Aadhaar scan. Require the
+        # metadata.kind that THIS router's own upload stamps, so only a real GRN
+        # document can be bound to a GRN. (Deliberately not also binding the
+        # uploader: GRN attachment is mandatory for receiving, and a same-kind
+        # id already sits behind the vendor-role gate on the download route --
+        # so an uploader check would add operational risk without closing a
+        # privilege boundary.)
+        _meta = store.get_metadata(str(grn.attachment_file_id).strip())
+        if _meta is None or _meta.get("kind") != _GRN_DOCUMENT_KIND:
             raise HTTPException(
                 status_code=400,
                 detail={

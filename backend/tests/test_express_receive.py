@@ -128,16 +128,26 @@ class _FakeTaskRepo:
 
 
 class _FileStore:
-    """Live store whose get() finds the attachment (gate passes)."""
+    """Live store whose reads find the attachment (gate passes).
 
-    def get(self, _fid):
+    get_metadata returns what POST /vendors/grn/upload-doc actually stamps: the
+    GRN create path now AUTHORISES a caller-supplied file_id by its kind rather
+    than merely proving it exists, so a faithful stub must carry the metadata."""
+
+    def get(self, _fid, **_kw):
         return (b"x", "inv.pdf", "application/pdf")
+
+    def get_metadata(self, _fid):
+        return {"kind": "grn_document", "uploaded_by": "u1"}
 
 
 class _EmptyFileStore:
-    """Live store whose get() finds NOTHING (forged/stale id -> BUG-010)."""
+    """Live store that finds NOTHING (forged/stale id -> BUG-010)."""
 
-    def get(self, _fid):
+    def get(self, _fid, **_kw):
+        return None
+
+    def get_metadata(self, _fid):
         return None
 
 

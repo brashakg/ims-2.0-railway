@@ -106,6 +106,16 @@ class FileStore:
         file_id. See the SECURITY CONTRACT block at the top of this module."""
         raise NotImplementedError
 
+    def get_metadata(self, file_id: str) -> Optional[dict]:
+        """Return the stored metadata dict, or None when the file is missing.
+
+        Exists so a handler that ACCEPTS a file_id from the request can
+        AUTHORISE it -- check its kind, its owner, its store -- before binding
+        it to a record. Proving a file merely EXISTS is not authorisation: the
+        bucket is shared, so "it exists" is true of every other feature's
+        documents too. Never returns bytes."""
+        raise NotImplementedError
+
     def delete(self, file_id: str) -> bool:
         raise NotImplementedError
 
@@ -140,6 +150,12 @@ class InMemoryFileStore(FileStore):
             if (rec.get("metadata") or {}).get("kind") != require_kind:
                 return None
         return (rec["content"], rec["filename"], rec["mime_type"])
+
+    def get_metadata(self, file_id) -> Optional[dict]:
+        rec = self._files.get(file_id)
+        if rec is None:
+            return None
+        return dict(rec.get("metadata") or {})
 
     def delete(self, file_id) -> bool:
         return self._files.pop(file_id, None) is not None
@@ -206,6 +222,19 @@ class GridFSFileStore(FileStore):
             )
         except Exception as e:
             logger.debug(f"[FILESTORE] get failed for {file_id}: {e}")
+            return None
+
+    def get_metadata(self, file_id) -> Optional[dict]:
+        fs = self._bucket()
+        if fs is None:
+            return None
+        try:
+            from bson import ObjectId
+
+            grid_out = fs.get(ObjectId(file_id))
+            return dict(getattr(grid_out, "metadata", None) or {})
+        except Exception as e:
+            logger.debug(f"[FILESTORE] get_metadata failed for {file_id}: {e}")
             return None
 
     def delete(self, file_id) -> bool:

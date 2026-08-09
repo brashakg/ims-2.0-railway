@@ -87,6 +87,49 @@ def _ensure_task_store_access(task: dict, current_user: dict) -> None:
         )
 
 
+# The metadata.kind this router's own upload stamps. Anything else in the
+# shared bucket is another feature's document and must never become a task
+# attachment.
+_TASK_ATTACHMENT_KIND = "task_attachment"
+
+
+def _authorise_attachment(file_id: str, current_user: dict) -> None:
+    """AUTHORISE a caller-supplied attachment file_id before binding it to a task.
+
+    P0 (security panel, reproduced end to end): this used to check only that the
+    id EXISTED (``fs.get(fid) is None -> 400``). Existence is not authorisation.
+    ONE GridFS bucket holds every binary in the app, so "it exists" is equally
+    true of a GRN supplier invoice or an employee Aadhaar scan. Because the id
+    is supplied by the CALLER (TaskCreate.attachment_file_id) and both
+    ``POST /tasks`` and ``GET /tasks/{task_id}/file`` are AUTHENTICATED, a
+    SALES_STAFF could attach someone else's file_id to a task they own and
+    stream the bytes back -- the victim's real filename included. Ids are not
+    hard to obtain either: this router's own upload returns live ObjectIds whose
+    5-byte random is shared per process and whose counter simply increments.
+
+    The file must therefore be (a) OUR kind of file, and (b) one THIS caller
+    uploaded. Both facts come from metadata written by upload_task_file below;
+    neither can be forged by the request.
+    """
+    fs = get_file_store()
+    if fs is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    meta = fs.get_metadata(file_id)
+    if (
+        meta is None
+        or meta.get("kind") != _TASK_ATTACHMENT_KIND
+        or not meta.get("uploaded_by")
+        or meta.get("uploaded_by") != current_user.get("user_id")
+    ):
+        # One message for every failure mode: a wrong-kind id, another user's
+        # id and a forged id are indistinguishable to the caller, so this is
+        # not an existence oracle over the bucket.
+        raise HTTPException(
+            status_code=400,
+            detail="attachment_file_id does not reference a file you uploaded",
+        )
+
+
 # Manager-tier roles that may act on ANY task in a store they can reach
 # (the same rungs the escalation ladder climbs). A non-manager who is neither
 # the assignee nor the assigner/creator must not act on someone else's task.
@@ -476,14 +519,7 @@ async def create_task(
     attachment = None
     if task.attachment_file_id and str(task.attachment_file_id).strip():
         fid = str(task.attachment_file_id).strip()
-        fs = get_file_store()
-        if fs is None:
-            raise HTTPException(status_code=503, detail="File storage unavailable")
-        if fs.get(fid) is None:
-            raise HTTPException(
-                status_code=400,
-                detail="attachment_file_id does not reference a stored file",
-            )
+        _authorise_attachment(fid, current_user)
         attachment = {
             "file_id": fid,
             "filename": task.attachment_filename,
@@ -620,7 +656,11 @@ async def download_task_file(
     store = get_file_store()
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    rec = store.get(file_id)
+    # Defence in depth behind _authorise_attachment: even if a foreign id were
+    # somehow persisted on a task (a legacy row, a future write path), this
+    # route will only ever stream THIS router's own kind of file. A wrong-kind
+    # id reads as "no longer available", never as bytes.
+    rec = store.get(file_id, require_kind=_TASK_ATTACHMENT_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="File no longer available")
 
@@ -810,15 +850,7 @@ async def update_task(
     if update.attachment_file_id is not None:
         fid = str(update.attachment_file_id).strip()
         if fid:
-            # Validate the referenced file exists (forged/missing -> 400).
-            fs = get_file_store()
-            if fs is None:
-                raise HTTPException(status_code=503, detail="File storage unavailable")
-            if fs.get(fid) is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="attachment_file_id does not reference a stored file",
-                )
+            _authorise_attachment(fid, current_user)
             update_data["attachment"] = {
                 "file_id": fid,
                 "filename": update.attachment_filename,

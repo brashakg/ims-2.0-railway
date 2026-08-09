@@ -535,6 +535,7 @@ class TestDcLogging:
         fid = store.put(
             content=b"%PDF-1.4 invoice", filename="inv.pdf",
             mime_type="application/pdf",
+            metadata={"kind": "grn_document", "uploaded_by": "u1"},
         )
         monkeypatch.setattr(vendors_router, "get_file_store", lambda: store)
         db = _FakeDB()
