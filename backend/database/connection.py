@@ -342,6 +342,7 @@ class DatabaseConnection:
         # NOTE the ordinal is load-bearing: an index on (source_id,
         # grn_line_index) alone would collide on the 2nd..Nth unit of every
         # multi-quantity line and silently receive 1 unit instead of N.
+        _grn_idx_failures_before = len(failures)
         _idx(
             "stock_units",
             [("source_id", 1), ("grn_line_index", 1), ("line_unit_seq", 1)],
@@ -354,6 +355,20 @@ class DatabaseConnection:
             name="uniq_grn_line_unit_seq",
             background=True,
         )
+        if len(failures) > _grn_idx_failures_before:
+            # LOUD, not just the aggregated stdout summary at the end of this
+            # method: a safety net whose absence is invisible is not a safety
+            # net. (An IndexOptionsConflict here would mean the same key pattern
+            # was already created under a different name.) Non-fatal by design --
+            # the router's claim + fail-closed heartbeat still hold, and it also
+            # verifies this index's presence at accept time and logs an error.
+            import logging
+
+            logging.getLogger(__name__).error(
+                "[DB] CRITICAL: the GRN duplicate-unit backstop index "
+                "uniq_grn_line_unit_seq FAILED to build: %s",
+                failures[-1],
+            )
 
         # Users
         _idx("users", "user_id", unique=True, background=True)

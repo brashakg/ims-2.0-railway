@@ -317,7 +317,17 @@ export function GoodsReceiptCockpit() {
   };
 
   const voidPendingGrn = async (grnId: string, grnNumber: string) => {
-    if (!window.confirm(`Void ${grnNumber}? Use this for duplicates — no stock was added by it.`)) return;
+    // Do NOT promise "no stock was added": the accept flow flips the status only
+    // after minting, so a receipt killed mid-accept sits at PENDING with real
+    // units already on the shelf. The backend refuses the void in that case
+    // (409) — this copy tells the operator what to do instead.
+    if (
+      !window.confirm(
+        `Void ${grnNumber}? Use this only for a duplicate or mistake that never put stock on the shelf. ` +
+          `If an earlier acceptance was interrupted, this will be refused — accept it again instead.`,
+      )
+    )
+      return;
     setGrnActionBusy(grnId);
     try {
       await vendorsApi.voidGRN(grnId);
