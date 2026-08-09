@@ -970,6 +970,21 @@ class MockCursor:
         return list(self.__iter__())
 
 
+def _mock_type_comparable(a, b) -> bool:
+    """True when Mongo would compare these two values at all (BSON type
+    bracketing). Numbers compare with numbers, strings with strings, dates with
+    dates; everything else is a non-match rather than an error."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool)
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return True
+    if isinstance(a, str) and isinstance(b, str):
+        return True
+    if isinstance(a, (datetime, _date)) and isinstance(b, (datetime, _date)):
+        return True
+    return False
+
+
 class MockCollection:
     """Mock collection for testing without MongoDB"""
 
@@ -1054,17 +1069,23 @@ class MockCollection:
                         flags = re.IGNORECASE if value.get("$options") == "i" else 0
                         if not re.search(op_value, str(doc_value), flags):
                             return False
-                    elif op == "$gt":
-                        if not (doc_value > op_value):
+                    elif op in ("$gt", "$lt", "$gte", "$lte"):
+                        # BSON TYPE BRACKETING. Mongo compares only values of
+                        # the same type and simply does not match across types;
+                        # it never errors. Python raises TypeError instead
+                        # (str vs datetime), and because BaseRepository.count
+                        # swallows exceptions and returns 0, ONE unparseable
+                        # row made an entire product+store read as zero stock --
+                        # taking the undated frames beside it off sale too.
+                        if not _mock_type_comparable(doc_value, op_value):
                             return False
-                    elif op == "$lt":
-                        if not (doc_value < op_value):
+                        if op == "$gt" and not (doc_value > op_value):
                             return False
-                    elif op == "$gte":
-                        if not (doc_value >= op_value):
+                        if op == "$lt" and not (doc_value < op_value):
                             return False
-                    elif op == "$lte":
-                        if not (doc_value <= op_value):
+                        if op == "$gte" and not (doc_value >= op_value):
+                            return False
+                        if op == "$lte" and not (doc_value <= op_value):
                             return False
                     elif op == "$in":
                         if doc_value not in op_value:

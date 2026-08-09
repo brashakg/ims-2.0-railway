@@ -56,7 +56,13 @@ def _op(val, op, arg) -> bool:
     if op == "$gte":
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
-        return isinstance(val, str) if arg == "string" else False
+        if arg == "string":
+            return isinstance(val, str)
+        if arg == "date":
+            # BSON date-typed values -- the shape inventory._parse_expiry reads
+            # natively and buckets as EXPIRED, so the floor must reach them too.
+            return isinstance(val, (datetime, date)) and not isinstance(val, bool)
+        return False
     if op == "$regex":
         # Mongo $regex only ever matches STRING values -- that type-bracketing is
         # exactly what makes the ISO-shape branch of the expiry floor work.
@@ -314,15 +320,30 @@ def test_expiry_floor_is_real_over_the_mock_collection_not_a_no_op():
         {"_id": "FRAME", "stock_id": "FRAME", "product_id": "P", "store_id": "S",
          "status": "AVAILABLE"}
     )
+    # A DATETIME-valued expiry. Without MockCollection's type guard a raw
+    # str-vs-datetime $gte raises TypeError, BaseRepository.count swallows it
+    # and returns 0, and EVERY unit for this product vanishes -- including the
+    # undated frame above. This row is what makes that regression visible.
+    coll.insert_one(
+        {"_id": "DTYPED", "stock_id": "DTYPED", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE",
+         "expiry_date": datetime(ist_today().year + 2, 1, 1)}
+    )
     repo = StockRepository(coll)
 
-    # The floor BITES: 1 sellable (the undated frame), 1 held back.
-    assert repo.find_available("P", "S") == 1
+    # The floor BITES: the undated frame AND the in-date datetime unit are
+    # sellable, the ISO-expired one is held back -- and nothing raised, so the
+    # neighbours did not vanish with it.
+    assert repo.find_available("P", "S") == 2
     assert repo.count_expired("P", "S") == 1
-    # The claim skips the expired unit entirely and takes the undated one.
-    assert repo.claim_one_available("P", "S", "O1") == "FRAME"
+    # The claim takes the in-date units and never the expired one.
+    claimed = {
+        repo.claim_one_available("P", "S", "O1"),
+        repo.claim_one_available("P", "S", "O2"),
+    }
+    assert claimed == {"FRAME", "DTYPED"}
     assert coll.find_one({"stock_id": "EXPIRED"})["status"] == "AVAILABLE"
-    assert repo.claim_one_available("P", "S", "O2") is None
+    assert repo.claim_one_available("P", "S", "O3") is None
     # And the guarded scan-sell refuses it too.
     assert repo.mark_sold("EXPIRED", "O3") is False
 
@@ -341,3 +362,36 @@ def test_mock_collection_models_not_and_type_operators():
         is False
     )
     assert coll._matches_filter({}, {"v": {"$not": {"$regex": "^[0-9]{4}-"}}}) is True
+
+
+def test_mock_range_operator_survives_mixed_types_on_an_ungated_query():
+    """Pins MockCollection's BSON type bracketing on a query with NO $type gate.
+
+    The expiry floor short-circuits on $type before any comparison, so it can
+    never exercise the guard -- which is exactly why reverting the guard did not
+    fail any expiry test. find_expiring is the real exposure: it compares
+    expiry_date against STRING bounds with no type gate at all, so ONE
+    date-typed row raises TypeError, BaseRepository.find_many swallows it, and
+    the whole expiry report comes back EMPTY -- hiding the string-dated units
+    that were perfectly readable.
+    """
+    from database.connection import MockCollection
+    from database.repositories.product_repository import StockRepository
+
+    coll = MockCollection("stock")
+    coll.insert_one(
+        {"_id": "STR-SOON", "stock_id": "STR-SOON", "product_id": "P",
+         "store_id": "S", "status": "AVAILABLE",
+         "expiry_date": (ist_today() + timedelta(days=10)).isoformat()}
+    )
+    coll.insert_one(
+        {"_id": "DATE-TYPED", "stock_id": "DATE-TYPED", "product_id": "P",
+         "store_id": "S", "status": "AVAILABLE",
+         "expiry_date": datetime(ist_today().year + 2, 1, 1)}
+    )
+    repo = StockRepository(coll)
+
+    rows = repo.find_expiring("S", days=30)
+
+    # The readable, genuinely-expiring unit must still be reported.
+    assert [r["stock_id"] for r in rows] == ["STR-SOON"]

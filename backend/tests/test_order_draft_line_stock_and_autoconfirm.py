@@ -69,7 +69,13 @@ def _op(val, op, arg) -> bool:
     if op == "$gte":
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
-        return isinstance(val, str) if arg == "string" else False
+        if arg == "string":
+            return isinstance(val, str)
+        if arg == "date":
+            # BSON date-typed values -- the shape inventory._parse_expiry reads
+            # natively and buckets as EXPIRED, so the floor must reach them too.
+            return isinstance(val, (datetime, date)) and not isinstance(val, bool)
+        return False
     if op == "$regex":
         # Mongo $regex only ever matches STRING values -- that type-bracketing is
         # exactly what makes the ISO-shape branch of the expiry floor work.
@@ -785,15 +791,24 @@ def test_removing_a_service_line_touches_no_stock(wired):
 
 def test_removing_a_lens_line_does_not_release_serialized_units(wired):
     """LENS stock is the power-grid cell (released by the hook), never a
-    stock_units row -- mirroring the gate _mark_units_sold applies on the way in."""
-    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    stock_units row.
+
+    NOTE: this test used to pre-seed the ONLY unit as ALREADY SOLD and then
+    assert it was "untouched" -- an assertion against a claim that could never
+    happen, which locked the _mark_units_sold gate asymmetry in as expected
+    behaviour. The unit now starts AVAILABLE, so the assertion has teeth in BOTH
+    directions: the lens line must not consume it on the way in, and must not
+    release anything on the way out.
+    """
+    wired["units"].append(_unit("U1", product_id="L-REAL"))
     lens = _add(
         _item(item_type="LENS", product_id="L-REAL", lens_line_id="LA", sph=-1.0)
     )
+    assert wired["units"][0]["status"] == "AVAILABLE"   # never consumed
 
     _remove(lens["item_id"])
 
-    assert wired["units"][0]["status"] == "SOLD"   # untouched
+    assert wired["units"][0]["status"] == "AVAILABLE"   # nothing minted either
 
 
 # =========================================================================== #
@@ -1033,3 +1048,257 @@ def test_fifo_removal_releases_nothing_when_every_unit_is_spoken_for(wired):
 
     assert wired["units"][0]["status"] == "SOLD"
     assert wired["stock"].find_available("P1", "S1") == 0
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF1 -- an ALREADY-CUT lens cell must never be released.
+#
+# The workshop MOUNTED commit writes its audit row under the POSITIONAL index
+# while reserve/release now key on item_id, and release_for_cancel only checks
+# the ONE key it is handed. So the item_id call sailed past the "already
+# committed" guard and released a cell whose lens is already mounted in the
+# customer's frame -- and when another pending order holds a reservation on the
+# same power cell, the CAS succeeds and silently decrements THAT order's
+# reservation. One physical lens, two customers.
+# =========================================================================== #
+
+
+class _FakeLensAudit:
+    """The lens_stock_audit collection, holding the rows the TWO modules really
+    emit: reserve rows keyed however the reserver keyed them, and commit rows
+    keyed by the workshop's POSITIONAL index."""
+
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+
+    def find_one(self, flt):
+        sids = flt.get("source_id")
+        want = sids.get("$in") if isinstance(sids, dict) else [sids]
+        action = flt.get("action")
+        for r in self.rows:
+            if r.get("source_id") in want and (
+                action is None or r.get("action") == action
+            ):
+                return dict(r)
+        return None
+
+
+class _FakeLensDb:
+    def __init__(self, audit):
+        self._audit = audit
+
+    def get_collection(self, name):
+        return self._audit if name == "lens_stock_audit" else None
+
+
+def _wire_lens_audit(monkeypatch, rows):
+    from api.routers import lens_stock as stock_router
+
+    audit = _FakeLensAudit(rows)
+    monkeypatch.setattr(stock_router, "_get_db", lambda: _FakeLensDb(audit))
+    return audit
+
+
+def test_release_skips_a_line_the_workshop_already_committed(wired, monkeypatch):
+    """The exact audit rows the two modules emit: workshop commits under the
+    POSITION, we release under the item_id."""
+    import api.services.lens_stock_hook as hook
+
+    line = {
+        "item_id": "IT-7",
+        "item_type": "LENS",
+        "product_id": "lens-x",
+        "lens_line_id": "LA",
+        "sph": -1.0,
+        "quantity": 1,
+    }
+    _wire_lens_audit(
+        monkeypatch,
+        [{"source_id": "ORD-1#2#commit", "action": "commit"}],   # POSITIONAL
+    )
+
+    asyncio.run(
+        om._release_lens_lines(
+            [line],
+            order_id="ORD-1",
+            store_id="S1",
+            user=_ADMIN,
+            release=hook.release_for_cancel,
+            positions=[2],
+        )
+    )
+
+    # NOTHING was released -- the lens is already cut and mounted.
+    assert wired["released"] == []
+
+
+def test_release_still_happens_when_nothing_was_committed(wired, monkeypatch):
+    """The guard must not over-block: an uncommitted line still releases."""
+    import api.services.lens_stock_hook as hook
+
+    line = {
+        "item_id": "IT-7",
+        "item_type": "LENS",
+        "product_id": "lens-x",
+        "lens_line_id": "LA",
+        "sph": -1.0,
+    }
+    _wire_lens_audit(monkeypatch, [{"source_id": "ORD-1#9#commit", "action": "commit"}])
+
+    asyncio.run(
+        om._release_lens_lines(
+            [line],
+            order_id="ORD-1",
+            store_id="S1",
+            user=_ADMIN,
+            release=hook.release_for_cancel,
+            positions=[2],
+        )
+    )
+
+    assert [r["line_index"] for r in wired["released"]] == ["IT-7", 2]
+
+
+def test_commit_under_the_item_id_key_also_blocks_the_release(wired, monkeypatch):
+    """Once the workshop crew keys its commit on item_id too, the guard must
+    still hold -- we check EVERY candidate key, not one of them."""
+    import api.services.lens_stock_hook as hook
+
+    line = {"item_id": "IT-7", "item_type": "LENS", "product_id": "lens-x",
+            "lens_line_id": "LA", "sph": -1.0}
+    _wire_lens_audit(
+        monkeypatch, [{"source_id": "ORD-1#IT-7#commit", "action": "commit"}]
+    )
+
+    asyncio.run(
+        om._release_lens_lines(
+            [line], order_id="ORD-1", store_id="S1", user=_ADMIN,
+            release=hook.release_for_cancel, positions=[2],
+        )
+    )
+
+    assert wired["released"] == []
+
+
+def test_commit_lookup_failure_does_not_block_a_normal_release(wired, monkeypatch):
+    """Fail-soft: if we cannot tell, the cancel must still work. A stuck
+    reservation is recoverable; a cancel that cannot complete is not."""
+    import api.services.lens_stock_hook as hook
+    from api.routers import lens_stock as stock_router
+
+    def _boom():
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(stock_router, "_get_db", _boom)
+    line = {"item_id": "IT-7", "item_type": "LENS", "product_id": "lens-x",
+            "lens_line_id": "LA", "sph": -1.0}
+
+    asyncio.run(
+        om._release_lens_lines(
+            [line], order_id="ORD-1", store_id="S1", user=_ADMIN,
+            release=hook.release_for_cancel, positions=[0],
+        )
+    )
+
+    assert len(wired["released"]) >= 1
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF2 -- ONE predicate decides what takes serialized stock, so the
+# way IN and the way OUT can never disagree again.
+# =========================================================================== #
+
+
+def _line(item_type, product_id="P1", **extra):
+    d = {"item_type": item_type, "product_id": product_id, "quantity": 1}
+    d.update(extra)
+    return d
+
+
+def test_mark_and_release_agree_on_exactly_the_same_lines():
+    """The drift that stranded stock-lens units: _mark_units_sold consumed a
+    LENS line's serialized unit while the release path skipped it."""
+    candidates = [
+        _line("FRAME"),
+        _line("SUNGLASS"),
+        _line("ACCESSORY"),
+        _line("LENS"),                                  # lens-hook stock
+        _line("LENS", product_id="L-REAL-CATALOG-ID"),  # POSLayout's real shape
+        _line("SERVICE"),
+        _line("EYE_TEST"),
+        _line("FRAME", product_id="custom-thing"),
+        _line("FRAME", product_id=""),
+    ]
+    marked = [ln for ln in candidates if om._takes_serialized_stock(ln)]
+    # The predicate IS the shared gate -- assert the classification directly.
+    assert [ln["item_type"] for ln in marked] == ["FRAME", "SUNGLASS", "ACCESSORY"]
+    for ln in candidates:
+        assert om._takes_serialized_stock(ln) is (ln in marked)
+
+
+def test_a_stock_lens_line_never_takes_a_serialized_unit(wired):
+    """End-to-end: POSLayout maps OPTICAL_LENS -> 'LENS' and sends the REAL
+    catalog product_id, so this line used to be flipped SOLD on the way in and
+    never released on the way out."""
+    wired["units"].append(_unit("U1", product_id="L-REAL"))
+    added = _add(
+        _item(item_type="LENS", product_id="L-REAL", product_name="1.6 SV",
+              lens_line_id="LA", sph=-1.0)
+    )
+
+    # The serialized unit was NOT consumed by the lens line.
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+    _remove(added["item_id"])
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF7 / MF8 -- the line-remove door must report an incomplete
+# restock, and a qty>1 scanned line must release ALL of its units.
+# =========================================================================== #
+
+
+def test_removing_a_qty2_scanned_line_releases_both_units(wired):
+    """A qty>1 line consumes its NAMED unit once and FIFO-allocates the rest, so
+    releasing only the named one strands the remainder -- and reported success."""
+    wired["units"].extend([_unit("U-NAMED"), _unit("U-EXTRA")])
+    added = _add(_item(stock_id="U-NAMED", quantity=2))
+    assert all(u["status"] == "SOLD" for u in wired["units"])
+
+    res = _remove(added["item_id"])
+
+    assert all(u["status"] == "AVAILABLE" for u in wired["units"])
+    assert res["stock_units_released"] == 2
+    assert res["stock_release_failed"] is False
+
+
+def test_incomplete_line_remove_restock_is_reported_and_persisted(wired):
+    wired["units"].append(_unit("U1"))
+    added = _add(_item())
+    coll = wired["stock"].collection
+    real = coll.find_one_and_update
+
+    def _boom(flt, upd, sort=None, **kw):
+        raise RuntimeError("mongo write blip")
+
+    coll.find_one_and_update = _boom
+    try:
+        res = _remove(added["item_id"])
+    finally:
+        coll.find_one_and_update = real
+
+    assert res["stock_release_failed"] is True
+    assert res["stock_units_released"] == 0
+    doc = wired["orders"].orders["ORD-1"]
+    assert doc["line_remove_stock_release_failed"] is True
+    assert doc["line_remove_stock_failed_item_id"] == added["item_id"]
+
+
+def test_clean_line_remove_reports_success(wired):
+    wired["units"].append(_unit("U1"))
+    added = _add(_item())
+    res = _remove(added["item_id"])
+    assert res["stock_release_failed"] is False
+    assert res["stock_units_released"] == 1
+    assert "line_remove_stock_release_failed" not in wired["orders"].orders["ORD-1"]

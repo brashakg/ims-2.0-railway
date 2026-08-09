@@ -363,32 +363,60 @@ class StockRepository(BaseRepository):
         except Exception:  # noqa: BLE001 -- clock helper must never break a sale
             return date.today().isoformat()
 
+    @staticmethod
+    def _expiry_floor_datetime() -> datetime:
+        """IST 'today' at midnight as a NAIVE datetime -- the floor for BSON
+        date-typed expiry values.
+
+        Deliberately the same instant the ISO floor represents, and deliberately
+        the same rule inventory.partition_by_expiry uses (days < 0 == expired,
+        so a unit expiring TODAY is still sellable). The two surfaces must agree
+        about a given lens or staff see it quarantined on the Contact Lens
+        screen while the till dispenses it.
+        """
+        try:
+            d = ist_today()
+        except Exception:  # noqa: BLE001
+            d = date.today()
+        return datetime(d.year, d.month, d.day)
+
     @classmethod
     def _not_expired_or(cls) -> List[Dict]:
         """$or branches selecting every unit that is NOT past its expiry.
 
-        Branch order is deliberate (mock/`$or` matchers short-circuit on the
-        first true branch, and the undated branch is the hot path):
-          1. undated -- field missing, null, or blank -> ALWAYS sellable
-          2. CANONICAL ISO string on/after IST today  -> still in date
-          3. anything that is not a canonical ISO date string (malformed string
-             OR a non-string legacy value) -> UNINTERPRETABLE, so it is allowed
-             through rather than silently hidden
+        FOUR branches, one per storage shape, so each comparison only ever runs
+        against a value of the type it can actually compare:
+          1. undated -- missing, null, or blank            -> ALWAYS sellable
+          2. malformed STRING (not ^YYYY-MM-DD)            -> unreadable, so
+             allowed through rather than silently hidden (fail-open)
+          3. canonical ISO string on/after IST today       -> still in date
+          4. BSON date-typed value on/after IST midnight   -> still in date
 
-        Branch 3 subsumes the old "non-string" branch: `$not: {$regex: ISO}`
-        matches a BSON datetime and a missing field as well as a malformed
-        string. The ONLY thing this floor removes from sale is a value we can
-        read with certainty and that is genuinely in the past.
+        Branch ORDER matters: the two branches that perform NO comparison come
+        first, so a non-comparable value short-circuits before any $gte is
+        evaluated. A raw $gte reached first raises TypeError inside
+        MockCollection, BaseRepository.count swallows it and returns 0, and
+        EVERY unit for that product+store disappears -- including the undated
+        frames beside it. (MockCollection is also type-guarded now, but the
+        ordering is the belt to that braces.)
+
+        Branch 4 is the correction to treating every non-string as
+        uninterpretable: inventory._parse_expiry reads BSON dates natively and
+        buckets a past one as EXPIRED, so selling it here made the CL screen and
+        the till contradict each other about the same physical lens. Whatever
+        partition_by_expiry calls EXPIRED is now unclaimable.
         """
         return [
             {"expiry_date": {"$in": [None, ""]}},
+            {"expiry_date": {"$type": "string", "$not": {"$regex": cls._ISO_DATE_RE}}},
             {
                 "expiry_date": {
-                    "$gte": cls._expiry_floor_iso(),
+                    "$type": "string",
                     "$regex": cls._ISO_DATE_RE,
+                    "$gte": cls._expiry_floor_iso(),
                 }
             },
-            {"expiry_date": {"$not": {"$regex": cls._ISO_DATE_RE}}},
+            {"expiry_date": {"$type": "date", "$gte": cls._expiry_floor_datetime()}},
         ]
 
     @classmethod
@@ -591,7 +619,10 @@ class StockRepository(BaseRepository):
         if product_id:
             flt["product_id"] = product_id
         # Hard bound so a misbehaving collection can never spin forever; no real
-        # order has 500 serialized units. An explicit stock_id is exactly one.
+        # order has 500 serialized units. An explicit stock_id targets exactly
+        # that unit, so the caller must sweep any REMAINING quantity separately
+        # (a qty>1 line consumes the named unit once and FIFO-allocates the
+        # rest on the way in -- see orders._release_line_units).
         if stock_id:
             max_units = 1
         elif limit is None:
@@ -699,9 +730,18 @@ class StockRepository(BaseRepository):
                 "order_id": order_id,
             }
         }
-        # Phase 1 (FEFO): earliest-expiring IN-DATE unit first.
+        # Phase 1 (FEFO): earliest-expiring IN-DATE unit first, ISO strings.
+        # The $type + $regex gate is NOT optional: without it this raw $gte is a
+        # lexicographic compare, so a genuinely EXPIRED non-ISO value like
+        # "31/12/2025" sorts ABOVE today's floor and gets FEFO-dispensed AHEAD
+        # of real in-date stock -- silently, because the unreadable-expiry
+        # warning lives on the scan door, which a FIFO line never reaches.
         dated_flt = dict(flt)
-        dated_flt["expiry_date"] = {"$gte": self._expiry_floor_iso()}
+        dated_flt["expiry_date"] = {
+            "$type": "string",
+            "$regex": self._ISO_DATE_RE,
+            "$gte": self._expiry_floor_iso(),
+        }
         try:
             doc = self.collection.find_one_and_update(
                 dated_flt, update, sort=[("expiry_date", 1)]
@@ -709,8 +749,23 @@ class StockRepository(BaseRepository):
         except Exception:
             doc = None
         if not doc:
-            # Phase 2: no in-date dated unit available -> claim any unit the
-            # expiry floor still permits (undated / legacy-typed).
+            # Phase 1b: the same FEFO ordering for BSON date-typed values, which
+            # cannot be compared against a string bound.
+            typed_flt = dict(flt)
+            typed_flt["expiry_date"] = {
+                "$type": "date",
+                "$gte": self._expiry_floor_datetime(),
+            }
+            try:
+                doc = self.collection.find_one_and_update(
+                    typed_flt, update, sort=[("expiry_date", 1)]
+                )
+            except Exception:
+                doc = None
+        if not doc:
+            # Phase 2: nothing in-date and dated -> claim any unit the expiry
+            # floor still permits (undated, or an unreadable value we fail open
+            # on rather than hide).
             undated_flt = dict(flt)
             undated_flt["$or"] = self._not_expired_or()
             try:
@@ -719,6 +774,21 @@ class StockRepository(BaseRepository):
                 return None
         if not doc:
             return None
+        # TRACEABILITY for the fail-open path: a FIFO sale never touches the
+        # scan door, so this is the only place an unreadable expiry can be
+        # recorded at the moment the unit actually leaves.
+        claimed_expiry = doc.get("expiry_date")
+        if claimed_expiry not in (None, "") and not (
+            self.is_iso_expiry(claimed_expiry)
+            or isinstance(claimed_expiry, (datetime, date))
+        ):
+            logger.warning(
+                "[STOCK] SOLD unit %s on order %s with an UNREADABLE expiry_date "
+                "%r (fail-open) -- normalise this value at the GRN door",
+                doc.get("stock_id") or doc.get("_id"),
+                order_id,
+                claimed_expiry,
+            )
         return doc.get("stock_id") or doc.get("_id")
 
     def mark_barcode_printed(self, stock_id: str) -> bool:

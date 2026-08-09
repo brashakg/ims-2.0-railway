@@ -69,7 +69,13 @@ def _op(val, op, arg) -> bool:
     if op == "$lt":
         return val is not _MISSING and _same_bson_type(val, arg) and val < arg
     if op == "$type":
-        return isinstance(val, str) if arg == "string" else False
+        if arg == "string":
+            return isinstance(val, str)
+        if arg == "date":
+            # BSON date-typed values -- the shape inventory._parse_expiry reads
+            # natively and buckets as EXPIRED, so the floor must reach them too.
+            return isinstance(val, (datetime, date)) and not isinstance(val, bool)
+        return False
     if op == "$regex":
         # Mongo $regex only ever matches STRING values -- that type-bracketing is
         # exactly what makes the ISO-shape branch of the expiry floor work.
@@ -621,3 +627,149 @@ def test_explicit_stock_id_ignores_the_exclusion_list():
     )
     assert freed == ["U1"]
     assert docs[0]["status"] == "AVAILABLE"
+
+
+# ===========================================================================
+# RE-VERIFY R4 MF5 -- a BSON date-typed expiry must obey a REAL datetime floor.
+# inventory._parse_expiry reads datetimes natively and buckets a past one as
+# EXPIRED, so selling it here made the Contact Lens screen and the till
+# contradict each other about the same physical lens.
+# ===========================================================================
+
+
+def _dt(delta_days: int) -> datetime:
+    d = ist_today() + timedelta(days=delta_days)
+    return datetime(d.year, d.month, d.day)
+
+
+def test_date_typed_expired_unit_is_not_sellable():
+    docs = [_unit("U-DT-OLD", expiry_date=_dt(-3))]
+    repo = _repo(docs)
+    assert repo.find_available("P1", "S1") == 0
+    assert repo.count_expired("P1", "S1") == 1
+    assert repo.claim_one_available("P1", "S1", "O1") is None
+    assert docs[0]["status"] == "AVAILABLE"      # untouched, just unsellable
+
+
+def test_date_typed_in_date_unit_is_still_sellable():
+    docs = [_unit("U-DT-NEW", expiry_date=_dt(30))]
+    repo = _repo(docs)
+    assert repo.find_available("P1", "S1") == 1
+    assert repo.count_expired("P1", "S1") == 0
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-DT-NEW"
+
+
+def test_date_typed_expiring_today_is_sellable():
+    """Same boundary as the ISO path and as partition_by_expiry (days < 0)."""
+    repo = _repo([_unit("U-DT-TODAY", expiry_date=_dt(0))])
+    assert repo.find_available("P1", "S1") == 1
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-DT-TODAY"
+
+
+def test_date_typed_fefo_dispenses_earliest_first():
+    docs = [
+        _unit("DT-LATE", expiry_date=_dt(200)),
+        _unit("DT-SOON", expiry_date=_dt(5)),
+    ]
+    repo = _repo(docs)
+    assert repo.claim_one_available("P1", "S1", "O1") == "DT-SOON"
+    assert repo.claim_one_available("P1", "S1", "O2") == "DT-LATE"
+
+
+# ===========================================================================
+# RE-VERIFY R4 MF4 -- the FIFO door must not silently dispense a non-ISO
+# EXPIRED value ahead of real in-date stock.
+# ===========================================================================
+
+
+def test_non_iso_value_is_never_fefo_dispensed_ahead_of_in_date_stock():
+    """'31/12/2025' sorts ABOVE today's ISO floor, so the ungated phase-1 $gte
+    matched it and FEFO handed it out FIRST -- silently, because the
+    unreadable-expiry warning lives on the scan door a FIFO line never reaches."""
+    docs = [
+        _unit("U-JUNK", expiry_date="31/12/2025"),
+        _unit("U-GOOD", expiry_date=_iso(10)),
+    ]
+    repo = _repo(docs)
+
+    # The readable, in-date unit is dispensed first.
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-GOOD"
+    # Only once real stock is gone does the unreadable one go (fail-open).
+    assert repo.claim_one_available("P1", "S1", "O2") == "U-JUNK"
+
+
+def test_unreadable_expiry_sale_is_logged_on_the_write_path(caplog):
+    repo = _repo([_unit("U-JUNK", expiry_date="31/12/2025")])
+    with caplog.at_level("WARNING"):
+        assert repo.claim_one_available("P1", "S1", "ORD-9") == "U-JUNK"
+    assert any("UNREADABLE expiry_date" in r.message for r in caplog.records)
+
+
+def test_readable_expiry_sale_is_not_logged_as_unreadable(caplog):
+    repo = _repo([_unit("U-OK", expiry_date=_iso(10))])
+    with caplog.at_level("WARNING"):
+        repo.claim_one_available("P1", "S1", "ORD-9")
+    assert not any("UNREADABLE expiry_date" in r.message for r in caplog.records)
+
+
+# ===========================================================================
+# RE-VERIFY R4 MF6 -- one unreadable row must not zero out the whole product.
+# The $gte branch used to be evaluated before the $not/$regex branch, so a
+# non-string value raised TypeError inside MockCollection, BaseRepository.count
+# swallowed it and returned 0, and EVERY unit for that product+store vanished --
+# including the undated frames beside it.
+# ===========================================================================
+
+
+def test_one_odd_typed_row_does_not_hide_the_frames_beside_it():
+    docs = [
+        _unit("U-ODD", expiry_date=12345),          # an int: comparable to nothing
+        _unit("U-FRAME"),                            # undated frame
+        _unit("U-ISO", expiry_date=_iso(30)),        # in-date lens
+    ]
+    repo = _repo(docs)
+    # The frame and the in-date lens remain sellable regardless of the odd row.
+    assert repo.find_available("P1", "S1") >= 2
+    claimed = {
+        repo.claim_one_available("P1", "S1", "O1"),
+        repo.claim_one_available("P1", "S1", "O2"),
+    }
+    assert "U-FRAME" in claimed and "U-ISO" in claimed
+
+
+# ===========================================================================
+# MUTATION-GAP CLOSURE (expiry). The first pass MISSED the phase-1 ISO-gate
+# revert: the junk value it used sorted AFTER the in-date ISO unit anyway, so
+# FEFO order was unchanged and the test passed with the gate removed.
+#
+# A MALFORMED value that lexicographically sorts BEFORE a real in-date date
+# isolates the gate: without it, phase 1 sorts the junk first and dispenses it.
+# ===========================================================================
+
+
+def test_phase1_never_orders_a_malformed_value_ahead_of_real_stock():
+    today = ist_today().isoformat()
+    # Same YYYY-MM- prefix, truncated day -> NOT ^\d{4}-\d{2}-\d{2}, yet it
+    # lexicographically sorts BEFORE the in-date ISO unit below and passes a
+    # raw string $gte against today. Exactly the shape that slips through an
+    # ungated phase 1.
+    malformed = today[:8] + "1"
+    docs = [
+        _unit("U-MALFORMED", expiry_date=malformed),
+        _unit("U-REAL", expiry_date=_iso(30)),
+    ]
+    repo = _repo(docs)
+
+    # The READABLE in-date unit must be dispensed first; the malformed one is
+    # only reachable through the fail-open fallback, after real stock is gone.
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-REAL"
+    assert repo.claim_one_available("P1", "S1", "O2") == "U-MALFORMED"
+
+
+def test_malformed_value_is_excluded_from_the_dated_phase_entirely():
+    """With no readable stock at all, the malformed unit still sells (fail-open)
+    -- but it must arrive via the fallback, which is what emits the warning."""
+    malformed = ist_today().isoformat()[:8] + "1"
+    repo = _repo([_unit("U-ONLY", expiry_date=malformed)])
+    assert repo.find_available("P1", "S1") == 1
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-ONLY"

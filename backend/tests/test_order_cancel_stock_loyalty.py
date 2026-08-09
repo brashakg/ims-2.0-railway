@@ -66,7 +66,13 @@ def _op(val, op, arg) -> bool:
     if op == "$gte":
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
-        return isinstance(val, str) if arg == "string" else False
+        if arg == "string":
+            return isinstance(val, str)
+        if arg == "date":
+            # BSON date-typed values -- the shape inventory._parse_expiry reads
+            # natively and buckets as EXPIRED, so the floor must reach them too.
+            return isinstance(val, (datetime, date)) and not isinstance(val, bool)
+        return False
     if op == "$regex":
         # Mongo $regex only ever matches STRING values -- that type-bracketing is
         # exactly what makes the ISO-shape branch of the expiry floor work.
@@ -177,6 +183,16 @@ class _FakeTxnColl:
 
     def __init__(self, rows):
         self.rows = rows
+
+    def find(self, flt=None):
+        """Order-scoped ledger read. The reversal now queries the collection
+        directly so a driver error RAISES instead of being swallowed into an
+        empty list that looks like 'this order earned nothing'."""
+        return [
+            dict(r)
+            for r in self.rows
+            if all(r.get(k) == v for k, v in (flt or {}).items())
+        ]
 
     def update_one(self, flt, upd):
         for r in self.rows:
@@ -664,22 +680,24 @@ def test_racing_cancel_that_loses_the_unique_index_does_not_move_money(wired):
     wired["txns"].rows.append(_redeem("C1", "ORD-1", 60))
     wired["accounts"].acct.update({"balance_points": 0, "lifetime_redeemed": 60})
 
-    real_find = wired["txns"].find_for_customer
+    # Snapshot the ledger as it looks BEFORE the winner writes its marker.
     stale = [dict(r) for r in wired["txns"].rows]
+    real_coll_find = wired["txns"].collection.find
 
-    def _stale_ledger(cid, limit=20):
+    def _stale_ledger(flt=None):
         return [dict(r) for r in stale]
 
     winner = L.reverse_for_cancel("ORD-1", "C1")
     assert winner["ok"] and winner["redeemed_restored"] == 60
     assert wired["accounts"].acct["balance_points"] == 60
 
-    # The racer now runs with the pre-winner ledger view.
-    wired["txns"].find_for_customer = _stale_ledger
+    # The racer now runs with the pre-winner ledger view, so its Python guard
+    # sees nothing and ONLY the partial-unique index can stop it.
+    wired["txns"].collection.find = _stale_ledger
     try:
         loser = L.reverse_for_cancel("ORD-1", "C1")
     finally:
-        wired["txns"].find_for_customer = real_find
+        wired["txns"].collection.find = real_coll_find
 
     assert loser["ok"] and loser.get("already_reversed") is True
     assert loser.get("raced") is True
@@ -1010,3 +1028,422 @@ def test_failed_status_write_does_not_run_the_undo(monkeypatch):
     assert orders.orders["ORD-1"]["status"] == "CONFIRMED"
     assert units[0]["status"] == "SOLD"
     assert accounts.adjustments == []
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF3 -- the retry door must open on GROUND TRUTH, not on a flag.
+# The failure stamp goes through base_repository.update, which swallows every
+# exception and returns False, so the very blip that fails the stock release
+# ALSO loses its own failure marker. Gating the retry on the flag meant the
+# operator log told staff to re-POST a cancel that 400s forever with units
+# still SOLD.
+# =========================================================================== #
+
+
+def test_retry_door_opens_on_stranded_stock_even_with_no_failure_marker(wired):
+    """Simulates the blip losing BOTH the release and the stamp: the doc says
+    the cancel was clean, the stock says otherwise. Stock wins."""
+    wired["units"].extend([_unit("U1"), _unit("U2")])
+    coll = wired["stock"].collection
+    real = coll.find_one_and_update
+    coll.find_one_and_update = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("blip")
+    )
+    stamps = {"blocked": True}
+    real_update = wired["orders"].update
+
+    def _update(oid, data):
+        # The stamp write fails too -- exactly the correlated failure.
+        if stamps["blocked"] and "cancel_stock_release_failed" in data:
+            return False
+        return real_update(oid, data)
+
+    wired["orders"].update = _update
+    try:
+        first = _cancel()
+    finally:
+        coll.find_one_and_update = real
+        wired["orders"].update = real_update
+
+    assert first["status"] == "CANCELLED"
+    doc = wired["orders"].orders["ORD-1"]
+    # The doc carries NO failure marker -- the stamp was lost.
+    assert doc.get("cancel_stock_release_failed") is not True
+    # ...but both units are still SOLD, and that is what opens the door.
+    assert wired["stock"].count_sold_units_for_order("ORD-1") == 2
+
+    retry = _cancel()
+
+    assert retry["message"] == "Cancel undo re-run"
+    assert retry["stock_units_released"] == 2
+    assert all(u["status"] == "AVAILABLE" for u in wired["units"])
+
+
+def test_clean_cancel_with_a_stamp_still_refuses_a_retry(wired):
+    """The ground-truth door must not make the endpoint replayable."""
+    wired["units"].append(_unit("U1"))
+    _cancel()
+    assert wired["stock"].count_sold_units_for_order("ORD-1") == 0
+    with pytest.raises(HTTPException) as exc:
+        _cancel()
+    assert exc.value.status_code == 400
+
+
+def test_lost_stamp_is_logged_loudly(wired, caplog):
+    wired["units"].append(_unit("U1"))
+    real_update = wired["orders"].update
+
+    def _update(oid, data):
+        if "cancel_stock_released" in data or "cancel_stock_release_failed" in data:
+            return False
+        return real_update(oid, data)
+
+    wired["orders"].update = _update
+    try:
+        with caplog.at_level("ERROR"):
+            _cancel()
+    finally:
+        wired["orders"].update = real_update
+
+    assert any(
+        "CANCEL RECONCILIATION STAMP LOST" in r.message for r in caplog.records
+    )
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF9 -- an unreadable ledger must not look like an empty one.
+# find_for_customer swallows every driver error and returns [], so a transient
+# blip during a cancel returned ok:True / clawed 0 / no failure flag, leaving
+# the customer holding redeemable points on a cancelled order.
+# =========================================================================== #
+
+
+def test_ledger_read_failure_is_not_mistaken_for_an_empty_ledger(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    def _boom(flt=None):
+        raise RuntimeError("mongo read blip")
+
+    wired["txns"].collection.find = _boom
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is False and res["reason"] == "ledger_read_failed"
+    assert wired["accounts"].adjustments == []      # no money moved on a guess
+
+
+def test_cancel_flags_an_unreadable_ledger_for_reconciliation(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    def _boom(flt=None):
+        raise RuntimeError("mongo read blip")
+
+    wired["txns"].collection.find = _boom
+
+    res = _cancel()
+
+    assert res["status"] == "CANCELLED"
+    assert res["loyalty_reversal_failed"] is True
+    assert wired["orders"].orders["ORD-1"]["loyalty_reversal_failed"] is True
+
+
+def test_a_genuinely_empty_ledger_is_still_a_clean_no_op(wired):
+    """The failure signal must not fire on an order that simply earned nothing."""
+    res = L.reverse_for_cancel("ORD-1", "C1")
+    assert res["ok"] is True and res.get("earned_clawed") == 0
+    assert wired["accounts"].adjustments == []
+
+
+def test_order_scoped_ledger_read_is_not_truncated_by_a_long_history(wired):
+    """The old limit=1000 could drop an old order's EARN row off the end. The
+    order-scoped query cannot truncate."""
+    for i in range(1200):
+        wired["txns"].rows.append(_earn("C1", f"OTHER-{i}", 1))
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] and res["earned_clawed"] == 100
+
+
+# =========================================================================== #
+# RE-VERIFY R4 MF10 -- the clawback must be guard-in-the-filter, not a read
+# followed by an unguarded $inc.
+# =========================================================================== #
+
+
+class _GuardedAccounts(_FakeAccounts):
+    """Models the real collection surface, so the reversal takes the GUARDED
+    find_one_and_update path rather than the unguarded adjust_balance."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        outer = self
+
+        class _Coll:
+            def find_one_and_update(self, flt, upd, **kw):
+                need = flt.get("balance_points", {}).get("$gte")
+                if need is not None and outer.acct["balance_points"] < need:
+                    return None          # guard refuses -> underflow
+                before = dict(outer.acct)
+                for k2, v2 in upd.get("$inc", {}).items():
+                    outer.acct[k2] = outer.acct.get(k2, 0) + v2
+                for k2, v2 in upd.get("$set", {}).items():
+                    outer.acct[k2] = v2
+                outer.adjustments.append({"guarded": True})
+                return before
+
+        self.collection = _Coll()
+
+
+def test_clawback_uses_the_guarded_filter(monkeypatch, wired):
+    acc = _GuardedAccounts(balance=100, le=100)
+    monkeypatch.setattr(L, "get_loyalty_account_repository", lambda: acc)
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] and res["earned_clawed"] == 100
+    assert acc.acct["balance_points"] == 0
+    assert acc.adjustments == [{"guarded": True}]
+
+
+def test_concurrent_redeem_cannot_drive_the_balance_negative(monkeypatch, wired):
+    """A redeem at another store lands between our read and our write. The
+    unguarded $inc would take balance_points NEGATIVE; the filter refuses."""
+    acc = _GuardedAccounts(balance=100, le=100)
+    monkeypatch.setattr(L, "get_loyalty_account_repository", lambda: acc)
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+
+    original_find = acc.find_or_create
+
+    def _find(cid):
+        snap = original_find(cid)
+        acc.acct["balance_points"] = 30   # the concurrent redeem lands NOW
+        return snap
+
+    acc.find_or_create = _find
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is False and res["reason"] == "balance_underflow"
+    assert acc.acct["balance_points"] == 30      # never negative
+    assert acc.adjustments == []
+
+
+# =========================================================================== #
+# SELF-FOUND (not on the panel list): clearing the incomplete flag is itself
+# fail-soft, so a marker can be left flagged even though the money DID land.
+# The repair must then be a NO-OP, not a second application.
+# =========================================================================== #
+
+
+def test_repair_does_not_re_apply_a_reversal_whose_money_already_landed(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    # Make the flag-clear fail, leaving a stale reversal_incomplete=True behind.
+    real_update_one = wired["txns"].collection.update_one
+    wired["txns"].collection.update_one = lambda flt, upd: None
+
+    first = L.reverse_for_cancel("ORD-1", "C1")
+    wired["txns"].collection.update_one = real_update_one
+
+    assert first["ok"] is True
+    assert wired["accounts"].acct["balance_points"] == 0    # money DID move
+    assert wired["txns"].rows[-1]["reversal_incomplete"] is True   # stale flag
+
+    n_before = len(wired["accounts"].adjustments)
+    again = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert again["ok"] is True
+    assert again.get("flag_cleared_only") is True
+    # THE POINT: no second claw. Balance stays 0, not -100.
+    assert wired["accounts"].acct["balance_points"] == 0
+    assert len(wired["accounts"].adjustments) == n_before
+
+
+# =========================================================================== #
+# MUTATION-GAP CLOSURE. Three round-4 mutations were MISSED by the first pass:
+# the tests passed with the fix reverted, i.e. they were not actually pinning
+# the behaviour. These isolate each fix so reverting it FAILS.
+# =========================================================================== #
+
+
+def test_retry_door_opens_on_stranded_stock_with_a_fully_clean_order_doc(wired):
+    """Isolates the GROUND-TRUTH clause of the retry door.
+
+    The earlier test also lost the stamp, so the door could open via the
+    "no cancel_stock_released key" clause and the ground-truth clause was never
+    the deciding factor. Here the first cancel is completely clean -- stamp
+    written, both failure flags False -- and a straggler write then re-marks a
+    unit SOLD against the cancelled order. ONLY count_sold_units_for_order can
+    open the door on that.
+    """
+    wired["units"].append(_unit("U1"))
+    first = _cancel()
+    assert first["stock_release_failed"] is False
+    doc = wired["orders"].orders["ORD-1"]
+    assert doc["cancel_stock_release_failed"] is False
+    assert doc["loyalty_reversal_failed"] is False
+    assert "cancel_stock_released" in doc          # the stamp DID land
+
+    # A straggler write lands after the cancel: the unit is SOLD again.
+    wired["units"][0]["status"] = "SOLD"
+    wired["units"][0]["order_id"] = "ORD-1"
+    assert wired["stock"].count_sold_units_for_order("ORD-1") == 1
+
+    retry = _cancel()
+
+    assert retry["message"] == "Cancel undo re-run"
+    assert retry["stock_units_released"] == 1
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+# =========================================================================== #
+# THE CHAIR'S REPRODUCTION (P0). MF4's own repair machinery double-applied
+# money: RET-1 reverses correctly, _clear_reversal_incomplete blips, and RET-2
+# -- a legitimate second partial return -- hits the reversal_incomplete branch
+# BEFORE it can answer already_reversed and RE-APPLIES the same deltas.
+# Observed on round 3: 240 points clawed on a 120-point order and
+# lifetime_earned driven NEGATIVE.
+#
+# Failure INJECTION, not reversion: the chair's point is that mutation testing
+# reverts fixes but does not inject transient faults, and this class of bug only
+# appears under one.
+# =========================================================================== #
+
+
+def test_two_partial_returns_apply_exactly_one_reversal_despite_a_clear_blip(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 120))
+    wired["accounts"].acct.update({"balance_points": 500, "lifetime_earned": 120})
+
+    # The flag-clear write fails EXACTLY ONCE, then recovers.
+    real_update_one = wired["txns"].collection.update_one
+    calls = {"n": 0}
+
+    def _flaky_update_one(flt, upd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient blip clearing the flag")
+        return real_update_one(flt, upd)
+
+    wired["txns"].collection.update_one = _flaky_update_one
+    try:
+        first = L.reverse_for_return("RET-1", "ORD-1", "C1")
+        second = L.reverse_for_return("RET-2", "ORD-1", "C1")
+    finally:
+        wired["txns"].collection.update_one = real_update_one
+
+    assert first["ok"] is True and first["earned_clawed"] == 120
+    # The stale flag must NOT authorise a re-application.
+    assert second["ok"] is True
+    assert second.get("repaired") is not True
+
+    # THE ASSERTION THAT MATTERS: exactly ONE balance movement, ever.
+    assert len(wired["accounts"].adjustments) == 1
+    assert wired["accounts"].acct["balance_points"] == 380   # 500 - 120, once
+    assert wired["accounts"].acct["lifetime_earned"] == 0    # never negative
+
+
+def test_repair_refuses_to_underflow(wired):
+    """The repair had no underflow guard, so it would drive the balance
+    negative on a customer who has since spent the points."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    wired["accounts"].adjust_balance = lambda *a, **k: dict(wired["accounts"].acct)
+
+    first = L.reverse_for_cancel("ORD-1", "C1")
+    assert first["ok"] is False          # money did not move; marker flagged
+
+    # The customer spends elsewhere before anyone retries.
+    wired["accounts"].acct["balance_points"] = 10
+    del wired["accounts"].adjust_balance          # repo works again
+
+    second = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert second["ok"] is False
+    assert second["reason"] == "balance_underflow"
+    assert wired["accounts"].acct["balance_points"] == 10    # never negative
+    assert wired["txns"].rows[-1]["reversal_incomplete"] is True   # still open
+
+
+def test_repair_applies_the_tier_rule_of_the_flow_that_wrote_the_marker(wired):
+    """A repaired CANCEL must move the tier (must-fix 9 on the recovery path);
+    the repair used to omit new_tier entirely."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 6000))
+    wired["accounts"].acct.update(
+        {"balance_points": 6000, "lifetime_earned": 6000, "tier": "GOLD"}
+    )
+    wired["accounts"].adjust_balance = lambda *a, **k: dict(wired["accounts"].acct)
+
+    assert L.reverse_for_cancel("ORD-1", "C1")["ok"] is False
+    assert wired["txns"].rows[-1]["recompute_tier"] is True
+
+    del wired["accounts"].adjust_balance
+    repaired = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert repaired["ok"] is True and repaired.get("repaired") is True
+    assert wired["accounts"].acct["lifetime_earned"] == 0
+    assert wired["accounts"].tiers_set == ["BRONZE"]      # tier came down too
+
+
+def test_repair_of_a_return_marker_does_not_touch_the_tier(wired):
+    """...and the mirror: a RETURN marker must not move the tier on repair."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 6000))
+    wired["accounts"].acct.update(
+        {"balance_points": 6000, "lifetime_earned": 6000, "tier": "GOLD"}
+    )
+    wired["accounts"].adjust_balance = lambda *a, **k: dict(wired["accounts"].acct)
+
+    assert L.reverse_for_return("RET-1", "ORD-1", "C1")["ok"] is False
+    assert wired["txns"].rows[-1]["recompute_tier"] is False
+
+    del wired["accounts"].adjust_balance
+    repaired = L.reverse_for_return("RET-1", "ORD-1", "C1")
+
+    assert repaired["ok"] is True and repaired.get("repaired") is True
+    assert wired["accounts"].tiers_set == []
+    assert wired["accounts"].acct["tier"] == "GOLD"
+
+
+# =========================================================================== #
+# P0-ENABLER: a LANDED write whose read-back failed must read as UNKNOWN, not
+# as "did not land" -- otherwise it flags the marker and authorises a repair
+# that re-applies money which already moved.
+# =========================================================================== #
+
+
+def test_unverifiable_write_does_not_authorise_a_repair(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    # adjust_balance applies the money but its read-back fails -> returns None,
+    # exactly what BaseRepository.find_by_id does when it swallows a read error.
+    def _applies_but_cannot_read_back(cid, delta_points=0, delta_lifetime_earned=0,
+                                      delta_lifetime_redeemed=0, new_tier=None):
+        wired["accounts"].acct["balance_points"] += delta_points
+        wired["accounts"].acct["lifetime_earned"] += delta_lifetime_earned
+        wired["accounts"].acct["lifetime_redeemed"] += delta_lifetime_redeemed
+        wired["accounts"].adjustments.append({"dp": delta_points})
+        return None
+
+    wired["accounts"].adjust_balance = _applies_but_cannot_read_back
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is False and res["reason"] == "verification_unknown"
+    # The money DID move once.
+    assert wired["accounts"].acct["balance_points"] == 0
+    # The repair door is CLOSED, so a retry cannot double-apply it.
+    marker = wired["txns"].rows[-1]
+    assert marker["reversal_incomplete"] is False
+    assert marker["reversal_verification"] == "unknown"
+
+    del wired["accounts"].adjust_balance
+    again = L.reverse_for_cancel("ORD-1", "C1")
+    assert again.get("already_reversed") is True
+    assert len(wired["accounts"].adjustments) == 1        # still exactly one
+    assert wired["accounts"].acct["balance_points"] == 0

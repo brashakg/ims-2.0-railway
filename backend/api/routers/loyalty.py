@@ -1154,9 +1154,18 @@ def _reversal_landed(
     earn/redeem landed between our read and our write), which we cannot
     distinguish from here: we accept it and log, because the alternative is
     false-flagging a reversal that did apply.
+
+    Returns True (landed) / False (definitely did not) / None (UNKNOWN).
+
+    None is not a formality. adjust_balance does update_one(...) and then
+    `return self.find_by_id(...)`, and BaseRepository.find_by_id swallows a read
+    error to None -- so a SUCCESSFUL write whose read-back merely failed comes
+    back as None. Treating that as "did not land" would flag the marker
+    incomplete and authorise a REPAIR that re-applies money which already moved.
+    Unknown must never authorise a repair.
     """
     if not isinstance(updated, dict):
-        return False
+        return None
     exp_balance = int(before.get("balance_points", 0)) + net_delta
     exp_earned = int(before.get("lifetime_earned", 0)) - earned
     exp_redeemed = int(before.get("lifetime_redeemed", 0)) - redeemed
@@ -1183,6 +1192,110 @@ def _reversal_landed(
         got_balance, got_earned, got_redeemed,
     )
     return True
+
+
+def _read_order_ledger(txns, customer_id: str, order_id: str, account: Dict[str, Any]):
+    """Every ledger row for (customer, order), plus whether the read SUCCEEDED.
+
+    Two problems with `find_for_customer(customer_id, limit=1000)`:
+      * it swallows every driver error and returns [], so a read blip is
+        indistinguishable from "this order earned nothing" -- and the reversal
+        then reports ok=True / clawed 0 / no failure flag;
+      * the hard limit=1000 silently truncates a long-lived customer's ledger,
+        so an old order's EARN row can fall off the end and never be clawed.
+
+    Preferred path is a direct order-scoped query through the collection: it
+    cannot truncate, and a driver error RAISES so we can report it. Falls back
+    to the repo method, where an empty ledger for an account that has earned in
+    its lifetime is treated as a failed read rather than an empty one.
+    """
+    coll = getattr(txns, "collection", None)
+    if coll is not None:
+        try:
+            rows = list(coll.find({"customer_id": customer_id, "order_id": order_id}))
+            return rows, True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("order-scoped ledger read failed: %s", exc)
+            return [], False
+    try:
+        rows = txns.find_for_customer(customer_id, limit=1000)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ledger read raised: %s", exc)
+        return [], False
+    if not rows and int(account.get("lifetime_earned", 0) or 0) > 0:
+        # The account has demonstrably earned before, so an empty ledger is a
+        # swallowed read error, not an empty history.
+        return [], False
+    return rows, True
+
+
+def _apply_reversal_balance(
+    accounts,
+    customer_id: str,
+    net_delta: int,
+    earned: int,
+    redeemed: int,
+    new_tier: Optional[str],
+):
+    """Apply the reversal deltas. Returns (status, updated_doc).
+
+    status: "ok" | "underflow" | "failed"
+
+    A NEGATIVE net_delta (the clawback) goes through a GUARDED
+    find_one_and_update whose filter requires the balance to still cover it --
+    the same guard-in-the-filter shape try_debit already uses. The Python
+    underflow check earlier is advisory: a concurrent redeem at another store
+    can land between the read and the write and drive balance_points NEGATIVE.
+    "No document matched" IS the underflow escalation, and it is definitive
+    rather than inferred.
+
+    Anything else falls back to adjust_balance, whose result the caller
+    verifies (it can never raise, so its return value proves nothing on its own).
+    """
+    coll = getattr(accounts, "collection", None)
+    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
+    if net_delta < 0 and callable(updater):
+        inc: Dict[str, Any] = {"balance_points": net_delta}
+        if earned:
+            inc["lifetime_earned"] = -earned
+        if redeemed:
+            inc["lifetime_redeemed"] = -redeemed
+        set_block: Dict[str, Any] = {"updated_at": datetime.now()}
+        if new_tier:
+            set_block["tier"] = new_tier
+        try:
+            doc = updater(
+                {
+                    "customer_id": customer_id,
+                    "balance_points": {"$gte": abs(int(net_delta))},
+                },
+                {"$inc": inc, "$set": set_block},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("guarded reversal debit failed: %s", exc)
+            return "failed", None
+        if doc is None:
+            return "underflow", None
+        # find_one_and_update returns the PRE-image; report the post-state. The
+        # filter matching IS the proof the write applied, so this path needs no
+        # further verification.
+        after = dict(doc)
+        after["balance_points"] = int(doc.get("balance_points", 0)) + net_delta
+        after["lifetime_earned"] = int(doc.get("lifetime_earned", 0)) - earned
+        after["lifetime_redeemed"] = int(doc.get("lifetime_redeemed", 0)) - redeemed
+        return "ok_guarded", after
+    try:
+        updated = accounts.adjust_balance(
+            customer_id,
+            delta_points=net_delta,
+            delta_lifetime_earned=-earned,
+            delta_lifetime_redeemed=-redeemed,
+            new_tier=new_tier,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("adjust_balance raised: %s", exc)
+        return "failed", None
+    return "ok", updated
 
 
 def _reverse_order_loyalty(
@@ -1231,10 +1344,21 @@ def _reverse_order_loyalty(
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
         return {"ok": False, "reason": "loyalty_db_unavailable"}
-    try:
-        ledger = txns.find_for_customer(customer_id, limit=1000)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s ledger read failed: %s", reason_prefix, exc)
+    account = accounts.find_or_create(customer_id)
+    ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
+    if not read_ok:
+        # DISTINGUISHABLE from "no loyalty rows". find_for_customer swallows
+        # every driver error and returns [], so a transient read blip used to
+        # look like an order that simply earned nothing: ok=True, clawed 0,
+        # loyalty_reversal_failed=False -- leaving the customer holding
+        # redeemable points on a cancelled order with no flag and no retry
+        # signal. That is the exact farm-and-cancel hole this reversal exists
+        # to close, so it must fail LOUD.
+        logger.error(
+            "%s ledger read FAILED for cust=%s order=%s -- refusing to reverse "
+            "on an unreadable ledger",
+            reason_prefix, customer_id, order_id,
+        )
         return {"ok": False, "reason": "ledger_read_failed"}
 
     # Idempotency. A prior reversal row short-circuits -- EXCEPT one flagged
@@ -1282,7 +1406,8 @@ def _reverse_order_loyalty(
     if earned <= 0 and redeemed <= 0:
         return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
 
-    account = accounts.find_or_create(customer_id)
+    # (account was read above, before the ledger, so the read-failure heuristic
+    # could compare the ledger against lifetime_earned.)
     balance_before = int(account.get("balance_points", 0))
     net_delta = redeemed - earned  # claw earned, restore redeemed
     if balance_before + net_delta < 0:
@@ -1332,6 +1457,26 @@ def _reverse_order_loyalty(
         # exact $inc without re-deriving it from a ledger that has since moved.
         "reversed_earn_points": earned,
         "reversed_redeem_points": redeemed,
+        # The account state this reversal is trying to produce. A repair checks
+        # it FIRST: clearing the incomplete flag is itself fail-soft, so a
+        # marker can be left flagged even though the money DID land, and a later
+        # repair would then re-apply the deltas and double-claw. Comparing
+        # against the intended end-state makes the repair a no-op in that case.
+        "expected_balance_after": balance_before + net_delta,
+        "expected_lifetime_earned_after": int(account.get("lifetime_earned", 0)) - earned,
+        "expected_lifetime_redeemed_after": (
+            int(account.get("lifetime_redeemed", 0)) - redeemed
+        ),
+        # The PRE-image too, so a repair can tell "money already moved" from
+        # "money never moved" even if the expected-after fields are ever absent.
+        "balance_before": balance_before,
+        "lifetime_earned_before": int(account.get("lifetime_earned", 0)),
+        "lifetime_redeemed_before": int(account.get("lifetime_redeemed", 0)),
+        # Whether THIS flow owns the tier. Carried so a repair applies the same
+        # tier rule the primary path did -- otherwise a repaired cancel drops
+        # lifetime_earned while leaving GOLD in place forever (must-fix 9 all
+        # over again, on the recovery path).
+        "recompute_tier": bool(recompute_tier),
         "reason": (
             f"{reason_prefix}: claw {earned} earned + restore {redeemed} "
             f"redeemed on order {order_id}"
@@ -1381,26 +1526,35 @@ def _reverse_order_loyalty(
         except Exception as exc:  # noqa: BLE001 -- tier math must never block the claw
             logger.warning("%s tier recompute skipped: %s", reason_prefix, exc)
 
-    try:
-        updated = accounts.adjust_balance(
-            customer_id,
-            delta_points=net_delta,
-            delta_lifetime_earned=-earned,
-            delta_lifetime_redeemed=-redeemed,
-            new_tier=new_tier,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _flag_reversal_incomplete(txns, txn_id, str(exc))
+    status, updated = _apply_reversal_balance(
+        accounts, customer_id, net_delta, earned, redeemed, new_tier
+    )
+    if status == "underflow":
+        # A concurrent redeem at another store landed between our read and our
+        # write. The guarded filter refused rather than driving the balance
+        # negative; the marker stays flagged so a retry can finish it.
+        _flag_reversal_incomplete(txns, txn_id, "balance underflow at write time")
         logger.error(
-            "%s balance update FAILED (marker %s written) cust=%s: %s",
-            reason_prefix, txn_id, customer_id, exc,
+            "%s BALANCE UNDERFLOW AT WRITE (marker %s) cust=%s net_delta=%s",
+            reason_prefix, txn_id, customer_id, net_delta,
         )
-        return {"ok": False, "reason": "balance_update_failed", "error": str(exc)}
+        return {"ok": False, "reason": "balance_underflow", "net_delta": net_delta}
+    if status == "failed":
+        _flag_reversal_incomplete(txns, txn_id, "balance write raised")
+        logger.error(
+            "%s balance update FAILED (marker %s written) cust=%s",
+            reason_prefix, txn_id, customer_id,
+        )
+        return {"ok": False, "reason": "balance_update_failed"}
 
-    # VERIFY (panel must-fix 4). adjust_balance cannot raise -- it swallows every
-    # exception and returns the account doc -- so the except above is not enough
-    # on its own and the old code reported ok=True on a silently failed $inc.
-    if not _reversal_landed(updated, account, net_delta, earned, redeemed):
+    # VERIFY (panel must-fix 4) -- only needed on the UNGUARDED fallback.
+    # adjust_balance cannot raise (it swallows every exception and returns the
+    # account doc), so "no exception" proved nothing and a silently failed $inc
+    # used to report ok=True. The guarded path above is self-proving.
+    landed = True if status == "ok_guarded" else _reversal_landed(
+        updated, account, net_delta, earned, redeemed
+    )
+    if landed is False:
         _flag_reversal_incomplete(txns, txn_id, "balance deltas did not apply")
         logger.error(
             "%s balance move DID NOT APPLY (marker %s written) cust=%s -- "
@@ -1408,6 +1562,18 @@ def _reverse_order_loyalty(
             reason_prefix, txn_id, customer_id,
         )
         return {"ok": False, "reason": "balance_update_failed"}
+    if landed is None:
+        # The write may well have succeeded -- only the read-back failed. We
+        # must NOT leave the marker repairable (that re-applies money which
+        # probably already moved) and we must NOT claim success. Close the
+        # repair door, surface it for a human.
+        _clear_reversal_incomplete(txns, txn_id, verification="unknown")
+        logger.error(
+            "%s balance move UNVERIFIABLE (marker %s) cust=%s -- the write may "
+            "have landed; repair is DISABLED for this row. Reconcile by hand.",
+            reason_prefix, txn_id, customer_id,
+        )
+        return {"ok": False, "reason": "verification_unknown", "txn_id": txn_id}
 
     _clear_reversal_incomplete(txns, txn_id)
     return {
@@ -1442,14 +1608,30 @@ def _flag_reversal_incomplete(txns, txn_id: str, why: str) -> None:
         logger.error("could not flag reversal %s incomplete: %s", txn_id, exc)
 
 
-def _clear_reversal_incomplete(txns, txn_id: str) -> None:
-    """Mark the reversal COMPLETE once the balance move is verified."""
+def _clear_reversal_incomplete(txns, txn_id: str, verification: str = "verified") -> None:
+    """Close the repair door on this reversal.
+
+    `verification="verified"` -- the balance move was proven to land.
+    `verification="unknown"`  -- we could not prove it either way, so repair is
+    disabled (re-applying money that already moved is far worse than leaving a
+    row for a human) and the row is marked for reconciliation.
+
+    Fail-soft, and DELIBERATELY so: if this write is lost the marker stays
+    reversal_incomplete=True, which is exactly why _repair_incomplete_reversal
+    re-reads the account and no-ops when the money already moved.
+    """
     coll = _marker_coll(txns)
     if coll is None:
         return
     try:
         coll.update_one(
-            {"txn_id": txn_id}, {"$set": {"reversal_incomplete": False}}
+            {"txn_id": txn_id},
+            {
+                "$set": {
+                    "reversal_incomplete": False,
+                    "reversal_verification": verification,
+                }
+            },
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("could not clear reversal flag %s: %s", txn_id, exc)
@@ -1489,24 +1671,86 @@ def _repair_incomplete_reversal(accounts, txns, row: Dict[str, Any]):
     net_delta = int(row.get("points") or 0)
     earned = int(row.get("reversed_earn_points") or 0)
     redeemed = int(row.get("reversed_redeem_points") or 0)
+    before = accounts.find_or_create(customer_id)
+
+    # ALREADY-LANDED CHECK. Clearing the incomplete flag is fail-soft, so a
+    # marker can be left flagged even though the money moved. Without this the
+    # repair would re-apply the deltas and DOUBLE-CLAW -- the failure mode the
+    # whole repair path exists to prevent. Only re-apply when the account is
+    # demonstrably NOT already at the intended end state.
+    want_balance = row.get("expected_balance_after")
+    if want_balance is not None:
+        already = (
+            int(before.get("balance_points", 0)) == int(want_balance)
+            and int(before.get("lifetime_earned", 0))
+            == int(row.get("expected_lifetime_earned_after", -1))
+            and int(before.get("lifetime_redeemed", 0))
+            == int(row.get("expected_lifetime_redeemed_after", -1))
+        )
+        if already:
+            logger.info(
+                "loyalty reversal %s was already applied; clearing the stale "
+                "incomplete flag WITHOUT re-applying", txn_id,
+            )
+            return {
+                "ok": True,
+                "already_reversed": True,
+                "flag_cleared_only": True,
+                "txn_id": txn_id,
+            }
+
+    # UNDERFLOW GUARD, same as the primary path. The repair had none, so it
+    # would happily drive balance_points negative on a customer who has since
+    # spent the points.
+    balance_now = int(before.get("balance_points", 0))
+    if balance_now + net_delta < 0:
+        _flag_reversal_incomplete(txns, txn_id, "repair would underflow")
+        logger.error(
+            "loyalty reversal repair %s would UNDERFLOW cust=%s balance=%s "
+            "net_delta=%s -- refusing",
+            txn_id, customer_id, balance_now, net_delta,
+        )
+        return {
+            "ok": False,
+            "reason": "balance_underflow",
+            "repair": True,
+            "balance": balance_now,
+            "net_delta": net_delta,
+        }
+
+    # TIER, same rule the primary path used for THIS flow (carried on the
+    # marker). Without it a repaired cancel drops lifetime_earned while leaving
+    # the customer on a tier they no longer hold.
+    repair_tier = None
+    if row.get("recompute_tier"):
+        try:
+            settings = _settings_safe()
+            lifetime_after = max(0, int(before.get("lifetime_earned", 0)) - earned)
+            recomputed = compute_tier(lifetime_after, settings)
+            if recomputed != before.get("tier"):
+                repair_tier = recomputed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("repair tier recompute skipped: %s", exc)
+
     logger.warning(
         "REPAIRING incomplete loyalty reversal %s (cust=%s order=%s delta=%s)",
         txn_id, customer_id, order_id, net_delta,
     )
-    before = accounts.find_or_create(customer_id)
-    try:
-        updated = accounts.adjust_balance(
-            customer_id,
-            delta_points=net_delta,
-            delta_lifetime_earned=-earned,
-            delta_lifetime_redeemed=-redeemed,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _flag_reversal_incomplete(txns, txn_id, str(exc))
+    status, updated = _apply_reversal_balance(
+        accounts, customer_id, net_delta, earned, redeemed, repair_tier
+    )
+    if status in ("failed", "underflow"):
+        _flag_reversal_incomplete(txns, txn_id, "repair " + status)
         return {"ok": False, "reason": "balance_update_failed", "repair": True}
-    if not _reversal_landed(updated, before, net_delta, earned, redeemed):
+    repair_landed = True if status == "ok_guarded" else _reversal_landed(
+        updated, before, net_delta, earned, redeemed
+    )
+    if repair_landed is False:
         _flag_reversal_incomplete(txns, txn_id, "repair deltas did not apply")
         return {"ok": False, "reason": "balance_update_failed", "repair": True}
+    if repair_landed is None:
+        _clear_reversal_incomplete(txns, txn_id, verification="unknown")
+        return {"ok": False, "reason": "verification_unknown", "repair": True}
     return {
         "ok": True,
         "repaired": True,
