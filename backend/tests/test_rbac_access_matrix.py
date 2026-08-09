@@ -1608,3 +1608,273 @@ class TestFinanceCrossStoreIDOR:
             assert r.status_code not in (401, 403), (
                 f"Own-store finance request on {path} should pass, got {r.status_code}"
             )
+
+
+# ===========================================================================
+# CLI-9 - lens-power combos: the malformed-role-gate regression
+# ===========================================================================
+# The two WRITE endpoints were gated with ``require_roles(_CLINICAL_ROLES)``
+# (the tuple passed as ONE positional arg). require_roles does
+# ``allowed = set(allowed_roles)``, so the gate's allow-set became
+# ``{("ADMIN", "STORE_MANAGER", "OPTOMETRIST")}`` -- a set holding one TUPLE,
+# which no role STRING can ever intersect. Every caller was 403'd except
+# SUPERADMIN (hardcoded bypass). The bug fails CLOSED, so it is invisible until
+# somebody actually needs the endpoint. These tests lock the fixed behaviour
+# through the REAL app + the real RBAC middleware.
+
+
+class _FakeComboCol:
+    """In-memory stand-in for the ``lens_power_combos`` Mongo collection.
+
+    Only the three operations the router uses (insert_one / find_one /
+    delete_one) -- enough to prove a real 200, not merely "the gate let it by".
+    """
+
+    def __init__(self, docs=None):
+        self.docs = [dict(d) for d in (docs or [])]
+        self.inserted = []
+
+    def insert_one(self, doc):
+        self.inserted.append(dict(doc))
+        self.docs.append(dict(doc))
+        return type("_Ins", (), {"inserted_id": "fake"})()
+
+    def find_one(self, flt, _projection=None):
+        for d in self.docs:
+            if d.get("combo_id") == flt.get("combo_id"):
+                return dict(d)
+        return None
+
+    def delete_one(self, flt):
+        before = len(self.docs)
+        self.docs = [
+            d for d in self.docs if d.get("combo_id") != flt.get("combo_id")
+        ]
+        return type("_Del", (), {"deleted_count": before - len(self.docs)})()
+
+
+_COMBOS_PATH = "/api/v1/clinical/lens-power-combos"
+_COMBO_BODY = {
+    "name": "Myopia mild SVS",
+    "right_eye": {"sph": "-1.00", "cyl": "0"},
+    "left_eye": {"sph": "-1.00", "cyl": "0"},
+}
+
+
+def _stub_combo_col(monkeypatch, col):
+    """Point the router's fail-soft collection accessor at ``col``."""
+    from api.routers import clinical
+
+    monkeypatch.setattr(clinical, "_get_lens_power_combos_col", lambda: col)
+    return col
+
+
+def _combo_doc(combo_id, created_by, store_id="BV-MATRIX-01"):
+    return {
+        "combo_id": combo_id,
+        "store_id": store_id,
+        "created_by": created_by,
+        "name": "Shared template",
+        "right_eye": {"sph": "-1.00", "cyl": "0"},
+        "left_eye": {"sph": "-1.00", "cyl": "0"},
+    }
+
+
+class TestLensPowerComboCreateGate:
+    """POST /clinical/lens-power-combos -- clinical roles in, everyone else out."""
+
+    @pytest.mark.parametrize("role", ["OPTOMETRIST", "STORE_MANAGER", "ADMIN"])
+    def test_clinical_role_can_create(self, matrix_client, monkeypatch, role):
+        col = _stub_combo_col(monkeypatch, _FakeComboCol())
+        token = _mint_token([role], uid="u-" + role.lower())
+        resp = matrix_client.post(
+            _COMBOS_PATH,
+            headers={"Authorization": "Bearer " + token},
+            json=_COMBO_BODY,
+        )
+        assert resp.status_code == 200, (
+            f"{role} must be able to save a lens-power combo, "
+            f"got {resp.status_code}: {resp.text[:300]}"
+        )
+        # Really persisted -- not just "the gate let the request through".
+        assert len(col.inserted) == 1
+        body = resp.json()
+        assert body["name"] == "Myopia mild SVS"
+        assert body["created_by"] == "u-" + role.lower()
+        assert body["store_id"] == "BV-MATRIX-01"
+
+    @pytest.mark.parametrize(
+        "role", ["SALES_STAFF", "CASHIER", "SALES_CASHIER", "WORKSHOP_STAFF"]
+    )
+    def test_non_clinical_role_is_forbidden(self, matrix_client, monkeypatch, role):
+        col = _stub_combo_col(monkeypatch, _FakeComboCol())
+        resp = matrix_client.post(
+            _COMBOS_PATH, headers=ALL_ROLE_HEADERS[role], json=_COMBO_BODY
+        )
+        assert_middleware_403(resp, "POST", _COMBOS_PATH)
+        # Blocked BEFORE the handler -- nothing reached the collection.
+        assert col.inserted == []
+
+    def test_no_token_is_401(self, matrix_client):
+        resp = matrix_client.post(_COMBOS_PATH, json=_COMBO_BODY)
+        assert resp.status_code == 401, resp.text
+
+
+class TestLensPowerComboDeleteGate:
+    """DELETE is deliberately narrower than POST: a combo is a SHARED store
+    template, so the role gate is only the first half -- store scope (404) and
+    creator-or-manager ownership (403) are enforced per-object in the handler.
+    """
+
+    def test_creator_may_delete_own_combo(self, matrix_client, monkeypatch):
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        token = _mint_token(["OPTOMETRIST"], uid="opto-a")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": "c-1"}
+        assert col.docs == []
+
+    def test_optometrist_may_not_delete_a_colleagues_combo(
+        self, matrix_client, monkeypatch
+    ):
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        token = _mint_token(["OPTOMETRIST"], uid="opto-b")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 403, resp.text
+        assert "creator or a manager" in resp.json()["detail"]
+        assert len(col.docs) == 1, "a colleague's template must survive"
+
+    def test_store_manager_may_delete_any_combo_in_their_store(
+        self, matrix_client, monkeypatch
+    ):
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        token = _mint_token(["STORE_MANAGER"], uid="mgr-1")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, resp.text
+        assert col.docs == []
+
+    def test_other_store_combo_is_404_not_403(self, matrix_client, monkeypatch):
+        # Existence-hiding: a store-scoped caller must not be able to probe for
+        # another store's combo by guessing its id.
+        col = _stub_combo_col(
+            monkeypatch,
+            _FakeComboCol([_combo_doc("c-1", "opto-x", store_id="BV-OTHER-01")]),
+        )
+        token = _mint_token(["STORE_MANAGER"], uid="mgr-1", store_id="BV-MATRIX-01")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 404, resp.text
+        assert len(col.docs) == 1, "another store's template must survive"
+
+    def test_missing_combo_is_404(self, matrix_client, monkeypatch):
+        _stub_combo_col(monkeypatch, _FakeComboCol())
+        token = _mint_token(["OPTOMETRIST"], uid="opto-a")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/nope", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 404, resp.text
+
+    @pytest.mark.parametrize("role", ["SALES_STAFF", "CASHIER"])
+    def test_non_clinical_role_is_forbidden(self, matrix_client, monkeypatch, role):
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers=ALL_ROLE_HEADERS[role]
+        )
+        assert_middleware_403(resp, "DELETE", _COMBOS_PATH + "/c-1")
+        assert len(col.docs) == 1
+
+
+class TestNoMalformedRoleGateAnywhere:
+    """Tripwire for the whole BUG CLASS, not just the two routes that had it.
+
+    ``require_roles(*roles)`` collapses its varargs into ``set(allowed_roles)``.
+    Hand it a tuple/list/set instead of splatted strings and the allow-set holds
+    a COLLECTION, which no role string can ever match -- a silent, fail-CLOSED
+    403 for everyone but SUPERADMIN. Grep cannot see it once the roles live in a
+    module constant, so this walks every dependency of every route on the REAL
+    app and asserts each require_roles allow-set contains only strings.
+
+    (Verified to have teeth: on the pre-fix tree it reported exactly the two
+    /clinical/lens-power-combos routes.)
+    """
+
+    @staticmethod
+    def _malformed_gates(app):
+        found = []
+        for route in app.routes:
+            dependant = getattr(route, "dependant", None)
+            if dependant is None:
+                continue
+            stack = [dependant]
+            while stack:
+                node = stack.pop()
+                call = getattr(node, "call", None)
+                qualname = getattr(call, "__qualname__", "") if call else ""
+                if qualname.startswith("require_roles.<locals>"):
+                    for cell in getattr(call, "__closure__", None) or ():
+                        value = cell.cell_contents
+                        if isinstance(value, (set, frozenset)) and any(
+                            not isinstance(item, str) for item in value
+                        ):
+                            found.append(
+                                (
+                                    sorted(getattr(route, "methods", None) or []),
+                                    getattr(route, "path", "?"),
+                                    value,
+                                )
+                            )
+                stack.extend(getattr(node, "dependencies", None) or [])
+        return found
+
+    def test_every_require_roles_gate_holds_only_role_strings(self):
+        from api.main import app as _app
+
+        malformed = self._malformed_gates(_app)
+        assert malformed == [], (
+            "require_roles() was handed a collection instead of splatted role "
+            "strings -- these routes 403 EVERYONE except SUPERADMIN:\n  "
+            + "\n  ".join(f"{m} {p} -> {v!r}" for m, p, v in malformed)
+        )
+
+    def test_the_tripwire_can_actually_see_the_gates(self):
+        # Guard against the introspection silently matching nothing (e.g. if
+        # require_roles is ever renamed), which would make the test above pass
+        # vacuously forever.
+        from api.main import app as _app
+        from api.routers.auth import require_roles
+
+        probe = require_roles("ADMIN")
+        assert probe.__qualname__.startswith("require_roles.<locals>"), (
+            "require_roles' inner dependency was renamed -- update the "
+            "malformed-gate tripwire's qualname match."
+        )
+        gates = 0
+        for route in _app.routes:
+            dependant = getattr(route, "dependant", None)
+            if dependant is None:
+                continue
+            stack = [dependant]
+            while stack:
+                node = stack.pop()
+                call = getattr(node, "call", None)
+                if call is not None and getattr(
+                    call, "__qualname__", ""
+                ).startswith("require_roles.<locals>"):
+                    gates += 1
+                stack.extend(getattr(node, "dependencies", None) or [])
+        assert gates > 100, f"expected hundreds of require_roles gates, saw {gates}"

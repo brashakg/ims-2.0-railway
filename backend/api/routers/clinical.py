@@ -2396,7 +2396,7 @@ async def list_lens_power_combos(
 async def create_lens_power_combo(
     payload: LensPowerComboCreate,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Save a named lens-power combination for reuse.
 
@@ -2447,16 +2447,52 @@ async def create_lens_power_combo(
 @router.delete("/lens-power-combos/{combo_id}")
 async def delete_lens_power_combo(
     combo_id: str,
-    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Delete a named lens-power combo.
 
-    Only the creator or a manager/admin may delete. Fail-soft 404 if the
-    combo doesn't exist (idempotent).
+    Only the creator or a manager/admin may delete -- and only within their own
+    store. Fail-soft 404 if the combo doesn't exist (idempotent).
+
+    DELETE is deliberately NARROWER than the create gate even though both share
+    _CLINICAL_ROLES: a combo is a SHARED store template, so one optometrist must
+    not be able to bin a colleague's (or another store's) template. The role
+    gate admits the clinical roles; these per-OBJECT checks -- store scope, then
+    ownership -- are the data-level half the middleware never evaluates:
+
+      * store scope  -> 404 (never 403), same existence-hiding posture as
+        _store_scope_or_404, so an out-of-scope caller cannot even probe for the
+        combo's existence by id.
+      * ownership    -> OPTOMETRIST may delete only combos they created;
+        STORE_MANAGER / ADMIN / SUPERADMIN may delete any in-scope combo (they
+        own the store's shared templates).
+
+    Deleting a combo cannot orphan clinical data: a combo is COPIED into an Rx
+    when applied and nothing stores a combo_id reference, so no prescription or
+    lens spec points back at it.
     """
     col = _get_lens_power_combos_col()
     if col is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        doc = col.find_one({"combo_id": combo_id}, {"_id": 0})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Could not delete combo") from exc
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Combo not found")
+
+    # Per-object store scope first -- 404 hides existence from other stores.
+    _store_scope_or_404(doc, current_user, entity="Combo")
+
+    roles = set(current_user.get("roles") or [])
+    is_manager = bool(roles & {"STORE_MANAGER", "ADMIN", "SUPERADMIN"})
+    if not is_manager and doc.get("created_by") != current_user.get("user_id"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the creator or a manager may delete this combo",
+        )
+
     try:
         result = col.delete_one({"combo_id": combo_id})
     except Exception as exc:
