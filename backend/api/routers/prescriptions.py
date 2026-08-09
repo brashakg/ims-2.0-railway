@@ -1457,10 +1457,49 @@ _PRINT_STYLE = """
 """
 
 
+# Junk tokens that must never reach a patient's Rx card. These are the LITERAL
+# strings you get from stringifying an empty value in Python ("None" -- exactly
+# what the pre-#969 `str(data.right_eye.get("pd", ""))` wrote), in JavaScript
+# ("null" / "undefined"), or from a float NaN ("nan"). They arrive from legacy
+# rows, CSV/Excel imports, integrations and device feeds, so the PRINT path has
+# to defend itself rather than trust the writers upstream.
+_ABSENT_RX_TOKENS = frozenset({"", "none", "null", "undefined", "nan"})
+
+
+def _is_absent_rx_value(value) -> bool:
+    """True when a stored Rx cell carries nothing a patient should be shown.
+
+    CLINICALLY LOAD-BEARING: a genuine 0 / 0.0 / "0" is a REAL prescription
+    value -- a cylinder of 0, an axis of 0 and a prism of 0 each mean
+    something specific -- so this is an explicit emptiness test and NEVER a
+    truthiness test. `if not value` here would silently erase real clinical
+    data from a patient's card, which is worse than printing junk.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        # .strip() catches whitespace-only; .lower() catches "NONE"/"Null".
+        return value.strip().lower() in _ABSENT_RX_TOKENS
+    return False
+
+
 def _cell(value) -> str:
-    """Render a stored Rx cell value, falling back to '-' for None/empty."""
-    if value is None or value == "":
+    """Render a stored Rx cell value, falling back to '-' when absent."""
+    if _is_absent_rx_value(value):
         return "-"
+    return str(value)
+
+
+def _text(value, fallback: str = "-") -> str:
+    """Render a free-text Rx field (lens/coating recommendation, remarks...).
+
+    `prescription.get("lens_recommendation", "N/A")` does NOT protect this: the
+    create path always WRITES the key, with a None value when the optometrist
+    left it blank, so dict.get's default never fires and the card printed the
+    literal "None" to the patient. Route through the same absence check.
+    """
+    if _is_absent_rx_value(value):
+        return fallback
     return str(value)
 
 
@@ -1505,9 +1544,9 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
-            <p><strong>Lens Recommendation:</strong> {prescription.get('lens_recommendation', 'N/A')}</p>
-            <p><strong>Coating:</strong> {prescription.get('coating_recommendation', 'N/A')}</p>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Lens Recommendation:</strong> {_text(prescription.get('lens_recommendation'), 'N/A')}</p>
+            <p><strong>Coating:</strong> {_text(prescription.get('coating_recommendation'), 'N/A')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
@@ -1522,11 +1561,14 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
     `identity_html` prepends the issuing store/entity supplier block."""
     right = prescription.get("cl_right") or {}
     left = prescription.get("cl_left") or {}
-    brand = prescription.get("cl_brand") or "-"
-    series = prescription.get("cl_series") or "-"
-    modality = prescription.get("modality") or "-"
+    brand = _text(prescription.get("cl_brand"))
+    series = _text(prescription.get("cl_series"))
+    modality = _text(prescription.get("modality"))
     color = prescription.get("color")
-    color_row = f"<p><strong>Color:</strong> {color}</p>" if color else ""
+    # `if color` alone let the junk string "None" through as truthy.
+    color_row = (
+        "" if _is_absent_rx_value(color) else f"<p><strong>Color:</strong> {color}</p>"
+    )
     return f"""
         <!DOCTYPE html>
         <html>
@@ -1568,7 +1610,7 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
                     <td>{_cell(left.get('diameter'))}</td>
                 </tr>
             </table>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
