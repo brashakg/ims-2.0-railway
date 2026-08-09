@@ -188,25 +188,64 @@ class _LostReplyColl(_FakeGrnColl):
         return type("R", (), {"matched_count": 0, "modified_count": 0})()
 
 
+class DuplicateKeyError(Exception):
+    """Stand-in for pymongo.errors.DuplicateKeyError.
+
+    The router matches it BY CLASS NAME (no hard pymongo import), exactly as
+    BaseRepository.create does, so this local class exercises the real path."""
+
+
 class _StockRepo:
     """Serialized stock_units stand-in.
 
-    `on_create` fires once BEFORE the very first unit is appended (the tightest
-    race window: claim taken, nothing minted yet). `after_hook` fires once right
-    AFTER row number `after_n` is appended -- used to interleave a takeover from
-    the MIDDLE of a multi-line mint."""
+    Emulates the UNIQUE PARTIAL index on
+    (source_id, grn_line_index, line_unit_seq): a row carrying all three whose
+    key is already present is rejected the way Mongo would reject it. Set
+    `enforce_unique = False` to model a world without the index (sentinels).
 
-    def __init__(self):
+    Hooks, all one-shot:
+      * `on_create`  -- before the very first unit is appended (tightest race
+        window: claim taken, nothing minted yet);
+      * `after_hook` at `after_n` -- right AFTER row N is appended;
+      * `before_hook` at `before_n` -- right BEFORE row N is attempted, i.e.
+        while that insert is IN FLIGHT. This is the one that reproduces a
+        wedged worker whose insert commits after a takeover.
+    """
+
+    def __init__(self, enforce_unique=True):
         self.rows = []
+        self.enforce_unique = enforce_unique
+        self._keys = set()
+        self.rejected = 0
         self.on_create: Optional[Callable[[], None]] = None
         self.after_hook: Optional[Callable[[], None]] = None
         self.after_n = 0
+        self.before_hook: Optional[Callable[[], None]] = None
+        self.before_n = 0
 
-    def create(self, doc):
+    def create(self, doc, *, raise_on_duplicate=False):
         hook = self.on_create
         if hook is not None:
             self.on_create = None
             hook()
+        before = self.before_hook
+        if before is not None:
+            if len(self.rows) + 1 == self.before_n:
+                self.before_hook = None
+                before()
+        key = (
+            doc.get("source_id"),
+            doc.get("grn_line_index"),
+            doc.get("line_unit_seq"),
+        )
+        indexed = self.enforce_unique and all(part is not None for part in key)
+        if indexed and key in self._keys:
+            self.rejected += 1
+            if raise_on_duplicate:
+                raise DuplicateKeyError("E11000 duplicate key: %s" % (key,))
+            return None
+        if indexed:
+            self._keys.add(key)
         row = dict(doc)
         row["stock_id"] = "ST-%d" % (len(self.rows) + 1)
         self.rows.append(row)
@@ -264,11 +303,11 @@ def _aged_lock(extra_seconds=60):
 def wired(monkeypatch):
     """Wire vendors to fake repos; returns (install) -> (grn_repo, stock_repo)."""
 
-    def install(grn_doc, repo_cls=_GrnRepo, coll_cls=None):
+    def install(grn_doc, repo_cls=_GrnRepo, coll_cls=None, enforce_unique=True):
         grn_repo = repo_cls(grn_doc)
         if coll_cls is not None:
             grn_repo.collection = coll_cls(grn_doc)
-        stock_repo = _StockRepo()
+        stock_repo = _StockRepo(enforce_unique=enforce_unique)
         monkeypatch.setattr(vd, "get_grn_repository", lambda: grn_repo)
         monkeypatch.setattr(vd, "get_stock_repository", lambda: stock_repo)
         # No PO repo -> the PO receipt math is skipped (covered elsewhere).
@@ -316,13 +355,32 @@ def test_double_click_accept_mints_stock_exactly_once(wired):
     assert grn_repo.doc["units_added"] == 5
 
 
-def test_race_without_the_claim_would_double_mint(wired, monkeypatch):
-    """Sentinel: neutralise the claim and the SAME interleaving doubles stock.
-
-    Proves the test above is measuring the claim and not some accident of the
-    harness -- and documents exactly what F8 was."""
+def test_race_without_the_claim_is_still_capped_by_the_unique_key(wired, monkeypatch):
+    """Defence in depth: neutralise the CLAIM and the unique
+    (source_id, grn_line_index, line_unit_seq) key alone still holds the line
+    to its accepted quantity -- the second racer's ordinals are rejected."""
     grn_repo, stock_repo = wired(_grn(qty=5))
     # Claim always "wins" == the pre-fix world (no claim at all).
+    monkeypatch.setattr(vd, "_claim_grn_for_accept", lambda *a, **k: "NO-LOCK")
+
+    def _second_click():
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    stock_repo.on_create = _second_click
+    _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert len(stock_repo.rows) == 5
+    assert stock_repo.rejected == 5, "every duplicate ordinal was refused"
+
+
+def test_race_with_neither_the_claim_nor_the_unique_key_double_mints(
+    wired, monkeypatch
+):
+    """Sentinel: with BOTH layers removed the same interleaving doubles stock.
+
+    Proves the tests above measure the guards and not some accident of the
+    harness -- and documents exactly what F8 was."""
+    grn_repo, stock_repo = wired(_grn(qty=5), enforce_unique=False)
     monkeypatch.setattr(vd, "_claim_grn_for_accept", lambda *a, **k: "NO-LOCK")
 
     def _second_click():
@@ -623,9 +681,13 @@ def test_midloop_takeover_with_an_aged_lock_does_not_double_mint(wired, monkeypa
     assert thief["out"]["grn_status"] == "ACCEPTED"
 
 
-def test_midloop_takeover_without_the_heartbeat_would_double_mint(wired, monkeypatch):
-    """Sentinel for MUST-FIX 3: disable the heartbeat and the same interleaving
-    over-mints, exactly as round 1 did."""
+def test_midloop_takeover_without_the_heartbeat_is_still_capped_by_the_unique_key(
+    wired, monkeypatch
+):
+    """Defence in depth: disable the heartbeat and the unique
+    (source_id, grn_line_index, line_unit_seq) index alone still caps the
+    receipt at its accepted quantity -- the woken worker's units collide with
+    the ordinals the takeover already minted and are rejected."""
     grn_repo, stock_repo = wired(_grn_lines([("P1", 4), ("P2", 6), ("P3", 6)]))
     monkeypatch.setattr(vd, "_grn_accept_heartbeat_tick", lambda *a, **k: None)
 
@@ -637,7 +699,27 @@ def test_midloop_takeover_without_the_heartbeat_would_double_mint(wired, monkeyp
     stock_repo.after_n = 6
     _run(vd.accept_grn("GRN-1", _ADMIN))
 
-    assert len(stock_repo.rows) == 20, "unfenced takeover over-mints (round-1 bug)"
+    assert len(stock_repo.rows) == 16
+    assert stock_repo.rejected == 4, "the duplicate ordinals were refused"
+
+
+def test_midloop_takeover_with_neither_guard_would_double_mint(wired, monkeypatch):
+    """Sentinel: with BOTH the heartbeat and the unique key removed, the same
+    interleaving over-mints -- which is exactly what round 1 did."""
+    grn_repo, stock_repo = wired(
+        _grn_lines([("P1", 4), ("P2", 6), ("P3", 6)]), enforce_unique=False
+    )
+    monkeypatch.setattr(vd, "_grn_accept_heartbeat_tick", lambda *a, **k: None)
+
+    def _steal():
+        grn_repo.doc["accept_lock_at"] = _aged_lock()
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    stock_repo.after_hook = _steal
+    stock_repo.after_n = 6
+    _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert len(stock_repo.rows) == 20, "unguarded takeover over-mints"
 
 
 def test_heartbeat_keeps_a_live_accept_from_being_declared_stale(wired, monkeypatch):
@@ -725,3 +807,206 @@ def test_a_stolen_winner_leaves_the_receipt_unclaimable_by_a_third_caller(wired)
     grn_repo.doc["status"] = "PARTIALLY_ACCEPTED"  # the dangerous status
 
     assert vd._claim_grn_for_accept(grn_repo, "GRN-1", "u3") is None
+
+
+# ===========================================================================
+# ROUND 3 -- the last hole: the in-flight insert of a taken-over worker.
+# Closed by a per-unit ordinal (line_unit_seq) plus the UNIQUE PARTIAL index on
+# stock_units {source_id, grn_line_index, line_unit_seq} (connection.py).
+# ===========================================================================
+def test_inflight_insert_after_a_takeover_is_rejected_by_the_unique_key(
+    wired, monkeypatch
+):
+    """The exact residual round 2 disclosed, now closed.
+
+    16 accepted units (P1 x4, P2 x6, P3 x6). The winner is WEDGED with the
+    insert of P2 unit #2 IN FLIGHT: the takeover reads the line count before
+    that insert lands, mints the whole remainder, and only then does the
+    wedged insert commit. Without a unique key it becomes a 17th unit on the
+    shelf. With one it is a DuplicateKeyError -- expected, logged, skipped."""
+    grn_repo, stock_repo = wired(_grn_lines([("P1", 4), ("P2", 6), ("P3", 6)]))
+    monkeypatch.setattr(vd, "_GRN_ACCEPT_HEARTBEAT_SECONDS", 0)
+
+    thief = {}
+
+    def _steal_while_the_insert_is_in_flight():
+        grn_repo.doc["accept_lock_at"] = _aged_lock()
+        thief["out"] = _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    stock_repo.before_hook = _steal_while_the_insert_is_in_flight
+    stock_repo.before_n = 7  # P2 unit #2 -- attempted, then the takeover runs
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert err.value.status_code == 409
+    assert len(stock_repo.rows) == 16, "16 accepted units -> exactly 16 rows"
+    assert stock_repo.rejected == 1, "the in-flight duplicate was refused"
+    assert thief["out"]["grn_status"] == "ACCEPTED"
+
+
+def test_inflight_insert_without_the_unique_key_becomes_a_phantom_unit(
+    wired, monkeypatch
+):
+    """Sentinel proving the index is what closes it: same interleaving, no
+    unique key -> 17 units for a 16-unit delivery."""
+    grn_repo, stock_repo = wired(
+        _grn_lines([("P1", 4), ("P2", 6), ("P3", 6)]), enforce_unique=False
+    )
+    monkeypatch.setattr(vd, "_GRN_ACCEPT_HEARTBEAT_SECONDS", 0)
+
+    def _steal_while_the_insert_is_in_flight():
+        grn_repo.doc["accept_lock_at"] = _aged_lock()
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    stock_repo.before_hook = _steal_while_the_insert_is_in_flight
+    stock_repo.before_n = 7
+
+    with pytest.raises(HTTPException):
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert len(stock_repo.rows) == 17, "one phantom unit without the unique key"
+
+
+def test_ordinals_are_contiguous_per_line_and_never_collide_across_lines(wired):
+    """Each line gets 0..qty-1, keyed per LINE (two lines of the same product
+    must not share a key -- that is what grn_line_index is in the index for)."""
+    _grn_repo, stock_repo = wired(_grn_lines([("P1", 3), ("P1", 2)]))
+    _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    by_line = {}
+    for row in stock_repo.rows:
+        by_line.setdefault(row["grn_line_index"], []).append(row["line_unit_seq"])
+    assert by_line == {0: [0, 1, 2], 1: [0, 1]}
+    assert len(stock_repo.rows) == 5
+    assert stock_repo.rejected == 0
+
+
+def test_a_retry_continues_the_ordinal_sequence_instead_of_restarting(wired):
+    """The ordinal MUST be derived from the already-minted count.
+
+    If a retry restarted at 0 it would collide with the rows already on the
+    shelf and the unique key would reject every unit -- receiving 1 unit
+    instead of N. Here the first attempt dies after 2 of 5 units; the retry
+    must mint ordinals 2,3,4 and end with exactly 5 units, none rejected."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    real_create = stock_repo.create
+    state = {"n": 0}
+
+    def _die_after_two(doc, **kw):
+        state["n"] += 1
+        if state["n"] > 2:
+            raise RuntimeError("worker died")
+        return real_create(doc, **kw)
+
+    stock_repo.create = _die_after_two
+    with pytest.raises(RuntimeError):
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert [r["line_unit_seq"] for r in stock_repo.rows] == [0, 1]
+
+    stock_repo.create = real_create
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert out["units_added"] == 3
+    assert [r["line_unit_seq"] for r in stock_repo.rows] == [0, 1, 2, 3, 4]
+    assert stock_repo.rejected == 0, "a retry must not collide with its own rows"
+
+
+def test_duplicate_rejection_is_not_surfaced_as_an_error(wired):
+    """A DuplicateKeyError from the unique key is the EXPECTED outcome of the
+    race, so the mint helper skips it and returns None -- it never propagates
+    out as a 500."""
+    _repo, stock_repo = wired(_grn(qty=1))
+    doc = {
+        "source_type": "GRN",
+        "source_id": "GRN-1",
+        "product_id": "P1",
+        "grn_line_index": 0,
+        "line_unit_seq": 0,
+    }
+    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is not None
+    # A rival worker already minted this exact ordinal.
+    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is None
+    assert stock_repo.rejected == 1
+    assert len(stock_repo.rows) == 1
+
+
+def test_repo_probe_uses_the_explicit_raise_on_duplicate_path(wired):
+    """BaseRepository.create supports raise_on_duplicate; a minimal mock does
+    not. The probe must pick the explicit path when it is available."""
+    _repo, stock_repo = wired(_grn(qty=1))
+    assert vd._stock_create_raises_on_duplicate(stock_repo) is True
+
+    class _MinimalStock:
+        def create(self, doc):
+            return doc
+
+    assert vd._stock_create_raises_on_duplicate(_MinimalStock()) is False
+
+
+def test_ensure_indexes_registers_the_unique_grn_line_unit_index():
+    """The ordinal is only half the fix -- the DB-level unique key must actually
+    be requested, with all three fields and a partial filter that exempts legacy
+    rows (they carry no line_unit_seq, so the build cannot fail on prod data).
+
+    An index on (source_id, grn_line_index) ALONE would be an outage: the
+    2nd..Nth unit of every multi-quantity line would collide and receiving would
+    silently mint 1 unit instead of N. This test pins the third field."""
+    from database.connection import DatabaseConnection
+
+    requested = []
+
+    class _StockColl:
+        def create_index(self, keys, **kw):
+            requested.append((keys, kw))
+            return "idx"
+
+    class _OtherColl:
+        def create_index(self, _keys, **_kw):
+            return "idx"
+
+    class _DB:
+        def __init__(self):
+            self.stock = _StockColl()
+            self.other = _OtherColl()
+
+        def __getitem__(self, name):
+            return self.stock if name == "stock_units" else self.other
+
+    conn = DatabaseConnection()
+    saved_db, saved_connected = conn._db, conn._connected
+    try:
+        conn._connected = True
+        conn._db = _DB()
+        conn.ensure_indexes()
+    finally:
+        conn._db, conn._connected = saved_db, saved_connected
+
+    match = [
+        (keys, kw)
+        for keys, kw in requested
+        if kw.get("name") == "uniq_grn_line_unit_seq"
+    ]
+    assert len(match) == 1, "the GRN per-unit unique index must be registered"
+    keys, kw = match[0]
+    assert keys == [("source_id", 1), ("grn_line_index", 1), ("line_unit_seq", 1)]
+    assert kw["unique"] is True
+    assert kw["partialFilterExpression"] == {
+        "source_id": {"$exists": True},
+        "grn_line_index": {"$exists": True},
+        "line_unit_seq": {"$exists": True},
+    }
+
+
+def test_non_duplicate_insert_errors_still_propagate(wired):
+    """Only DuplicateKeyError is swallowed -- a real insert failure must still
+    abort the accept (and hand the claim back)."""
+    grn_repo, stock_repo = wired(_grn(qty=2))
+
+    def _boom(_doc, **_kw):
+        raise RuntimeError("stock store down")
+
+    stock_repo.create = _boom
+    with pytest.raises(RuntimeError):
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert grn_repo.doc["accept_lock_token"] is None

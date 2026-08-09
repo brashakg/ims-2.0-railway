@@ -2654,10 +2654,12 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     Counts through the RAW collection when one is available, because
     BaseRepository.count swallows driver errors and returns 0
     (base_repository.py:230-243) -- and a silent 0 here is a licence to mint an
-    entire receipt a second time. There is no unique index behind
-    (source_id, grn_line_index), so this read is the ONLY defence on the re-run
-    paths; a failure must reach the caller, which aborts. Falls back to
-    repo.count only for minimal mocks that expose no collection."""
+    entire receipt a second time. A failure must reach the caller, which aborts.
+    Falls back to repo.count only for minimal mocks that expose no collection.
+
+    This count is ALSO the origin of each unit's `line_unit_seq` ordinal, so it
+    is what makes the unique (source_id, grn_line_index, line_unit_seq) index
+    line up across retries instead of colliding."""
     coll = getattr(stock_repo, "collection", None)
     counter = getattr(coll, "count_documents", None)
     if callable(counter):
@@ -2666,6 +2668,49 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     if callable(repo_count):
         return int(repo_count(flt) or 0)
     raise RuntimeError("stock repository exposes no way to count minted units")
+
+
+def _stock_create_raises_on_duplicate(stock_repo) -> bool:
+    """Does this stock repository's create() accept raise_on_duplicate?
+
+    BaseRepository does (it re-raises DuplicateKeyError instead of swallowing
+    it into a silent None); minimal test/mock repos take only the document.
+    Probed once per accept so a duplicate rejection is reported EXPLICITLY
+    rather than being indistinguishable from a generic insert failure."""
+    try:
+        import inspect
+
+        return "raise_on_duplicate" in inspect.signature(stock_repo.create).parameters
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _grn_mint_unit(stock_repo, doc: dict, raises_on_duplicate: bool):
+    """Insert ONE serialized unit for a GRN line.
+
+    Returns the created row, or None when the unique
+    (source_id, grn_line_index, line_unit_seq) index REJECTED it. That
+    rejection is the EXPECTED outcome of the last remaining race -- an insert
+    that was already in flight inside a worker which got declared stale and
+    taken over, landing after the takeover holder minted the same ordinal. It
+    is the index doing its job, NOT a failure: log it and skip the unit, never
+    surface it as a 500. Any other exception still propagates (the accept then
+    aborts and hands the claim back)."""
+    try:
+        if raises_on_duplicate:
+            return stock_repo.create(doc, raise_on_duplicate=True)
+        return stock_repo.create(doc)
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ != "DuplicateKeyError":
+            raise
+        logger.warning(
+            "[VENDOR] GRN %s line %s unit #%s was already minted by another "
+            "attempt -- the unique key rejected the duplicate, skipping",
+            doc.get("source_id"),
+            doc.get("grn_line_index"),
+            doc.get("line_unit_seq"),
+        )
+        return None
 
 
 def _grn_accept_lock_minutes_left(locked_at) -> Optional[int]:
@@ -2870,6 +2915,8 @@ def _accept_grn_claimed(
     # F8 round 2: heartbeat state for the whole mint (across every line), so a
     # long accept keeps its claim fresh and stops dead if the claim is stolen.
     heartbeat_state = {"units": 0, "at": datetime.now()}
+    # Probed ONCE per accept, not per unit.
+    mint_raises_on_duplicate = _stock_create_raises_on_duplicate(stock_repo)
 
     if stock_repo is not None:
         for line_index, item in enumerate(grn.get("items", []) or []):
@@ -2907,9 +2954,10 @@ def _accept_grn_claimed(
             # `already = 0`, which disarmed the two re-run paths this claim
             # machinery depends on (the token-guarded release retry and the
             # stale takeover): one transient error on a retry and an entire
-            # 200-unit receipt mints a second time. There is no unique index
-            # behind (source_id, grn_line_index) to catch that at the database,
-            # so if we cannot verify what is already received, we STOP.
+            # 200-unit receipt mints a second time. The unique index on
+            # (source_id, grn_line_index, line_unit_seq) is the DB-level
+            # backstop, but it only lines up if the ordinals continue this
+            # count -- so if we cannot verify what is already received, we STOP.
             try:
                 already = _grn_already_minted(
                     stock_repo,
@@ -3023,7 +3071,23 @@ def _accept_grn_claimed(
             if item.get("expiry_date"):
                 batch_fields["expiry_date"] = item.get("expiry_date")
 
-            for _ in range(to_mint):
+            # line_unit_seq is the per-line ORDINAL of each physical unit, and it
+            # is what the unique index (source_id, grn_line_index, line_unit_seq)
+            # constrains. It MUST be derived from `already` -- the count of units
+            # this line has already put in stock_units -- and never from a fresh
+            # 0 or a random value:
+            #   * a retry / stale-takeover mints "the remainder", so its ordinals
+            #     have to CONTINUE the line's existing sequence. Restarting at 0
+            #     would collide with the rows already on the shelf and the index
+            #     would reject every unit -- receiving 1 unit instead of N;
+            #   * a random value would be unique per attempt, so two workers
+            #     minting the same physical unit would both succeed and the index
+            #     would constrain nothing.
+            # Deriving it from `already` makes the ordinals of a line exactly
+            # 0..accepted_qty-1 no matter how many attempts it took: the winner
+            # covers 0..N-1, a takeover that read `already = k` covers k..N-1, the
+            # overlap is rejected by the index, and the union is exactly N units.
+            for seq in range(already, already + to_mint):
                 # Keep the claim alive while we work, and STOP immediately if it
                 # was taken over (raises 409). `to_mint` was computed before this
                 # loop started, so without this check a worker that was wedged
@@ -3032,7 +3096,8 @@ def _accept_grn_claimed(
                 _grn_accept_heartbeat_tick(
                     grn_repo, grn_id, claim_token, heartbeat_state
                 )
-                created = stock_repo.create(
+                created = _grn_mint_unit(
+                    stock_repo,
                     {
                         "store_id": store_id,
                         "product_id": product_id,
@@ -3045,12 +3110,14 @@ def _accept_grn_claimed(
                         "source_type": "GRN",
                         "source_id": grn_id,
                         "grn_line_index": line_index,
+                        "line_unit_seq": seq,
                         "grn_number": grn_number,
                         "po_id": po_id,
                         "created_by": user_id,
                         **cost_fields,
                         **batch_fields,
-                    }
+                    },
+                    mint_raises_on_duplicate,
                 )
                 if created:
                     units_added += 1
