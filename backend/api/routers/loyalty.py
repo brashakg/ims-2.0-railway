@@ -1125,9 +1125,64 @@ def earn_for_order_internal(
 
 # Ledger fields that tag an ADJUST row as "this row already reversed the
 # loyalty of some order". `return_id` is the returns flow (BUG-099);
-# `cancel_of_order_id` is the order-cancel flow (F4). The cancel path checks
-# BOTH so a return and a cancel can never claw back the SAME order twice.
+# `cancel_of_order_id` is the order-cancel flow (F4). `reversal_of_order_id` is
+# the CANONICAL one written by BOTH flows -- the per-flow ids stay for audit and
+# per-retry idempotency, but the ORDER is what must only ever be reversed once.
 _REVERSAL_MARKER_FIELDS = ("return_id", "cancel_of_order_id")
+_REVERSAL_ORDER_FIELD = "reversal_of_order_id"
+
+
+def _reversal_landed(
+    updated: Optional[Dict[str, Any]],
+    before: Dict[str, Any],
+    net_delta: int,
+    earned: int,
+    redeemed: int,
+) -> bool:
+    """Did the balance move ACTUALLY apply?
+
+    LoyaltyAccountRepository.adjust_balance wraps its whole body in
+    ``except Exception: return self.find_by_id(...)`` -- it can never raise. So
+    "no exception" proves NOTHING, and the balance_update_failed branch was
+    unreachable dead code: a failed $inc reported ok=True, the order was stamped
+    loyalty_reversal_failed=False, and every retry short-circuited on the marker,
+    leaving the money permanently unreconcilable.
+
+    adjust_balance returns the account doc on BOTH paths, so we verify against
+    it. Exact match on all three counters -> landed. NOTHING moved at all ->
+    definitely did not land. Anything in between is concurrent drift (another
+    earn/redeem landed between our read and our write), which we cannot
+    distinguish from here: we accept it and log, because the alternative is
+    false-flagging a reversal that did apply.
+    """
+    if not isinstance(updated, dict):
+        return False
+    exp_balance = int(before.get("balance_points", 0)) + net_delta
+    exp_earned = int(before.get("lifetime_earned", 0)) - earned
+    exp_redeemed = int(before.get("lifetime_redeemed", 0)) - redeemed
+    got_balance = int(updated.get("balance_points", 0))
+    got_earned = int(updated.get("lifetime_earned", 0))
+    got_redeemed = int(updated.get("lifetime_redeemed", 0))
+    if (got_balance, got_earned, got_redeemed) == (
+        exp_balance,
+        exp_earned,
+        exp_redeemed,
+    ):
+        return True
+    unchanged = (got_balance, got_earned, got_redeemed) == (
+        int(before.get("balance_points", 0)),
+        int(before.get("lifetime_earned", 0)),
+        int(before.get("lifetime_redeemed", 0)),
+    )
+    if unchanged and (net_delta or earned or redeemed):
+        return False
+    logger.warning(
+        "loyalty reversal verification saw concurrent drift "
+        "(expected b=%s le=%s lr=%s, got b=%s le=%s lr=%s); accepting",
+        exp_balance, exp_earned, exp_redeemed,
+        got_balance, got_earned, got_redeemed,
+    )
+    return True
 
 
 def _reverse_order_loyalty(
@@ -1139,25 +1194,34 @@ def _reverse_order_loyalty(
     reason_prefix: str,
     extra_marker: Optional[Dict[str, Any]] = None,
     block_on_any_prior_reversal: bool = False,
+    recompute_tier: bool = False,
 ) -> Dict[str, Any]:
     """Shared engine behind reverse_for_return (returns) and reverse_for_cancel
     (order cancel): claw back the points EARNED on `order_id` and restore the
     points REDEEMED on it.
 
     The balance + both lifetime counters move in a SINGLE atomic adjust_balance
-    ($inc). Never raises -- always returns a dict; the caller decides how to
-    surface a failure.
+    ($inc), and the result is VERIFIED (adjust_balance cannot raise). Never
+    raises -- always returns a dict; the caller decides how to surface a failure.
 
     IDEMPOTENCY (the whole point): an ADJUST ledger row tagged
     ``{marker_field: marker_value}`` is written FIRST and IS the claim. A retried
     call finds it and returns ``already_reversed`` without touching the balance.
     Marker-before-balance means the only possible partial failure is "marker
-    written, balance not moved" -- i.e. we fail toward NOT clawing (the customer
-    keeps their points) and the caller flags the doc for reconciliation. We never
-    double-claw.
+    written, balance not moved" -- and that case is now DETECTED and flagged
+    ``reversal_incomplete`` on the marker so a retry REPAIRS it instead of
+    reporting already-done. We never double-claw.
 
-    ``block_on_any_prior_reversal`` additionally treats a reversal written by the
-    OTHER flow as done, so cancel-after-return cannot claw the same points twice.
+    ``block_on_any_prior_reversal`` treats a reversal written by ANY flow for
+    this ORDER as done, so neither cancel-after-return nor a second partial
+    return can claw the same points twice.
+
+    ``recompute_tier`` is OPT-IN and belongs to the CANCEL flow only. A cancel
+    un-does the whole order, so the tier it bought must come back down. A RETURN
+    must NOT move the tier: origin/main's reverse_for_return passed no new_tier,
+    and because the return claw is order-wide rather than line-proportional, one
+    partial return of a multi-line order would otherwise demote a legitimately
+    held tier and permanently cut the customer's earn multiplier.
 
     buy -> earn 100 / redeem 50, then reverse:
       net balance delta = redeemed(50) - earned(100) = -50 (claw 50 net),
@@ -1173,26 +1237,37 @@ def _reverse_order_loyalty(
         logger.warning("%s ledger read failed: %s", reason_prefix, exc)
         return {"ok": False, "reason": "ledger_read_failed"}
 
-    # Idempotency: an ADJUST row already tagged with THIS marker == done.
+    # Idempotency. A prior reversal row short-circuits -- EXCEPT one flagged
+    # reversal_incomplete, whose money never landed: that one is REPAIRED.
     for row in ledger:
         if row.get("type") != "ADJUST":
             continue
-        if row.get(marker_field) == marker_value:
-            return {"ok": True, "already_reversed": True}
-        if (
+        same_marker = row.get(marker_field) == marker_value
+        same_order = (
             block_on_any_prior_reversal
             and row.get("order_id") == order_id
-            and any(row.get(f) for f in _REVERSAL_MARKER_FIELDS)
-        ):
-            # This order's loyalty was already reversed by the other flow
-            # (e.g. a return). Reversing again would DOUBLE-claw.
-            return {
-                "ok": True,
-                "already_reversed": True,
-                "reversed_by": next(
-                    f for f in _REVERSAL_MARKER_FIELDS if row.get(f)
-                ),
-            }
+            and (
+                row.get(_REVERSAL_ORDER_FIELD) == order_id
+                or any(row.get(f) for f in _REVERSAL_MARKER_FIELDS)
+            )
+        )
+        if not (same_marker or same_order):
+            continue
+        if row.get("reversal_incomplete"):
+            repaired = _repair_incomplete_reversal(accounts, txns, row)
+            if repaired is not None:
+                return repaired
+        # Already reversed. For `same_order` this is the guard that stops a
+        # SECOND PARTIAL RETURN (a different return_id, so a different unique
+        # key and no index collision) from reversing the WHOLE order again --
+        # which minted points and drove lifetime_redeemed negative.
+        out: Dict[str, Any] = {"ok": True, "already_reversed": True}
+        if not same_marker:
+            out["reversed_by"] = next(
+                (f for f in _REVERSAL_MARKER_FIELDS if row.get(f)),
+                _REVERSAL_ORDER_FIELD,
+            )
+        return out
 
     earned = sum(
         int(t.get("points") or 0)
@@ -1244,6 +1319,19 @@ def _reverse_order_loyalty(
         "points": net_delta,
         "order_id": order_id,
         marker_field: marker_value,
+        # CANONICAL per-ORDER key, written by BOTH flows and backed by its own
+        # partial-unique index. The per-flow ids remain the per-retry key; this
+        # one is what makes "this order's loyalty has been reversed" a single
+        # fact that a second partial return cannot side-step.
+        _REVERSAL_ORDER_FIELD: order_id,
+        # The money has NOT moved yet. Flipped off only after the balance move
+        # is VERIFIED, so a marker left behind by a failed $inc is repairable
+        # instead of masquerading as a completed reversal.
+        "reversal_incomplete": True,
+        # The two lifetime deltas, recorded so a repair can reconstruct the
+        # exact $inc without re-deriving it from a ledger that has since moved.
+        "reversed_earn_points": earned,
+        "reversed_redeem_points": redeemed,
         "reason": (
             f"{reason_prefix}: claw {earned} earned + restore {redeemed} "
             f"redeemed on order {order_id}"
@@ -1271,24 +1359,30 @@ def _reverse_order_loyalty(
                      reason_prefix)
         return {"ok": False, "reason": "marker_write_failed"}
 
-    # TIER (panel must-fix 9): lifetime_earned is being decremented, so the tier
-    # it drives MUST be recomputed in the SAME adjust_balance call -- exactly as
-    # the earn path does. Without this, create-order -> cancel leaves a
-    # permanently inflated GOLD/PLATINUM multiplier (1.25x / 1.5x) applied to
-    # every FUTURE genuine purchase: the customer keeps a tier they no longer
-    # earned, and every later order over-awards points forever.
+    # TIER (panel must-fix 9, corrected): lifetime_earned is being decremented,
+    # so for a CANCEL the tier it drives must come back down in the SAME
+    # adjust_balance call -- otherwise create-order -> cancel leaves a
+    # permanently inflated GOLD/PLATINUM multiplier (1.25x / 1.5x) on every
+    # FUTURE genuine purchase.
+    #
+    # OPT-IN ONLY. Doing this unconditionally silently changed the RETURNS money
+    # path, which origin/main never touched: because the return claw is
+    # order-wide rather than line-proportional, ONE partial return of a two-line
+    # order would demote a legitimately held GOLD to SILVER and permanently cut
+    # the customer's earn rate. Returns therefore pass recompute_tier=False.
     new_tier = None
-    try:
-        settings = _settings_safe()
-        lifetime_after = max(0, int(account.get("lifetime_earned", 0)) - earned)
-        recomputed = compute_tier(lifetime_after, settings)
-        if recomputed != account.get("tier"):
-            new_tier = recomputed
-    except Exception as exc:  # noqa: BLE001 -- tier math must never block the claw
-        logger.warning("%s tier recompute skipped: %s", reason_prefix, exc)
+    if recompute_tier:
+        try:
+            settings = _settings_safe()
+            lifetime_after = max(0, int(account.get("lifetime_earned", 0)) - earned)
+            recomputed = compute_tier(lifetime_after, settings)
+            if recomputed != account.get("tier"):
+                new_tier = recomputed
+        except Exception as exc:  # noqa: BLE001 -- tier math must never block the claw
+            logger.warning("%s tier recompute skipped: %s", reason_prefix, exc)
 
     try:
-        accounts.adjust_balance(
+        updated = accounts.adjust_balance(
             customer_id,
             delta_points=net_delta,
             delta_lifetime_earned=-earned,
@@ -1296,16 +1390,126 @@ def _reverse_order_loyalty(
             new_tier=new_tier,
         )
     except Exception as exc:  # noqa: BLE001
+        _flag_reversal_incomplete(txns, txn_id, str(exc))
         logger.error(
             "%s balance update FAILED (marker %s written) cust=%s: %s",
             reason_prefix, txn_id, customer_id, exc,
         )
         return {"ok": False, "reason": "balance_update_failed", "error": str(exc)}
 
+    # VERIFY (panel must-fix 4). adjust_balance cannot raise -- it swallows every
+    # exception and returns the account doc -- so the except above is not enough
+    # on its own and the old code reported ok=True on a silently failed $inc.
+    if not _reversal_landed(updated, account, net_delta, earned, redeemed):
+        _flag_reversal_incomplete(txns, txn_id, "balance deltas did not apply")
+        logger.error(
+            "%s balance move DID NOT APPLY (marker %s written) cust=%s -- "
+            "flagged reversal_incomplete; a retry will repair it",
+            reason_prefix, txn_id, customer_id,
+        )
+        return {"ok": False, "reason": "balance_update_failed"}
+
+    _clear_reversal_incomplete(txns, txn_id)
     return {
         "ok": True,
         "tier": new_tier or account.get("tier"),
         "tier_changed": new_tier is not None,
+        "earned_clawed": earned,
+        "redeemed_restored": redeemed,
+        "net_delta": net_delta,
+        "txn_id": txn_id,
+    }
+
+
+def _marker_coll(txns):
+    """The raw loyalty_transactions collection, or None. Used for the small
+    guarded marker updates the repository has no method for."""
+    return getattr(txns, "collection", None)
+
+
+def _flag_reversal_incomplete(txns, txn_id: str, why: str) -> None:
+    """Record that this reversal's MONEY did not move. Fail-soft: the caller has
+    already returned a failure, and the order doc is stamped either way."""
+    coll = _marker_coll(txns)
+    if coll is None:
+        return
+    try:
+        coll.update_one(
+            {"txn_id": txn_id},
+            {"$set": {"reversal_incomplete": True, "reversal_error": why}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("could not flag reversal %s incomplete: %s", txn_id, exc)
+
+
+def _clear_reversal_incomplete(txns, txn_id: str) -> None:
+    """Mark the reversal COMPLETE once the balance move is verified."""
+    coll = _marker_coll(txns)
+    if coll is None:
+        return
+    try:
+        coll.update_one(
+            {"txn_id": txn_id}, {"$set": {"reversal_incomplete": False}}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not clear reversal flag %s: %s", txn_id, exc)
+
+
+def _repair_incomplete_reversal(accounts, txns, row: Dict[str, Any]):
+    """Finish a reversal whose marker exists but whose MONEY never moved.
+
+    Without this, the marker permanently short-circuits every retry and the
+    money is unreconcilable -- the marker says "reversed", the balance says
+    otherwise, and nothing can ever reconcile them.
+
+    The repair is CLAIMED atomically: find_one_and_update flips
+    reversal_incomplete True -> False in the same write that selects the row, so
+    only ONE caller can ever apply the outstanding $inc. If the balance move
+    then fails again the flag is set back so a later retry can pick it up.
+    Returns a result dict, or None when this caller did not win the claim (the
+    caller then falls through to the normal already_reversed answer).
+    """
+    txn_id = row.get("txn_id")
+    coll = _marker_coll(txns)
+    if not txn_id or coll is None:
+        return None
+    try:
+        claimed = coll.find_one_and_update(
+            {"txn_id": txn_id, "reversal_incomplete": True},
+            {"$set": {"reversal_incomplete": False}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("reversal repair claim failed for %s: %s", txn_id, exc)
+        return None
+    if not claimed:
+        return None  # someone else is repairing / already did
+
+    customer_id = row.get("customer_id") or ""
+    order_id = row.get("order_id") or ""
+    net_delta = int(row.get("points") or 0)
+    earned = int(row.get("reversed_earn_points") or 0)
+    redeemed = int(row.get("reversed_redeem_points") or 0)
+    logger.warning(
+        "REPAIRING incomplete loyalty reversal %s (cust=%s order=%s delta=%s)",
+        txn_id, customer_id, order_id, net_delta,
+    )
+    before = accounts.find_or_create(customer_id)
+    try:
+        updated = accounts.adjust_balance(
+            customer_id,
+            delta_points=net_delta,
+            delta_lifetime_earned=-earned,
+            delta_lifetime_redeemed=-redeemed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _flag_reversal_incomplete(txns, txn_id, str(exc))
+        return {"ok": False, "reason": "balance_update_failed", "repair": True}
+    if not _reversal_landed(updated, before, net_delta, earned, redeemed):
+        _flag_reversal_incomplete(txns, txn_id, "repair deltas did not apply")
+        return {"ok": False, "reason": "balance_update_failed", "repair": True}
+    return {
+        "ok": True,
+        "repaired": True,
         "earned_clawed": earned,
         "redeemed_restored": redeemed,
         "net_delta": net_delta,
@@ -1320,10 +1524,23 @@ def reverse_for_return(
     EARNED on the original order and restore the points REDEEMED on it.
 
     Called by returns.create_return after the atomic qty claim. Idempotent on
-    return_id (an ADJUST ledger row tagged with the return_id is the guard, so a
-    retried / duplicate return never double-reverses). Semantics are UNCHANGED --
-    the mechanics simply moved into the shared _reverse_order_loyalty engine that
-    the order-cancel reversal (F4) also uses.
+    return_id, AND -- since the claw is order-wide, not line-proportional -- on
+    the ORDER: partial returns are cumulative by design (returns.py:1524), so a
+    SECOND partial return of the same order carries a DIFFERENT return_id, hits
+    no unique-index collision, and used to reverse the WHOLE order a second time:
+    points MINTED and lifetime_redeemed driven NEGATIVE. block_on_any_prior_
+    reversal closes that, backed by the canonical reversal_of_order_id index.
+
+    CHOICE OF FIX (the alternative was making the claw line-proportional and
+    keying the marker per line): blocking is the conservative option because it
+    preserves origin/main's order-wide claw semantics exactly. Re-proportioning
+    the return claw would change what every partial return pays back -- a real
+    money-behaviour change, which is precisely the class of regression this round
+    is correcting. It belongs in its own PR with the accountant in the room.
+
+    TIER IS NOT RECOMPUTED HERE. origin/main passed no new_tier, and because the
+    claw is order-wide, one partial return of a multi-line order would otherwise
+    demote a legitimately held tier and permanently cut the earn multiplier.
     """
     if not customer_id or not order_id or not return_id:
         return {"ok": False, "reason": "missing_ids"}
@@ -1333,6 +1550,8 @@ def reverse_for_return(
         marker_field="return_id",
         marker_value=return_id,
         reason_prefix=f"Return {return_id}",
+        block_on_any_prior_reversal=True,
+        recompute_tier=False,
     )
 
 
@@ -1369,6 +1588,10 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
             reason_prefix=f"Cancel {order_id}",
             extra_marker={"source": "ORDER_CANCEL"},
             block_on_any_prior_reversal=True,
+            # A cancel un-does the ENTIRE order, so the tier that order bought
+            # must come back down with it. This is the ONLY caller that asks for
+            # it -- see reverse_for_return for why returns must not.
+            recompute_tier=True,
         )
     except Exception as exc:  # noqa: BLE001 -- must never break a cancel
         logger.error("reverse_for_cancel failed for order %s: %s", order_id, exc)

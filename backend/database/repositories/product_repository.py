@@ -532,6 +532,7 @@ class StockRepository(BaseRepository):
         *,
         product_id: Optional[str] = None,
         stock_id: Optional[str] = None,
+        exclude_stock_ids=None,
         limit: Optional[int] = None,
         reason: str = "ORDER_CANCELLED",
     ) -> "StockReleaseResult":
@@ -569,6 +570,13 @@ class StockRepository(BaseRepository):
           * `product_id` + `limit` -- the FIFO fallback for a line that never
             named a unit.
           * neither -- the whole order (cancel).
+
+        `exclude_stock_ids` protects the FIFO fallback from SERIALIZED OVERSELL:
+        two lines of the same product, one of them scanned. Removing the FIFO
+        line would otherwise release whichever unit matched first -- possibly the
+        serial the SURVIVING line is still billing -- putting a unit the customer
+        is buying back on the sellable shelf. Callers pass the stock_ids named by
+        every line that remains on the order.
         """
         released: List[str] = []
         if not order_id:
@@ -576,6 +584,10 @@ class StockRepository(BaseRepository):
         flt: Dict = {"order_id": order_id, "status": "SOLD"}
         if stock_id:
             flt["stock_id"] = stock_id
+        elif exclude_stock_ids:
+            keep = [str(s) for s in exclude_stock_ids if s]
+            if keep:
+                flt["stock_id"] = {"$nin": keep}
         if product_id:
             flt["product_id"] = product_id
         # Hard bound so a misbehaving collection can never spin forever; no real

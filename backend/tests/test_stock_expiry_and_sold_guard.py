@@ -572,3 +572,52 @@ def test_mark_sold_accepts_case_variants_of_available(status):
     repo = _repo(docs)
     assert repo.mark_sold("U1", "ORD-1") is True
     assert docs[0]["status"] == "SOLD"
+
+
+# ===========================================================================
+# RE-VERIFY MUST-FIX 6 -- the FIFO sweep must never release a serial that a
+# SURVIVING line still names. Repo-level guard for the oversell.
+# ===========================================================================
+
+
+def test_release_excludes_serials_named_by_surviving_lines():
+    docs = [
+        _unit("U-KEPT", status="SOLD", order_id="ORD-1"),
+        _unit("U-FREE", status="SOLD", order_id="ORD-1"),
+    ]
+    repo = _repo(docs)
+
+    freed, incomplete = repo.release_sold_units_for_order(
+        "ORD-1", product_id="P1", exclude_stock_ids=["U-KEPT"], limit=1
+    )
+
+    assert freed == ["U-FREE"] and incomplete is False
+    by_id = {d["stock_id"]: d for d in docs}
+    assert by_id["U-KEPT"]["status"] == "SOLD"        # still billed, still sold
+    assert by_id["U-FREE"]["status"] == "AVAILABLE"
+
+
+def test_release_frees_nothing_when_every_unit_is_named_by_a_survivor():
+    """The oversell case: one unit, and the surviving line owns it. Releasing
+    anything here puts a unit the customer is buying back on the shelf."""
+    docs = [_unit("U-ONLY", status="SOLD", order_id="ORD-1")]
+    repo = _repo(docs)
+
+    freed, incomplete = repo.release_sold_units_for_order(
+        "ORD-1", product_id="P1", exclude_stock_ids=["U-ONLY"], limit=1
+    )
+
+    assert freed == [] and incomplete is False
+    assert docs[0]["status"] == "SOLD"
+
+
+def test_explicit_stock_id_ignores_the_exclusion_list():
+    """An explicitly targeted unit is the line's OWN serial -- the exclusion
+    list describes OTHER lines, so it must not veto the direct release."""
+    docs = [_unit("U1", status="SOLD", order_id="ORD-1")]
+    repo = _repo(docs)
+    freed, _ = repo.release_sold_units_for_order(
+        "ORD-1", stock_id="U1", exclude_stock_ids=["U-OTHER"]
+    )
+    assert freed == ["U1"]
+    assert docs[0]["status"] == "AVAILABLE"

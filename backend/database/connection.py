@@ -530,6 +530,25 @@ class DatabaseConnection:
             name="uniq_loyalty_return_reversal",
             background=True,
         )
+        # CANONICAL per-ORDER reversal guard. The two indexes above key on the
+        # per-flow id, which makes a RETRY of the same cancel/return idempotent
+        # but does NOT stop a SECOND PARTIAL RETURN of the same order: partial
+        # returns are cumulative by design, so return #2 carries a different
+        # return_id, collides with nothing, and re-reverses the WHOLE order --
+        # minting points and driving lifetime_redeemed negative. Both flows now
+        # stamp reversal_of_order_id, so an order's loyalty can be reversed
+        # exactly once no matter which door does it.
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("reversal_of_order_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "type": "ADJUST",
+                "reversal_of_order_id": {"$type": "string"},
+            },
+            name="uniq_loyalty_order_reversal",
+            background=True,
+        )
 
         # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail). UNIQUE
         # sparse `seq` is the belt-and-braces against a forked tamper-evident

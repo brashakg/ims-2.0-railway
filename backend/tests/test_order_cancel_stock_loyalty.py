@@ -124,19 +124,74 @@ class _FakeStockColl:
         return before
 
 
-class _FakeOrderRepo:
+class _FakeOrdersColl:
+    """The order collection's atomic surface. _claim_order_for_cancel uses
+    find_one_and_update with a $nin status filter -- WITHOUT this the repo has
+    no `collection`, the claim silently takes the legacy fallback branch, and
+    the atomic guard that IS the fix is never executed by any test."""
+
     def __init__(self, orders):
+        self.orders = orders
+        self.calls = 0
+
+    def find_one_and_update(self, flt, upd, **kw):
+        self.calls += 1
+        oid = flt.get("order_id")
+        doc = self.orders.get(oid)
+        if doc is None:
+            return None
+        status_cond = flt.get("status")
+        if isinstance(status_cond, dict) and "$nin" in status_cond:
+            if doc.get("status") in status_cond["$nin"]:
+                return None
+        elif status_cond is not None and doc.get("status") != status_cond:
+            return None
+        before = dict(doc)
+        doc.update(upd.get("$set", {}))
+        return before
+
+
+class _FakeOrderRepo:
+    def __init__(self, orders, with_collection=True):
         self.orders = {o["order_id"]: o for o in orders}
+        self.update_ok = True
+        self.collection = (
+            _FakeOrdersColl(self.orders) if with_collection else None
+        )
 
     def find_by_id(self, oid):
         doc = self.orders.get(oid)
         return dict(doc) if doc else None
 
     def update(self, oid, data):
-        if oid not in self.orders:
+        if not self.update_ok or oid not in self.orders:
             return False
         self.orders[oid].update(data)
         return True
+
+
+class _FakeTxnColl:
+    """The loyalty_transactions collection surface used by the marker flag
+    updates and the atomic repair claim. Backed by the SAME row list the repo
+    hands out, so a flag written here is visible to the next ledger read."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def update_one(self, flt, upd):
+        for r in self.rows:
+            if all(r.get(k) == v for k, v in flt.items()):
+                r.update(upd.get("$set", {}))
+                return type("obj", (object,), {"modified_count": 1})()
+        return type("obj", (object,), {"modified_count": 0})()
+
+    def find_one_and_update(self, flt, upd, **kw):
+        for r in self.rows:
+            if all(r.get(k) == v for k, v in flt.items()):
+                before = dict(r)
+                r.update(upd.get("$set", {}))
+                return before
+        return None
 
 
 class _DuplicateKeyError(Exception):
@@ -156,6 +211,8 @@ class _FakeTxns:
     def __init__(self, rows=None):
         self.rows = [dict(r) for r in (rows or [])]
         self.created = []
+        # The reversal writes its marker flags through the raw collection.
+        self.collection = _FakeTxnColl(self.rows)
 
     def find_for_customer(self, cid, limit=20):
         return [dict(r) for r in self.rows if r.get("customer_id") == cid][:limit]
@@ -163,7 +220,7 @@ class _FakeTxns:
     def _violates_unique(self, doc):
         if doc.get("type") != "ADJUST":
             return False
-        for field in ("cancel_of_order_id", "return_id"):
+        for field in ("cancel_of_order_id", "return_id", "reversal_of_order_id"):
             val = doc.get(field)
             if not isinstance(val, str):
                 continue
@@ -223,6 +280,11 @@ class _FakeAccounts:
         if new_tier is not None:
             self.tiers_set.append(new_tier)
             self.acct["tier"] = new_tier
+        # The REAL LoyaltyAccountRepository.adjust_balance returns the account
+        # doc on BOTH its success and its swallowed-exception path. The
+        # reversal verifies the deltas against exactly this value, so a fake
+        # that returned None would make every reversal look like a failed $inc.
+        return dict(self.acct)
 
 
 _ADMIN = {
@@ -743,3 +805,208 @@ def test_a_clean_cancel_still_refuses_a_second_cancel(wired):
         _cancel()
     assert exc.value.status_code == 400
     assert "already cancelled" in str(exc.value.detail).lower()
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 2 -- the tier recompute must NOT reach the RETURNS path.
+# origin/main's reverse_for_return passed no new_tier. Because the return claw
+# is order-wide, not line-proportional, ONE partial return of a multi-line order
+# would otherwise demote a legitimately held tier and permanently cut the
+# customer's earn multiplier on every future purchase.
+# =========================================================================== #
+
+
+def test_partial_return_never_moves_the_tier(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 6000))
+    wired["accounts"].acct.update(
+        {"balance_points": 6000, "lifetime_earned": 6000, "tier": "GOLD"}
+    )
+
+    res = L.reverse_for_return("RET-1", "ORD-1", "C1")
+
+    assert res["ok"] and res["earned_clawed"] == 6000
+    assert wired["accounts"].tiers_set == []          # NO tier write at all
+    assert wired["accounts"].acct["tier"] == "GOLD"   # untouched
+    assert res.get("tier_changed") is False
+
+
+def test_cancel_still_moves_the_tier(wired):
+    """The mirror of the test above -- proving the flag is opt-in, not off."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 6000))
+    wired["accounts"].acct.update(
+        {"balance_points": 6000, "lifetime_earned": 6000, "tier": "GOLD"}
+    )
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] and res["tier_changed"] is True
+    assert wired["accounts"].tiers_set == ["BRONZE"]
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 3 -- a SECOND partial return must not re-reverse the order.
+# Partial returns are cumulative by design, so return #2 carries a different
+# return_id, collides with no unique index, and used to claw the WHOLE order
+# again: points MINTED and lifetime_redeemed driven NEGATIVE.
+# =========================================================================== #
+
+
+def test_second_partial_return_does_not_reverse_the_order_again(wired):
+    wired["txns"].rows.extend(
+        [_earn("C1", "ORD-1", 100), _redeem("C1", "ORD-1", 40)]
+    )
+    wired["accounts"].acct.update(
+        {"balance_points": 60, "lifetime_earned": 100, "lifetime_redeemed": 40}
+    )
+
+    first = L.reverse_for_return("RET-1", "ORD-1", "C1")
+    second = L.reverse_for_return("RET-2", "ORD-1", "C1")   # different return!
+
+    assert first["ok"] and first["earned_clawed"] == 100
+    assert second["ok"] and second.get("already_reversed") is True
+    assert len(wired["accounts"].adjustments) == 1        # ONE reversal only
+    assert wired["accounts"].acct["balance_points"] == 0
+    assert wired["accounts"].acct["lifetime_redeemed"] == 0
+    assert wired["accounts"].acct["lifetime_earned"] == 0
+
+
+def test_every_reversal_marker_carries_the_canonical_order_key(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 10))
+    wired["accounts"].acct.update({"balance_points": 10, "lifetime_earned": 10})
+    L.reverse_for_return("RET-9", "ORD-1", "C1")
+    marker = wired["txns"].created[0]
+    assert marker["reversal_of_order_id"] == "ORD-1"
+    assert marker["return_id"] == "RET-9"
+
+
+def test_cancel_after_a_return_is_still_blocked_by_the_canonical_key(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    L.reverse_for_return("RET-1", "ORD-1", "C1")
+    wired["accounts"].adjustments.clear()
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] and res.get("already_reversed") is True
+    assert wired["accounts"].adjustments == []
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 4 -- adjust_balance CANNOT raise, so "no exception" proves
+# nothing. A silently failed $inc used to report ok=True with the marker
+# consumed, leaving the money permanently unreconcilable.
+# =========================================================================== #
+
+
+def test_silently_failed_balance_move_is_detected(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    # Mirror the real repo's swallow: no exception, no change, returns the doc.
+    wired["accounts"].adjust_balance = lambda *a, **k: dict(wired["accounts"].acct)
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is False and res["reason"] == "balance_update_failed"
+    marker = wired["txns"].rows[-1]
+    assert marker["reversal_incomplete"] is True     # flagged for repair
+    assert wired["accounts"].acct["balance_points"] == 100   # money untouched
+
+
+def test_a_retry_repairs_an_incomplete_reversal_instead_of_reporting_done(wired):
+    """The whole point: the marker must not permanently mask an unmoved balance."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    real_adjust = wired["accounts"].adjust_balance
+    wired["accounts"].adjust_balance = lambda *a, **k: dict(wired["accounts"].acct)
+
+    first = L.reverse_for_cancel("ORD-1", "C1")
+    assert first["ok"] is False
+
+    wired["accounts"].adjust_balance = real_adjust   # the blip clears
+    second = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert second["ok"] is True and second.get("repaired") is True
+    assert wired["accounts"].acct["balance_points"] == 0     # money finally moved
+    assert wired["accounts"].acct["lifetime_earned"] == 0
+    assert wired["txns"].rows[-1]["reversal_incomplete"] is False
+    # And a THIRD call is a clean no-op -- the repair is not re-appliable.
+    third = L.reverse_for_cancel("ORD-1", "C1")
+    assert third["ok"] and third.get("already_reversed") is True
+    assert wired["accounts"].acct["balance_points"] == 0
+
+
+def test_a_completed_reversal_is_never_repaired(wired):
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    L.reverse_for_cancel("ORD-1", "C1")
+    assert wired["txns"].rows[-1]["reversal_incomplete"] is False
+    n = len(wired["accounts"].adjustments)
+
+    again = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert again.get("already_reversed") is True
+    assert len(wired["accounts"].adjustments) == n     # no second inc
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 5 -- the ATOMIC claim must be the path under test, and a
+# failed status write must NOT run the undo.
+# =========================================================================== #
+
+
+def test_cancel_uses_the_atomic_claim_path(wired):
+    wired["units"].append(_unit("U1"))
+    _cancel()
+    # The guarded find_one_and_update -- the actual fix -- was executed.
+    assert wired["orders"].collection.calls >= 1
+
+
+def test_atomic_claim_refuses_a_second_cancel_without_a_second_undo(wired):
+    wired["units"].extend([_unit("U1"), _unit("U2")])
+    _cancel()
+    calls_after_first = wired["orders"].collection.calls
+    with pytest.raises(HTTPException) as exc:
+        _cancel()
+    assert exc.value.status_code == 400
+    # The second attempt DID go through the atomic filter (and matched nothing).
+    assert wired["orders"].collection.calls > calls_after_first
+
+
+def test_failed_status_write_does_not_run_the_undo(monkeypatch):
+    """Legacy fallback path (no `collection`): base_repository.update returns
+    False on failure, so discarding it ran the FULL stock + loyalty undo and
+    reported success for an order still sitting CONFIRMED."""
+    orders = _FakeOrderRepo([_order()], with_collection=False)
+    orders.update_ok = False
+    units = [_unit("U1")]
+    stock = StockRepository(_FakeStockColl(units))
+    txns = _FakeTxns([_earn("C1", "ORD-1", 100)])
+    accounts = _FakeAccounts(balance=100, le=100)
+
+    monkeypatch.setattr(om, "get_order_repository", lambda: orders)
+    monkeypatch.setattr(om, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(om, "validate_store_access", lambda *a, **k: None)
+    monkeypatch.setattr(L, "get_loyalty_transaction_repository", lambda: txns)
+    monkeypatch.setattr(L, "get_loyalty_account_repository", lambda: accounts)
+
+    import api.services.lens_stock_hook as hook
+    import api.services.audit_alerts as alerts
+
+    async def _noop(**kwargs):
+        return None
+
+    async def _noop_alert(*a, **k):
+        return None
+
+    monkeypatch.setattr(hook, "release_for_cancel", _noop)
+    monkeypatch.setattr(alerts, "alert_order_cancelled", _noop_alert)
+
+    with pytest.raises(HTTPException) as exc:
+        _cancel()
+
+    assert exc.value.status_code == 500
+    # NOTHING was undone: the order is not cancelled, so its stock and points
+    # must still belong to it.
+    assert orders.orders["ORD-1"]["status"] == "CONFIRMED"
+    assert units[0]["status"] == "SOLD"
+    assert accounts.adjustments == []

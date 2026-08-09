@@ -3850,6 +3850,10 @@ async def remove_order_item(
                 store_id=order.get("store_id") or "",
                 user=current_user,
                 release=release_for_cancel,
+                # The removed line's TRUE position in the pre-removal order.
+                # Legacy reservations are keyed on exactly this number, so
+                # defaulting to 0 released the wrong cell (or someone else's).
+                positions=[_removed_pos],
             )
         except Exception as rel_exc:  # noqa: BLE001
             logger.warning(
@@ -3859,7 +3863,7 @@ async def remove_order_item(
                 rel_exc,
             )
 
-        _release_line_units(order_id, item_id, _removed)
+        _release_line_units(order_id, item_id, _removed, surviving_lines=items)
 
         # Audit alert (May 2026) — flag the deleted item even on DRAFT
         # so the audit trail is complete; severity HIGH for DRAFT.
@@ -4429,7 +4433,9 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
     return {"order_id": order_id, "status": "DELIVERED"}
 
 
-def _release_line_units(order_id: str, item_id: str, line: dict) -> None:
+def _release_line_units(
+    order_id: str, item_id: str, line: dict, surviving_lines: Optional[List[dict]] = None
+) -> None:
     """Give back the serialized stock of ONE removed DRAFT line.
 
     Targeting matters (panel must-fix 5). When the line names its own
@@ -4464,9 +4470,19 @@ def _release_line_units(order_id: str, item_id: str, line: dict) -> None:
                 order_id, stock_id=str(sid), reason="ORDER_LINE_REMOVED"
             )
         else:
+            # SERIALIZED OVERSELL GUARD: never hand back a serial that a
+            # SURVIVING line is still billing. Two lines of the same product,
+            # one scanned, the other FIFO -- removing the FIFO line could
+            # otherwise release the scanned line's unit.
+            keep = [
+                str(other.get("stock_id"))
+                for other in (surviving_lines or [])
+                if other.get("stock_id")
+            ]
             result = stock_repo.release_sold_units_for_order(
                 order_id,
                 product_id=pid,
+                exclude_stock_ids=keep,
                 limit=max(int(line.get("quantity") or 1), 1),
                 reason="ORDER_LINE_REMOVED",
             )
@@ -4501,17 +4517,33 @@ async def _release_lens_lines(
     store_id: str,
     user: dict,
     release,
+    positions: Optional[List[int]] = None,
 ) -> List[dict]:
     """Release the lens cell of every line, under BOTH the current key and the
     key the older code may have used.
 
     An order reserved before the item_id switch holds its cell under
-    "{order_id}#{position-or-line_index}". Releasing only under the new key
-    would leak those cells forever, so each line is released under its primary
-    key and, when different, its legacy key too. Both calls are idempotent
-    no-ops when no such reservation exists. Fully fail-soft per line.
+    "{order_id}#{position}" -- origin/main passed `line_index=idx`, i.e. the
+    POSITION, and those legacy lines carry an item_id but NO line_index. So the
+    legacy key is the line's TRUE POSITION IN THE ORDER, which is why
+    `positions` MUST be supplied whenever `lines` is not the whole order.
+
+    Passing a one-element list without `positions` made every caller release
+    under position 0: for a legacy order, removing the lens line at position 1
+    emitted keys [item_id, 0] while the live reservation sat at key 1 -- the
+    removed line's cell was never released (the exact leak this exists to close)
+    and the key-0 call could CONSUME the neighbouring line's live reservation,
+    leaking that one on the later cancel.
+
+    Both calls are idempotent no-ops when no such reservation exists. Fully
+    fail-soft per line.
     """
-    for pos, line in enumerate(lines or []):
+    seq = (
+        list(positions)
+        if positions is not None
+        else list(range(len(lines or [])))
+    )
+    for pos, line in zip(seq, lines or []):
         keys = [_lens_reservation_key(line, pos)]
         legacy = _legacy_lens_reservation_key(line, pos)
         if legacy is not None:
@@ -4578,7 +4610,15 @@ def _claim_order_for_cancel(
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") in ("CANCELLED", "DELIVERED"):
         return None
-    repo.update(order_id, payload)
+    # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
+    # False, so discarding this result meant a FAILED status write still ran the
+    # whole stock + loyalty undo and reported the order cancelled -- stock back
+    # on the shelf and points clawed for an order still sitting CONFIRMED.
+    if not repo.update(order_id, payload):
+        logger.error(
+            "[ORDERS] cancel status write failed for %s; undo NOT run", order_id
+        )
+        return None
     return existing
 
 
@@ -4631,6 +4671,14 @@ async def cancel_order(
         if claimed is None:
             fresh = repo.find_by_id(order_id) or {}
             if fresh.get("status") != "CANCELLED":
+                if fresh and fresh.get("status") != "DELIVERED":
+                    # Still cancellable -> we did not lose a race, the STATUS
+                    # WRITE ITSELF failed. Fail loudly; the order is untouched
+                    # and no stock/loyalty undo has run.
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Could not cancel the order -- please retry.",
+                    )
                 # Lost the race to a DELIVER (or the doc vanished).
                 raise HTTPException(
                     status_code=400,

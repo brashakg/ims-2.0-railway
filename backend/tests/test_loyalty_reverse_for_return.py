@@ -56,6 +56,10 @@ class _FakeAccounts:
         self.acct["balance_points"] += delta_points
         self.acct["lifetime_earned"] += delta_lifetime_earned
         self.acct["lifetime_redeemed"] += delta_lifetime_redeemed
+        if new_tier is not None:
+            self.acct["tier"] = new_tier
+        # Mirrors the real repo, which returns the account doc on both paths.
+        return dict(self.acct)
 
 
 def _wire(monkeypatch, txns, accounts):

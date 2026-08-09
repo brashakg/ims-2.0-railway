@@ -876,3 +876,160 @@ def test_reservation_key_falls_back_to_position_for_legacy_lines():
     modern = {"item_id": "IT-Z", "line_index": 2}
     assert om._lens_reservation_key(modern, 0) == "IT-Z"
     assert om._legacy_lens_reservation_key(modern, 0) == 2     # also try the old key
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 1 -- the legacy release key is the line's TRUE POSITION.
+#
+# origin/main reserved with line_index=idx, i.e. the POSITION, and those legacy
+# lines carry an item_id but NO line_index. _release_lens_lines was called with
+# a ONE-element list and enumerated from 0, so fallback_position was ALWAYS 0:
+# removing the lens line at position 1 emitted keys [item_id, 0] while the live
+# reservation sat at key 1. The removed line's cell was never released, and the
+# key-0 call could CONSUME the neighbouring line's live reservation.
+#
+# Every order in production today is a legacy order, so this is the ONLY shape
+# that matters for the leak this fix exists to close.
+# =========================================================================== #
+
+
+def _legacy_lens_line(item_id, lens_line_id, sph):
+    """A line as origin/main wrote it: an item_id uuid4, but NO line_index."""
+    return {
+        "item_id": item_id,
+        "item_type": "LENS",
+        "product_id": "lens-x",
+        "lens_line_id": lens_line_id,
+        "sph": sph,
+        "quantity": 1,
+    }
+
+
+def test_legacy_line_at_position_1_releases_key_1_not_key_0(wired):
+    import api.services.lens_stock_hook as hook
+
+    lines = [
+        _legacy_lens_line("IT-0", "LA", -1.0),
+        _legacy_lens_line("IT-1", "LB", -2.0),   # the one being removed
+    ]
+
+    asyncio.run(
+        om._release_lens_lines(
+            [lines[1]],
+            order_id="ORD-1",
+            store_id="S1",
+            user=_ADMIN,
+            release=hook.release_for_cancel,
+            positions=[1],
+        )
+    )
+
+    keys = [r["line_index"] for r in wired["released"]]
+    assert keys == ["IT-1", 1]     # its own key, then its TRUE legacy key
+    assert 0 not in keys           # never the neighbour's live reservation
+
+
+def test_removing_the_second_line_of_a_legacy_order_uses_position_1(wired):
+    """End-to-end through remove_order_item, which is where the one-element
+    list was losing the position."""
+    order = wired["orders"].orders["ORD-1"]
+    order["items"] = [
+        _legacy_lens_line("IT-0", "LA", -1.0),
+        _legacy_lens_line("IT-1", "LB", -2.0),
+    ]
+    wired["released"].clear()
+
+    _remove("IT-1")
+
+    keys = [r["line_index"] for r in wired["released"]]
+    assert keys == ["IT-1", 1]
+    assert 0 not in keys
+    # The surviving line is untouched and still on the order.
+    assert [i["item_id"] for i in order["items"]] == ["IT-0"]
+
+
+def test_removing_the_third_line_uses_position_2(wired):
+    order = wired["orders"].orders["ORD-1"]
+    order["items"] = [
+        _legacy_lens_line("IT-0", "LA", -1.0),
+        _legacy_lens_line("IT-1", "LB", -2.0),
+        _legacy_lens_line("IT-2", "LC", -3.0),
+    ]
+    wired["released"].clear()
+
+    _remove("IT-2")
+
+    assert [r["line_index"] for r in wired["released"]] == ["IT-2", 2]
+
+
+def test_cancel_still_releases_every_line_under_its_own_position(wired):
+    """The whole-order path must keep using each line's real position."""
+    import api.services.lens_stock_hook as hook
+
+    lines = [
+        _legacy_lens_line("IT-0", "LA", -1.0),
+        _legacy_lens_line("IT-1", "LB", -2.0),
+        _legacy_lens_line("IT-2", "LC", -3.0),
+    ]
+
+    asyncio.run(
+        om._release_lens_lines(
+            lines,
+            order_id="ORD-1",
+            store_id="S1",
+            user=_ADMIN,
+            release=hook.release_for_cancel,
+        )
+    )
+
+    assert [r["line_index"] for r in wired["released"]] == [
+        "IT-0", 0, "IT-1", 1, "IT-2", 2
+    ]
+
+
+# =========================================================================== #
+# RE-VERIFY MUST-FIX 6 -- the FIFO release must not steal a SURVIVING line's
+# serial. Two lines of one product, one scanned: removing the FIFO line could
+# release the scanned unit the customer is still being billed for, putting it
+# back on the sellable shelf (serialized oversell).
+# =========================================================================== #
+
+
+def test_fifo_removal_never_releases_a_surviving_lines_scanned_serial(wired):
+    wired["units"].extend([_unit("U-SCANNED"), _unit("U-FIFO")])
+    scanned = _add(_item(stock_id="U-SCANNED"))   # line 1 names its serial
+    fifo = _add(_item())                          # line 2 takes what is left
+    by_id = {u["stock_id"]: u for u in wired["units"]}
+    assert by_id["U-SCANNED"]["status"] == "SOLD"
+    assert by_id["U-FIFO"]["status"] == "SOLD"
+
+    _remove(fifo["item_id"])                      # remove the FIFO line
+
+    by_id = {u["stock_id"]: u for u in wired["units"]}
+    # The scanned line survives, so ITS unit must stay SOLD.
+    assert by_id["U-SCANNED"]["status"] == "SOLD"
+    assert by_id["U-FIFO"]["status"] == "AVAILABLE"
+    assert wired["stock"].find_available("P1", "S1") == 1
+
+
+def test_fifo_removal_releases_nothing_when_every_unit_is_spoken_for(wired):
+    """Only one unit exists and the SURVIVING line named it: the removed FIFO
+    line has no unit of its own, so nothing may be released. Releasing here is
+    exactly the oversell -- the customer walks out with a unit marked
+    AVAILABLE."""
+    wired["units"].append(_unit("U-ONLY"))
+    _add(_item(stock_id="U-ONLY"))
+    order = wired["orders"].orders["ORD-1"]
+    ghost = {
+        "item_id": "IT-GHOST",
+        "item_type": "FRAME",
+        "product_id": "P1",
+        "quantity": 1,
+        "line_index": 1,
+    }
+    order["items"] = order["items"] + [ghost]
+
+    _remove("IT-GHOST")
+
+    assert wired["units"][0]["status"] == "SOLD"
+    assert wired["stock"].find_available("P1", "S1") == 0
