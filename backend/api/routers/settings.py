@@ -1071,13 +1071,23 @@ async def get_logo(
 
     Any authenticated user may fetch the logo (it renders in the app
     shell / Settings / invoices). Returns 404 when the blob is gone.
+
+    SECURITY (P0): this route takes the file_id straight from the REQUEST -- no
+    owning record authorises it -- and reads the SHARED GridFS bucket, which
+    also holds employee Aadhaar / PAN / UAN / ESIC scans (written by
+    routers/hr.py's employee-document upload), GRN attachments and expense
+    bills. Without require_kind, any authenticated user holding a file_id could
+    stream any employee's statutory-ID scan, bypassing hr.py's ADMIN-only
+    download gate entirely. Scoping to the kind stamped at upload
+    (settings.py's logo upload sets metadata kind="business_logo") makes a
+    wrong-kind id 404, exactly as products.py does for its public image serve.
     """
     from ..services.file_store import get_file_store
 
     fs = get_file_store()
     if fs is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    blob = fs.get(file_id)
+    blob = fs.get(file_id, require_kind="business_logo")
     if blob is None:
         raise HTTPException(status_code=404, detail="Logo not found")
     content, filename, mime_type = blob

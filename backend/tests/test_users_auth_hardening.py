@@ -912,26 +912,399 @@ def test_store_scope_filter_reuses_the_canonical_helper():
 
 
 def test_jarvis_users_collection_excludes_credentials_and_statutory_ids():
-    excluded = jarvis_router._COLLECTION_FIELD_EXCLUSIONS["users"]
+    excluded = jarvis_router._excluded_fields_for("users")
     for field in _CREDENTIAL_FIELDS + _GOVT_ID_FIELD_NAMES:
         assert field in excluded, f"{field} is still readable via jarvis/data"
 
 
-def test_jarvis_builds_a_zeroed_projection_for_the_users_collection():
+@pytest.mark.parametrize("collection", ["salary_config", "payslips"])
+def test_jarvis_payroll_collections_exclude_statutory_ids(collection):
+    """The IDs must not simply move one collection to the left -- these are on
+    the same queryable allow-list and carry pan / uan / esi / bank fields."""
+    assert collection in jarvis_router._JARVIS_QUERYABLE_COLLECTIONS
+    excluded = jarvis_router._excluded_fields_for(collection)
+    for field in (
+        "pan",
+        "uan",
+        "esi_ip_number",
+        "bank_account_no",
+        "bank_account",
+        "bank_ifsc",
+    ):
+        assert field in excluded, f"{field} readable on {collection}"
+
+
+def test_jarvis_exclusions_are_global_so_a_new_collection_cannot_default_open():
+    """Fail-safe by construction: the rule is by FIELD NAME across every
+    collection, so allow-listing a new collection tomorrow cannot expose them."""
+    for collection in ("orders", "a_collection_added_next_year"):
+        excluded = jarvis_router._excluded_fields_for(collection)
+        assert "approval_pin_hash" in excluded
+        assert "bank_account_no" in excluded
+
+
+def test_jarvis_builds_a_zeroed_projection():
     """The exclusion list must actually reach pymongo as a projection."""
     projection = {"_id": 0}
-    for excluded in jarvis_router._COLLECTION_FIELD_EXCLUSIONS.get("users", ()):
+    for excluded in jarvis_router._excluded_fields_for("users"):
         projection[excluded] = 0
     assert projection["_id"] == 0
     assert projection["approval_pin_hash"] == 0
     assert projection["aadhaar_no"] == 0
-    # A collection with no exclusions keeps the original shape.
-    other = {"_id": 0}
-    for excluded in jarvis_router._COLLECTION_FIELD_EXCLUSIONS.get("orders", ()):
-        other[excluded] = 0
-    assert other == {"_id": 0}
+    # All-exclusion projections are legal Mongo (no inclusion/exclusion mixing).
+    assert set(projection.values()) == {0}
 
 
 def test_jarvis_users_is_still_queryable():
     """The fix must be a projection, not a removal -- the browser still works."""
     assert "users" in jarvis_router._JARVIS_QUERYABLE_COLLECTIONS
+
+
+# ---------------------------------------------------------------------------
+# ... and the projection must not be invertible through the filter/sort inputs
+# ---------------------------------------------------------------------------
+# `total` is a count over the caller's filter and is computed BEFORE the
+# projection, so a $regex prefix walk on an excluded field reads the hidden
+# bytes back one character at a time. A field we refuse to return must be a
+# field we refuse to be interrogated about.
+
+
+def _jarvis_client(actor):
+    app = FastAPI()
+    app.include_router(jarvis_router.router, prefix="/api/v1/jarvis")
+
+    async def _u():
+        return dict(actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+_JARVIS_SUPERADMIN = {
+    "user_id": "su-j",
+    "username": "su_j",
+    "roles": ["SUPERADMIN"],
+    "store_ids": ["S1"],
+    "active_store_id": "S1",
+}
+
+
+@pytest.mark.parametrize(
+    "field", ["approval_pin_hash", "aadhaar_no", "password_hash", "bank_account_no"]
+)
+def test_jarvis_rejects_a_filter_on_an_excluded_field(field):
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get(f"/api/v1/jarvis/data/users?filter_field={field}&filter_value=x")
+    assert r.status_code == 400, r.text
+    assert "not queryable" in r.text
+
+
+@pytest.mark.parametrize("field", ["approval_pin_hash", "pan"])
+def test_jarvis_rejects_a_sort_on_an_excluded_field(field):
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get(f"/api/v1/jarvis/data/users?sort_by={field}")
+    assert r.status_code == 400, r.text
+
+
+def test_jarvis_rejects_a_dotted_path_into_an_excluded_field():
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get(
+        "/api/v1/jarvis/data/users?filter_field=pin_attempts.count&filter_value=1"
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_jarvis_rejects_an_operator_shaped_field_name():
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get("/api/v1/jarvis/data/users?filter_field=$where&filter_value=1")
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{"$regex": "^abc"}',
+        '{"$ne": null}',
+        '{"$where": "1"}',
+        '[1, 2]',
+    ],
+)
+def test_jarvis_rejects_an_operator_dict_as_a_filter_value(value):
+    """_coerce_mongo_value is a bare json.loads, so an operator would land LIVE
+    -- rebuilding the count oracle and opening $where/$expr/$function."""
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get(
+        "/api/v1/jarvis/data/users",
+        params={"filter_field": "username", "filter_value": value},
+    )
+    assert r.status_code == 400, r.text
+    assert "scalar" in r.text
+
+
+def test_jarvis_still_allows_an_ordinary_scalar_filter():
+    """The guard must not break the browser's legitimate use."""
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get("/api/v1/jarvis/data/users?filter_field=username&filter_value=admin")
+    assert r.status_code == 200, r.text
+    assert r.json()["collection"] == "users"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "filter_field=approval_pin_hash&filter_value=x",
+        "sort_by=aadhaar_no",
+        "filter_field=username&filter_value=%7B%22%24regex%22%3A%22a%22%7D",
+    ],
+)
+def test_jarvis_rejects_before_it_touches_the_database(query, monkeypatch):
+    """ORDERING LOCK. The validation must run BEFORE the collection handle is
+    resolved, so a refused query is refused identically whether or not Mongo is
+    reachable. This is not hypothetical: with the check placed after the
+    `col is None` early-return, a DB-less process answered 200 to exactly these
+    queries -- caught only because the full-suite run had a different connection
+    state than the single-file run."""
+    monkeypatch.setattr(jarvis_router, "get_db_collection", lambda _c: None)
+    c = _jarvis_client(_JARVIS_SUPERADMIN)
+    r = c.get(f"/api/v1/jarvis/data/users?{query}")
+    assert r.status_code == 400, r.text
+
+
+# ===========================================================================
+# Fourth door: the shared GridFS bucket
+# ===========================================================================
+# ONE bucket holds product images, company logos, GRN attachments, expense
+# bills, task attachments AND employee Aadhaar/PAN/UAN/ESIC scans, so a file_id
+# is a bearer capability over the whole bucket. GET /settings/business/logo/
+# {file_id} took the id straight from the URL and called fs.get(file_id) with no
+# require_kind, so any authenticated user holding an hr-uploaded file_id could
+# stream a colleague's statutory-ID scan -- bypassing hr.py's ADMIN-only gate.
+
+
+def _logo_client(store, actor=None):
+    monkey_actor = actor or {
+        "user_id": "cash-1",
+        "roles": ["SALES_CASHIER"],
+        "store_ids": ["S1"],
+        "active_store_id": "S1",
+    }
+    app = FastAPI()
+    app.include_router(settings_router.router, prefix="/api/v1/settings")
+
+    async def _u():
+        return dict(monkey_actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+def test_employee_id_scan_file_id_404s_from_the_logo_route(monkeypatch):
+    """The exact P0: an hr-uploaded employee document must NOT stream here."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    # hr.py stamps employee_id/doc_type and NO kind (hr.py's document upload).
+    hr_file_id = store.put(
+        content=b"AADHAAR-SCAN-BYTES",
+        filename="aadhaar.jpg",
+        mime_type="image/jpeg",
+        metadata={"employee_id": "emp-a", "doc_type": "AADHAAR"},
+    )
+    monkeypatch.setattr(fs_module, "get_file_store", lambda: store)
+
+    c = _logo_client(store)
+    r = c.get(f"/api/v1/settings/business/logo/{hr_file_id}")
+    assert r.status_code == 404, r.text
+    assert b"AADHAAR-SCAN-BYTES" not in r.content
+
+
+def test_a_real_logo_still_streams_from_the_logo_route(monkeypatch):
+    """Guard against over-tightening: the logo must still render."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    logo_id = store.put(
+        content=b"LOGO-BYTES",
+        filename="logo.png",
+        mime_type="image/png",
+        metadata={"kind": "business_logo", "uploaded_by": "admin-1"},
+    )
+    monkeypatch.setattr(fs_module, "get_file_store", lambda: store)
+
+    c = _logo_client(store)
+    r = c.get(f"/api/v1/settings/business/logo/{logo_id}")
+    assert r.status_code == 200, r.text
+    assert r.content == b"LOGO-BYTES"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"kind": "product_image"},
+        {"kind": "grn_attachment"},
+        {"kind": "expense_bill"},
+        {},
+    ],
+)
+def test_no_other_kind_streams_from_the_logo_route(metadata, monkeypatch):
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    fid = store.put(
+        content=b"OTHER-KIND",
+        filename="x.bin",
+        mime_type="application/octet-stream",
+        metadata=metadata,
+    )
+    monkeypatch.setattr(fs_module, "get_file_store", lambda: store)
+    c = _logo_client(store)
+    assert c.get(f"/api/v1/settings/business/logo/{fid}").status_code == 404
+
+
+def test_any_kind_sentinel_is_an_explicit_opt_out():
+    """The deliberate-unscoped path stays available for serves whose file_id
+    comes from an already-authorised record."""
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    fid = store.put(
+        content=b"B",
+        filename="f",
+        mime_type="text/plain",
+        metadata={"employee_id": "e1"},
+    )
+    assert store.get(fid, require_kind=fs_module.ANY_KIND) is not None
+    assert store.get(fid, require_kind="business_logo") is None
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL guard for the class: no NEW unscoped serve can appear silently
+# ---------------------------------------------------------------------------
+# Every audited exception below takes its file_id from a record the caller has
+# already been authorised to read, so the record IS the authorisation. Any call
+# site not listed here must pass require_kind, or this test fails.
+_AUDITED_UNSCOPED_FILE_GETS = {
+    # file -> why an unscoped read is correct there
+    "admin_catalog.py": "file_id read off the bulk-import job the caller fetched",
+    "expenses.py": "file_id read off the expense after _assert_expense_object_access",
+    "handoffs.py": "file_id read off the handoff after the uploader/recipient check",
+    "hr.py": "file_id read off the employee doc row behind the ADMIN-only gate",
+    "tasks.py": "file_id read off the task after _ensure_task_store_access",
+    "vendors.py": "file_id read off the GRN after can_access_store_scoped",
+}
+
+
+def test_every_file_store_get_is_kind_scoped_or_audited():
+    """The structural fix for the class. Round 1, 2 and 3 each shipped with one
+    unremembered door; this makes the next one fail CI instead."""
+    import ast
+    import pathlib
+
+    api_root = pathlib.Path(__file__).resolve().parents[1] / "api"
+    offenders = []
+    scanned = 0
+    for path in sorted(api_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "get_file_store" not in source:
+            continue
+        scanned += 1
+        tree = ast.parse(source)
+        # Names bound to an actual file-store handle in THIS file, so a local
+        # variable that merely happens to be called `store` is not confused for
+        # one (dict.get / cache.get / a shop record all use the same spelling).
+        handles = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                callee = node.value.func
+                name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+                if name == "get_file_store":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            handles.add(target.id)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "get":
+                continue
+            if not (isinstance(func.value, ast.Name) and func.value.id in handles):
+                continue
+            # ... and it must be a read BY file id (the capability), not some
+            # other .get on the same handle.
+            first_arg = node.args[0] if node.args else None
+            if first_arg is None or "file_id" not in ast.unparse(first_arg):
+                continue
+            if any(kw.arg == "require_kind" for kw in node.keywords):
+                continue
+            if path.name in _AUDITED_UNSCOPED_FILE_GETS:
+                continue
+            offenders.append(f"{path.name}:{node.lineno}")
+    # Guard the guard: if the detection stops finding the modules it audits, the
+    # test would pass vacuously.
+    assert scanned >= 8, f"file-store scan found only {scanned} modules"
+    assert not offenders, (
+        "unscoped file-store read(s) -- pass require_kind=<kind> when the "
+        "file_id comes from the request, or require_kind=ANY_KIND (and add an "
+        "entry to _AUDITED_UNSCOPED_FILE_GETS) when it comes from an "
+        f"already-authorised record: {offenders}"
+    )
+
+
+# ===========================================================================
+# documents[].file_id must not be handed to a require_manager caller
+# ===========================================================================
+# hr.py's docstring claims "the bytes are only reachable through the RBAC-gated
+# download endpoint". sanitize_user never touched `documents`, so the GridFS
+# handle rode out whole on every users read -- and (with the logo door above)
+# that handle was all an attacker needed.
+
+_EMPLOYEE_WITH_DOCS = dict(
+    _STORE_A_EMPLOYEE,
+    documents=[
+        {
+            "doc_id": "d1",
+            "doc_type": "AADHAAR",
+            "file_id": "GRIDFS-HANDLE-0001",
+            "filename": "aadhaar.jpg",
+            "content_type": "image/jpeg",
+            "size": 1234,
+            "uploaded_at": "2026-08-01T00:00:00",
+            "uploaded_by": "admin-1",
+        }
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1/users/emp-a", "/api/v1/users/store/S1", "/api/v1/users"],
+)
+def test_no_users_route_emits_a_document_file_id(path, monkeypatch):
+    repo = _FakeUserRepo(seed=[_EMPLOYEE_WITH_DOCS, _MANAGER_A])
+    c, _ = _users_client(_ADMIN, monkeypatch, repo=repo)
+    r = c.get(path)
+    assert r.status_code == 200, r.text
+    assert "GRIDFS-HANDLE-0001" not in r.text
+    assert '"file_id"' not in r.text
+
+
+def test_document_metadata_still_travels_so_the_list_ui_works(monkeypatch):
+    repo = _FakeUserRepo(seed=[_EMPLOYEE_WITH_DOCS, _MANAGER_A])
+    c, _ = _users_client(_ADMIN, monkeypatch, repo=repo)
+    docs = c.get("/api/v1/users/emp-a").json()["documents"]
+    assert len(docs) == 1
+    assert docs[0]["doc_id"] == "d1"
+    assert docs[0]["doc_type"] == "AADHAAR"
+    assert docs[0]["filename"] == "aadhaar.jpg"
+    assert "file_id" not in docs[0]
+
+
+def test_safe_documents_is_an_allow_list():
+    out = users_router._safe_documents(
+        [{"doc_id": "d1", "file_id": "H", "a_new_field_next_year": "leak"}]
+    )
+    assert out == [{"doc_id": "d1"}]
+    # Junk shapes never raise.
+    assert users_router._safe_documents(None) == []
+    assert users_router._safe_documents("nope") == []
+    assert users_router._safe_documents([None, 1]) == []

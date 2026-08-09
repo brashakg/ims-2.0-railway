@@ -308,8 +308,15 @@ _CREDENTIAL_FIELDS = (
     "pin_attempts",
 )
 
-# Statutory / government identity numbers held on the employee record. Named so
-# the PII surface of a user document is written down in ONE place.
+# Statutory / government identity numbers held on the employee record.
+#
+# DOCUMENTATION-ONLY inventory -- deliberately has no readers here. The
+# full-record routes on this router INTENTIONALLY return these values to an
+# in-scope manager (require_manager + the store scope above); whether that bar
+# should be raised to HR/ADMIN, or the values masked to last-4, is an open
+# product decision for the owner, not something to guess at inside a security
+# fix. Named in one place so the PII surface of a user document is written down
+# and the next reviewer is not left guessing which fields are in scope.
 _GOVT_ID_FIELDS = (
     "aadhaar_no",
     "pan_no",
@@ -344,17 +351,55 @@ _PICKER_FIELDS = (
 )
 
 
+# The employee-document metadata a user record may carry (written by hr.py's
+# document upload as a `documents` array). Everything EXCEPT file_id may travel:
+# the file_id is a GridFS handle into the shared bucket, and handing it to a
+# require_manager caller defeats hr.py's ADMIN-only + per-employee download gate
+# -- its own docstring claims "the bytes are only reachable through the
+# RBAC-gated download endpoint", which was false while this array rode out
+# whole. Allow-list, not deny-list, so a field added to doc_record later cannot
+# leak by omission.
+_DOCUMENT_METADATA_FIELDS = (
+    "doc_id",
+    "doc_type",
+    "filename",
+    "content_type",
+    "size",
+    "uploaded_at",
+    "uploaded_by",
+)
+
+
+def _safe_documents(documents) -> list:
+    """Project an employee's `documents` array down to metadata only.
+
+    Drops file_id (the GridFS handle). The UI still gets everything it needs to
+    LIST a document; fetching the bytes still has to go through hr.py's gated
+    download, which takes doc_id and re-checks the caller.
+    """
+    if not isinstance(documents, list):
+        return []
+    return [
+        {f: d[f] for f in _DOCUMENT_METADATA_FIELDS if f in d}
+        for d in documents
+        if isinstance(d, dict)
+    ]
+
+
 def sanitize_user(user: dict) -> dict:
     """Strip credential material from a user document before it leaves the API.
 
     This is the SINGLE definition of "sanitised user" for the full-record
     routes. It is a deny-list because those routes are meant to return the whole
     employee record to an entitled reader; the credential fields are the ones
-    that must never appear regardless.
+    that must never appear regardless -- plus the GridFS handles inside
+    `documents`, which are capabilities rather than data.
     """
     if user is not None:
         for field in _CREDENTIAL_FIELDS:
             user.pop(field, None)
+        if "documents" in user:
+            user["documents"] = _safe_documents(user.get("documents"))
     return user
 
 
@@ -393,7 +438,11 @@ def _store_scope_filter(current_user: dict):
     is_cross, stores = user_store_scope(current_user)
     if is_cross:
         return None
-    return {"$in": sorted(stores)}
+    # USER_SCHEMA is documentation-only, so store_ids can hold a None or a
+    # non-string from a bad import; a bare sorted() would raise TypeError and
+    # 500 the route. Dropping the junk keeps the filter valid and still fails
+    # closed (an all-junk list yields {"$in": []}).
+    return {"$in": sorted({s for s in stores if isinstance(s, str) and s})}
 
 
 def _target_user_stores(target: dict) -> list:

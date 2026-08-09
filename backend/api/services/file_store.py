@@ -49,6 +49,32 @@ ALLOWED_MIME_TYPES = frozenset(
 MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 
 
+# ---------------------------------------------------------------------------
+# SECURITY CONTRACT for FileStore.get -- read this before adding a serve route
+# ---------------------------------------------------------------------------
+# ONE GridFS bucket holds every binary the app stores: product images, company
+# logos, GRN attachments, expense bills, task attachments, handoff files, and
+# employee Aadhaar / PAN / UAN / ESIC SCANS. A file_id is therefore a bearer
+# capability over the whole bucket -- whoever can name one can read it unless
+# the read is scoped.
+#
+# THE RULE:
+#   * If the endpoint takes the file_id from the REQUEST (path/query/body), it
+#     MUST pass require_kind="<the kind stamped at upload>". Anything else is a
+#     universal read of the bucket. This is not hypothetical: the company-logo
+#     serve omitted it and could stream any employee's Aadhaar scan.
+#   * If the endpoint derives the file_id from a record the caller has ALREADY
+#     been authorised to read (the expense doc, the GRN, the task, the handoff,
+#     the employee document row), the record is the authorisation and the read
+#     may be unscoped -- pass require_kind=ANY_KIND to say so DELIBERATELY.
+#
+# Both branches are asserted by a guard test, so a new serve endpoint cannot
+# silently inherit universal read by simply forgetting the argument. Making the
+# parameter a hard runtime requirement would break the already-audited callers
+# above mid-shift on a live system, so the enforcement lives in the test.
+ANY_KIND = "__any_kind__"
+
+
 class FileStore:
     """Abstract file-store interface."""
 
@@ -68,12 +94,16 @@ class FileStore:
     ) -> Optional[Tuple[bytes, str, str]]:
         """Return (content, filename, mime_type) or None when missing.
 
-        `require_kind`: when set, ALSO return None unless the stored file's
-        metadata.kind matches. This lets a PUBLIC per-kind serve endpoint (e.g.
-        product images) refuse to hand back a DIFFERENT kind of file from the
-        shared store -- without it, a public image serve could be handed a GRN
-        attachment / expense bill file_id and leak it. Callers that don't pass
-        require_kind get the original unscoped behaviour."""
+        `require_kind`: when set to a kind string, ALSO return None unless the
+        stored file's metadata.kind matches, so a serve endpoint refuses to hand
+        back a DIFFERENT kind of file from the shared bucket -- without it, an
+        image serve handed a GRN attachment / expense bill / employee ID-scan
+        file_id would leak it.
+
+        MANDATORY whenever the file_id comes from the request. Pass the module
+        sentinel ``ANY_KIND`` (or None, its legacy equivalent) ONLY when the
+        caller has already been authorised against the record that owns the
+        file_id. See the SECURITY CONTRACT block at the top of this module."""
         raise NotImplementedError
 
     def delete(self, file_id: str) -> bool:
@@ -106,8 +136,9 @@ class InMemoryFileStore(FileStore):
         rec = self._files.get(file_id)
         if rec is None:
             return None
-        if require_kind is not None and (rec.get("metadata") or {}).get("kind") != require_kind:
-            return None
+        if require_kind not in (None, ANY_KIND):
+            if (rec.get("metadata") or {}).get("kind") != require_kind:
+                return None
         return (rec["content"], rec["filename"], rec["mime_type"])
 
     def delete(self, file_id) -> bool:
@@ -164,7 +195,7 @@ class GridFSFileStore(FileStore):
             from bson import ObjectId
 
             grid_out = fs.get(ObjectId(file_id))
-            if require_kind is not None:
+            if require_kind not in (None, ANY_KIND):
                 meta = getattr(grid_out, "metadata", None) or {}
                 if meta.get("kind") != require_kind:
                     return None
