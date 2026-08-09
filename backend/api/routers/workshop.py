@@ -396,25 +396,62 @@ QC_HANDOVER_BLOCKED_MESSAGE = (
     "handing it to the customer."
 )
 
-# Job statuses the handover gate does NOT block on. See the skip-rules block in
-# assert_linked_job_qc_cleared for the reasoning behind each. The invariant these
-# encode -- the gate blocks exactly the states QC can fix -- is asserted below
-# and pinned by test_gate_blocks_only_states_qc_can_fix.
-_HANDOVER_GATE_SKIP_STATUSES = frozenset({"CANCELLED", "DELIVERED", "PENDING"})
+# Job statuses the handover gate NEVER blocks on, whatever else is true.
+#
+# PENDING IS DELIBERATELY NOT HERE, and this comment exists so nobody puts it
+# back. It was added for one round and that single change re-opened this PR's own
+# hole for 100% of the live in-flight spectacle population: both un-QC'd jobs in
+# production are PENDING, so the counter door returned 200 on jobs the bench door
+# was simultaneously holding for missing QC. Two claims were used to justify the
+# skip and BOTH were false:
+#   * "no lab work has begun, so nothing exists that could be un-QC'd" -- wrong.
+#     PENDING is not in lab_routing._TERMINAL_JOB_STATUSES, and only INTAKE
+#     advances the status, so a job whose INTAKE leg was HELD walks every station
+#     to PICKUP -- real bench work, full station_timestamps and scan_history --
+#     while its status stays PENDING.
+#   * "there is no performable remedy" -- wrong. The live rows carry
+#     confirmed_by_sales=True (the sales gate passes) and lens_status=None (the
+#     F9 DC hardlock fires only on ORDERED), so PENDING -> IN_PROGRESS ->
+#     COMPLETED -> QC is performable today.
+# The real defect was that the 400 NAMED THE WRONG REMEDY ("run QC" on a status
+# QC refuses). The fix for a message that names the wrong remedy is to fix the
+# MESSAGE -- see _handover_block_detail -- never to remove the block.
+_HANDOVER_GATE_SKIP_STATUSES = frozenset({"CANCELLED", "DELIVERED"})
 
-# ENFORCED INVARIANTS, not comments. Both encode a rule this PR was sent back
+# Statuses the gate blocks on whose remedy is NOT "run QC" (QC refuses them), so
+# they need their own sentence instead. Keeping them here rather than in the skip
+# set is the whole point: they are still blocked, just told the truth.
+_HANDOVER_NON_QC_REMEDY_STATUSES = frozenset({"PENDING"})
+
+# ENFORCED INVARIANTS, not comments. Each encodes a rule this PR was sent back
 # for violating; an assert at import fails the deploy loudly instead of letting
-# the two halves drift apart again in six months.
-#   1. Every status the handover gate can BLOCK on must be a status QC will
-#      actually ACCEPT -- otherwise the 400 names a remedy the API refuses.
+# the halves drift apart again in six months.
+#   1. Every status the gate blocks on must have a remedy that actually exists:
+#      either QC accepts it, or it has its own named non-QC remedy. What must
+#      never happen is a block whose message points at an API that refuses.
 #   2. The canonical patient-facing pair must never leak into the
 #      not-patient-facing set that _is_patient_facing tests against.
-assert set(VALID_JOB_TRANSITIONS) - _HANDOVER_GATE_SKIP_STATUSES <= set(
-    _QC_INPUT_STATUSES
-), "handover gate would block a status QC refuses"
+assert (
+    set(VALID_JOB_TRANSITIONS)
+    - _HANDOVER_GATE_SKIP_STATUSES
+    - _HANDOVER_NON_QC_REMEDY_STATUSES
+) <= set(_QC_INPUT_STATUSES), "handover gate would block a status with no remedy"
 assert not (_QC_REQUIRED_TARGETS & _NON_PATIENT_FACING_STATUSES), (
     "a patient-facing status is marked bench-internal"
 )
+
+
+def _handover_block_detail(job: dict) -> str:
+    """The counter-facing sentence for a blocked handover, branched on WHY the
+    job is blocked so it always names a step that actually exists."""
+    label = job.get("job_number") or job.get("job_id") or "linked"
+    if (job.get("status") or "").strip().upper() in _HANDOVER_NON_QC_REMEDY_STATUSES:
+        return (
+            f"Workshop job {label} has not been started yet, so it has no QC "
+            f"record. Start the job, complete it and record QC before handing it "
+            f"to the customer."
+        )
+    return QC_HANDOVER_BLOCKED_MESSAGE.format(job=label)
 
 
 def assert_linked_job_qc_cleared(order: dict) -> None:
@@ -442,22 +479,24 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
     correctly-QC'd order forever. create_job's dedup already applies this exact
     check, so both halves now agree.
 
-    SKIP RULES -- the gate blocks EXACTLY the states QC can actually fix
-    (_QC_INPUT_STATUSES). Blocking a state with no reachable remedy is what a
-    gate must never do, so each skip is deliberate:
+    SKIP RULES. A gate must never block with a remedy that does not exist, but
+    the answer to that is an honest MESSAGE, not a skip -- so the skip list is as
+    short as it can be:
       * CANCELLED -- not being handed over.
       * DELIVERED -- the handover ALREADY happened; blocking buys zero safety and
         is unrecoverable (QC refuses DELIVERED and VALID_JOB_TRANSITIONS leaves
         it terminal), so a legacy delivered job would strand its order forever
         for every role including SUPERADMIN. Safe because no NEW job can reach
         DELIVERED without QC now.
-      * PENDING -- no lab work has begun, so this job has produced nothing that
-        could BE un-QC'd; and QC deliberately refuses PENDING (a pass routes to
-        READY, skipping the sales-confirm and F9 DC gates). If physical goods
-        exist they came from a worked sibling, which the union above now checks.
-        Blocking here would strand real orders behind a remedy the counter
-        cannot perform.
-    The invariant "every blocked state is QC-able" is pinned by a test.
+      * a PENDING job ON AN ORDER THAT ALREADY HAS A QC-CLEARED JOB -- the
+        duplicate "ghost" shape. The safety-net created a second job nobody
+        worked; the real job is QC'd and its glasses are finished and on the
+        shelf. Blocking there strands a customer for a row that produced nothing.
+        A LONE PENDING job is still BLOCKED (it is the live prod shape and it can
+        have walked the whole bench to PICKUP) -- it just gets its own sentence
+        from _handover_block_detail naming the real remedy: start the job.
+    The invariant "every blocked state has a remedy that exists" is an
+    import-time assert plus a test.
 
     An order with NO workshop job (a frame-only or accessory sale) has nothing to
     check and passes.
@@ -495,17 +534,25 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
         ):
             jobs.append(linked)
 
+    # The ghost carve-out needs to know whether ANY job on this order is cleared,
+    # so compute it before the loop rather than per-job.
+    has_cleared_job = any(
+        _qc_cleared(j) for j in jobs if isinstance(j, dict)
+    )
+
     for job in jobs:
         if not isinstance(job, dict):
             continue
-        if (job.get("status") or "").strip().upper() in _HANDOVER_GATE_SKIP_STATUSES:
+        status = (job.get("status") or "").strip().upper()
+        if status in _HANDOVER_GATE_SKIP_STATUSES:
+            continue
+        # Ghost duplicate ONLY: an unworked PENDING row alongside a job that is
+        # genuinely QC-cleared. A lone PENDING job falls through and blocks.
+        if status == "PENDING" and has_cleared_job:
             continue
         if not _qc_cleared(job):
             raise HTTPException(
-                status_code=400,
-                detail=QC_HANDOVER_BLOCKED_MESSAGE.format(
-                    job=job.get("job_number") or job.get("job_id") or "linked"
-                ),
+                status_code=400, detail=_handover_block_detail(job)
             )
 
 

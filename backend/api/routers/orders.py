@@ -73,15 +73,26 @@ POS_WRITE_ROLES = (
 # Roles permitted to CLOSE A HANDOVER (mark an order ready / delivered). This is
 # deliberately NOT POS_WRITE_ROLES: that set's exclusion is scoped to order
 # CREATION ("CASHIER is payment-only -> may record payments but not create
-# orders"), and delivering is not creating. CASHIER is this codebase's designated
-# front-desk pickup role -- labels.SCAN_ROLES says so verbatim ("CASHIER is
-# included so a front-desk cashier can scan a job to DELIVERED at pickup"), and
-# workshop._LAB_SCAN_ROLES, workshop._FITTING_ROLES and shipping._FULFILMENT_ROLES
-# all carry it. Gating handover on POS_WRITE_ROLES would leave a cashier able to
-# scan the job to DELIVERED and physically hand the glasses over, but unable to
-# close the order -- revenue and NPS stuck at READY with no in-app escalation.
-# The QC gate, not the role list, is the real patient-safety control here.
-HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER",)
+# orders"), and delivering is not creating.
+#
+# THE RULE, stated once so it is applied consistently: whoever this codebase lets
+# SCAN A JOB TO DELIVERED at the pickup counter must also be able to CLOSE the
+# order. Anything else leaves someone able to physically hand the glasses over
+# but unable to finish the transaction -- revenue and NPS stuck at READY with no
+# in-app escalation, and (because the Orders screen renders Mark Delivered with
+# no role condition) a visible button that 403s in front of the customer.
+#
+# The scan roles are labels.SCAN_ROLES and workshop._LAB_SCAN_ROLES. Both carry
+# CASHIER ("included so a front-desk cashier can scan a job to DELIVERED at
+# pickup") AND WORKSHOP_STAFF. An earlier round applied this reasoning to CASHIER
+# and missed WORKSHOP_STAFF, which sits in the identical position in the identical
+# two tuples -- so both are here now. The QC gate, not the role list, is the real
+# patient-safety control on this path.
+#
+# NOTE (open, owner decision): OPTOMETRIST is on the Orders nav in the frontend
+# but is in NEITHER scan-role tuple, so it is deliberately not added here. That
+# FE/BE mismatch predates this change and is flagged, not decided.
+HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
 
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product

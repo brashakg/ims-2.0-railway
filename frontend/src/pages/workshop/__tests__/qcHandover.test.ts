@@ -73,21 +73,25 @@ describe('awaitingHandoverQc', () => {
     ).toBe(false);
   });
 
-  it('warns for a station-less PENDING job awaiting sales confirmation', () => {
-    // The POS safety-net job: no current_station at all, so the station test
-    // never fires -- it would otherwise show neither warning nor action.
-    expect(awaitingHandoverQc({ status: 'PENDING' })).toBe(true);
-    expect(
-      awaitingHandoverQc({ status: 'PENDING', fitting_details: {} }),
-    ).toBe(true);
-  });
-
-  it('stays quiet once sales HAVE confirmed a PENDING job', () => {
+  it('warns for EVERY un-QCd PENDING job, station or not', () => {
+    // THE LIVE PROD SHAPE. Both un-QC'd jobs in production are PENDING with
+    // confirmed_by_sales=true and no current_station, and the backend gate
+    // blocks them -- so the screen must warn. An earlier version only warned
+    // when sales had NOT confirmed, i.e. exactly the shape the live rows are
+    // NOT in, leaving both screens silent on every order in flight.
     expect(
       awaitingHandoverQc({
         status: 'PENDING',
         fitting_details: { confirmed_by_sales: true },
       }),
+    ).toBe(true);
+    expect(awaitingHandoverQc({ status: 'PENDING' })).toBe(true);
+    expect(awaitingHandoverQc({ status: 'PENDING', fitting_details: {} })).toBe(true);
+  });
+
+  it('stays quiet for a PENDING job that already has QC on file', () => {
+    expect(
+      awaitingHandoverQc({ status: 'PENDING', qc_passed: true }),
     ).toBe(false);
   });
 
@@ -105,12 +109,22 @@ describe('awaitingHandoverQc', () => {
 });
 
 describe('handoverBlockerMessage', () => {
-  it('names SALES CONFIRMATION for a PENDING job, not QC', () => {
+  it('names SALES CONFIRMATION for an unconfirmed PENDING job', () => {
     // Telling staff to "run QC" on a PENDING job would name a step the API
     // refuses -- QC deliberately rejects PENDING.
     const msg = handoverBlockerMessage({ status: 'PENDING' });
     expect(msg).toContain('fitting');
     expect(msg).not.toContain('QC');
+  });
+
+  it('names START THE JOB for a confirmed PENDING job (the live prod shape)', () => {
+    // Mirrors the backend's _handover_block_detail: sales have confirmed, so
+    // the real next step is starting the job, not confirming the fitting.
+    const msg = handoverBlockerMessage({
+      status: 'PENDING',
+      fitting_details: { confirmed_by_sales: true },
+    });
+    expect(msg).toContain('not been started');
   });
 
   it('names QC for a job on the pickup shelf', () => {

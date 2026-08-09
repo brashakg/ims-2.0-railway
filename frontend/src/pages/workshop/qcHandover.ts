@@ -53,31 +53,37 @@ export const awaitingHandoverQc = (job: QcJobLike) =>
   job.status !== 'CANCELLED' &&
   (job.status === 'READY' ||
     HANDOVER_STATIONS.includes((job.current_station || '').toUpperCase()) ||
-    // A PENDING job auto-created by the POS safety net has NO current_station at
-    // all, so the station test above never fires for it. It is stuck for a
-    // different reason -- sales have not confirmed the fitting, which is what
-    // blocks PENDING -> IN_PROGRESS -- and it would otherwise show neither a
-    // warning nor an action. Narrow on purpose: only an unconfirmed PENDING job,
-    // not every early-stage bench job (warning fatigue is the failure mode on
-    // the other side).
-    isAwaitingSalesConfirmation(job));
+    // EVERY un-QC'd PENDING job, station or no station. The backend handover
+    // gate blocks these (they are the live in-flight shape, and a PENDING job
+    // can have walked the whole bench while its status never moved), so the
+    // screen has to say so -- an earlier version only warned when sales had NOT
+    // confirmed the fitting, which is exactly the shape the live rows are NOT
+    // in, leaving both screens silent on every order in flight.
+    job.status === 'PENDING');
 
 /**
- * A PENDING job that sales have not yet confirmed the fitting for. This -- not
- * QC -- is what is actually blocking it, so the UI must say so rather than
- * telling staff to run a QC the API would refuse on a PENDING job.
+ * A PENDING job that sales have not yet confirmed the fitting for. Sales
+ * confirmation -- not QC -- is the FIRST thing blocking such a job, so the note
+ * names that step instead.
  */
 export const isAwaitingSalesConfirmation = (job: QcJobLike) =>
   job.status === 'PENDING' && !job.fitting_details?.confirmed_by_sales;
 
 /**
  * The sentence to show for a job that needs attention before handover. Branches
- * on WHY it is stuck, so the note always names a step that actually exists.
+ * on WHY it is stuck, so the note always names a step that actually exists --
+ * telling staff to "run QC" on a PENDING job would name an API that refuses it.
+ * Mirrors the backend's _handover_block_detail.
  */
-export const handoverBlockerMessage = (job: QcJobLike): string =>
-  isAwaitingSalesConfirmation(job)
-    ? 'Sales have not confirmed the fitting for this job yet — confirm the fitting details before it can go to the bench.'
-    : 'No QC recorded for this job — run QC before handing it over.';
+export const handoverBlockerMessage = (job: QcJobLike): string => {
+  if (isAwaitingSalesConfirmation(job)) {
+    return 'Sales have not confirmed the fitting for this job yet — confirm the fitting details before it can go to the bench.';
+  }
+  if (job.status === 'PENDING') {
+    return 'This job has not been started yet — start it, complete it and run QC before handing it over.';
+  }
+  return 'No QC recorded for this job — run QC before handing it over.';
+};
 
 /**
  * Read an order line's prescription id regardless of casing.

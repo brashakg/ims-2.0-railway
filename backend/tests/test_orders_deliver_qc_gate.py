@@ -228,11 +228,14 @@ def test_deliver_is_role_gated(monkeypatch):
 
 
 def test_ready_is_role_gated(monkeypatch):
+    """ACCOUNTANT is out of scope for a counter handover. (This test previously
+    used WORKSHOP_STAFF, which was itself the asymmetry being fixed -- it can
+    scan a job to DELIVERED, so it must be able to close the order.)"""
     client, orepo = _client(
         monkeypatch,
         _order(status="CONFIRMED", workshop_job_id="JID-1"),
         [_wjob(qc_passed=True)],
-        roles=("WORKSHOP_STAFF",),
+        roles=("ACCOUNTANT",),
     )
     assert client.post("/api/v1/orders/ORD-1/ready").status_code == 403
     assert orepo.status_updates == []
@@ -353,6 +356,35 @@ def test_cross_order_pointer_is_ignored(monkeypatch):
     assert orepo.status_updates == []
 
 
+def test_foreign_pointer_does_not_falsely_block_a_cleared_order(monkeypatch):
+    """PINS THE OWNERSHIP CHECK, which was load-bearing but unpinned: replacing
+    it with a bare isinstance() left the whole suite green.
+
+    Here every job that BELONGS to this order is QC-cleared and only the
+    foreign job (another order's) is un-QC'd. Without the ownership check the
+    foreign job is pulled in and falsely blocks a correctly-QC'd handover.
+    test_cross_order_pointer_is_ignored cannot catch this -- it makes the
+    foreign job the QC'd one, so the sweep alone produces its 400."""
+    client, orepo = _client(
+        monkeypatch,
+        _order(workshop_job_id="JID-FOREIGN"),
+        [
+            # Another order's job, NOT QC'd -- must be ignored entirely.
+            _wjob(
+                job_id="JID-FOREIGN",
+                job_number="WS-FOREIGN",
+                order_id="ORD-9",
+                status="COMPLETED",
+            ),
+            # This order's own job IS cleared.
+            _wjob(job_id="JID-1", job_number="WS-1", qc_passed=True),
+        ],
+    )
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 200, resp.text
+    assert orepo.status_updates == ["DELIVERED"]
+
+
 def test_stale_pointer_to_a_deleted_job_still_checks_the_real_one(monkeypatch):
     """A dangling pointer must not make the gate silently pass."""
     client, orepo = _client(
@@ -380,31 +412,116 @@ def test_legacy_delivered_job_does_not_strand_its_order(monkeypatch):
     assert orepo.status_updates == ["DELIVERED"]
 
 
-def test_pending_job_does_not_strand_its_order(monkeypatch):
-    """No lab work has begun, so nothing exists that could BE un-QC'd; and QC
-    deliberately refuses PENDING (a pass would route to READY, skipping the
-    sales-confirm and F9 DC gates). Two of four live jobs are PENDING."""
+def test_lone_pending_job_blocks_the_handover(monkeypatch):
+    """THE LIVE PROD SHAPE, and the regression for the round that skipped it.
+
+    Both un-QC'd jobs in production are PENDING on in-flight orders, so skipping
+    PENDING re-opened this PR's own hole for 100% of the spectacle work: the
+    counter door returned 200 on jobs the bench door was holding. PENDING is NOT
+    "no work done" -- only INTAKE advances the status, so a job whose INTAKE leg
+    was held walks the whole bench while its status stays PENDING."""
     client, orepo = _client(
         monkeypatch, _order(workshop_job_id="JID-1"), [_wjob(status="PENDING")]
     )
-    assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 200
-    assert orepo.status_updates == ["DELIVERED"]
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 400, resp.text
+    assert orepo.status_updates == []
 
 
-def test_gate_blocks_only_states_qc_can_fix(monkeypatch):
-    """THE INVARIANT, enforced rather than described: every job status the gate
-    blocks on must be one the QC endpoints accept. Blocking a state whose named
-    remedy the API refuses is the exact failure this PR was returned for."""
+def test_lone_pending_job_names_the_real_remedy(monkeypatch):
+    """The round-1 defect was that the 400 named a remedy the API refuses. The
+    fix is an honest MESSAGE, not a skip: QC rejects PENDING, so the sentence
+    must say 'start the job', never 'run QC'."""
+    client, _orepo = _client(
+        monkeypatch, _order(workshop_job_id="JID-1"), [_wjob(status="PENDING")]
+    )
+    detail = client.post("/api/v1/orders/ORD-1/deliver").json()["detail"]
+    assert "not been started" in detail
+    assert "Start the job" in detail
+
+
+def test_lone_pending_blocks_ready_and_shipping_too(monkeypatch):
+    """All three handover doors agree on the live shape."""
+    client, orepo = _client(
+        monkeypatch,
+        _order(status="CONFIRMED", workshop_job_id="JID-1"),
+        [_wjob(status="PENDING")],
+    )
+    assert client.post("/api/v1/orders/ORD-1/ready").status_code == 400
+    assert orepo.status_updates == []
+
+    ship = _shipping_client(
+        monkeypatch, _order(workshop_job_id="JID-1"), [_wjob(status="PENDING")]
+    )
+    assert ship.post("/api/v1/shipping/shipments", json=_SHIPMENT_BODY).status_code == 400
+
+
+def test_pending_job_that_walked_to_pickup_blocks(monkeypatch):
+    """The status never moved but the job is physically at the pickup counter --
+    exactly the case the 'no lab work has begun' justification got wrong."""
+    client, orepo = _client(
+        monkeypatch,
+        _order(workshop_job_id="JID-1"),
+        [_wjob(status="PENDING", current_station="PICKUP")],
+    )
+    assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 400
+    assert orepo.status_updates == []
+
+
+def test_gate_blocks_only_states_with_a_real_remedy(monkeypatch):
+    """THE INVARIANT, enforced rather than described: every status the gate
+    blocks on must have a remedy that EXISTS -- either QC accepts it, or it has
+    its own named non-QC remedy. What must never happen is a block pointing at an
+    API that refuses. (Blocking with the wrong message is fixed by fixing the
+    message; removing the block is what re-opened the hole.)"""
     blocked = set(wm.VALID_JOB_TRANSITIONS) - set(wm._HANDOVER_GATE_SKIP_STATUSES)
     assert blocked
-    assert blocked <= set(wm._QC_INPUT_STATUSES)
-    # And prove it end to end for each blocked status.
+    assert (blocked - set(wm._HANDOVER_NON_QC_REMEDY_STATUSES)) <= set(
+        wm._QC_INPUT_STATUSES
+    )
+    # PENDING is blocked, and its remedy is deliberately NOT QC.
+    assert "PENDING" in blocked
+    assert "PENDING" not in set(wm._QC_INPUT_STATUSES)
+    # Every blocked status really does 400, and never with a QC instruction it
+    # cannot act on.
     for status in sorted(blocked):
         client, orepo = _client(
             monkeypatch, _order(workshop_job_id="JID-1"), [_wjob(status=status)]
         )
-        assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 400, status
+        resp = client.post("/api/v1/orders/ORD-1/deliver")
+        assert resp.status_code == 400, status
         assert orepo.status_updates == [], status
+        if status in wm._HANDOVER_NON_QC_REMEDY_STATUSES:
+            assert "run QC" not in resp.json()["detail"], status
+
+
+def test_both_doors_agree_on_one_shared_document(monkeypatch):
+    """THE TEST THAT WOULD HAVE CAUGHT THE LAST ROUND. The bench scan gate and
+    the counter gate must reach the SAME verdict on the SAME job doc -- the
+    regression shipped a PR whose two gates contradicted each other."""
+    for status in ("PENDING", "IN_PROGRESS", "COMPLETED", "READY"):
+        job = _wjob(status=status)  # un-QC'd
+
+        bench_blocks = (
+            wm.evaluate_scan_transition_gate(None, job, "DELIVERED") is not None
+        )
+
+        client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), [job])
+        counter_blocks = (
+            client.post("/api/v1/orders/ORD-1/deliver").status_code == 400
+        )
+
+        assert bench_blocks == counter_blocks is True, (
+            f"doors disagree on {status}: bench={bench_blocks} counter={counter_blocks}"
+        )
+        assert orepo.status_updates == [], status
+
+    # ...and both must AGREE to let a QC-cleared job through.
+    cleared = _wjob(status="READY", qc_passed=True)
+    assert wm.evaluate_scan_transition_gate(None, cleared, "DELIVERED") is None
+    client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), [cleared])
+    assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 200
+    assert orepo.status_updates == ["DELIVERED"]
 
 
 def test_ready_gate_runs_after_the_legality_check(monkeypatch):
@@ -445,6 +562,34 @@ def test_cashier_is_still_stopped_by_the_qc_gate(monkeypatch):
     )
     assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 400
     assert orepo.status_updates == []
+
+
+def test_workshop_staff_can_close_a_handover(monkeypatch):
+    """Same rule as CASHIER, applied consistently: WORKSHOP_STAFF is in
+    labels.SCAN_ROLES and workshop._LAB_SCAN_ROLES, so it may scan a job to
+    DELIVERED at pickup. Leaving it out of HANDOVER_ROLES left it able to hand
+    the glasses over but unable to close the order -- and the Orders screen
+    renders Mark Delivered with no role condition, so the button 403'd in front
+    of the customer."""
+    client, orepo = _client(
+        monkeypatch,
+        _order(workshop_job_id="JID-1"),
+        [_wjob(qc_passed=True)],
+        roles=("WORKSHOP_STAFF",),
+    )
+    assert client.post("/api/v1/orders/ORD-1/deliver").status_code == 200
+    assert orepo.status_updates == ["DELIVERED"]
+
+
+def test_every_scan_role_can_close_a_handover(monkeypatch):
+    """THE RULE, pinned mechanically rather than role-by-role: whoever may scan
+    a job to DELIVERED must be able to close the order. Derived from the scan
+    tuples so adding a role there can never silently reintroduce the asymmetry."""
+    from api.routers import labels as labels_mod
+
+    scan_roles = set(labels_mod.SCAN_ROLES) | set(wm._LAB_SCAN_ROLES)
+    handover = set(om.HANDOVER_ROLES) | {"SUPERADMIN"}
+    assert scan_roles <= handover, f"can scan but cannot close: {scan_roles - handover}"
 
 
 def test_out_of_scope_roles_are_still_refused(monkeypatch):
