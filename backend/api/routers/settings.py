@@ -1831,6 +1831,14 @@ async def test_integration(
     the org's integration posture -- which providers are wired up and enabled,
     plus the DISPATCH_MODE that says whether live messaging is armed. The body
     still returns booleans and the mode only, never a credential value.
+
+    NOTE: the rbac_policy row for this path still declares AUTHENTICATED. That
+    is documentation drift, not a hole -- the RBAC middleware is deny-only (its
+    every allow branch is call_next, which runs this route's own Depends), so it
+    can never grant ahead of this gate; the route gate is authoritative. The row
+    is deliberately NOT narrowed here: narrowing a declared row makes the
+    middleware start denying one layer earlier, which is the lockout direction,
+    and 24 other rows are in the same state. That is one batched follow-up.
     """
     collection = _get_settings_collection("integrations")
     doc = (

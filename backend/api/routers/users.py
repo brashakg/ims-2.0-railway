@@ -284,11 +284,62 @@ def hash_password(password: str) -> str:
     return _bc.hashpw(password.encode(), _bc.gensalt(rounds=12)).decode()
 
 
-def sanitize_user(user: dict) -> dict:
-    """Remove sensitive fields from user response"""
+# Credential material that must NEVER leave the API on a user document.
+#
+# P0 (reproduced by the security panel): this helper used to pop only
+# password_hash/password, so ``approval_pin_hash`` survived every user-read
+# route. That field is the bcrypt of the MAKER-CHECKER approval PIN, written
+# onto the users document itself by services/approvals.py:233 (set_approver_pin
+# does a $set through _users_coll), so it rides along inside the raw doc.
+# ApprovalPinSet (see the approval-pin route below) caps the PIN at 4-6 DIGITS,
+# i.e. a 10^4-10^6 keyspace -- an offline crack of the hash is seconds' work,
+# and the recovered PIN authorises discount overrides, journal entries, petty
+# cash and vendor RMA. ``pin_attempts`` is the lockout counter for the same PIN.
+#
+# VERIFIED BEFORE REMOVAL: a grep of frontend/src, backend/api/routers and
+# backend/api/services finds ZERO readers of these three fields outside
+# services/approvals.py, which queries the users collection directly and never
+# consumes a router response. Stripping them therefore cannot blank a screen,
+# break a picker, or 401 anyone.
+_CREDENTIAL_FIELDS = (
+    "password",
+    "password_hash",
+    "approval_pin_hash",
+    "approval_pin_set_at",
+    "pin_attempts",
+)
+
+# Statutory / government identity numbers held on the employee record. They stay
+# visible on THIS router (require_manager plus the F10 store scope) but are
+# stripped for callers entitled only to a staff PICKER -- see the roster in
+# routers/stores.py, which any authenticated colleague at the store may read.
+_GOVT_ID_FIELDS = (
+    "aadhaar_no",
+    "pan_no",
+    "uan_no",
+    "pf_no",
+    "esic_no",
+    "bank_account_no",
+)
+
+
+def sanitize_user(user: dict, strip_govt_ids: bool = False) -> dict:
+    """Strip credential material from a user document before it leaves the API.
+
+    This is the SINGLE definition of "sanitised user". routers/stores.py's
+    roster imports it instead of keeping its own pop-list, because two
+    independently-maintained lists are exactly how approval_pin_hash stayed
+    exposed on both routers at once.
+
+    ``strip_govt_ids=True`` additionally removes the statutory identity numbers,
+    for callers entitled only to a name/role picker.
+    """
     if user is not None:
-        user.pop("password_hash", None)
-        user.pop("password", None)
+        for field in _CREDENTIAL_FIELDS:
+            user.pop(field, None)
+        if strip_govt_ids:
+            for field in _GOVT_ID_FIELDS:
+                user.pop(field, None)
     return user
 
 
@@ -871,8 +922,10 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
             user_id, {"is_active": False, "deactivated_by": current_user.get("user_id")}
         ):
             # F18: drop the memoised live-status entry so the token the sacked
-            # employee is already holding is rejected on their NEXT request
-            # instead of surviving until its natural expiry.
+            # employee is already holding stops working within the cache TTL
+            # (usually the very next request) instead of surviving until its
+            # natural expiry. The TTL, not "next request", is the guaranteed
+            # bound -- see the write-after-delete race noted in auth.py.
             invalidate_user_status(user_id)
             return {"message": "User deactivated"}
 

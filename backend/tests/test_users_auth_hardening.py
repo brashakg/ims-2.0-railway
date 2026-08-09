@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api import dependencies as api_dependencies  # noqa: E402
 from api.routers import auth as auth_router  # noqa: E402
 from api.routers import settings as settings_router  # noqa: E402
+from api.routers import stores as stores_router  # noqa: E402
 from api.routers import users as users_router  # noqa: E402
 from api.routers.auth import create_access_token, get_current_user  # noqa: E402
 from api.services.cache import cache  # noqa: E402
@@ -106,12 +107,68 @@ class _FakeUserRepo:
     def set_active(self, user_id, value):
         self._docs[user_id]["is_active"] = value
 
+    def search_users(self, q, store_id=None):
+        ql = (q or "").lower()
+        return [
+            dict(d)
+            for d in self._docs.values()
+            if ql in (d.get("username", "") + d.get("full_name", "")).lower()
+            and (store_id is None or store_id in (d.get("store_ids") or []))
+        ]
+
+    # -- Mongo-ish matcher, enough for the queries the two routers actually
+    # -- issue: scalar equality with array containment, $or, $ne and $in.
+    @staticmethod
+    def _match_value(doc_value, expected):
+        if isinstance(expected, dict):
+            if "$ne" in expected:
+                return doc_value != expected["$ne"]
+            if "$in" in expected:
+                if isinstance(doc_value, list):
+                    return any(v in expected["$in"] for v in doc_value)
+                return doc_value in expected["$in"]
+            return doc_value == expected
+        if isinstance(doc_value, list):
+            return expected in doc_value
+        return doc_value == expected
+
+    def _matches(self, doc, query):
+        for key, expected in (query or {}).items():
+            if key == "$or":
+                if not any(self._matches(doc, sub) for sub in expected):
+                    return False
+                continue
+            if not self._match_value(doc.get(key), expected):
+                return False
+        return True
+
+    def find_many(self, query=None, skip=0, limit=100):
+        out = [dict(d) for d in self._docs.values() if self._matches(d, query or {})]
+        return out[skip : skip + limit]
+
 
 # ---------------------------------------------------------------------------
 # F10 fixtures: two stores, one employee each, both carrying HR PII
 # ---------------------------------------------------------------------------
 
 _PII_FIELDS = ("aadhaar_no", "pan_no", "uan_no")
+
+# The maker-checker PIN material services/approvals.py writes ONTO the user
+# document. It must never appear in any API response (P0).
+_CREDENTIAL_FIELDS = (
+    "password",
+    "password_hash",
+    "approval_pin_hash",
+    "approval_pin_set_at",
+    "pin_attempts",
+)
+
+_PIN_MATERIAL = {
+    "password_hash": "$2b$12$notarealhashvaluefortestsonly000000000000000000000",
+    "approval_pin_hash": "$2b$12$pinhashplaceholderforregressiontestonly0000000000",
+    "approval_pin_set_at": "2026-08-01T00:00:00",
+    "pin_attempts": {"count": 0, "window_start": "2026-08-01T00:00:00"},
+}
 
 _STORE_A_EMPLOYEE = {
     "user_id": "emp-a",
@@ -124,6 +181,10 @@ _STORE_A_EMPLOYEE = {
     "aadhaar_no": "111122223333",
     "pan_no": "ABCDE1234F",
     "uan_no": "100200300400",
+    "pf_no": "PF0001",
+    "esic_no": "ESIC0001",
+    "bank_account_no": "50100123456789",
+    **_PIN_MATERIAL,
 }
 
 _STORE_B_EMPLOYEE = {
@@ -142,12 +203,17 @@ _STORE_B_EMPLOYEE = {
 _MANAGER_A = {
     "user_id": "mgr-a",
     "username": "mgr_a",
+    "full_name": "Manager A",
     "roles": ["STORE_MANAGER"],
     "store_ids": ["S1"],
     "primary_store_id": "S1",
     "active_store_id": "S1",
     "is_active": True,
     "aadhaar_no": "121212121212",
+    # The manager is the interesting victim: their approval PIN authorises
+    # discount overrides / JEs / petty cash, and the store roster below is
+    # readable by every cashier at the store.
+    **_PIN_MATERIAL,
 }
 
 _ADMIN = {"user_id": "admin-1", "roles": ["ADMIN"], "store_ids": ["S1"]}
@@ -471,3 +537,174 @@ def test_integration_probe_matches_the_other_integration_gates():
 
     src = inspect.getsource(settings_router.test_integration)
     assert 'require_roles("ADMIN")' in src
+
+
+# ===========================================================================
+# P0 -- approval-PIN credential must never leave the API on a user document
+# ===========================================================================
+# services/approvals.py:233 writes `approval_pin_hash` (bcrypt of a 4-6 DIGIT
+# maker-checker PIN) onto the users document, so it rode along in every raw
+# user payload. A 10^4-10^6 keyspace is offline-crackable in seconds and the
+# recovered PIN authorises discount overrides, journal entries, petty cash and
+# vendor RMA. Two doors served it: the users router (sanitize_user) and the
+# stores router's staff roster (its own pop-list) -- which is the one POS
+# actually calls, and which ANY authenticated colleague at the store may read.
+
+
+def _assert_no_credentials(payload_text, doc=None):
+    """No credential field NAME and no PIN/password VALUE anywhere in a body."""
+    for field in _CREDENTIAL_FIELDS:
+        assert field not in payload_text, f"{field} leaked in response"
+    for value in (doc or _PIN_MATERIAL).values():
+        if isinstance(value, str) and value:
+            assert value not in payload_text, "credential value leaked in response"
+
+
+def test_sanitize_user_strips_the_approval_pin_material():
+    """Unit-level lock on the helper the panel executed to prove the P0."""
+    out = users_router.sanitize_user(
+        {
+            "user_id": "u1",
+            "username": "u1",
+            "aadhaar_no": "111122223333",
+            **_PIN_MATERIAL,
+        }
+    )
+    for field in _CREDENTIAL_FIELDS:
+        assert field not in out, f"{field} survived sanitize_user"
+    # Non-credential fields are untouched on this router.
+    assert out["user_id"] == "u1"
+    assert out["aadhaar_no"] == "111122223333"
+
+
+def test_sanitize_user_can_also_strip_govt_ids_for_picker_callers():
+    out = users_router.sanitize_user(
+        {"user_id": "u1", "full_name": "U One", "roles": ["SALES_STAFF"],
+         "aadhaar_no": "111122223333", "pan_no": "ABCDE1234F",
+         "uan_no": "1", "pf_no": "2", "esic_no": "3", "bank_account_no": "4",
+         **_PIN_MATERIAL},
+        strip_govt_ids=True,
+    )
+    for field in _CREDENTIAL_FIELDS + _GOVT_ID_FIELD_NAMES:
+        assert field not in out, f"{field} survived the picker sanitiser"
+    # The picker fields the three live call sites render must survive.
+    assert out["user_id"] == "u1"
+    assert out["full_name"] == "U One"
+    assert out["roles"] == ["SALES_STAFF"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/users/mgr-a",
+        "/api/v1/users/store/S1",
+        "/api/v1/users",
+        "/api/v1/users/search?q=mgr",
+        "/api/v1/users/role/STORE_MANAGER",
+    ],
+)
+def test_no_users_route_returns_the_approval_pin_hash(path, monkeypatch):
+    """Every users-router read path that can surface a user document."""
+    c, _ = _users_client(_ADMIN, monkeypatch)
+    r = c.get(path)
+    assert r.status_code == 200, r.text
+    _assert_no_credentials(r.text)
+
+
+def test_users_router_still_returns_the_fields_it_is_supposed_to(monkeypatch):
+    """Guard against over-stripping: the P0 fix must not blank the record."""
+    c, _ = _users_client(_ADMIN, monkeypatch)
+    body = c.get("/api/v1/users/emp-a").json()
+    assert body["user_id"] == "emp-a"
+    assert body["full_name"] == "Employee A"
+    assert body["roles"] == ["SALES_STAFF"]
+    # Govt IDs are NOT stripped on this router (require_manager + F10 scope);
+    # raising them to an HR/ADMIN bar is a tracked follow-up, not this fix.
+    assert body["aadhaar_no"] == "111122223333"
+
+
+# ---------------------------------------------------------------------------
+# The door POS actually calls: GET /stores/{store_id}/users
+# ---------------------------------------------------------------------------
+
+_GOVT_ID_FIELD_NAMES = (
+    "aadhaar_no",
+    "pan_no",
+    "uan_no",
+    "pf_no",
+    "esic_no",
+    "bank_account_no",
+)
+
+_CASHIER_AT_S1 = {
+    "user_id": "cash-1",
+    "roles": ["SALES_CASHIER"],
+    "store_ids": ["S1"],
+    "active_store_id": "S1",
+}
+
+
+def _stores_client(actor, monkeypatch, repo=None):
+    repo = repo or _FakeUserRepo(
+        seed=[_STORE_A_EMPLOYEE, _STORE_B_EMPLOYEE, _MANAGER_A]
+    )
+    monkeypatch.setattr(stores_router, "get_user_repository", lambda: repo)
+    app = FastAPI()
+    app.include_router(stores_router.router, prefix="/api/v1/stores")
+
+    async def _u():
+        return dict(actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app), repo
+
+
+def test_store_roster_does_not_leak_the_managers_approval_pin_to_a_cashier(
+    monkeypatch,
+):
+    """The exact attack the panel reproduced: a SALES_CASHIER at S1 reads the
+    roster and used to receive the STORE_MANAGER's bcrypt approval-PIN hash."""
+    c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
+    r = c.get("/api/v1/stores/S1/users")
+    assert r.status_code == 200, r.text
+    _assert_no_credentials(r.text)
+
+
+def test_store_roster_does_not_leak_statutory_pii_to_a_cashier(monkeypatch):
+    c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
+    r = c.get("/api/v1/stores/S1/users")
+    assert r.status_code == 200, r.text
+    for field in _GOVT_ID_FIELD_NAMES:
+        assert field not in r.text, f"{field} leaked from the store roster"
+    for value in ("111122223333", "ABCDE1234F", "121212121212", "50100123456789"):
+        assert value not in r.text, "a statutory ID value leaked"
+
+
+def test_store_roster_still_feeds_the_pos_picker_and_the_two_modals(monkeypatch):
+    """POSLayout.tsx:1491, NewTaskModal.tsx:143 and WalkoutIntakeModal.tsx:121
+    map over user_id / id / username / name / full_name / roles. All must
+    survive the strip or the salesperson picker goes blank mid-shift."""
+    c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
+    body = c.get("/api/v1/stores/S1/users").json()
+    rows = {u["user_id"]: u for u in body["users"]}
+    assert set(rows) == {"emp-a", "mgr-a"}
+    assert body["total"] == 2
+    for row in rows.values():
+        assert row.get("user_id")
+        assert row.get("full_name")
+        assert isinstance(row.get("roles"), list) and row["roles"]
+        assert row.get("username")
+        assert row.get("is_active") is True
+
+
+def test_store_roster_role_filter_and_active_flag_still_work(monkeypatch):
+    """The strip must not disturb the query behaviour the pickers depend on."""
+    c, _ = _stores_client(_CASHIER_AT_S1, monkeypatch)
+    body = c.get("/api/v1/stores/S1/users?roles=STORE_MANAGER").json()
+    assert [u["user_id"] for u in body["users"]] == ["mgr-a"]
+
+
+def test_store_roster_and_users_router_share_one_sanitiser():
+    """Two independently-maintained pop-lists are exactly how this P0 stayed
+    open on both routers at once -- lock the single definition in place."""
+    assert stores_router.sanitize_user is users_router.sanitize_user

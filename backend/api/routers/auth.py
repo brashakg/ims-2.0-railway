@@ -428,9 +428,16 @@ def _mint_access_token(token_data: dict) -> Tuple[str, int]:
 #   2. The lookup itself is a PROJECTED find_one on the indexed `user_id`.
 # The DENY verdict is deliberately NOT cached: a stale "disabled" entry would
 # lock out a legitimate user, and a rejected caller costs nothing worth saving.
-# users.py drops the cached ALLOW entry the instant an account is deactivated,
-# so the app's own deactivation path takes effect on the very NEXT request; the
-# TTL is only the backstop for a status changed directly in the database.
+# users.py drops the cached ALLOW entry whenever an account is deactivated.
+#
+# THE GUARANTEED BOUND IS THE TTL, NOT "the next request". Usually the
+# invalidation makes it land on the very next request, but there is a
+# write-after-delete race: a request already in flight can read is_active=True,
+# have the admin's DELETE + cache.delete land, and only THEN execute its own
+# cache.set -- re-arming a stale ALLOW for a full TTL. So the honest promise to
+# an owner handling a sacking is "gone within _USER_STATUS_TTL_SECONDS", which
+# is still a 45x improvement on the 45-minute token lifetime this replaces. Do
+# not let this comment drift back into promising more than the code delivers.
 #
 # FAILURE MODE (deliberate): #726's convention is that the app fails LOUD when
 # Mongo is unreachable - and it still does, at the routes that actually need
