@@ -36,8 +36,8 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/admin/integrations/tally/regenerate -> SUPERADMIN only
   GET  /api/v1/admin/escalations           -> ADMIN only; SUPERADMIN passes; others -> 403
   GET  /api/v1/admin/system-health         -> ADMIN only; others -> 403
-  GET  /api/v1/payroll/config              -> finance roles; non-finance -> 403
-  POST /api/v1/payroll/run                 -> finance roles; SALES_STAFF -> 403
+  GET  /api/v1/payroll/config              -> ADMIN only (owner ruling 2026-08-09)
+  POST /api/v1/payroll/run                 -> ADMIN only (owner ruling 2026-08-09)
   GET  /api/v1/finance/cash-flow           -> finance roles; WORKSHOP_STAFF -> 403
   GET  /api/v1/finance/pnl                 -> finance roles; OPTOMETRIST -> 403
   GET  /api/v1/customers/{id}/loyalty/add  -> credit roles; SALES_STAFF -> 403
@@ -111,14 +111,14 @@ from api.services.rbac_policy import (  # noqa: E402
 # TestClient setup
 # ---------------------------------------------------------------------------
 # We use conftest.py's session-scoped `client` fixture.  However some routes
-# hit `MockDatabase.get_collection()` which doesn't exist — this causes an
+# hit `MockDatabase.get_collection()` which doesn't exist -- this causes an
 # unhandled AttributeError that the default TestClient (raise_server_exceptions=
 # True) re-raises as a Python exception instead of returning a 500 HTTP response.
 #
 # For the RBAC matrix tests we care ONLY about the authz outcome (401/403 vs
 # anything else), not about DB-level errors after the gate passes.  So we
 # provide our own `_matrix_client` fixture with raise_server_exceptions=False
-# that converts those crashes into 500 HTTP responses — proving the authz gate
+# that converts those crashes into 500 HTTP responses -- proving the authz gate
 # let the request through.  Tests that assert on _specific_ authz outcomes
 # (e.g. 404 existence-hiding) still use the shared `client` fixture so server
 # exceptions bubble up if something truly unexpected occurs.
@@ -133,7 +133,7 @@ def matrix_client():
     """Session-scoped TestClient with raise_server_exceptions=False.
 
     When MONGODB_URI="" some routes hit MockDatabase.get_collection() which
-    doesn't exist — the unhandled AttributeError is a DB-absence crash, NOT
+    doesn't exist -- the unhandled AttributeError is a DB-absence crash, NOT
     an authz rejection.  With raise_server_exceptions=False the TestClient
     returns a 500 HTTP response instead of re-raising the Python exception,
     letting us assert "status != 401/403" (authz passed) cleanly.
@@ -209,7 +209,7 @@ def assert_route_allowed(response, role: str, method: str, path: str) -> None:
     """Assert the response is NOT a 401 or 403 (authz blocked).
 
     500 is also acceptable: some routes throw unhandled AttributeError when
-    MONGODB_URI="" and the DB is None/Mock — that is a DB-absence crash, NOT
+    MONGODB_URI="" and the DB is None/Mock -- that is a DB-absence crash, NOT
     an authz rejection. The authz gate ran and passed; the route just crashed
     trying to do DB work. We treat 500 as "authorized through" here.
     """
@@ -241,7 +241,7 @@ def assert_clinical_403(response, role: str, path: str) -> None:
 
 
 # ===========================================================================
-# SECTION 1: PUBLIC endpoints — reachable with NO token
+# SECTION 1: PUBLIC endpoints -- reachable with NO token
 # ===========================================================================
 
 class TestPublicEndpoints:
@@ -252,7 +252,7 @@ class TestPublicEndpoints:
         assert r.status_code == 200, r.text
 
     def test_login_no_token(self, client):
-        # Reaches the handler — fails on credentials (401/422), never RBAC 403
+        # Reaches the handler -- fails on credentials (401/422), never RBAC 403
         r = client.post(
             "/api/v1/auth/login",
             json={"username": "nobody-xyz", "password": "wrongpw123"},
@@ -287,7 +287,7 @@ class TestPublicEndpoints:
 
 
 # ===========================================================================
-# SECTION 2: AUTHENTICATED routes — any role passes, no-token -> 401
+# SECTION 2: AUTHENTICATED routes -- any role passes, no-token -> 401
 # ===========================================================================
 
 class TestAuthenticatedEndpoints:
@@ -311,7 +311,7 @@ class TestAuthenticatedEndpoints:
             )
 
     def test_customers_list_all_roles(self, matrix_client):
-        """GET /customers is AUTHENTICATED — every role passes."""
+        """GET /customers is AUTHENTICATED -- every role passes."""
         for role in ALL_ROLES:
             r = matrix_client.get("/api/v1/customers", headers=ALL_ROLE_HEADERS[role])
             assert r.status_code not in (401, 403), (
@@ -319,7 +319,7 @@ class TestAuthenticatedEndpoints:
             )
 
     def test_orders_list_all_roles(self, matrix_client):
-        """GET /orders is AUTHENTICATED — every role passes (store-scoped in handler)."""
+        """GET /orders is AUTHENTICATED -- every role passes (store-scoped in handler)."""
         for role in ALL_ROLES:
             r = matrix_client.get("/api/v1/orders", headers=ALL_ROLE_HEADERS[role])
             assert r.status_code not in (401, 403), (
@@ -517,7 +517,7 @@ class TestAdminOnlyRoutes:
 
 
 # ===========================================================================
-# SECTION 7: Finance/HR/Payroll — finance-roles only
+# SECTION 7: Finance/HR/Payroll -- finance-roles only
 # ===========================================================================
 
 class TestFinancePayrollHrRoutes:
@@ -535,7 +535,7 @@ class TestFinancePayrollHrRoutes:
         Route gate (_ACCOUNTANT_ROLES = ("ADMIN", "ACCOUNTANT")) denies AREA_MANAGER+STORE_MANAGER
         => Live app 403s them (with middleware 'Forbidden:' body!); policy too permissive.
 
-    These are captured as xfail tests below (NOT loosened — kept as policy divergence evidence).
+    These are captured as xfail tests below (NOT loosened -- kept as policy divergence evidence).
     """
 
     _FINANCE_ROLES = {"ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
@@ -545,7 +545,6 @@ class TestFinancePayrollHrRoutes:
     _FINANCE_PATHS_ALL_4_ALLOWED = [
         ("GET", "/api/v1/finance/cash-flow"),
         ("GET", "/api/v1/finance/pnl"),
-        ("GET", "/api/v1/payroll/config"),
         ("GET", "/api/v1/hr/attendance"),
         ("GET", "/api/v1/hr/leaves"),
         ("GET", "/api/v1/reports/gstr1"),
@@ -557,6 +556,10 @@ class TestFinancePayrollHrRoutes:
     _FINANCE_PATHS = _FINANCE_PATHS_ALL_4_ALLOWED + [
         ("POST", "/api/v1/payroll/run"),
         ("GET", "/api/v1/expenses/aging"),
+        # OWNER RULING 2026-08-09: the salary-config LIST is every employee's
+        # CTC / bank / PAN, so it left the all-4-finance set and is ADMIN-only.
+        # It stays here so the non-finance denial test still covers it.
+        ("GET", "/api/v1/payroll/config"),
     ]
 
     @pytest.mark.parametrize("method,path", _FINANCE_PATHS_ALL_4_ALLOWED)
@@ -574,9 +577,9 @@ class TestFinancePayrollHrRoutes:
     # is ground truth here: if a "denied" assert ever fails, the row was
     # over-tightened and must be reverted.
 
-    # GET /expenses/aging  — route gate _ACCOUNTANT_ROLES=(ADMIN,ACCOUNTANT);
+    # GET /expenses/aging  -- route gate _ACCOUNTANT_ROLES=(ADMIN,ACCOUNTANT);
     # policy row is ['ACCOUNTANT','ADMIN'] (always was). AREA_MANAGER and
-    # STORE_MANAGER are correctly DENIED by the middleware (no bug — the old
+    # STORE_MANAGER are correctly DENIED by the middleware (no bug -- the old
     # xfail was a stale-copy misread).
     @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
     def test_expenses_aging_denied_for_manager_roles(self, client, role):
@@ -588,10 +591,11 @@ class TestFinancePayrollHrRoutes:
         r = matrix_client.get("/api/v1/expenses/aging", headers=ALL_ROLE_HEADERS[role])
         assert_route_allowed(r, role, "GET", "/api/v1/expenses/aging")
 
-    # POST /payroll/run  — route gate _RUN_ROLES=(ADMIN,ACCOUNTANT); policy row
-    # now TIGHTENED to ['ACCOUNTANT','ADMIN']. AREA_MANAGER + STORE_MANAGER are
-    # correctly DENIED by the middleware (the real divergence is now fixed).
-    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+    # POST /payroll/run -- OWNER RULING 2026-08-09, applied 2026-08-10: the run
+    # RESPONSE returns every employee's breakdown, so it is ADMIN-only now. The
+    # policy row and the handler agree; ACCOUNTANT moved from allowed to denied
+    # (this is the change that makes running payroll an admin task).
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"])
     def test_payroll_run_denied_for_manager_roles(self, client, role):
         r = client.post(
             "/api/v1/payroll/run",
@@ -600,8 +604,9 @@ class TestFinancePayrollHrRoutes:
         )
         assert_middleware_403(r, "POST", "/api/v1/payroll/run")
 
-    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
-    def test_payroll_run_allowed_for_accountant_admin(self, matrix_client, role):
+    @pytest.mark.parametrize("role", ["ADMIN"])
+    def test_payroll_run_allowed_for_admin_only(self, matrix_client, role):
+        """ACCOUNTANT used to be in this list (owner ruling moved it out)."""
         r = matrix_client.post(
             "/api/v1/payroll/run",
             headers=ALL_ROLE_HEADERS[role],
@@ -618,7 +623,7 @@ class TestFinancePayrollHrRoutes:
     # authorized through. If a REMOVED role is actually allowed by the live
     # route, the denied-assert fails and the row must be reverted.
     #
-    # (method, path, kept_roles, removed_roles, body) — confirmed against the
+    # (method, path, kept_roles, removed_roles, body) -- confirmed against the
     # require_roles(...) gate in backend/api/routers/payroll.py:
     #   require_roles("ADMIN")             -> kept {ADMIN}
     #   require_roles(*_RUN_ROLES)         -> kept {ADMIN, ACCOUNTANT}
@@ -639,12 +644,16 @@ class TestFinancePayrollHrRoutes:
         # require_roles(*_RUN_ROLES=(ADMIN,ACCOUNTANT)) rows -> ADMIN+ACCOUNTANT kept
         ("POST", "/api/v1/payroll/approve", ["ACCOUNTANT", "ADMIN"],
          ["AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
-        ("POST", "/api/v1/payroll/run", ["ACCOUNTANT", "ADMIN"],
-         ["AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
-        ("GET", "/api/v1/payroll/tally/salary-jv", ["ACCOUNTANT", "ADMIN"],
-         ["AREA_MANAGER", "STORE_MANAGER"], None),
-        ("GET", "/api/v1/payroll/registers/pf-ecr", ["ACCOUNTANT", "ADMIN"],
-         ["AREA_MANAGER", "STORE_MANAGER"], None),
+        # OWNER RULING 2026-08-09: these three carry salary (the run response
+        # returns per-employee rows; the PF ECR is one line per employee with UAN
+        # and wages; the Tally JV's "Salary Payable" total is one person's net pay
+        # in a single-employee store). ACCOUNTANT moved from kept -> removed.
+        ("POST", "/api/v1/payroll/run", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
+        ("GET", "/api/v1/payroll/tally/salary-jv", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("GET", "/api/v1/payroll/registers/pf-ecr", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
     ]
 
     @pytest.mark.parametrize(
@@ -695,7 +704,7 @@ class TestFinancePayrollHrRoutes:
 
 
 # ===========================================================================
-# SECTION 8: Credit/loyalty routes — restricted credit roles
+# SECTION 8: Credit/loyalty routes -- restricted credit roles
 # ===========================================================================
 
 class TestCreditLoyaltyRoutes:
@@ -763,7 +772,7 @@ class TestCreditLoyaltyRoutes:
 
 
 # ===========================================================================
-# SECTION 9: Marketing bulk-send — mgmt roles only
+# SECTION 9: Marketing bulk-send -- mgmt roles only
 # ===========================================================================
 
 class TestMarketingRoutes:
@@ -796,7 +805,7 @@ class TestMarketingRoutes:
 
 
 # ===========================================================================
-# SECTION 10: Catalog pricing routes — catalog roles only
+# SECTION 10: Catalog pricing routes -- catalog roles only
 # ===========================================================================
 
 class TestCatalogRoutes:
@@ -868,7 +877,7 @@ class TestCatalogRoutes:
 
 class TestOrderCreation:
     """POST /orders requires ADMIN, AREA_MANAGER, SALES_CASHIER, SALES_STAFF,
-    STORE_MANAGER, SUPERADMIN — ACCOUNTANT, OPTOMETRIST, CASHIER, WORKSHOP_STAFF
+    STORE_MANAGER, SUPERADMIN -- ACCOUNTANT, OPTOMETRIST, CASHIER, WORKSHOP_STAFF
     must be denied."""
 
     _POS_ROLES_ALLOWED = {"ADMIN", "AREA_MANAGER", "SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN"}
@@ -903,7 +912,7 @@ class TestPrescriptionRoutes:
     PUT /prescriptions/{id} is ALSO self_enforced (since #366): on a denied role
     the middleware DEFERS to the route, which returns the body-specific clinical
     403 ('Only optometrists and managers can edit prescriptions...'), NOT the
-    generic middleware 'Forbidden:' 403 — same pattern as POST /prescriptions."""
+    generic middleware 'Forbidden:' 403 -- same pattern as POST /prescriptions."""
 
     _CLINICAL_ROLES = {"ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"}
     _NON_CLINICAL = set(ALL_ROLES) - _CLINICAL_ROLES
@@ -977,7 +986,7 @@ class TestPrescriptionRoutes:
 
 
 # ===========================================================================
-# SECTION 13: User management — ADMIN/SUPERADMIN only
+# SECTION 13: User management -- ADMIN/SUPERADMIN only
 # ===========================================================================
 
 class TestUserManagementRoutes:
@@ -1026,7 +1035,7 @@ class TestUserManagementRoutes:
 
 
 # ===========================================================================
-# SECTION 14: Audit verify — SUPERADMIN only
+# SECTION 14: Audit verify -- SUPERADMIN only
 # ===========================================================================
 
 class TestAuditVerify:
@@ -1158,7 +1167,7 @@ class TestSettingsAdminControls:
 
 
 # ===========================================================================
-# SECTION 18: Inventory management — write routes
+# SECTION 18: Inventory management -- write routes
 # ===========================================================================
 
 class TestInventoryWriteRoutes:
@@ -1196,7 +1205,7 @@ class TestInventoryWriteRoutes:
 
 
 # ===========================================================================
-# SECTION 19: Vendor finance routes — accountant/admin only
+# SECTION 19: Vendor finance routes -- accountant/admin only
 # ===========================================================================
 
 class TestVendorFinanceRoutes:
@@ -1245,7 +1254,7 @@ class TestVendorFinanceRoutes:
 
 
 # ===========================================================================
-# SECTION 20: Returns — cashier + admin (not optometrist/catalog)
+# SECTION 20: Returns -- cashier + admin (not optometrist/catalog)
 # ===========================================================================
 
 class TestReturnsRoutes:
@@ -1308,7 +1317,7 @@ class TestPayoutLock:
 
 
 # ===========================================================================
-# SECTION 22: Policy consistency probe — check_access vs live app
+# SECTION 22: Policy consistency probe -- check_access vs live app
 # ===========================================================================
 
 class TestPolicyConsistencyWithLiveApp:
@@ -1340,7 +1349,10 @@ class TestPolicyConsistencyWithLiveApp:
         ("GET", "/api/v1/admin/system-health", "ADMIN", True),
         ("GET", "/api/v1/admin/system-health", "STORE_MANAGER", False),
         # Finance
-        ("GET", "/api/v1/payroll/config", "ACCOUNTANT", True),
+        # ACCOUNTANT flipped True -> False on 2026-08-09 (owner ruling): the
+        # salary-config list is other people's CTC, bank account and PAN.
+        ("GET", "/api/v1/payroll/config", "ACCOUNTANT", False),
+        ("GET", "/api/v1/payroll/config", "ADMIN", True),
         ("GET", "/api/v1/payroll/config", "SALES_STAFF", False),
         ("GET", "/api/v1/finance/pnl", "AREA_MANAGER", True),
         ("GET", "/api/v1/finance/pnl", "OPTOMETRIST", False),
@@ -1415,7 +1427,7 @@ class TestPolicyConsistencyWithLiveApp:
         """
         entry = policy_for(method, path)
         assert entry is not None, (
-            f"No policy entry for {method} {path} — coverage gap"
+            f"No policy entry for {method} {path} -- coverage gap"
         )
 
         # Self-enforced rows: 404-hiding (jarvis/techcherry) or clinical 403.
@@ -1428,7 +1440,7 @@ class TestPolicyConsistencyWithLiveApp:
         body = {}
         if method in ("POST", "PUT", "PATCH"):
             # Minimal bodies that won't cause body-parse errors on most routes.
-            # Routes may still return 422 (validation) once authz passes — that's fine.
+            # Routes may still return 422 (validation) once authz passes -- that's fine.
             body = {"_noop": True}
 
         r = matrix_client.request(method, path, headers=headers, json=body)
@@ -1526,7 +1538,7 @@ class TestCrossStoreListIDOR:
     tasks / attendance-PII / workshop queue / purchase orders / clinical queue.
     """
 
-    # (path, query) — all GET list endpoints that resolve ?store_id.
+    # (path, query) -- all GET list endpoints that resolve ?store_id.
     _CROSS_STORE_PATHS = [
         "/api/v1/tasks?store_id=BV-BOK-01",
         "/api/v1/hr/attendance?store_id=BV-BOK-01",
@@ -1548,7 +1560,7 @@ class TestCrossStoreListIDOR:
 
     def test_admin_allowed_cross_store(self, matrix_client):
         # ADMIN is cross-store: the same requests must NOT be authz-blocked
-        # (may 500 on missing mock DB — that's allowed through, proving authz).
+        # (may 500 on missing mock DB -- that's allowed through, proving authz).
         token = _mint_token(["ADMIN"], store_id="BV-PUN-01")
         headers = {"Authorization": f"Bearer {token}"}
         for path in self._CROSS_STORE_PATHS:

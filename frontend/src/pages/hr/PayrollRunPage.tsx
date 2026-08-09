@@ -17,6 +17,8 @@ import {
   type StatutorySummary,
 } from '../../services/api/payroll';
 import { entitiesApi, type Entity } from '../../services/api/entities';
+import { PayrollAccessNotice } from '../../components/hr/PayrollAccessNotice';
+import { isForbiddenError, forbiddenDetail } from '../../utils/errorHandler';
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -35,7 +37,10 @@ export function PayrollRunPage() {
   const { user } = useAuth();
   const toast = useToast();
   const roles = user?.roles || [];
-  const canRun = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'].some((r) => roles.includes(r as never));
+  // Owner ruling 2026-08-09: running payroll returns every employee's row, so
+  // it is ADMIN/SUPERADMIN only. ACCOUNTANT previously ran payroll; the button
+  // is hidden for them now rather than left to 403 on click.
+  const canRun = ['SUPERADMIN', 'ADMIN'].some((r) => roles.includes(r as never));
   const canLock = roles.includes('SUPERADMIN' as never) || roles.includes('ADMIN' as never);
 
   const now = new Date();
@@ -44,6 +49,9 @@ export function PayrollRunPage() {
   const [entityId, setEntityId] = useState('');
   const [entities, setEntities] = useState<Entity[]>([]);
 
+  // Set when the API refuses on permissions, so the page can say so instead of
+  // rendering an empty grid that reads as "no payroll rows exist".
+  const [noAccess, setNoAccess] = useState<string | null>(null);
   const [configs, setConfigs] = useState<SalaryConfig[]>([]);
   const [lwp, setLwp] = useState<Record<string, number>>({});
   const [advances, setAdvances] = useState<Record<string, number>>({});
@@ -63,8 +71,11 @@ export function PayrollRunPage() {
     try {
       const r = await payrollApi.listConfigs(entityId ? { entity_id: entityId } : {});
       setConfigs(r.configs || []);
-    } catch {
+    } catch (e) {
       setConfigs([]);
+      if (isForbiddenError(e)) {
+        setNoAccess(forbiddenDetail(e, 'Payroll data is restricted to administrators.'));
+      }
     }
   }, [entityId]);
 
@@ -73,15 +84,24 @@ export function PayrollRunPage() {
       const r = await payrollApi.listRunRows({ month, year, ...scope() });
       setRows(r.rows || []);
       setTotals(r.totals || {});
-    } catch {
+      setNoAccess(null);
+    } catch (e) {
       setRows([]);
       setTotals({});
+      if (isForbiddenError(e)) {
+        setNoAccess(forbiddenDetail(e, 'The payroll register is restricted to administrators.'));
+      }
     }
     try {
       const s = await payrollApi.getSummary({ month, year, ...scope() });
       setSummary(s.summary);
-    } catch {
+    } catch (e) {
       setSummary(null);
+      if (isForbiddenError(e)) {
+        setNoAccess((prev) =>
+          prev || forbiddenDetail(e, 'Payroll totals are restricted to administrators.'),
+        );
+      }
     }
   }, [month, year, scope]);
 
@@ -115,7 +135,11 @@ export function PayrollRunPage() {
         await loadRows();
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Payroll run failed');
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'Running payroll is restricted to administrators.')
+          : e instanceof Error ? e.message : 'Payroll run failed',
+      );
     } finally {
       setBusy(false);
     }
@@ -160,19 +184,37 @@ export function PayrollRunPage() {
   const exportTally = async () => {
     try {
       download(await payrollApi.downloadTallyJv({ month, year, ...scope() }), `salary_jv_${year}_${mm}.xml`);
-    } catch (e) { toast.error(e instanceof Error ? e.message : 'Tally export failed'); }
+    } catch (e) {
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'The Tally salary JV is restricted to administrators.')
+          : e instanceof Error ? e.message : 'Tally export failed',
+      );
+    }
   };
   const exportEcr = async () => {
     try {
       download(await payrollApi.downloadPfEcr({ month, year, ...scope() }), `pf_ecr_${year}_${mm}.txt`);
-    } catch (e) { toast.error(e instanceof Error ? e.message : 'PF ECR export failed'); }
+    } catch (e) {
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'The PF ECR file is restricted to administrators.')
+          : e instanceof Error ? e.message : 'PF ECR export failed',
+      );
+    }
   };
   const printPayslip = async (emp: string) => {
     try {
       const html = await payrollApi.getPayslipHtml(emp, month, year);
       const w = window.open('', '_blank');
       if (w) { w.document.write(html); w.document.close(); w.focus(); }
-    } catch (e) { toast.error(e instanceof Error ? e.message : 'Payslip print failed'); }
+    } catch (e) {
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, "Only an administrator may print another employee's payslip.")
+          : e instanceof Error ? e.message : 'Payslip print failed',
+      );
+    }
   };
 
   return (
@@ -288,7 +330,9 @@ export function PayrollRunPage() {
             </div>
           )}
         </div>
-        {rows.length === 0 ? (
+        {noAccess ? (
+          <PayrollAccessNotice message={noAccess} what="the payroll register" />
+        ) : rows.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">No payroll rows yet. Run payroll above.</div>
         ) : (
           <div className="overflow-x-auto">

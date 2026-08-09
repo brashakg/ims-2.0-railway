@@ -332,7 +332,44 @@ def _is_commission_manager(current_user: dict) -> bool:
     return any(r in caller_roles for r in _COMMISSION_MANAGER_ROLES)
 
 
-def _assert_self_or_salary_admin(employee_id: str, current_user: dict) -> None:
+def _is_salary_admin(current_user: dict) -> bool:
+    """True for the only roles allowed to see other people's salary data."""
+    caller_roles = current_user.get("roles") or []
+    return any(r in caller_roles for r in _SALARY_CROSS_EMPLOYEE_ROLES)
+
+
+def _assert_salary_admin(current_user: dict) -> None:
+    """ADMIN / SUPERADMIN only -- for the AGGREGATE salary reads.
+
+    A store's salary sheet, the payroll-run grid, the statutory registers and
+    the Tally / PF-ECR exports have no "self" row to fall back to: they are
+    other people's pay by construction. Under the owner ruling they are simply
+    closed to everyone below ADMIN.
+
+    The totals-only exports (registers/summary, tally/salary-jv) are included
+    DELIBERATELY even though they carry no per-employee row: these stores run
+    1-5 staff, so a monthly net-pay total IS an individual's salary by
+    subtraction, and a single-employee store's total is that person's pay
+    exactly. Closing the per-employee routes while leaving the totals open
+    would be a rule that only looks strict.
+
+    ``detail`` is written in plain English because the frontend shows it to a
+    store manager verbatim.
+    """
+    if _is_salary_admin(current_user):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Payroll and salary data is restricted to administrators. "
+            "Please ask an administrator."
+        ),
+    )
+
+
+def _assert_self_or_salary_admin(
+    employee_id: str, current_user: dict, what: str = "payslip"
+) -> None:
     """Authorize a read of ``employee_id``'s payslip (owner ruling + P1 panel).
 
     The three payslip routes took the employee id as a FREE path parameter with
@@ -369,12 +406,14 @@ def _assert_self_or_salary_admin(employee_id: str, current_user: dict) -> None:
     caller_id = current_user.get("user_id") or current_user.get("id")
     if employee_id and caller_id and employee_id == caller_id:
         return
-    caller_roles = current_user.get("roles") or []
-    if any(r in caller_roles for r in _SALARY_CROSS_EMPLOYEE_ROLES):
+    if _is_salary_admin(current_user):
         return
     raise HTTPException(
         status_code=403,
-        detail="Only an administrator may view another employee's payslip",
+        detail=(
+            f"Only an administrator may view another employee's {what}. "
+            "You can always see your own."
+        ),
     )
 
 
@@ -550,7 +589,12 @@ async def get_salary_config(
     store reach doesn't cover it. SUPERADMIN/ADMIN (cross-store) pass; a
     legacy config with NO store_id is readable only by those cross-store
     admins, never by store-scoped staff.
+
+    OWNER RULING 2026-08-09: on top of that store guard, salary details for
+    ANOTHER employee are ADMIN/SUPERADMIN only. A manager can still open their
+    own config; the store guard below is kept as defence in depth.
     """
+    _assert_self_or_salary_admin(employee_id, current_user, "salary details")
     db = _get_db()
     if not db:
         return {"config": None}
@@ -613,7 +657,12 @@ async def list_salary_configs(
     include_inactive: bool = Query(False),
     current_user: dict = Depends(get_current_user),
 ):
-    """List salary configurations (optionally scoped by store or entity)."""
+    """List salary configurations (optionally scoped by store or entity).
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only -- every row is somebody
+    else's CTC, bank account and PAN.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"configs": [], "total": 0}
@@ -792,7 +841,12 @@ async def get_salary_sheet(
     Reads from the ``payroll`` collection (written by POST /payroll/run).
     Falls back to the legacy ``salary_records`` collection so data is never
     silently missing on installs that still have the old schema.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. A store's salary sheet is
+    every colleague's pay in one table; there is no "self" version of it (staff
+    use GET /hr/me/payslip).
     """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"salaries": [], "total": 0, "store_id": store_id}
@@ -827,41 +881,20 @@ async def get_salary_sheet(
         )
 
 
-@router.get("/salary/{employee_id}")
-async def get_employee_salary(
-    employee_id: str,
-    month: Optional[int] = Query(None, ge=1, le=12),
-    year: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Get individual employee salary breakdown for a specific month or latest"""
-    db = _get_db()
-    if not db:
-        return {"salary": None}
-
-    try:
-        salary_records_coll = db.get_collection("salary_records")
-
-        if month and year:
-            # Get specific month
-            record = salary_records_coll.find_one(
-                {"employee_id": employee_id, "month": month, "year": year}
-            )
-        else:
-            # Get latest
-            records = list(
-                salary_records_coll.find({"employee_id": employee_id})
-                .sort("created_at", -1)
-                .limit(1)
-            )
-            record = records[0] if records else None
-
-        return {"salary": record or {}}
-    except Exception as e:
-        logger.error("Payroll operation failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="Payroll operation failed. Please try again."
-        )
+# REMOVED 2026-08-10 (owner decision): GET /payroll/salary/{employee_id}.
+#
+# It returned the RAW, unprojected ``salary_records`` document for any employee
+# id -- bank_account_no, pan and ctc_annual included -- to any caller the router
+# mount admitted, with no store check and no self check. The security panel
+# pulled a Bokaro employee's bank account and PAN with a Pune manager's token.
+#
+# The owner chose REMOVAL over restriction: the route had NO frontend caller
+# (verified across frontend/src), everything it served is available from
+# GET /payroll/payslip/{employee_id} (self-or-admin) and GET /hr/me/payslip
+# (self), and a deleted surface cannot be re-opened by a future capability
+# grant, a policy-row edit or a mis-scoped refactor. Its rbac_policy row is
+# deleted with it, so the route/policy parity check stays green in both
+# directions.
 
 
 # ============================================================================
@@ -1006,7 +1039,12 @@ async def get_salary_advances(
     status: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get salary advance history for an employee"""
+    """Get salary advance history for an employee.
+
+    OWNER RULING 2026-08-09: an outstanding advance is a deduction from pay, so
+    it is salary data -- SELF, or ADMIN/SUPERADMIN for anyone else.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user, "salary advances")
     db = _get_db()
     if not db:
         return {"advances": [], "total": 0}
@@ -1255,7 +1293,12 @@ async def get_incentive_summary(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Get incentive earned for a month (integrated from incentives module)"""
+    """Get incentive earned for a month (integrated from incentives module).
+
+    OWNER RULING 2026-08-09: an incentive is an earning line on the payslip, so
+    it is salary data -- SELF, or ADMIN/SUPERADMIN for anyone else.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user, "incentive earnings")
     db = _get_db()
     if not db:
         return {"incentive": None}
@@ -1569,7 +1612,14 @@ async def run_payroll(
 
     Persists DRAFT rows (idempotent per employee+month+year) unless dry_run.
     Already APPROVED/PAID rows are never overwritten.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. This is a WRITE, but its
+    RESPONSE returns ``rows`` -- the full per-employee breakdown for everyone in
+    scope -- so leaving it open to the ACCOUNTANT would hand back exactly the
+    data the read routes now refuse. Running payroll is therefore an ADMIN task
+    from here on; that operating cost is written up in the PR body.
     """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1700,7 +1750,12 @@ async def list_payroll_rows(
     entity_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """The salary register: saved payroll rows for a month + scope."""
+    """The salary register: saved payroll rows for a month + scope.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only -- this is the whole run,
+    every employee's gross, deductions and net pay.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"rows": [], "total": 0, "totals": {}}
@@ -1832,7 +1887,14 @@ async def payroll_statutory_summary(
     entity_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid)."""
+    """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid).
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. These are TOTALS, not rows,
+    but a 1-5 person store's monthly net total is an individual's salary by
+    inference (exactly so when a store has one employee), which is why the
+    aggregate exports are closed alongside the per-employee ones.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {
@@ -1866,7 +1928,13 @@ async def payroll_tally_jv(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """Balanced Tally salary Journal Voucher (XML) for a month + entity."""
+    """Balanced Tally salary Journal Voucher (XML) for a month + entity.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. The JV carries ledger
+    TOTALS rather than employee rows, but "Salary Payable" for a 1-5 person
+    store is an individual's net pay by inference -- see _assert_salary_admin.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1905,7 +1973,13 @@ async def payroll_pf_ecr(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """EPFO PF ECR text file for a month + scope."""
+    """EPFO PF ECR text file for a month + scope.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. The ECR is the single most
+    salary-bearing export in this module -- one line PER EMPLOYEE carrying UAN,
+    name, gross wages, EPF/EPS wages and each contribution.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

@@ -56,6 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.main import _FINANCE_ROLES  # noqa: E402  - the REAL mount gate
 from api.routers import hr as hr_mod  # noqa: E402
+from api.routers import hr_self_service as hr_self_mod  # noqa: E402
 from api.routers import payroll as payroll_mod  # noqa: E402
 from api.routers.auth import require_roles  # noqa: E402
 from api.services import rbac_policy  # noqa: E402
@@ -254,6 +255,26 @@ def _payroll_db():
                 ]
             ),
             "entities": _FakeColl([{"entity_id": "ent-1", "name": "BV Opticals"}]),
+            "salary_advances": _FakeColl(
+                [
+                    {
+                        "advance_id": "adv-1",
+                        "employee_id": OTHER_ID,
+                        "amount": 5000.0,
+                        "status": "PENDING",
+                    }
+                ]
+            ),
+            "incentives": _FakeColl(
+                [
+                    {
+                        "staff_id": OTHER_ID,
+                        "month": 5,
+                        "year": 2026,
+                        "incentive_amount": 4200.0,
+                    }
+                ]
+            ),
         }
     )
 
@@ -395,6 +416,207 @@ def test_salary_and_commission_rules_are_separate_constants():
         assert getattr(exc.value, "status_code", None) == 403
     assert not payroll_mod._is_commission_manager({"roles": ["CASHIER"]})
     assert not payroll_mod._is_commission_manager({})
+
+
+# ===========================================================================
+# A2. THE FULL SALARY FAMILY (owner decision 2026-08-10: close everything)
+# ===========================================================================
+# Per-employee reads -> SELF or ADMIN. Aggregate reads (a whole store's pay, the
+# run register, the statutory exports) have no "self" row -> ADMIN only.
+
+_PER_EMPLOYEE_SALARY_PATHS = (
+    "/payroll/payslip/{eid}",
+    "/payroll/payslip/{eid}/5/2026",
+    "/payroll/payslip/{eid}/5/2026/print",
+    "/payroll/config/{eid}",
+    "/payroll/advances/{eid}",
+    "/payroll/incentive-summary/{eid}/5/2026",
+)
+
+_AGGREGATE_SALARY_PATHS = (
+    "/payroll/config",
+    "/payroll/salary-sheet?month=5&year=2026",
+    "/payroll/run/rows?month=5&year=2026",
+    "/payroll/registers/summary?month=5&year=2026",
+    "/payroll/tally/salary-jv?month=5&year=2026",
+    "/payroll/registers/pf-ecr?month=5&year=2026",
+)
+
+
+@pytest.mark.parametrize("template", _PER_EMPLOYEE_SALARY_PATHS)
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_per_employee_salary_reads_are_self_or_admin(payroll_client, template, role):
+    """Every per-employee salary read refuses a colleague's id for non-admins."""
+    tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
+    r = payroll_client.get(template.format(eid=OTHER_ID), headers=_auth(tok))
+    assert r.status_code == 403, f"{template}: {r.text}"
+    for leak in ("99000", "SECRET-222", "5000", "4200"):
+        assert leak not in r.text, f"{template} leaked {leak}"
+
+
+@pytest.mark.parametrize("template", _PER_EMPLOYEE_SALARY_PATHS)
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_per_employee_salary_reads_still_allow_self(payroll_client, template, role):
+    tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
+    r = payroll_client.get(template.format(eid=SELF_ID), headers=_auth(tok))
+    assert r.status_code == 200, f"{template}: {r.text}"
+
+
+@pytest.mark.parametrize("path", _AGGREGATE_SALARY_PATHS)
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_aggregate_salary_reads_are_admin_only(payroll_client, path, role):
+    """A store's salary sheet / the run register / the statutory exports have no
+    self version -- they are closed outright below ADMIN."""
+    tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
+    r = payroll_client.get(path, headers=_auth(tok))
+    assert r.status_code == 403, f"{path}: {r.text}"
+    assert "99000" not in r.text and "SECRET-222" not in r.text
+
+
+@pytest.mark.parametrize("path", _AGGREGATE_SALARY_PATHS)
+def test_aggregate_salary_reads_still_work_for_admin(payroll_client, path):
+    tok = _token(["ADMIN"], user_id="u-admin", store_ids=[])
+    r = payroll_client.get(path, headers=_auth(tok))
+    assert r.status_code == 200, f"{path}: {r.text}"
+
+
+def test_payroll_run_is_admin_only_because_its_response_returns_rows(payroll_client):
+    """POST /payroll/run is a WRITE, but its response body carries every
+    employee's breakdown -- so the same rule applies to it."""
+    body = {"month": 5, "year": 2026, "dry_run": True}
+    acct = _token(["ACCOUNTANT"], user_id=SELF_ID, store_ids=[STORE_A])
+    r = payroll_client.post("/payroll/run", json=body, headers=_auth(acct))
+    assert r.status_code == 403, r.text
+    assert "rows" not in r.json()
+
+
+def test_deleted_salary_route_is_gone(payroll_client):
+    """GET /payroll/salary/{employee_id} was REMOVED, not restricted: it served
+    raw bank_account_no / pan / ctc_annual. Even an ADMIN gets 404 now."""
+    for role in ("ADMIN", "SUPERADMIN", "ACCOUNTANT"):
+        tok = _token([role], user_id="u-x", store_ids=[STORE_A])
+        r = payroll_client.get(f"/payroll/salary/{OTHER_ID}", headers=_auth(tok))
+        assert r.status_code == 404, f"{role}: {r.status_code} {r.text}"
+
+
+def test_deleted_route_has_no_stale_rbac_policy_row():
+    """The POLICY row must die with the route -- tests/test_rbac_policy.py checks
+    parity in BOTH directions, so a stale row fails CI."""
+    assert rbac_policy.policy_for("GET", "/api/v1/payroll/salary/emp-1") is None
+
+
+def test_commission_payload_carries_no_salary_figure(payroll_client):
+    """For the record: commission is a SALES surface. Its rows expose revenue and
+    a commission rate/amount -- never a salary, CTC or net pay -- and the
+    salary_config read behind it is a PROJECTION fetching only
+    commission_rate_percent."""
+    tok = _token(["STORE_MANAGER"], user_id=SELF_ID, store_ids=[STORE_A])
+    r = payroll_client.get(
+        "/payroll/commission/summary",
+        params={"month": 5, "year": 2026},
+        headers=_auth(tok),
+    )
+    assert r.status_code == 200, r.text
+    banned = (
+        "net_pay",
+        "ctc",
+        "basic",
+        "hra",
+        "gross_salary",
+        "bank_account",
+        "pf_employee",
+        "professional_tax",
+        "salary",
+    )
+    body = r.text.lower()
+    for field in banned:
+        assert field not in body, f"commission payload exposed {field}"
+    for item in r.json()["items"]:
+        assert set(item) <= {
+            "employee_id",
+            "name",
+            "store_id",
+            "sales_count",
+            "revenue",
+            "commission_rate_percent",
+            "commission_amount",
+            "rank",
+            "recent_orders",
+        }, item
+
+
+def test_hr_payroll_list_is_admin_only(hr_client):
+    """GET /hr/payroll returns base_salary / gross / deductions / net per named
+    employee, and reuses the payroll router's gate so the two cannot drift."""
+    for role in NON_ADMIN_PAY_ROLES:
+        tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
+        r = hr_client.get(
+            "/hr/payroll", params={"year": 2026, "month": 5}, headers=_auth(tok)
+        )
+        assert r.status_code == 403, f"{role}: {r.text}"
+    tok = _token(["ADMIN"], user_id="u-admin", store_ids=[])
+    assert (
+        hr_client.get(
+            "/hr/payroll", params={"year": 2026, "month": 5}, headers=_auth(tok)
+        ).status_code
+        == 200
+    )
+
+
+def test_hr_salary_slip_stub_is_self_or_admin(hr_client):
+    tok = _token(["STORE_MANAGER"], user_id=SELF_ID, store_ids=[STORE_A])
+    other = hr_client.get(
+        f"/hr/employee/{OTHER_ID}/salary-slip",
+        params={"year": 2026, "month": 5},
+        headers=_auth(tok),
+    )
+    assert other.status_code == 403, other.text
+    own = hr_client.get(
+        f"/hr/employee/{SELF_ID}/salary-slip",
+        params={"year": 2026, "month": 5},
+        headers=_auth(tok),
+    )
+    assert own.status_code == 200, own.text
+
+
+def test_salary_403_detail_is_plain_english_for_the_screen():
+    """The frontend shows these strings verbatim (PayrollAccessNotice), so they
+    must read as a permission message, not as an error code."""
+    with pytest.raises(Exception) as exc:
+        payroll_mod._assert_salary_admin({"roles": ["ACCOUNTANT"]})
+    detail = exc.value.detail
+    assert "administrator" in detail.lower()
+    assert detail.endswith(".")
+    with pytest.raises(Exception) as exc2:
+        payroll_mod._assert_self_or_salary_admin(
+            OTHER_ID, {"user_id": SELF_ID, "roles": ["ACCOUNTANT"]}, "salary advances"
+        )
+    assert "salary advances" in exc2.value.detail
+
+
+def test_floor_staff_self_service_payslip_is_untouched(monkeypatch):
+    """THE PROMISE THE WHOLE RULE RESTS ON: everybody can still see their OWN pay.
+
+    /hr/me/payslip is mounted WITHOUT the finance-roles gate (api/main.py mounts
+    hr_self_service_router separately), reads only the caller's own id, and is
+    what the /my-work page uses. If closing the payroll routes ever took this
+    with it, every employee would lose sight of their own salary -- so it is
+    asserted here next to the closures rather than trusted.
+    """
+    db = _payroll_db()
+    monkeypatch.setattr(hr_self_mod, "_get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(hr_self_mod.router, prefix="/hr")  # no gate, as in main.py
+    c = TestClient(app)
+
+    tok = _token(["CASHIER"], user_id=SELF_ID, store_ids=[STORE_A])
+    r = c.get("/hr/me/payslip", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    slip = r.json()["payslip"]
+    assert slip is not None and slip["employee_id"] == SELF_ID
+    assert slip["breakdown"]["net_pay"] == 21000.0
+    # ... and it is genuinely self-only: the colleague's numbers never appear.
+    assert "99000" not in r.text and "SECRET-222" not in r.text
 
 
 # ===========================================================================

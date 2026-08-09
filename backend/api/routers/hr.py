@@ -23,6 +23,10 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
 )
+# The salary-access rule lives in ONE place: the payroll router defines it and
+# this router reuses it (owner ruling 2026-08-09). payroll.py imports nothing
+# from hr.py, so this direction cannot cycle.
+from .payroll import _assert_salary_admin, _assert_self_or_salary_admin
 from ..services import attendance_engine
 from ..services.file_store import (
     get_file_store,
@@ -1868,7 +1872,14 @@ async def list_payroll(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
-    """List payroll records for a month"""
+    """List payroll records for a month.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. Each record carries
+    base_salary, gross_salary, deductions and net_salary for a named employee.
+    Reuses payroll._assert_salary_admin so this router and the payroll router
+    cannot drift into two different definitions of "may see salary".
+    """
+    _assert_salary_admin(current_user)
     payroll_repo = get_payroll_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
@@ -2002,6 +2013,13 @@ async def get_salary_slip(
     month: int,
     current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
+    """Salary slip by employee. STUB -- returns an empty salarySlip today.
+
+    Gated anyway (OWNER RULING 2026-08-09, SELF or ADMIN/SUPERADMIN): it is a
+    salary-named route with no frontend caller, and the cheapest moment to put
+    the rule on it is before somebody fills the stub in.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user, "salary slip")
     return {"employeeId": employee_id, "year": year, "month": month, "salarySlip": {}}
 
 

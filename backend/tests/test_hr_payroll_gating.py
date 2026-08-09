@@ -92,11 +92,28 @@ class TestLegacyHrPayrollRouteGating:
         )
         assert resp.status_code == 403
 
-    def test_accountant_allowed_on_payroll_list(self, client):
-        """ACCOUNTANT is in _HR_READ_ROLES and must be allowed to list payroll."""
+    def test_accountant_now_blocked_on_payroll_list(self, client):
+        """ACCOUNTANT may no longer LIST payroll records.
+
+        This asserted "not 403" until 2026-08-09. GET /hr/payroll returns
+        base_salary / gross_salary / deductions / net_salary for named
+        employees, and the owner ruled that only ADMIN/SUPERADMIN may see
+        another person's salary. The accountant keeps their _HR_READ_ROLES
+        reach for everything in this router that is NOT salary (attendance,
+        leave, shifts); this one route moved.
+        """
         resp = client.get(
             "/api/v1/hr/payroll",
             headers=_headers(["ACCOUNTANT"]),
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code == 403
+
+    def test_admin_still_allowed_on_payroll_list(self, client, auth_headers):
+        """...and the data is still reachable by the role that may see it."""
+        resp = client.get(
+            "/api/v1/hr/payroll",
+            headers=auth_headers,
             params={"year": 2026, "month": 6},
         )
         assert resp.status_code != 403
