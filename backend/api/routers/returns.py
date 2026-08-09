@@ -673,6 +673,12 @@ _REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
 # Every tender a refund leg may name.
 _REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
 
+# Per-line ceiling on an EXCHANGE replacement quantity. The exchange difference
+# feeds the cash drawer, so an unbounded client quantity is a drawer input: a
+# fat-finger 50 produced a Rs 344,100 COLLECT against a Rs 1,100 real one. A
+# genuine bulk swap is a separate sale, not a counter exchange.
+_MAX_REPLACEMENT_QTY = 20
+
 
 def _normalize_refund_tenders(
     raw: Optional[List["RefundTenderLine"]], net_amount: float
@@ -911,8 +917,82 @@ def _resolve_replacement_prices(
                     "the exchange difference cannot be computed."
                 ),
             )
-        row["unit_price"] = catalog_price
-        row["price_source"] = "CATALOG"
+        # ---- QUANTITY: the OTHER half of the drawer input -----------------
+        # unit_price was made server-authoritative; quantity was not, and the
+        # drawer figure is unit_price x quantity. Measured before this guard:
+        # quantity 50 -> collect_amount 344100.00 (a Rs 343,000 phantom
+        # shortage from one fat-finger on the adjacent input box), 1e6 ->
+        # 6,999,994,100.00, and 2.5 was accepted.
+        raw_qty = row.get("quantity", 1)
+        try:
+            qty = float(raw_qty)
+        except (TypeError, ValueError):
+            qty = -1.0
+        if qty <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' needs a quantity of at least 1."
+                ),
+            )
+        if abs(qty - round(qty)) > 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement quantity for '{name}' must be a whole number "
+                    f"(got {qty:g})."
+                ),
+            )
+        qty = int(round(qty))
+        if qty > _MAX_REPLACEMENT_QTY:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement quantity {qty} for '{name}' exceeds the "
+                    f"per-line limit of {_MAX_REPLACEMENT_QTY} for an exchange. "
+                    "Raise a separate sale for a bulk swap - a quantity this "
+                    "large moves the cash drawer by the difference."
+                ),
+            )
+        row["quantity"] = qty
+
+        # ---- PRICE: the catalog is a CEILING, not an override -------------
+        # Optical retail discounts routinely. Forcing the catalog price made a
+        # frame sold at 15% off and swapped for the SAME sku manufacture a
+        # COLLECT the customer never owed, with no honest payload available. So
+        # a client price AT OR BELOW the catalog is honoured (the real
+        # negotiated number) and anything ABOVE it is refused -- the drawer can
+        # never be moved upward by a typed figure.
+        client_price = None
+        raw_price = row.get("unit_price")
+        if raw_price not in (None, ""):
+            try:
+                client_price = round(float(raw_price), 2)
+            except (TypeError, ValueError):
+                client_price = None
+        if client_price is not None and client_price > catalog_price + 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement price Rs {client_price:.2f} for '{name}' is "
+                    f"above the catalog price Rs {catalog_price:.2f}. A price "
+                    "above catalog cannot be charged on an exchange - it would "
+                    "move the cash drawer by the difference."
+                ),
+            )
+        if client_price is not None and client_price > 0:
+            row["unit_price"] = client_price
+            row["price_source"] = (
+                "CATALOG" if abs(client_price - catalog_price) <= 0.01
+                else "NEGOTIATED"
+            )
+            row["catalog_price"] = catalog_price
+            row["discount_from_catalog"] = round(catalog_price - client_price, 2)
+        else:
+            row["unit_price"] = catalog_price
+            row["price_source"] = "CATALOG"
+            row["catalog_price"] = catalog_price
+            row["discount_from_catalog"] = 0.0
         out.append(row)
     return out
 
@@ -1832,10 +1912,16 @@ async def quote_return(
     # TRUE when a split made only of cash-in tenders CANNOT reach the net refund
     # (a part-voucher sale), so the till must surface WHY and offer the
     # STORE_CREDIT leg / the un-netted escape instead of dead-ending the cashier.
+    # The pool must ACTUALLY EXIST. Without this guard a Shopify-paid order
+    # (no captured tenders at all) reported cash_in_shortfall True with an EMPTY
+    # non_refundable pool, so the till printed an impossible "refund that portion
+    # as STORE_CREDIT" instruction AND suppressed the one correct advisory
+    # ("record it as cash paid out") on exactly the orders it was written for.
     cash_in_shortfall = (
         body.return_type == "RETURN"
         and net_amount > 0
         and cash_in_refundable_total + 0.01 < net_amount
+        and round(sum(non_refundable.values()), 2) > 0
     )
     return {
         "order_id": resolved_order_id,
@@ -1848,9 +1934,17 @@ async def quote_return(
             gross_refund, engine.dominant_gst_rate(priced_lines)
         ),
         "settlement": settlement,
-        # Catalog-resolved replacement lines so the till shows (and the cashier
-        # confirms) the SAME prices the settlement was computed from.
+        # Server-resolved replacement lines + the total they sum to, so the till
+        # shows (and the cashier confirms) the SAME figures the settlement used.
+        # No client number reaches collect_amount unverified.
         "replacement_items_priced": replacement_priced,
+        "replacement_total": round(
+            sum(
+                float(r.get("quantity") or 0) * float(r.get("unit_price") or 0)
+                for r in replacement_priced
+            ),
+            2,
+        ),
         # Per-tender truth for the picker (and what the POST gate enforces).
         "captured_tenders": captured,
         # What the sale took on instruments that cannot come back as cash.
@@ -2267,6 +2361,62 @@ async def create_return(
         refund_amount = net_amount
         refund_method = body.refund_method or _order_payment_method(order)
 
+        # ISSUE the NON-DRAWER portion. A STORE_CREDIT (or reissued voucher) leg
+        # is a PROMISE OF MONEY: without this the customer surrendered the goods,
+        # took only the cash legs in notes, and the balance existed NOWHERE in
+        # IMS -- and because refund_amount counts the full net against the
+        # cumulative cap, the corrective refund was blocked forever. The drawer
+        # stayed correct, so nothing flagged it.
+        _non_drawer_total = round(
+            sum(
+                float(t.get("amount") or 0)
+                for t in (refund_tenders or [])
+                if str(t.get("method") or "") in _REFUND_NON_DRAWER
+            ),
+            2,
+        )
+        if _non_drawer_total > 0:
+            # Pro-rate the GST split to the credited portion so the GSTR-1 CDNR
+            # reverses the tax that actually belongs to it, not the whole refund.
+            _share = (_non_drawer_total / net_amount) if net_amount else 0.0
+            credit_entry = _issue_store_credit(
+                customer_id,
+                _non_drawer_total,
+                reason=f"Refund {return_id} - non-drawer tender portion",
+                ref=return_id,
+                current_user=current_user,
+                gross=round(gross_refund * _share, 2),
+                restocking_fee=round(restocking_fee * _share, 2),
+                taxable=round(float(gst_view.get("taxable") or 0) * _share, 2),
+                tax=round(
+                    _non_drawer_total - float(gst_view.get("taxable") or 0) * _share, 2
+                ),
+                gst_rate=gst_view.get("gst_rate"),
+                interstate=(
+                    order.get("interstate")
+                    if isinstance(order.get("interstate"), bool)
+                    else None
+                ),
+            )
+            if credit_entry is None:
+                # FAIL LOUD: a 201 must never claim credit with no ledger row
+                # behind it. Release the qty claim so the refund stays retryable.
+                for done in claimed:
+                    _release_returnable_qty(
+                        resolved_order_id,
+                        done["orig_line"],
+                        float(done["ret_line"].return_qty),
+                    )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Could not issue the Rs {_non_drawer_total:.2f} store-credit "
+                        "portion of this refund, so nothing was recorded. Retry, "
+                        "or refund the whole amount to a payment tender."
+                    ),
+                )
+            credit_amount = _non_drawer_total
+
     elif body.return_type == "CREDIT_NOTE":
         credit_amount = net_amount
         refund_method = "STORE_CREDIT"
@@ -2485,6 +2635,9 @@ async def create_return(
         "collect_method": collect_method,
         "drawer_auto_netted": drawer_auto_netted,
         "credit_amount": credit_amount,
+        # The ledger row backing any store-credit portion, so the till can show
+        # the customer what was issued (and a caller can verify it exists).
+        "credit_entry": credit_entry,
         "collect_amount": collect_amount,
         "settlement": settlement,
         "restocked": restocked,

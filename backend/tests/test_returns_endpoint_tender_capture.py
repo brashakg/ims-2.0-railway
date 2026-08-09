@@ -215,7 +215,10 @@ def ctx(monkeypatch):
         orders_coll = _ClaimingOrdersColl(order)
         repo = _RepoWithColl(orders_coll)
         returns_coll = _QueryColl()
-        ledger_coll = _FakeColl()
+        ledger_coll = _QueryColl()
+        # ONE customer repo per build so a store-credit balance bump is
+        # observable (a fresh repo per lookup silently swallowed it).
+        customer_repo = _FakeCustomerRepo()
 
         class _FakeDB:
             is_connected = True
@@ -239,7 +242,7 @@ def ctx(monkeypatch):
 
         monkeypatch.setattr(returns_router, "get_order_repository", lambda: repo)
         monkeypatch.setattr(
-            returns_router, "get_customer_repository", lambda: _FakeCustomerRepo()
+            returns_router, "get_customer_repository", lambda: customer_repo
         )
         monkeypatch.setattr(
             returns_router, "get_product_repository",
@@ -257,6 +260,8 @@ def ctx(monkeypatch):
         app = FastAPI()
         app.include_router(returns_router.router, prefix="/api/v1/returns")
         return {
+            "customers": customer_repo,
+            "ledger": ledger_coll,
             "client": TestClient(app),
             "order": order,
             "returns": returns_coll,
@@ -585,7 +590,7 @@ def test_exchange_even_direction_moves_no_money(ctx):
             catalog_price=_BILLED_GROSS)
     r = c["client"].post(
         "/api/v1/returns",
-        json=_exchange_payload("CASH"),
+        json=_exchange_payload("CASH", client_price=_BILLED_GROSS),
         headers=_HDR,
     )
     assert r.status_code in (200, 201), r.text
@@ -761,7 +766,16 @@ def test_part_voucher_sale_quote_flags_the_shortfall(ctx):
 
 
 def test_part_voucher_refund_completes_via_store_credit(ctx):
+    """ROUND-5 MUST-FIX 1 + 2. A STORE_CREDIT leg used to pay the customer
+    NOTHING: 201, _issue_store_credit calls 0, credit_note_ledger empty, while
+    refund_amount was stamped 5900 -- the customer surrendered Rs 5,900 of goods,
+    took Rs 3,000 in notes, and the missing Rs 2,900 existed nowhere in IMS (and
+    the cumulative cap then blocked the corrective refund forever).
+
+    The old test asserted only 201 + the cash leg, so it was GREEN while the
+    customer was short. It now proves the money was actually issued."""
     c = _voucher_ctx(ctx)
+    before = c["customers"].customers["CUST-1"]["store_credit"]
     r = c["client"].post(
         "/api/v1/returns",
         json=_payload(
@@ -773,12 +787,74 @@ def test_part_voucher_refund_completes_via_store_credit(ctx):
         headers=_HDR,
     )
     assert r.status_code in (200, 201), r.text
-    assert r.json()["drawer_auto_netted"] is True
+    body = r.json()
+    assert body["drawer_auto_netted"] is True
+
     # ONLY the cash leg reaches the drawer; store credit never does.
     _, refunds = _cash_sales_for_window(
         c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
     )
     assert refunds == 3000.00
+
+    # THE CUSTOMER IS ACTUALLY PAID: balance rose by EXACTLY the STORE_CREDIT leg.
+    after = c["customers"].customers["CUST-1"]["store_credit"]
+    assert round(after - before, 2) == 2900.00, (before, after)
+
+    # ... and a real ISSUED ledger row backs it, carrying the GST split so the
+    # GSTR-1 CDNR reports the true output-tax reversal.
+    issued = [d for d in c["ledger"].docs if d.get("type") == "ISSUED"]
+    assert len(issued) == 1, c["ledger"].docs
+    row = issued[0]
+    assert row["amount"] == 2900.00
+    assert row["ref"] == body["return_id"]
+    assert row.get("taxable") is not None and row.get("tax") is not None
+    # GST is pro-rated to the credited portion, not the whole refund.
+    assert round(row["taxable"] + row["tax"], 2) == 2900.00
+    assert row.get("gst_rate") == 18.0
+
+    # The response surfaces what was issued.
+    assert body["credit_amount"] == 2900.00
+    assert body["credit_entry"] is not None
+
+
+def test_store_credit_refund_is_reflected_on_the_return_doc(ctx):
+    c = _voucher_ctx(ctx)
+    c["client"].post(
+        "/api/v1/returns",
+        json=_payload(
+            refund_tenders=[
+                {"method": "CASH", "amount": 3000.00},
+                {"method": "STORE_CREDIT", "amount": 2900.00},
+            ]
+        ),
+        headers=_HDR,
+    )
+    doc = c["returns"].docs[0]
+    assert doc["credit_amount"] == 2900.00
+    assert doc["credit_entry"] is not None
+    # refund_amount stays the FULL net (the cumulative cap is on total value
+    # returned), but the credited portion is now explicit and backed by a row.
+    assert doc["refund_amount"] == 5900.00
+
+
+def test_all_store_credit_refund_issues_the_whole_amount(ctx):
+    """A sale paid ENTIRELY on a voucher refunds entirely as store credit."""
+    c = ctx([{"method": "GIFT_VOUCHER", "amount": _BILLED_GROSS}])
+    before = c["customers"].customers["CUST-1"]["store_credit"]
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_payload(
+            refund_tenders=[{"method": "STORE_CREDIT", "amount": _BILLED_GROSS}]
+        ),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    after = c["customers"].customers["CUST-1"]["store_credit"]
+    assert round(after - before, 2) == _BILLED_GROSS
+    _, refunds = _cash_sales_for_window(
+        c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
+    )
+    assert refunds == 0.0  # nothing left the drawer
 
 
 def test_store_credit_leg_cannot_exceed_the_non_refundable_pool(ctx):
@@ -821,32 +897,176 @@ def test_part_voucher_cash_only_split_still_refused(ctx):
 
 
 def test_exchange_ignores_a_fat_finger_client_price(ctx):
+    """ROUND-4 harm, ROUND-5 answer. A typed Rs 59,000 produced a Rs 53,100
+    COLLECT. The catalog price is now a CEILING, so an above-catalog price is
+    REFUSED outright -- the cashier sees the error instead of a silently
+    different number, and the drawer is never moved by a typed figure."""
     c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
     r = c["client"].post(
         "/api/v1/returns",
         json=_exchange_payload("CASH", client_price=59000.00),
         headers=_HDR,
     )
-    assert r.status_code in (200, 201), r.text
-    # Settlement uses the CATALOG price (7000), not the typed 59000.
-    assert r.json()["settlement"]["difference"] == round(
-        _CATALOG_PRICE - _BILLED_GROSS, 2
-    )
+    assert r.status_code == 400, r.text
     sales, _ = _cash_sales_for_window(
         c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
     )
-    assert sales == round(_CATALOG_PRICE - _BILLED_GROSS, 2)  # Rs 1,100, not 53,100
+    assert sales == 0.0  # neither Rs 53,100 nor Rs 1,100 reached the drawer
 
 
 def test_exchange_quote_echoes_catalog_priced_lines(ctx):
     c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
     q = c["client"].post(
         "/api/v1/returns/quote",
-        json=_exchange_payload("CASH", client_price=59000.00),
+        json=_exchange_payload("CASH", client_price=_CATALOG_PRICE),
         headers=_HDR,
     ).json()
     assert q["replacement_items_priced"][0]["unit_price"] == _CATALOG_PRICE
     assert q["replacement_items_priced"][0]["price_source"] == "CATALOG"
+    assert q["replacement_total"] == _CATALOG_PRICE
+
+
+# ===========================================================================
+# ROUND-5 MUST-FIX 4 (verdict): cash_in_shortfall must require a pool that
+# ACTUALLY EXISTS. On a Shopify-paid order (no captured tenders, no
+# non-refundable pool) it came back True with non_refundable_tenders {}, so the
+# till printed an impossible "refund that portion as STORE_CREDIT" AND the
+# !cashInShortfall gate suppressed the ONE correct advisory on exactly the
+# orders it was written for.
+# ===========================================================================
+
+
+def test_unverifiable_order_does_not_claim_a_nonexistent_voucher_pool(ctx):
+    c = ctx([])  # Shopify-paid / imported: no captured payments at all
+    c["order"]["amount_paid"] = _BILLED_GROSS
+    q = c["client"].post("/api/v1/returns/quote", json=_payload(), headers=_HDR).json()
+    assert q["captured_tenders"] == {}
+    assert q["non_refundable_tenders"] == {}
+    # There is no voucher portion to steer the cashier towards.
+    assert q["cash_in_shortfall"] is False
+    # ... but the order genuinely cannot be verified, so the escape advisory
+    # (the one that says "record it as cash paid out") must still fire.
+    assert q["tenders_unverifiable"] is True
+
+
+def test_part_voucher_order_still_reports_the_shortfall(ctx):
+    """The guard must not disarm the REAL case it was written for."""
+    c = _voucher_ctx(ctx)
+    q = c["client"].post("/api/v1/returns/quote", json=_payload(), headers=_HDR).json()
+    assert q["non_refundable_tenders"] == {"GIFT_VOUCHER": 2900.00}
+    assert q["cash_in_shortfall"] is True
+
+
+# ===========================================================================
+# ROUND-5 MUST-FIX 5 (verdict): replacement QUANTITY was an unverified client
+# number multiplied straight into a drawer figure. Measured before the fix:
+# quantity 50 -> collect_amount 344100.0 (a Rs 343,000 phantom shortage from
+# one fat-finger); 1e6 -> 6,999,994,100.0; 2.5 accepted.
+# ===========================================================================
+
+
+def _qty_payload(qty, collect_method="CASH", client_price=_CATALOG_PRICE):
+    body = _payload(
+        return_type="EXCHANGE",
+        replacement_items=[
+            {
+                "product_id": "PRD-2",
+                "name": "Replacement Frame",
+                "sku": "RB-2",
+                "quantity": qty,
+                "unit_price": client_price,
+            }
+        ],
+    )
+    body["collect_method"] = collect_method
+    return body
+
+
+def test_fat_finger_replacement_quantity_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post("/api/v1/returns", json=_qty_payload(50), headers=_HDR)
+    assert r.status_code == 400, r.text
+    assert c["returns"].docs == []
+    assert _returned_qty(c["order"]) == 0.0
+    sales, _ = _cash_sales_for_window(
+        c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
+    )
+    assert sales == 0.0  # no Rs 344,100 phantom reached the drawer
+
+
+def test_absurd_replacement_quantity_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post("/api/v1/returns", json=_qty_payload(1_000_000), headers=_HDR)
+    assert r.status_code == 400, r.text
+
+
+def test_fractional_replacement_quantity_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post("/api/v1/returns", json=_qty_payload(2.5), headers=_HDR)
+    assert r.status_code == 400, r.text
+    assert "whole" in r.text.lower() or "quantity" in r.text.lower()
+
+
+def test_zero_replacement_quantity_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post("/api/v1/returns", json=_qty_payload(0), headers=_HDR)
+    assert r.status_code == 400, r.text
+
+
+def test_quantity_within_the_line_cap_is_accepted(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post("/api/v1/returns", json=_qty_payload(2), headers=_HDR)
+    assert r.status_code in (200, 201), r.text
+    # 2 x 7000 - 5900 = 8100 collected.
+    assert r.json()["collect_amount"] == 8100.00
+
+
+# ===========================================================================
+# ROUND-5 MUST-FIX 6 (verdict): the catalog price must be a CEILING, not an
+# override. Optical retail discounts routinely; a Rs 5,900 frame sold at 15%
+# off and swapped for the identical SKU manufactured a Rs 885 COLLECT the
+# customer never owed, with no representable honest payload.
+# ===========================================================================
+
+
+def test_negotiated_price_below_catalog_is_honoured(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_qty_payload(1, client_price=6500.00),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    # 6500 - 5900 = 600, NOT the catalog-derived 1100.
+    assert r.json()["collect_amount"] == 600.00
+    assert r.json()["settlement"]["replacement_total"] == 6500.00
+
+
+def test_price_above_catalog_is_refused(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_qty_payload(1, client_price=59000.00),
+        headers=_HDR,
+    )
+    assert r.status_code == 400, r.text
+    assert c["returns"].docs == []
+    sales, _ = _cash_sales_for_window(
+        c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
+    )
+    assert sales == 0.0
+
+
+def test_quote_echoes_a_server_computed_replacement_total(ctx):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    q = c["client"].post(
+        "/api/v1/returns/quote",
+        json=_qty_payload(2, client_price=6500.00),
+        headers=_HDR,
+    ).json()
+    assert q["replacement_total"] == 13000.00
+    assert q["replacement_items_priced"][0]["price_source"] == "NEGOTIATED"
+    assert q["replacement_items_priced"][0]["quantity"] == 2
 
 
 def test_exchange_with_uncatalogued_replacement_is_rejected_pre_claim(ctx):

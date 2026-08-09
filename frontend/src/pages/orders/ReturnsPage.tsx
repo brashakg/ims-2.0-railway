@@ -105,6 +105,14 @@ export default function ReturnsPage() {
   const [approvalNote, setApprovalNote] = useState('');
   const [restockingFee, setRestockingFee] = useState(0);
   const [resultId, setResultId] = useState<string | null>(null);
+  // THE SERVER'S answer about whether Day-End will auto-deduct this refund.
+  // The old banner keyed on the LOCAL refundTenders array, so on an order the
+  // server could not verify (a Shopify-paid order: refund_tenders persisted
+  // None, drawer nets Rs 0) the screen still told the cashier NOT to record the
+  // payout -- a guaranteed false shortage blamed on them at close.
+  const [resultDrawerNetted, setResultDrawerNetted] = useState<boolean | null>(null);
+  const [resultCashRefunded, setResultCashRefunded] = useState(0);
+  const [resultCreditAmount, setResultCreditAmount] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Refund-tender capture (drawer-truth): how the money is actually handed back.
@@ -457,6 +465,16 @@ export default function ReturnsPage() {
   ): Promise<boolean> => {
     const result = await returnsApi.create(buildPayload(approval));
     setResultId(result.return_id || null);
+    // Read the SERVER's verdict + the amounts it actually recorded.
+    setResultDrawerNetted(result?.drawer_auto_netted === true);
+    setResultCashRefunded(
+      Math.round(
+        ((result?.refund_tenders as any[]) || [])
+          .filter((t) => String(t?.method || '').toUpperCase() === 'CASH')
+          .reduce((sum: number, t: any) => sum + (Number(t?.amount) || 0), 0) * 100,
+      ) / 100,
+    );
+    setResultCreditAmount(Number(result?.credit_amount) || 0);
     setStep('complete');
     return true;
   };
@@ -984,15 +1002,27 @@ export default function ReturnsPage() {
                   : 'Even exchange — no balance due')
                 : 'Refund recorded against the tender(s) you selected'}
           </p>
-          {/* Double-count guard: this cash refund is now auto-deducted in
-              Day-End; staff must NOT also key it as a manual "cash paid out". */}
-          {returnType === 'RETURN' && refundTenders.some(t => t.method === 'CASH' && (Number(t.amount) || 0) > 0) && (
+          {/* Store credit actually ISSUED for the non-drawer portion. */}
+          {returnType === 'RETURN' && resultCreditAmount > 0 && (
+            <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              {fp(resultCreditAmount)} issued as store credit to the customer's account.
+            </p>
+          )}
+          {/* Day-End guidance keyed on the SERVER's answer, never on local
+              intent. Getting this backwards guarantees a false shortage. */}
+          {returnType === 'RETURN' && resultDrawerNetted === true && resultCashRefunded > 0 && (
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
-              This cash refund is now recorded in Day-End — do not also enter it as cash paid out.
+              This {fp(resultCashRefunded)} cash refund is now recorded in Day-End — do not also enter it as cash paid out.
+            </p>
+          )}
+          {returnType === 'RETURN' && resultDrawerNetted === false && roundedNet > 0 && (
+            <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              This refund could NOT be auto-deducted from the drawer (the order has no verified payment tenders).
+              If you handed back cash, record {fp(netRefund)} as cash paid out at day-end — otherwise the till will read short.
             </p>
           )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
