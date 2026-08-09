@@ -14,9 +14,12 @@ selection algorithm, and validation helpers. The router owns all I/O.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # --- Status lifecycle -------------------------------------------------------
 
@@ -388,3 +391,49 @@ def advance(db, request_id: str, to: str, *, actor: Dict[str, Any]) -> Dict[str,
             "request changed concurrently", status=409, code="conflict"
         )
     return updated
+
+
+def cancel_linked_request(
+    db, request_id: str, *, actor: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Back-sync a linked EA request to CANCELLED when its transfer is cancelled.
+
+    Called from transfers.cancel_transfer for a stock_transfers doc that carries
+    ``endless_aisle_request_id``. Without this, cancelling the transfer strands the
+    request at TRANSFER_CREATED pointing at a CANCELLED transfer -- and the
+    decorative EA ship/deliver endpoints could still march that orphan on to
+    DELIVERED.
+
+    Only flips the request when CANCELLED is a LEGAL transition from its current
+    status (PENDING / ACCEPTED / TRANSFER_CREATED per ALLOWED_TRANSITIONS): an
+    already SHIPPED / DELIVERED / REJECTED / CANCELLED request is left untouched --
+    we never force-cancel a terminal or post-ship request. Reuses the guarded,
+    status-keyed transition so a concurrent flip cannot double-apply.
+
+    FAIL-SOFT: never raises. The transfer cancel is the authoritative action; this
+    back-sync is best-effort and must not turn a committed cancel into a 500.
+    Returns the updated request, or None if there was nothing safe to do / on any
+    error. Moves no stock and books no GST -- a pure status back-sync.
+    """
+    try:
+        if db is None or not request_id:
+            return None
+        req = get_request(db, request_id)
+        if req is None:
+            return None
+        frm = req.get("status")
+        if not can_transition(frm, STATUS_CANCELLED):
+            return None
+        return _guarded_transition(
+            db,
+            request_id,
+            frm,
+            STATUS_CANCELLED,
+            actor=actor or {},
+            extra={"cancelled_via": "transfer_cancel"},
+        )
+    except Exception:  # noqa: BLE001 - fail-soft, never break the transfer cancel
+        logger.warning(
+            "[ENDLESS_AISLE] cancel back-sync failed for request %s", request_id
+        )
+        return None
