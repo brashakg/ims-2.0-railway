@@ -13,6 +13,8 @@ import { describe, it, expect } from 'vitest';
 import {
   hasQcOnFile,
   awaitingHandoverQc,
+  handoverBlockerMessage,
+  isAwaitingSalesConfirmation,
   QC_ACTIONABLE_STATUSES,
   resolveItemPrescriptionId,
   backendMessage,
@@ -69,7 +71,24 @@ describe('awaitingHandoverQc', () => {
     expect(
       awaitingHandoverQc({ status: 'IN_PROGRESS', current_station: 'EDGING' }),
     ).toBe(false);
-    expect(awaitingHandoverQc({ status: 'PENDING' })).toBe(false);
+  });
+
+  it('warns for a station-less PENDING job awaiting sales confirmation', () => {
+    // The POS safety-net job: no current_station at all, so the station test
+    // never fires -- it would otherwise show neither warning nor action.
+    expect(awaitingHandoverQc({ status: 'PENDING' })).toBe(true);
+    expect(
+      awaitingHandoverQc({ status: 'PENDING', fitting_details: {} }),
+    ).toBe(true);
+  });
+
+  it('stays quiet once sales HAVE confirmed a PENDING job', () => {
+    expect(
+      awaitingHandoverQc({
+        status: 'PENDING',
+        fitting_details: { confirmed_by_sales: true },
+      }),
+    ).toBe(false);
   });
 
   it('stays quiet once QC is on file', () => {
@@ -82,6 +101,39 @@ describe('awaitingHandoverQc', () => {
   it('stays quiet for terminal jobs', () => {
     expect(awaitingHandoverQc({ status: 'DELIVERED', current_station: 'PICKUP' })).toBe(false);
     expect(awaitingHandoverQc({ status: 'CANCELLED', current_station: 'PICKUP' })).toBe(false);
+  });
+});
+
+describe('handoverBlockerMessage', () => {
+  it('names SALES CONFIRMATION for a PENDING job, not QC', () => {
+    // Telling staff to "run QC" on a PENDING job would name a step the API
+    // refuses -- QC deliberately rejects PENDING.
+    const msg = handoverBlockerMessage({ status: 'PENDING' });
+    expect(msg).toContain('fitting');
+    expect(msg).not.toContain('QC');
+  });
+
+  it('names QC for a job on the pickup shelf', () => {
+    expect(handoverBlockerMessage({ status: 'READY' })).toContain('QC');
+  });
+
+  it('names QC for a held job at the pickup station', () => {
+    expect(
+      handoverBlockerMessage({ status: 'IN_PROGRESS', current_station: 'PICKUP' }),
+    ).toContain('QC');
+  });
+});
+
+describe('isAwaitingSalesConfirmation', () => {
+  it('is true only for an unconfirmed PENDING job', () => {
+    expect(isAwaitingSalesConfirmation({ status: 'PENDING' })).toBe(true);
+    expect(
+      isAwaitingSalesConfirmation({
+        status: 'PENDING',
+        fitting_details: { confirmed_by_sales: true },
+      }),
+    ).toBe(false);
+    expect(isAwaitingSalesConfirmation({ status: 'IN_PROGRESS' })).toBe(false);
   });
 });
 

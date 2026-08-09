@@ -268,7 +268,11 @@ _REWORK_OVERRIDE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"
 # that guard the -> IN_PROGRESS leg. DELIVERED / CANCELLED stay excluded because
 # the job is gone -- retro-QC'ing a handed-over job would rewrite history.
 # (All three exclusions are pinned by tests in test_workshop_qc_checklist.py.)
-_QC_INPUT_STATUSES = ("IN_PROGRESS", "COMPLETED", "QC_FAILED", "READY")
+# PROCESSING is the legacy frontend alias of IN_PROGRESS (update_job_status maps
+# it via STATUS_ALIASES). A stored PROCESSING job must be QC-able for the same
+# reason IN_PROGRESS must be: otherwise the handover gate would block it with a
+# remedy the API refuses.
+_QC_INPUT_STATUSES = ("IN_PROGRESS", "PROCESSING", "COMPLETED", "QC_FAILED", "READY")
 _QC_INPUT_STATUS_MESSAGE = (
     "QC can only be recorded while the job is in progress, completed, QC-failed "
     "or ready for pickup (current: {status})."
@@ -392,6 +396,26 @@ QC_HANDOVER_BLOCKED_MESSAGE = (
     "handing it to the customer."
 )
 
+# Job statuses the handover gate does NOT block on. See the skip-rules block in
+# assert_linked_job_qc_cleared for the reasoning behind each. The invariant these
+# encode -- the gate blocks exactly the states QC can fix -- is asserted below
+# and pinned by test_gate_blocks_only_states_qc_can_fix.
+_HANDOVER_GATE_SKIP_STATUSES = frozenset({"CANCELLED", "DELIVERED", "PENDING"})
+
+# ENFORCED INVARIANTS, not comments. Both encode a rule this PR was sent back
+# for violating; an assert at import fails the deploy loudly instead of letting
+# the two halves drift apart again in six months.
+#   1. Every status the handover gate can BLOCK on must be a status QC will
+#      actually ACCEPT -- otherwise the 400 names a remedy the API refuses.
+#   2. The canonical patient-facing pair must never leak into the
+#      not-patient-facing set that _is_patient_facing tests against.
+assert set(VALID_JOB_TRANSITIONS) - _HANDOVER_GATE_SKIP_STATUSES <= set(
+    _QC_INPUT_STATUSES
+), "handover gate would block a status QC refuses"
+assert not (_QC_REQUIRED_TARGETS & _NON_PATIENT_FACING_STATUSES), (
+    "a patient-facing status is marked bench-internal"
+)
+
 
 def assert_linked_job_qc_cleared(order: dict) -> None:
     """PATIENT SAFETY: raise 400 when an order's linked workshop job has not
@@ -402,15 +426,45 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
     only the Workshop screen left the likelier handover door wide open, so this
     is called from orders.deliver_order and orders.mark_ready.
 
-    Resolution order mirrors how the link is written: the order's own
-    workshop_job_id reverse pointer first, then a find_by_order sweep for orders
-    predating the pointer. An order with NO workshop job (a frame-only or
-    accessory sale) has nothing to check and passes.
+    Resolution is a UNION, never a short-circuit. An earlier build checked the
+    workshop_job_id reverse pointer and, only if that missed, swept
+    find_by_order -- so an order with TWO lab jobs had exactly ONE examined and
+    every sibling was invisible. That is not hypothetical: a duplicate pair
+    exists in prod today (created before create_job gained its dedup, which
+    cannot fix rows retroactively). QC would pass on the pointed-at job while the
+    un-QC'd SIBLING was the one the bench actually ground, and the patient
+    received un-QC'd spectacles at HTTP 200. So: ALWAYS sweep find_by_order, and
+    add the pointer job only when it really belongs to THIS order.
+
+    The pointer is ownership-checked because find_by_id is keyed on job_id
+    alone: a stale or cross-order workshop_job_id would otherwise make the gate
+    judge a DIFFERENT order's QC record -- failing open, or falsely blocking a
+    correctly-QC'd order forever. create_job's dedup already applies this exact
+    check, so both halves now agree.
+
+    SKIP RULES -- the gate blocks EXACTLY the states QC can actually fix
+    (_QC_INPUT_STATUSES). Blocking a state with no reachable remedy is what a
+    gate must never do, so each skip is deliberate:
+      * CANCELLED -- not being handed over.
+      * DELIVERED -- the handover ALREADY happened; blocking buys zero safety and
+        is unrecoverable (QC refuses DELIVERED and VALID_JOB_TRANSITIONS leaves
+        it terminal), so a legacy delivered job would strand its order forever
+        for every role including SUPERADMIN. Safe because no NEW job can reach
+        DELIVERED without QC now.
+      * PENDING -- no lab work has begun, so this job has produced nothing that
+        could BE un-QC'd; and QC deliberately refuses PENDING (a pass routes to
+        READY, skipping the sales-confirm and F9 DC gates). If physical goods
+        exist they came from a worked sibling, which the union above now checks.
+        Blocking here would strand real orders behind a remedy the counter
+        cannot perform.
+    The invariant "every blocked state is QC-able" is pinned by a test.
+
+    An order with NO workshop job (a frame-only or accessory sale) has nothing to
+    check and passes.
 
     Fail-SOFT on infrastructure only -- no workshop repo, or a lookup error,
     passes through rather than blocking a paid customer on an outage. A job that
-    IS found and is not QC-cleared is a hard 400. A CANCELLED job is skipped (it
-    is not being handed over).
+    IS found and is not QC-cleared is a hard 400.
     """
     if not isinstance(order, dict):
         return
@@ -421,25 +475,30 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
     if repo is None:
         return
 
-    jobs: List[dict] = []
+    order_id = order.get("order_id")
+    try:
+        jobs: List[dict] = list(repo.find_by_order(order_id) or [])
+    except Exception:  # noqa: BLE001 -- infrastructure fail-soft
+        return
+
+    # Add the pointed-at job ONLY when it belongs to this order and the sweep
+    # missed it (a sweep that already returned it needs no duplicate entry).
     job_id = order.get("workshop_job_id")
-    if job_id:
+    if job_id and not any(j.get("job_id") == job_id for j in jobs if isinstance(j, dict)):
         try:
             linked = repo.find_by_id(job_id)
-            if linked:
-                jobs = [linked]
         except Exception:  # noqa: BLE001
-            return
-    if not jobs:
-        try:
-            jobs = list(repo.find_by_order(order.get("order_id")) or [])
-        except Exception:  # noqa: BLE001
-            return
+            linked = None
+        if (
+            isinstance(linked, dict)
+            and str(linked.get("order_id") or "") == str(order_id or "")
+        ):
+            jobs.append(linked)
 
     for job in jobs:
         if not isinstance(job, dict):
             continue
-        if (job.get("status") or "").strip().upper() == "CANCELLED":
+        if (job.get("status") or "").strip().upper() in _HANDOVER_GATE_SKIP_STATUSES:
             continue
         if not _qc_cleared(job):
             raise HTTPException(

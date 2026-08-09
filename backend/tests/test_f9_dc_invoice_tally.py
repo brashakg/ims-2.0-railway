@@ -386,8 +386,17 @@ def _pi_client_full(db, grn_repo, audit=None, roles=("ACCOUNTANT",)):
 
 
 def _workshop_client(
-    db, wrepo, audit=None, order_exists=True, roles=("STORE_MANAGER",), monkeypatch=None
+    monkeypatch, db, wrepo, audit=None, order_exists=True, roles=("STORE_MANAGER",)
 ):
+    """TestClient for the workshop router.
+
+    `monkeypatch` is REQUIRED (it used to be optional, with the router globals
+    replaced by plain assignment). Plain assignment is never torn down, so these
+    doubles leaked into every later test in the session -- and create_job became
+    sensitive to that leak once it gained the dedup's find_by_order lookup,
+    producing an order-dependent failure in
+    test_require_flag_false_bypasses_hardlock. Everything below is scoped.
+    """
     app = FastAPI()
     app.include_router(workshop_router.router, prefix="/api/v1/workshop")
 
@@ -395,8 +404,8 @@ def _workshop_client(
         return _user(roles)
 
     app.dependency_overrides[get_current_user] = _u
-    workshop_router.get_db = lambda: db
-    workshop_router.get_workshop_repository = lambda: wrepo
+    monkeypatch.setattr(workshop_router, "get_db", lambda: db)
+    monkeypatch.setattr(workshop_router, "get_workshop_repository", lambda: wrepo)
 
     class _OrderRepo:
         def find_by_id(self, _id):
@@ -405,29 +414,27 @@ def _workshop_client(
         def update(self, *a, **k):
             return True
 
-    workshop_router.get_order_repository = lambda: _OrderRepo()
-    workshop_router.get_audit_repository = lambda: audit
+    monkeypatch.setattr(workshop_router, "get_order_repository", lambda: _OrderRepo())
+    monkeypatch.setattr(workshop_router, "get_audit_repository", lambda: audit)
 
     # POST /workshop/jobs verifies its prescription_id (exists + belongs to the
     # order's customer + not expired). These are DC-HARDLOCK tests, so resolve
     # the body's RX1 to a valid in-date Rx for the order's customer -- otherwise
     # every create here would 422 on the Rx gate before reaching the hardlock.
-    # Scoped through monkeypatch so it cannot leak into other test modules.
-    if monkeypatch is not None:
-        from api import dependencies as _deps
+    from api import dependencies as _deps
 
-        class _RxRepo:
-            def find_by_id(self, rx_id):
-                if rx_id != "RX1":
-                    return None
-                return {
-                    "prescription_id": "RX1",
-                    "customer_id": "C1",
-                    "prescription_date": datetime.now().isoformat(),
-                    "validity_months": 12,
-                }
+    class _RxRepo:
+        def find_by_id(self, rx_id):
+            if rx_id != "RX1":
+                return None
+            return {
+                "prescription_id": "RX1",
+                "customer_id": "C1",
+                "prescription_date": datetime.now().isoformat(),
+                "validity_months": 12,
+            }
 
-        monkeypatch.setattr(_deps, "get_prescription_repository", lambda: _RxRepo())
+    monkeypatch.setattr(_deps, "get_prescription_repository", lambda: _RxRepo())
 
     return TestClient(app)
 
@@ -628,7 +635,7 @@ class TestWorkshopHardlock:
     def test_external_lens_no_dc_is_blocked_inhouse_passes(self, monkeypatch):
         db = _FakeDB()
         wrepo = _WorkshopRepo()
-        c = _workshop_client(db, wrepo, monkeypatch=monkeypatch)
+        c = _workshop_client(monkeypatch, db, wrepo)
 
         # ORDERED lens, no DC -> 422 DC_HARDLOCK.
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
@@ -653,7 +660,7 @@ class TestWorkshopHardlock:
                 "items": [_grn_item("L1", 3)],
             }
         )
-        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
+        c = _workshop_client(monkeypatch, db, _WorkshopRepo())
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
 
@@ -663,7 +670,7 @@ class TestWorkshopHardlock:
         db.collections["purchase_settings"].append(
             {"_id": "default", "dc_hardlock_from_date": "2099-01-01"}
         )
-        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
+        c = _workshop_client(monkeypatch, db, _WorkshopRepo())
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
 
@@ -672,7 +679,7 @@ class TestWorkshopHardlock:
         audit = _AuditRepo()
         # STORE_MANAGER supplying an override reason -> 403 (not authorised).
         c_sm = _workshop_client(
-            db, _WorkshopRepo(), audit=audit, roles=("STORE_MANAGER",), monkeypatch=monkeypatch
+            monkeypatch, db, _WorkshopRepo(), audit=audit, roles=("STORE_MANAGER",)
         )
         r_sm = c_sm.post(
             "/api/v1/workshop/jobs",
@@ -682,7 +689,7 @@ class TestWorkshopHardlock:
 
         # ADMIN overriding with a reason -> 201 + audit row.
         c_adm = _workshop_client(
-            db, _WorkshopRepo(), audit=audit, roles=("ADMIN",), monkeypatch=monkeypatch
+            monkeypatch, db, _WorkshopRepo(), audit=audit, roles=("ADMIN",)
         )
         r_adm = c_adm.post(
             "/api/v1/workshop/jobs",
@@ -697,7 +704,7 @@ class TestWorkshopHardlock:
         db.collections["purchase_settings"].append(
             {"_id": "default", "require_dc_for_workshop": False}
         )
-        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
+        c = _workshop_client(monkeypatch, db, _WorkshopRepo())
         # Flag off -> ORDERED lens with no DC succeeds.
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
@@ -723,9 +730,9 @@ class TestWorkshopHardlock:
             "fitting_details": {"confirmed_by_sales": True},           # passes the sales gate
         })
 
-    def test_inprogress_ordered_no_dc_blocked(self):
+    def test_inprogress_ordered_no_dc_blocked(self, monkeypatch):
         db = _FakeDB(); wrepo = _WorkshopRepo()
-        c = _workshop_client(db, wrepo)
+        c = _workshop_client(monkeypatch, db, wrepo)
         self._seed_ordered_job(wrepo)
         r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
         assert r.status_code == 422
@@ -733,28 +740,28 @@ class TestWorkshopHardlock:
         # Status must NOT have advanced.
         assert wrepo.find_by_id("JOB-1")["status"] == "PENDING"
 
-    def test_inprogress_ordered_with_dc_allowed(self):
+    def test_inprogress_ordered_with_dc_allowed(self, monkeypatch):
         db = _FakeDB()
         db.collections["grns"].append({
             "grn_id": "DC1", "grn_subtype": "DELIVERY_CHALLAN", "status": "ACCEPTED",
             "store_id": "S1", "items": [_grn_item("L1", 3)],
         })
-        wrepo = _WorkshopRepo(); c = _workshop_client(db, wrepo)
+        wrepo = _WorkshopRepo(); c = _workshop_client(monkeypatch, db, wrepo)
         self._seed_ordered_job(wrepo)
         r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
         assert r.status_code == 200, r.text
         assert wrepo.find_by_id("JOB-1")["status"] == "IN_PROGRESS"
 
-    def test_inprogress_inhouse_lens_exempt(self):
-        db = _FakeDB(); wrepo = _WorkshopRepo(); c = _workshop_client(db, wrepo)
+    def test_inprogress_inhouse_lens_exempt(self, monkeypatch):
+        db = _FakeDB(); wrepo = _WorkshopRepo(); c = _workshop_client(monkeypatch, db, wrepo)
         self._seed_ordered_job(wrepo, lens_status="RECEIVED")  # not ORDERED -> exempt
         r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
         assert r.status_code == 200, r.text
 
-    def test_inprogress_ordered_admin_override_audited(self):
+    def test_inprogress_ordered_admin_override_audited(self, monkeypatch):
         db = _FakeDB(); audit = _AuditRepo()
         wrepo = _WorkshopRepo()
-        c = _workshop_client(db, wrepo, audit=audit, roles=("ADMIN",))
+        c = _workshop_client(monkeypatch, db, wrepo, audit=audit, roles=("ADMIN",))
         self._seed_ordered_job(wrepo)
         r = c.patch(
             "/api/v1/workshop/jobs/JOB-1/status",

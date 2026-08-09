@@ -44,6 +44,7 @@ import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import {
   hasQcOnFile,
   awaitingHandoverQc,
+  handoverBlockerMessage,
   QC_ACTIONABLE_STATUSES,
   resolveItemPrescriptionId,
   backendMessage,
@@ -82,6 +83,9 @@ interface Job {
   // job that has never been QC'd -- see hasQcOnFile below.
   qc_passed?: boolean;
   qc_waived?: boolean;
+  // Sales confirmation of the fitting. A PENDING job without it cannot start
+  // work at all -- see isAwaitingSalesConfirmation in ./qcHandover.
+  fitting_details?: { confirmed_by_sales?: boolean } | null;
 }
 
 // PATIENT SAFETY: a job is cleared for handover only when lens QC PASSED or was
@@ -1155,7 +1159,7 @@ const loadJobs = async () => {
                   )}
                   {awaitingHandoverQc(selectedJob) && (
                     <p className="text-xs text-amber-700 w-full">
-                      No QC recorded for this job — run QC before handing it over.
+                      {handoverBlockerMessage(selectedJob)}
                     </p>
                   )}
                   {['COMPLETED', 'READY'].includes(selectedJob.status) && (

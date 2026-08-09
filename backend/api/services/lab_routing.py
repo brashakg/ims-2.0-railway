@@ -511,6 +511,21 @@ def advance_lab_station(
     gate_block = None
     if advances_to:
         advances_to = str(advances_to).strip().upper() or None
+        # RE-VALIDATE ON READ, not just on write. upsert_station now rejects a
+        # value outside VALID_ADVANCES_JOB_STATUS, but any row written BEFORE
+        # that validation existed is still sitting in lab_stations and would be
+        # copied straight into workshop_jobs.status by the line below. Treating
+        # an unknown value as status-neutral makes the fix retroactive with no
+        # migration: the scan is still recorded, the status simply does not move.
+        if advances_to not in VALID_ADVANCES_JOB_STATUS:
+            logger.warning(
+                "[LAB_ROUTING] station %s for store %s has an invalid "
+                "advances_job_status %r - ignoring it (status left unchanged)",
+                code,
+                store_id,
+                advances_to,
+            )
+            advances_to = None
     if advances_to and advances_to != job_status:
         # SAFETY GATES (BUG-116c / BUG-116a / F9): the scan-driven status flip
         # must enforce the SAME gates as the workshop PATCH handler -- a scan may
