@@ -43,14 +43,26 @@ def _make_order(
     grand_total: float = 118.0,
     taxable: float = 100.0,
     tax: float = 18.0,
-    subtotal: float = 100.0,
     discount: float = 0.0,
-    cgst: float = 9.0,
-    sgst: float = 9.0,
     status: str = "COMPLETED",
     created_iso: str = "2026-05-08T10:00:00+00:00",
     customer_name: str = "Test Customer",
 ):
+    """An order in the shape `orders.py` ACTUALLY persists it.
+
+    This fixture used to hand-supply `taxable`, `cgst_amount` and
+    `sgst_amount` -- fields NO order-writing path in the codebase persists (see
+    orders.py:2360-2400) -- and set `subtotal` to the taxable value. That is
+    precisely why the zero-output-GST export defect survived for so long: every
+    test fed the voucher builder a document that had already been reshaped, so
+    the missing reshape was invisible.
+
+    The real shape: no order-level `taxable`, no GST-head fields, `subtotal` is
+    the pre-cart-discount tax-INCLUSIVE gross, total GST lives on `tax_amount`,
+    and the per-line `taxable_value` / `tax_amount` stamped in place by
+    orders._compute_per_category_gst are the ONLY place a taxable value is
+    persisted.
+    """
     return {
         "order_id": order_id,
         "store_id": store_id,
@@ -58,17 +70,19 @@ def _make_order(
         "created_at": created_iso,
         "customer_name": customer_name,
         "grand_total": grand_total,
-        "taxable": taxable,
-        "tax": tax,
-        # A REAL order document persists its total GST under `tax_amount` -- the
-        # field the canonical finance sales-JV reshape reads. The fixture used
-        # to carry only `tax`, which is why the zero-output-GST NEXUS export
-        # went unnoticed for so long.
         "tax_amount": tax,
-        "subtotal": subtotal,
+        # Gross (tax-inclusive), NOT the taxable value.
+        "subtotal": grand_total,
         "total_discount": discount,
-        "cgst_amount": cgst,
-        "sgst_amount": sgst,
+        "items": [
+            {
+                "item_id": f"{order_id}-L1",
+                "item_total": grand_total,
+                "gst_rate": 18.0,
+                "taxable_value": taxable,
+                "tax_amount": tax,
+            }
+        ],
     }
 
 
@@ -403,11 +417,18 @@ async def test_orchestrator_skips_stores_with_no_orders(patched_nexus):
 
 @pytest.mark.asyncio
 async def test_orchestrator_writes_unbalanced_row(patched_nexus):
-    """A store with mismatched orders still gets a row, marked unbalanced."""
+    """A store with mismatched orders still gets a row, marked unbalanced.
+
+    The Rs 3 mismatch is expressed through the PER-LINE `taxable_value` (the
+    only place a real order persists a taxable figure). Expressed through a
+    hand-supplied order-level `taxable` -- as this test used to -- the same
+    money reported CLEAN in production, because no order writer persists that
+    field.
+    """
     nexus, db = patched_nexus
     orders = db.get_collection("orders")
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    # Off by ₹3 — outside 50p tolerance
+    # Header says Rs 121.00; the lines only account for Rs 100 + Rs 18 = 118.
     orders.insert_one(
         _make_order(
             order_id="BAD",
@@ -424,6 +445,7 @@ async def test_orchestrator_writes_unbalanced_row(patched_nexus):
     assert len(rows) == 1
     assert rows[0]["balanced"] is False
     assert rows[0]["balance_check"]["mismatch_count"] == 1
+    assert rows[0]["balance_check"]["mismatches"][0]["delta"] == 3.0
     assert result.ok is True  # Export still completes; row just flagged
 
 

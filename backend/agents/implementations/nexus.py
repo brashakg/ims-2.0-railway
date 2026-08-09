@@ -38,6 +38,7 @@ from ..nexus_providers import (
     razorpay_list_payments,
     shiprocket_track_awb,
     tally_build_day_voucher_xml_checked,
+    tally_resolve_state_maps,
     validate_voucher_balance,
 )
 
@@ -247,14 +248,27 @@ class NexusAgent(JarvisAgent):
         XML filename suffix. An `agent.event("tally.unbalanced", ...)`
         is emitted so SENTINEL can flag it.
 
-        MONEY GATE: the XML itself is built through
+        MONEY GATE: the XML is built through
         `tally_build_day_voucher_xml_checked`, which applies the CANONICAL
         finance sales-JV tax reshape (taxable vs CGST/SGST vs IGST) and then
-        refuses to emit a voucher that does not balance or that under-books
-        output GST. A store that trips that gate gets NO row written at all --
-        an importable XML that overstates Sales and understates GST is far
-        worse than a missing file -- and the whole export returns ok=False so
-        the failure lands in `sync_runs` and fires a `sync.failed` event.
+        refuses to emit any voucher that does not balance or that under-books
+        output GST.
+
+        A rejected order is QUARANTINED, not fatal to the store: the good
+        vouchers still export, the row records `gate_skipped_orders` and is
+        forced `balanced=False` so it downloads as `*_UNBALANCED.xml`, and the
+        run returns ok=False (sync_runs row + `sync.failed` event + verbatim
+        error from /regenerate). One bad imported row must never black out a
+        store's books night after night with no operator escape.
+
+        When NOTHING can be priced for a store, a POISON row is upserted
+        (xml="", voucher_count=0, balanced=False, gate_error=...). A bare
+        `continue` would have left any PRE-EXISTING row for that
+        (date, store_id) in place, and admin.py streams it unmarked -- so a
+        stale or pre-fix zero-GST voucher would have downloaded clean.
+
+        The head split (CGST/SGST vs IGST) is only as good as the state data:
+        the gates verify the TOTAL output GST, not which head it lands on.
         """
         orders_coll = self.get_collection("orders")
         export_coll = self.get_collection("tally_exports")
@@ -307,6 +321,15 @@ class NexusAgent(JarvisAgent):
         gate_failures: List[str] = []
         total_vouchers = 0
 
+        # Resolve the store/customer state maps ONCE for the whole tick. They
+        # are full scans of `stores` + `customers`; rebuilding them inside the
+        # per-store loop meant 6 scans of each every night.
+        try:
+            store_states, customer_states = tally_resolve_state_maps(self.db)
+        except TallyExportError as e:
+            logger.error("[NEXUS] Tally export ABORTED on %s: %s", export_date_iso, e)
+            return SyncResult(ok=False, provider="tally", kind="export", error=str(e))
+
         for store in stores:
             sid = store.get("store_id")
             if not sid:
@@ -331,19 +354,40 @@ class NexusAgent(JarvisAgent):
                 "store_name": store.get("store_name") or sid,
             }
             try:
-                xml, _priced = tally_build_day_voucher_xml_checked(
-                    self.db, orders, store_meta=store_meta
+                xml, priced, rejected = tally_build_day_voucher_xml_checked(
+                    self.db, orders, store_meta=store_meta,
+                    store_states=store_states, customer_states=customer_states,
                 )
-            except TallyExportError as e:
-                # FAIL LOUD, emit NOTHING. Writing the row anyway would put a
-                # downloadable, importable voucher in the accountant's hands
-                # that books gross-as-Sales with zero output GST.
+            except (TallyExportError, ValueError, TypeError) as e:
+                # NOTHING could be priced for this store. Write a POISON ROW
+                # rather than `continue`: a bare continue left any PRE-EXISTING
+                # row for this (date, store) untouched, and admin.py streams
+                # that with `suffix = "" if row.get("balanced", True)` -- i.e.
+                # a stale or pre-fix zero-GST voucher downloads green and
+                # unmarked. The poison row makes the failure a VISIBLE row and
+                # forces `_UNBALANCED` + `X-Tally-Balanced: 0` on any download.
+                # ValueError/TypeError are caught too so one junk document can
+                # only ever fail ITS store, never the whole chain.
                 logger.error(
                     "[NEXUS] Tally export ABORTED for store %s on %s: %s",
                     sid, export_date_iso, e,
                 )
                 gate_failures.append(f"{sid}: {e}")
+                self._write_poison_export_row(
+                    export_coll, export_date_iso, sid, store_meta, str(e)
+                )
                 continue
+
+            if rejected:
+                logger.error(
+                    "[NEXUS] Tally export QUARANTINED %d order(s) for store %s on %s: %s",
+                    len(rejected), sid, export_date_iso,
+                    "; ".join(f"{r['order_id']}: {r['reason']}" for r in rejected[:5]),
+                )
+                gate_failures.append(
+                    f"{sid}: {len(rejected)} order(s) quarantined "
+                    f"({', '.join(r['order_id'] for r in rejected[:5])})"
+                )
 
             row = {
                 "agent_id": self.agent_id,
@@ -351,10 +395,21 @@ class NexusAgent(JarvisAgent):
                 "store_id": sid,
                 "store_code": store_meta["store_code"],
                 "store_name": store_meta["store_name"],
-                "voucher_count": len(orders),
+                "voucher_count": len(priced),
                 "xml": xml,
-                "balanced": balance["ok"],
+                # A quarantined order means the file is INCOMPLETE, so it must
+                # download as *_UNBALANCED.xml even when the vouchers that DID
+                # make it are individually perfect.
+                "balanced": bool(balance["ok"]) and not rejected,
                 "balance_check": balance,
+                "unverified_count": balance.get("unverified_count", 0),
+                "gate_skipped_orders": [r["order_id"] for r in rejected],
+                "gate_skipped_reasons": rejected[:20],
+                "gate_error": "",
+                # Distinguishes post-fix rows (canonical GST reshape applied)
+                # from the pre-fix zero-GST rows still sitting in the
+                # collection, so a backfill can find and re-issue them.
+                "builder_version": 2,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "consumed": False,
             }
@@ -368,8 +423,8 @@ class NexusAgent(JarvisAgent):
                     upsert=True,
                 )
                 rows_written += 1
-                total_vouchers += len(orders)
-                if not balance["ok"]:
+                total_vouchers += len(priced)
+                if not row["balanced"]:
                     unbalanced_stores.append(sid)
             except Exception as e:
                 logger.warning(f"[NEXUS] tally_exports write failed for store {sid}: {e}")
@@ -384,10 +439,11 @@ class NexusAgent(JarvisAgent):
             except Exception:
                 pass  # event bus is fail-soft
 
-        # A gate failure is a HARD failure of the export even if other stores
-        # succeeded: ok=False makes _run_integration_sync record it in
-        # sync_runs and _do_background_work dispatch `sync.failed`, and the
-        # SUPERADMIN /regenerate endpoint surfaces the error text verbatim.
+        # A gate failure is a HARD failure of the export even when other stores
+        # (and the other orders in the same store) exported fine: ok=False makes
+        # _run_integration_sync record it in sync_runs and _do_background_work
+        # dispatch `sync.failed`, and the SUPERADMIN /regenerate endpoint
+        # surfaces the error text verbatim.
         if gate_failures:
             shown = " | ".join(gate_failures[:3])
             more = f" (+{len(gate_failures) - 3} more)" if len(gate_failures) > 3 else ""
@@ -397,10 +453,13 @@ class NexusAgent(JarvisAgent):
                 kind="export",
                 items_synced=total_vouchers,
                 error=(
-                    f"Tally voucher gate rejected {len(gate_failures)} store(s); "
-                    f"NO export written for them: {shown}{more}"
+                    f"Tally voucher gate rejected orders in {len(gate_failures)} "
+                    f"store(s): {shown}{more}"
                 ),
-                notes=f"{rows_written} store row(s) written before the gate tripped",
+                notes=(
+                    f"{rows_written} store row(s) written; affected rows are "
+                    "marked UNBALANCED with gate_skipped_orders"
+                ),
             )
 
         if rows_written == 0:
@@ -417,6 +476,40 @@ class NexusAgent(JarvisAgent):
             items_synced=total_vouchers,
             notes=notes,
         )
+
+    def _write_poison_export_row(self, export_coll, export_date_iso, sid,
+                                 store_meta, error: str) -> None:
+        """Upsert a VISIBLE failure row for a store whose export was rejected.
+
+        Leaving the prior row in place was the real defect: `admin.py` streams
+        whatever row exists with no `_UNBALANCED` suffix when `balanced` is
+        truthy, so a stale (or pre-fix zero-GST) voucher downloaded clean and
+        green while the run reported ok=False somewhere the CA never looks.
+        Poisoning the row keeps the failure on the accountant's screen and
+        makes any download self-identify as unusable. Fail-soft: a write error
+        is logged, never raised, so one store cannot abort the tick."""
+        try:
+            export_coll.update_one(
+                {"export_date": export_date_iso, "store_id": sid},
+                {"$set": {
+                    "agent_id": self.agent_id,
+                    "export_date": export_date_iso,
+                    "store_id": sid,
+                    "store_code": store_meta.get("store_code") or sid,
+                    "store_name": store_meta.get("store_name") or sid,
+                    "voucher_count": 0,
+                    "xml": "",
+                    "balanced": False,
+                    "gate_error": error,
+                    "gate_skipped_orders": [],
+                    "builder_version": 2,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "consumed": False,
+                }},
+                upsert=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] poison tally_exports write failed for {sid}: {e}")
 
     async def _build_tally_export_legacy(self, day_start, day_end, orders_coll, export_coll) -> SyncResult:
         """Single-row chain-wide export — used when StoreRepository
@@ -445,19 +538,31 @@ class NexusAgent(JarvisAgent):
 
         balance = validate_voucher_balance(todays_orders)
         try:
-            xml, _priced = tally_build_day_voucher_xml_checked(self.db, todays_orders)
-        except TallyExportError as e:
+            xml, priced, rejected = tally_build_day_voucher_xml_checked(
+                self.db, todays_orders
+            )
+        except (TallyExportError, ValueError, TypeError) as e:
             # Same money gate as the per-store path: emit nothing, fail loud.
             logger.error("[NEXUS] Tally legacy export ABORTED: %s", e)
             return SyncResult(ok=False, provider="tally", kind="export",
                               error=f"Tally voucher gate rejected the export: {e}")
+        if rejected:
+            logger.error(
+                "[NEXUS] Tally legacy export QUARANTINED %d order(s): %s",
+                len(rejected),
+                "; ".join(f"{r['order_id']}: {r['reason']}" for r in rejected[:5]),
+            )
         try:
             export_coll.insert_one({
                 "agent_id": self.agent_id,
                 "export_date": day_start.isoformat(),
-                "voucher_count": len(todays_orders),
+                "voucher_count": len(priced),
                 "xml": xml,
-                "balanced": balance["ok"],
+                "unverified_count": balance.get("unverified_count", 0),
+                "gate_skipped_orders": [r["order_id"] for r in rejected],
+                "gate_skipped_reasons": rejected[:20],
+                "builder_version": 2,
+                "balanced": bool(balance["ok"]) and not rejected,
                 "balance_check": balance,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "consumed": False,
@@ -466,10 +571,20 @@ class NexusAgent(JarvisAgent):
             return SyncResult(ok=False, provider="tally", kind="export",
                               error=f"tally_exports write failed: {e}")
 
+        if rejected:
+            return SyncResult(
+                ok=False, provider="tally", kind="export",
+                items_synced=len(priced),
+                error=(
+                    f"Tally voucher gate quarantined {len(rejected)} order(s): "
+                    + ", ".join(r["order_id"] for r in rejected[:5])
+                ),
+                notes="Row written and marked UNBALANCED with gate_skipped_orders",
+            )
         return SyncResult(
             ok=True, provider="tally", kind="export",
-            items_synced=len(todays_orders),
-            notes=f"Legacy chain-wide export: {len(todays_orders)} voucher(s)",
+            items_synced=len(priced),
+            notes=f"Legacy chain-wide export: {len(priced)} voucher(s)",
         )
 
     async def _record_sync_runs(self, runs: List[Dict[str, Any]]):
