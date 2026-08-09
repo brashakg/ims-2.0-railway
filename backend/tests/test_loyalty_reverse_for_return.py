@@ -20,9 +20,24 @@ class _FakeTxns:
     def find_for_customer(self, cid, limit=20):
         return [dict(r) for r in self.rows if r.get("customer_id") == cid][:limit]
 
-    def create(self, doc):
+    def create(self, doc, raise_on_duplicate=False):
+        # The reversal now claims via an insert guarded by the partial UNIQUE
+        # index on (customer_id, return_id) for type=ADJUST; model it.
+        if doc.get("type") == "ADJUST" and isinstance(doc.get("return_id"), str):
+            for r in self.rows:
+                if (
+                    r.get("type") == "ADJUST"
+                    and r.get("customer_id") == doc.get("customer_id")
+                    and r.get("return_id") == doc.get("return_id")
+                ):
+                    if raise_on_duplicate:
+                        exc = Exception("duplicate")
+                        exc.__class__.__name__ = "DuplicateKeyError"
+                        raise exc
+                    return None
         self.created.append(dict(doc))
         self.rows.append(dict(doc))
+        return dict(doc)
 
 
 class _FakeAccounts:

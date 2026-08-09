@@ -6,7 +6,7 @@ Product and Stock data access operations
 
 import logging
 import re
-from typing import List, Optional, Dict
+from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta
 
 from api.utils.ist import ist_today
@@ -20,6 +20,26 @@ logger = logging.getLogger(__name__)
 # (the Catalog Manager list) can request an explicit tri-state filter
 # (True = active only, False = inactive only, None = everything).
 _LEGACY = object()
+
+# Case variants of the sellable status. stock_units is written with "AVAILABLE"
+# everywhere in current code, but legacy / imported rows carry lowercase forms
+# and inventory.py + oracle.py already treat those as on-hand. Used by the
+# guarded mark_sold so tightening it from an unguarded update cannot make a
+# legacy row silently unsellable.
+AVAILABLE_STATUS_VALUES = ["AVAILABLE", "available", "Available"]
+
+
+class StockReleaseResult(NamedTuple):
+    """Outcome of a stock release (order cancel / DRAFT line removal).
+
+    `incomplete` is the half that used to be missing: a mid-loop write failure
+    returned a PARTIAL list that was indistinguishable from a clean run, so the
+    caller reported success while units stayed SOLD against a CANCELLED order.
+    Callers must OR `incomplete` into whatever failure flag they persist.
+    """
+
+    released: List[str]
+    incomplete: bool
 
 
 class ProductRepository(BaseRepository):
@@ -312,13 +332,23 @@ class StockRepository(BaseRepository):
     # built as an $or whose FIRST branch is "undated" -- a frame matches that
     # branch and is never hidden, never re-sorted, never re-counted.
     #
-    # Comparisons are STRING-vs-STRING only (matching how the value is stored).
-    # A legacy row holding a non-string expiry (a BSON datetime from an old
-    # import) can NOT be compared against an ISO string in Mongo -- rather than
-    # silently hide it we let it through via the explicit non-string branch:
-    # when we cannot reason about the value we err toward SELLING, never toward
-    # hiding stock. Genuinely past-dated ISO rows -- the real-world case -- are
-    # excluded, and surfaced by count_expired() so nothing vanishes untraced.
+    # ONLY a value we can actually PARSE may take stock off the shelf. A raw
+    # string $gte is not a date comparison, it is a lexicographic one, and on the
+    # real data shapes it is WRONG IN BOTH DIRECTIONS (panel must-fix 8):
+    #   "15-08-2027" (a valid FUTURE date, DD-MM-YYYY) sorts BELOW "2026-08-09",
+    #       so real in-date stock went dark while the counter was told it was
+    #       "PAST THEIR EXPIRY DATE";
+    #   "31/12/2025" (genuinely EXPIRED) sorts ABOVE it, so it stayed sellable.
+    # The GRN door (vendors.py) validates the field with nothing but a whitespace
+    # strip, so both shapes are accepted today.
+    #
+    # So the floor now only bites on a CANONICAL ISO value (^YYYY-MM-DD). Every
+    # other shape -- missing, null, blank, malformed string, or a legacy BSON
+    # datetime -- passes through as SELLABLE with a warning at the scan door.
+    # That makes the fail-soft direction CONSISTENT: when we cannot interpret the
+    # value we never false-block the counter. The real fix for the malformed
+    # shapes is normalisation AT INGEST (see the note on _ISO_DATE_RE below).
+    _ISO_DATE_RE = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}"
 
     @staticmethod
     def _expiry_floor_iso() -> str:
@@ -339,16 +369,33 @@ class StockRepository(BaseRepository):
 
         Branch order is deliberate (mock/`$or` matchers short-circuit on the
         first true branch, and the undated branch is the hot path):
-          1. undated  -- field missing, null, or blank  -> ALWAYS sellable
-          2. ISO-string expiry on/after IST today       -> still in date
-          3. expiry present but NOT a string (legacy)   -> cannot be compared,
-             so it is allowed through rather than silently hidden
+          1. undated -- field missing, null, or blank -> ALWAYS sellable
+          2. CANONICAL ISO string on/after IST today  -> still in date
+          3. anything that is not a canonical ISO date string (malformed string
+             OR a non-string legacy value) -> UNINTERPRETABLE, so it is allowed
+             through rather than silently hidden
+
+        Branch 3 subsumes the old "non-string" branch: `$not: {$regex: ISO}`
+        matches a BSON datetime and a missing field as well as a malformed
+        string. The ONLY thing this floor removes from sale is a value we can
+        read with certainty and that is genuinely in the past.
         """
         return [
             {"expiry_date": {"$in": [None, ""]}},
-            {"expiry_date": {"$gte": cls._expiry_floor_iso()}},
-            {"expiry_date": {"$not": {"$type": "string"}}},
+            {
+                "expiry_date": {
+                    "$gte": cls._expiry_floor_iso(),
+                    "$regex": cls._ISO_DATE_RE,
+                }
+            },
+            {"expiry_date": {"$not": {"$regex": cls._ISO_DATE_RE}}},
         ]
+
+    @classmethod
+    def is_iso_expiry(cls, value) -> bool:
+        """True when `value` is a canonical ^YYYY-MM-DD string -- i.e. the only
+        shape the expiry floor is allowed to act on."""
+        return bool(isinstance(value, str) and re.match(cls._ISO_DATE_RE, value))
 
     def sellable_filter(self, product_id: str, store_id: str) -> Dict:
         """Canonical 'what POS may actually sell' query for one product+store:
@@ -381,7 +428,9 @@ class StockRepository(BaseRepository):
         Derived as (AVAILABLE total) - (sellable) rather than as its own query,
         so the two buckets ALWAYS reconcile: any AVAILABLE unit that find_available
         does not count shows up here. A product with no dated units always
-        returns 0.
+        returns 0, and so does one whose dates are unreadable -- those are
+        SELLABLE now (see _not_expired_or branch 3), so counting them here would
+        be a lie in the other direction.
         """
         try:
             total = self.count(
@@ -447,10 +496,18 @@ class StockRepository(BaseRepository):
         the unit must still be AVAILABLE **and** not past its expiry date, else
         NOTHING is written and False is returned. The caller (POS) must surface
         that as a real error -- never a silent success.
+
+        The status match accepts the CASE VARIANTS of AVAILABLE. Turning an
+        unguarded update into an exact-equality guard would otherwise make a
+        legacy lowercase `available` row silently unsellable through this door
+        (inventory.py / oracle.py already treat those as on-hand). Deliberately
+        NOT widened to `in_stock`: that is a different status token which neither
+        this method nor claim_one_available ever sold before, so accepting it
+        here would be a NEW behaviour change rather than a regression fix.
         """
         flt: Dict = {
             "stock_id": stock_id,
-            "status": "AVAILABLE",
+            "status": {"$in": AVAILABLE_STATUS_VALUES},
             "$or": self._not_expired_or(),
         }
         try:
@@ -474,18 +531,28 @@ class StockRepository(BaseRepository):
         order_id: str,
         *,
         product_id: Optional[str] = None,
+        stock_id: Optional[str] = None,
         limit: Optional[int] = None,
         reason: str = "ORDER_CANCELLED",
-    ) -> List[str]:
-        """Flip every unit still SOLD against `order_id` back to AVAILABLE and
-        return the stock_ids reactivated. The stock-side UNDO of a sale that
-        never happened (order cancelled / a DRAFT line removed).
+    ) -> "StockReleaseResult":
+        """Flip units still SOLD against `order_id` back to AVAILABLE. Returns
+        ``StockReleaseResult(released=[stock_ids], incomplete=bool)`` -- the
+        stock-side UNDO of a sale that never happened (order cancelled / a DRAFT
+        line removed).
 
         IDEMPOTENT BY CONSTRUCTION: each unit is claimed with an ATOMIC
         find_one_and_update whose filter requires status=="SOLD" AND
         order_id==this order. The very same write clears `order_id`, so the
         unit can never match again -- a retried / double cancel reactivates
         NOTHING (and a concurrent return-restock can never double-count it).
+        That property is what makes a RE-RUN safe after a partial failure.
+
+        `incomplete` is TRUE when a write failed mid-loop (panel must-fix 4).
+        This used to `break` and return the partial list indistinguishably from
+        a clean run, so the caller reported the cancel as a success while units
+        stayed SOLD against a CANCELLED order -- silent, permanent stock loss.
+        The caller MUST surface `incomplete` (see orders.cancel_order, which
+        flags the order and allows a re-run).
 
         Lineage is preserved, not overwritten: the stale sale attribution
         (order_id / sold_at / sold_to_customer_id) is CLEARED so an AVAILABLE
@@ -493,18 +560,33 @@ class StockRepository(BaseRepository):
         prior_sold_order_id / released_from_order_id keep the audit trail
         (mirrors returns._reactivate_original_unit).
 
-        `product_id` + `limit` narrow the release to ONE line's worth of units
-        (a single removed DRAFT line); omitted -> the whole order.
+        Targeting (panel must-fix 5):
+          * `stock_id`  -- release THAT EXACT unit. Required for a removed DRAFT
+            line that named its own serial: releasing an arbitrary unit of the
+            same product leaves the customer holding a serial the system shows
+            AVAILABLE (double-sellable) while a frame sitting on the shelf reads
+            SOLD. Never guess when the line told us the answer.
+          * `product_id` + `limit` -- the FIFO fallback for a line that never
+            named a unit.
+          * neither -- the whole order (cancel).
         """
         released: List[str] = []
         if not order_id:
-            return released
+            return StockReleaseResult(released, False)
         flt: Dict = {"order_id": order_id, "status": "SOLD"}
+        if stock_id:
+            flt["stock_id"] = stock_id
         if product_id:
             flt["product_id"] = product_id
         # Hard bound so a misbehaving collection can never spin forever; no real
-        # order has 500 serialized units.
-        max_units = 500 if limit is None else max(int(limit), 0)
+        # order has 500 serialized units. An explicit stock_id is exactly one.
+        if stock_id:
+            max_units = 1
+        elif limit is None:
+            max_units = 500
+        else:
+            max_units = max(int(limit), 0)
+        incomplete = False
         for _ in range(min(max_units, 500)):
             try:
                 doc = self.collection.find_one_and_update(
@@ -524,18 +606,34 @@ class StockRepository(BaseRepository):
                     },
                 )
             except Exception as exc:  # noqa: BLE001
+                # A write failed: units may still be SOLD against a cancelled
+                # order. Report it -- do NOT return a partial list as success.
                 logger.error(
-                    "[STOCK] release_sold_units_for_order(%s) write failed: %s",
+                    "[STOCK] release_sold_units_for_order(%s) write failed after "
+                    "%d unit(s): %s -- remaining units may be STRANDED SOLD",
                     order_id,
+                    len(released),
                     exc,
                 )
+                incomplete = True
                 break
             if not doc:
                 break
             sid = doc.get("stock_id") or doc.get("_id")
             if sid:
                 released.append(str(sid))
-        return released
+        return StockReleaseResult(released, incomplete)
+
+    def count_sold_units_for_order(self, order_id: str) -> int:
+        """How many units are STILL SOLD against this order. Lets the cancel
+        path tell "nothing to release" apart from "release did not finish", and
+        makes a re-run after a partial failure verifiable."""
+        if not order_id:
+            return 0
+        try:
+            return self.count({"order_id": order_id, "status": "SOLD"})
+        except Exception:  # noqa: BLE001
+            return 0
 
     def claim_one_available(
         self,

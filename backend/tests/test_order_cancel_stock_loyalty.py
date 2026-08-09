@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 
@@ -66,6 +67,10 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
         return isinstance(val, str) if arg == "string" else False
+    if op == "$regex":
+        # Mongo $regex only ever matches STRING values -- that type-bracketing is
+        # exactly what makes the ISO-shape branch of the expiry floor work.
+        return isinstance(val, str) and re.search(arg, val) is not None
     raise AssertionError("fake collection: unsupported operator " + op)
 
 
@@ -134,7 +139,20 @@ class _FakeOrderRepo:
         return True
 
 
+class _DuplicateKeyError(Exception):
+    """Stands in for pymongo.errors.DuplicateKeyError (matched by class name)."""
+
+
+DuplicateKeyError = _DuplicateKeyError
+_DuplicateKeyError.__name__ = "DuplicateKeyError"
+
+
 class _FakeTxns:
+    """Models the partial UNIQUE index on (customer_id, cancel_of_order_id) and
+    (customer_id, return_id) for type=ADJUST -- the DB-level guard the reversal
+    claim now relies on. Without modelling it here the concurrency test would
+    prove nothing."""
+
     def __init__(self, rows=None):
         self.rows = [dict(r) for r in (rows or [])]
         self.created = []
@@ -142,20 +160,44 @@ class _FakeTxns:
     def find_for_customer(self, cid, limit=20):
         return [dict(r) for r in self.rows if r.get("customer_id") == cid][:limit]
 
-    def create(self, doc):
+    def _violates_unique(self, doc):
+        if doc.get("type") != "ADJUST":
+            return False
+        for field in ("cancel_of_order_id", "return_id"):
+            val = doc.get(field)
+            if not isinstance(val, str):
+                continue
+            for r in self.rows:
+                if (
+                    r.get("type") == "ADJUST"
+                    and r.get("customer_id") == doc.get("customer_id")
+                    and r.get(field) == val
+                ):
+                    return True
+        return False
+
+    def create(self, doc, raise_on_duplicate=False):
+        if self._violates_unique(doc):
+            if raise_on_duplicate:
+                raise _DuplicateKeyError("duplicate reversal marker")
+            return None
         self.created.append(dict(doc))
         self.rows.append(dict(doc))
         return dict(doc)
 
 
 class _FakeAccounts:
-    def __init__(self, balance=0, le=0, lr=0):
+    def __init__(self, balance=0, le=0, lr=0, tier="BRONZE"):
         self.acct = {
             "balance_points": balance,
             "lifetime_earned": le,
             "lifetime_redeemed": lr,
+            "tier": tier,
         }
         self.adjustments = []
+        # Every non-None new_tier the reversal asked for, in order. Proves the
+        # tier moves in the SAME adjust_balance call as the lifetime decrement.
+        self.tiers_set = []
 
     def find_or_create(self, cid):
         return dict(self.acct)
@@ -178,6 +220,9 @@ class _FakeAccounts:
         self.acct["balance_points"] += delta_points
         self.acct["lifetime_earned"] += delta_lifetime_earned
         self.acct["lifetime_redeemed"] += delta_lifetime_redeemed
+        if new_tier is not None:
+            self.tiers_set.append(new_tier)
+            self.acct["tier"] = new_tier
 
 
 _ADMIN = {
@@ -323,7 +368,8 @@ def test_cancel_restock_is_idempotent(wired):
     assert exc.value.status_code == 400
 
     # ...and even the raw stock undo cannot double-reactivate.
-    assert wired["stock"].release_sold_units_for_order("ORD-1") == []
+    again = wired["stock"].release_sold_units_for_order("ORD-1")
+    assert again.released == [] and again.incomplete is False
     assert wired["units"] == snapshot
 
 
@@ -524,3 +570,176 @@ def test_reverse_for_cancel_marker_is_tagged_with_the_order(wired):
     assert marker["order_id"] == "ORD-1"
     assert marker["source"] == "ORDER_CANCEL"
     assert marker["points"] == -50
+
+
+# =========================================================================== #
+# PANEL MUST-FIX 2 -- the reversal claim must be ATOMIC, not check-then-write.
+# The ledger snapshot is advisory; the partial UNIQUE index on
+# (customer_id, cancel_of_order_id) for type=ADJUST is the real guard.
+# =========================================================================== #
+
+
+def test_two_concurrent_cancels_claw_exactly_once(wired):
+    """DOUBLE-CLAW would BURN the customer's points. Both callers see the same
+    pre-reversal ledger (the check-then-write window); only one may insert."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    first = L.reverse_for_cancel("ORD-1", "C1")
+    second = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert first["ok"] and first.get("earned_clawed") == 100
+    assert second["ok"] and second.get("already_reversed") is True
+    assert len(wired["accounts"].adjustments) == 1     # ONE balance move
+    assert wired["accounts"].acct["balance_points"] == 0
+    assert len(wired["txns"].created) == 1             # ONE marker row
+
+
+def test_racing_cancel_that_loses_the_unique_index_does_not_move_money(wired):
+    """The loser's ledger snapshot is STALE (taken before the winner inserted),
+    so the Python guard passes and only the DuplicateKeyError stops it. This is
+    the exact interleaving that used to double-restore/double-claw."""
+    wired["txns"].rows.append(_redeem("C1", "ORD-1", 60))
+    wired["accounts"].acct.update({"balance_points": 0, "lifetime_redeemed": 60})
+
+    real_find = wired["txns"].find_for_customer
+    stale = [dict(r) for r in wired["txns"].rows]
+
+    def _stale_ledger(cid, limit=20):
+        return [dict(r) for r in stale]
+
+    winner = L.reverse_for_cancel("ORD-1", "C1")
+    assert winner["ok"] and winner["redeemed_restored"] == 60
+    assert wired["accounts"].acct["balance_points"] == 60
+
+    # The racer now runs with the pre-winner ledger view.
+    wired["txns"].find_for_customer = _stale_ledger
+    try:
+        loser = L.reverse_for_cancel("ORD-1", "C1")
+    finally:
+        wired["txns"].find_for_customer = real_find
+
+    assert loser["ok"] and loser.get("already_reversed") is True
+    assert loser.get("raced") is True
+    # NO second restore: the balance did not double to 120 (minted rupees).
+    assert wired["accounts"].acct["balance_points"] == 60
+    assert len(wired["accounts"].adjustments) == 1
+
+
+def test_marker_write_that_returns_none_does_not_move_the_balance(wired):
+    """If the claim insert comes back empty we do NOT hold the claim, so we must
+    not touch money -- failing toward NOT clawing."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+    wired["txns"].create = lambda doc, raise_on_duplicate=False: None
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is False and res["reason"] == "marker_write_failed"
+    assert wired["accounts"].adjustments == []
+
+
+# =========================================================================== #
+# PANEL MUST-FIX 9 -- lifetime_earned drops, so the TIER must be recomputed.
+# =========================================================================== #
+
+
+def test_cancel_downgrades_an_unearned_tier(wired):
+    """Buy big -> GOLD -> cancel. Leaving the tier up gives a permanent 1.25x /
+    1.5x earn multiplier on every FUTURE genuine purchase."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 6000))
+    wired["accounts"].acct.update(
+        {"balance_points": 6000, "lifetime_earned": 6000, "tier": "GOLD"}
+    )
+
+    _cancel()
+
+    assert wired["accounts"].acct["lifetime_earned"] == 0
+    # adjust_balance was told to move the tier back down in the SAME call.
+    assert wired["accounts"].tiers_set == ["BRONZE"]
+    assert wired["accounts"].acct["tier"] == "BRONZE"
+
+
+def test_cancel_leaves_a_still_earned_tier_alone(wired):
+    """Only the points from THIS order come off; a tier the customer still
+    qualifies for on their remaining lifetime must not be touched."""
+    wired["txns"].rows.extend(
+        [_earn("C1", "ORD-1", 50), _earn("C1", "ORD-OLD", 6000)]
+    )
+    wired["accounts"].acct.update(
+        {"balance_points": 6050, "lifetime_earned": 6050, "tier": "GOLD"}
+    )
+
+    _cancel()
+
+    assert wired["accounts"].acct["lifetime_earned"] == 6000
+    assert wired["accounts"].tiers_set == []        # no tier change requested
+    assert wired["accounts"].acct["tier"] == "GOLD"
+
+
+# =========================================================================== #
+# PANEL MUST-FIX 3 + 4 -- single-shot cancel, and a re-runnable undo.
+# =========================================================================== #
+
+
+def test_concurrent_cancels_run_the_undo_exactly_once(wired):
+    """Two cancels in flight: the guarded claim means only ONE flips the order,
+    so the stock reactivation and the loyalty clawback happen once."""
+    wired["units"].extend([_unit("U1"), _unit("U2")])
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    first = _cancel()
+    with pytest.raises(HTTPException) as exc:
+        _cancel()
+
+    assert first["stock_units_released"] == 2
+    assert exc.value.status_code == 400
+    assert len(wired["accounts"].adjustments) == 1
+    assert sum(1 for u in wired["units"] if u["status"] == "AVAILABLE") == 2
+
+
+def test_partial_restock_is_reported_and_the_cancel_can_be_rerun(wired):
+    """A mid-loop write failure used to answer 200 'Order cancelled' with units
+    still SOLD, and the already-cancelled 400 then refused every retry --
+    permanent silent stock loss. Now it is flagged AND re-runnable."""
+    coll = wired["stock"].collection
+    calls = {"n": 0}
+    real = coll.find_one_and_update
+
+    def _flaky(flt, upd, sort=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("mongo write blip")
+        return real(flt, upd, sort=sort, **kw)
+
+    coll.find_one_and_update = _flaky
+    wired["units"].extend([_unit("U1"), _unit("U2")])
+
+    first = _cancel()
+
+    assert first["status"] == "CANCELLED"
+    assert first["stock_release_failed"] is True      # NOT reported as clean
+    assert first["stock_units_still_sold"] == 1
+    doc = wired["orders"].orders["ORD-1"]
+    assert doc["cancel_stock_release_failed"] is True
+
+    # The blip clears; re-POSTing the cancel finishes the job instead of 400ing.
+    coll.find_one_and_update = real
+    retry = _cancel()
+
+    assert retry["message"] == "Cancel undo re-run"
+    assert retry["stock_release_failed"] is False
+    assert retry["stock_units_still_sold"] == 0
+    assert all(u["status"] == "AVAILABLE" for u in wired["units"])
+
+
+def test_a_clean_cancel_still_refuses_a_second_cancel(wired):
+    """The re-run door opens ONLY for an unfinished undo -- a completed cancel
+    must still 400, or the endpoint becomes replayable."""
+    wired["units"].append(_unit("U1"))
+    _cancel()
+    with pytest.raises(HTTPException) as exc:
+        _cancel()
+    assert exc.value.status_code == 400
+    assert "already cancelled" in str(exc.value.detail).lower()

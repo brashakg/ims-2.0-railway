@@ -18,6 +18,7 @@ F2 (2026-08 audit) updated this harness twice over:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 
@@ -56,6 +57,10 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
         return isinstance(val, str) if arg == "string" else False
+    if op == "$regex":
+        # Mongo $regex only ever matches STRING values -- that type-bracketing is
+        # exactly what makes the ISO-shape branch of the expiry floor work.
+        return isinstance(val, str) and re.search(arg, val) is not None
     raise AssertionError("fake collection: unsupported operator " + op)
 
 
@@ -288,3 +293,51 @@ def test_fefo_works_over_real_mock_collection_no_mongo():
     assert repo.claim_one_available("P", "S", "O2") == "D-LATE"
     assert repo.claim_one_available("P", "S", "O3") == "N1"
     assert repo.claim_one_available("P", "S", "O4") is None
+
+
+def test_expiry_floor_is_real_over_the_mock_collection_not_a_no_op():
+    """MockCollection._matches_filter used to treat UNKNOWN operators as
+    MATCHING, so every branch of the expiry $or matched and the floor was a
+    complete NO-OP in no-Mongo mode -- a test asserting it over a MockCollection
+    would have passed with the floor DELETED. $not / $type / $regex are modelled
+    now, so this asserts real behaviour: an expired unit is neither claimable
+    nor counted, while an undated one beside it is untouched."""
+    from database.connection import MockCollection
+    from database.repositories.product_repository import StockRepository
+
+    coll = MockCollection("stock")
+    coll.insert_one(
+        {"_id": "EXPIRED", "stock_id": "EXPIRED", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE", "expiry_date": _iso(-5)}
+    )
+    coll.insert_one(
+        {"_id": "FRAME", "stock_id": "FRAME", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE"}
+    )
+    repo = StockRepository(coll)
+
+    # The floor BITES: 1 sellable (the undated frame), 1 held back.
+    assert repo.find_available("P", "S") == 1
+    assert repo.count_expired("P", "S") == 1
+    # The claim skips the expired unit entirely and takes the undated one.
+    assert repo.claim_one_available("P", "S", "O1") == "FRAME"
+    assert coll.find_one({"stock_id": "EXPIRED"})["status"] == "AVAILABLE"
+    assert repo.claim_one_available("P", "S", "O2") is None
+    # And the guarded scan-sell refuses it too.
+    assert repo.mark_sold("EXPIRED", "O3") is False
+
+
+def test_mock_collection_models_not_and_type_operators():
+    """Direct guard on the mock itself: if these regress to 'unknown operator ->
+    matches', every expiry assertion above silently stops proving anything."""
+    from database.connection import MockCollection
+
+    coll = MockCollection("probe")
+    assert coll._matches_filter({"v": "2026-01-01"}, {"v": {"$type": "string"}}) is True
+    assert coll._matches_filter({"v": 5}, {"v": {"$type": "string"}}) is False
+    assert coll._matches_filter({"v": 5}, {"v": {"$not": {"$type": "string"}}}) is True
+    assert (
+        coll._matches_filter({"v": "2026-01-01"}, {"v": {"$not": {"$type": "string"}}})
+        is False
+    )
+    assert coll._matches_filter({}, {"v": {"$not": {"$regex": "^[0-9]{4}-"}}}) is True

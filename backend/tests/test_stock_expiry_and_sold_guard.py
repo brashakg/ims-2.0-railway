@@ -30,6 +30,7 @@ why the expiry filters are string-vs-string.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 
@@ -69,6 +70,10 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val < arg
     if op == "$type":
         return isinstance(val, str) if arg == "string" else False
+    if op == "$regex":
+        # Mongo $regex only ever matches STRING values -- that type-bracketing is
+        # exactly what makes the ISO-shape branch of the expiry floor work.
+        return isinstance(val, str) and re.search(arg, val) is not None
     raise AssertionError("fake collection: unsupported operator " + op)
 
 
@@ -352,8 +357,9 @@ def test_release_reactivates_only_this_orders_sold_units():
         _unit("U4", status="DAMAGED", order_id="ORD-1"),
     ]
     repo = _repo(docs)
-    freed = repo.release_sold_units_for_order("ORD-1")
+    freed, incomplete = repo.release_sold_units_for_order("ORD-1")
     assert sorted(freed) == ["U1", "U2"]
+    assert incomplete is False
     by_id = {d["stock_id"]: d for d in docs}
     for sid in ("U1", "U2"):
         assert by_id[sid]["status"] == "AVAILABLE"
@@ -372,10 +378,11 @@ def test_release_is_idempotent_double_cancel_cannot_double_reactivate():
         _unit("U2", status="SOLD", order_id="ORD-1"),
     ]
     repo = _repo(docs)
-    assert sorted(repo.release_sold_units_for_order("ORD-1")) == ["U1", "U2"]
+    assert sorted(repo.release_sold_units_for_order("ORD-1").released) == ["U1", "U2"]
     snapshot = [dict(d) for d in docs]
     # Second (retried) cancel: nothing left to claim, nothing changes.
-    assert repo.release_sold_units_for_order("ORD-1") == []
+    again = repo.release_sold_units_for_order("ORD-1")
+    assert again.released == [] and again.incomplete is False
     assert docs == snapshot
 
 
@@ -386,8 +393,10 @@ def test_release_can_be_scoped_to_one_line_by_product_and_quantity():
         _unit("B1", product_id="PB", status="SOLD", order_id="ORD-1"),
     ]
     repo = _repo(docs)
-    freed = repo.release_sold_units_for_order("ORD-1", product_id="PA", limit=1)
-    assert len(freed) == 1 and freed[0] in {"A1", "A2"}
+    freed, incomplete = repo.release_sold_units_for_order(
+        "ORD-1", product_id="PA", limit=1
+    )
+    assert len(freed) == 1 and freed[0] in {"A1", "A2"} and incomplete is False
     by_id = {d["stock_id"]: d for d in docs}
     assert sum(1 for d in docs if d["status"] == "AVAILABLE") == 1
     assert by_id["B1"]["status"] == "SOLD"  # the other line is untouched
@@ -395,7 +404,7 @@ def test_release_can_be_scoped_to_one_line_by_product_and_quantity():
 
 def test_release_returns_empty_for_a_blank_order_id():
     repo = _repo([_unit("U1", status="SOLD", order_id="ORD-1")])
-    assert repo.release_sold_units_for_order("") == []
+    assert repo.release_sold_units_for_order("") == ([], False)
 
 
 def test_released_unit_is_immediately_sellable_again():
@@ -405,3 +414,161 @@ def test_released_unit_is_immediately_sellable_again():
     assert repo.find_available("P1", "S1") == 1
     assert repo.claim_one_available("P1", "S1", "ORD-9") == "U1"
     assert docs[0]["order_id"] == "ORD-9"
+
+
+# ===========================================================================
+# PANEL MUST-FIX 8 -- the floor may ONLY act on a canonical ISO date.
+# A raw string $gte is lexicographic, not chronological, so it was wrong in
+# BOTH directions on the shapes the GRN door actually accepts.
+# ===========================================================================
+
+
+def test_valid_future_non_iso_date_is_not_hidden():
+    """'15-08-2027' is a VALID FUTURE date that sorts BELOW today's ISO string.
+    The old raw $gte removed it from sale and told the counter it was 'PAST
+    THEIR EXPIRY DATE' -- real in-date stock going dark."""
+    docs = [_unit("U-DDMMYYYY", expiry_date="15-08-2027")]
+    repo = _repo(docs)
+    assert repo.find_available("P1", "S1") == 1
+    assert repo.count_expired("P1", "S1") == 0
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-DDMMYYYY"
+
+
+def test_expired_non_iso_date_is_also_not_hidden_but_is_flagged_upstream():
+    """'31/12/2025' IS genuinely expired, but we cannot prove that with a string
+    compare (it sorts ABOVE today and the old code sold it anyway). We keep
+    selling it rather than guess -- the fail-soft direction must be consistent --
+    and the durable fix is normalising at the GRN door. This test pins the
+    CHOICE so it cannot change silently."""
+    docs = [_unit("U-SLASH", expiry_date="31/12/2025")]
+    repo = _repo(docs)
+    assert repo.find_available("P1", "S1") == 1
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-SLASH"
+    assert repo.is_iso_expiry("31/12/2025") is False
+    assert repo.is_iso_expiry("2025-12-31") is True
+
+
+def test_only_canonical_iso_dates_can_ever_be_held_back():
+    repo = _repo(
+        [
+            _unit("ISO-PAST", expiry_date=_iso(-2)),      # blocked
+            _unit("ISO-FUTURE", expiry_date=_iso(2)),     # sellable
+            _unit("JUNK", expiry_date="not-a-date"),      # sellable (unreadable)
+            _unit("DDMM", expiry_date="15-08-2027"),      # sellable (unreadable)
+            _unit("NONE"),                                # sellable (undated)
+        ]
+    )
+    assert repo.find_available("P1", "S1") == 4
+    assert repo.count_expired("P1", "S1") == 1
+
+
+# ===========================================================================
+# PANEL MUST-FIX 4 -- a partial release must NOT look like a clean success.
+# ===========================================================================
+
+
+class _FlakyColl(_FakeColl):
+    """Fails the Nth find_one_and_update, mid-loop."""
+
+    def __init__(self, docs, fail_on):
+        super().__init__(docs)
+        self.calls = 0
+        self.fail_on = fail_on
+
+    def find_one_and_update(self, flt, upd, sort=None, **kw):
+        self.calls += 1
+        if self.calls == self.fail_on:
+            raise RuntimeError("mongo write blip")
+        return super().find_one_and_update(flt, upd, sort=sort, **kw)
+
+
+def test_partial_release_reports_incomplete():
+    docs = [
+        _unit("U1", status="SOLD", order_id="ORD-1"),
+        _unit("U2", status="SOLD", order_id="ORD-1"),
+        _unit("U3", status="SOLD", order_id="ORD-1"),
+    ]
+    repo = StockRepository(_FlakyColl(docs, fail_on=2))
+
+    released, incomplete = repo.release_sold_units_for_order("ORD-1")
+
+    assert len(released) == 1        # only the first unit came back
+    assert incomplete is True        # ...and we SAY SO
+    # Two units are genuinely stranded, and the count proves it.
+    assert repo.count_sold_units_for_order("ORD-1") == 2
+
+
+def test_rerun_after_a_partial_release_finishes_the_job():
+    """The release is idempotent by construction, so a retry is safe AND
+    completes -- which is what makes the cancel re-run path legitimate."""
+    docs = [
+        _unit("U1", status="SOLD", order_id="ORD-1"),
+        _unit("U2", status="SOLD", order_id="ORD-1"),
+    ]
+    coll = _FlakyColl(docs, fail_on=2)
+    repo = StockRepository(coll)
+    first = repo.release_sold_units_for_order("ORD-1")
+    assert first.incomplete is True and len(first.released) == 1
+
+    coll.fail_on = -1  # the blip clears
+    second = repo.release_sold_units_for_order("ORD-1")
+
+    assert second.incomplete is False and len(second.released) == 1
+    assert repo.count_sold_units_for_order("ORD-1") == 0
+    assert all(d["status"] == "AVAILABLE" for d in docs)
+
+
+def test_count_sold_units_for_order_is_scoped_to_the_order():
+    repo = _repo(
+        [
+            _unit("U1", status="SOLD", order_id="ORD-1"),
+            _unit("U2", status="SOLD", order_id="ORD-2"),
+            _unit("U3", status="AVAILABLE"),
+        ]
+    )
+    assert repo.count_sold_units_for_order("ORD-1") == 1
+    assert repo.count_sold_units_for_order("ORD-2") == 1
+    assert repo.count_sold_units_for_order("") == 0
+
+
+# ===========================================================================
+# PANEL MUST-FIX 5 -- release the line's OWN serial, not an arbitrary one.
+# ===========================================================================
+
+
+def test_release_targets_the_exact_named_unit():
+    docs = [
+        _unit("U-SCANNED", status="SOLD", order_id="ORD-1"),
+        _unit("U-OTHER", status="SOLD", order_id="ORD-1"),
+    ]
+    repo = _repo(docs)
+
+    freed, incomplete = repo.release_sold_units_for_order(
+        "ORD-1", stock_id="U-OTHER"
+    )
+
+    assert freed == ["U-OTHER"] and incomplete is False
+    by_id = {d["stock_id"]: d for d in docs}
+    assert by_id["U-OTHER"]["status"] == "AVAILABLE"
+    assert by_id["U-SCANNED"]["status"] == "SOLD"   # NOT an arbitrary pick
+
+
+def test_release_by_stock_id_never_touches_another_orders_unit():
+    docs = [_unit("U1", status="SOLD", order_id="ORD-OTHER")]
+    repo = _repo(docs)
+    freed, _ = repo.release_sold_units_for_order("ORD-1", stock_id="U1")
+    assert freed == []
+    assert docs[0]["status"] == "SOLD" and docs[0]["order_id"] == "ORD-OTHER"
+
+
+# ===========================================================================
+# FOLD-IN -- a legacy lowercase status must not become silently unsellable.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("status", ["AVAILABLE", "available", "Available"])
+def test_mark_sold_accepts_case_variants_of_available(status):
+    docs = [_unit("U1", status=status)]
+    repo = _repo(docs)
+    assert repo.mark_sold("U1", "ORD-1") is True
+    assert docs[0]["status"] == "SOLD"

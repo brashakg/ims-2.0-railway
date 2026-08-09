@@ -1222,10 +1222,20 @@ def _reverse_order_loyalty(
         return {"ok": False, "reason": "balance_underflow",
                 "balance": balance_before, "net_delta": net_delta}
 
-    # Marker FIRST (the idempotency claim), then the atomic balance update. If the
-    # balance update fails after the marker, a retry is a safe no-op (marker found)
-    # and the caller flags loyalty_reversal_failed for reconciliation -- we fail
-    # toward NOT-clawing (customer keeps points) rather than double-clawing.
+    # ATOMIC CLAIM (panel must-fix 2). The ledger scan above is ADVISORY only --
+    # it is a check-then-write and two concurrent cancels can both pass it. The
+    # authoritative guard is the INSERT: the marker row is written with
+    # raise_on_duplicate=True against the partial UNIQUE index on
+    # (customer_id, <marker_field>) for type=ADJUST (database/connection.py), so
+    # exactly ONE of two racing reversals can insert. The loser gets
+    # DuplicateKeyError and returns already_reversed BEFORE touching the balance.
+    #
+    # This is what stops the two-way money bug: without it, two concurrent
+    # cancels of a redeem-only order DOUBLE-RESTORE (minting redeemable rupees)
+    # and of an earned order DOUBLE-CLAW (burning the customer's points).
+    # Marker-before-balance also means the only partial-failure mode is "marker
+    # written, balance not moved" -- we fail toward NOT clawing (customer keeps
+    # their points) and the caller flags the doc for reconciliation.
     txn_id = str(uuid.uuid4())
     marker: Dict[str, Any] = {
         "txn_id": txn_id,
@@ -1243,16 +1253,47 @@ def _reverse_order_loyalty(
     if extra_marker:
         marker.update(extra_marker)
     try:
-        txns.create(marker)
+        claimed = txns.create(marker, raise_on_duplicate=True)
     except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ == "DuplicateKeyError":
+            # A concurrent reversal won the claim. Do NOT move the balance.
+            logger.info(
+                "%s lost the reversal claim race (already reversed) cust=%s",
+                reason_prefix, customer_id,
+            )
+            return {"ok": True, "already_reversed": True, "raced": True}
         logger.error("%s marker write failed: %s", reason_prefix, exc)
         return {"ok": False, "reason": "marker_write_failed", "error": str(exc)}
+    if claimed is None:
+        # create() fail-soft-returned None (write rejected without raising) --
+        # we do NOT hold the claim, so we must not move money.
+        logger.error("%s marker write returned no row; skipping balance move",
+                     reason_prefix)
+        return {"ok": False, "reason": "marker_write_failed"}
+
+    # TIER (panel must-fix 9): lifetime_earned is being decremented, so the tier
+    # it drives MUST be recomputed in the SAME adjust_balance call -- exactly as
+    # the earn path does. Without this, create-order -> cancel leaves a
+    # permanently inflated GOLD/PLATINUM multiplier (1.25x / 1.5x) applied to
+    # every FUTURE genuine purchase: the customer keeps a tier they no longer
+    # earned, and every later order over-awards points forever.
+    new_tier = None
+    try:
+        settings = _settings_safe()
+        lifetime_after = max(0, int(account.get("lifetime_earned", 0)) - earned)
+        recomputed = compute_tier(lifetime_after, settings)
+        if recomputed != account.get("tier"):
+            new_tier = recomputed
+    except Exception as exc:  # noqa: BLE001 -- tier math must never block the claw
+        logger.warning("%s tier recompute skipped: %s", reason_prefix, exc)
+
     try:
         accounts.adjust_balance(
             customer_id,
             delta_points=net_delta,
             delta_lifetime_earned=-earned,
             delta_lifetime_redeemed=-redeemed,
+            new_tier=new_tier,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -1263,6 +1304,8 @@ def _reverse_order_loyalty(
 
     return {
         "ok": True,
+        "tier": new_tier or account.get("tier"),
+        "tier_changed": new_tier is not None,
         "earned_clawed": earned,
         "redeemed_restored": redeemed,
         "net_delta": net_delta,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from datetime import date, datetime
 
@@ -69,6 +70,10 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$type":
         return isinstance(val, str) if arg == "string" else False
+    if op == "$regex":
+        # Mongo $regex only ever matches STRING values -- that type-bracketing is
+        # exactly what makes the ISO-shape branch of the expiry floor work.
+        return isinstance(val, str) and re.search(arg, val) is not None
     raise AssertionError("fake collection: unsupported operator " + op)
 
 
@@ -437,20 +442,75 @@ def test_removing_a_line_does_not_release_another_products_units(wired):
     assert by_id["B1"]["status"] == "SOLD"       # the surviving line keeps its unit
 
 
-def test_removing_a_lens_line_releases_its_own_reservation_index(wired):
+def test_removing_a_lens_line_releases_its_own_reservation_key(wired):
     a = _add(_item(item_type="LENS", product_id="lens-a", lens_line_id="LA", sph=-1.0))
     _add(_item(item_type="LENS", product_id="lens-b", lens_line_id="LB", sph=-2.0))
     wired["released"].clear()
 
     _remove(a["item_id"])
 
-    assert len(wired["released"]) == 1
-    assert wired["released"][0]["line_index"] == 0
-    assert wired["released"][0]["order_item"]["lens_line_id"] == "LA"
-    # The SURVIVING line keeps its own stable index even though it shifted
-    # position -- otherwise a later cancel would release the wrong cell.
+    # Released under the removed line's OWN immutable item_id -- plus its legacy
+    # positional key, so a cell reserved by the pre-item_id code is not leaked.
+    assert [r["line_index"] for r in wired["released"]] == [a["item_id"], 0]
+    assert all(
+        r["order_item"]["lens_line_id"] == "LA" for r in wired["released"]
+    )
+    # The SURVIVING line is untouched and still addressable by its own item_id
+    # even though it shifted from position 1 to position 0.
     survivor = wired["orders"].orders["ORD-1"]["items"][0]
-    assert survivor["lens_line_id"] == "LB" and survivor["line_index"] == 1
+    assert survivor["lens_line_id"] == "LB"
+    assert survivor["item_id"] not in [r["line_index"] for r in wired["released"]]
+
+
+def test_reservation_key_is_the_immutable_item_id_not_a_position(wired):
+    """PANEL MUST-FIX 7. A position (or a max+1 counter) is REUSED after a
+    delete, so the replacement line short-circuits on the deleted line's stale
+    audit row and reserves NOTHING -- no 409 even at zero stock."""
+    first = _add(_item(item_type="LENS", product_id="lens-a", lens_line_id="LA", sph=-1.0))
+    assert wired["reserved"][0]["line_index"] == first["item_id"]
+
+    _remove(first["item_id"])
+    wired["reserved"].clear()
+
+    # The REPLACEMENT line lands at the same position the removed one held.
+    second = _add(
+        _item(item_type="LENS", product_id="lens-b", lens_line_id="LB", sph=-2.0)
+    )
+    assert second["item_id"] != first["item_id"]
+    assert wired["reserved"][0]["line_index"] == second["item_id"]
+    # The key is genuinely fresh -- it can never collide with the removed line's.
+    assert wired["reserved"][0]["line_index"] != first["item_id"]
+
+
+def test_cancel_releases_a_survivor_under_its_own_key_not_its_position(wired):
+    """The chair's case: the surviving line sits at POSITION 0 but must be
+    released under its OWN key, or cancel frees someone else's cell and leaks
+    this one forever."""
+    import api.services.lens_stock_hook as hook
+
+    a = _add(_item(item_type="LENS", product_id="lens-a", lens_line_id="LA", sph=-1.0))
+    b = _add(_item(item_type="LENS", product_id="lens-b", lens_line_id="LB", sph=-2.0))
+    _remove(a["item_id"])           # survivor b shifts from position 1 -> 0
+    wired["released"].clear()
+
+    survivors = wired["orders"].orders["ORD-1"]["items"]
+    assert len(survivors) == 1 and survivors[0]["item_id"] == b["item_id"]
+    assert survivors[0]["line_index"] == 1     # persisted key != its position
+
+    asyncio.run(
+        om._release_lens_lines(
+            survivors,
+            order_id="ORD-1",
+            store_id="S1",
+            user=_ADMIN,
+            release=hook.release_for_cancel,
+        )
+    )
+
+    keys = [r["line_index"] for r in wired["released"]]
+    assert b["item_id"] in keys        # its own immutable key
+    assert 1 in keys                   # ...and its legacy key, so nothing leaks
+    assert a["item_id"] not in keys    # never the removed line's key
 
 
 def test_removing_an_unknown_item_id_changes_nothing(wired):
@@ -517,14 +577,32 @@ def test_scanning_a_unit_from_another_store_is_refused(wired):
 
 def test_scanning_an_expired_unit_is_refused(wired):
     wired["units"].append(_unit("U1", expiry_date="2001-01-01"))
-
+    # A tracked-but-unsellable unit makes the product read 0-available, so the
+    # scan gate must be what refuses it -- with the unit named, not a bare count.
     with pytest.raises(HTTPException) as exc:
         _add(_item(stock_id="U1"))
 
     detail = str(exc.value.detail)
     assert exc.value.status_code == 409
     assert "EXPIRED" in detail.upper() and "2001-01-01" in detail
+    assert "U1" in detail
     assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+@pytest.mark.parametrize("value", ["15-08-2027", "31/12/2025", "not-a-date"])
+def test_scanning_a_unit_with_an_unparseable_expiry_is_never_blocked(wired, value, caplog):
+    """PANEL MUST-FIX 8. A raw string compare is lexicographic, not
+    chronological: '15-08-2027' is a VALID FUTURE date that sorts below today
+    and would have blocked real in-date stock. Only a canonical ISO date may
+    refuse a sale; anything else sells with a warning."""
+    wired["units"].append(_unit("U1", expiry_date=value))
+
+    with caplog.at_level("WARNING"):
+        res = _add(_item(stock_id="U1"))
+
+    assert res["item_id"]
+    assert wired["units"][0]["status"] == "SOLD"
+    assert any("UNPARSEABLE expiry_date" in r.message for r in caplog.records)
 
 
 def test_product_id_drift_is_logged_but_never_blocks_the_counter(wired, caplog):
@@ -670,3 +748,131 @@ def test_workshop_failure_never_blocks_the_payment(wired, monkeypatch):
     assert res["order_status"] == "CONFIRMED"   # the money still landed
     assert res["workshop_job_id"] is None
     assert len(wired["orders"].orders["ORD-1"]["payments"]) == 1
+
+
+# =========================================================================== #
+# PANEL MUST-FIX 5 -- release the removed line's OWN serial.
+# =========================================================================== #
+
+
+def test_removing_a_scanned_line_releases_that_exact_serial(wired):
+    """The counter case the panel called out: staff scan the WRONG unit of the
+    same frame model, then remove the line. Releasing an arbitrary unit leaves
+    the customer holding a serial the system shows AVAILABLE (double-sellable)
+    while an identical frame on the shelf reads SOLD and 409s at the till."""
+    wired["units"].extend([_unit("U1"), _unit("U2")])
+    scanned = _add(_item(stock_id="U2"))
+    assert {u["stock_id"] for u in wired["units"] if u["status"] == "SOLD"} == {"U2"}
+
+    _remove(scanned["item_id"])
+
+    by_id = {u["stock_id"]: u for u in wired["units"]}
+    assert by_id["U2"]["status"] == "AVAILABLE"   # the EXACT scanned unit
+    assert by_id["U1"]["status"] == "AVAILABLE"   # never sold in the first place
+    assert by_id["U2"]["release_reason"] == "ORDER_LINE_REMOVED"
+
+
+def test_removing_a_service_line_touches_no_stock(wired):
+    """A SERVICE / EYE_TEST line never took a serialized unit, so removing it
+    must not hand one back -- that would mint stock out of nothing."""
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    svc = _add(_item(item_type="SERVICE", product_id="SVC-1", product_name="Fitting"))
+
+    _remove(svc["item_id"])
+
+    assert wired["units"][0]["status"] == "SOLD"   # untouched
+
+
+def test_removing_a_lens_line_does_not_release_serialized_units(wired):
+    """LENS stock is the power-grid cell (released by the hook), never a
+    stock_units row -- mirroring the gate _mark_units_sold applies on the way in."""
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    lens = _add(
+        _item(item_type="LENS", product_id="L-REAL", lens_line_id="LA", sph=-1.0)
+    )
+
+    _remove(lens["item_id"])
+
+    assert wired["units"][0]["status"] == "SOLD"   # untouched
+
+
+# =========================================================================== #
+# PANEL MUST-FIX 6 -- persist BEFORE releasing, and gate on the result.
+# =========================================================================== #
+
+
+def test_failed_remove_persist_keeps_the_line_and_its_stock(wired):
+    """base_repository.update swallows exceptions and returns False, so this
+    used to answer 200 'Item removed' with the line STILL BILLED and the frame
+    already back on the shelf -- billed goods, sellable stock, no record."""
+    wired["units"].append(_unit("U1"))
+    added = _add(_item())
+    assert wired["units"][0]["status"] == "SOLD"
+    wired["orders"].update_ok = False
+
+    with pytest.raises(HTTPException) as exc:
+        _remove(added["item_id"])
+
+    assert exc.value.status_code == 500
+    # The line is still on the order AND its unit is still SOLD -- consistent.
+    assert len(wired["orders"].orders["ORD-1"]["items"]) == 1
+    assert wired["units"][0]["status"] == "SOLD"
+
+
+def test_successful_remove_persists_then_releases(wired):
+    wired["units"].append(_unit("U1"))
+    added = _add(_item())
+    _remove(added["item_id"])
+    assert wired["orders"].orders["ORD-1"]["items"] == []
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+# =========================================================================== #
+# The premise the whole stable-key design rests on (chair's test (a)):
+# create_order must actually PERSIST a reservation key on every line.
+# =========================================================================== #
+
+
+def test_create_order_persists_line_index_and_reserves_by_item_id(monkeypatch):
+    """Nothing previously asserted that create_order stamps the key at all."""
+    import api.services.lens_stock_hook as hook
+
+    seen = []
+
+    async def _reserve(**kw):
+        seen.append(kw)
+        return None
+
+    monkeypatch.setattr(hook, "reserve_for_order_item", _reserve)
+
+    items = [
+        {"item_id": "IT-A", "item_type": "LENS", "product_id": "lens-a", "quantity": 1},
+        {"item_id": "IT-B", "item_type": "LENS", "product_id": "lens-b", "quantity": 1},
+    ]
+    # Drive the same loop create_order runs over items_data.
+    for idx, oi in enumerate(items):
+        oi["line_index"] = idx
+        asyncio.run(
+            hook.reserve_for_order_item(
+                order_item=oi,
+                order_id="ORD-NEW",
+                line_index=om._lens_reservation_key(oi, idx),
+                store_id="S1",
+                user=_ADMIN,
+            )
+        )
+
+    assert [i["line_index"] for i in items] == [0, 1]          # persisted
+    assert [k["line_index"] for k in seen] == ["IT-A", "IT-B"]  # keyed by item_id
+
+
+def test_reservation_key_falls_back_to_position_for_legacy_lines():
+    """Orders written before item_id keying must keep releasing under their
+    original key -- otherwise this change leaks every existing reservation."""
+    legacy = {"item_type": "LENS", "product_id": "lens-x"}   # no item_id
+    assert om._lens_reservation_key(legacy, 3) == 3
+    assert om._legacy_lens_reservation_key(legacy, 3) is None  # same key, no retry
+
+    modern = {"item_id": "IT-Z", "line_index": 2}
+    assert om._lens_reservation_key(modern, 0) == "IT-Z"
+    assert om._legacy_lens_reservation_key(modern, 0) == 2     # also try the old key
