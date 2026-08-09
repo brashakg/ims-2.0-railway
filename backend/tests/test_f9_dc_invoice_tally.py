@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -378,7 +379,9 @@ def _pi_client_full(db, grn_repo, audit=None, roles=("ACCOUNTANT",)):
     return c
 
 
-def _workshop_client(db, wrepo, audit=None, order_exists=True, roles=("STORE_MANAGER",)):
+def _workshop_client(
+    db, wrepo, audit=None, order_exists=True, roles=("STORE_MANAGER",), monkeypatch=None
+):
     app = FastAPI()
     app.include_router(workshop_router.router, prefix="/api/v1/workshop")
 
@@ -391,13 +394,35 @@ def _workshop_client(db, wrepo, audit=None, order_exists=True, roles=("STORE_MAN
 
     class _OrderRepo:
         def find_by_id(self, _id):
-            return {"order_id": _id} if order_exists else None
+            return {"order_id": _id, "customer_id": "C1"} if order_exists else None
 
         def update(self, *a, **k):
             return True
 
     workshop_router.get_order_repository = lambda: _OrderRepo()
     workshop_router.get_audit_repository = lambda: audit
+
+    # POST /workshop/jobs verifies its prescription_id (exists + belongs to the
+    # order's customer + not expired). These are DC-HARDLOCK tests, so resolve
+    # the body's RX1 to a valid in-date Rx for the order's customer -- otherwise
+    # every create here would 422 on the Rx gate before reaching the hardlock.
+    # Scoped through monkeypatch so it cannot leak into other test modules.
+    if monkeypatch is not None:
+        from api import dependencies as _deps
+
+        class _RxRepo:
+            def find_by_id(self, rx_id):
+                if rx_id != "RX1":
+                    return None
+                return {
+                    "prescription_id": "RX1",
+                    "customer_id": "C1",
+                    "prescription_date": datetime.now().isoformat(),
+                    "validity_months": 12,
+                }
+
+        monkeypatch.setattr(_deps, "get_prescription_repository", lambda: _RxRepo())
+
     return TestClient(app)
 
 
@@ -594,10 +619,10 @@ def _job_body(lens_status, product_id="L1", **over):
 
 
 class TestWorkshopHardlock:
-    def test_external_lens_no_dc_is_blocked_inhouse_passes(self):
+    def test_external_lens_no_dc_is_blocked_inhouse_passes(self, monkeypatch):
         db = _FakeDB()
         wrepo = _WorkshopRepo()
-        c = _workshop_client(db, wrepo)
+        c = _workshop_client(db, wrepo, monkeypatch=monkeypatch)
 
         # ORDERED lens, no DC -> 422 DC_HARDLOCK.
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
@@ -608,7 +633,7 @@ class TestWorkshopHardlock:
         r2 = c.post("/api/v1/workshop/jobs", json=_job_body("RECEIVED"))
         assert r2.status_code == 201, r2.text
 
-    def test_external_lens_with_dc_passes(self):
+    def test_external_lens_with_dc_passes(self, monkeypatch):
         db = _FakeDB()
         # Seed an accepted DC covering L1 at store S1.
         db.collections["grns"].append(
@@ -620,25 +645,27 @@ class TestWorkshopHardlock:
                 "items": [_grn_item("L1", 3)],
             }
         )
-        c = _workshop_client(db, _WorkshopRepo())
+        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
 
-    def test_hardlock_respects_cutover_date(self):
+    def test_hardlock_respects_cutover_date(self, monkeypatch):
         db = _FakeDB()
         # Cutover in the future -> a job created today is BEFORE it -> exempt.
         db.collections["purchase_settings"].append(
             {"_id": "default", "dc_hardlock_from_date": "2099-01-01"}
         )
-        c = _workshop_client(db, _WorkshopRepo())
+        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text
 
-    def test_admin_override_with_reason_audited_storemanager_forbidden(self):
+    def test_admin_override_with_reason_audited_storemanager_forbidden(self, monkeypatch):
         db = _FakeDB()
         audit = _AuditRepo()
         # STORE_MANAGER supplying an override reason -> 403 (not authorised).
-        c_sm = _workshop_client(db, _WorkshopRepo(), audit=audit, roles=("STORE_MANAGER",))
+        c_sm = _workshop_client(
+            db, _WorkshopRepo(), audit=audit, roles=("STORE_MANAGER",), monkeypatch=monkeypatch
+        )
         r_sm = c_sm.post(
             "/api/v1/workshop/jobs",
             json=_job_body("ORDERED", override_reason="DC in transit"),
@@ -646,7 +673,9 @@ class TestWorkshopHardlock:
         assert r_sm.status_code == 403
 
         # ADMIN overriding with a reason -> 201 + audit row.
-        c_adm = _workshop_client(db, _WorkshopRepo(), audit=audit, roles=("ADMIN",))
+        c_adm = _workshop_client(
+            db, _WorkshopRepo(), audit=audit, roles=("ADMIN",), monkeypatch=monkeypatch
+        )
         r_adm = c_adm.post(
             "/api/v1/workshop/jobs",
             json=_job_body("ORDERED", override_reason="Emergency - DC in transit"),
@@ -655,12 +684,12 @@ class TestWorkshopHardlock:
         assert r_adm.json()["dc_hardlock_override"] is True
         assert any(r["action"] == "dc_hardlock_override" for r in audit.rows)
 
-    def test_require_flag_false_bypasses_hardlock(self):
+    def test_require_flag_false_bypasses_hardlock(self, monkeypatch):
         db = _FakeDB()
         db.collections["purchase_settings"].append(
             {"_id": "default", "require_dc_for_workshop": False}
         )
-        c = _workshop_client(db, _WorkshopRepo())
+        c = _workshop_client(db, _WorkshopRepo(), monkeypatch=monkeypatch)
         # Flag off -> ORDERED lens with no DC succeeds.
         r = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r.status_code == 201, r.text

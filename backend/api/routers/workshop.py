@@ -288,9 +288,35 @@ SCAN_GATE_MESSAGES = {
         "record the DC before starting work."
     ),
     "QC_REQUIRED": (
-        "QC not passed for this job - complete QC before marking it Ready."
+        "QC not passed for this job - complete QC (or record an audited waiver) "
+        "before marking it Ready or handing it to the patient."
     ),
 }
+
+# PATIENT-FACING statuses. READY parks the job on the pickup shelf; DELIVERED is
+# the physical handover to the patient. BOTH require a QC pass or an explicit,
+# audited QC waiver.
+#
+# Gating READY alone was NOT enough (the bug this set closes): the PICKUP lab
+# station advances a job straight to DELIVERED (see the default station sequence
+# in services/lab_routing.py), and a blocked gate on the scan path is a HOLD, not
+# a rejection -- the station still advances, only the status is withheld. So a
+# job whose DISPATCH -> READY leg was held HERE for missing QC would keep moving
+# down the bench and the very next scan (PICKUP -> DELIVERED) handed it to the
+# patient with zero QC record. The handover itself must be gated too.
+_QC_REQUIRED_TARGETS = frozenset({"READY", "DELIVERED"})
+
+
+def _qc_cleared(job: dict) -> bool:
+    """True when a job carries a QC pass or an explicit, audited QC waiver.
+
+    SINGLE source of truth for the patient-facing QC rule -- used by the shared
+    scan gate below AND by the manager-facing status PATCH, so the bench and the
+    manager screen can never disagree about what "QC done" means. `qc_waived` is
+    only ever set by the QC endpoints, which demand a waive_reason and write an
+    audit row, so a waiver reaching this check is always an audited one.
+    """
+    return job.get("qc_passed") is True or job.get("qc_waived") is True
 
 
 def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional[str]:
@@ -307,6 +333,8 @@ def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional
                        external-lab ORDERED lens) an accepted Delivery Challan
                        must cover the lens SKU (F9 hardlock).
       -> READY       : lens QC must have passed or been explicitly waived.
+      -> DELIVERED   : same QC rule -- the PICKUP station advances straight to
+                       DELIVERED, so the handover to the patient is gated too.
     """
     target = (target_status or "").strip().upper()
 
@@ -331,11 +359,11 @@ def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional
         except HTTPException:
             return "DC_REQUIRED"
 
-    # BUG-116a (patient-safety): a lens job must NOT reach READY-for-pickup
-    # without a QC pass or an explicit waiver.
-    if target == "READY" and not (
-        job.get("qc_passed") is True or job.get("qc_waived") is True
-    ):
+    # BUG-116a (patient-safety): a lens job must NOT reach the patient -- neither
+    # the READY pickup shelf nor the DELIVERED handover -- without a QC pass or an
+    # explicit, audited waiver. See _QC_REQUIRED_TARGETS for why DELIVERED (the
+    # PICKUP station's target) has to be in this set.
+    if target in _QC_REQUIRED_TARGETS and not _qc_cleared(job):
         return "QC_REQUIRED"
 
     return None
@@ -587,6 +615,98 @@ def _assert_job_store_access(job: dict, current_user: dict) -> None:
     job's existence isn't confirmed to a cross-store caller."""
     if not can_access_store_scoped(job.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
+
+
+def _verify_job_prescription(prescription_id, order, current_user) -> None:
+    """Verify the prescription a workshop job is about to be created against.
+
+    A workshop job's prescription_id is what the bench GRINDS. Storing it
+    unverified meant a typo'd / stale / WRONG-PATIENT Rx id could be attached to
+    a job and drive a real lens; nothing downstream re-checked it.
+
+    This deliberately REUSES the canonical POS gate's rules
+    (orders._validate_order_line_rx, BUG-006) rather than inventing a second
+    policy -- same checks, same 422 shape, same expiry-override role list:
+
+      * blank prescription_id -> nothing to verify (behaviour unchanged)
+      * unknown prescription_id            -> 422 (HARD)
+      * Rx belongs to a DIFFERENT customer -> 422 (HARD -- wrong patient)
+      * EXPIRED Rx -> 422 unless the caller is Store-Manager+ (the SAME
+        _RX_EXPIRY_OVERRIDE_ROLES the order path uses); a deliberate, senior
+        clinical decision, never a silent pass.
+
+    Fail-SOFT only where the order path already fails soft: no prescription repo
+    or a repo/lookup error passes through (a clinical-store outage must not 500
+    or stall the bench). A wrong-patient Rx is NEVER fail-soft -- once the Rx doc
+    is in hand, a mismatch is a hard error.
+
+    `order` is the resolved order doc (or None when the order repo is
+    unavailable); it is the only source of the job's customer, since the job doc
+    itself carries no customer_id at create time. With no order doc the customer
+    match is skipped -- there is nothing to compare against -- but existence and
+    expiry are still enforced.
+    """
+    rx_id = (prescription_id or "").strip()
+    if not rx_id:
+        return
+
+    try:
+        from ..dependencies import get_prescription_repository
+
+        rx_repo = get_prescription_repository()
+    except Exception:  # noqa: BLE001 -- mirrors orders.py fail-soft
+        rx_repo = None
+    if rx_repo is None:
+        return
+
+    try:
+        rx = rx_repo.find_by_id(rx_id)
+    except Exception:  # noqa: BLE001 -- clinical store unreachable -> fail-soft
+        return
+
+    if rx is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Prescription '{rx_id}' was not found. Select the customer's "
+                f"prescription before opening the workshop job."
+            ),
+        )
+
+    # WRONG-PATIENT guard (hard). The Rx must belong to the order's customer.
+    customer_id = ""
+    if isinstance(order, dict):
+        customer_id = order.get("customer_id") or order.get("customerId") or ""
+    rx_customer = rx.get("customer_id") or rx.get("customerId")
+    if customer_id and rx_customer and str(rx_customer) != str(customer_id):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Prescription '{rx_id}' belongs to a different customer than "
+                f"this order. Select a prescription for the order's customer."
+            ),
+        )
+
+    # Expiry: SAME policy + SAME role list as the POS order path.
+    try:
+        from .prescriptions import _rx_validity
+
+        _expiry, is_valid = _rx_validity(rx)
+    except Exception:  # noqa: BLE001 -- can't compute -> don't block (fail-soft)
+        is_valid = None
+    if is_valid is False:
+        from .orders import _RX_EXPIRY_OVERRIDE_ROLES
+
+        roles = current_user.get("roles") or []
+        if not any(r in roles for r in _RX_EXPIRY_OVERRIDE_ROLES):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Prescription '{rx_id}' has EXPIRED. A Store Manager or "
+                    f"higher must approve opening a workshop job on an expired "
+                    f"prescription."
+                ),
+            )
 
 
 def job_to_frontend(job: dict) -> dict:
@@ -1021,10 +1141,17 @@ async def create_job(
 
     if repo is not None:
         # Verify order exists
+        order = None
         if order_repo is not None:
             order = order_repo.find_by_id(job.order_id)
             if order is None:
                 raise HTTPException(status_code=404, detail="Order not found")
+
+        # PATIENT SAFETY: the prescription_id stored on the job is what the bench
+        # grinds -- verify it EXISTS, belongs to THIS order's customer, and is not
+        # expired (Store-Manager+ override) before the job is opened. Reuses the
+        # canonical POS Rx gate's rules; see _verify_job_prescription.
+        _verify_job_prescription(job.prescription_id, order, current_user)
 
         store_id = current_user.get("active_store_id")
         created_at = datetime.now().isoformat()
@@ -1326,27 +1453,34 @@ async def update_job_status(
                 except Exception:  # noqa: BLE001
                     pass
 
-        # BUG-116a (patient-safety): a lens job must NOT reach READY-for-pickup
-        # without a QC record. The dedicated QC endpoints (/jobs/{id}/qc) set
-        # qc_passed before flipping the job to READY; this GENERIC transition
-        # previously bypassed that (the gate here was a no-op `pass`), so a job
-        # could be PATCHed COMPLETED -> READY with zero QC and reach the patient.
-        # Require an explicit QC pass or waiver on ANY -> READY transition.
+        # BUG-116a (patient-safety): a lens job must NOT reach the PATIENT without
+        # a QC record. The dedicated QC endpoints (/jobs/{id}/qc, /qc-checklist)
+        # set qc_passed/qc_waived before flipping the job to READY; this GENERIC
+        # transition previously bypassed that (the gate here was a no-op `pass`),
+        # so a job could be PATCHed COMPLETED -> READY with zero QC.
+        #
+        # DELIVERED is gated by the SAME rule, via the same _qc_cleared() source
+        # of truth. The old code reasoned that "DELIVERED from READY is always
+        # fine because READY is QC-gated above" -- that only holds for jobs whose
+        # READY leg passed through THIS gate. A job that reached READY before the
+        # gate existed (live rows) carries no QC record at all, and would still be
+        # handed to the patient on a plain READY -> DELIVERED PATCH. Remedy for
+        # such a job: run QC on it (the QC endpoints accept a READY job precisely
+        # for this) -- a pass/audited waiver clears it, a fail pulls it back off
+        # the pickup shelf into QC_FAILED for rework.
+        #
         # NOTE: the barcode-scan paths mirror THIS gate (and the IN_PROGRESS
         # sales-confirm + DC gates above) via evaluate_scan_transition_gate --
-        # keep the two in sync if these rules change.
-        if status == "READY" and not (
-            job.get("qc_passed") is True or job.get("qc_waived") is True
-        ):
+        # both now read _QC_REQUIRED_TARGETS / _qc_cleared, so they cannot drift.
+        if status in _QC_REQUIRED_TARGETS and not _qc_cleared(job):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Cannot mark this job READY: lens QC must pass (record it via "
-                    "the QC endpoint) or be explicitly waived (qc_waived) first."
+                    f"Cannot mark this job {status}: lens QC must pass (record it "
+                    f"via the QC endpoint) or be explicitly waived (qc_waived) "
+                    f"first."
                 ),
             )
-        # DELIVERED from READY is always fine -- the job passed/waived QC to reach
-        # READY (enforced above), so no further gate is needed here.
 
         # BUG-116d: a QC_FAILED -> IN_PROGRESS move is a rework. Cap it: once the
         # job has already been reworked MAX_REWORK times, only a manager may send
@@ -1529,7 +1663,13 @@ async def qc_job(
     + implicit SUPERADMIN). Sales staff cannot run QC.
 
     A job with passed=True advances to READY; passed=False advances to QC_FAILED.
-    The job must be in COMPLETED or QC_FAILED state; any other state returns 400.
+    The job must be in COMPLETED, QC_FAILED or READY state; any other state
+    returns 400.
+
+    READY is accepted so a job that reached the pickup shelf with NO QC record
+    (rows created before the QC gates existed) can still be QC'd: it is the only
+    way to clear the -> DELIVERED QC gate for such a job, and a FAIL correctly
+    pulls it back off the shelf into QC_FAILED for rework.
     """
     repo = get_workshop_repository()
 
@@ -1539,9 +1679,10 @@ async def qc_job(
             raise HTTPException(status_code=404, detail="Workshop job not found")
         _assert_job_store_access(job, current_user)
 
-        if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
+        if job.get("status") not in ["COMPLETED", "QC_FAILED", "READY"]:
             raise HTTPException(
-                status_code=400, detail="Job must be COMPLETED or QC_FAILED for QC"
+                status_code=400,
+                detail="Job must be COMPLETED, QC_FAILED or READY for QC",
             )
 
         if repo.add_qc_result(
@@ -1581,6 +1722,12 @@ async def qc_checklist(
     A job MUST NOT reach READY status via any other path unless QC passed or
     was explicitly waived here. This endpoint enforces that invariant.
 
+    Accepted input states: COMPLETED, QC_FAILED and READY. READY is accepted so a
+    job that reached the pickup shelf with NO QC record (rows created before the
+    QC gates existed) can still be QC'd or given an audited waiver -- otherwise
+    such a job could never clear the -> DELIVERED gate. A FAIL on a READY job
+    correctly pulls it back off the shelf into QC_FAILED for rework.
+
     Gate: WORKSHOP_STAFF / STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN.
     Sales staff and cashiers cannot run QC.
     """
@@ -1593,12 +1740,12 @@ async def qc_checklist(
         raise HTTPException(status_code=404, detail="Workshop job not found")
     _assert_job_store_access(job, current_user)
 
-    if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
+    if job.get("status") not in ["COMPLETED", "QC_FAILED", "READY"]:
         raise HTTPException(
             status_code=400,
             detail=(
-                "QC checklist can only be submitted when the job is in COMPLETED "
-                "or QC_FAILED state (current: {})".format(job.get("status"))
+                "QC checklist can only be submitted when the job is in COMPLETED, "
+                "QC_FAILED or READY state (current: {})".format(job.get("status"))
             ),
         )
 

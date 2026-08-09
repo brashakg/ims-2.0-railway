@@ -485,10 +485,16 @@ def advance_lab_station(
         # must enforce the SAME gates as the workshop PATCH handler -- a scan may
         # NOT start a job (-> IN_PROGRESS) until sales confirm the fitting AND
         # (for an external-lab ORDERED lens) a Delivery Challan covers its SKU,
-        # nor mark it READY (-> patient pickup) without a QC pass/waiver. On a
-        # gate fail we keep the physical-station scan but DO NOT flip status and
-        # DO NOT auto-notify. Delegated to the single shared scan gate in
-        # workshop.py so this path and labels.scan_advance cannot drift apart.
+        # nor mark it READY (-> pickup shelf) or DELIVERED (-> handed to the
+        # patient at the PICKUP station) without a QC pass/waiver. On a gate fail
+        # we keep the physical-station scan but DO NOT flip status and DO NOT
+        # auto-notify. Delegated to the single shared scan gate in workshop.py so
+        # this path and labels.scan_advance cannot drift apart.
+        #
+        # PATIENT SAFETY: the PICKUP leg (-> DELIVERED) is the LAST gate before
+        # the glasses leave the store. A hold here is deliberately NOT a failed
+        # scan (a physical scan is always recorded) -- the caller surfaces
+        # status_gate_blocked=QC_REQUIRED and the job stays un-delivered.
         from ..routers.workshop import evaluate_scan_transition_gate
 
         gate_block = evaluate_scan_transition_gate(db, updated, advances_to)
@@ -504,7 +510,12 @@ def advance_lab_station(
                 logger.warning("[LAB_ROUTING] status transition failed: %s", e)
 
     _gate_msg = {
-        "QC_REQUIRED": " Status held: record/waive lens QC before marking READY.",
+        # Covers BOTH patient-facing legs: DISPATCH -> READY (pickup shelf) and
+        # PICKUP -> DELIVERED (handover). Do NOT hand the job over on this hold.
+        "QC_REQUIRED": (
+            " Status held: record/waive lens QC before marking READY or handing"
+            " the job to the customer."
+        ),
         "SALES_CONFIRM_REQUIRED": " Status held: sales must confirm the fitting before work starts.",
         "DC_REQUIRED": (
             " Status held: no Delivery Challan logged for this lens. Ask the"

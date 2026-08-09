@@ -71,7 +71,19 @@ interface Job {
   // F2 -- in-house lab station the job is currently at (snake_case, passes
   // through job_to_frontend as-is). Null until the first lab scan.
   current_station?: string | null;
+  // QC record (snake_case, passes through job_to_frontend as-is). Absent on a
+  // job that has never been QC'd -- see hasQcOnFile below.
+  qc_passed?: boolean;
+  qc_waived?: boolean;
 }
+
+// PATIENT SAFETY: a job is cleared for handover only when lens QC PASSED or was
+// explicitly (audited) waived -- the SAME rule the backend gate enforces
+// (workshop._qc_cleared / _QC_REQUIRED_TARGETS), which now blocks -> DELIVERED,
+// not just -> READY. Both fields are absent on a job that was never QC'd, so an
+// absent field reads as "not recorded". Used only to steer the UI toward the
+// right next action; the backend remains the authority.
+const hasQcOnFile = (job: Job) => job.qc_passed === true || job.qc_waived === true;
 
 // Lens-order lifecycle: forward-only NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED.
 type LensStatus = 'NOT_ORDERED' | 'ORDERED' | 'RECEIVED' | 'MOUNTED';
@@ -399,13 +411,21 @@ const loadJobs = async () => {
   // Submit a structured QC checklist via the /qc-checklist endpoint (Phase 6.9).
   // Each checklist item (key, label, passed, note) is stored server-side with
   // reviewer identity + timestamp. Pass -> READY, fail -> QC_FAILED.
+  //
+  // `previousStatus` is the job's status BEFORE this submission. QC is now also
+  // run on a job that is ALREADY READY (ongoing workflow: the handover gate
+  // needs a QC record, and a job routinely reaches the pickup shelf without
+  // one), and that case differs in two ways -- the toast copy and the pickup
+  // label auto-print. Both are handled below.
   const [qcBusy, setQcBusy] = useState(false);
   const handleQcSubmit = async (
     jobId: string,
     passed: boolean,
     notes: string,
     checklistItems?: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+    previousStatus?: JobStatus,
   ) => {
+    const wasAlreadyReady = previousStatus === 'READY';
     setQcBusy(true);
     try {
       let res;
@@ -420,13 +440,34 @@ const loadJobs = async () => {
         // Fallback to the simple /qc endpoint (no structured items).
         res = await workshopApi.qcJob(jobId, passed, notes);
       }
-      toast.success(passed ? 'QC passed — job ready for pickup' : 'QC failed — job flagged for rework');
+      // Copy has to be true for a job that was ALREADY on the pickup shelf:
+      // "now ready for pickup" would be wrong there (it never moved), and a
+      // fail is not a generic "flagged for rework" — it pulls the job back OFF
+      // the shelf, which the counter needs to understand immediately.
+      if (passed) {
+        toast.success(
+          wasAlreadyReady
+            ? 'QC recorded — job cleared for handover'
+            : 'QC passed — job ready for pickup',
+        );
+      } else {
+        toast.success(
+          wasAlreadyReady
+            ? 'QC failed — job pulled off the pickup shelf for rework'
+            : 'QC failed — job flagged for rework',
+        );
+      }
       setQcModalJob(null);
       setSelectedJob(null);
       await loadJobs();
-      // On a pass the job is now READY — auto-print the pickup label, honouring
-      // the auto_print_stage_sticker setting (fail-soft, mirrors handleStatusChange).
-      if (res?.status === 'READY') {
+      // On a pass from COMPLETED / QC_FAILED the job has JUST reached the pickup
+      // shelf — auto-print the pickup label, honouring the
+      // auto_print_stage_sticker setting (fail-soft, mirrors handleStatusChange).
+      // A job that was ALREADY READY is deliberately excluded: its pickup label
+      // was printed when it first became READY, and silently spitting out a
+      // duplicate every time QC is recorded at the shelf would confuse the
+      // counter. Staff can still reprint on demand via the Pickup label button.
+      if (res?.status === 'READY' && !wasAlreadyReady) {
         try {
           const s = await settingsApi.getPrinterSettings();
           if ((s as any)?.auto_print_stage_sticker !== false) {
@@ -1050,6 +1091,22 @@ const loadJobs = async () => {
                       </button>
                     </>
                   )}
+                  {/* PATIENT SAFETY: the backend blocks -> DELIVERED without a
+                      QC pass/waiver, so QC on a job that is ALREADY on the
+                      pickup shelf is ongoing workflow, not a legacy shim: a job
+                      routinely reaches READY with no QC record. Same canRunQc
+                      role gate, same modal + submit path as COMPLETED /
+                      QC_FAILED. When QC is already on file this is a secondary
+                      (re-run / waive) action, so it steps back to btn-outline
+                      and Mark Delivered stays the primary green action. */}
+                  {selectedJob.status === 'READY' && canRunQc && (
+                    <button
+                      onClick={() => setQcModalJob(selectedJob)}
+                      className={`${hasQcOnFile(selectedJob) ? 'btn-outline' : 'btn-primary'} text-sm flex items-center gap-1`}
+                    >
+                      <ClipboardCheck className="w-4 h-4" /> Run QC before handover
+                    </button>
+                  )}
                   {selectedJob.status === 'READY' && (
                     <div className="flex items-center gap-2 flex-wrap">
                       <input
@@ -1060,8 +1117,18 @@ const loadJobs = async () => {
                         className="input-field text-sm w-56"
                         maxLength={80}
                       />
+                      {/* Deliberately NOT disabled when QC is missing: the
+                          backend gate is the authority and returns a plain
+                          English 400, and a client-side block driven by a field
+                          that may simply be absent on an older job would be a
+                          fake refusal. The note below states the real state. */}
                       <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
                     </div>
+                  )}
+                  {selectedJob.status === 'READY' && !hasQcOnFile(selectedJob) && (
+                    <p className="text-xs text-amber-700 w-full">
+                      No QC recorded for this job — run QC before handing it over.
+                    </p>
                   )}
                   {['COMPLETED', 'READY'].includes(selectedJob.status) && (
                     <button
@@ -1172,7 +1239,9 @@ const loadJobs = async () => {
           busy={qcBusy}
           onCancel={() => setQcModalJob(null)}
           onSubmit={(passed, notes, checklistItems) =>
-            handleQcSubmit(qcModalJob.id, passed, notes, checklistItems)
+            // Pass the PRE-submit status so the handler can tell "just reached
+            // the shelf" from "QC'd at the shelf" (toast copy + label reprint).
+            handleQcSubmit(qcModalJob.id, passed, notes, checklistItems, qcModalJob.status)
           }
         />
       )}
