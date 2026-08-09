@@ -1814,7 +1814,7 @@ async def update_integration(
 
 @router.post("/integrations/{integration_type}/test")
 async def test_integration(
-    integration_type: str, current_user: dict = Depends(get_current_user)
+    integration_type: str, current_user: dict = Depends(require_roles("ADMIN"))
 ):
     """Report integration readiness honestly (does NOT fake success).
 
@@ -1823,6 +1823,14 @@ async def test_integration(
     present (presence only, never values) plus the current DISPATCH_MODE, so
     the operator can tell configured-vs-dormant. (Was previously a placebo
     that returned success unconditionally.)
+
+    F17: gated to ADMIN/SUPERADMIN, matching every other integration route in
+    this router (GET /integrations, GET/PUT /integrations/{integration_type},
+    /integrations/catalog, /integrations/anthropic/models). This was the one
+    integration endpoint ANY authenticated user could call, and it discloses
+    the org's integration posture -- which providers are wired up and enabled,
+    plus the DISPATCH_MODE that says whether live messaging is armed. The body
+    still returns booleans and the mode only, never a credential value.
     """
     collection = _get_settings_collection("integrations")
     doc = (

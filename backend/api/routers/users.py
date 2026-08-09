@@ -12,8 +12,15 @@ from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
 
-from .auth import get_current_user
-from ..dependencies import get_user_repository, resolve_store_scope, get_audit_repository
+from .auth import get_current_user, invalidate_user_status
+from ..dependencies import (
+    can_access_store_scoped,
+    get_audit_repository,
+    get_user_repository,
+    resolve_store_scope,
+    user_store_scope,
+    validate_store_access,
+)
 from ..services.role_caps import role_baseline_cap, effective_discount_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
@@ -285,6 +292,50 @@ def sanitize_user(user: dict) -> dict:
     return user
 
 
+def _target_user_stores(target: dict) -> list:
+    """Every store a user record is attached to (multi-store users are normal --
+    an AREA_MANAGER carries several). Reads the same fields the create/update
+    handlers write: ``store_ids`` plus the ``primary_store_id`` denormalisation.
+    """
+    stores = [s for s in (target.get("store_ids") or []) if s]
+    primary = target.get("primary_store_id") or target.get("store_id")
+    if primary and primary not in stores:
+        stores.append(primary)
+    return stores
+
+
+def _assert_can_read_user(target: dict, current_user: dict) -> None:
+    """Store-scope guard for reading ANOTHER employee's record (F10 IDOR).
+
+    ``GET /users/{user_id}`` was gated by ``require_manager`` only, so a
+    STORE_MANAGER pinned to store A could read any user_id in the org -- and the
+    payload carries HR PII (aadhaar_no / pan_no / uan_no / pf_no / esic_no).
+
+    Reuses the canonical store-scope helpers in ``api/dependencies.py`` rather
+    than inventing a second rule:
+      * ``user_store_scope`` -> SUPERADMIN / ADMIN are cross-store by design and
+        keep their existing org-wide reach.
+      * ``can_access_store_scoped`` -> every other role (AREA_MANAGER included,
+        bounded by its own ``store_ids``) may read a user only when at least ONE
+        of that user's stores is inside their reach.
+    Reading your OWN record is always allowed. A target with no store at all is
+    readable only by the cross-store roles -- the same posture
+    ``can_access_store_scoped`` takes for an unattributed document.
+    """
+    if target.get("user_id") and target.get("user_id") == current_user.get("user_id"):
+        return
+    is_cross, _ = user_store_scope(current_user)
+    if is_cross:
+        return
+    if any(
+        can_access_store_scoped(s, current_user) for s in _target_user_stores(target)
+    ):
+        return
+    raise HTTPException(
+        status_code=403, detail="No access to users outside your store"
+    )
+
+
 # Roles that constitute org-wide administrative control. We refuse to let the
 # LAST active holder of admin power be removed/deactivated/demoted, which would
 # lock everyone out of user management.
@@ -431,7 +482,12 @@ async def get_store_users(
     role: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager),
 ):
-    """Get users for a specific store"""
+    """Get users for a specific store (only stores the caller can access)."""
+    # F10: this returned the roster -- including HR PII -- for ANY store id a
+    # manager cared to type. validate_store_access is the canonical guard used
+    # by every other store-scoped route: admins pass, AREA_MANAGER passes within
+    # its store_ids, a store-pinned role is 403'd outside its own store(s).
+    validate_store_access(store_id, current_user)
     repo = get_user_repository()
 
     if repo is not None:
@@ -650,12 +706,13 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
 
 @router.get("/{user_id}", response_model=dict)
 async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
-    """Get user by ID"""
+    """Get user by ID (store-scoped -- see _assert_can_read_user)."""
     repo = get_user_repository()
 
     if repo is not None:
         user = repo.find_by_id(user_id)
         if user is not None:
+            _assert_can_read_user(user, current_user)
             return sanitize_user(user)
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -766,6 +823,11 @@ async def update_user(
                 )
 
         if repo.update(user_id, update_data):
+            # F18: an edit that flips is_active must take effect immediately for
+            # tokens already in the wild (both ways -- a re-activation must not
+            # keep 401ing off a stale entry either).
+            if "is_active" in update_data:
+                invalidate_user_status(user_id)
             return {"user_id": user_id, "message": "User updated successfully"}
 
         raise HTTPException(status_code=500, detail="Failed to update user")
@@ -808,6 +870,10 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
         if repo.update(
             user_id, {"is_active": False, "deactivated_by": current_user.get("user_id")}
         ):
+            # F18: drop the memoised live-status entry so the token the sacked
+            # employee is already holding is rejected on their NEXT request
+            # instead of surviving until its natural expiry.
+            invalidate_user_status(user_id)
             return {"message": "User deactivated"}
 
         raise HTTPException(status_code=500, detail="Failed to deactivate user")
