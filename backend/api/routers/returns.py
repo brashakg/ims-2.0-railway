@@ -1126,6 +1126,69 @@ def _fulfilment_unit_queue(
     return out
 
 
+def _has_order_scoped_sold_unit(
+    stock_repo: Any,
+    product_id: Optional[str],
+    store_id: Optional[str],
+    order_id: Optional[str],
+    used_ids: set,
+) -> bool:
+    """True when THIS order still has an un-reclaimed SOLD unit of this product
+    at this shop. Strictly order-scoped -- it can never see another order's
+    unit, so it adds no hijack risk. Fail-soft -> False."""
+    if stock_repo is None or not product_id or not store_id or not order_id:
+        return False
+    try:
+        rows = (
+            stock_repo.find_many(
+                {
+                    "product_id": product_id,
+                    "store_id": store_id,
+                    "order_id": order_id,
+                    "status": "SOLD",
+                }
+            )
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] outstanding-unit lookup failed: %s", exc)
+        return False
+    for unit in rows:
+        sid = unit.get("stock_id") or unit.get("_id")
+        if sid and sid not in used_ids:
+            return True
+    return False
+
+
+def _take_fulfilment_slot(
+    stock_repo: Any,
+    queue: List[str],
+    product_id: Optional[str],
+    order_id: Optional[str],
+    used_ids: set,
+) -> str:
+    """Consume the queue slot whose shop STILL holds an outstanding SOLD unit
+    for this order, not blindly the first one.
+
+    The queue is rebuilt from the (unchanged) order on every call, so it has no
+    memory of earlier PARTIAL returns -- ordinary when a courier returns the two
+    halves of a split line on different days. Popping blindly re-picked the same
+    first shop on the second return: its unit was already back, the order-scoped
+    lookup missed, and (correctly refusing the order-agnostic fallback) it MINTED
+    a phantom there while the other shop's real unit stayed SOLD forever. Picking
+    the slot that still has something outstanding makes the queue reflect what is
+    still OWED rather than what originally shipped."""
+    for idx, candidate in enumerate(queue):
+        if _has_order_scoped_sold_unit(
+            stock_repo, product_id, candidate, order_id, used_ids
+        ):
+            return queue.pop(idx)
+    # Nothing outstanding anywhere (every shop's unit already came back, or the
+    # units were never stamped): keep the original order for a stable, honest
+    # fallback -- the caller mints there.
+    return queue.pop(0)
+
+
 def _restock_intent_rows(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Per-product summary rows for a restock that recorded INTENT but applied
     nothing (no stock repo, or no physical store to restock to).
@@ -1332,7 +1395,18 @@ def _restock_good_items(
     #     line split 1+1 across two shops sends one unit to each), and
     #   * a per-PRODUCT default for anything the breakdown does not cover.
     # The physical-store path never runs this block at all.
+    # exact_order_only must be keyed on "is the store I am searching the store
+    # the sale was booked against?", not merely on "did I redirect?". A legacy
+    # ONLINE order carrying NO store_id key at all resolves to the caller's own
+    # shop, is judged physical, and would otherwise reach the order-agnostic
+    # fallback and grab an unrelated walk-in's SOLD unit. Channel/source is the
+    # cheap, precise tell for that population.
     is_redirected = bool(routing["redirected_from"])
+    is_online_order = (
+        is_redirected
+        or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
+        or bool((order or {}).get("shopify_order_id"))
+    )
     per_product_queue: Dict[str, List[str]] = {}
     per_product_default: Dict[str, str] = {}
     if is_redirected:
@@ -1371,7 +1445,9 @@ def _restock_good_items(
         # physical too (an UNRESOLVED route returned early above).
         queue = per_product_queue.get(pid) or []
         if queue:
-            unit_store = queue.pop(0)
+            unit_store = _take_fulfilment_slot(
+                stock_repo, queue, pid, order_id, used_ids
+            )
         else:
             unit_store = per_product_default.get(pid) or target_store
         if unit_store and unit_store not in landed_stores:
@@ -1405,7 +1481,7 @@ def _restock_good_items(
             # would grab an unrelated walk-in customer's SOLD unit at this shop
             # -- flipping a frame that is on somebody's face to AVAILABLE and
             # erasing their sale. Mint instead; that is the honest record.
-            exact_order_only=is_redirected,
+            exact_order_only=is_online_order,
         )
         if sid:
             row["reactivated"] += 1
@@ -1465,6 +1541,13 @@ def _restock_good_items(
         else:
             all_ok = False
             row["applied"] = False
+
+    # A per-line row's store_id was set once from its FIRST unit and never
+    # revised, so a 2-at-BOK + 1-at-PUN line read {quantity: 3, store_id: BOK}
+    # -- the exact lie the top-level field is deliberately nulled to avoid.
+    for row in per_line_applied.values():
+        ids = row.get("store_ids") or []
+        row["store_id"] = ids[0] if len(ids) == 1 else None
 
     result["restocked"] = list(per_line_applied.values())
     # Where the units ACTUALLY landed. When a split sent them to more than one
@@ -2422,6 +2505,10 @@ async def create_return(
         "restock_store_redirected_from": restock_result.get(
             "restock_store_redirected_from"
         ),
+        # Without the reason a caller sees redirected_from=<online store> and
+        # cannot tell "routed by the fulfilment breakdown" from "fell back to
+        # the counter". The persisted doc and the retry response both carry it.
+        "restock_store_reason": restock_result.get("restock_store_reason"),
         "message": message,
     }
 

@@ -365,6 +365,16 @@ def test_confirm_posts_from_stored_doc_and_resolves(ctx):
     ret = ctx["returns"].find_one({"shopify_refund_id": "700001"})
     assert ret is not None and ret["status"] == "COMPLETED"
     assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+    # WHICH shop, and REACTIVATED not minted. Asserting only "some unit is
+    # AVAILABLE" let a mis-route stay green: the original unit could sit SOLD
+    # at its own shop while a phantom was minted somewhere else.
+    assert ctx["stock_repo"].units[0]["stock_id"] == "stk-1"
+    assert ctx["stock_repo"].units[0]["store_id"] == "BV-GANGA-01"
+    assert len(ctx["stock_repo"].units) == 1  # nothing minted
+    # The persisted doc records where the units actually landed -- never the
+    # stockless online store.
+    assert ret["restock_store_id"] == "BV-GANGA-01"
+    assert ret["restock_store_ids"] == ["BV-GANGA-01"]
     # The review row is stamped resolved / POSTED.
     row = ctx["review"].find_one({"review_id": "rev-1"})
     assert row["status"] == "POSTED" and row["resolved"] is True

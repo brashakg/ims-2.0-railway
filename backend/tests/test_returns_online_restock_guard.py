@@ -616,6 +616,112 @@ def test_one_line_split_across_two_shops_sends_each_unit_home(monkeypatch):
     )
 
 
+def test_two_sequential_returns_on_a_split_line_each_go_home(monkeypatch):
+    """The per-unit queue is rebuilt fresh from the (unchanged) order every
+    time, so it has no memory of an earlier PARTIAL return -- ordinary when a
+    courier returns the two halves of a split line on different days. Popping
+    blindly re-picked the SAME first shop on return #2: its unit was already
+    back, so the order-scoped lookup missed and it MINTED a phantom there while
+    the other shop's real unit stayed SOLD forever."""
+    order = dict(
+        _ONLINE_ORDER,
+        items=[
+            {"item_id": "li1", "product_id": "PRD-1", "quantity": 2,
+             "returned_qty": 0},
+        ],
+        fulfillment_stores=[PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE],
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-BOK", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+            {"stock_id": "STK-PUN", "product_id": "PRD-1",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    hdr = {"Authorization": f"Bearer {ctx['token']}"}
+
+    # Return #1: one frame comes back.
+    r1 = ctx["client"].post(
+        "/api/v1/returns", json=_payload("ORD-ONL-1", ONLINE_STORE), headers=hdr
+    )
+    assert r1.status_code == 201, r1.text
+    assert r1.json()["restock_stock_ids"] == ["STK-BOK"]
+
+    # Return #2, weeks later: the SECOND frame comes back as its own return.
+    r2 = ctx["client"].post(
+        "/api/v1/returns", json=_payload("ORD-ONL-1", ONLINE_STORE), headers=hdr
+    )
+    assert r2.status_code == 201, r2.text
+
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    assert by_id["STK-BOK"]["status"] == "AVAILABLE"
+    assert by_id["STK-PUN"]["status"] == "AVAILABLE", (
+        "the second return re-picked the first shop and stranded STK-PUN"
+    )
+    # ZERO phantoms: no shop gained a unit it never held.
+    assert all(not sid.startswith("NEW-") for sid in by_id)
+    assert r2.json()["restock_stock_ids"] == ["STK-PUN"]
+    assert r2.json()["restock_store_id"] == PHYSICAL_COUNTER_STORE
+
+
+def test_split_line_per_row_store_id_does_not_name_one_shop(monkeypatch):
+    """A per-line row's store_id was set from its FIRST unit and never revised,
+    so a 1-at-BOK + 1-at-PUN line claimed BOTH landed at BOK -- the exact lie
+    the top-level field is deliberately nulled to avoid."""
+    order = dict(
+        _ONLINE_ORDER,
+        items=[
+            {"item_id": "li1", "product_id": "PRD-1", "quantity": 2,
+             "returned_qty": 0},
+        ],
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-BOK", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+            {"stock_id": "STK-PUN", "product_id": "PRD-1",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-1"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    payload = _payload("ORD-ONL-1", ONLINE_STORE)
+    payload["items"][0]["return_qty"] = 2
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=payload,
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    row = r.json()["restocked"][0]
+    assert row["quantity"] == 2
+    # Split -> the single-valued field must be NULL, not one of the two shops.
+    assert row["store_id"] is None
+    assert sorted(row["store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
+    # ...and a SINGLE-shop line still names its shop.
+    assert r.json()["restock_store_id"] is None
+    assert r.json()["restock_store_reason"] is not None
+
+
 def test_multi_store_online_order_returns_each_product_to_its_own_shop(monkeypatch):
     """shopify_ingest._claim_units_multistore can fulfil one online order from
     SEVERAL shops. Each returned product must go back to the shop its own unit
@@ -1009,6 +1115,95 @@ def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monke
     doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-7001"][0]
     assert doc["restock_store_id"] is None
     assert doc["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+
+def test_accountant_confirm_door_routes_each_product_to_its_own_shop(monkeypatch):
+    """THE DOOR THAT ACTUALLY RUNS. SHOPIFY_REFUND_AUTO is OFF by default, so
+    every live Shopify refund goes through post_from_review. That function
+    rebuilds `order` from the review row -- which stores NO fulfillment_stores
+    and NO fulfillment_breakdown -- and a NON-None order suppresses the guard's
+    own re-load, so per-unit routing was dead here: every confirm fell through
+    to the alphabetically-first fallback, minting a phantom on one physical
+    shelf while the other shop's real unit stayed SOLD forever."""
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        items=[
+            {"item_id": "li1", "product_id": "PRD-1", "quantity": 1, "sku": "RB-1",
+             "unit_price": 1500, "returned_qty": 0},
+            {"item_id": "li2", "product_id": "PRD-2", "quantity": 1, "sku": "OK-2",
+             "unit_price": 2000, "returned_qty": 0},
+        ],
+        fulfillment_stores=sorted([PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]),
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _ConfirmDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    # A review row as _queue_review persists it: NO fulfilment stamps at all.
+    review = {
+        "review_id": "rev-9",
+        "shopify_refund_id": "RF-9009",
+        "order_id": "ORD-ONL-9",
+        "order_number": "ONL-5001",
+        "customer_id": "CUST-1",
+        "customer_name": "Asha",
+        "store_id": ONLINE_STORE,
+        "shopify_order_id": "9009",
+        # The alphabetically-first shop -- what used to win for BOTH products.
+        "proposed_restock_store_id": sorted(
+            [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+        )[0],
+        "credit_note": {"gross_refund": 0.0, "net_refund": 0.0, "gst_breakup": {},
+                        "lines": []},
+        "proposed_restock": [
+            {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+             "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+             "condition": "GOOD"},
+            {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+             "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+             "condition": "GOOD"},
+        ],
+    }
+
+    out = sr.post_from_review(_ConfirmDB(), review)
+
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    # BOTH real units come home to their OWN shop; ZERO phantoms minted.
+    assert by_id["STK-A"]["status"] == "AVAILABLE"
+    assert by_id["STK-A"]["store_id"] == PHYSICAL_FULFILMENT_STORE
+    assert by_id["STK-B"]["status"] == "AVAILABLE", (
+        "STK-B was stranded SOLD at its own shop -- per-unit routing is dead on "
+        "the confirm door"
+    )
+    assert by_id["STK-B"]["store_id"] == PHYSICAL_COUNTER_STORE
+    assert all(not sid.startswith("NEW-") for sid in by_id)
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    assert out["restock_applied"] is True
+    assert sorted(out["restock_store_ids"]) == sorted(
+        [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
+    )
 
 
 def test_retry_restock_door_redirects_off_the_online_store(monkeypatch):

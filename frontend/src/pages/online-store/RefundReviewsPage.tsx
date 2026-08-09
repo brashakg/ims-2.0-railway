@@ -158,11 +158,21 @@ export default function RefundReviewsPage() {
           // backend had restocked NOTHING (an online order with no fulfilment
           // stamp resolves to no physical store and mints nothing on purpose).
           const result = (res?.result ?? {}) as {
+            status?: string;
             restock_applied?: boolean;
             restock_store_id?: string | null;
             restock_store_ids?: string[] | null;
             return_id?: string | null;
           };
+          // An idempotent re-confirm returns {status:'duplicate'} with NO
+          // restock_applied key. Reading that as `false` would pin the red
+          // "stock not put back" banner on a refund whose units were restocked
+          // fine on the first pass.
+          if (result.status === 'duplicate') {
+            toast.success('Already posted — this refund was confirmed earlier.');
+            await load();
+            return;
+          }
           const landed =
             result.restock_store_ids && result.restock_store_ids.length > 0
               ? result.restock_store_ids.join(', ')

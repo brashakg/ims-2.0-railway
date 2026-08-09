@@ -299,15 +299,30 @@ def _proposed_restock_store_for_order(order: Dict[str, Any]) -> Optional[str]:
 
     Deliberately returns None rather than falling back to the order's own
     `store_id`: on an online order that is the stockless online bucket, and
-    showing "restock into BV-ONLINE-01" on the review screen is a lie."""
+    showing "restock into BV-ONLINE-01" on the review screen is a lie. Every
+    candidate is filtered the same way, since a stamp written by a pre-fix
+    claim could itself name an online store."""
+    from .stores_util import is_online_store
+
+    def _physical(value) -> Optional[str]:
+        sid = _norm(value)
+        if not sid or is_online_store(None, sid):
+            return None
+        return sid
+
     stores = order.get("fulfillment_stores")
-    if isinstance(stores, list) and stores:
-        return _norm(stores[0]) or None
+    if isinstance(stores, list):
+        for candidate in stores:
+            hit = _physical(candidate)
+            if hit:
+                return hit
     breakdown = order.get("fulfillment_breakdown")
     if isinstance(breakdown, list):
         for row in breakdown:
-            if isinstance(row, dict) and _norm(row.get("store_id")):
-                return _norm(row.get("store_id"))
+            if isinstance(row, dict):
+                hit = _physical(row.get("store_id"))
+                if hit:
+                    return hit
     return None
 
 
@@ -964,8 +979,11 @@ def _post_credit_and_restock(
             # There is no human counter on this door (the webhook runs as
             # SYSTEM), but a STORED review row may carry a physical store an
             # accountant was shown. Hand it over as the caller-supplied FALLBACK
-            # only: the guard still ranks the order's per-unit fulfilment
-            # breakdown above it, and still rejects it if it is an online store.
+            # only: the guard ranks the order's per-unit fulfilment breakdown
+            # above it and rejects it outright if it is an online store. Now
+            # that post_from_review merges the real fulfilment stamps back on,
+            # this hint is correctly INERT whenever the order carries them --
+            # it only decides anything for an order with no stamps at all.
             processing_store_id=restock_store,
             order=order,
         )
@@ -1053,6 +1071,44 @@ def _post_credit_and_restock(
     }
 
 
+_FULFILMENT_CONTEXT_KEYS = (
+    "fulfillment_stores",
+    "fulfillment_breakdown",
+    "channel",
+    "interstate",
+)
+
+
+def _merge_fulfilment_context(order: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy the REAL order's fulfilment stamps onto a rebuilt order dict.
+
+    `fulfillment_stores` / `fulfillment_breakdown` are the ONLY record of which
+    physical shop shipped each unit, and the restock router needs them to send
+    each returned unit back to the shop it left. A review row does not store
+    them, so a dict rebuilt from the row must be topped up here -- otherwise the
+    router sees an order with no stamps and falls back to a single store for
+    every unit.
+
+    Mutates and returns ``order``. Fail-soft: an unreadable order leaves the
+    dict untouched (the router then re-loads for itself, and worst case falls
+    back exactly as before). Never raises."""
+    if not order.get("order_id"):
+        return order
+    try:
+        from ..routers.returns import _load_order_for_restock
+
+        real = _load_order_for_restock(order.get("order_id"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] fulfilment-context load skipped: %s", exc)
+        real = None
+    if not isinstance(real, dict):
+        return order
+    for key in _FULFILMENT_CONTEXT_KEYS:
+        if real.get(key) is not None and order.get(key) is None:
+            order[key] = real[key]
+    return order
+
+
 def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
     """Post the credit note + restock from a STORED `shopify_refund_review` row
     (the accountant CONFIRM action). Rebuilds the order context + ReturnLine list
@@ -1074,6 +1130,14 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
         "store_id": review.get("store_id"),
         "shopify_order_id": review.get("shopify_order_id"),
     }
+    # SHOPIFY_REFUND_AUTO is OFF by default, so THIS is the door every live
+    # refund walks through. The rebuilt dict above carries no fulfilment stamps,
+    # and handing a NON-None order to _restock_good_items suppresses its own
+    # re-load -- which killed per-unit routing on exactly the path that runs:
+    # every confirm fell through to the alphabetically-first fallback store,
+    # stranding the other shop's real unit SOLD forever and minting a phantom on
+    # a live physical shelf. Merge the REAL order's fulfilment stamps back on.
+    _merge_fulfilment_context(order)
     return_lines = _return_lines_from_proposed(review.get("proposed_restock") or [])
     settled_externally = bool(
         review.get("settled_externally") or credit_note.get("settled_externally")
