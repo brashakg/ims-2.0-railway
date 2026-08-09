@@ -353,7 +353,7 @@ export default function BlindEodTallyPage() {
           </p>
           <DenomGrid rows={blindDenoms} onChange={setBlindPieces} disabled={confirming} />
           <div className="flex items-center gap-3 mt-3">
-            <label className="text-sm text-gray-600">Cash paid out (₹)</label>
+            <label className="text-sm text-gray-600">Cash paid out — petty cash / vendor (₹)</label>
             <input
               type="number"
               min={0}
@@ -363,6 +363,9 @@ export default function BlindEodTallyPage() {
               className="w-28 px-2 py-1 border border-gray-300 rounded text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-bv disabled:bg-gray-50"
             />
           </div>
+          <p className="text-xs text-amber-600 mt-1">
+            Do NOT include customer refunds here — a refund recorded on the Returns screen is auto-deducted from the drawer. Entering it again would double-count it.
+          </p>
           <div className="flex items-center justify-between mt-4">
             <span className="text-sm text-gray-600">
               Counted: <span className="font-semibold text-gray-900 tabular-nums">{paisaToInr(blindTotalPaisa)}</span>

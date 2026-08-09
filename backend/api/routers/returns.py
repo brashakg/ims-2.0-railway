@@ -55,6 +55,7 @@ from ..dependencies import (
 from ..services import restock_engine
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
+from ..services.tender_routing import canonicalize_tender
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -122,6 +123,20 @@ class ReplacementLine(BaseModel):
     gst_rate: Optional[float] = Field(default=None, ge=0)
 
 
+class RefundTenderLine(BaseModel):
+    """One leg of HOW a money refund is physically handed back (drawer-truth).
+
+    The money panel proved that GUESSING the refund tender from the original
+    sale regresses split-tender days (a UPI+CASH sale whose cash-back keeps a
+    false shortage; a CASH+CARD sale whose whole refund is cut from CASH ->
+    negative drawer). So the Returns screen now CAPTURES the actual refund
+    tender(s), and the Day-End readers net off THIS breakdown only -- never off
+    the inferred ``refund_method``. Codes: CASH / UPI / CARD / BANK."""
+
+    method: str = Field(..., description="CASH / UPI / CARD / BANK")
+    amount: float = Field(..., ge=0)
+
+
 class ReturnCreate(BaseModel):
     order_id: Optional[str] = None
     order_number: Optional[str] = None
@@ -131,7 +146,20 @@ class ReturnCreate(BaseModel):
     items: List[ReturnLine] = Field(default_factory=list)
     replacement_items: List[ReplacementLine] = Field(default_factory=list)
     approval_note: Optional[str] = None
+    # Legacy metadata / Tally hint (the ORIGINAL sale's tender). NOT used by the
+    # Day-End drawer readers anymore -- they consume refund_tenders (RETURN) /
+    # collect_method (EXCHANGE COLLECT). Kept for display + backward-compat.
     refund_method: Optional[str] = None
+    # RETURN only: the explicit per-tender breakdown of the cash actually
+    # returned. Sum MUST equal the net refund. When present + valid the return
+    # is stamped drawer_auto_netted=True and the CASH legs feed the drawer;
+    # ABSENT -> the refund is UNKNOWN to the drawer and netted NOWHERE (staff
+    # keep the manual "cash paid out" workaround -- never fabricated).
+    refund_tenders: Optional[List[RefundTenderLine]] = None
+    # EXCHANGE COLLECT only: the tender the price DIFFERENCE was collected in at
+    # the till (a NEW cash-in, not a reversal of the original sale). ABSENT ->
+    # the collect is UNKNOWN and added to no drawer/gateway figure.
+    collect_method: Optional[str] = None
     # Optional absolute Rs deduction for damaged / opened goods. 0 = full
     # refund. Must be >= 0 and <= the GST-inclusive gross refund (enforced in
     # the handler -> 422). Net refund = gross - restocking_fee.
@@ -620,6 +648,78 @@ def _order_payment_method(order: Optional[Dict[str, Any]]) -> str:
         if val:
             return str(val)
     return "SOURCE"
+
+
+# Cash-in tenders a refund/collect leg may be recorded against (canonical form).
+# STORE_CREDIT / vouchers / loyalty are not drawer-or-gateway money and are
+# handled by the store-credit ledger, never by refund_tenders.
+_REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
+
+
+def _normalize_refund_tenders(
+    raw: Optional[List["RefundTenderLine"]], net_amount: float
+):
+    """Validate + canonicalize an explicit refund-tender breakdown against the
+    net refund. Returns (list_or_None, drawer_auto_netted).
+
+    The Day-End drawer readers net off THIS breakdown only (never the inferred
+    refund_method). ABSENT/empty -> (None, False): the refund is UNKNOWN to the
+    drawer and netted nowhere (staff keep the manual workaround). A recognized,
+    balanced breakdown -> (normalized_rows, True). Raises 400 on an unrecognized
+    tender or a split whose sum does not equal the net refund (drawer integrity:
+    a fabricated or unbalanced breakdown must never reach a money reader)."""
+    if not raw:
+        return None, False
+    out: List[Dict[str, Any]] = []
+    total = 0.0
+    for t in raw:
+        method = str(getattr(t, "method", "") or "").strip().upper()
+        canon = canonicalize_tender(method)
+        if canon not in _REFUND_CASH_IN:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unrecognized refund tender '{method}'. "
+                    "Use CASH / UPI / CARD / BANK."
+                ),
+            )
+        try:
+            amt = round(float(getattr(t, "amount", 0) or 0), 2)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if amt <= 0:
+            continue
+        out.append({"method": canon, "amount": amt})
+        total += amt
+    if not out:
+        return None, False
+    if abs(round(total, 2) - round(float(net_amount or 0), 2)) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refund tender split (Rs {round(total, 2)}) must equal the net "
+                f"refund (Rs {round(float(net_amount or 0), 2)})."
+            ),
+        )
+    return out, True
+
+
+def _normalize_collect_method(raw: Optional[str]) -> Optional[str]:
+    """Canonicalize the EXCHANGE-COLLECT tender (the tender the price difference
+    was taken in). ABSENT -> None (the collect is UNKNOWN to every money reader,
+    never fabricated). Raises 400 on an unrecognized tender."""
+    if not raw:
+        return None
+    canon = canonicalize_tender(str(raw).strip().upper())
+    if canon not in _REFUND_CASH_IN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unrecognized collect tender '{raw}'. "
+                "Use CASH / UPI / CARD / BANK."
+            ),
+        )
+    return canon
 
 
 def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
@@ -1725,10 +1825,20 @@ async def create_return(
                 "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
             )
 
+    # Explicit refund/collect tender capture (drawer-truth). Validated here so a
+    # bad breakdown 400s BEFORE any store-credit / stock side effect. refund_method
+    # stays as legacy metadata; the Day-End readers use refund_tenders/collect_method.
+    refund_tenders: Optional[List[Dict[str, Any]]] = None
+    collect_method: Optional[str] = None
+    drawer_auto_netted = False
+
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back.
         refund_amount = net_amount
         refund_method = body.refund_method or _order_payment_method(order)
+        refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
+            body.refund_tenders, net_amount
+        )
 
     elif body.return_type == "CREDIT_NOTE":
         credit_amount = net_amount
@@ -1759,6 +1869,10 @@ async def create_return(
         refund_method = body.refund_method or _order_payment_method(order)
         if settlement["direction"] == engine.COLLECT:
             collect_amount = settlement["difference"]
+            # The difference is a NEW cash-in; record the tender it was taken in
+            # (drawer-truth), not the original sale's tender. Absent -> UNKNOWN.
+            collect_method = _normalize_collect_method(body.collect_method)
+            drawer_auto_netted = collect_method is not None
         elif settlement["direction"] == engine.REFUND:
             # Refund the difference as store credit (recorded, not executed).
             credit_amount = settlement["difference"]
@@ -1839,6 +1953,16 @@ async def create_return(
         "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
+        # DRAWER-TRUTH: the explicit refund-tender breakdown the Day-End readers
+        # net off (RETURN) and the tender an exchange difference was collected in
+        # (EXCHANGE COLLECT). None when the cashier gave no breakdown -> the
+        # refund is UNKNOWN to the drawer and netted nowhere (manual workaround).
+        "refund_tenders": refund_tenders,
+        "collect_method": collect_method,
+        # True when this return carries an explicit breakdown, so it WILL be
+        # auto-deducted in Day-End -- the FE warns staff not to also key it as a
+        # manual "cash paid out" (double-count guard).
+        "drawer_auto_netted": drawer_auto_netted,
         "credit_amount": credit_amount,
         "collect_amount": collect_amount,
         "settlement": settlement,
@@ -1934,6 +2058,9 @@ async def create_return(
         "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
+        "refund_tenders": refund_tenders,
+        "collect_method": collect_method,
+        "drawer_auto_netted": drawer_auto_netted,
         "credit_amount": credit_amount,
         "collect_amount": collect_amount,
         "settlement": settlement,

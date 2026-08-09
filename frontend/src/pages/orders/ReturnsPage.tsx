@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { orderApi, productApi } from '../../services/api';
-import { returnsApi, type CreateReturnPayload } from '../../services/api/returns';
+import { returnsApi, type CreateReturnPayload, type RefundTenderCode } from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
 import { formatDateIST } from '../../utils/datetime';
 import {
@@ -78,6 +78,14 @@ export default function ReturnsPage() {
   const [restockingFee, setRestockingFee] = useState(0);
   const [resultId, setResultId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Refund-tender capture (drawer-truth): how the money is actually handed back.
+  // The Day-End drawer nets off THIS, never a guessed original-sale tender.
+  const [refundTenders, setRefundTenders] = useState<{ method: RefundTenderCode; amount: number }[]>([]);
+  // EXCHANGE COLLECT: the tender the price difference is taken in at the till.
+  const [collectMethod, setCollectMethod] = useState<RefundTenderCode>('CASH');
+  // Irreversible-refund confirmation dialog (UI P0: no submit without a confirm).
+  const [showConfirm, setShowConfirm] = useState(false);
 
   // EXCHANGE: replacement product picker state
   const [replacementItems, setReplacementItems] = useState<ReplacementItem[]>([]);
@@ -163,6 +171,69 @@ export default function ReturnsPage() {
   const exchangeDirection: 'COLLECT' | 'REFUND' | 'EVEN' =
     Math.abs(exchangeDiff) < 0.005 ? 'EVEN' : exchangeDiff > 0 ? 'COLLECT' : 'REFUND';
 
+  // ----- Refund-tender capture (drawer-truth) -----
+  // The money panel proved that GUESSING the refund tender from the original
+  // sale regresses split-tender days, so the cashier records how the refund is
+  // actually returned. Single-tender source -> prefill that tender (changeable);
+  // split source -> the cashier must specify the split (no silent default).
+  const TENDER_CODES: RefundTenderCode[] = ['CASH', 'UPI', 'CARD', 'BANK'];
+  const toTenderCode = (m?: string): RefundTenderCode | null => {
+    const k = String(m || '').toUpperCase();
+    if (k === 'CASH') return 'CASH';
+    if (['UPI', 'GPAY', 'PHONEPE', 'PAYTM', 'QR'].includes(k)) return 'UPI';
+    if (['CARD', 'DEBIT', 'DEBIT_CARD', 'CREDIT_CARD', 'EDC', 'POS'].includes(k)) return 'CARD';
+    if (['BANK', 'BANK_TRANSFER', 'NEFT', 'RTGS', 'IMPS'].includes(k)) return 'BANK';
+    return null;
+  };
+  const sourceTenders: RefundTenderCode[] = Array.from(
+    new Set(
+      ((selectedOrder?.payments as any[]) || [])
+        .map((p) => toTenderCode(p?.method || p?.mode))
+        .filter((t): t is RefundTenderCode => t !== null),
+    ),
+  );
+  const isSplitSource = sourceTenders.length > 1;
+  const roundedNet = Math.round(netRefund * 100) / 100;
+
+  // (Re)prefill the refund-tender picker whenever the order / type / amount
+  // changes. Single-tender: full amount on the source tender (editable). Split
+  // or unknown source: seed ONE blank row and require the cashier to fill it so
+  // the total matches -- never a silent default that could misroute the drawer.
+  useEffect(() => {
+    if (returnType !== 'RETURN' || roundedNet <= 0) {
+      setRefundTenders([]);
+      return;
+    }
+    if (!isSplitSource) {
+      setRefundTenders([{ method: sourceTenders[0] || 'CASH', amount: roundedNet }]);
+    } else {
+      setRefundTenders((prev) =>
+        prev.length ? prev : [{ method: sourceTenders[0] || 'CASH', amount: 0 }],
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrder, returnType, roundedNet, isSplitSource]);
+
+  const refundTenderTotal = Math.round(
+    refundTenders.reduce((s, t) => s + (Number(t.amount) || 0), 0) * 100,
+  ) / 100;
+  // Balanced within Re 1 (paise rounding tolerance) and every leg non-negative.
+  const refundTendersBalanced =
+    Math.abs(refundTenderTotal - roundedNet) < 1 &&
+    refundTenders.every((t) => (Number(t.amount) || 0) >= 0);
+  // A RETURN with a positive net must carry a balanced breakdown before submit.
+  const refundTendersReady =
+    returnType !== 'RETURN' || roundedNet <= 0 || (refundTenders.length > 0 && refundTendersBalanced);
+
+  const addRefundTenderRow = () =>
+    setRefundTenders((prev) => [...prev, { method: 'CASH', amount: 0 }]);
+  const removeRefundTenderRow = (i: number) =>
+    setRefundTenders((prev) => prev.filter((_, idx) => idx !== i));
+  const updateRefundTenderRow = (
+    i: number,
+    patch: Partial<{ method: RefundTenderCode; amount: number }>,
+  ) => setRefundTenders((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+
   // ----- Replacement product picker (EXCHANGE only) -----
   const searchProducts = async () => {
     if (!productQuery.trim()) return;
@@ -247,6 +318,18 @@ export default function ReturnsPage() {
       // Restocking fee is a refund-path concept only (EXCHANGE is settled on
       // the difference). Send it for RETURN / CREDIT_NOTE.
       restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
+      // DRAWER-TRUTH: the tender(s) the refund was actually returned in. Sent
+      // for a RETURN with a positive net so Day-End auto-nets the CASH leg(s).
+      refund_tenders:
+        returnType === 'RETURN' && roundedNet > 0
+          ? refundTenders.map((t) => ({
+              method: t.method,
+              amount: Math.round((Number(t.amount) || 0) * 100) / 100,
+            }))
+          : undefined,
+      // EXCHANGE COLLECT: the tender the price difference was collected in.
+      collect_method:
+        returnType === 'EXCHANGE' && exchangeDirection === 'COLLECT' ? collectMethod : undefined,
       refund_reason: returnType === 'EXCHANGE' ? undefined : dominantMatrixReason(),
       refund_approval_request_id: approval?.requestId,
       refund_approval_token: approval?.approvalToken,
@@ -573,6 +656,18 @@ export default function ReturnsPage() {
                     </span>
                     <span className="text-lg">{exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))}</span>
                   </div>
+                  {exchangeDirection === 'COLLECT' && (
+                    <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-gray-200">
+                      <label className="text-sm text-gray-700">Collected via</label>
+                      <select
+                        value={collectMethod}
+                        onChange={e => setCollectMethod(e.target.value as RefundTenderCode)}
+                        className="w-40 px-2 py-1.5 border border-gray-300 rounded text-sm"
+                      >
+                        {TENDER_CODES.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="mb-3 space-y-2">
@@ -601,6 +696,59 @@ export default function ReturnsPage() {
                     </span>
                     <span className="font-bold text-lg text-gray-900">{fc(netRefund)}</span>
                   </div>
+
+                  {/* Refund-tender capture (RETURN only): how the cash is returned. */}
+                  {returnType === 'RETURN' && roundedNet > 0 && (
+                    <div className="mt-3 pt-3 border-t border-gray-200">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-800">Refund paid via</span>
+                        {isSplitSource && (
+                          <span className="text-xs text-amber-600">Split-tender sale — specify how the refund is returned</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 mb-2">
+                        Recorded in Day-End so the drawer nets it automatically — the total must equal the net refund.
+                      </p>
+                      <div className="space-y-2">
+                        {refundTenders.map((t, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <select
+                              value={t.method}
+                              onChange={e => updateRefundTenderRow(i, { method: e.target.value as RefundTenderCode })}
+                              className="w-32 px-2 py-1.5 border border-gray-300 rounded text-sm"
+                            >
+                              {TENDER_CODES.map(code => <option key={code} value={code}>{code}</option>)}
+                            </select>
+                            <div className="flex items-center flex-1">
+                              <span className="text-gray-400 mr-1">₹</span>
+                              <input
+                                type="number" min={0} value={t.amount || ''}
+                                onChange={e => updateRefundTenderRow(i, { amount: Math.max(0, Number(e.target.value)) })}
+                                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-right tabular-nums"
+                              />
+                            </div>
+                            {refundTenders.length > 1 && (
+                              <button type="button" onClick={() => removeRefundTenderRow(i)}
+                                className="p-1.5 text-gray-400 hover:text-bv-red-600" aria-label="Remove tender">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between mt-2">
+                        <button type="button" onClick={addRefundTenderRow}
+                          className="text-xs text-bv-red-600 font-medium flex items-center gap-1">
+                          <Plus className="w-3 h-3" /> Add tender
+                        </button>
+                        <span className={clsx('text-xs font-medium',
+                          refundTendersBalanced ? 'text-green-700' : 'text-amber-600')}>
+                          {fc(refundTenderTotal)} / {fc(roundedNet)}
+                          {!refundTendersBalanced && ' — must match net refund'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
               <textarea value={approvalNote} onChange={e => setApprovalNote(e.target.value)}
@@ -609,11 +757,14 @@ export default function ReturnsPage() {
               <div className="flex gap-3">
                 <button onClick={() => { setStep('search'); setSelectedOrder(null); }}
                   className="px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
-                <button onClick={handleSubmit} disabled={isSubmitting}
-                  className="flex-1 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50">
-                  {isSubmitting ? 'Processing...' : `Submit ${returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Return'} (${activeReturns.length} items)`}
+                <button onClick={() => setShowConfirm(true)} disabled={isSubmitting || !refundTendersReady}
+                  className="flex-1 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                  {isSubmitting ? 'Processing...' : `Review ${returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Return'} (${activeReturns.length} items)`}
                 </button>
               </div>
+              {returnType === 'RETURN' && roundedNet > 0 && !refundTendersReady && (
+                <p className="text-xs text-amber-600 mt-2 text-right">Enter the refund tender split so it totals the net refund.</p>
+              )}
             </div>
           )}
         </div>
@@ -636,10 +787,17 @@ export default function ReturnsPage() {
                 ? (exchangeDirection === 'COLLECT' ? 'Collect this balance from the customer'
                   : exchangeDirection === 'REFUND' ? 'Difference issued as store credit'
                   : 'Even exchange — no balance due')
-                : 'Refund to be processed via original payment method'}
+                : 'Refund recorded against the tender(s) you selected'}
           </p>
+          {/* Double-count guard: this cash refund is now auto-deducted in
+              Day-End; staff must NOT also key it as a manual "cash paid out". */}
+          {returnType === 'RETURN' && refundTenders.some(t => t.method === 'CASH' && (Number(t.amount) || 0) > 0) && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              This cash refund is now recorded in Day-End — do not also enter it as cash paid out.
+            </p>
+          )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod('CASH'); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
@@ -714,6 +872,65 @@ export default function ReturnsPage() {
           onClose={() => setApprovalGate(null)}
           onApproved={onRefundApproved}
         />
+      )}
+
+      {/* UI P0: irreversible-refund confirmation. Names the order, items, net
+          refund AND the refund tender(s) before anything is recorded. */}
+      {showConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle className="w-5 h-5 text-bv-red-600" />
+              <h3 className="text-lg font-bold text-gray-900">
+                Confirm {returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Refund'}
+              </h3>
+            </div>
+            <p className="text-sm text-gray-500 mb-3">
+              This records money movement and cannot be undone. Please check the details.
+            </p>
+            <dl className="text-sm space-y-1.5 mb-4">
+              <div className="flex justify-between"><dt className="text-gray-500">Order</dt>
+                <dd className="font-medium text-gray-900">{selectedOrder?.orderNumber || selectedOrder?.order_number || '—'}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Items</dt>
+                <dd className="font-medium text-gray-900 text-right max-w-[60%] truncate">
+                  {activeReturns.length} · {activeReturns.map(i => i.productName).join(', ')}
+                </dd></div>
+              {returnType === 'EXCHANGE' ? (
+                <>
+                  <div className="flex justify-between"><dt className="text-gray-500">
+                    {exchangeDirection === 'COLLECT' ? 'Collect from customer' : exchangeDirection === 'REFUND' ? 'Refund / store credit' : 'Even exchange'}</dt>
+                    <dd className="font-bold text-gray-900">{exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))}</dd></div>
+                  {exchangeDirection === 'COLLECT' && (
+                    <div className="flex justify-between"><dt className="text-gray-500">Collected via</dt>
+                      <dd className="font-medium text-gray-900">{collectMethod}</dd></div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="flex justify-between"><dt className="text-gray-500">
+                    {returnType === 'CREDIT_NOTE' ? 'Net store credit' : 'Net refund'}</dt>
+                    <dd className="font-bold text-gray-900">{fc(netRefund)}</dd></div>
+                  {returnType === 'RETURN' && roundedNet > 0 && (
+                    <div className="flex justify-between"><dt className="text-gray-500">Refund tender(s)</dt>
+                      <dd className="font-medium text-gray-900 text-right">
+                        {refundTenders.map((t, i) => <div key={i}>{t.method} {fc(t.amount)}</div>)}
+                      </dd></div>
+                  )}
+                </>
+              )}
+            </dl>
+            <div className="flex gap-3">
+              <button onClick={() => setShowConfirm(false)}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Back</button>
+              <button
+                onClick={() => { setShowConfirm(false); handleSubmit(); }}
+                disabled={isSubmitting}
+                className="flex-1 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50">
+                {isSubmitting ? 'Processing...' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

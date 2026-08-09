@@ -256,30 +256,53 @@ def compute_expected(
     """The Z-Read expected figure + the by-tender breakdown.
 
     Z-READ MATH (paisa-exact integers):
-        cash_sales_paisa = E5 reconcile_window CASH net (collected - refunded)
-        expected_cash_paisa = opening_float + cash_sales - cash_payouts
+        cash_sales_paisa   = E5 reconcile_window CASH COLLECTED (gross, ex-refunds)
+        cash_refunds_paisa = E5 reconcile_window CASH REFUNDED (recorded refunds)
+        expected_cash_paisa = opening + cash_sales - cash_refunds - cash_payouts
         (variance = counted - expected is computed at blind-submit)
 
+    This is the ONLY caller that opts into the returns netting
+    (include_returns=True) -- the drawer figure must net recorded cash refunds,
+    windowed on the refund's own day. cash_sales_paisa is now GROSS collected and
+    cash_refunds_paisa is surfaced separately so the manager console + Z-Read can
+    show a distinct "Cash refunds (recorded)" line instead of silently shrinking
+    sales (and so a recorded refund is never conflated with a manual cash payout).
+
     The per-tender ``by_mode`` from E5 rides along so the Z-Read can show sales by
-    tender (UPI/CARD/etc.) -- only CASH feeds the drawer-expected figure. This is
-    the SAME E5 reader the day-close already uses; there is no parallel orders
-    aggregation. DB absent -> a zero-sales envelope (never raises)."""
+    tender (UPI/CARD/etc.) -- only CASH feeds the drawer-expected figure. DB
+    absent -> a zero-sales envelope (never raises)."""
     from . import tender_reconciliation as tr
 
-    recon = tr.reconcile_window(db, store_id, window_start, window_end)
+    recon = tr.reconcile_window(
+        db, store_id, window_start, window_end, include_returns=True
+    )
     by_mode = recon.get("by_mode") or {}
     cash_row = by_mode.get("CASH") or {}
-    cash_net_rupees = float(cash_row.get("net", 0) or 0)
-    cash_sales_paisa = _to_int_paisa_from_rupees(cash_net_rupees)
+    cash_collected_paisa = _to_int_paisa_from_rupees(
+        float(cash_row.get("collected", 0) or 0)
+    )
+    cash_refunds_paisa = _to_int_paisa_from_rupees(
+        float(cash_row.get("refunded", 0) or 0)
+    )
 
     opening = int(opening_float_paisa or 0)
     payouts = int(cash_payouts_paisa or 0)
-    expected_cash_paisa = opening + cash_sales_paisa - payouts
+    # Explicit identity: opening + collected - refunded - payouts. (Equivalent to
+    # opening + CASH.net - payouts, but keeping collected/refunded distinct keeps
+    # the console honest and lets the double-count advisory compare refunds vs
+    # the manual payout box.)
+    expected_cash_paisa = opening + cash_collected_paisa - cash_refunds_paisa - payouts
+    # Non-blocking double-count advisory: a manual cash payout AND a recorded
+    # cash refund in the same window may be the SAME money entered twice (staff
+    # used the pre-fix "cash paid out" workaround). Surfaced, never auto-applied.
+    refund_double_entry_advisory = cash_refunds_paisa > 0 and payouts > 0
     return {
         "opening_float_paisa": opening,
-        "cash_sales_paisa": cash_sales_paisa,
+        "cash_sales_paisa": cash_collected_paisa,
+        "cash_refunds_paisa": cash_refunds_paisa,
         "cash_payouts_paisa": payouts,
         "expected_cash_paisa": expected_cash_paisa,
+        "refund_double_entry_advisory": refund_double_entry_advisory,
         "by_mode": by_mode,
         "total_net_rupees": recon.get("total_net", 0.0),
         "window_start": recon.get("window_start"),
@@ -543,6 +566,10 @@ def blind_submit(
                     "cash_payouts_paisa": payouts,
                     "expected_cash_paisa": expected_cash_paisa,
                     "cash_sales_paisa": exp["cash_sales_paisa"],
+                    "cash_refunds_paisa": exp.get("cash_refunds_paisa", 0),
+                    "refund_double_entry_advisory": exp.get(
+                        "refund_double_entry_advisory", False
+                    ),
                     "variance_paisa": variance_paisa,
                     "variance_status": vstatus,
                     "by_mode": exp["by_mode"],
@@ -817,6 +844,7 @@ _CASHIER_HIDDEN_FIELDS = (
     "variance_paisa",
     "variance_status",
     "cash_sales_paisa",
+    "cash_refunds_paisa",
     "by_mode",
     "tolerance_paisa",
 )
@@ -848,6 +876,7 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
 
     opening = int(session.get("opening_float_paisa", 0) or 0)
     cash_sales = int(session.get("cash_sales_paisa", 0) or 0)
+    cash_refunds = int(session.get("cash_refunds_paisa", 0) or 0)
     payouts = int(session.get("cash_payouts_paisa", 0) or 0)
     expected = session.get("expected_cash_paisa")
     counted = session.get("blind_count_paisa")
@@ -868,9 +897,16 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "opening_denominations": session.get("opening_denominations") or [],
         "blind_denominations": session.get("blind_denominations") or [],
         "by_mode": session.get("by_mode") or {},
-        # The Z-Read identity: opening + cash_sales - payouts = expected.
+        # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
+        # expected. cash_sales is GROSS collected; cash_refunds is the recorded
+        # cash refunds auto-deducted (a DISTINCT line from the manual payouts, so
+        # a refund is never silently merged into "cash paid out").
         "cash_sales_paisa": cash_sales,
+        "cash_refunds_paisa": cash_refunds,
         "cash_payouts_paisa": payouts,
+        "refund_double_entry_advisory": bool(
+            session.get("refund_double_entry_advisory")
+        ),
         "expected_cash_paisa": expected,
         "counted_cash_paisa": counted,
         "variance_paisa": variance,

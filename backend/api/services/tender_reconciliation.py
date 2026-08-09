@@ -241,6 +241,7 @@ def reconcile_window(
     window_end: Any = None,
     *,
     tender_map: Optional[Dict[str, str]] = None,
+    include_returns: bool = False,
 ) -> Dict[str, Any]:
     """Aggregate ``order.payments[]`` for ``store_id`` in [start, end] by
     canonical tender. ``window_*`` may be ISO strings or datetimes; both a
@@ -257,18 +258,26 @@ def reconcile_window(
     (returns.py create_return) -- POS never writes a negative payments[] row --
     so the by-mode nets (and the F23 blind Z-Read expected drawer figure that
     eod_tally.compute_expected derives from CASH.net) never saw refunds: a
-    false SHORT every time cash was refunded. COMPLETED, non-historical
-    returns are therefore netted into the by-mode rows, windowed on the
-    RETURN's OWN created_at (= the refund date). CASH refunds reduce the
-    expected drawer; UPI/CARD refunds reduce those tenders' nets. A
-    COLLECT-direction EXCHANGE (difference collected at the till; recorded
-    only on the return doc, never in payments[]) is symmetric cash-IN.
-    ``count`` stays the number of payments[] rows -- returns docs do not
-    increment it."""
+    false SHORT every time cash was refunded. When ``include_returns=True`` the
+    COMPLETED, non-historical returns in the window are netted into the by-mode
+    rows, windowed on the RETURN's OWN created_at (= the refund date), off the
+    EXPLICIT per-tender breakdown the cashier recorded (returns.refund_tenders /
+    returns.collect_method) -- NEVER the inferred refund_method. CASH refunds
+    reduce the expected drawer; UPI/CARD refunds reduce those tenders' nets. A
+    COLLECT-direction EXCHANGE (difference collected at the till) is a symmetric
+    cash-IN on collect_method. ``count`` stays the number of payments[] rows.
+
+    CONTRACT GUARD (money-panel redesign): ``include_returns`` DEFAULTS TO FALSE
+    so every existing consumer (bank_reconciliation.build_pos_digital_expected,
+    the payment_reconciliations snapshot, the cash-register close by-mode
+    display) keeps the payments-only contract it was written against -- netting
+    refunds into it silently emitted NEGATIVE expected gateway settlements with
+    negative MDR. Only eod_tally.compute_expected (the drawer figure) opts in."""
     if tender_map is None:
         tender_map = get_effective_tender_map(db, store_id=store_id)
 
     all_payments: List[Dict[str, Any]] = []
+    payments_read_ok = True
     if db is not None:
         try:
             match = _window_match(store_id, window_start, window_end)
@@ -277,9 +286,14 @@ def reconcile_window(
                 all_payments.extend(o.get("payments") or [])
         except Exception:  # noqa: BLE001
             all_payments = []
+            payments_read_ok = False
 
     by_mode = split_payments_by_mode(all_payments)
-    _net_returns_into_by_mode(db, by_mode, store_id, window_start, window_end)
+    # Skip the returns netting when the payments read failed, so the two Day-End
+    # readers never disagree (a refunds-only envelope must not be frozen into the
+    # hash-chained snapshot on a transient Mongo blip).
+    if include_returns and payments_read_ok:
+        _net_returns_into_by_mode(db, by_mode, store_id, window_start, window_end)
     total_net = 0.0
     for tender, agg in by_mode.items():
         agg["ledger"] = resolve_ledger(tender, tender_map)
@@ -303,18 +317,31 @@ def _net_returns_into_by_mode(
     """Net COMPLETED, non-historical ``returns`` docs into the by-mode rows
     (in place). See reconcile_window's docstring for the why.
 
-    RETURN docs subtract ``refund_amount`` from their normalized
-    ``refund_method`` tender (refunded up, net down). COLLECT-direction
-    EXCHANGE docs add ``collect_amount`` (collected up, net up). CREDIT_NOTE /
-    EXCHANGE-refund issue store credit -- no tender money moves, and their
-    ``refund_amount`` is None by construction. ``created_at`` on returns docs
-    is an ISO STRING (datetime.now().isoformat()); ``_window_match`` already
-    emits the dual string/datetime $or window (BUG-031 pattern).
-    ``historical: True`` docs (Shopify-era imports) settled outside the till
-    and are excluded. Fail-soft: never disturbs the payments[] aggregation."""
+    TENDER SOURCE (money-panel redesign): net off the EXPLICIT breakdown the
+    cashier recorded, NEVER the inferred refund_method. A RETURN subtracts each
+    ``refund_tenders`` leg from its own canonical tender (refunded up, net
+    down). A COLLECT-direction EXCHANGE adds ``collect_amount`` to
+    ``collect_method`` (collected up, net up). A return that carries NO
+    refund_tenders / collect_method is UNKNOWN and netted NOWHERE (never
+    fabricated). CREDIT_NOTE / EXCHANGE-refund issue store credit -- no tender
+    money moves.
+
+    ``created_at`` on returns docs is an ISO STRING (datetime.now().isoformat());
+    ``_window_match`` already emits the dual string/datetime $or window (BUG-031
+    pattern). ``historical: True`` docs (Shopify-era imports) settled outside
+    the till and are excluded. NON-DESTRUCTIVE fail-soft: accumulate into a
+    local delta map and merge into ``by_mode`` only after the cursor drains, so
+    a mid-cursor error leaves the payments[] aggregation untouched."""
     if db is None:
         return
     try:
+        deltas: Dict[str, Dict[str, float]] = {}
+
+        def _bump(tender: str, *, refunded: float = 0.0, collected: float = 0.0):
+            d = deltas.setdefault(tender, {"collected": 0.0, "refunded": 0.0})
+            d["refunded"] += refunded
+            d["collected"] += collected
+
         ret_match = _window_match(store_id, window_start, window_end)
         ret_match["status"] = "COMPLETED"
         ret_match["historical"] = {"$ne": True}
@@ -325,8 +352,8 @@ def _net_returns_into_by_mode(
                 "return_type": 1,
                 "status": 1,
                 "historical": 1,
-                "refund_method": 1,
-                "refund_amount": 1,
+                "refund_tenders": 1,
+                "collect_method": 1,
                 "collect_amount": 1,
                 "settlement": 1,
             },
@@ -338,37 +365,42 @@ def _net_returns_into_by_mode(
                 continue
             if r.get("historical") is True:
                 continue
-            tender = canonicalize_tender(r.get("refund_method"))
             rtype = str(r.get("return_type") or "").upper()
             if rtype == "RETURN":
-                try:
-                    amt = float(r.get("refund_amount") or 0)
-                except (TypeError, ValueError):
-                    amt = 0.0
-                if amt <= 0:
-                    continue
-                row = by_mode.setdefault(
-                    tender,
-                    {"collected": 0.0, "refunded": 0.0, "net": 0.0, "count": 0},
-                )
-                row["refunded"] = round(row["refunded"] + amt, 2)
-                row["net"] = round(row["net"] - amt, 2)
+                for t in r.get("refund_tenders") or []:
+                    tender = canonicalize_tender((t or {}).get("method"))
+                    if tender == "UNKNOWN":
+                        continue
+                    try:
+                        amt = float((t or {}).get("amount") or 0)
+                    except (TypeError, ValueError):
+                        amt = 0.0
+                    if amt > 0:
+                        _bump(tender, refunded=amt)
             elif rtype == "EXCHANGE":
                 direction = str(
                     (r.get("settlement") or {}).get("direction") or ""
                 ).upper()
+                if direction != "COLLECT":
+                    continue
+                tender = canonicalize_tender(r.get("collect_method"))
+                if tender == "UNKNOWN":
+                    continue
                 try:
                     coll_amt = float(r.get("collect_amount") or 0)
                 except (TypeError, ValueError):
                     coll_amt = 0.0
-                if direction != "COLLECT" or coll_amt <= 0:
-                    continue
-                row = by_mode.setdefault(
-                    tender,
-                    {"collected": 0.0, "refunded": 0.0, "net": 0.0, "count": 0},
-                )
-                row["collected"] = round(row["collected"] + coll_amt, 2)
-                row["net"] = round(row["net"] + coll_amt, 2)
+                if coll_amt > 0:
+                    _bump(tender, collected=coll_amt)
+
+        for tender, d in deltas.items():
+            row = by_mode.setdefault(
+                tender,
+                {"collected": 0.0, "refunded": 0.0, "net": 0.0, "count": 0},
+            )
+            row["collected"] = round(row["collected"] + d["collected"], 2)
+            row["refunded"] = round(row["refunded"] + d["refunded"], 2)
+            row["net"] = round(row["net"] + d["collected"] - d["refunded"], 2)
     except Exception:  # noqa: BLE001
         return
 

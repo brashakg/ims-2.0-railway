@@ -35,6 +35,15 @@ export interface ReplacementLinePayload {
   gst_rate?: number;
 }
 
+// One leg of HOW a money refund was physically handed back. The Day-End drawer
+// nets off THIS breakdown (never the inferred original-sale tender). Codes:
+// CASH / UPI / CARD / BANK. Sum must equal the net refund.
+export type RefundTenderCode = 'CASH' | 'UPI' | 'CARD' | 'BANK';
+export interface RefundTenderLinePayload {
+  method: RefundTenderCode;
+  amount: number;
+}
+
 export interface CreateReturnPayload {
   order_id?: string;
   order_number?: string;
@@ -44,7 +53,14 @@ export interface CreateReturnPayload {
   items: ReturnLinePayload[];
   replacement_items?: ReplacementLinePayload[];
   approval_note?: string;
+  // Legacy metadata / Tally hint (the ORIGINAL sale's tender). NOT used by the
+  // drawer readers anymore — they consume refund_tenders / collect_method.
   refund_method?: string;
+  // RETURN only: explicit per-tender breakdown of the cash actually returned.
+  // Sum must equal the net refund. Absent -> the refund is not auto-netted.
+  refund_tenders?: RefundTenderLinePayload[];
+  // EXCHANGE COLLECT only: the tender the price difference was collected in.
+  collect_method?: RefundTenderCode;
   // Optional absolute Rs deduction for damaged / opened goods. 0 = full
   // refund. Net refund = gross - restocking_fee.
   restocking_fee?: number;

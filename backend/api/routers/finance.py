@@ -3627,9 +3627,16 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     NOT modelled as negative payments[] rows: that would corrupt the
     payment_status ladder, the online-mapper staff_sum floor, the cumulative
     refund cap, Tally receipt vouchers and stamp_payment_ledgers.
-    A COLLECT-direction EXCHANGE (customer pays the price difference at the
-    till; recorded only as collect_amount on the return doc, never in
-    payments[]) is symmetric cash-IN and is added to cash_sales.
+
+    TENDER SOURCE (money-panel redesign, PR #964 round 2): the CASH figure is
+    netted off the EXPLICIT per-tender breakdown the cashier recorded on the
+    Returns screen (returns.refund_tenders for a RETURN; returns.collect_method
+    for a COLLECT-direction EXCHANGE cash-IN) -- NEVER the inferred refund_method.
+    Guessing the tender from the original sale regressed split-tender days (a
+    UPI+CASH sale's cash-back kept a false shortage; a CASH+CARD sale's whole
+    refund was cut from CASH -> negative drawer). A return that carries NO
+    refund_tenders is UNKNOWN to the drawer and netted NOWHERE (staff keep the
+    manual "cash paid out" workaround; the drawer never sees a fabricated number).
     Returns (cash_sales, cash_refunds) as positive magnitudes."""
     if db is None:
         return 0.0, 0.0
@@ -3637,18 +3644,38 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     # matches it (Mongo type-bracketing) -> cash_sales always 0 -> false drawer
     # variance. Match BOTH a datetime window (current Date-typed docs) AND a
     # string window (any legacy ISO-string created_at) via $or.
+    #
+    # The string clause is built from an ISO-STRING form of the bound even when a
+    # caller passes a datetime (the annotation says str, but the IST-day helpers
+    # elsewhere hand out naive-UTC datetimes) -- returns.created_at is string-only
+    # and would type-bracket to no match against a datetime bound, silently
+    # resurrecting the whole false-shortage bug. Coerce so it never can.
+    def _as_iso(v) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return str(v)
+
+    start_str = _as_iso(start_iso)
+    end_str = _as_iso(end_iso)
     start_dt = _to_dt(start_iso)
     date_win: Dict = {"$gte": start_dt} if start_dt else {}
-    str_win: Dict = {"$gte": start_iso}
+    str_win: Dict = {"$gte": start_str} if start_str else {}
     if end_iso:
-        str_win["$lte"] = end_iso
+        if end_str:
+            str_win["$lte"] = end_str
         end_dt = _to_dt(end_iso)
         if end_dt:
             date_win["$lte"] = end_dt
-    or_clauses = [{"created_at": str_win}]
+    or_clauses = []
     if date_win:
-        or_clauses.insert(0, {"created_at": date_win})
-    match: Dict = {"store_id": store_id, "$or": or_clauses}
+        or_clauses.append({"created_at": date_win})
+    if str_win:
+        or_clauses.append({"created_at": str_win})
+    match: Dict = {"store_id": store_id}
+    if or_clauses:
+        match["$or"] = or_clauses
 
     cash_sales = 0.0
     cash_refunds = 0.0
@@ -3674,10 +3701,21 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     # an ISO STRING (datetime.now().isoformat()); reuse the same dual
     # string/datetime $or window (BUG-031 pattern) for safety. historical:True
     # docs (Shopify-era imports) settled OUTSIDE the drawer and are excluded.
-    # Fail-soft: an error here must never zero the sales figure above.
+    #
+    # TENDER SOURCE (money-panel redesign): net off the EXPLICIT refund_tenders /
+    # collect_method the cashier recorded -- NEVER the inferred refund_method
+    # (guessing it regressed split-tender days). A return with no refund_tenders
+    # is UNKNOWN to the drawer and netted NOWHERE (staff keep the manual "cash
+    # paid out" workaround; the drawer never gets a fabricated number).
+    #
+    # Fail-soft is NON-DESTRUCTIVE: accumulate into locals and merge ONLY after
+    # the cursor drains, so a mid-cursor error leaves the payments-derived
+    # figures untouched (never a half-netted drawer presented as authoritative).
     try:
         from ..services.tender_routing import canonicalize_tender
 
+        add_cash_refunds = 0.0
+        add_cash_sales = 0.0
         ret_match: Dict = {
             "store_id": store_id,
             "status": "COMPLETED",
@@ -3691,8 +3729,8 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
                 "return_type": 1,
                 "status": 1,
                 "historical": 1,
-                "refund_method": 1,
-                "refund_amount": 1,
+                "refund_tenders": 1,
+                "collect_method": 1,
                 "collect_amount": 1,
                 "settlement": 1,
             },
@@ -3704,30 +3742,39 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
                 continue
             if r.get("historical") is True:
                 continue
-            if canonicalize_tender(r.get("refund_method")) != "CASH":
-                continue
             rtype = str(r.get("return_type") or "").upper()
             if rtype == "RETURN":
-                try:
-                    amt = float(r.get("refund_amount") or 0)
-                except (TypeError, ValueError):
-                    amt = 0.0
-                if amt > 0:
-                    cash_refunds += amt
+                # Sum the CASH legs of the EXPLICIT refund breakdown only.
+                for t in r.get("refund_tenders") or []:
+                    if canonicalize_tender((t or {}).get("method")) != "CASH":
+                        continue
+                    try:
+                        amt = float((t or {}).get("amount") or 0)
+                    except (TypeError, ValueError):
+                        amt = 0.0
+                    if amt > 0:
+                        add_cash_refunds += amt
             elif rtype == "EXCHANGE":
+                # A COLLECT is a NEW cash-in; key it off collect_method (absent
+                # -> UNKNOWN, added nowhere).
                 direction = str(
                     (r.get("settlement") or {}).get("direction") or ""
                 ).upper()
+                if direction != "COLLECT":
+                    continue
+                if canonicalize_tender(r.get("collect_method")) != "CASH":
+                    continue
                 try:
                     coll_amt = float(r.get("collect_amount") or 0)
                 except (TypeError, ValueError):
                     coll_amt = 0.0
-                if direction == "COLLECT" and coll_amt > 0:
-                    cash_sales += coll_amt
-            # CREDIT_NOTE / EXCHANGE-refund issue STORE CREDIT (no drawer cash
-            # moves) -- refund_amount is None on those docs by construction.
+                if coll_amt > 0:
+                    add_cash_sales += coll_amt
+            # CREDIT_NOTE / EXCHANGE-refund issue STORE CREDIT (no drawer cash).
+        cash_refunds += add_cash_refunds
+        cash_sales += add_cash_sales
     except Exception:
-        pass
+        logger.warning("[CASH-DRAWER] returns netting skipped (fail-soft)", exc_info=True)
     return round(cash_sales, 2), round(cash_refunds, 2)
 
 
@@ -3933,6 +3980,12 @@ async def close_cash_register(
     except Exception:  # noqa: BLE001
         by_mode_breakdown = None
 
+    # Non-blocking double-count advisory: a recorded cash refund (auto-deducted
+    # from the drawer) AND a manual cash payout/expense in the same window may be
+    # the SAME money entered twice (staff used the pre-fix "cash paid out"
+    # workaround). Surface it so the closer can check; never auto-applied.
+    refund_double_entry_advisory = cash_refunds > 0 and cash_expenses > 0
+
     update = {
         "status": "CLOSED",
         "closed_at": end_iso,
@@ -3942,6 +3995,7 @@ async def close_cash_register(
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
+        "refund_double_entry_advisory": refund_double_entry_advisory,
         "by_mode_breakdown": by_mode_breakdown,
         "bank_deposit": summary["bank_deposit"],
         "counted": counted,
@@ -4029,6 +4083,9 @@ async def list_cash_register_sessions(
             "cash_expenses": cash_expenses,
             "bank_deposit": 0.0,
             "expected": expected,
+            # Advisory: a recorded cash refund AND a manual cash payout/expense
+            # in the window may be double entry (pre-fix workaround). FE warns.
+            "refund_double_entry_advisory": cash_refunds > 0 and cash_expenses > 0,
         }
 
     return {
@@ -4275,8 +4332,12 @@ async def cash_reconciliation_summary(
                 "session_date": sess_day,
                 "shift": s.get("shift"),
                 "opening_float": _p2r(s.get("opening_float_paisa")),
+                # cash_sales is now GROSS collected; cash_refunds is the recorded
+                # cash refunds auto-deducted (distinct from the manual cash
+                # payouts in cash_expenses) so this row is comparable to the
+                # cash-register rows above and no sales silently vanish.
                 "cash_sales": _p2r(s.get("cash_sales_paisa")),
-                "cash_refunds": 0.0,
+                "cash_refunds": _p2r(s.get("cash_refunds_paisa")),
                 "cash_expenses": _p2r(s.get("cash_payouts_paisa")),
                 "bank_deposit": 0.0,
                 "expected_cash": expected,

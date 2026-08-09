@@ -50,6 +50,9 @@ export interface ExpectedPreview {
   cash_expenses: number;
   bank_deposit: number;
   expected: number;
+  // True when a recorded cash refund AND a manual cash payout/expense fall in
+  // the same window — possibly the same money entered twice (pre-fix workaround).
+  refund_double_entry_advisory?: boolean;
 }
 
 export interface SessionsResponse {
