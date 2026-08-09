@@ -31,9 +31,15 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
+
+# Used ONLY by the env-reading helpers at the bottom of this module (to warn
+# about a misconfigured cap). The signature verifiers stay side-effect free.
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -176,13 +182,22 @@ def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
 #
 #   1. Delivery timestamps arrive in vendor HEADERS (Shopify:
 #      X-Shopify-Triggered-At), and headers sit OUTSIDE the HMAC -- an
-#      attacker replaying a captured body can rewrite them freely.
+#      attacker replaying a captured body can rewrite them freely, or
+#      simply OMIT them (no header -> no timestamp -> no cap at all).
 #      A header-derived window is therefore a STALENESS CAP ONLY, never
 #      the load-bearing control, and its window must be wider than every
-#      vendor's retry horizon (default 7 days) so it can never eat a
-#      legitimate retry. Razorpay is the exception: its event-emission
-#      time rides INSIDE the signed envelope (top-level integer
-#      `created_at` epoch), so for Razorpay the cap is signature-bound.
+#      vendor's retry horizon so it can never eat a legitimate retry.
+#      Razorpay is the exception: its event-emission time rides INSIDE the
+#      signed envelope (top-level integer `created_at` epoch), so for
+#      Razorpay -- and ONLY Razorpay -- the cap is signature-bound and
+#      cannot be stripped.
+#
+#      Do NOT read the "cap <= dedupe retention" alignment below as a
+#      universal age bound. It is signature-bound for Razorpay only. For
+#      Shopify and Shiprocket there is NO enforceable age bound and dedupe
+#      carries 100% of the replay defence. That is the correct fail-safe
+#      direction (a missing clock accepts rather than drops), but the next
+#      reader must not lean on the invariant.
 #
 #   2. The load-bearing anti-replay is CONTENT-BOUND dedupe.
 #      `body_fingerprint()` hashes the exact bytes the HMAC covers, so a
@@ -210,12 +225,30 @@ DELIVERY_TIMESTAMP_HEADERS = {
     "shiprocket": (),
 }
 
-# Staleness cap default: 7 days. Deliberately far beyond every vendor's
-# retry horizon (Shopify ~48 h, Razorpay ~24 h) so a legitimate retry can
-# NEVER trip it, while still being far below the 30-day TTL on the
-# receiver's dedupe store -- i.e. no delivery can outlive the dedupe
-# records and become re-ingestible.
-_DELIVERY_MAX_AGE_DEFAULT = 7 * 24 * 3600
+# How long the receiver's dedupe store keeps a delivery. This is the TTL on
+# webhook_inbox.received_at -- api/routers/webhooks.py imports THIS constant
+# for its TTL index so the two numbers can never drift apart.
+DEDUPE_RETENTION_SECONDS = 30 * 24 * 3600
+
+# Staleness cap default == the dedupe retention above, deliberately.
+#
+# The cap exists ONLY to cover the window where dedupe genuinely cannot help:
+# a delivery older than the retention has had its dedupe row expire, so it
+# would be re-ingestible. Anything younger is already rejected by
+# fingerprint/id dedupe, so a tighter cap would add no protection and only
+# create a way to drop real deliveries. It was 7 days in the first cut of
+# this fix; that bought nothing and gave Razorpay -- whose clock is inside
+# the HMAC and therefore cannot be omitted by an operator resending from the
+# dashboard -- a new silent-drop path after a >7-day outage.
+_DELIVERY_MAX_AGE_DEFAULT = DEDUPE_RETENTION_SECONDS
+
+# Hard floor for the env override. The whole point of this module's fix is
+# that a narrow freshness window destroys legitimate lifecycle traffic and
+# vendor retries; an operator pasting the old WEBHOOK_REPLAY_WINDOW_SECONDS
+# value (300) into the new key would reinstate that outage on live GST
+# traffic. 48 h is the longest vendor retry horizon (Shopify), so no
+# configured value may sit below it.
+_DELIVERY_MAX_AGE_FLOOR = 48 * 3600
 
 
 def _replay_window_seconds() -> int:
@@ -231,18 +264,36 @@ def _replay_window_seconds() -> int:
 def delivery_max_age_seconds() -> int:
     """Staleness cap for a webhook DELIVERY timestamp, read at call time.
 
-    Env: `WEBHOOK_DELIVERY_MAX_AGE_SECONDS` (default 604800 = 7 days).
-    Garbage / non-positive values fall back to the default rather than
-    producing a zero-width window that would reject everything.
+    Env: `WEBHOOK_DELIVERY_MAX_AGE_SECONDS` (default = DEDUPE_RETENTION_SECONDS,
+    2592000 = 30 days). Garbage / non-positive values fall back to the default
+    rather than producing a zero-width window that would reject everything,
+    and any value below `_DELIVERY_MAX_AGE_FLOOR` (48 h, the longest vendor
+    retry horizon) is raised to the floor with a warning -- a too-small cap
+    is the original outage, not a tightening.
+
+    Callers that need an exact window for testing should pass
+    `window_seconds=` to `is_stale_delivery` instead; that argument is
+    honoured verbatim.
     """
     raw = os.getenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "")
     if not raw:
         return _DELIVERY_MAX_AGE_DEFAULT
     try:
         n = int(raw)
-        return n if n > 0 else _DELIVERY_MAX_AGE_DEFAULT
     except (TypeError, ValueError):
         return _DELIVERY_MAX_AGE_DEFAULT
+    if n <= 0:
+        return _DELIVERY_MAX_AGE_DEFAULT
+    if n < _DELIVERY_MAX_AGE_FLOOR:
+        logger.warning(
+            "[WEBHOOK_VERIFY] WEBHOOK_DELIVERY_MAX_AGE_SECONDS=%s is below the "
+            "%ss floor (the longest vendor retry horizon); using the floor. A "
+            "cap this small drops legitimate lifecycle events and retries.",
+            n,
+            _DELIVERY_MAX_AGE_FLOOR,
+        )
+        return _DELIVERY_MAX_AGE_FLOOR
+    return n
 
 
 def _parse_iso(timestamp_str: str) -> Optional[datetime]:
@@ -271,6 +322,7 @@ def _parse_iso(timestamp_str: str) -> Optional[datetime]:
             return _parse_epoch_number(float(s))
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
+        s = _normalise_fractional_seconds(s)
         dt = datetime.fromisoformat(s)
         # Treat naive timestamps as UTC
         if dt.tzinfo is None:
@@ -278,6 +330,32 @@ def _parse_iso(timestamp_str: str) -> Optional[datetime]:
         return dt
     except (TypeError, ValueError, OverflowError, OSError):
         return None
+
+
+# Matches the fractional-seconds group in an ISO-8601 timestamp, e.g. the
+# ".320072772" in "2026-08-09T10:15:16.320072772+00:00".
+_FRACTION_RE = re.compile(r"\.(\d+)")
+
+
+def _normalise_fractional_seconds(s: str) -> str:
+    """Pad/truncate ISO fractional seconds to exactly 6 digits.
+
+    Shopify's X-Shopify-Triggered-At carries NINE fractional digits
+    ("2026-08-09T10:15:16.320072772Z"). `datetime.fromisoformat` before
+    Python 3.11 accepts only 3 or 6 digits, and 3.10 is a REQUIRED CI target
+    here -- so without this the parse fails, `_parse_iso` returns None, and
+    the staleness cap becomes a silent no-op for the vendor it matters most
+    for. Fail-safe either way (None means "accept"), but a control that
+    quietly does nothing on half the deploy matrix is not a control.
+    """
+    m = _FRACTION_RE.search(s)
+    if not m:
+        return s
+    digits = m.group(1)
+    if len(digits) == 6:
+        return s
+    fixed = (digits + "000000")[:6]
+    return s[: m.start()] + "." + fixed + s[m.end():]
 
 
 def _parse_epoch_number(value: float) -> Optional[datetime]:
@@ -367,11 +445,29 @@ def body_fingerprint(vendor: str, raw_body: bytes, scope: str = "") -> str:
     are not collapsed into one. Vendor is always mixed in so two vendors
     can never collide.
 
+    BOTH vendor and scope are NORMALISED (strip + lower-case) here, inside
+    the primitive, so no caller can get it wrong. This is not cosmetic: the
+    scope comes from an UNSIGNED, attacker-mutable header, so if it were
+    hashed verbatim an attacker would only have to vary its case or pad it
+    with a space to mint a fresh dedupe key for the exact same signed bytes
+    -- 'orders/updated' / 'Orders/Updated' / 'ORDERS/UPDATED' / ' orders/
+    updated' produced FIVE different fingerprints, i.e. thousands of
+    accepted replays of one captured delivery, while the consumer
+    (nexus.py `_handle_shopify_webhook`) lower-cases the same header and
+    routes every variant identically. Normalising cannot merge two
+    genuinely distinct topics -- vendor topic names differ by more than
+    case -- it only collapses spellings of the SAME topic, which is
+    precisely what we want.
+
     Returns "sha256:<hex>" (the prefix keeps synthetic keys visually
     distinct from vendor-issued delivery ids in the inbox).
     """
     h = hashlib.sha256()
-    h.update(f"{(vendor or '').lower()}\n{scope or ''}\n".encode("utf-8"))
+    h.update(
+        f"{(vendor or '').strip().lower()}\n{(scope or '').strip().lower()}\n".encode(
+            "utf-8"
+        )
+    )
     if isinstance(raw_body, (bytes, bytearray)):
         h.update(bytes(raw_body))
     elif raw_body:
@@ -447,4 +543,5 @@ __all__ = [
     "body_fingerprint",
     "delivery_max_age_seconds",
     "DELIVERY_TIMESTAMP_HEADERS",
+    "DEDUPE_RETENTION_SECONDS",
 ]

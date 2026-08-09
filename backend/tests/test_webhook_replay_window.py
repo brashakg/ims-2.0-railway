@@ -383,27 +383,112 @@ def test_replay_with_rotated_delivery_id_is_still_rejected(client, patched_webho
     assert len(patched_webhooks["dispatched"]) == 1, "replay must not re-dispatch"
 
 
-def test_delivery_timestamp_beyond_staleness_cap_is_rejected(
-    client, patched_webhooks, monkeypatch
+def test_delivery_timestamp_beyond_staleness_cap_is_skipped_but_recorded(
+    client, patched_webhooks
 ):
-    """A delivery whose OWN clock is older than the staleness cap is refused.
-    The cap (7 days by default) sits far beyond every vendor retry horizon
-    and below the inbox TTL, so nothing legitimate can reach this branch."""
-    monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "3600")
-    body = _old_order_body(days_old=3, order_id=931003)
+    """A delivery whose OWN clock is older than the staleness cap is not
+    processed — but it is NOT silently discarded either.
+
+    The cap is pinned to the 30-day dedupe retention (no env override here:
+    this exercises the real default), so it can only bite where dedupe
+    genuinely cannot help. And the row is persisted with processed=True +
+    skipped_reason so a correctly-signed delivery always leaves a durable,
+    greppable record."""
+    body = _old_order_body(days_old=40, order_id=931003)
 
     r = _post_shopify(
         client,
         body,
         topic="orders/paid",
         webhook_id="wh-stale",
-        triggered_at=_iso(datetime.now(timezone.utc) - timedelta(hours=5)),
+        triggered_at=_iso(datetime.now(timezone.utc) - timedelta(days=40)),
     )
 
     assert r.status_code == 200
-    assert r.json() == {"status": "skipped", "reason": "delivery_too_old"}
-    assert len(patched_webhooks["db"].get_collection("webhook_inbox").docs) == 0
+    payload = r.json()
+    assert payload["status"] == "skipped"
+    assert payload["reason"] == "delivery_too_old"
+    assert payload["webhook_id"], "the skip must be traceable to a row"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1, "a signed delivery must never vanish without a record"
+    row = inbox.docs[0]
+    assert row["skipped_reason"] == "delivery_too_old"
+    assert row["processed"] is True, "must never be drained as real work"
+    assert row["payload"]["id"] == 931003
+    assert patched_webhooks["dispatched"] == [], "must not dispatch a stale delivery"
+
+
+def test_retry_of_a_stale_delivery_resolves_as_duplicate_not_a_second_skip_row(
+    client, patched_webhooks
+):
+    """Dedupe runs before the staleness cap, so a vendor retrying a delivery
+    we already recorded as too old gets a duplicate — not an unbounded pile
+    of skip rows."""
+    body = _old_order_body(days_old=40, order_id=931009)
+    kwargs = dict(topic="orders/paid", webhook_id="wh-stale-retry",
+                  triggered_at=_iso(datetime.now(timezone.utc) - timedelta(days=40)))
+
+    first = _post_shopify(client, body, **kwargs)
+    assert first.json()["reason"] == "delivery_too_old"
+
+    retry = _post_shopify(client, body, **kwargs)
+    assert retry.json()["status"] == "duplicate"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1, "a retry must not write a second skip row"
     assert patched_webhooks["dispatched"] == []
+
+
+def test_razorpay_resend_after_a_long_outage_is_not_silently_dropped(
+    client, patched_webhooks
+):
+    """REGRESSION (must-fix 2). Razorpay's clock is INSIDE the HMAC, so unlike
+    a Shopify header it cannot be omitted — an owner clicking Resend in the
+    Razorpay dashboard after a long outage has no escape hatch.
+
+    A 10-day-old envelope (well past the old 7-day cap) must be ingested
+    normally. Only beyond the 30-day dedupe retention is it refused, and even
+    then it is recorded, never dropped."""
+    def _envelope(age_days: int, pay_id: str) -> bytes:
+        return json.dumps(
+            {
+                "entity": "event",
+                "event": "payment.captured",
+                "created_at": int(
+                    (datetime.now(timezone.utc) - timedelta(days=age_days)).timestamp()
+                ),
+                "payload": {"payment": {"entity": {"id": pay_id, "amount": 499900}}},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _post(body: bytes, event_id: str):
+        return client.post(
+            "/api/v1/webhooks/razorpay",
+            content=body,
+            headers={
+                "X-Razorpay-Signature": _hex_sig(body, RAZORPAY_SECRET),
+                "X-Razorpay-Event-Id": event_id,
+                "content-type": "application/json",
+            },
+        )
+
+    ten_days = _post(_envelope(10, "pay_outage_1"), "evt_outage_1")
+    assert ten_days.status_code == 200, ten_days.text
+    assert ten_days.json()["status"] == "received", (
+        "a 10-day-old signed Razorpay envelope must be ingested — the old "
+        "7-day cap turned an operator resend into permanent GST loss"
+    )
+    assert len(patched_webhooks["dispatched"]) == 1
+
+    beyond = _post(_envelope(40, "pay_outage_2"), "evt_outage_2")
+    assert beyond.json()["status"] == "skipped"
+    assert beyond.json()["reason"] == "delivery_too_old"
+    rows = patched_webhooks["db"].get_collection("webhook_inbox").docs
+    assert len(rows) == 2, "even the refused delivery must leave a durable row"
+    assert rows[1]["skipped_reason"] == "delivery_too_old"
+    assert len(patched_webhooks["dispatched"]) == 1, "stale one must not dispatch"
 
 
 def test_shiprocket_verbatim_replay_is_rejected(client, patched_webhooks):
@@ -423,6 +508,193 @@ def test_shiprocket_verbatim_replay_is_rejected(client, patched_webhooks):
     assert r2.json()["status"] == "duplicate"
     assert len(patched_webhooks["db"].get_collection("webhook_inbox").docs) == 1
     assert len(patched_webhooks["dispatched"]) == 1
+
+
+@pytest.mark.parametrize("attacker_topic", [
+    "Orders/Paid",
+    "ORDERS/PAID",
+    "orders/Paid",
+    " orders/paid",
+    "orders/paid ",
+    "\torders/paid",
+])
+def test_case_or_whitespace_variant_of_topic_cannot_mint_a_new_dedupe_key(
+    client, patched_webhooks, attacker_topic
+):
+    """REGRESSION (must-fix 1). The topic comes from an UNSIGNED header. If it
+    were hashed verbatim, an attacker could vary only its case or padding to
+    mint a fresh dedupe key for the exact same signed bytes and replay one
+    captured delivery thousands of times — while the consumer
+    (nexus._handle_shopify_webhook) lower-cases the same header and routes
+    every variant identically.
+
+    Both the topic and the delivery id are rotated here; the replay must
+    still be a duplicate, with exactly one inbox row and one dispatch."""
+    body = _old_order_body(days_old=1, order_id=932001)
+
+    first = _post_shopify(client, body, topic="orders/paid",
+                          webhook_id="wh-original",
+                          triggered_at=_iso(datetime.now(timezone.utc)))
+    assert first.json()["status"] == "received"
+
+    replay = _post_shopify(client, body, topic=attacker_topic,
+                           webhook_id="wh-rotated",
+                           triggered_at=_iso(datetime.now(timezone.utc)))
+
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "duplicate", (
+        f"topic variant {attacker_topic!r} minted a fresh dedupe key"
+    )
+    assert len(patched_webhooks["db"].get_collection("webhook_inbox").docs) == 1
+    assert len(patched_webhooks["dispatched"]) == 1
+
+
+def test_whitespace_padded_delivery_id_cannot_dodge_the_unique_index(
+    client, patched_webhooks
+):
+    """REGRESSION (must-fix 1). event_id is stripped before it is used as a
+    dedupe key, so ' evt_x ' and 'evt_x' are the same delivery."""
+    body = json.dumps(
+        {"entity": "event", "event": "payment.captured",
+         "payload": {"payment": {"entity": {"id": "pay_ws", "amount": 100}}}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    def _post(event_id: str):
+        return client.post(
+            "/api/v1/webhooks/razorpay",
+            content=body,
+            headers={
+                "X-Razorpay-Signature": _hex_sig(body, RAZORPAY_SECRET),
+                "X-Razorpay-Event-Id": event_id,
+                "content-type": "application/json",
+            },
+        )
+
+    assert _post("evt_ws_1").json()["status"] == "received"
+    assert _post("  evt_ws_1  ").json()["status"] == "duplicate"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1
+    assert inbox.docs[0]["event_id"] == "evt_ws_1", "the stored id must be stripped"
+    assert len(patched_webhooks["dispatched"]) == 1
+
+
+def test_retry_redispatches_a_row_whose_dispatch_failed(client, patched_webhooks,
+                                                        monkeypatch):
+    """REGRESSION (must-fix 3). Nothing sweeps webhook_inbox for
+    processed=false — NexusAgent._handle_inbox_webhook is reachable only from
+    on_event('webhook.received'), and _do_background_work iterates
+    INTEGRATION_SCHEDULES. So a row whose dispatch failed is stranded, and the
+    fingerprint dedupe now swallows the vendor retry that used to rescue it by
+    accident.
+
+    A retry that matches an UNPROCESSED row must therefore re-dispatch it."""
+    import agents.registry as reg
+
+    async def boom(event, payload, source=""):
+        raise RuntimeError("nexus registry unavailable")
+
+    monkeypatch.setattr(reg, "dispatch_event", boom)
+
+    body = _old_order_body(days_old=1, order_id=933001)
+    kwargs = dict(topic="orders/paid", webhook_id="wh-stranded",
+                  triggered_at=_iso(datetime.now(timezone.utc)))
+
+    first = _post_shopify(client, body, **kwargs)
+    assert first.status_code == 200, "a dispatch failure must still ACK"
+    assert first.json()["status"] == "received"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1
+    assert inbox.docs[0]["processed"] is False, "row is stranded, unprocessed"
+    assert patched_webhooks["dispatched"] == []
+
+    # Age the row past the grace window: below it, an unprocessed row is
+    # assumed to be a normal in-flight async dispatch, not a stranded one.
+    inbox.docs[0]["received_at"] = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    # NEXUS comes back; the vendor retries the same delivery.
+    async def ok(event, payload, source=""):
+        patched_webhooks["dispatched"].append({"event": event, "payload": payload})
+
+    monkeypatch.setattr(reg, "dispatch_event", ok)
+
+    retry = _post_shopify(client, body, **kwargs)
+    assert retry.status_code == 200
+    out = retry.json()
+    assert out["status"] == "duplicate", "still must not create a second row"
+    assert out["redispatched"] is True, "the stranded row must be re-dispatched"
+    assert out["webhook_id"] == inbox.docs[0]["webhook_id"]
+
+    assert len(inbox.docs) == 1, "re-dispatch must not write a second row"
+    assert len(patched_webhooks["dispatched"]) == 1
+    assert patched_webhooks["dispatched"][0]["payload"]["webhook_id"] == (
+        inbox.docs[0]["webhook_id"]
+    )
+
+
+def test_duplicate_of_a_processed_row_does_not_redispatch(client, patched_webhooks):
+    """The mirror of the test above: once a row HAS drained, a replay must
+    stay inert — ack only, no re-dispatch, no reprocessing. This also covers
+    a row NEXUS drained with a handler_error: it is processed, so a replay
+    must not silently re-run a failed money handler."""
+    body = _old_order_body(days_old=1, order_id=933002)
+    kwargs = dict(topic="orders/paid", webhook_id="wh-drained",
+                  triggered_at=_iso(datetime.now(timezone.utc)))
+
+    assert _post_shopify(client, body, **kwargs).json()["status"] == "received"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    inbox.docs[0]["processed"] = True  # NEXUS drained it
+    inbox.docs[0]["handler_error"] = "ValueError: boom"
+    inbox.docs[0]["received_at"] = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    replay = _post_shopify(client, body, **kwargs)
+    out = replay.json()
+    assert out["status"] == "duplicate"
+    assert "redispatched" not in out
+    assert len(patched_webhooks["dispatched"]) == 1, "must not re-dispatch"
+
+
+def test_fast_retry_of_an_inflight_row_does_not_double_dispatch(
+    client, patched_webhooks
+):
+    """The event bus fans out asynchronously when Redis is configured (prod),
+    so processed=false immediately after a 200 is the NORMAL in-flight state.
+    A retry arriving inside the grace window must NOT start a second
+    concurrent drain of the same row."""
+    body = _old_order_body(days_old=1, order_id=933003)
+    kwargs = dict(topic="orders/paid", webhook_id="wh-inflight",
+                  triggered_at=_iso(datetime.now(timezone.utc)))
+
+    assert _post_shopify(client, body, **kwargs).json()["status"] == "received"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert inbox.docs[0]["processed"] is False, "still draining"
+
+    out = _post_shopify(client, body, **kwargs).json()
+    assert out["status"] == "duplicate"
+    assert out.get("redispatched") is None, (
+        "an in-flight row must not be re-dispatched"
+    )
+    assert len(patched_webhooks["dispatched"]) == 1
+
+
+def test_duplicate_echoes_the_matched_webhook_id(client, patched_webhooks):
+    """Shopify's 'Send test notification' posts a byte-stable canned payload,
+    so every send after the first dedupes. Echo the matched webhook_id so an
+    operator can see WHICH row matched rather than reading it as a failure."""
+    body = b'{"awb":"AWB-TEST","current_status":"TEST"}'
+    headers = {
+        "X-Shiprocket-Signature": _hex_sig(body, SHIPROCKET_SECRET),
+        "content-type": "application/json",
+    }
+    first = client.post("/api/v1/webhooks/shiprocket", content=body, headers=headers)
+    second = client.post("/api/v1/webhooks/shiprocket", content=body, headers=headers)
+
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["webhook_id"] == first.json()["webhook_id"]
 
 
 def test_same_body_under_a_different_topic_is_not_collapsed(
@@ -680,9 +952,37 @@ class TestIsStaleDelivery:
         ts = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
         assert webhook_verify.is_stale_delivery(ts) is False
 
+    def test_ten_day_old_delivery_within_default_cap(self):
+        """An operator resending after a long outage must not be dropped."""
+        ts = _iso(datetime.now(timezone.utc) - timedelta(days=10))
+        assert webhook_verify.is_stale_delivery(ts) is False
+
     def test_beyond_cap_is_stale(self):
-        ts = _iso(datetime.now(timezone.utc) - timedelta(days=9))
+        ts = _iso(datetime.now(timezone.utc) - timedelta(days=40))
         assert webhook_verify.is_stale_delivery(ts) is True
+
+    @pytest.mark.parametrize("fraction", [
+        ".320072772",   # what Shopify actually sends: 9 digits
+        ".320072",      # 6 digits
+        ".320",         # 3 digits
+        ".32",          # 2 digits
+        "",             # none
+    ])
+    def test_shopify_fractional_second_precision_is_parsed(self, fraction):
+        """X-Shopify-Triggered-At carries NINE fractional digits, which
+        datetime.fromisoformat before Python 3.11 (3.10 is a REQUIRED CI
+        target) cannot parse. Without normalisation the cap would be a
+        permanent no-op on half the deploy matrix and nothing would notice."""
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        ts = old.strftime("%Y-%m-%dT%H:%M:%S") + fraction + "Z"
+        assert webhook_verify._parse_iso(ts) is not None, f"unparsed: {ts}"
+        assert webhook_verify.is_stale_delivery(ts) is True
+
+    def test_fractional_seconds_with_a_numeric_offset(self):
+        ts = "2026-08-09T10:15:16.320072772+05:30"
+        parsed = webhook_verify._parse_iso(ts)
+        assert parsed is not None
+        assert parsed.utcoffset().total_seconds() == 5.5 * 3600
 
     def test_explicit_window_argument_wins(self):
         ts = _iso(datetime.now(timezone.utc) - timedelta(seconds=120))
@@ -695,22 +995,47 @@ class TestIsStaleDelivery:
         assert webhook_verify.is_stale_delivery("not-a-date") is False
 
     def test_epoch_seconds_and_millis_parsed(self):
-        old = datetime.now(timezone.utc) - timedelta(days=9)
+        old = datetime.now(timezone.utc) - timedelta(days=40)
         assert webhook_verify.is_stale_delivery(str(int(old.timestamp()))) is True
         assert webhook_verify.is_stale_delivery(str(int(old.timestamp() * 1000))) is True
         fresh = datetime.now(timezone.utc)
         assert webhook_verify.is_stale_delivery(str(int(fresh.timestamp()))) is False
 
-    def test_env_override_and_garbage_fallback(self, monkeypatch):
+    def test_cap_default_is_pinned_to_the_dedupe_retention(self, monkeypatch):
+        """The cap may only bite where dedupe genuinely cannot help, i.e.
+        once the dedupe row has expired. Anything tighter is a drop path with
+        no security benefit."""
         monkeypatch.delenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", raising=False)
-        assert webhook_verify.delivery_max_age_seconds() == 7 * 24 * 3600
-        monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "120")
-        assert webhook_verify.delivery_max_age_seconds() == 120
+        assert (
+            webhook_verify.delivery_max_age_seconds()
+            == webhook_verify.DEDUPE_RETENTION_SECONDS
+            == 30 * 24 * 3600
+        )
+
+    def test_env_override_and_garbage_fallback(self, monkeypatch):
+        monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", str(10 * 24 * 3600))
+        assert webhook_verify.delivery_max_age_seconds() == 10 * 24 * 3600
         monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "garbage")
-        assert webhook_verify.delivery_max_age_seconds() == 7 * 24 * 3600
+        assert webhook_verify.delivery_max_age_seconds() == 30 * 24 * 3600
         # A zero/negative cap would reject everything - never honour it.
         monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "0")
-        assert webhook_verify.delivery_max_age_seconds() == 7 * 24 * 3600
+        assert webhook_verify.delivery_max_age_seconds() == 30 * 24 * 3600
+
+    @pytest.mark.parametrize("bad", ["300", "60", "3600", "86399"])
+    def test_env_override_below_the_floor_is_clamped(self, monkeypatch, bad):
+        """An operator pasting the old WEBHOOK_REPLAY_WINDOW_SECONDS value
+        (300) into the new key would reinstate the exact outage this module
+        exists to fix, on live GST traffic. Anything under the longest vendor
+        retry horizon is clamped to it."""
+        monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", bad)
+        assert webhook_verify.delivery_max_age_seconds() == 48 * 3600
+
+    def test_a_clamped_cap_still_accepts_a_full_vendor_retry_horizon(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("WEBHOOK_DELIVERY_MAX_AGE_SECONDS", "300")
+        ts = _iso(datetime.now(timezone.utc) - timedelta(hours=47))
+        assert webhook_verify.is_stale_delivery(ts) is False
 
     def test_narrow_replay_window_env_does_not_affect_delivery_cap(self, monkeypatch):
         """WEBHOOK_REPLAY_WINDOW_SECONDS=300 (the prod default that caused the
@@ -741,6 +1066,34 @@ class TestBodyFingerprint:
         )
         assert base != webhook_verify.body_fingerprint(
             "razorpay", self.BODY, scope="orders/paid"
+        )
+
+    def test_scope_is_normalised_inside_the_primitive(self):
+        """The scope arrives on an unsigned header. Case/whitespace variants
+        of the SAME topic must collapse to ONE key, or an attacker mints a
+        fresh dedupe key per spelling and replays at will. Normalising in the
+        primitive means no future caller can get this wrong."""
+        variants = [
+            "orders/updated", "Orders/Updated", "ORDERS/UPDATED",
+            "orders/Updated", " orders/updated", "orders/updated ",
+            "\torders/updated\n",
+        ]
+        prints = {
+            webhook_verify.body_fingerprint("shopify", self.BODY, scope=v)
+            for v in variants
+        }
+        assert len(prints) == 1, f"{len(prints)} distinct keys for one topic"
+
+    def test_vendor_is_normalised_too(self):
+        assert webhook_verify.body_fingerprint("shopify", self.BODY) == (
+            webhook_verify.body_fingerprint("  Shopify ", self.BODY)
+        )
+
+    def test_distinct_topics_still_do_not_collide_after_normalisation(self):
+        assert webhook_verify.body_fingerprint(
+            "shopify", self.BODY, scope="orders/paid"
+        ) != webhook_verify.body_fingerprint(
+            "shopify", self.BODY, scope="orders/updated"
         )
 
     def test_empty_body_does_not_crash(self):
