@@ -246,7 +246,20 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     // Network error
     message = 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
-    message = 'Server error. Please try again in a moment.';
+    // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
+    // a crash. Goods-receipt acceptance uses it to say "N units were received
+    // before we stopped — the units already received are safe and will not be
+    // counted twice", which is the sentence that stops a clerk recounting a
+    // half-received carton and hand-adding the difference (a double mint that
+    // sits outside every server-side guard). So a STRING detail on a 503
+    // survives; every other 5xx keeps the generic text so no internal error
+    // message can leak to a user.
+    const safeStopDetail =
+      error.response.status === 503 ? error.response?.data?.detail : undefined;
+    message =
+      typeof safeStopDetail === 'string' && safeStopDetail.trim()
+        ? safeStopDetail
+        : 'Server error. Please try again in a moment.';
   } else {
     // Handle various API error formats (detail can be string or array)
     const rawDetail = error.response?.data?.detail;

@@ -823,8 +823,7 @@ def test_stale_window_is_wide_enough_to_be_safe_and_short_enough_to_wait_out():
     assert vd._GRN_ACCEPT_LOCK_STALE_SECONDS >= vd._GRN_ACCEPT_HEARTBEAT_SECONDS * 20
     # ...and capped, because this is how long staff wait after a hard kill.
     assert vd._GRN_ACCEPT_LOCK_STALE_SECONDS <= 600
-    # The unverifiable-claim abort must fire BEFORE a takeover is possible.
-    assert vd._GRN_ACCEPT_LOCK_STALE_SECONDS / 2 < vd._GRN_ACCEPT_LOCK_STALE_SECONDS
+    # Real bounds live in test_abort_bounds_are_strictly_inside_the_takeover_window.
 
 
 def test_conflict_message_is_honest_about_the_wait(wired):
@@ -986,8 +985,9 @@ def test_a_retry_continues_the_ordinal_sequence_instead_of_restarting(wired):
 
 def test_duplicate_rejection_is_not_surfaced_as_an_error(wired):
     """A DuplicateKeyError from the unique key is the EXPECTED outcome of the
-    race, so the mint helper skips it and returns None -- it never propagates
-    out as a 500."""
+    race, so the mint helper reports it as _GRN_MINT_DUPLICATE and the caller
+    skips the unit -- it never propagates out as a 500. (Round 5 made this a
+    DISTINCT answer from a falsy 'the insert did not land', which must abort.)"""
     _repo, stock_repo = wired(_grn(qty=1))
     doc = {
         "source_type": "GRN",
@@ -998,7 +998,7 @@ def test_duplicate_rejection_is_not_surfaced_as_an_error(wired):
     }
     assert vd._grn_mint_unit(stock_repo, dict(doc), True) is not None
     # A rival worker already minted this exact ordinal.
-    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is None
+    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is vd._GRN_MINT_DUPLICATE
     assert stock_repo.rejected == 1
     assert len(stock_repo.rows) == 1
 
@@ -1168,7 +1168,7 @@ def test_persistent_heartbeat_errors_abort_even_with_no_takeover(wired, monkeypa
     assert err.value.status_code == 503
     # Stopped after MAX_ERRORS consecutive failures, not after the whole line.
     assert grn_repo.collection.heartbeat_attempts == vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS
-    assert len(stock_repo.rows) < 30
+    assert len(stock_repo.rows) == vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS - 1
     # The claim was handed back so the operator can retry immediately.
     assert grn_repo.doc["accept_lock_token"] is None
 
@@ -1436,3 +1436,261 @@ def test_void_fails_closed_when_the_stock_check_errors(wired, monkeypatch):
         _run(vd.void_grn("GRN-1", _ADMIN))
     assert err.value.status_code == 503
     assert grn_repo.doc["status"] == "PENDING"
+
+
+# ===========================================================================
+# ROUND 5 -- the mirror image of the original bug, found by inverting the
+# ordering, plus the ordinal hole and the retry amplifier.
+#   MF1 void raced the mint and orphaned units on a VOID receipt
+#   MF2 the flip reported SUCCESS over a VOID doc
+#   MF3 express 500 was auto-retried into a second stock-bearing GRN
+#   MF4 a real insert failure punched a permanent ordinal hole
+#   MF5 the 503 copy never reached the operator
+# ===========================================================================
+
+
+# --- MF1 + MF2: void racing an in-flight accept ---------------------------
+def test_void_racing_an_in_flight_accept_is_refused(wired, monkeypatch):
+    """THE inverted ordering. The accept claims, then stalls before its first
+    mint -- a window that in production spans the PO fetch, the product lookup,
+    the cost backfill write and the already-minted count. A void landing there
+    passes the status gate AND the stock gate (nothing is minted yet), and the
+    accept then puts the whole delivery onto a VOID receipt.
+
+    Void now takes the same guarded claim, so it simply loses."""
+    grn_repo, stock_repo = wired(_grn(qty=20))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    voided = {}
+
+    def _void_mid_claim():
+        try:
+            _run(vd.void_grn("GRN-1", _ADMIN))
+        except HTTPException as exc:
+            voided["exc"] = exc
+
+    # Fires BEFORE the first unit is appended: claim taken, nothing minted.
+    stock_repo.on_create = _void_mid_claim
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert voided["exc"].status_code == 409
+    assert "being accepted right now" in voided["exc"].detail
+    assert grn_repo.doc["status"] == "ACCEPTED", "the receipt must not be VOID"
+    assert len(stock_repo.rows) == 20
+    assert out["units_added"] == 20
+    assert out.get("status_flip_failed") is None
+
+
+def test_flip_over_a_void_doc_is_reported_as_a_failure_not_success(wired):
+    """MF2 in isolation: even if a receipt reaches VOID by some other route,
+    the terminal flip must NOT answer a green 'GRN accepted, stock added'.
+
+    `_guarded_grn_write` returns plain False on a no-match, which is neither
+    None nor _GRN_WRITE_ERROR -- round 4 fell through to `return True`."""
+    grn_repo, _stock = wired(_grn(status="VOID"))
+    assert vd._advance_grn_terminal_status(grn_repo, "GRN-1", "ACCEPTED") is False
+    assert grn_repo.doc["status"] == "VOID"
+
+    # ...but a receipt somebody else already advanced is still a success.
+    ok_repo, _s2 = wired(_grn(status="ACCEPTED"))
+    assert vd._advance_grn_terminal_status(ok_repo, "GRN-1", "ACCEPTED") is True
+
+
+def test_units_never_end_up_behind_a_void_receipt(wired, monkeypatch):
+    """End-to-end guarantee, asserted from the stock side: whichever of the two
+    wins, the units and the receipt status can never disagree."""
+    grn_repo, stock_repo = wired(_grn(qty=6))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    def _void_mid_claim():
+        try:
+            _run(vd.void_grn("GRN-1", _ADMIN))
+        except HTTPException:
+            pass
+
+    stock_repo.on_create = _void_mid_claim
+    _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    if stock_repo.rows:
+        assert grn_repo.doc["status"] != "VOID"
+    else:
+        assert grn_repo.doc["status"] == "VOID"
+
+
+def test_void_before_any_accept_still_wins_cleanly(wired, monkeypatch):
+    """The claim must not make a legitimate void harder: with no accept in
+    flight, void takes the claim, voids, and hands it straight back."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+    out = _run(vd.void_grn("GRN-1", _ADMIN))
+    assert out["grn_status"] == "VOID"
+    assert grn_repo.doc["status"] == "VOID"
+    assert grn_repo.doc["accept_lock_token"] is None, "claim handed back"
+
+
+def test_accept_after_a_void_is_refused(wired, monkeypatch):
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+    _run(vd.void_grn("GRN-1", _ADMIN))
+    with pytest.raises(HTTPException) as err:
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert err.value.status_code == 400
+    assert stock_repo.rows == []
+
+
+# --- MF4: a real insert failure must not punch an ordinal hole -------------
+def test_a_dropped_insert_does_not_punch_a_permanent_ordinal_hole(wired):
+    """BaseRepository.create swallows every non-duplicate error and returns
+    None. Round 4 advanced `seq` anyway, leaving ordinals [0,1,2,4..9]; the
+    re-accept then computed already=9, tried seq=9, was rejected as a duplicate,
+    and the 10th physical unit could NEVER be received -- silent, permanent, and
+    a regression versus main, which healed on retry."""
+    grn_repo, stock_repo = wired(_grn(qty=10))
+    real_create = stock_repo.create
+
+    def _drop_unit_three(doc, **kw):
+        if doc.get("line_unit_seq") == 3:
+            return None  # exactly what BaseRepository.create does on an error
+        return real_create(doc, **kw)
+
+    stock_repo.create = _drop_unit_three
+    with pytest.raises(HTTPException) as err:
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert err.value.status_code == 503
+    assert "will not be counted twice" in err.value.detail
+
+    # The ordinals are still a CONTIGUOUS PREFIX -- no hole was punched.
+    assert [r["line_unit_seq"] for r in stock_repo.rows] == [0, 1, 2]
+
+    # ...so the retry heals completely.
+    stock_repo.create = real_create
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert out["units_added"] == 7
+    assert [r["line_unit_seq"] for r in stock_repo.rows] == list(range(10))
+    assert stock_repo.rejected == 0
+
+
+def test_a_duplicate_is_still_skipped_not_treated_as_a_failure(wired):
+    """The other half of the three-way answer: an index-rejected ordinal must
+    NOT abort the accept."""
+    grn_repo, stock_repo = wired(_grn(qty=3))
+    doc = {
+        "source_type": "GRN",
+        "source_id": "GRN-1",
+        "product_id": "P1",
+        "grn_line_index": 0,
+        "line_unit_seq": 0,
+    }
+    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is not None
+    assert vd._grn_mint_unit(stock_repo, dict(doc), True) is vd._GRN_MINT_DUPLICATE
+    # A genuine failure is a DIFFERENT, falsy answer.
+
+    class _Dead:
+        def create(self, _doc, raise_on_duplicate=False):
+            return None
+
+    assert not vd._grn_mint_unit(_Dead(), dict(doc), True)
+
+
+# --- MF3: express must not be auto-retried into a second receipt -----------
+def test_express_partial_is_a_conflict_not_a_server_error():
+    """The frontend api client auto-retries every 5xx POST three times, and
+    _create_grn_impl has no duplicate guard for STANDARD receipts -- so each
+    retry created a NEW grn_id and minted the whole delivery again, which the
+    per-(grn, line, unit) index cannot catch because it keys on source_id.
+
+    Asserted at the source so nobody can quietly restore the 500."""
+    import inspect
+
+    src = inspect.getsource(vd.express_receive_grn)
+    assert "status_code=500" not in src, "express must not raise a retryable 5xx"
+    assert src.count("status_code=409") >= 3
+
+
+# --- Ship-with-note hardening (all inside files already being edited) ------
+def test_half_window_arm_aborts_even_before_max_errors(wired):
+    """The `unconfirmed_for >= STALE/2` arm is the exact mechanism that
+    justifies dropping the window to 300s -- 'a worker gives up at half the
+    window, BEFORE a takeover is even permitted'. It had no behavioural test."""
+    grn_repo, _stock = wired(_grn())
+    token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
+    grn_repo.collection.__class__ = _HeartbeatBoomColl
+    grn_repo.collection.heartbeat_attempts = 0
+
+    stale_confirm = datetime.now() - timedelta(
+        seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS / 2 + 5
+    )
+    state = {
+        "units": vd._GRN_ACCEPT_HEARTBEAT_UNITS,
+        "at": datetime.now(),
+        "errors": 1,  # well under MAX_ERRORS: the TIME arm must fire
+        "confirmed_at": stale_confirm,
+    }
+    with pytest.raises(HTTPException) as err:
+        vd._grn_accept_heartbeat_tick(grn_repo, "GRN-1", token, state)
+    assert err.value.status_code == 503
+    assert state["errors"] == 2, "one attempt, and it did not reset the run"
+
+
+def test_abort_bounds_are_strictly_inside_the_takeover_window():
+    """Replaces a tautology (x/2 < x) that would have passed with the half-
+    window arm deleted and MAX_ERRORS set to 500."""
+    worst_case_errors_arm = (
+        vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS * vd._GRN_ACCEPT_HEARTBEAT_SECONDS
+    )
+    assert worst_case_errors_arm < vd._GRN_ACCEPT_LOCK_STALE_SECONDS
+    assert vd._GRN_ACCEPT_LOCK_STALE_SECONDS / 2 < vd._GRN_ACCEPT_LOCK_STALE_SECONDS
+    # MAX_ERRORS is what bounds units minted against an unprovable claim.
+    assert vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS <= 5
+
+
+def test_unverified_mint_tolerance_is_exactly_max_errors_minus_one(wired, monkeypatch):
+    """MAX_ERRORS tolerates MAX_ERRORS-1 units minted while the claim cannot be
+    proved. Pin the exact number so the tolerance cannot drift unnoticed."""
+    grn_repo, stock_repo = wired(_grn(qty=30), coll_cls=_HeartbeatBoomColl)
+    monkeypatch.setattr(vd, "_GRN_ACCEPT_HEARTBEAT_SECONDS", 0)
+    with pytest.raises(HTTPException):
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert len(stock_repo.rows) == vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS - 1
+
+
+def test_headline_interleave_with_the_index_absent_is_pinned(wired, monkeypatch):
+    """MF4 explicitly tolerates a MISSING index (ensure_indexes is fail-soft and
+    receiving must never be blocked). In that state the fail-closed heartbeat
+    alone still bounds the damage -- pin the exact count so the tolerance is
+    visible rather than assumed."""
+    grn_repo, stock_repo = wired(_grn(qty=20), enforce_unique=False)
+    monkeypatch.setattr(vd, "_GRN_ACCEPT_HEARTBEAT_SECONDS", 0)
+
+    def _steal():
+        grn_repo.doc["accept_lock_at"] = _aged_lock()
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+        grn_repo.collection.__class__ = _HeartbeatBoomColl
+        grn_repo.collection.heartbeat_attempts = 0
+
+    stock_repo.after_hook = _steal
+    stock_repo.after_n = 6
+    with pytest.raises(HTTPException):
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    # 20 real units + (MAX_ERRORS - 1) minted before the abort could fire.
+    assert len(stock_repo.rows) == 20 + (vd._GRN_ACCEPT_HEARTBEAT_MAX_ERRORS - 1)
+
+
+def test_void_fail_closed_on_the_production_count_branch(wired, monkeypatch):
+    """The round-4 test monkeypatched repo.count, but production takes the
+    collection.count_documents branch -- prove the 503 on the branch prod runs."""
+    grn_repo, stock_repo = wired(_grn(qty=10))
+
+    class _Coll:
+        def count_documents(self, _flt):
+            raise RuntimeError("mongo unavailable")
+
+    stock_repo.collection = _Coll()
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.void_grn("GRN-1", _ADMIN))
+    assert err.value.status_code == 503
+    assert grn_repo.doc["status"] == "PENDING"
+    assert grn_repo.doc["accept_lock_token"] is None, "claim handed back"

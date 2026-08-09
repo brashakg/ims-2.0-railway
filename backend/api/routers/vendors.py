@@ -2430,6 +2430,10 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
 # no reader interprets them, but they are not literally invisible.)
 _GRN_ACCEPTABLE_STATUSES = ("PENDING", "PARTIALLY_ACCEPTED")
 
+# Statuses that mean "this receipt HAS been accepted". Anything else the flip
+# lands on (VOID, ESCALATED, missing) is a failure, not a benign no-op.
+_GRN_TERMINAL_ACCEPT_STATUSES = ("ACCEPTED", "PARTIALLY_ACCEPTED")
+
 # A crashed / KILLED worker (SIGKILL, OOM, Railway redeploy -- nothing that any
 # except/finally can catch) must not freeze a receipt forever, so a lock older
 # than this may be taken over. That wait is pure SHOP-FLOOR TIME: a carton on the
@@ -2598,7 +2602,15 @@ def _guarded_grn_write_retried(grn_repo, flt: dict, patch: dict, *, what, grn_id
     how a single failed lock release could park a receipt behind the stale
     window with nobody able to see why."""
     res = None
-    for _ in range(2):
+    for attempt in range(2):
+        if attempt:
+            # A brief pause: back-to-back attempts against a broken socket both
+            # fail in milliseconds and the "retry" buys nothing. This is short
+            # enough not to matter to a request and long enough to clear a
+            # primary stepdown that is already completing.
+            import time
+
+            time.sleep(0.25)
         res = _guarded_grn_write(grn_repo, flt, patch)
         if res is not _GRN_WRITE_ERROR:
             return res
@@ -2646,8 +2658,14 @@ def _advance_grn_terminal_status(grn_repo, grn_id: str, grn_status: str) -> bool
     real units on the shelf, and leaving them behind a PENDING receipt is worse
     than a stale flip. But it IS guarded to only ever ADVANCE -- the filter
     accepts only the pre-terminal statuses -- so a stale worker cannot demote an
-    already-ACCEPTED receipt back to PARTIALLY_ACCEPTED. Matching nothing is a
-    SUCCESS: it means somebody already advanced it, so nothing is stranded."""
+    already-ACCEPTED receipt back to PARTIALLY_ACCEPTED.
+
+    Matching nothing is NOT automatically success. It only means the doc is no
+    longer in a pre-terminal status, which is benign if somebody already
+    advanced it -- and a silent catastrophe if the receipt went VOID underneath
+    us, because the caller would then answer a green "GRN accepted, stock added"
+    over a VOID doc while N real sellable units sit behind it. So on a no-match
+    we RE-READ and only report success for a genuinely terminal status."""
     res = _guarded_grn_write(
         grn_repo,
         {"grn_id": grn_id, "status": {"$in": list(_GRN_ACCEPTABLE_STATUSES)}},
@@ -2663,6 +2681,23 @@ def _advance_grn_terminal_status(grn_repo, grn_id: str, grn_status: str) -> bool
             "and a re-accept is idempotent.",
             grn_id,
             grn_status,
+        )
+        return False
+    if res is False:
+        try:
+            current = grn_repo.find_by_id(grn_id)
+        except Exception:  # noqa: BLE001
+            current = None
+        status_now = (current or {}).get("status")
+        if status_now in _GRN_TERMINAL_ACCEPT_STATUSES:
+            return True  # somebody already advanced it; nothing is stranded
+        logger.error(
+            "[VENDOR] GRN %s: terminal status flip to %s did NOT apply -- the "
+            "receipt is now %s. Units are already minted and are NOT attached "
+            "to an accepted receipt; this needs manual reconciliation.",
+            grn_id,
+            grn_status,
+            status_now,
         )
         return False
     return True
@@ -2899,16 +2934,27 @@ def _is_grn_unit_duplicate(exc) -> bool:
     return False
 
 
+# "This ordinal already exists" -- the index did its job. DISTINCT from a falsy
+# return, which now means the insert genuinely did not land.
+_GRN_MINT_DUPLICATE = object()
+
+
 def _grn_mint_unit(stock_repo, doc: dict, raises_on_duplicate: bool):
     """Insert ONE serialized unit for a GRN line.
 
-    Returns the created row, or None when the unique
-    (source_id, grn_line_index, line_unit_seq) index REJECTED it. That
-    rejection is the EXPECTED outcome of the last remaining race -- an insert
-    that was already in flight inside a worker which got declared stale and
-    taken over, landing after the takeover holder minted the same ordinal. It
-    is the index doing its job, NOT a failure: log it and skip the unit, never
-    surface it as a 500.
+    Returns the created row, ``_GRN_MINT_DUPLICATE`` when the unique
+    (source_id, grn_line_index, line_unit_seq) index rejected it, or a FALSY
+    value when the insert genuinely failed.
+
+    That three-way answer is load-bearing. A duplicate is the EXPECTED outcome
+    of the last remaining race (an insert already in flight inside a worker that
+    got declared stale and taken over) -- skipping it is correct. A real failure
+    is the opposite: `seq` must NOT advance past it, because the loop would
+    leave a HOLE in the line's ordinals that the unique index then makes
+    PERMANENTLY unfillable -- the re-accept computes `already` from the row
+    COUNT, lands on an ordinal that already exists, is rejected as a duplicate,
+    and the missing physical unit can never be received. Collapsing the two into
+    one falsy return is exactly that bug.
 
     A DuplicateKeyError from ANY OTHER index is re-raised: skipping it would
     silently lose a real received unit. NOTE the real BaseRepository.create
@@ -2940,7 +2986,7 @@ def _grn_mint_unit(stock_repo, doc: dict, raises_on_duplicate: bool):
             doc.get("grn_line_index"),
             doc.get("line_unit_seq"),
         )
-        return None
+        return _GRN_MINT_DUPLICATE
 
 
 def _grn_accept_lock_minutes_left(locked_at) -> Optional[int]:
@@ -3355,6 +3401,36 @@ def _accept_grn_claimed(
                     },
                     mint_raises_on_duplicate,
                 )
+                if created is _GRN_MINT_DUPLICATE:
+                    # Another attempt already owns this ordinal. Advancing seq
+                    # is correct here -- the unit exists, it is simply not ours.
+                    continue
+                if not created:
+                    # A REAL insert failure (BaseRepository.create swallows every
+                    # non-duplicate exception into a falsy return, so this is the
+                    # only signal there is). STOP: carrying on would mint the
+                    # remaining ordinals around this one and leave a hole the
+                    # unique index makes permanently unfillable. Aborting here
+                    # leaves the line's ordinals a contiguous prefix, so the
+                    # re-accept recomputes `already` and mints exactly the
+                    # missing units -- it heals.
+                    logger.error(
+                        "[VENDOR] GRN %s line %s: unit #%s did not insert -- "
+                        "stopping so the ordinal sequence stays contiguous and "
+                        "a retry can finish the receipt",
+                        grn_id,
+                        line_index,
+                        seq,
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            f"{units_added} unit(s) were received before the "
+                            "stock store stopped responding. Open the receiving "
+                            "screen and accept it again -- the units already "
+                            "received are safe and will not be counted twice."
+                        ),
+                    )
                 if created:
                     units_added += 1
                     stock_id = created.get("stock_id") or created.get("_id")
@@ -3628,6 +3704,17 @@ async def express_receive_grn(
             "receiving screen to accept or void it."
         ),
     }
+    # EXPRESS_PARTIAL is a 409, NOT a 500. The GRN row already exists, so this
+    # is a conflict, not a server fault -- and the distinction is a stock-safety
+    # one, not a semantic nicety: the frontend api client auto-retries every 5xx
+    # POST three times, _create_grn_impl has no duplicate guard for STANDARD
+    # receipts (only DELIVERY_CHALLAN has one), and each retry therefore creates
+    # a NEW grn_id and mints the WHOLE delivery again -- which the per-(grn,
+    # line, unit) unique index cannot catch, because it keys on source_id.
+    # Before this PR every raise inside accept was a PRE-mint 4xx, so a retried
+    # express duplicate held zero units and was harmlessly voidable; the two
+    # MID-mint 503s added here (count-verify and heartbeat) fire AFTER stock is
+    # on the shelf, which is what turns that retry into real phantom stock.
     try:
         accept_res = await _accept_grn_impl(grn_id, current_user)
     except HTTPException as exc:
@@ -3636,10 +3723,10 @@ async def express_receive_grn(
             grn_id,
             exc.detail,
         )
-        raise HTTPException(status_code=500, detail=_partial_detail)
+        raise HTTPException(status_code=409, detail=_partial_detail)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] express-receive accept crashed for %s: %s", grn_id, exc)
-        raise HTTPException(status_code=500, detail=_partial_detail)
+        raise HTTPException(status_code=409, detail=_partial_detail)
 
     grn_status = accept_res.get("grn_status")
     if grn_status is not None and grn_status != "ACCEPTED":
@@ -3647,8 +3734,10 @@ async def express_receive_grn(
         # catalogued / incomplete catalog). The chain cannot finish (F3 blocks
         # the invoice draft on a non-ACCEPTED GRN), so surface the exact
         # recovery instead of a half-true success.
+        # 409, not 500 -- same reason as above: this receipt already holds real
+        # stock, so it must never be auto-retried into a second one.
         raise HTTPException(
-            status_code=500,
+            status_code=409,
             detail={
                 **_partial_detail,
                 "grn_status": grn_status,
@@ -3819,77 +3908,105 @@ async def void_grn(
             ),
         )
 
-    # STOCK GATE. FAILS CLOSED: if we cannot establish that this receipt put
-    # nothing on the shelf, we do not void it.
-    stock_repo = get_stock_repository()
-    if stock_repo is not None:
-        try:
-            already_minted = _grn_already_minted(
-                stock_repo, {"source_type": "GRN", "source_id": grn_id}
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "[VENDOR] GRN %s: could not check for already-minted units "
-                "before voiding (%s) -- refusing the void",
-                grn_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Could not check whether this goods receipt has already put "
-                    "stock on the shelf, so it was not voided. Try again in a "
-                    "moment."
-                ),
-            ) from exc
-        if already_minted > 0:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"This goods receipt has already put {already_minted} "
-                    "unit(s) into stock -- an earlier acceptance was "
-                    "interrupted before it finished. It cannot be voided, "
-                    "because that would leave those units on the shelf with no "
-                    "receipt behind them. Accept it again to finish receiving; "
-                    "the units already received will not be counted twice."
-                ),
-            )
+    # MUTUAL EXCLUSION WITH ACCEPT. Void takes the SAME guarded claim the accept
+    # path uses, so the two can never interleave. A point-in-time stock gate is
+    # not enough on its own: a void landing in the window between an accept's
+    # claim and its FIRST mint -- a window spanning the PO fetch, the product
+    # lookup, the cost backfill write and the already-minted count -- passes
+    # every gate here while the accept is still about to mint. The accept then
+    # puts the whole delivery onto a VOID receipt: real sellable units behind a
+    # voided doc, PO receipt math permanently short (it sums ACCEPTED GRNs only),
+    # and re-accepting impossible because accept refuses a non-PENDING receipt.
+    # Taking the claim closes both orderings, not just accept-then-void.
+    claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
+    if claim_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This goods receipt is being accepted right now, so it cannot "
+                "be voided. Wait for that to finish, then refresh -- if it put "
+                "stock on the shelf it must be accepted, never voided."
+            ),
+        )
 
-    grn_repo.update(
-        grn_id,
-        {
-            "status": "VOID",
-            "voided_at": datetime.now().isoformat(),
-            "voided_by": current_user.get("user_id"),
-        },
-    )
-    # Fail-soft audit trail (same contract as the other GRN mutations).
     try:
-        audit = get_audit_repository()
-        if audit is not None:
-            audit.create(
-                {
-                    "kind": "grn_void",
-                    "entity_type": "grn",
-                    "entity_id": grn_id,
-                    "action": "VOID",
-                    "performed_by": current_user.get("user_id"),
-                    "details": {
-                        "grn_number": grn.get("grn_number"),
-                        "po_id": grn.get("po_id"),
-                        "store_id": grn.get("store_id"),
-                    },
-                }
-            )
-    except Exception:  # noqa: BLE001 - audit must never block the void
-        pass
+        # STOCK GATE. FAILS CLOSED: if we cannot establish that this receipt put
+        # nothing on the shelf, we do not void it. Read UNDER the claim, so no
+        # accept can be minting while we look.
+        stock_repo = get_stock_repository()
+        if stock_repo is not None:
+            try:
+                already_minted = _grn_already_minted(
+                    stock_repo, {"source_type": "GRN", "source_id": grn_id}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[VENDOR] GRN %s: could not check for already-minted units "
+                    "before voiding (%s) -- refusing the void",
+                    grn_id,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not check whether this goods receipt has already "
+                        "put stock on the shelf, so it was not voided. Try "
+                        "again in a moment."
+                    ),
+                ) from exc
+            if already_minted > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"This goods receipt has already put {already_minted} "
+                        "unit(s) into stock -- an earlier acceptance was "
+                        "interrupted before it finished. It cannot be voided, "
+                        "because that would leave those units on the shelf with "
+                        "no receipt behind them. Accept it again to finish "
+                        "receiving; the units already received will not be "
+                        "counted twice."
+                    ),
+                )
 
-    return {
-        "message": "GRN voided",
-        "grn_id": grn_id,
-        "grn_number": grn.get("grn_number"),
-        "grn_status": "VOID",
-    }
+        grn_repo.update(
+            grn_id,
+            {
+                "status": "VOID",
+                "voided_at": datetime.now().isoformat(),
+                "voided_by": current_user.get("user_id"),
+            },
+        )
+        # Fail-soft audit trail (same contract as the other GRN mutations).
+        try:
+            audit = get_audit_repository()
+            if audit is not None:
+                audit.create(
+                    {
+                        "kind": "grn_void",
+                        "entity_type": "grn",
+                        "entity_id": grn_id,
+                        "action": "VOID",
+                        "performed_by": current_user.get("user_id"),
+                        "details": {
+                            "grn_number": grn.get("grn_number"),
+                            "po_id": grn.get("po_id"),
+                            "store_id": grn.get("store_id"),
+                        },
+                    }
+                )
+        except Exception:  # noqa: BLE001 - audit must never block the void
+            pass
+
+        return {
+            "message": "GRN voided",
+            "grn_id": grn_id,
+            "grn_number": grn.get("grn_number"),
+            "grn_status": "VOID",
+        }
+    finally:
+        # VOID is terminal, so the claim is always handed back -- on the happy
+        # path and on every refusal above.
+        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
 
 
 @router.post("/grn/{grn_id}/escalate")

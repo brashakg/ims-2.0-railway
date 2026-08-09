@@ -317,7 +317,12 @@ def test_express_rejected_qty_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 5, "accepted_qty": 4, "rejected_qty": 1}
+            {
+                "product_id": "P1",
+                "received_qty": 5,
+                "accepted_qty": 4,
+                "rejected_qty": 1,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -331,7 +336,12 @@ def test_express_short_accept_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 5, "accepted_qty": 3, "rejected_qty": 0}
+            {
+                "product_id": "P1",
+                "received_qty": 5,
+                "accepted_qty": 3,
+                "rejected_qty": 0,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -345,7 +355,12 @@ def test_express_zero_received_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 0, "accepted_qty": 0, "rejected_qty": 0}
+            {
+                "product_id": "P1",
+                "received_qty": 0,
+                "accepted_qty": 0,
+                "rejected_qty": 0,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -372,7 +387,9 @@ def test_express_rejects_delivery_challan(monkeypatch):
 
 def test_express_missing_attachment_400(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
-    body = _body(attachment_file_id=None, attachment_filename=None, attachment_mime=None)
+    body = _body(
+        attachment_file_id=None, attachment_filename=None, attachment_mime=None
+    )
     with pytest.raises(HTTPException) as e:
         _run(body, _user())
     assert e.value.status_code == 400
@@ -440,7 +457,13 @@ def test_express_accept_failure_surfaces_partial_with_grn_id(monkeypatch):
     monkeypatch.setattr(vendors_mod, "_accept_grn_impl", _boom)
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
-    assert e.value.status_code == 500
+    # 409, NOT 5xx: the frontend api client auto-retries every 5xx POST three
+    # times, and each retry runs _create_grn_impl again with a fresh grn_id (no
+    # duplicate guard exists for STANDARD receipts), minting the WHOLE delivery
+    # again under a source_id the per-unit unique index cannot correlate. The
+    # GRN row already exists, so this is a conflict, not a server fault.
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
     detail = e.value.detail
     assert detail["code"] == "EXPRESS_PARTIAL"
     # The stranded GRN is addressable (the pending panel recovers it).
@@ -462,7 +485,10 @@ def test_express_held_lines_surface_partial_not_false_success(monkeypatch):
     )
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
-    assert e.value.status_code == 500
+    # 409 for the same stock-safety reason: this receipt already holds real
+    # units, so it must never be auto-retried into a second one.
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
     detail = e.value.detail
     assert detail["code"] == "EXPRESS_PARTIAL"
     assert detail["grn_status"] == "PARTIALLY_ACCEPTED"
@@ -527,11 +553,7 @@ def test_express_gated_by_vendor_roles():
 def test_rbac_row_catalogued():
     from api.services import rbac_policy as rbac
 
-    rows = [
-        p
-        for p in rbac.POLICY
-        if p.get("path") == "/api/v1/vendors/grn/express"
-    ]
+    rows = [p for p in rbac.POLICY if p.get("path") == "/api/v1/vendors/grn/express"]
     assert len(rows) == 1
     assert rows[0]["method"] == "POST"
     assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._VENDOR_ROLES)
