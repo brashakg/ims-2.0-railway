@@ -762,16 +762,20 @@ def test_phase1_never_orders_a_malformed_value_ahead_of_real_stock(monkeypatch):
     monkeypatch.setattr(
         StockRepository, "_expiry_floor_iso", staticmethod(lambda: "2026-09-09")
     )
+    malformed, real = "2026-1-5", "2026-12-01"
     docs = [
-        # NOT ^\d{4}-\d{2}-\d{2} (single-digit day), genuinely EXPIRED, and it
-        # both passes a raw string $gte against the floor and sorts BEFORE the
-        # in-date unit -- so an ungated phase 1 dispenses it FIRST.
-        _unit("U-MALFORMED", expiry_date="2026-9-8"),
-        _unit("U-REAL", expiry_date="2026-12-01"),
+        # Single-digit MONTH and DAY -> not ^\d{4}-\d{2}-\d{2}. Genuinely
+        # expired (5 Jan 2026, floor is 9 Sep 2026).
+        _unit("U-MALFORMED", expiry_date=malformed),
+        _unit("U-REAL", expiry_date=real),
     ]
     repo = _repo(docs)
-    assert "2026-9-8" >= "2026-09-09"          # passes a raw $gte
-    assert "2026-9-8" > "2026-12-01"           # ...and an ungated sort puts it first
+
+    # THE TWO PROPERTIES THAT MAKE THIS DISCRIMINATE. Both must hold or the
+    # mutation survives -- asserted, not assumed, because getting the second one
+    # backwards is exactly how this test twice failed to catch its own gate.
+    assert malformed >= "2026-09-09"   # slips through a raw $gte
+    assert malformed < real            # ...and an ungated sort puts it FIRST
 
     # The READABLE in-date unit must be dispensed first regardless.
     assert repo.claim_one_available("P1", "S1", "O1") == "U-REAL"
