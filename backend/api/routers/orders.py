@@ -4129,7 +4129,11 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
                 status_code=400, detail="Cannot confirm order with no items"
             )
 
-        if repo.update_status(order_id, "CONFIRMED", current_user.get("user_id")):
+        # Guarded claim, not a blind stamp: a cancel that wins its own claim
+        # between this handler's read and this write must NOT be overwritten.
+        if _claim_order_status(
+            repo, order_id, "CONFIRMED", ("DRAFT",), current_user.get("user_id")
+        ):
             # POS operational-wins: guarantee a fitting order has a workshop/lab
             # job once it's committed. Idempotent + fail-soft (the POS client may
             # already have created it; a non-POS confirm path may not have).
@@ -4351,7 +4355,27 @@ async def add_payment(
             auto_confirmed = False
             workshop_job_id = None
             if refreshed and refreshed.get("status") == "DRAFT":
-                repo.update_status(order_id, "CONFIRMED", current_user.get("user_id"))
+                # Same guarded claim as /confirm -- the auto-confirm door is
+                # not exempt from a concurrent cancel.
+                if not _claim_order_status(
+                    repo, order_id, "CONFIRMED", ("DRAFT",),
+                    current_user.get("user_id"),
+                ):
+                    logger.warning(
+                        "[ORDERS] auto-confirm on payment skipped for %s -- "
+                        "its status changed (likely cancelled)", order_id,
+                    )
+                    refreshed = repo.find_by_id(order_id) or refreshed
+                    return {
+                        "payment_id": payment_data["payment_id"],
+                        "message": "Payment recorded",
+                        "amount": payment.amount,
+                        "workshop_job_id": None,
+                        "order_status": (refreshed or {}).get("status", "DRAFT"),
+                        "payment_status": (refreshed or {}).get(
+                            "payment_status", "PARTIAL"
+                        ),
+                    }
                 auto_confirmed = True
                 # F16: this auto-confirm bypassed confirm_order, so the workshop
                 # safety-net never ran and a paid spectacle order NEVER reached
@@ -4416,7 +4440,12 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
                 detail=f"Cannot mark as ready — current status is {order.get('status')}. Valid transitions: {', '.join(VALID_TRANSITIONS.get(order.get('status', ''), set()))}",
             )
 
-        if repo.update_status(order_id, "READY", current_user.get("user_id")):
+        # READY is exactly the precondition the deliver guard requires, so a
+        # resurrected order would deliver cleanly straight afterwards. Claim it.
+        if _claim_order_status(
+            repo, order_id, "READY", ("CONFIRMED", "PROCESSING"),
+            current_user.get("user_id"),
+        ):
             return {
                 "order_id": order_id,
                 "status": "READY",
@@ -4752,16 +4781,31 @@ async def _release_lens_lines(
 
 
 def _claim_order_status(
-    repo, order_id: str, new_status: str, required_status: str, user_id
+    repo, order_id: str, new_status: str, required_status, user_id
 ) -> bool:
-    """Atomically move an order to `new_status` ONLY while it is still
-    `required_status`. Returns False when the precondition no longer holds.
+    """Atomically move an order to `new_status` ONLY while its status is still
+    one of `required_status`. Returns False when the precondition no longer
+    holds. `required_status` may be a single status or any collection of them.
 
-    The generic sibling of _claim_order_for_cancel, for the doors whose repo
-    write carries no status precondition of its own. Falls back to a plain
-    read-check-update when the collection has no find_one_and_update, so a
-    legacy/mock backend still works.
+    THE PRECONDITION IS THE POINT. OrderRepository.update_status writes
+    update_one({order_id}, ...) filtered on the id ALONE, so every door that
+    calls it directly will happily overwrite a status another request just
+    claimed. _claim_order_for_cancel wins its claim correctly and these doors
+    used to stamp straight over it: the cancel's stock release and loyalty
+    clawback both STAND while the order comes back alive, so a frame that is
+    physically in the customer's bag reads AVAILABLE and is re-sellable -- and
+    on a pooled ONLINE store that is a Shopify oversell.
+
+    Falls back to a plain read-check-update when the collection has no
+    find_one_and_update, so a legacy/mock backend still works (that fallback
+    enforces the SAME set membership -- it is a narrower window, not an open
+    door).
     """
+    wanted = (
+        [required_status]
+        if isinstance(required_status, str)
+        else list(required_status)
+    )
     payload = {
         "status": new_status,
         "status_updated_at": datetime.now().isoformat(),
@@ -4772,7 +4816,7 @@ def _claim_order_status(
     if callable(updater):
         try:
             doc = updater(
-                {"order_id": order_id, "status": required_status},
+                {"order_id": order_id, "status": {"$in": wanted}},
                 {"$set": payload},
             )
         except Exception as exc:  # noqa: BLE001
@@ -4793,7 +4837,7 @@ def _claim_order_status(
                 )
             return True
     existing = repo.find_by_id(order_id)
-    if not existing or existing.get("status") != required_status:
+    if not existing or existing.get("status") not in wanted:
         return False
     return bool(repo.update_status(order_id, new_status, user_id))
 

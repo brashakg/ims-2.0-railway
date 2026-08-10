@@ -145,8 +145,10 @@ class _FakeOrdersColl:
         if doc is None:
             return None
         want = flt.get("status")
-        if isinstance(want, dict) and "$nin" in want:
-            if doc.get("status") in want["$nin"]:
+        if isinstance(want, dict):
+            if "$nin" in want and doc.get("status") in want["$nin"]:
+                return None
+            if "$in" in want and doc.get("status") not in want["$in"]:
                 return None
         elif want is not None and doc.get("status") != want:
             return None
@@ -1442,3 +1444,212 @@ def test_a_tracked_product_that_releases_nothing_is_still_a_real_failure(wired):
     assert res["stock_units_released"] == 0
     assert res["stock_release_failed"] is True
     assert wired["orders"].orders["ORD-1"]["line_remove_stock_release_failed"] is True
+
+
+# =========================================================================== #
+# ROUND 6 / MUST-FIX 1 -- /confirm, /ready and the payment auto-confirm must
+# not resurrect a cancelled order.
+#
+# OrderRepository.update_status writes update_one({order_id}, ...) filtered on
+# the ID ALONE. _claim_order_for_cancel wins its claim correctly; these three
+# doors used to stamp straight over it. The cancel's stock release and loyalty
+# clawback both STAND, the order comes back alive, and -- because READY is
+# exactly the precondition the deliver guard requires -- it then delivers
+# cleanly. The frame is in the customer's bag and the system says AVAILABLE.
+#
+# NOTE ON THE HOOK: these doors do NOT go through find_one_and_update on the
+# way in, so a hook on the fake collection (as the deliver test uses) never
+# fires here. The cancel is injected by mutating the stored doc directly, which
+# is what a concurrent worker's committed write actually looks like.
+# =========================================================================== #
+
+
+def _cancelled_by_a_concurrent_worker(wired, order_id="ORD-1"):
+    """Exactly what _claim_order_for_cancel leaves behind: status CANCELLED and
+    the line's unit already released to AVAILABLE."""
+    wired["orders"].orders[order_id]["status"] = "CANCELLED"
+    for u in wired["units"]:
+        if u.get("order_id") == order_id:
+            u.update({"status": "AVAILABLE", "order_id": None,
+                      "released_from_order_id": order_id})
+
+
+def _inject_cancel_after_nth_read(wired, n, order_id="ORD-1"):
+    """Commit a concurrent cancel INSIDE the handler's read-to-write window.
+
+    This is the only shape that exercises the defect. Cancelling BEFORE the call
+    is useless -- the handler's own read then sees CANCELLED and it refuses for
+    an unrelated reason (validate_status_transition), so the test passes even
+    with the guard removed. The handler must read a LIVE order, then have the
+    cancel land, then reach its write.
+
+    Hooking find_one_and_update (as the deliver test does) does NOT work here:
+    these doors never went through the claim, which is the finding itself.
+    """
+    real_find = wired["orders"].find_by_id
+    calls = {"n": 0}
+
+    def _find(oid):
+        doc = real_find(oid)          # pre-cancel snapshot, as the handler saw it
+        calls["n"] += 1
+        if calls["n"] == n:
+            _cancelled_by_a_concurrent_worker(wired, order_id)
+        return doc
+
+    wired["orders"].find_by_id = _find
+    return lambda: setattr(wired["orders"], "find_by_id", real_find)
+
+
+def test_confirm_cannot_resurrect_a_cancelled_order(wired):
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _inject_cancel_after_nth_read(wired, 1)
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+
+    assert exc.value.status_code in (400, 500)
+    # THE CANCELLATION STANDS.
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_mark_ready_cannot_resurrect_a_cancelled_order(wired):
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "items": [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _inject_cancel_after_nth_read(wired, 1)
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+
+    assert exc.value.status_code in (400, 500)
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_a_resurrected_order_cannot_then_be_delivered(wired):
+    """The full chain the consequence depends on: /ready puts the order back at
+    READY, which is exactly what the deliver guard accepts."""
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "payment_status": "PAID",
+                "items": [{"item_id": "I1", "item_type": "FRAME",
+                           "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _inject_cancel_after_nth_read(wired, 1)
+
+    try:
+        with pytest.raises(HTTPException):
+            asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(om.deliver_order("ORD-1", current_user=_ADMIN))
+
+    assert exc.value.status_code == 400
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_payment_auto_confirm_cannot_resurrect_a_cancelled_order(wired):
+    doc = _draft_order()
+    doc.update({"grand_total": 5000.0, "balance_due": 5000.0,
+                "items": [{"item_id": "I1", "item_type": "FRAME",
+                           "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+
+    # add_payment reads the order twice (the handler's own read, then the
+    # `refreshed` read the auto-confirm branch keys off). The cancel lands after
+    # BOTH, so the branch fires on a stale DRAFT snapshot -- the real window.
+    restore = _inject_cancel_after_nth_read(wired, 2)
+    try:
+        res = asyncio.run(om.add_payment(
+            "ORD-1", om.PaymentCreate(method="CASH", amount=1000.0),
+            current_user=_ADMIN, idempotency_key=None))
+    finally:
+        restore()
+
+    # The payment is recorded, but the order is NOT resurrected.
+    assert res["order_status"] != "CONFIRMED"
+    assert res["workshop_job_id"] is None
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+# --- the guards must not over-block the ordinary path ----------------------- #
+
+
+def test_confirm_still_works_on_a_draft_order(wired):
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    res = asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+    assert res["status"] == "CONFIRMED"
+    assert wired["orders"].orders["ORD-1"]["status"] == "CONFIRMED"
+
+
+def test_mark_ready_still_works_from_confirmed_and_from_processing(wired):
+    for start in ("CONFIRMED", "PROCESSING"):
+        doc = _draft_order()
+        doc.update({"status": start, "items": [
+            {"item_id": "I1", "item_type": "FRAME", "product_id": "P1",
+             "quantity": 1}]})
+        wired["orders"].orders["ORD-1"] = doc
+        res = asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+        assert res["status"] == "READY", start
+        assert wired["orders"].orders["ORD-1"]["status"] == "READY"
+
+
+def test_payment_auto_confirm_still_works_on_a_clean_draft(wired):
+    wired["orders"].orders["ORD-1"] = _fitting_order()
+    res = _pay(1000.0)
+    assert res["order_status"] == "CONFIRMED"
+    assert res["workshop_job_id"] == "JID-1"
+
+
+def test_the_non_atomic_fallback_also_enforces_the_status_set(wired):
+    """A backend without find_one_and_update takes the read-check-update
+    fallback. That is a NARROWER window, not an open door -- it must still
+    refuse when the status is no longer in the required set, or the guard is
+    only half-built."""
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    wired["orders"].collection = None          # no atomic surface at all
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _inject_cancel_after_nth_read(wired, 1)
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+
+    assert exc.value.status_code in (400, 500)
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_the_fallback_still_confirms_a_clean_draft(wired):
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    wired["orders"].collection = None
+    res = asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+    assert res["status"] == "CONFIRMED"

@@ -1286,6 +1286,39 @@ def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]
     customer_id = marker.get("customer_id") or ""
     if not txn_id or not customer_id:
         return {"ok": True, "already_reversed": True}
+
+    # PRE-GUARD MARKER -- written by the code running in production TODAY, whose
+    # money already moved through adjust_balance and which never touched the
+    # account's applied_reversals array.
+    #
+    # This is the one shape the exactly-once guard cannot see. `$ne` on a
+    # MISSING field MATCHES in Mongo, and it matches an EMPTY array just the
+    # same, because the guard keys on membership of THIS marker's txn_id. So
+    # every legacy marker looks unapplied forever: re-issuing the write would
+    # claw a second time (a REGRESSION -- main returns already_reversed with no
+    # money move), or, when the $gte guard refuses, report
+    # unapplied_reversal=True on every retry of a reversal that main already
+    # completed, permanently wedging the cancel retry door open.
+    #
+    # Detected by SHAPE, not by a backfill: a marker missing this PR's own
+    # fields predates the guard. A backfill alone cannot work -- old and new
+    # workers coexist during a rolling deploy, so a legacy marker can be written
+    # AFTER the migration runs. The shape guard needs no migration and no
+    # ordering constraint, and it fails in the safe direction this PR chose:
+    # never move money we cannot prove is outstanding.
+    if _REVERSAL_ORDER_FIELD not in marker or "reversed_earn_points" not in marker:
+        logger.info(
+            "loyalty reversal %s predates the exactly-once guard "
+            "(cust=%s order=%s) -- its money moved under the old path; "
+            "not re-issuing",
+            txn_id, customer_id, marker.get("order_id"),
+        )
+        return {
+            "ok": True,
+            "already_reversed": True,
+            "pre_guard_marker": True,
+            "txn_id": txn_id,
+        }
     net_delta = int(marker.get("points") or 0)
     earned = int(marker.get("reversed_earn_points") or 0)
     redeemed = int(marker.get("reversed_redeem_points") or 0)

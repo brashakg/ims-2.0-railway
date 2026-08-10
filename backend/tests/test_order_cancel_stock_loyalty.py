@@ -147,8 +147,10 @@ class _FakeOrdersColl:
         if doc is None:
             return None
         status_cond = flt.get("status")
-        if isinstance(status_cond, dict) and "$nin" in status_cond:
-            if doc.get("status") in status_cond["$nin"]:
+        if isinstance(status_cond, dict):
+            if "$nin" in status_cond and doc.get("status") in status_cond["$nin"]:
+                return None
+            if "$in" in status_cond and doc.get("status") not in status_cond["$in"]:
                 return None
         elif status_cond is not None and doc.get("status") != status_cond:
             return None
@@ -269,9 +271,15 @@ class _FakeAccountsColl:
 
     def find_one_and_update(self, flt, upd, **kw):
         acct = self.owner.acct
-        applied = acct.setdefault("applied_reversals", [])
+        # MONGO SEMANTICS, DELIBERATELY: $ne against a MISSING field MATCHES,
+        # and against an EMPTY array it matches too. This fake used to
+        # setdefault the array into existence, which made the absent-field
+        # shape -- 100% of production loyalty_accounts -- UNREACHABLE in every
+        # loyalty test. Do not reintroduce the setdefault; the missing shape is
+        # the one that mattered.
+        applied = acct.get("applied_reversals")
         ne = (flt.get("applied_reversals") or {}).get("$ne")
-        if ne is not None and ne in applied:
+        if ne is not None and applied is not None and ne in applied:
             return None                      # this reversal already applied
         need = (flt.get("balance_points") or {}).get("$gte")
         if need is not None and acct.get("balance_points", 0) < need:
@@ -282,6 +290,7 @@ class _FakeAccountsColl:
         for k, v in upd.get("$set", {}).items():
             acct[k] = v
         for k, v in upd.get("$addToSet", {}).items():
+            # $addToSet CREATES the array -- that is the only thing that may.
             acct.setdefault(k, [])
             if v not in acct[k]:
                 acct[k].append(v)
@@ -297,14 +306,18 @@ class _FakeAccountsColl:
 
 
 class _FakeAccounts:
-    def __init__(self, balance=0, le=0, lr=0, tier="BRONZE"):
+    def __init__(self, balance=0, le=0, lr=0, tier="BRONZE", applied=None):
         self.acct = {
             "balance_points": balance,
             "lifetime_earned": le,
             "lifetime_redeemed": lr,
             "tier": tier,
-            "applied_reversals": [],
         }
+        # DEFAULT IS THE PRODUCTION SHAPE: no applied_reversals key at all.
+        # Every one of the 8 live loyalty_accounts looks like this, and seeding
+        # an empty list here is what hid the legacy-marker defect from 60 tests.
+        if applied is not None:
+            self.acct["applied_reversals"] = list(applied)
         self.collection = _FakeAccountsColl(self)
         self.adjustments = []
         # Every non-None new_tier the reversal asked for, in order. Proves the
@@ -423,6 +436,7 @@ def wired(monkeypatch):
         "stock": stock_repo,
         "txns": txns,
         "accounts": accounts,
+        "monkeypatch": monkeypatch,
     }
 
 
@@ -1587,3 +1601,209 @@ def test_completion_of_a_return_marker_never_moves_the_tier(wired):
     assert done["ok"] and done.get("completed_now") is True
     assert wired["accounts"].tiers_set == []
     assert wired["accounts"].acct["tier"] == "GOLD"
+
+
+# =========================================================================== #
+# ROUND 6 / MUST-FIX 2 -- LEGACY (PRE-GUARD) REVERSAL MARKERS.
+#
+# applied_reversals is NEW IN THIS PR. At merge-base b4410af, reverse_for_return
+# wrote {txn_id, customer_id, type, points, order_id, return_id, reason,
+# created_at} and moved money via adjust_balance, which never touched the
+# account array. reverse_for_cancel did not exist at all.
+#
+# LIVE CLUSTER: loyalty_accounts TOTAL 8, WITH applied_reversals 0 -- and
+# {applied_reversals: {$ne: <random>}} matched ALL 8. $ne on a MISSING field
+# MATCHES, so the exactly-once guard was blind to 100% of existing accounts.
+#
+# Two failure directions, both reported as success:
+#   money moves   -> the reversal is applied a SECOND time (a REGRESSION: main
+#                    returns already_reversed with no money move)
+#   $gte refuses  -> unapplied_reversal=True FOREVER on a reversal main already
+#                    completed, wedging the cancel retry door permanently open
+#
+# The fix detects PRE-GUARD markers BY SHAPE. A backfill alone cannot work: old
+# and new workers coexist during a rolling deploy, so a legacy marker can be
+# written after the migration runs.
+# =========================================================================== #
+
+
+def _legacy_marker(cid, order_id, points, return_id="RET-OLD"):
+    """EXACTLY the marker shape origin/main writes -- no reversal_of_order_id,
+    no reversed_earn_points, no recompute_tier."""
+    return {
+        "txn_id": "legacy-txn-1",
+        "customer_id": cid,
+        "type": "ADJUST",
+        "points": points,
+        "order_id": order_id,
+        "return_id": return_id,
+        "reason": f"Return {return_id}: claw on order {order_id}",
+        "created_at": datetime(2026, 7, 1),
+    }
+
+
+def test_production_accounts_have_no_applied_reversals_field(wired):
+    """The premise. If this ever starts failing because the fake seeds the
+    field again, every test below silently stops testing production's shape."""
+    assert "applied_reversals" not in wired["accounts"].acct
+
+
+def test_ne_matches_a_missing_field_so_the_guard_alone_is_blind(wired):
+    """Pins the Mongo semantics the whole defect rests on."""
+    coll = wired["accounts"].collection
+    doc = coll.find_one_and_update(
+        {"customer_id": "C1", "applied_reversals": {"$ne": "some-random-txn"}},
+        {"$set": {"probe": 1}},
+    )
+    assert doc is not None, "$ne on a MISSING field must MATCH, as Mongo does"
+
+
+def test_legacy_return_marker_is_not_re_applied(wired):
+    """The money direction: retry of the same return moved 2000 -> 1500."""
+    wired["txns"].rows.extend([
+        _earn("C1", "ORD-1", 500),
+        _legacy_marker("C1", "ORD-1", -500),
+    ])
+    wired["accounts"].acct.update({"balance_points": 2000, "lifetime_earned": 500})
+
+    res = L.reverse_for_return("RET-OLD", "ORD-1", "C1")
+
+    assert res["ok"] is True
+    assert res.get("already_reversed") is True
+    assert res.get("pre_guard_marker") is True
+    assert res.get("completed_now") is not True
+    assert wired["accounts"].acct["balance_points"] == 2000      # NOT 1500
+    assert wired["accounts"].adjustments == []
+
+
+def test_legacy_marker_blocks_a_cancel_from_re_reversing(wired):
+    """Second partial return / cancel against a legacy marker: also 2000->1500."""
+    wired["txns"].rows.extend([
+        _earn("C1", "ORD-1", 500),
+        _legacy_marker("C1", "ORD-1", -500),
+    ])
+    wired["accounts"].acct.update({"balance_points": 2000, "lifetime_earned": 500})
+
+    res = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert res["ok"] is True and res.get("pre_guard_marker") is True
+    assert wired["accounts"].acct["balance_points"] == 2000
+    assert wired["accounts"].adjustments == []
+
+
+def test_legacy_redeem_direction_mints_nothing(wired):
+    """The redeem direction MINTED points at Re 1/point: 800 -> 1600."""
+    wired["txns"].rows.extend([
+        _redeem("C1", "ORD-1", 800),
+        _legacy_marker("C1", "ORD-1", 800),
+    ])
+    wired["accounts"].acct.update({"balance_points": 800, "lifetime_redeemed": 800})
+
+    res = L.reverse_for_return("RET-OLD", "ORD-1", "C1")
+
+    assert res["ok"] is True and res.get("pre_guard_marker") is True
+    assert wired["accounts"].acct["balance_points"] == 800       # NOT 1600
+    assert wired["accounts"].adjustments == []
+
+
+def test_legacy_marker_never_reports_unapplied_forever(wired):
+    """The direction that is LIVE TODAY: the $gte guard refuses (prod's one
+    legacy row is points=-16 on a balance of 0), so every call returned
+    unapplied_reversal=True on a reversal main already completed -- wedging the
+    cancel retry door permanently open."""
+    wired["txns"].rows.extend([
+        _earn("C1", "ORD-1", 16),
+        _legacy_marker("C1", "ORD-1", -16),
+    ])
+    wired["accounts"].acct.update({"balance_points": 0, "lifetime_earned": 16})
+
+    for _ in range(3):
+        res = L.reverse_for_return("RET-OLD", "ORD-1", "C1")
+        assert res["ok"] is True, res
+        assert res.get("unapplied_reversal") is not True
+        assert res.get("pre_guard_marker") is True
+    assert wired["accounts"].acct["balance_points"] == 0
+
+
+def test_cancel_does_not_stamp_failure_on_a_legacy_completed_reversal(wired):
+    """...and the order doc therefore stays clean instead of carrying
+    loyalty_reversal_failed on a finished cancel."""
+    wired["units"].append(_unit("U1"))
+    wired["txns"].rows.extend([
+        _earn("C1", "ORD-1", 16),
+        _legacy_marker("C1", "ORD-1", -16),
+    ])
+    wired["accounts"].acct.update({"balance_points": 0, "lifetime_earned": 16})
+
+    res = _cancel()
+
+    assert res["loyalty_reversal_failed"] is False
+    assert wired["orders"].orders["ORD-1"]["loyalty_reversal_failed"] is False
+
+
+def test_an_empty_array_is_treated_exactly_like_a_missing_one(wired):
+    """The chair's self-correction: an account already carrying
+    applied_reversals: [] is NOT safe. The guard keys on MEMBERSHIP of this
+    marker's txn_id, so an empty array matches $ne exactly like an absent one --
+    ADDING THE FIELD IS NOT A FIX."""
+    acc = _FakeAccounts(balance=2000, le=500, applied=[])
+    monkey = wired["monkeypatch"]
+    monkey.setattr(L, "get_loyalty_account_repository", lambda: acc)
+    wired["txns"].rows.extend([
+        _earn("C1", "ORD-1", 500),
+        _legacy_marker("C1", "ORD-1", -500),
+    ])
+
+    res = L.reverse_for_return("RET-OLD", "ORD-1", "C1")
+
+    assert res.get("pre_guard_marker") is True
+    assert acc.acct["balance_points"] == 2000
+    assert acc.adjustments == []
+
+
+def test_a_marker_written_by_THIS_pr_is_still_completed_normally(wired):
+    """The shape guard must not over-block: a marker carrying this PR's fields
+    whose money never moved must still be finished."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 100, "lifetime_earned": 100})
+
+    real = wired["accounts"].collection.find_one_and_update
+    wired["accounts"].collection.find_one_and_update = (
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("write blip"))
+    )
+    first = L.reverse_for_cancel("ORD-1", "C1")
+    wired["accounts"].collection.find_one_and_update = real
+    assert first["ok"] is False
+
+    second = L.reverse_for_cancel("ORD-1", "C1")
+
+    assert second["ok"] is True
+    assert second.get("completed_now") is True
+    assert second.get("pre_guard_marker") is not True
+    assert wired["accounts"].acct["balance_points"] == 0
+
+
+def test_a_refused_guarded_write_invents_no_field(wired):
+    """Mongo writes NOTHING when find_one_and_update matches nothing.
+
+    A fake that setdefaults the array on the READ path invents
+    applied_reversals as a side effect of a REFUSED write -- which is exactly
+    how the absent-field shape (100% of production loyalty_accounts) became
+    unreachable across 60 loyalty tests. This pins the write fidelity, not just
+    the initial seed.
+    """
+    acct = wired["accounts"].acct
+    acct["balance_points"] = 0
+    assert "applied_reversals" not in acct
+
+    doc = wired["accounts"].collection.find_one_and_update(
+        {"customer_id": "C1",
+         "applied_reversals": {"$ne": "t1"},
+         "balance_points": {"$gte": 500}},          # refuses: balance is 0
+        {"$inc": {"balance_points": -500},
+         "$addToSet": {"applied_reversals": "t1"}},
+    )
+
+    assert doc is None                              # the write was refused
+    assert "applied_reversals" not in acct          # ...so nothing was written
+    assert acct["balance_points"] == 0
