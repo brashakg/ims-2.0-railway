@@ -338,8 +338,9 @@ def _is_salary_admin(current_user: dict) -> bool:
     return any(r in caller_roles for r in _SALARY_CROSS_EMPLOYEE_ROLES)
 
 
-def _assert_salary_admin(current_user: dict) -> None:
-    """ADMIN / SUPERADMIN only -- for the AGGREGATE salary reads.
+def _assert_salary_admin(current_user: dict, action: str = "") -> None:
+    """ADMIN / SUPERADMIN only -- for the AGGREGATE salary reads and the
+    payroll SIGN-OFF writes.
 
     A store's salary sheet, the payroll-run grid, the statutory registers and
     the Tally / PF-ECR exports have no "self" row to fall back to: they are
@@ -353,6 +354,13 @@ def _assert_salary_admin(current_user: dict) -> None:
     exactly. Closing the per-employee routes while leaving the totals open
     would be a rule that only looks strict.
 
+    OWNER RULING 2026-08-10 extends this to payroll SIGN-OFF: whoever approves
+    payroll must be able to see what they are approving. An approval on figures
+    the approver cannot read is a rubber stamp, not a control -- so the approve
+    writes carry this same gate even though their responses contain no salary.
+    ``action`` names the attempted action in the 403 so the toast reads as a
+    permission message rather than a failure.
+
     ``detail`` is written in plain English because the frontend shows it to a
     store manager verbatim.
     """
@@ -361,8 +369,12 @@ def _assert_salary_admin(current_user: dict) -> None:
     raise HTTPException(
         status_code=403,
         detail=(
-            "Payroll and salary data is restricted to administrators. "
-            "Please ask an administrator."
+            f"Only an administrator may {action}. Please ask an administrator."
+            if action
+            else (
+                "Payroll and salary data is restricted to administrators. "
+                "Please ask an administrator."
+            )
         ),
     )
 
@@ -1472,6 +1484,13 @@ async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
 # PAYROLL RUN (compute -> DRAFT -> APPROVED -> PAID/locked)
 # ============================================================================
 
+# OUTER gate for the payroll-run family. Since the owner rulings of 2026-08-09
+# and 2026-08-10, ACCOUNTANT passes this gate but is then refused inside the
+# handler by _assert_salary_admin on every route that returns salary or signs
+# payroll off (run, approve, tally-jv, pf-ecr). The wider outer gate is kept on
+# purpose: it lets the handler answer with a plain-English 403 that the payroll
+# screens show verbatim, instead of require_roles' generic message. Do not read
+# this tuple as "the accountant can run payroll" -- they cannot.
 _RUN_ROLES = ("ADMIN", "ACCOUNTANT")  # SUPERADMIN auto-passes
 
 
@@ -1794,7 +1813,14 @@ async def approve_payroll(
     req: PayrollBatchAction,
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """Move DRAFT payroll rows to APPROVED for a month + scope."""
+    """Move DRAFT payroll rows to APPROVED for a month + scope.
+
+    OWNER RULING 2026-08-10: ADMIN/SUPERADMIN only. The response carries no
+    salary, so this is not a disclosure fix -- it is a controls fix. The
+    ACCOUNTANT can no longer see the register (owner ruling 2026-08-09), and
+    signing off figures you cannot read is a rubber stamp.
+    """
+    _assert_salary_admin(current_user, "approve a payroll run")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

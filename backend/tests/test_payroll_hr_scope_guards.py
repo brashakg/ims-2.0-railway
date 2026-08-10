@@ -176,6 +176,15 @@ class _FakeColl:
         self.docs.append(dict(doc))
         return type("_R", (), {"inserted_id": "fake"})()
 
+    def update_many(self, query=None, update=None):
+        """Enough of pymongo's update_many for the approve / lock writes."""
+        changed = 0
+        for d in self.docs:
+            if _matches(d, query or {}):
+                d.update((update or {}).get("$set", {}))
+                changed += 1
+        return type("_R", (), {"modified_count": changed})()
+
 
 class _FakeDb:
     def __init__(self, collections):
@@ -617,6 +626,99 @@ def test_floor_staff_self_service_payslip_is_untouched(monkeypatch):
     assert slip["breakdown"]["net_pay"] == 21000.0
     # ... and it is genuinely self-only: the colleague's numbers never appear.
     assert "99000" not in r.text and "SECRET-222" not in r.text
+
+
+# ===========================================================================
+# A3. PAYROLL SIGN-OFF (owner ruling 2026-08-10)
+# ===========================================================================
+# "Whoever approves payroll should be able to see what they are approving."
+# There are TWO approve routes, in different routers, and the HR one had the
+# WIDER gate of the pair (_HR_READ_ROLES let a STORE_MANAGER approve).
+# POST /payroll/lock was already ADMIN-only and is asserted here so the whole
+# sign-off family is pinned in one place.
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_payroll_approve_is_admin_only(payroll_client, role):
+    """All three manager-tier roles are refused -- but by different layers, and
+    the test says which rather than pretending one gate does it all.
+
+    AREA_MANAGER / STORE_MANAGER never passed this route's own
+    ``require_roles(*_RUN_ROLES)``, so they get that gate's generic 403. The
+    ACCOUNTANT does pass it and is refused by _assert_salary_admin, which is the
+    gate this ruling added and the one whose wording reaches the toast.
+    """
+    r = payroll_client.post(
+        "/payroll/approve",
+        json={"month": 5, "year": 2026},
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    if role == "ACCOUNTANT":
+        assert "administrator" in r.text.lower()
+        assert "approve a payroll run" in r.text
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_payroll_lock_is_admin_only(payroll_client, role):
+    """Already ADMIN-only before this round -- asserted so the family cannot
+    drift apart later."""
+    r = payroll_client.post(
+        "/payroll/lock",
+        json={"month": 5, "year": 2026},
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+
+
+@pytest.mark.parametrize("role", ADMIN_PAY_ROLES)
+def test_payroll_approve_still_works_for_admin(payroll_client, role):
+    r = payroll_client.post(
+        "/payroll/approve",
+        json={"month": 5, "year": 2026},
+        headers=_auth(_token([role], user_id="u-admin", store_ids=[])),
+    )
+    assert r.status_code == 200, f"{role}: {r.text}"
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_hr_payroll_approve_is_admin_only(hr_client, role):
+    """The SECOND approve route. Its old gate (_HR_READ_ROLES) also admitted
+    AREA_MANAGER and STORE_MANAGER, not just the accountant."""
+    r = hr_client.post(
+        "/hr/payroll/pr-1/approve",
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    # _HR_READ_ROLES admitted all three, so here the NEW gate is what refuses
+    # every one of them -- and its wording is what the user sees.
+    assert "administrator" in r.text.lower()
+    assert "approve a payroll record" in r.text
+
+
+def test_hr_payroll_approve_reaches_the_handler_for_admin(hr_client):
+    """An ADMIN gets past the gate. The fake repo has no such record, so the
+    handler's own 404 is the proof it was reached -- not a 403."""
+    r = hr_client.post(
+        "/hr/payroll/pr-does-not-exist/approve",
+        headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
+    )
+    assert r.status_code != 403, r.text
+
+
+def test_signoff_403_names_the_action_not_just_the_data():
+    """The toast must read as a permission message about THIS action."""
+    with pytest.raises(Exception) as exc:
+        payroll_mod._assert_salary_admin(
+            {"roles": ["ACCOUNTANT"]}, "approve a payroll run"
+        )
+    detail = exc.value.detail
+    assert "approve a payroll run" in detail
+    assert "administrator" in detail.lower()
+    # ... and the no-action form still reads as the data message.
+    with pytest.raises(Exception) as exc2:
+        payroll_mod._assert_salary_admin({"roles": ["ACCOUNTANT"]})
+    assert "restricted to administrators" in exc2.value.detail
 
 
 # ===========================================================================

@@ -1985,7 +1985,15 @@ async def approve_payroll(
     payroll_id: str,
     current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
-    """Approve payroll for payment"""
+    """Approve payroll for payment.
+
+    OWNER RULING 2026-08-10: ADMIN/SUPERADMIN only. This is the SECOND approve
+    route in the payroll family (the other is POST /payroll/approve) and it had
+    the widest gate of the two -- _HR_READ_ROLES let a STORE_MANAGER or
+    AREA_MANAGER approve a payroll record as well as the ACCOUNTANT. Whoever
+    signs payroll off must be able to see what they are signing.
+    """
+    _assert_salary_admin(current_user, "approve a payroll record")
     payroll_repo = get_payroll_repository()
 
     if payroll_repo is not None:

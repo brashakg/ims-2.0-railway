@@ -3139,7 +3139,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/hr/payroll/{payroll_id}/approve",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
@@ -5081,7 +5081,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/approve",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ["ADMIN"],
     },
     # OWNER RULING 2026-08-09 ("nobody except admin/superadmin should see anyone
     # elses salary"), applied 2026-08-10. The AGGREGATE salary routes below --

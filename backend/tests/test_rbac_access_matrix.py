@@ -641,9 +641,11 @@ class TestFinancePayrollHrRoutes:
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
         ("PUT", "/api/v1/payroll/pt-slabs/JH", ["ADMIN"],
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"slabs": []}),
-        # require_roles(*_RUN_ROLES=(ADMIN,ACCOUNTANT)) rows -> ADMIN+ACCOUNTANT kept
-        ("POST", "/api/v1/payroll/approve", ["ACCOUNTANT", "ADMIN"],
-         ["AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
+        # OWNER RULING 2026-08-10: payroll SIGN-OFF is ADMIN-only. The accountant
+        # can no longer see the register, and approving figures you cannot read
+        # is a rubber stamp -- so ACCOUNTANT moved from kept -> removed here too.
+        ("POST", "/api/v1/payroll/approve", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
         # OWNER RULING 2026-08-09: these three carry salary (the run response
         # returns per-employee rows; the PF ECR is one line per employee with UAN
         # and wages; the Tally JV's "Salary Payable" total is one person's net pay

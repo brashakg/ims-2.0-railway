@@ -41,6 +41,10 @@ export function PayrollRunPage() {
   // it is ADMIN/SUPERADMIN only. ACCOUNTANT previously ran payroll; the button
   // is hidden for them now rather than left to 403 on click.
   const canRun = ['SUPERADMIN', 'ADMIN'].some((r) => roles.includes(r as never));
+  // Owner ruling 2026-08-10: approving payroll is ADMIN-only too -- signing off
+  // figures you cannot see is a rubber stamp. Named separately from canRun so
+  // the two rules stay legible even though they currently coincide.
+  const canApprove = ['SUPERADMIN', 'ADMIN'].some((r) => roles.includes(r as never));
   const canLock = roles.includes('SUPERADMIN' as never) || roles.includes('ADMIN' as never);
 
   const now = new Date();
@@ -152,7 +156,11 @@ export function PayrollRunPage() {
       toast.success(`Approved ${r.approved} payslips`);
       await loadRows();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Approve failed');
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'Only an administrator may approve a payroll run.')
+          : e instanceof Error ? e.message : 'Approve failed',
+      );
     } finally {
       setBusy(false);
     }
@@ -165,7 +173,11 @@ export function PayrollRunPage() {
       toast.success(`Locked ${r.locked} payslips as paid`);
       await loadRows();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Lock failed');
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'Only an administrator may lock a payroll run as paid.')
+          : e instanceof Error ? e.message : 'Lock failed',
+      );
     } finally {
       setBusy(false);
     }
@@ -286,6 +298,13 @@ export function PayrollRunPage() {
           </table>
           </div>
         )}
+        {!canRun && (
+          <div className="border-t border-gray-100 px-4 py-3 text-sm text-gray-600">
+            <span className="font-medium text-gray-800">Run, Preview and Approve are administrator-only.</span>{' '}
+            You can still open this page, but an administrator has to run the payroll, approve it
+            and download the PF and Tally files. This is a permission limit, not a fault.
+          </div>
+        )}
         {canRun && configs.length > 0 && (
           <div className="flex justify-end gap-2 p-3 border-t border-gray-100">
             <button className="btn-secondary" onClick={() => doRun(true)} disabled={busy}>Preview</button>
@@ -321,7 +340,7 @@ export function PayrollRunPage() {
             <div className="flex flex-wrap gap-2">
               <button className="btn-secondary" onClick={exportTally} disabled={busy}>Tally JV</button>
               <button className="btn-secondary" onClick={exportEcr} disabled={busy}>PF ECR</button>
-              {canRun && (
+              {canApprove && (
                 <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
               )}
               {canLock && (
