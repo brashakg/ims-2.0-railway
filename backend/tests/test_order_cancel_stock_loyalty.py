@@ -156,6 +156,10 @@ class _FakeOrdersColl:
             return None
         before = dict(doc)
         doc.update(upd.get("$set", {}))
+        # See the note in test_order_draft_line_stock_and_autoconfirm.py: a fake
+        # that drops $push lets status_history silently stop being written.
+        for key, value in upd.get("$push", {}).items():
+            doc.setdefault(key, []).append(value)
         return before
 
 

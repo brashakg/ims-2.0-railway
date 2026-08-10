@@ -4806,10 +4806,23 @@ def _claim_order_status(
         if isinstance(required_status, str)
         else list(required_status)
     )
+    now = datetime.now()
     payload = {
         "status": new_status,
-        "status_updated_at": datetime.now().isoformat(),
+        "status_updated_at": now,
         "status_updated_by": user_id,
+    }
+    # update_status sets this and orders.py surfaces it; folding the write in
+    # means we must carry it or silently drop it.
+    if new_status == "DELIVERED":
+        payload["delivered_at"] = now
+    # status_history feeds the CUSTOMER-FACING portal tracking view, the online
+    # order mirror and the order detail response. It is part of the claim, not
+    # an afterthought.
+    history_entry = {
+        "status": new_status,
+        "timestamp": now.isoformat(),
+        "changed_by": user_id or "system",
     }
     coll = getattr(repo, "collection", None)
     updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
@@ -4817,7 +4830,7 @@ def _claim_order_status(
         try:
             doc = updater(
                 {"order_id": order_id, "status": {"$in": wanted}},
-                {"$set": payload},
+                {"$set": payload, "$push": {"status_history": history_entry}},
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -4825,20 +4838,40 @@ def _claim_order_status(
                 new_status, order_id, exc,
             )
         else:
-            if doc is None:
-                return False
-            # Keep the repo's own status_history bookkeeping.
-            try:
-                repo.update_status(order_id, new_status, user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[ORDERS] status_history update after %s claim failed "
-                    "for %s: %s", new_status, order_id, exc,
-                )
-            return True
+            # ONE round trip, and NOTHING after it. The previous version won the
+            # claim here and then called repo.update_status four lines later --
+            # which is update_one({id}, ...) with NO status precondition, the
+            # exact primitive this helper's docstring diagnoses as the bug. A
+            # cancel committing in that gap was stamped straight back over, and
+            # since _claim_order_for_cancel filters $nin [CANCELLED, DELIVERED],
+            # both CONFIRMED and READY stayed claimable. Losing that race used to
+            # leave the unit SOLD; now that cancel releases it, it leaves a frame
+            # in the customer's bag reading AVAILABLE.
+            return doc is not None
+    # NON-ATOMIC FALLBACK -- only for a collection with no find_one_and_update.
+    # Real pymongo has it and so does MockCollection, so this is unreachable in
+    # production and in local no-Mongo mode alike; it exists for hand-rolled
+    # doubles. We still narrow it as far as the surface allows: a guarded
+    # update_one carrying the SAME status precondition, so the window is the
+    # read-modify-write of one statement rather than two round trips. Only when
+    # even that is missing do we fall back to a bare read-check.
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") not in wanted:
         return False
+    guarded = getattr(coll, "update_one", None) if coll is not None else None
+    if callable(guarded):
+        try:
+            res = guarded(
+                {"order_id": order_id, "status": {"$in": wanted}},
+                {"$set": payload, "$push": {"status_history": history_entry}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] guarded %s fallback failed for %s: %s",
+                new_status, order_id, exc,
+            )
+        else:
+            return bool(getattr(res, "modified_count", 0))
     return bool(repo.update_status(order_id, new_status, user_id))
 
 

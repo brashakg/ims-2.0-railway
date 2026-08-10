@@ -154,6 +154,14 @@ class _FakeOrdersColl:
             return None
         before = dict(doc)
         doc.update(upd.get("$set", {}))
+        # $push IS NOT OPTIONAL. This fake used to apply only $set and SILENTLY
+        # DROP $push, so the status-claim fix could pass 132 tests while
+        # status_history quietly stopped being written -- and status_history
+        # feeds the CUSTOMER-FACING portal tracking view, the online order
+        # mirror and the order detail response. A double weaker than production
+        # is how the applied_reversals blind spot happened; do not weaken it.
+        for key, value in upd.get("$push", {}).items():
+            doc.setdefault(key, []).append(value)
         return before
 
 
@@ -1653,3 +1661,241 @@ def test_the_fallback_still_confirms_a_clean_draft(wired):
     wired["orders"].collection = None
     res = asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
     assert res["status"] == "CONFIRMED"
+
+
+# =========================================================================== #
+# ROUND 7 -- THE POST-CLAIM WINDOW.
+#
+# _claim_order_status used to win its atomic claim and then, four lines later,
+# call repo.update_status -- update_one({id}, ...) with NO status precondition,
+# the exact primitive the helper's own docstring diagnoses as the bug. A cancel
+# committing in that one-round-trip gap was stamped straight back over.
+#
+# This is a DIFFERENT WINDOW from the round-6 tests, which hook find_by_id and
+# land the cancel BEFORE the claim. These hook the collection and land it AFTER
+# the claim returns. Both windows must be covered; the earlier tests pass with
+# this defect live.
+#
+# _claim_order_for_cancel filters $nin [CANCELLED, DELIVERED], so CONFIRMED and
+# READY both stay claimable -- and deliver is immune only INCIDENTALLY, because
+# DELIVERED happens to sit in that $nin.
+# =========================================================================== #
+
+
+def _cancel_lands_after_the_claim(wired, order_id="ORD-1"):
+    """Commit a concurrent cancel immediately AFTER the guarded claim returns,
+    i.e. inside the gap the follow-up write used to occupy."""
+    coll = wired["orders"].collection
+    real = coll.find_one_and_update
+    state = {"fired": False}
+
+    def _hook(flt, upd, **kw):
+        doc = real(flt, upd, **kw)
+        if doc is not None and not state["fired"]:
+            state["fired"] = True
+            _cancelled_by_a_concurrent_worker(wired, order_id)
+        return doc
+
+    coll.find_one_and_update = _hook
+    return lambda: setattr(coll, "find_one_and_update", real)
+
+
+def test_confirm_does_not_reopen_the_post_claim_window(wired):
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _cancel_lands_after_the_claim(wired)
+    try:
+        asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+    except HTTPException:
+        pass
+    finally:
+        restore()
+
+    # THE CANCELLATION STANDS and the released unit stays released.
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_mark_ready_does_not_reopen_the_post_claim_window(wired):
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "items": [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _cancel_lands_after_the_claim(wired)
+    try:
+        asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    except HTTPException:
+        pass
+    finally:
+        restore()
+
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_a_post_claim_resurrected_order_cannot_then_be_delivered(wired):
+    """The consequence chain: /ready leaving the order at READY is exactly what
+    the deliver guard accepts, so the whole thing has to hold end to end."""
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "payment_status": "PAID",
+                "items": [{"item_id": "I1", "item_type": "FRAME",
+                           "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _cancel_lands_after_the_claim(wired)
+    try:
+        asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    except HTTPException:
+        pass
+    finally:
+        restore()
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(om.deliver_order("ORD-1", current_user=_ADMIN))
+
+    assert exc.value.status_code == 400
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+def test_auto_confirm_does_not_reopen_the_post_claim_window(wired):
+    doc = _draft_order()
+    doc.update({"grand_total": 5000.0, "balance_due": 5000.0,
+                "items": [{"item_id": "I1", "item_type": "FRAME",
+                           "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    restore = _cancel_lands_after_the_claim(wired)
+    try:
+        asyncio.run(om.add_payment(
+            "ORD-1", om.PaymentCreate(method="CASH", amount=1000.0),
+            current_user=_ADMIN, idempotency_key=None))
+    except HTTPException:
+        pass
+    finally:
+        restore()
+
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+
+
+# --- constraint 1 + 2: the claim must still write what update_status wrote --- #
+
+
+def test_the_claim_appends_status_history(wired):
+    """Folding the write in means status_history is now OUR responsibility. It
+    feeds the customer-facing portal tracking view, so losing it is a silent
+    customer-visible regression -- and a fake that drops $push hides it."""
+    wired["orders"].orders["ORD-1"] = _draft_order()
+    wired["orders"].orders["ORD-1"]["items"] = [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}
+    ]
+    wired["orders"].orders["ORD-1"]["status_history"] = []
+
+    asyncio.run(om.confirm_order("ORD-1", current_user=_ADMIN))
+
+    history = wired["orders"].orders["ORD-1"]["status_history"]
+    assert len(history) == 1
+    assert history[0]["status"] == "CONFIRMED"
+    assert history[0]["changed_by"] == _ADMIN["user_id"]
+    assert history[0]["timestamp"]
+
+
+def test_the_claim_sets_delivered_at_on_delivery(wired):
+    """delivered_at was set by update_status and is surfaced on the order read;
+    deleting that call drops it unless it is folded in."""
+    wired["orders"].orders["ORD-1"] = _ready_order()
+    res = _deliver()
+    assert res["status"] == "DELIVERED"
+    doc = wired["orders"].orders["ORD-1"]
+    assert doc.get("delivered_at") is not None
+    assert doc["status_history"][-1]["status"] == "DELIVERED"
+
+
+def test_a_refused_claim_appends_no_history(wired):
+    """A claim that loses must write NOTHING -- not the status, not a history
+    entry that would tell the customer their order advanced."""
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "status_history": [],
+                "items": [{"item_id": "I1", "item_type": "FRAME",
+                           "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    restore = _inject_cancel_after_nth_read(wired, 1)
+    try:
+        with pytest.raises(HTTPException):
+            asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["orders"].orders["ORD-1"]["status_history"] == []
+
+
+class _UpdateOnlyColl:
+    """A collection with update_one but NO find_one_and_update -- the exact
+    surface the guarded fallback branch exists for. Nulling the whole collection
+    (as the other fallback test does) skips this branch entirely, so without
+    this double the fallback's own status precondition is unpinned."""
+
+    def __init__(self, orders):
+        self.orders = orders
+
+    def update_one(self, flt, upd):
+        doc = self.orders.get(flt.get("order_id"))
+        matched = doc is not None
+        want = flt.get("status")
+        if matched and isinstance(want, dict) and "$in" in want:
+            matched = doc.get("status") in want["$in"]
+        if not matched:
+            return type("R", (object,), {"modified_count": 0})()
+        doc.update(upd.get("$set", {}))
+        for key, value in upd.get("$push", {}).items():
+            doc.setdefault(key, []).append(value)
+        return type("R", (object,), {"modified_count": 1})()
+
+
+def test_the_guarded_fallback_branch_enforces_the_status_set(wired):
+    """The fallback's guarded update_one must carry the SAME precondition. It is
+    a narrower window than two round trips, not an open door."""
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "status_history": [], "items": [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["orders"].collection = _UpdateOnlyColl(wired["orders"].orders)
+    wired["units"].append(_unit("U1", status="SOLD", order_id="ORD-1"))
+    # AFTER THE SECOND read: mark_ready reads once, then the helper's own
+    # read-check reads again. Injecting at the FIRST read makes the read-check
+    # itself refuse, so the guarded update_one -- the thing under test -- is
+    # never reached and its precondition is unpinned. This lands the cancel in
+    # the gap BETWEEN the read-check and the write, which is the only window
+    # the fallback's own precondition can defend.
+    restore = _inject_cancel_after_nth_read(wired, 2)
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+    finally:
+        restore()
+
+    assert exc.value.status_code in (400, 500)
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+    assert wired["units"][0]["status"] == "AVAILABLE"
+    assert wired["orders"].orders["ORD-1"]["status_history"] == []
+
+
+def test_the_guarded_fallback_branch_still_advances_a_clean_order(wired):
+    doc = _draft_order()
+    doc.update({"status": "CONFIRMED", "status_history": [], "items": [
+        {"item_id": "I1", "item_type": "FRAME", "product_id": "P1", "quantity": 1}]})
+    wired["orders"].orders["ORD-1"] = doc
+    wired["orders"].collection = _UpdateOnlyColl(wired["orders"].orders)
+
+    res = asyncio.run(om.mark_ready("ORD-1", current_user=_ADMIN))
+
+    assert res["status"] == "READY"
+    assert wired["orders"].orders["ORD-1"]["status"] == "READY"
+    assert wired["orders"].orders["ORD-1"]["status_history"][-1]["status"] == "READY"
