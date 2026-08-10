@@ -1210,9 +1210,14 @@ _AUDITED_UNSCOPED_FILE_GETS = {
 
 # Floor on DETECTED CALL SITES (not modules scanned). If a refactor makes the
 # detector stop seeing file-store reads, this trips instead of the suite going
-# quietly green -- the previous version asserted on "modules containing the
-# string get_file_store", which cannot notice detection collapsing.
-_MIN_DETECTED_FILE_GETS = 8
+# quietly green -- an earlier version asserted on "modules containing the string
+# get_file_store", which cannot notice detection collapsing.
+#
+# Set to the EXACT current count, not a round number below it: the panel noted
+# that a floor of 8 against 10 real sites left two sites of slack, i.e. the
+# detector could go blind to two doors and still pass. Raising this when a
+# legitimate new read is added is the intended friction.
+_MIN_DETECTED_FILE_GETS = 10
 
 
 def test_every_file_store_get_is_kind_scoped_or_audited():
@@ -1281,7 +1286,24 @@ def test_every_file_store_get_is_kind_scoped_or_audited():
             #    spelling and this test still passed. FileStore.get has one
             #    purpose, so every call on a handle is a read of the bucket.
             detected += 1
-            if any(kw.arg == "require_kind" for kw in node.keywords):
+            # 3b. Check the VALUE, not the presence of the token. The previous
+            #    version accepted ANY require_kind= keyword, so the panel
+            #    restored the round-4 P0 as
+            #    `fs.get(file_id, require_kind=ANY_KIND)` and this test passed --
+            #    while file_store treats ANY_KIND and None as fully unscoped. A
+            #    scoped read is one whose value is neither.
+            scoped = False
+            for kw in node.keywords:
+                if kw.arg != "require_kind":
+                    continue
+                value = kw.value
+                unscoped_value = (
+                    isinstance(value, ast.Constant) and value.value is None
+                ) or (isinstance(value, ast.Name) and value.id == "ANY_KIND") or (
+                    isinstance(value, ast.Attribute) and value.attr == "ANY_KIND"
+                )
+                scoped = not unscoped_value
+            if scoped:
                 continue
             unscoped_by_file.setdefault(path.name, []).append(node.lineno)
 
@@ -1306,10 +1328,15 @@ def test_every_file_store_get_is_kind_scoped_or_audited():
             )
 
     assert not offenders, (
-        "unscoped file-store read(s) -- pass require_kind=<kind> when the "
-        "file_id comes from the request, or require_kind=ANY_KIND (and add a "
-        "PROVEN entry to _AUDITED_UNSCOPED_FILE_GETS naming the line that "
-        f"mints the id server-side) : {offenders}"
+        "UNSCOPED file-store read(s): {}\n"
+        "Pass require_kind=\"<the kind stamped at upload>\". ANY_KIND is NOT a "
+        "way to silence this check -- file_store treats it as a fully unscoped "
+        "read of a bucket that also holds employee Aadhaar/PAN scans, and this "
+        "guard counts it as unscoped. It is legitimate ONLY when the file_id "
+        "was minted server-side by store.put() in the same handler and read "
+        "back off the record (never accepted from the request); in that case "
+        "add a PROVEN entry to _AUDITED_UNSCOPED_FILE_GETS naming the minting "
+        "line.".format(offenders)
     )
 
 
@@ -1577,6 +1604,286 @@ def test_grn_document_route_refuses_a_foreign_blob(monkeypatch):
     assert "rekha_aadhaar.jpg" not in r.text
     for header_value in r.headers.values():
         assert "rekha_aadhaar.jpg" not in header_value
+
+
+# ---------------------------------------------------------------------------
+# The chair's cross-store, cross-entity GRN laundering (round 5)
+# ---------------------------------------------------------------------------
+# Checking only the KIND still let a caller launder another STORE's document:
+# the download is scoped by the GRN RECORD, so binding a victim's grn_document
+# file_id to a GRN in your own store walks it past that scope. VICTIM:
+# ACCOUNTANT at BV-RANCHI-01. THIEF: STORE_MANAGER at WO-JSR-01 -- different
+# store AND different legal entity. Front door 404s; the laundered door did not.
+
+
+def _grn_items(vendors_router):
+    return [
+        vendors_router.GRNItemCreate(
+            product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0
+        )
+    ]
+
+
+def _grn_create_ok(monkeypatch, store, thief):
+    """Drive the REAL _create_grn_impl with everything except the attachment
+    authorisation stubbed permissive, so only that gate can reject."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+
+    monkeypatch.setattr(vendors_router, "get_file_store", lambda: store)
+
+    class _PoRepo:
+        """Receivable PO delivering to the CALLER's own store, so the store bind
+        is the only thing that can reject -- the thief legitimately owns the GRN
+        they are creating; it is the DOCUMENT that belongs to another store."""
+
+        def find_by_id(self, po_id):
+            return {
+                "po_id": po_id,
+                "po_number": "PO-TEST-1",
+                "vendor_id": "V1",
+                "vendor_name": "Acme Optics",
+                "status": "SENT",
+                "delivery_store_id": thief["active_store_id"],
+                "items": [{"product_id": "P1", "quantity": 5}],
+            }
+
+        def find_one(self, _q):
+            return self.find_by_id("PO1")
+
+        def update(self, *_a, **_k):
+            return True
+
+    class _GrnRepo:
+        def __init__(self):
+            self.created = None
+
+        def find_one(self, _q):
+            return None
+
+        def create(self, doc):
+            self.created = doc
+            return doc
+
+        def find_many(self, *_a, **_k):
+            return []
+
+    grn_repo = _GrnRepo()
+    monkeypatch.setattr(vendors_router, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(vendors_router, "get_purchase_order_repository", lambda: _PoRepo())
+    return asyncio, vendors_router, grn_repo
+
+
+def test_thief_cannot_bind_another_stores_grn_document(monkeypatch):
+    """CALL 1 of the chair's two-call theft must fail: binding the victim's
+    file_id to a GRN in the thief's own store is refused."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    victim_id = store.put(
+        content=b"SUPPLIER-INVOICE cost-price Rs.1420/unit Essilor terms 90d",
+        filename="essilor_ranchi_aug26.pdf",
+        mime_type="application/pdf",
+        metadata={
+            "kind": "grn_document",
+            "store_id": "BV-RANCHI-01",
+            "uploaded_by": "acct-ranchi",
+        },
+    )
+    thief = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    _grn_create_ok(monkeypatch, store, thief)
+
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-1",
+        items=_grn_items(vendors_router),
+        attachment_file_id=victim_id,
+        attachment_filename="harmless.pdf",
+    )
+    with pytest.raises(Exception) as exc:
+        asyncio.run(vendors_router._create_grn_impl(body, thief))
+    detail = getattr(exc.value, "detail", {})
+    assert getattr(exc.value, "status_code", None) == 400
+    assert detail.get("code") == "ATTACHMENT_INVALID"
+    # The rejection must not disclose WHY (kind vs store vs forged) -- one
+    # message for all, so it is not an ownership oracle over the bucket.
+    assert "store" not in str(detail).lower()
+    assert "essilor_ranchi_aug26.pdf" not in str(detail)
+
+
+def test_own_store_grn_document_still_binds(monkeypatch):
+    """Guard against trading the fix for an outage: receiving must still work
+    when the document was uploaded for the store the goods land in."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    mine = store.put(
+        content=b"REAL-GRN-DOC",
+        filename="inv.pdf",
+        mime_type="application/pdf",
+        metadata={
+            "kind": "grn_document",
+            "store_id": "WO-JSR-01",
+            "uploaded_by": "sm-jsr",
+        },
+    )
+    actor = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    _grn_create_ok(monkeypatch, store, actor)
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-2",
+        items=_grn_items(vendors_router),
+        attachment_file_id=mine,
+    )
+    # Must get PAST the attachment gate. Anything later (empty items, numbering)
+    # is not this test's concern -- only that ATTACHMENT_INVALID is not raised.
+    try:
+        asyncio.run(vendors_router._create_grn_impl(body, actor))
+    except Exception as exc:  # noqa: BLE001
+        detail = getattr(exc, "detail", {})
+        code = detail.get("code") if isinstance(detail, dict) else None
+        assert code != "ATTACHMENT_INVALID", f"own-store attachment refused: {detail}"
+
+
+def test_same_store_foreign_kind_cannot_be_bound_to_a_grn(monkeypatch):
+    """The KIND check must have its own behavioural cover, not just the store
+    bind: a task_attachment carries a store_id too (tasks.py stamps it), so a
+    colleague's same-store task file would satisfy the store bind alone."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    same_store_task_file = store.put(
+        content=b"A COLLEAGUE'S PRIVATE TASK ATTACHMENT",
+        filename="private_note.pdf",
+        mime_type="application/pdf",
+        metadata={
+            "kind": "task_attachment",
+            "store_id": "WO-JSR-01",
+            "uploaded_by": "someone-else",
+        },
+    )
+    actor = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    _grn_create_ok(monkeypatch, store, actor)
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-4",
+        items=_grn_items(vendors_router),
+        attachment_file_id=same_store_task_file,
+    )
+    with pytest.raises(Exception) as exc:
+        asyncio.run(vendors_router._create_grn_impl(body, actor))
+    assert getattr(exc.value, "detail", {}).get("code") == "ATTACHMENT_INVALID"
+
+
+def test_grn_attachment_without_a_store_stamp_is_refused(monkeypatch):
+    """Fail CLOSED on an odd blob: no store_id means refuse, not allow."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    unstamped = store.put(
+        content=b"X",
+        filename="x.pdf",
+        mime_type="application/pdf",
+        metadata={"kind": "grn_document", "uploaded_by": "someone"},
+    )
+    actor = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    _grn_create_ok(monkeypatch, store, actor)
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-3",
+        items=_grn_items(vendors_router),
+        attachment_file_id=unstamped,
+    )
+    with pytest.raises(Exception) as exc:
+        asyncio.run(vendors_router._create_grn_impl(body, actor))
+    detail = getattr(exc.value, "detail", {})
+    assert detail.get("code") == "ATTACHMENT_INVALID"
+
+
+def test_omitting_require_kind_raises_at_runtime():
+    """THE spelling-proof control. A static guard has to enumerate spellings --
+    the panel evaded the previous one with 11 of 16 (`fid = file_id`, a handle
+    passed as a parameter, a handle on self., an aliased import, a walrus, a
+    tuple-unpack, getattr(fs, "get"), a module without the literal string...).
+    A required keyword-only argument does not care how the call is spelled."""
+    import inspect
+
+    from api.services import file_store as fs_module
+
+    for impl in (fs_module.FileStore, fs_module.InMemoryFileStore, fs_module.GridFSFileStore):
+        param = inspect.signature(impl.get).parameters["require_kind"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, impl
+        assert param.default is inspect.Parameter.empty, (
+            f"{impl.__name__}.get gives require_kind a default -- omitting it "
+            "must be a TypeError, not a silent unscoped read"
+        )
+
+    store = fs_module.InMemoryFileStore()
+    fid = store.put(
+        content=b"B", filename="f", mime_type="text/plain", metadata={"kind": "x"}
+    )
+    # NOTE: `pylint --errors-only` ALSO flags these as E1125 missing-kwoa --
+    # a third enforcement layer (CI lint) on top of the runtime signature and
+    # the AST guard. Disabled only here, where omitting the argument is the
+    # thing under test.
+    with pytest.raises(TypeError):
+        store.get(fid)  # pylint: disable=missing-kwoa
+    # Every evasion spelling routes through the same signature.
+    handle = store
+    alias = handle
+    fid2 = fid
+    with pytest.raises(TypeError):
+        alias.get(fid2)  # pylint: disable=missing-kwoa
+    with pytest.raises(TypeError):
+        getattr(alias, "get")(fid2)  # pylint: disable=missing-kwoa
+
+
+def test_any_kind_is_counted_as_unscoped_by_the_static_guard():
+    """The guard must check the VALUE of require_kind, not the presence of the
+    token -- the panel restored the round-4 P0 as `require_kind=ANY_KIND` and
+    the old guard passed it."""
+    import ast
+
+    src = "fs.get(file_id, require_kind=ANY_KIND)"
+    call = ast.parse(src).body[0].value
+    kw = call.keywords[0]
+    unscoped = (isinstance(kw.value, ast.Name) and kw.value.id == "ANY_KIND") or (
+        isinstance(kw.value, ast.Constant) and kw.value.value is None
+    )
+    assert unscoped, "ANY_KIND must be classified as an unscoped read"
 
 
 def test_grn_document_route_still_serves_a_real_grn_document(monkeypatch):

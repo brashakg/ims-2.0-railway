@@ -68,10 +68,19 @@ MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 #     the employee document row), the record is the authorisation and the read
 #     may be unscoped -- pass require_kind=ANY_KIND to say so DELIBERATELY.
 #
-# Both branches are asserted by a guard test, so a new serve endpoint cannot
-# silently inherit universal read by simply forgetting the argument. Making the
-# parameter a hard runtime requirement would break the already-audited callers
-# above mid-shift on a live system, so the enforcement lives in the test.
+# ENFORCEMENT IS AT RUNTIME, NOT IN A LINTER. `require_kind` is a REQUIRED
+# keyword-only argument: omit it and the call raises TypeError immediately.
+# An earlier round tried to enforce this with an AST guard instead; a security
+# panel evaded it with 11 of 16 spellings (`fid = file_id`, a handle passed as a
+# parameter, a handle on `self.`, an aliased import, a walrus, a tuple-unpack,
+# `getattr(fs, "get")`, ...) and shipped a LIVE route that streamed any blob.
+# Static analysis has to enumerate spellings; the signature does not care how
+# the call is spelled. The static guard is kept as a second layer, but it is no
+# longer the thing standing between the bucket and a new serve endpoint.
+#
+# ANY_KIND is the DELIBERATE opt-out, and it is deliberately NOT the path of
+# least resistance: it must be named at the call site, and the guard test
+# treats it as unscoped rather than as "argument present, therefore fine".
 ANY_KIND = "__any_kind__"
 
 
@@ -90,7 +99,7 @@ class FileStore:
         raise NotImplementedError
 
     def get(
-        self, file_id: str, *, require_kind: Optional[str] = None
+        self, file_id: str, *, require_kind: str
     ) -> Optional[Tuple[bytes, str, str]]:
         """Return (content, filename, mime_type) or None when missing.
 
@@ -142,7 +151,7 @@ class InMemoryFileStore(FileStore):
         }
         return file_id
 
-    def get(self, file_id, *, require_kind=None):
+    def get(self, file_id, *, require_kind):
         rec = self._files.get(file_id)
         if rec is None:
             return None
@@ -203,7 +212,7 @@ class GridFSFileStore(FileStore):
             logger.warning(f"[FILESTORE] put failed: {e}")
             return None
 
-    def get(self, file_id, *, require_kind=None):
+    def get(self, file_id, *, require_kind):
         fs = self._bucket()
         if fs is None:
             return None

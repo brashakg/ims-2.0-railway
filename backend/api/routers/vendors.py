@@ -62,6 +62,16 @@ _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # or served from, a GRN.
 _GRN_DOCUMENT_KIND = "grn_document"
 
+# ONE message for every attachment rejection -- forged id, wrong kind, another
+# store's document -- so the create endpoint cannot be used as an existence or
+# ownership oracle over the shared bucket.
+_ATTACHMENT_INVALID_DETAIL = {
+    "code": "ATTACHMENT_INVALID",
+    "message": (
+        "The attached file is no longer available or invalid. Please re-upload."
+    ),
+}
+
 # Tighter set for money-out / accounts-payable writes (bills, payments, debit
 # notes). Recording a payable or releasing cash is an accounting action, so it
 # is limited to ADMIN / ACCOUNTANT (SUPERADMIN auto-passes via require_roles).
@@ -2110,24 +2120,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         # P0 (security panel): existence is NOT authorisation. The id is
         # supplied by the CALLER (GRNCreate.attachment_file_id) and ONE bucket
         # holds every binary in the app, so an existence check passes just as
-        # happily for a task attachment or an employee Aadhaar scan. Require the
-        # metadata.kind that THIS router's own upload stamps, so only a real GRN
-        # document can be bound to a GRN. (Deliberately not also binding the
-        # uploader: GRN attachment is mandatory for receiving, and a same-kind
-        # id already sits behind the vendor-role gate on the download route --
-        # so an uploader check would add operational risk without closing a
-        # privilege boundary.)
-        _meta = store.get_metadata(str(grn.attachment_file_id).strip())
-        if _meta is None or _meta.get("kind") != _GRN_DOCUMENT_KIND:
+        # happily for a task attachment or an employee Aadhaar scan.
+        # Kind is checked here; the STORE bind runs below, once the receiving
+        # store is final (a PO-backed GRN is re-pointed to the PO's store).
+        _attachment_meta = store.get_metadata(str(grn.attachment_file_id).strip())
+        if (
+            _attachment_meta is None
+            or _attachment_meta.get("kind") != _GRN_DOCUMENT_KIND
+        ):
             raise HTTPException(
                 status_code=400,
-                detail={
-                    "code": "ATTACHMENT_INVALID",
-                    "message": (
-                        "The attached file is no longer available or invalid. "
-                        "Please re-upload."
-                    ),
-                },
+                detail=_ATTACHMENT_INVALID_DETAIL,
             )
 
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
@@ -2159,6 +2162,36 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                         status_code=404, detail="Purchase order not found"
                     )
                 store_id = po_store
+
+    # P0 STORE BIND (security panel round 5, reproduced end to end). Checking
+    # only the KIND still let a caller LAUNDER another store's document: the
+    # download route is scoped by the GRN RECORD
+    # (can_access_store_scoped(grn["store_id"])), so binding a victim's
+    # grn_document file_id to a GRN in YOUR OWN store walks it straight past
+    # that scope. A STORE_MANAGER at WO-JSR-01 bound an ACCOUNTANT's
+    # BV-RANCHI-01 supplier invoice -- a different store AND a different legal
+    # entity -- and streamed it back, cost prices, vendor terms and the real
+    # filename included, while the front door correctly 404'd.
+    #
+    # POST /vendors/grn/upload-doc already stamps store_id, so binding the store
+    # costs the receiving flow nothing: the live UI uploads and creates from the
+    # same component. The UPLOADER is deliberately NOT bound -- that would
+    # foreclose an ops-uploads / accountant-creates split -- but "don't bind the
+    # uploader" never implied "bind nothing".
+    #
+    # Strict: the blob must CARRY a store_id and it must equal the receiving
+    # store. A blob with no store_id is refused rather than allowed through, so
+    # this cannot fail open on an odd upload; the fix is one re-upload, which
+    # stamps the current store. (Prod probe: all live grn_document blobs carry
+    # store_id.) Same indistinguishable message as every other attachment
+    # rejection, so this is not an existence oracle over the bucket.
+    if not is_dc:
+        _blob_store = (_attachment_meta or {}).get("store_id")
+        if not _blob_store or _blob_store != store_id:
+            raise HTTPException(
+                status_code=400,
+                detail=_ATTACHMENT_INVALID_DETAIL,
+            )
 
     # W1.4 / OS-006: the receiving store is now FINAL (PO re-point applied).
     # An ONLINE store owns no stock -- accepting goods there would mint real
