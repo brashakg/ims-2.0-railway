@@ -78,9 +78,8 @@ import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 import {
   axisOrNull,
   axisPromptReason,
-  buildAxisProvenanceRemark,
+  axisSourceFor,
   eyesNeedingCounterAxis,
-  joinRemarks,
   validateCounterAxis,
   EYE_LABEL,
   type EyeKey,
@@ -165,6 +164,12 @@ function mapCategory(cat: string): string {
   };
   return map[canonical] || canonical || cat;
 }
+
+// Roles the backend actually lets create a prescription. MIRROR of the
+// CLINICAL_ROLES set in backend/api/routers/prescriptions.py create_prescription
+// (which 403s everything else). Used ONLY to tell the truth in the counter-axis
+// prompt -- the server remains the gate. Keep in step with that set.
+const RX_SAVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] as const;
 
 // ----------------------------------------------------------------------------
 // PATIENT SAFETY: pending counter axis entry
@@ -456,6 +461,13 @@ export function POSLayout() {
 
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
+      // PATIENT SAFETY: while the counter-axis prompt is open the whole wizard
+      // keyboard map is INERT. The tag check below only spares INPUT/TEXTAREA/
+      // SELECT, so with focus on the dialog's own button an Escape reached
+      // goBack() and walked the sale back a step mid-prompt, and a barcode
+      // scanner's trailing Enter reached goNext(). Neither may happen while a
+      // blocking clinical prompt is up.
+      if (axisPrompt) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       // F2 jumps to the group that renders the products catalog; F9 to the
@@ -482,7 +494,7 @@ export function POSLayout() {
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [(store.cart || []).length, isComplete, isFinalInputGroup, currentGroupIndex, flowGroups, goToGroup, goNext, goBack, canProceed]);
+  }, [(store.cart || []).length, isComplete, isFinalInputGroup, currentGroupIndex, flowGroups, goToGroup, goNext, goBack, canProceed, axisPrompt]);
 
   // --------------------------------------------------------------------------
   // Save a counter-captured prescription
@@ -497,28 +509,21 @@ export function POSLayout() {
     try {
       const isOptometrist = user?.roles?.includes('OPTOMETRIST');
       const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
-      // Provenance rides on `remarks` -- the only free field the create door
-      // persists verbatim -- so a remake dispute can tell a counter-entered
-      // axis from a clinician-recorded one.
-      const remarks = joinRemarks(
-        rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : null,
-        counterAxisEyes.length > 0
-          ? buildAxisProvenanceRemark(counterAxisEyes, user?.name)
-          : null,
-      );
-
+      // Provenance is stamped PER EYE as `axis_source`, never into `remarks`:
+      // remarks is published to the OTP-gated customer portal and printed on the
+      // patient's Rx card, and no staff screen renders it. See rxAxisEntry.
       const result = await prescriptionApi.createPrescription({
         patient_id: store.patient?.id || store.customer?.id,
         customer_id: store.customer?.id,
         source,
         optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
         validity_months: 12,
-        right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: axisOrNull(rxData.axis_od), add: String(rxData.add_od || 0), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined },
-        left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: axisOrNull(rxData.axis_os), add: String(rxData.add_os || 0), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined },
+        right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: axisOrNull(rxData.axis_od), add: String(rxData.add_od || 0), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined, axis_source: axisSourceFor('od', counterAxisEyes) },
+        left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: axisOrNull(rxData.axis_os), add: String(rxData.add_os || 0), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined, axis_source: axisSourceFor('os', counterAxisEyes) },
         ipd: rxData.ipd || undefined,
         lens_recommendation: rxData.lens_type || undefined,
         next_checkup: rxData.next_checkup || undefined,
-        remarks,
+        remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
       } as any);
 
       if (result?.prescription_id) {
@@ -1243,6 +1248,12 @@ export function POSLayout() {
             <div className="p-4">
               <PrescriptionForm
                 allowContactLens={false}
+                // PATIENT SAFETY: hand the "cylinder but no axis" case to the
+                // blocking prompt below instead of rejecting it with a transient
+                // toast. Without this the modal is unreachable -- the form's own
+                // validateEyePair returns before onSubmit ever fires -- and the
+                // owner chose a prompt over a hard block deliberately.
+                deferAxisPrompt
                 onSubmit={async (rxData) => {
                   setErrorMsg(null);
                   // PATIENT SAFETY: a cylinder with no axis cannot be ground.
@@ -1268,16 +1279,27 @@ export function POSLayout() {
         </div>
       )}
       {/* PATIENT SAFETY: axis required before this prescription can be saved.
-          Deliberately un-dismissable -- no backdrop click, no close X, no
-          Escape. The only ways out are entering a valid axis or going back to
-          the prescription (which saves NOTHING). z-[60] so it sits above the
-          New Prescription overlay (z-50) it was launched from. */}
+          Deliberately un-dismissable -- no backdrop click, no close X, and the
+          wizard's global key map is switched off while it is open (see the
+          keydown effect) so a stray Escape cannot walk the sale back a step and
+          a scanner's trailing Enter cannot advance it. Enter inside the dialog
+          does NOT submit either: POS counters use barcode scanners that emit
+          Enter, and a clinical value must be committed by a deliberate click.
+          The only ways out are a valid axis or going back to the prescription
+          (which saves NOTHING). z-[60] sits above the New Prescription overlay
+          (z-50) it was launched from. */}
       {axisPrompt && (
         <div
           className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="axis-prompt-title"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.preventDefault();
+            // Escape is swallowed here as well as at the window handler, so the
+            // dialog is inert even if it is ever rendered outside POSLayout.
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); }
+          }}
         >
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto border border-gray-200">
             <div className="p-4 border-b border-gray-200 flex items-start gap-2">
@@ -1285,10 +1307,23 @@ export function POSLayout() {
               <div>
                 <h3 id="axis-prompt-title" className="font-semibold text-gray-900">Axis needed before this prescription can be saved</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Anyone at the counter can enter it. Check the prescription the customer brought, or ask the optometrist.
+                  Anyone at the counter can type it in. Check the prescription the customer brought, or ask the optometrist.
                 </p>
               </div>
             </div>
+            {/* Truthful about who can actually SAVE. create_prescription
+                (routers/prescriptions.py) 403s every role outside
+                SUPERADMIN / ADMIN / STORE_MANAGER / OPTOMETRIST, and the New
+                Prescription entry has no role gate -- so a cashier could fill
+                this in and hit a 403 with the sale stranded, the exact stall the
+                prompt exists to avoid. We tell them BEFORE they type rather than
+                widening a clinical write door. The server stays the only gate;
+                this list mirrors it and must be updated with it. */}
+            {!RX_SAVE_ROLES.some((r) => user?.roles?.includes(r as any)) && (
+              <div className="mx-4 mt-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-800">
+                You can enter the axis here, but saving a new prescription needs a manager or optometrist. Ask one to finish it, or attach an existing prescription instead.
+              </div>
+            )}
             <div className="p-4 space-y-4">
               {axisPrompt.eyes.map((eye) => (
                 <div key={eye}>
@@ -1303,6 +1338,11 @@ export function POSLayout() {
                     type="text"
                     inputMode="numeric"
                     autoComplete="off"
+                    // Focus lands in the FIRST axis box, not on the barcode
+                    // field behind the scrim -- otherwise a scanner burst is
+                    // typed invisibly into the product search while a clinical
+                    // prompt is up.
+                    autoFocus={eye === axisPrompt.eyes[0]}
                     placeholder="e.g. 90"
                     aria-label={`${EYE_LABEL[eye]} axis`}
                     aria-invalid={axisPrompt.errors[eye] ? true : undefined}

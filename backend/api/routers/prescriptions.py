@@ -201,6 +201,24 @@ class EyeData(BaseModel):
     prism: Optional[str] = None
     base: Optional[str] = None
     acuity: Optional[str] = None
+    # PATIENT SAFETY / AUDIT: how THIS eye's axis came to be recorded.
+    #   None (absent)   = recorded by the clinician on the prescription -- normal.
+    #   COUNTER_ENTERED = supplied at the POS counter because the prescription
+    #                     carried a cylinder but no axis. POS never invents an
+    #                     axis; it asks, and stamps the answer here.
+    # It lives on the EYE, not in `remarks`, deliberately: `remarks` is projected
+    # to the OTP-gated CUSTOMER portal (portal._safe_prescription_view -> "notes")
+    # and printed on the patient-facing Rx card, while NO internal staff screen
+    # renders it -- so provenance there would tell the PATIENT their axis was
+    # supplied at the counter and stay invisible to the optician handling the
+    # remake dispute it exists for. Exactly inverted. Per-eye also beats a single
+    # free-text note when only one eye was counter-entered.
+    # Persisted automatically by `right_eye.model_dump()` in create_prescription
+    # -- no router change needed. WHO/WHEN are already on the doc (`created_by`,
+    # `prescription_date`), so they are not duplicated onto the eye.
+    # Add new members to the Literal (do not loosen to a bare str) so a typo can
+    # never masquerade as a valid provenance value.
+    axis_source: Optional[Literal["COUNTER_ENTERED"]] = None
 
     @field_validator("sph")
     @classmethod

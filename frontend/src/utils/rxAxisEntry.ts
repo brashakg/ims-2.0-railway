@@ -169,37 +169,32 @@ export function axisPromptReason(eye: EyeKey, cyl: unknown): string {
 // ---------------------------------------------------------------------------
 // Provenance: a counter-entered axis is NOT a clinician-recorded axis
 // ---------------------------------------------------------------------------
-// A stable, greppable marker so a remake dispute can tell the two apart, and so
-// "how often does this happen" is a query rather than a guess. It is appended to
-// the prescription's `remarks`, which is the only free field the create door
-// persists verbatim (routers/prescriptions.create_prescription copies a fixed
-// set of keys into rx_data, so any NEW key would be silently dropped -- see the
-// PR notes for the durable first-class field this should become).
-export const AXIS_COUNTER_MARK = '[AXIS-AT-COUNTER]';
+// Stamped on the EYE sub-document as `axis_source`, which the backend persists
+// automatically via `right_eye.model_dump()` (routers/prescriptions.py EyeData).
+//
+// DO NOT MOVE THIS INTO `remarks`. An earlier round of this work did, on the
+// stated belief that remarks was the only field the create door persists
+// verbatim. That was WRONG twice over:
+//   * it is not the only one -- the eye is a whole-model dump, so a field added
+//     to EyeData persists with no router change at all; and
+//   * `remarks` is projected to the OTP-gated CUSTOMER portal
+//     (portal._safe_prescription_view -> "notes", rendered by RxPortalPage) and
+//     printed on the patient-facing Rx card -- while NO internal staff screen
+//     renders it. Provenance there tells the PATIENT their axis was supplied at
+//     the counter, and hides it from the optician handling the remake dispute
+//     it exists for. Exactly inverted.
+//
+// WHO and WHEN are not duplicated here: the prescription doc already carries
+// `created_by` and `prescription_date`.
+//
+// The literal is pinned by a test -- renaming it silently orphans every
+// historical row and every saved query, so the test must move with it.
+export const AXIS_SOURCE_COUNTER = 'COUNTER_ENTERED';
 
-/**
- * Build the provenance note recorded against the prescription.
- * `when` is injectable so the text is testable.
- */
-export function buildAxisProvenanceRemark(
-  eyes: EyeKey[],
-  staffName: string | undefined,
-  when: Date = new Date(),
-): string {
-  const which = eyes.map((e) => EYE_LABEL[e]).join(' and ');
-  const who = (staffName || '').trim() || 'counter staff';
-  const date = when.toISOString().slice(0, 10);
-  return (
-    `${AXIS_COUNTER_MARK} ${which} axis entered at the counter by ${who} on ${date} - ` +
-    `not recorded by the prescribing clinician`
-  );
-}
-
-/**
- * Join the prescription remarks, dropping blanks. Keeps the existing doctor
- * note and adds the provenance note beside it rather than replacing it.
- */
-export function joinRemarks(...parts: Array<string | null | undefined>): string | undefined {
-  const kept = parts.map((p) => (p || '').trim()).filter((p) => p !== '');
-  return kept.length > 0 ? kept.join(' | ') : undefined;
+/** The `axis_source` value for one eye: the marker, or undefined to omit it. */
+export function axisSourceFor(
+  eye: EyeKey,
+  counterEnteredEyes: EyeKey[],
+): typeof AXIS_SOURCE_COUNTER | undefined {
+  return counterEnteredEyes.includes(eye) ? AXIS_SOURCE_COUNTER : undefined;
 }

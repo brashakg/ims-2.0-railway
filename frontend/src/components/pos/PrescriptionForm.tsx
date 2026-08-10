@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
 import { RxPowerInput } from '../clinical/RxPowerInput';
-import { validateEyePair } from '../../constants/rxLimits';
+import { validateEyePair, type RxEyeValues } from '../../constants/rxLimits';
+import { isAxisMissing, isToricCyl } from '../../utils/rxAxisEntry';
 import { useToast } from '../../context/ToastContext';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
@@ -74,6 +75,16 @@ interface PrescriptionFormProps {
   // Label for the primary action. Defaults to "Add to Order" (POS context).
   // Clinic create/edit passes "Save prescription" / "Save changes".
   submitLabel?: string;
+  // PATIENT SAFETY (POS only). When true, the ONE case "this eye has a cylinder
+  // but no axis" is NOT rejected here with a transient toast; it is handed to
+  // onSubmit so the caller can run its own blocking counter-axis prompt (see
+  // POSLayout). Defaults to FALSE, so the clinic create/edit callers keep the
+  // existing hard rejection unchanged.
+  //
+  // Nothing else is relaxed: the eye is still fully validated, and it is only
+  // deferred when the missing axis is its ONLY problem. An out-of-range SPH, a
+  // bad PD, an axis-without-cyl and so on still block here as before.
+  deferAxisPrompt?: boolean;
 }
 
 export function PrescriptionForm({
@@ -82,6 +93,7 @@ export function PrescriptionForm({
   initialData,
   allowContactLens = true,
   submitLabel = 'Add to Order',
+  deferAxisPrompt = false,
 }: PrescriptionFormProps) {
   const toast = useToast();
   const [prescription, setPrescription] = useState<PrescriptionData>(
@@ -135,20 +147,29 @@ export function PrescriptionForm({
 
   // Validate the entered powers against the canonical realistic limits before
   // submitting (the backend is the ultimate gate; this gives a fast message).
+  // PATIENT SAFETY: is this eye's ONLY problem "a cylinder with no axis"?
+  //
+  // Decided by REMOVING the cylinder and re-validating -- never by inventing a
+  // placeholder axis to satisfy the pairing rule, and never by matching on the
+  // error message text. If the eye is clean once the cylinder is set aside, the
+  // pairing was its only fault and the counter prompt can collect the axis.
+  // Any other fault (out-of-range SPH, bad PD, axis-without-cyl, bad VA) still
+  // fails here, exactly as before.
+  const axisIsTheOnlyProblem = (eye: RxEyeValues, label: string): boolean => {
+    if (!isToricCyl(eye.cyl) || !isAxisMissing(eye.axis)) return false;
+    return validateEyePair({ ...eye, cyl: undefined }, label) === null;
+  };
+
   const validateBeforeSubmit = (): string | null => {
     if (rxKind === 'SPECTACLE') {
-      const od = validateEyePair(
-        { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
-          add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od },
-        'Right eye (OD)',
-      );
-      if (od) return od;
-      const os = validateEyePair(
-        { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
-          add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os },
-        'Left eye (OS)',
-      );
-      if (os) return os;
+      const odEye = { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
+        add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od };
+      const od = validateEyePair(odEye, 'Right eye (OD)');
+      if (od && !(deferAxisPrompt && axisIsTheOnlyProblem(odEye, 'Right eye (OD)'))) return od;
+      const osEye = { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
+        add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os };
+      const os = validateEyePair(osEye, 'Left eye (OS)');
+      if (os && !(deferAxisPrompt && axisIsTheOnlyProblem(osEye, 'Left eye (OS)'))) return os;
     } else {
       // Contact lens: power/cyl/axis/add + base curve + diameter per eye.
       const check = (eye: CLEyeData | undefined, label: string): string | null =>

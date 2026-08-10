@@ -19,14 +19,13 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-  AXIS_COUNTER_MARK,
+  AXIS_SOURCE_COUNTER,
   axisOrNull,
   axisPromptReason,
-  buildAxisProvenanceRemark,
+  axisSourceFor,
   eyesNeedingCounterAxis,
   isAxisMissing,
   isToricCyl,
-  joinRemarks,
   validateCounterAxis,
 } from '../rxAxisEntry';
 
@@ -190,29 +189,30 @@ describe('prompt copy names the eye and the cylinder', () => {
 });
 
 describe('provenance: a counter-entered axis is not a clinician-recorded one', () => {
-  it('carries a stable, greppable marker naming the eyes and the staff member', () => {
-    const note = buildAxisProvenanceRemark(['od'], 'Asha Kumari', new Date('2026-08-10T09:00:00Z'));
-    expect(note).toContain(AXIS_COUNTER_MARK);
-    expect(note).toContain('Right eye (OD)');
-    expect(note).toContain('Asha Kumari');
-    expect(note).toContain('2026-08-10');
-    expect(note).toContain('not recorded by the prescribing clinician');
+  // PINS THE LITERAL. Renaming this value silently orphans every historical row
+  // and every saved query -- and the backend accepts it as a Literal, so a
+  // rename becomes a 422 at the counter. It must move with its migration, and
+  // failing this test is the reminder.
+  it('has a stable wire value that must not be renamed casually', () => {
+    expect(AXIS_SOURCE_COUNTER).toBe('COUNTER_ENTERED');
   });
 
-  it('names both eyes when both were entered at the counter', () => {
-    const note = buildAxisProvenanceRemark(['od', 'os'], 'Asha', new Date('2026-08-10T09:00:00Z'));
-    expect(note).toContain('Right eye (OD) and Left eye (OS)');
+  it('stamps only the eyes that were entered at the counter', () => {
+    expect(axisSourceFor('od', ['od'])).toBe(AXIS_SOURCE_COUNTER);
+    expect(axisSourceFor('os', ['od'])).toBeUndefined();
+    expect(axisSourceFor('os', ['od', 'os'])).toBe(AXIS_SOURCE_COUNTER);
   });
 
-  it('falls back to a generic actor rather than dropping the marker', () => {
-    expect(buildAxisProvenanceRemark(['os'], undefined)).toContain('counter staff');
-    expect(buildAxisProvenanceRemark(['os'], '   ')).toContain('counter staff');
+  it('stamps nothing when no axis was entered at the counter', () => {
+    expect(axisSourceFor('od', [])).toBeUndefined();
+    expect(axisSourceFor('os', [])).toBeUndefined();
   });
 
-  it('keeps the existing doctor remark beside the provenance note', () => {
-    expect(joinRemarks('Dr. Rao', 'axis note')).toBe('Dr. Rao | axis note');
-    expect(joinRemarks(null, 'axis note')).toBe('axis note');
-    expect(joinRemarks('Dr. Rao', null)).toBe('Dr. Rao');
-    expect(joinRemarks(null, undefined, '')).toBeUndefined();
+  // The marker must be a machine value, not prose: it rides on the eye
+  // sub-document, and anything sentence-like suggests it belongs in `remarks`
+  // -- which is published to the patient portal and printed on the Rx card.
+  it('is an opaque machine token, not patient-facing prose', () => {
+    expect(AXIS_SOURCE_COUNTER).toMatch(/^[A-Z_]+$/);
+    expect(AXIS_SOURCE_COUNTER).not.toMatch(/\s/);
   });
 });

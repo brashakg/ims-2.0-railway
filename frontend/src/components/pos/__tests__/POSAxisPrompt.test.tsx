@@ -15,22 +15,20 @@
 // prints a fabricated 180.
 //
 // ---------------------------------------------------------------------------
-// Why PrescriptionForm is STUBBED here (this is not a harness dodging the real
-// path -- read before "fixing" it to render the real form)
+// Why PrescriptionForm is STUBBED here
 // ---------------------------------------------------------------------------
-// PrescriptionForm.validateBeforeSubmit already runs validateEyePair, which
-// rejects a toric-without-axis ("AXIS is required when CYL is set") and toasts
-// BEFORE onSubmit is ever called. So on the CREATE path the old `|| 180` mostly
-// could not fire for a toric Rx -- its real live damage was (a) NON-TORIC eyes,
-// where a blank axis became a meaningless stored 180, and (b) the ATTACH doors,
-// which have no such validation and fabricated an axis for legacy stored Rx.
+// To isolate POSLayout's gate from the form's own validation, so a failure here
+// names POSLayout and nothing else. The stub feeds onSubmit an exact payload,
+// which lets each eye be varied independently -- awkward to do through the real
+// inputs, and that per-eye independence is what catches a half-applied fix.
 //
-// That makes POSLayout's own gate genuinely unreachable through the real form's
-// UI, so driving the real form here would assert PrescriptionForm's validator,
-// not POSLayout's. The gate still has to exist and be correct: it is the
-// defence in depth for every caller that is not that one form, and the owner
-// asked for an unmissable prompt rather than a toast. Stubbing the form is what
-// puts POSLayout -- the unit under test -- on the stand.
+// The real form IS driven, without any stub, in POSAxisPromptRealForm.test.tsx:
+// that file proves the door actually opens (PrescriptionForm.validateEyePair
+// used to reject a toric-without-axis with a transient toast BEFORE onSubmit
+// fired, so this modal never rendered in production until `deferAxisPrompt`
+// routed that one case through). The two files are complementary and neither is
+// sufficient alone: that one proves the door opens, this one proves what is
+// behind it -- including for callers that are not that form.
 
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -116,7 +114,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { POSLayout } from '../POSLayout';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
-import { AXIS_COUNTER_MARK } from '../../../utils/rxAxisEntry';
+import { AXIS_SOURCE_COUNTER } from '../../../utils/rxAxisEntry';
 
 function renderPOS() {
   return render(
@@ -139,6 +137,17 @@ function seedRxSale() {
   });
 }
 
+/**
+ * The Customer step, where RxAvailableBadge offers one-click "Attach Latest Rx".
+ * This door renders NO powers before attaching, so the honest "axis not
+ * recorded" label never appears here -- the store value is the only evidence.
+ */
+async function openCustomerStep() {
+  seedRxSale();
+  renderPOS();
+  act(() => usePOSStore.getState().setStep('customer'));
+}
+
 /** Reveal the Rx surface on the merged Products & Rx step. */
 async function openRxSurface() {
   seedRxSale();
@@ -147,9 +156,14 @@ async function openRxSurface() {
   fireEvent.click(screen.getByRole('button', { name: 'Use last exam' }));
 }
 
-/** ...and open the New Prescription modal on top of it. */
+/** ...and open the New Prescription modal on top of it.
+ *
+ *  The await is load-bearing: the Rx step fetches prescriptions in an effect,
+ *  and a promise settling after the form mounts re-renders it. Wait for the
+ *  fetch to settle first so the suite is deterministic. */
 async function openNewRxForm() {
   await openRxSurface();
+  await screen.findByText(/No prescriptions found/);
   fireEvent.click(screen.getByText('New Prescription'));
   return screen.getByText('stub-submit-rx');
 }
@@ -264,11 +278,38 @@ describe('a toric Rx with no axis cannot proceed without a value', () => {
     const body = H.createPrescription.mock.calls[0][0];
     // The axis the staff member typed -- not 180, not a guess.
     expect(body.right_eye.axis).toBe(85);
-    // Provenance is persisted, and the doctor remark survives beside it.
-    expect(body.remarks).toContain(AXIS_COUNTER_MARK);
-    expect(body.remarks).toContain('Right eye (OD)');
-    expect(body.remarks).toContain('Asha Kumari');
-    expect(body.remarks).toContain('Dr. Rao');
+    // Provenance is stamped ON THE EYE that was counter-entered...
+    expect(body.right_eye.axis_source).toBe(AXIS_SOURCE_COUNTER);
+    // ...and NOT on the eye that was not.
+    expect(body.left_eye.axis_source).toBeUndefined();
+    // The doctor remark is untouched.
+    expect(body.remarks).toBe('Dr. Rao');
+  });
+
+  // PRIVACY / AUDIT REGRESSION. `remarks` is projected to the OTP-gated customer
+  // portal (portal._safe_prescription_view -> "notes", rendered by
+  // RxPortalPage) and printed on the patient-facing Rx card, while no internal
+  // staff screen renders it. Provenance there would tell the PATIENT their axis
+  // was supplied at the counter and hide it from the optician handling the
+  // remake dispute. It must never travel in a patient-reachable field.
+  it('never puts counter provenance in a patient-visible field', async () => {
+    H.rx = { sph_od: -2, cyl_od: -1.25, axis_od: undefined, doctor_name: 'Rao' };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+    await screen.findByText(PROMPT_TITLE);
+    fireEvent.change(screen.getByLabelText('Right eye (OD) axis'), { target: { value: '85' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save axis and continue' }));
+
+    await waitFor(() => expect(H.createPrescription).toHaveBeenCalledTimes(1));
+    const body = H.createPrescription.mock.calls[0][0];
+    // Every field _safe_prescription_view can project, plus the free-text ones
+    // the printed card emits. None may carry the marker or the staff name.
+    for (const field of [body.remarks, body.notes, body.lens_recommendation, body.coating_recommendation, body.ipd]) {
+      const text = String(field ?? '');
+      expect(text).not.toContain(AXIS_SOURCE_COUNTER);
+      expect(text).not.toContain('counter');
+      expect(text).not.toContain('Asha Kumari');
+    }
   });
 });
 
@@ -283,8 +324,9 @@ describe('an axis of 0 is a real clinical value', () => {
     const body = H.createPrescription.mock.calls[0][0];
     expect(body.right_eye.axis).toBe(0);
     expect(body.left_eye.axis).toBe(0);
-    // No counter-entry provenance: nothing was entered at the counter.
-    expect(body.remarks ?? '').not.toContain(AXIS_COUNTER_MARK);
+    // No counter-entry provenance on either eye: nothing was entered here.
+    expect(body.right_eye.axis_source).toBeUndefined();
+    expect(body.left_eye.axis_source).toBeUndefined();
   });
 });
 
@@ -337,13 +379,19 @@ describe('the Rx chooser never prints an axis the prescription does not have', (
     expect(row.textContent).not.toContain('180');
   });
 
-  it('attaches a stored axis-less Rx to the sale as axis-less, never as 180', async () => {
+  // BOTH eyes exercise the MISSING-axis path here. An earlier version of this
+  // fixture put the missing axis on the right eye and a recorded 0 on the left,
+  // so the left eye's only assertion pinned the 0 case -- and a mutation that
+  // fabricated 180 on the LEFT eye alone passed green while the identical
+  // mutation on the right eye was killed. Same door, same mutation, one eye
+  // caught. Keep both eyes on `null`.
+  it('attaches a stored axis-less Rx as axis-less on BOTH eyes, never as 180', async () => {
     H.stored = [{
       prescription_id: 'RX-OLD-3',
       test_date: new Date().toISOString(),
       validity_months: 24,
       right_eye: { sph: '-2.00', cyl: '-1.25', axis: null },
-      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 0 },
+      left_eye: { sph: '-1.00', cyl: '-0.75', axis: null },
     }];
     await openRxSurface();
 
@@ -351,7 +399,131 @@ describe('the Rx chooser never prints an axis the prescription does not have', (
     await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
     const rx: any = usePOSStore.getState().prescription;
     expect(rx.rightEye.axis).toBeNull();
-    // ...and a recorded 0 survives the attach untouched.
+    expect(rx.leftEye.axis).toBeNull();
+  });
+
+  it('keeps a recorded axis of 0 on BOTH eyes through the attach', async () => {
+    H.stored = [{
+      prescription_id: 'RX-OLD-4',
+      test_date: new Date().toISOString(),
+      validity_months: 24,
+      right_eye: { sph: '-2.00', cyl: '-1.25', axis: 0 },
+      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 0 },
+    }];
+    await openRxSurface();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Attach' }));
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBe(0);
     expect(rx.leftEye.axis).toBe(0);
+  });
+});
+
+// ============================================================================
+// The one-click "Attach Latest Rx" door (RxAvailableBadge.handleSwitchToRx)
+// ============================================================================
+// This was the highest-traffic axis door and had NO test at all: restoring the
+// original `Number(... || ... || 180)` on BOTH eyes here killed nothing. It is
+// also the worst place to fabricate, because it renders no powers before
+// attaching -- staff see a button, not a prescription, so there is nothing on
+// screen to contradict a fabricated 180.
+describe('one-click "Attach Latest Rx" never fabricates an axis', () => {
+  it('attaches an axis-less stored Rx as axis-less on BOTH eyes', async () => {
+    H.stored = [{
+      prescription_id: 'RX-LATEST-1',
+      test_date: new Date().toISOString(),
+      validity_months: 24,
+      right_eye: { sph: '-2.00', cyl: '-1.25', axis: null },
+      left_eye: { sph: '-1.00', cyl: '-0.75', axis: null },
+    }];
+    await openCustomerStep();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBeNull();
+    expect(rx.leftEye.axis).toBeNull();
+  });
+
+  it('keeps a recorded axis of 0 on BOTH eyes', async () => {
+    H.stored = [{
+      prescription_id: 'RX-LATEST-2',
+      test_date: new Date().toISOString(),
+      validity_months: 24,
+      right_eye: { sph: '-2.00', cyl: '-1.25', axis: 0 },
+      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 0 },
+    }];
+    await openCustomerStep();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBe(0);
+    expect(rx.leftEye.axis).toBe(0);
+  });
+
+  it('carries a genuinely recorded axis through unchanged on BOTH eyes', async () => {
+    H.stored = [{
+      prescription_id: 'RX-LATEST-3',
+      test_date: new Date().toISOString(),
+      validity_months: 24,
+      right_eye: { sph: '-2.00', cyl: '-1.25', axis: 12 },
+      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 175 },
+    }];
+    await openCustomerStep();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBe(12);
+    expect(rx.leftEye.axis).toBe(175);
+  });
+});
+
+// ============================================================================
+// Keyboard safety: POS counters run barcode scanners that emit Enter
+// ============================================================================
+describe('the prompt is inert to stray scanner and keyboard input', () => {
+  async function openPrompt() {
+    H.rx = { cyl_od: -1.25, axis_od: undefined };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+    await screen.findByText(PROMPT_TITLE);
+  }
+
+  it('puts focus in the axis field, not the barcode box behind the scrim', async () => {
+    await openPrompt();
+    expect(document.activeElement).toBe(screen.getByLabelText('Right eye (OD) axis'));
+  });
+
+  it('a stray Escape does not walk the sale back a step', async () => {
+    await openPrompt();
+    const before = usePOSStore.getState().current_step;
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Back to the prescription' }), { key: 'Escape', code: 'Escape' });
+    fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' });
+    expect(usePOSStore.getState().current_step).toBe(before);
+    expect(screen.getByText(PROMPT_TITLE)).toBeInTheDocument();
+    expect(H.createPrescription).not.toHaveBeenCalled();
+  });
+
+  it('a scanner Enter neither submits a partial value nor advances the wizard', async () => {
+    await openPrompt();
+    const before = usePOSStore.getState().current_step;
+    const input = screen.getByLabelText('Right eye (OD) axis');
+    // A scanner bursts characters then a trailing Enter.
+    fireEvent.change(input, { target: { value: '8901234' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.keyDown(window, { key: 'Enter', code: 'Enter' });
+
+    expect(usePOSStore.getState().current_step).toBe(before);
+    expect(screen.getByText(PROMPT_TITLE)).toBeInTheDocument();
+    expect(H.createPrescription).not.toHaveBeenCalled();
+  });
+
+  it('tells a non-clinical role that saving needs a manager, before they type', async () => {
+    await openPrompt();
+    // MOCK_USER is STORE_MANAGER, which CAN save -- no warning.
+    expect(screen.queryByText(/saving a new prescription needs a manager or optometrist/i)).not.toBeInTheDocument();
   });
 });
