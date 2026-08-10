@@ -410,25 +410,237 @@ def test_worked_pending_blocks_ready_and_shipping_too(monkeypatch, sibling):
     assert ship.post("/api/v1/shipping/shipments", json=_SHIPMENT_BODY).status_code == 400
 
 
-def test_bench_evidence_predicate_matches_the_real_doc_shapes(monkeypatch):
-    """Pins WHY the carve-out is safe: the fields it tests are exactly the ones a
-    genuinely unworked ghost lacks. orders._ensure_workshop_job_for_order writes
-    status=PENDING with none of them, and both live prod PENDING rows read
-    current_station=None, scan_history=[], station_timestamps={}."""
-    assert wm._has_bench_evidence(_worked_pending()) is True
-    # Any ONE of the three is enough.
-    assert wm._has_bench_evidence({"current_station": "EDGING"}) is True
-    assert wm._has_bench_evidence({"scan_history": [{"station": "INTAKE"}]}) is True
-    assert wm._has_bench_evidence({"station_timestamps": {"INTAKE": "x"}}) is True
-    # The live prod / safety-net ghost shape.
-    assert wm._has_bench_evidence(_wjob(status="PENDING")) is False
+def test_pristine_predicate_is_inverted_and_channel_agnostic():
+    """THE POINT OF THE INVERSION. Three rounds enumerated ways a job might have
+    been worked and reality had one more each time (bench scans, then the lens
+    lifecycle, then the vendor channel). The predicate now proves the POSITIVE --
+    this doc is exactly what a create door produced -- so a channel nobody has
+    thought of yet is closed by construction, not by being listed."""
+    ghost = {
+        "job_id": "JID-G", "job_number": "WS-G", "order_id": "ORD-1",
+        "store_id": STORE, "status": "PENDING", "auto_created": True,
+    }
+    assert wm._is_pristine_ghost(ghost) is True
+
+    # Each known channel disqualifies it...
+    for key, value in (
+        ("scan_history", [{"station": "INTAKE"}]),   # round 3's channel
+        ("station_timestamps", {"INTAKE": "x"}),
+        ("current_station", "EDGING"),
+        ("lens_status", "MOUNTED"),                  # round 4's channel
+        ("vendor_status", "RECEIVED"),               # round 4's other channel
+        ("qc_passed", True),
+    ):
+        assert wm._is_pristine_ghost({**ghost, key: value}) is False, key
+
+    # ...and so does a channel that does not exist yet. THIS is the guard the
+    # coordinator asked for: any future writer recording progress writes SOME
+    # field, and whatever it invents lands here without anyone updating a list.
+    assert wm._is_pristine_ghost({**ghost, "teleporter_status": "BEAMED"}) is False
+    assert wm._is_pristine_ghost({**ghost, "some_future_channel": 1}) is False
+
+    # A mutation that adds NO new key is caught by the second signal.
     assert (
-        wm._has_bench_evidence(
-            {"status": "PENDING", "current_station": None,
-             "scan_history": [], "station_timestamps": {}}
+        wm._is_pristine_ghost(
+            {**ghost, "created_at": "2026-08-10T10:00:00",
+             "updated_at": "2026-08-10T11:00:00"}
         )
         is False
     )
+    assert (
+        wm._is_pristine_ghost(
+            {**ghost, "created_at": "2026-08-10T10:00:00",
+             "updated_at": "2026-08-10T10:00:00"}
+        )
+        is True
+    )
+
+    # Falsy extras record nothing -- an empty-but-present container is still
+    # pristine (behaviour the panel confirmed correct).
+    assert (
+        wm._is_pristine_ghost(
+            {**ghost, "current_station": None, "scan_history": [],
+             "station_timestamps": {}}
+        )
+        is True
+    )
+
+
+def test_pristine_key_set_matches_what_creation_actually_writes(monkeypatch):
+    """Pins the allowlist against the REAL create door rather than a copy of it.
+    Add a field to orders._ensure_workshop_job_for_order and this goes red,
+    telling you to update _PRISTINE_GHOST_KEYS -- so the inversion cannot rot
+    into a stale list."""
+    created: Dict[str, Any] = {}
+
+    class _CapturingRepo:
+        def find_by_order(self, _oid):
+            return []
+
+        def create(self, data):
+            # Mirror BaseRepository.create: it stamps the id field and both
+            # timestamps on top of whatever the caller supplied.
+            doc = dict(data)
+            doc.setdefault("job_id", "JID-NEW")
+            doc.setdefault("created_at", "2026-08-10T10:00:00")
+            doc.setdefault("updated_at", "2026-08-10T10:00:00")
+            created.update(doc)
+            return doc
+
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_workshop_repository", lambda: _CapturingRepo())
+    monkeypatch.setattr(om, "get_order_repository", lambda: _OrderRepo(_order()))
+
+    om._ensure_workshop_job_for_order(
+        {
+            "order_id": "ORD-1",
+            "store_id": STORE,
+            "expected_delivery": "2026-09-01T00:00:00",
+            "items": [
+                {"item_type": "FRAME", "product_id": "F1", "product_name": "RB"},
+                {"item_type": "LENS", "product_id": "L1", "prescription_id": "RX-9"},
+            ],
+        },
+        "user-1",
+    )
+
+    assert created, "the safety net did not create a job"
+    unknown = set(created) - set(wm._PRISTINE_GHOST_KEYS)
+    assert not unknown, (
+        f"creation writes keys the pristine allowlist does not know: {sorted(unknown)}. "
+        "Add them to _PRISTINE_GHOST_KEYS or the ghost carve-out will never fire."
+    )
+    # And the freshly-created doc really does read as pristine end to end.
+    assert wm._is_pristine_ghost(created) is True
+
+
+@pytest.mark.parametrize(
+    "channel_label, worked_fields",
+    [
+        # Round 3's channel: six bench scans with the INTAKE leg held.
+        (
+            "bench_scans",
+            {
+                "current_station": "PICKUP",
+                "scan_history": [{"station": "PICKUP"}],
+                "station_timestamps": {"PICKUP": "2026-08-10T10:00:00"},
+            },
+        ),
+        # Round 4's channel: the LENS LIFECYCLE. update_lens_status writes only
+        # these fields, has no job-status guard, and hard-commits the reserved
+        # lens-catalog cell on MOUNTED because the lens is already cut and in the
+        # customer's frame. The F9 DC hardlock parks the job at PENDING
+        # throughout -- a system gate holding the status while the lens is worked
+        # through a channel that carries no gate.
+        (
+            "lens_lifecycle_mounted",
+            {
+                "lens_status": "MOUNTED",
+                "lens_mounted_at": "2026-08-10T10:00:00",
+                "lens_status_updated_by": "u9",
+            },
+        ),
+        # Round 4's other channel: the vendor lifecycle.
+        (
+            "vendor_status",
+            {
+                "vendor_status": "RECEIVED",
+                "vendor_status_updated_at": "2026-08-10T10:00:00",
+                "vendor_status_history": [{"status": "RECEIVED"}],
+            },
+        ),
+        # A channel nobody has written yet.
+        ("future_unknown_channel", {"teleporter_status": "BEAMED"}),
+    ],
+)
+def test_worked_through_any_channel_is_not_a_ghost(
+    monkeypatch, channel_label, worked_fields
+):
+    """A PENDING job progressed through ANY channel must block at all three
+    doors, even beside a QC-cleared sibling. Same document, same instant: the
+    bench gate says QC_REQUIRED, so the counter must not say 200."""
+    worked = _wjob(
+        job_id="JID-W", job_number="WS-WORKED", status="PENDING", **worked_fields
+    )
+    sibling = _wjob(job_id="JID-1", job_number="WS-1", qc_passed=True)
+    jobs = [worked, sibling]
+
+    # The bench door already refuses this doc.
+    assert wm.evaluate_scan_transition_gate(None, worked, "DELIVERED") == "QC_REQUIRED"
+
+    client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), jobs)
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 400, f"{channel_label}: {resp.text}"
+    assert "WS-WORKED" in resp.json()["detail"]
+    assert orepo.status_updates == []
+
+    ready_client, ready_orepo = _client(
+        monkeypatch, _order(status="CONFIRMED", workshop_job_id="JID-1"), jobs
+    )
+    assert ready_client.post("/api/v1/orders/ORD-1/ready").status_code == 400, channel_label
+    assert ready_orepo.status_updates == []
+
+    ship = _shipping_client(monkeypatch, _order(workshop_job_id="JID-1"), jobs)
+    assert (
+        ship.post("/api/v1/shipping/shipments", json=_SHIPMENT_BODY).status_code == 400
+    ), channel_label
+
+
+def test_lens_status_channel_end_to_end_through_the_real_endpoints(monkeypatch):
+    """The chair's sequence, driven rather than hand-seeded: the DC hardlock holds
+    the job at PENDING while the lens is ordered, received and MOUNTED through the
+    lens-status endpoint, which never touches job.status."""
+    from api.routers.auth import get_current_user as _gcu
+
+    job = _wjob(job_id="JID-A", job_number="WS-A", status="PENDING")
+
+    class _Repo:
+        def find_by_id(self, jid):
+            return job if job["job_id"] == jid else None
+
+        def find_by_order(self, oid):
+            return [job] if job["order_id"] == oid else []
+
+        def update(self, jid, data):
+            job.update(data)
+            return True
+
+        def update_status(self, *a, **k):
+            return True
+
+    app = FastAPI()
+    app.include_router(wm.router, prefix="/api/v1/workshop")
+    monkeypatch.setattr(wm, "get_workshop_repository", lambda: _Repo())
+    monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(wm, "get_db", lambda: None)
+
+    async def _user():
+        return {
+            "user_id": "u9", "roles": ["STORE_MANAGER"],
+            "store_ids": [STORE], "active_store_id": STORE,
+        }
+
+    app.dependency_overrides[_gcu] = _user
+    wclient = TestClient(app)
+
+    for step in ("ORDERED", "RECEIVED", "MOUNTED"):
+        r = wclient.post("/api/v1/workshop/jobs/JID-A/lens-status", json={"status": step})
+        assert r.status_code == 200, f"{step}: {r.text}"
+
+    # The lens is cut and in the frame; the job status never moved.
+    assert job["status"] == "PENDING"
+    assert job["lens_status"] == "MOUNTED"
+    assert not job.get("scan_history")  # the round-3 predicate would see nothing
+    assert wm._is_pristine_ghost(job) is False  # ...but this one does
+
+    sibling = _wjob(job_id="JID-1", job_number="WS-1", qc_passed=True)
+    client, orepo = _client(
+        monkeypatch, _order(workshop_job_id="JID-1"), [job, sibling]
+    )
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 400, resp.text
+    assert orepo.status_updates == []
 
 
 def test_cross_order_pointer_is_ignored(monkeypatch):

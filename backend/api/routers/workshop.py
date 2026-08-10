@@ -441,28 +441,95 @@ assert not (_QC_REQUIRED_TARGETS & _NON_PATIENT_FACING_STATUSES), (
 )
 
 
-def _has_bench_evidence(job: dict) -> bool:
-    """True when this job shows ANY sign of having been through the lab.
+# Every key a freshly-created workshop job can legitimately carry. The union of
+# the two create doors' shapes -- orders._ensure_workshop_job_for_order (the POS
+# safety net) and workshop.create_job (the client door) -- plus the three keys
+# BaseRepository.create stamps (job_id, created_at, updated_at) and Mongo's _id.
+#
+# This set is pinned against the REAL creation path by
+# test_pristine_key_set_matches_what_creation_actually_writes: add a field to
+# either create door and that test goes red, telling you to update this set.
+_PRISTINE_GHOST_KEYS = frozenset(
+    {
+        "_id",
+        "job_id",
+        "job_number",
+        "order_id",
+        "store_id",
+        "frame_details",
+        "lens_details",
+        "prescription_id",
+        "fitting_instructions",
+        "fitting_details",
+        "special_notes",
+        "expected_date",
+        "status",
+        "created_by",
+        "created_at",
+        "updated_at",
+        "auto_created",
+    }
+)
 
-    The ghost carve-out below exists for a row that produced NOTHING -- the
-    duplicate the POS safety net creates and nobody works. Keying that carve-out
-    on the status string alone was wrong: PENDING is not in
-    lab_routing._TERMINAL_JOB_STATUSES and only INTAKE advances the status, so a
-    job whose INTAKE leg was HELD walks EDGING/COATING/QC_LAB (which carry
-    advances_job_status=None and hit no gate at all) all the way to PICKUP,
-    accumulating real bench work, while its status stays PENDING. Such a job has
-    ground lenses behind it and must never be waved through as a ghost.
 
-    A genuinely unworked ghost has none of these fields:
-    orders._ensure_workshop_job_for_order writes status=PENDING with no
-    current_station, no scan_history and no station_timestamps -- and both live
-    production PENDING rows read exactly that.
+def _is_pristine_ghost(job: dict) -> bool:
+    """PROVE this row is untouched since creation -- do not go hunting for
+    evidence that it was worked.
+
+    THIS PREDICATE IS DELIBERATELY INVERTED, and the history is why. The ghost
+    carve-out below exists for a duplicate row that produced NOTHING. Three
+    successive attempts asked "can I find evidence this job WAS worked?" and each
+    time reality had one more channel:
+      1. status alone            -- missed a job walked through six bench scans;
+      2. + scan_history /        -- missed the LENS LIFECYCLE
+         station_timestamps /       (update_lens_status writes only lens_status
+         current_station            and its timestamps, has no job-status guard,
+                                    and hard-commits the reserved lens cell on
+                                    MOUNTED because the lens is already cut and
+                                    in the customer's frame), and missed the
+                                    VENDOR channel (vendor_portal.post_status /
+                                    post_admin_vendor_status write only
+                                    vendor_status*).
+    Enumerating writers cannot be finished; a fourth channel would simply be
+    found. So the question is now the positive one: is this doc EXACTLY what a
+    create door produced, with nothing added and nothing changed?
+
+    Two independent signals, either of which is enough to disqualify:
+      * ANY key outside _PRISTINE_GHOST_KEYS carrying a TRUTHY value. Recording
+        progress means writing something; whatever field a future writer invents,
+        it lands here. (Falsy extras -- scan_history=[], station_timestamps={},
+        current_station=None -- record nothing and are ignored, so an empty-but-
+        present container still reads as pristine.)
+      * updated_at having moved past created_at. BaseRepository.update stamps
+        updated_at on EVERY write and BaseRepository.create sets created_at ==
+        updated_at, so any mutation of an existing field -- even one that adds no
+        new key -- shows up here. lab_routing's direct find_one_and_update stamps
+        it too.
+
+    A genuinely unworked ghost trips neither: the safety net writes the creation
+    shape and nothing touches it again.
     """
-    return bool(
-        job.get("scan_history")
-        or job.get("station_timestamps")
-        or job.get("current_station")
-    )
+    for key, value in job.items():
+        if key not in _PRISTINE_GHOST_KEYS and value:
+            return False
+    return not _timestamp_moved(job.get("created_at"), job.get("updated_at"))
+
+
+def _timestamp_moved(created_at, updated_at) -> bool:
+    """True when updated_at is present and differs from created_at.
+
+    Tolerant of the shapes these fields take across the codebase (datetime from
+    BaseRepository, ISO strings from some callers and from JSON round-trips):
+    compares by value first, then by string form. A missing updated_at means the
+    doc was never updated -> not moved.
+    """
+    if updated_at is None:
+        return False
+    if created_at is None:
+        return True
+    if updated_at == created_at:
+        return False
+    return str(updated_at) != str(created_at)
 
 
 def _handover_block_detail(job: dict) -> str:
@@ -512,13 +579,13 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
         it terminal), so a legacy delivered job would strand its order forever
         for every role including SUPERADMIN. Safe because no NEW job can reach
         DELIVERED without QC now.
-      * an UNWORKED PENDING job on an order that already has a QC-cleared job --
+      * an UNTOUCHED PENDING job on an order that already has a QC-cleared job --
         the duplicate "ghost" shape. The safety net created a second job nobody
         worked; the real job is QC'd and its glasses are finished and on the
         shelf. Blocking there strands a customer for a row that produced nothing.
-        "Unworked" is tested with _has_bench_evidence, NOT with the status
-        string: a PENDING job can have walked the whole bench to PICKUP (see that
-        helper), and such a job has ground lenses behind it.
+        "Untouched" is PROVEN by _is_pristine_ghost, not inferred from the status
+        string and not searched for field by field -- see that helper for why the
+        test is inverted.
         A LONE PENDING job is still BLOCKED (it is the live prod shape) -- it
         just gets its own sentence from _handover_block_detail naming the real
         remedy: start the job.
@@ -573,12 +640,14 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
         status = (job.get("status") or "").strip().upper()
         if status in _HANDOVER_GATE_SKIP_STATUSES:
             continue
-        # Ghost duplicate ONLY: a PENDING row that shows NO sign of bench work,
-        # alongside a job that is genuinely QC-cleared. A lone PENDING job, or
-        # one carrying any bench evidence, falls through and blocks -- otherwise
-        # a two-job order could hand over a lens that was ground but never
+        # Ghost duplicate ONLY: a PENDING row PROVABLY untouched since creation,
+        # alongside a job that is genuinely QC-cleared. A lone PENDING job, or one
+        # that anything has written to, falls through and blocks -- otherwise a
+        # two-job order could hand over a lens that was ground but never
         # inspected, while the bench scanner refuses that same document.
-        if status == "PENDING" and has_cleared_job and not _has_bench_evidence(job):
+        # _is_pristine_ghost is deliberately a POSITIVE proof of untouchedness,
+        # not a search for evidence of work; see its docstring.
+        if status == "PENDING" and has_cleared_job and _is_pristine_ghost(job):
             continue
         if not _qc_cleared(job):
             raise HTTPException(
