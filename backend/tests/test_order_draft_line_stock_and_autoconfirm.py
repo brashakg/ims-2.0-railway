@@ -133,11 +133,34 @@ class _FakeStockColl:
         return before
 
 
+class _FakeOrdersColl:
+    """The atomic surface the guarded status claims use. Without it the deliver
+    claim silently takes the legacy fallback and the race guard is untested."""
+
+    def __init__(self, orders):
+        self.orders = orders
+
+    def find_one_and_update(self, flt, upd, **kw):
+        doc = self.orders.get(flt.get("order_id"))
+        if doc is None:
+            return None
+        want = flt.get("status")
+        if isinstance(want, dict) and "$nin" in want:
+            if doc.get("status") in want["$nin"]:
+                return None
+        elif want is not None and doc.get("status") != want:
+            return None
+        before = dict(doc)
+        doc.update(upd.get("$set", {}))
+        return before
+
+
 class _FakeOrderRepo:
     def __init__(self, orders):
         self.orders = {o["order_id"]: o for o in orders}
         self.update_ok = True
         self.status_updates = []
+        self.collection = _FakeOrdersColl(self.orders)
 
     def find_by_id(self, oid):
         doc = self.orders.get(oid)
@@ -1302,3 +1325,120 @@ def test_clean_line_remove_reports_success(wired):
     assert res["stock_release_failed"] is False
     assert res["stock_units_released"] == 1
     assert "line_remove_stock_release_failed" not in wired["orders"].orders["ORD-1"]
+
+
+# =========================================================================== #
+# MUST-FIX 4 -- an in-flight DELIVER must not overwrite a CANCELLED order.
+#
+# update_status writes update_one({order_id}, ...) with NO status precondition,
+# and the window from deliver_order's read to that write spans the store-access,
+# Rx-hold, transition and payment checks. Cancel wins its own claim mid-window,
+# then deliver overwrites CANCELLED -> DELIVERED.
+#
+# The race is pre-existing, but this PR sharpens the consequence: cancel now
+# RELEASES stock, so losing it leaves a frame physically in the customer's bag
+# reading AVAILABLE and re-sellable -- and on a pooled ONLINE store that feeds a
+# Shopify oversell. Before, the unit stayed correctly SOLD.
+# =========================================================================== #
+
+
+def _ready_order(order_id="ORD-1"):
+    doc = _draft_order(order_id)
+    doc.update({
+        "status": "READY",
+        "payment_status": "PAID",
+        "grand_total": 5000.0,
+        "amount_paid": 5000.0,
+        "items": [{"item_id": "I1", "item_type": "FRAME", "product_id": "P1",
+                   "quantity": 1}],
+    })
+    return doc
+
+
+def _deliver(order_id="ORD-1"):
+    return asyncio.run(om.deliver_order(order_id, current_user=_ADMIN))
+
+
+def test_deliver_succeeds_on_a_ready_order(wired):
+    wired["orders"].orders["ORD-1"] = _ready_order()
+    res = _deliver()
+    assert res["status"] == "DELIVERED"
+    assert wired["orders"].orders["ORD-1"]["status"] == "DELIVERED"
+
+
+def test_deliver_cannot_overwrite_an_order_cancelled_mid_flight(wired):
+    """The order is CANCELLED after deliver_order's read but before its write."""
+    wired["orders"].orders["ORD-1"] = _ready_order()
+    coll = wired["orders"].collection
+    real = coll.find_one_and_update
+    state = {"done": False}
+
+    def _cancel_lands_first(flt, upd, **kw):
+        if not state["done"]:
+            state["done"] = True
+            # A cancel wins its claim inside deliver's window.
+            wired["orders"].orders["ORD-1"]["status"] = "CANCELLED"
+        return real(flt, upd, **kw)
+
+    coll.find_one_and_update = _cancel_lands_first
+    try:
+        with pytest.raises(HTTPException) as exc:
+            _deliver()
+    finally:
+        coll.find_one_and_update = real
+
+    assert exc.value.status_code == 400
+    # The cancellation STANDS -- no resurrection, no invented unit.
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+
+
+def test_deliver_refuses_an_already_cancelled_order(wired):
+    wired["orders"].orders["ORD-1"] = _ready_order()
+    wired["orders"].orders["ORD-1"]["status"] = "CANCELLED"
+    with pytest.raises(HTTPException) as exc:
+        _deliver()
+    assert exc.value.status_code == 400
+    assert wired["orders"].orders["ORD-1"]["status"] == "CANCELLED"
+
+
+def test_deliver_is_not_replayable(wired):
+    wired["orders"].orders["ORD-1"] = _ready_order()
+    assert _deliver()["status"] == "DELIVERED"
+    with pytest.raises(HTTPException) as exc:
+        _deliver()
+    assert exc.value.status_code == 400
+
+
+# =========================================================================== #
+# RIDE-ALONG 6 -- the line-remove door must not cry wolf on a product that was
+# never unit-tracked. It contradicted the availability gate, which deliberately
+# exempts exactly these products, and poisoned the signal it was built to raise.
+# =========================================================================== #
+
+
+def test_removing_an_untracked_product_line_is_not_a_restock_failure(wired):
+    """No stock_units rows for this product at all -> nothing to release and
+    nothing wrong. The cancel door already reports incomplete=False here."""
+    res_add = _add(_item(product_id="P-UNTRACKED", product_name="Cloth"))
+    assert wired["units"] == []                       # genuinely untracked
+
+    res = _remove(res_add["item_id"])
+
+    assert res["stock_units_released"] == 0
+    assert res["stock_release_failed"] is False        # NOT a false alarm
+    assert "line_remove_stock_release_failed" not in wired["orders"].orders["ORD-1"]
+
+
+def test_a_tracked_product_that_releases_nothing_is_still_a_real_failure(wired):
+    """The gate must not silence the genuine case: the product IS unit-tracked,
+    the line consumed a unit, and nothing came back."""
+    wired["units"].append(_unit("U1"))
+    added = _add(_item())
+    # Something else takes the unit out from under the order.
+    wired["units"][0]["order_id"] = "ORD-OTHER"
+
+    res = _remove(added["item_id"])
+
+    assert res["stock_units_released"] == 0
+    assert res["stock_release_failed"] is True
+    assert wired["orders"].orders["ORD-1"]["line_remove_stock_release_failed"] is True

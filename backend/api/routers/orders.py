@@ -3883,7 +3883,8 @@ async def remove_order_item(
             )
 
         _freed_units, _restock_failed = _release_line_units(
-            order_id, item_id, _removed, surviving_lines=items
+            order_id, item_id, _removed, surviving_lines=items,
+            store_id=order.get("store_id"),
         )
         if _restock_failed:
             # PERSIST the failure so it is discoverable, mirroring what cancel
@@ -4459,7 +4460,28 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
                 detail="Order must have at least partial payment before delivery",
             )
 
-        if repo.update_status(order_id, "DELIVERED", current_user.get("user_id")):
+        # ATOMIC DELIVER CLAIM. update_status writes update_one({order_id}, ...)
+        # with NO status precondition, and the window from the read above to
+        # this write spans the store-access, Rx-hold, transition and payment
+        # checks. A cancel that wins its own claim mid-window would then be
+        # OVERWRITTEN back to DELIVERED here.
+        #
+        # That race is pre-existing, but THIS PR sharpens its consequence: cancel
+        # now releases stock, so losing it leaves a frame that is physically in
+        # the customer's bag reading AVAILABLE and re-sellable -- and on a pooled
+        # ONLINE store that feeds a Shopify oversell. Before, the unit stayed
+        # correctly SOLD and only loyalty was wrong.
+        if not _claim_order_status(
+            repo, order_id, "DELIVERED", "READY", current_user.get("user_id")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot deliver this order -- its status changed (it may "
+                    "have just been cancelled). Refresh and try again."
+                ),
+            )
+        if True:
             # CRM-9: Auto-trigger NPS survey on delivery (fail-soft — a survey
             # failure must NEVER block the delivery confirmation).
             try:
@@ -4478,8 +4500,29 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
     return {"order_id": order_id, "status": "DELIVERED"}
 
 
+def _is_unit_tracked(stock_repo, product_id: str, store_id: Optional[str]) -> bool:
+    """Does this product have ANY serialized stock_units row at this store?
+
+    Same question the availability assert asks before it will block a sale
+    (`if not tracked: continue`). A product that is not unit-tracked can never
+    strand a unit, so it must never raise the restock-failure signal.
+    Fail-soft TRUE-ish only when we genuinely cannot tell: a lookup error
+    returns False so we do not invent an alarm.
+    """
+    if not product_id or not store_id or stock_repo is None:
+        return False
+    try:
+        return bool(stock_repo.count({"product_id": product_id, "store_id": store_id}))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _release_line_units(
-    order_id: str, item_id: str, line: dict, surviving_lines: Optional[List[dict]] = None
+    order_id: str,
+    item_id: str,
+    line: dict,
+    surviving_lines: Optional[List[dict]] = None,
+    store_id: Optional[str] = None,
 ) -> tuple:
     """Give back the serialized stock of ONE removed DRAFT line.
 
@@ -4551,10 +4594,17 @@ def _release_line_units(
             )
             freed += list(getattr(result, "released", result) or [])
             incomplete = bool(getattr(result, "incomplete", False)) or incomplete
-        if len(freed) < qty:
-            # GROUND TRUTH beats the return value, exactly as the cancel door
-            # does: fewer units back than the line consumed means something is
-            # still SOLD against a line that no longer exists.
+        # GROUND TRUTH beats the return value, exactly as the cancel door does:
+        # fewer units back than the line consumed means something is still SOLD
+        # against a line that no longer exists.
+        #
+        # ...but ONLY for a product that is actually unit-tracked at this store.
+        # A plain ACCESSORY has no stock_units rows at all, so it releases
+        # nothing and is not a failure -- and the availability gate 3,000 lines
+        # earlier exempts exactly these products (`if not tracked: continue`).
+        # Without this the door cried wolf on every non-tracked line and
+        # poisoned the very signal it was built to raise.
+        if len(freed) < qty and _is_unit_tracked(stock_repo, pid, store_id):
             incomplete = True
         if incomplete:
             logger.error(
@@ -4699,6 +4749,53 @@ async def _release_lens_lines(
                     rel_exc,
                 )
     return list(lines or [])
+
+
+def _claim_order_status(
+    repo, order_id: str, new_status: str, required_status: str, user_id
+) -> bool:
+    """Atomically move an order to `new_status` ONLY while it is still
+    `required_status`. Returns False when the precondition no longer holds.
+
+    The generic sibling of _claim_order_for_cancel, for the doors whose repo
+    write carries no status precondition of its own. Falls back to a plain
+    read-check-update when the collection has no find_one_and_update, so a
+    legacy/mock backend still works.
+    """
+    payload = {
+        "status": new_status,
+        "status_updated_at": datetime.now().isoformat(),
+        "status_updated_by": user_id,
+    }
+    coll = getattr(repo, "collection", None)
+    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
+    if callable(updater):
+        try:
+            doc = updater(
+                {"order_id": order_id, "status": required_status},
+                {"$set": payload},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] atomic %s claim unavailable for %s (%s); falling back",
+                new_status, order_id, exc,
+            )
+        else:
+            if doc is None:
+                return False
+            # Keep the repo's own status_history bookkeeping.
+            try:
+                repo.update_status(order_id, new_status, user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ORDERS] status_history update after %s claim failed "
+                    "for %s: %s", new_status, order_id, exc,
+                )
+            return True
+    existing = repo.find_by_id(order_id)
+    if not existing or existing.get("status") != required_status:
+        return False
+    return bool(repo.update_status(order_id, new_status, user_id))
 
 
 def _claim_order_for_cancel(

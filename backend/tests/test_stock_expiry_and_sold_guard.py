@@ -747,29 +747,43 @@ def test_one_odd_typed_row_does_not_hide_the_frames_beside_it():
 # ===========================================================================
 
 
-def test_phase1_never_orders_a_malformed_value_ahead_of_real_stock():
-    today = ist_today().isoformat()
-    # Same YYYY-MM- prefix, truncated day -> NOT ^\d{4}-\d{2}-\d{2}, yet it
-    # lexicographically sorts BEFORE the in-date ISO unit below and passes a
-    # raw string $gte against today. Exactly the shape that slips through an
-    # ungated phase 1.
-    malformed = today[:8] + "1"
+def test_phase1_never_orders_a_malformed_value_ahead_of_real_stock(monkeypatch):
+    """CLOCK IS FROZEN. The first version of this test built its malformed value
+    as `today[:8] + "1"`, which on the 10th of a month is "2026-08-1" -- a
+    shorter PREFIX of the floor "2026-08-10", so it sorts BELOW the floor and a
+    raw $gte excludes it anyway. The test therefore passed with the gate
+    deleted, on every day after the 9th. It was written on the 9th and it
+    caught the mutation exactly once.
+
+    Pinned to a fixed date with a single-digit day -- the shape a hand-typed GRN
+    actually produces, since the GRN door validates expiry with nothing but a
+    whitespace strip.
+    """
+    monkeypatch.setattr(
+        StockRepository, "_expiry_floor_iso", staticmethod(lambda: "2026-09-09")
+    )
     docs = [
-        _unit("U-MALFORMED", expiry_date=malformed),
-        _unit("U-REAL", expiry_date=_iso(30)),
+        # NOT ^\d{4}-\d{2}-\d{2} (single-digit day), genuinely EXPIRED, and it
+        # both passes a raw string $gte against the floor and sorts BEFORE the
+        # in-date unit -- so an ungated phase 1 dispenses it FIRST.
+        _unit("U-MALFORMED", expiry_date="2026-9-8"),
+        _unit("U-REAL", expiry_date="2026-12-01"),
     ]
     repo = _repo(docs)
+    assert "2026-9-8" >= "2026-09-09"          # passes a raw $gte
+    assert "2026-9-8" > "2026-12-01"           # ...and an ungated sort puts it first
 
-    # The READABLE in-date unit must be dispensed first; the malformed one is
-    # only reachable through the fail-open fallback, after real stock is gone.
+    # The READABLE in-date unit must be dispensed first regardless.
     assert repo.claim_one_available("P1", "S1", "O1") == "U-REAL"
     assert repo.claim_one_available("P1", "S1", "O2") == "U-MALFORMED"
 
 
-def test_malformed_value_is_excluded_from_the_dated_phase_entirely():
+def test_malformed_value_is_excluded_from_the_dated_phase_entirely(monkeypatch):
     """With no readable stock at all, the malformed unit still sells (fail-open)
     -- but it must arrive via the fallback, which is what emits the warning."""
-    malformed = ist_today().isoformat()[:8] + "1"
-    repo = _repo([_unit("U-ONLY", expiry_date=malformed)])
+    monkeypatch.setattr(
+        StockRepository, "_expiry_floor_iso", staticmethod(lambda: "2026-09-09")
+    )
+    repo = _repo([_unit("U-ONLY", expiry_date="2026-9-8")])
     assert repo.find_available("P1", "S1") == 1
     assert repo.claim_one_available("P1", "S1", "O1") == "U-ONLY"

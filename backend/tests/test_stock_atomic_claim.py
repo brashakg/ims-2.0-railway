@@ -368,12 +368,25 @@ def test_mock_range_operator_survives_mixed_types_on_an_ungated_query():
     """Pins MockCollection's BSON type bracketing on a query with NO $type gate.
 
     The expiry floor short-circuits on $type before any comparison, so it can
-    never exercise the guard -- which is exactly why reverting the guard did not
-    fail any expiry test. find_expiring is the real exposure: it compares
-    expiry_date against STRING bounds with no type gate at all, so ONE
-    date-typed row raises TypeError, BaseRepository.find_many swallows it, and
-    the whole expiry report comes back EMPTY -- hiding the string-dated units
-    that were perfectly readable.
+    never exercise the guard -- which is why reverting the guard failed no
+    expiry test. find_expiring is the exposure that CAN: it compares expiry_date
+    against STRING bounds with no type gate at all.
+
+    SCOPE -- corrected after the claim was tested against production. REAL
+    MongoDB TYPE-BRACKETS: a cross-type comparison simply does not match, it
+    does NOT raise. Verified read-only against the live cluster (server 8.3.2)
+    by feeding this exact predicate through a $documents stage over an ISO
+    string, a BSON date, a malformed string, a null and an absent field: no
+    error, and the readable string-dated unit was returned. Production also
+    holds zero date-typed expiry rows, and MockCollection is structurally
+    unreachable there (connection.py returns None in production rather than
+    serving the mock).
+
+    So this pins MOCK FIDELITY, not a production outage: without the guard the
+    mock raises where Mongo would not, BaseRepository.find_many swallows it, and
+    LOCAL no-Mongo runs see an empty report -- which is exactly the kind of
+    divergence that makes a test lie about production. find_expiring itself is
+    byte-identical to origin/main and is untouched by this PR.
     """
     from database.connection import MockCollection
     from database.repositories.product_repository import StockRepository
