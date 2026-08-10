@@ -1220,18 +1220,24 @@ _AUDITED_UNSCOPED_FILE_GETS = {
 _MIN_DETECTED_FILE_GETS = 10
 
 
-def test_every_file_store_get_is_kind_scoped_or_audited():
-    """The structural fix for the class. Round 1, 2 and 3 each shipped with one
-    unremembered door; this makes the next one fail CI instead."""
+def scan_file_store_reads(root):
+    """Scan a tree for FileStore.get call sites.
+
+    Returns ``(detected, unscoped_by_file)``. Extracted from the test body so
+    the guard can be POINTED AT A FIXTURE and proven to fail -- the previous
+    "ANY_KIND is unscoped" test ast.parsed a string and re-implemented these
+    isinstance checks inline, so deleting the real ANY_KIND arm turned nothing
+    red. A guard whose own test never calls it is the exact failure mode this
+    guard exists to prevent, recursing.
+    """
     import ast
     import pathlib
 
-    api_root = pathlib.Path(__file__).resolve().parents[1] / "api"
-    offenders = []
+    root = pathlib.Path(root)
     unscoped_by_file = {}
     detected = 0
 
-    for path in sorted(api_root.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         if "get_file_store" not in source:
             continue
@@ -1306,6 +1312,18 @@ def test_every_file_store_get_is_kind_scoped_or_audited():
             if scoped:
                 continue
             unscoped_by_file.setdefault(path.name, []).append(node.lineno)
+
+    return detected, unscoped_by_file
+
+
+def test_every_file_store_get_is_kind_scoped_or_audited():
+    """The structural fix for the class. Rounds 1-3 each shipped with one
+    unremembered door; this makes the next one fail CI instead."""
+    import pathlib
+
+    api_root = pathlib.Path(__file__).resolve().parents[1] / "api"
+    offenders = []
+    detected, unscoped_by_file = scan_file_store_reads(api_root)
 
     # 4. The floor is on DETECTED CALL SITES, so detection collapsing trips the
     #    test instead of silently emptying it.
@@ -1672,7 +1690,7 @@ def _grn_create_ok(monkeypatch, store, thief):
     grn_repo = _GrnRepo()
     monkeypatch.setattr(vendors_router, "get_grn_repository", lambda: grn_repo)
     monkeypatch.setattr(vendors_router, "get_purchase_order_repository", lambda: _PoRepo())
-    return asyncio, vendors_router, grn_repo
+    return grn_repo
 
 
 def test_thief_cannot_bind_another_stores_grn_document(monkeypatch):
@@ -1760,6 +1778,167 @@ def test_own_store_grn_document_still_binds(monkeypatch):
         detail = getattr(exc, "detail", {})
         code = detail.get("code") if isinstance(detail, dict) else None
         assert code != "ATTACHMENT_INVALID", f"own-store attachment refused: {detail}"
+
+
+def test_delivery_challan_subtype_does_not_bypass_the_attachment_gate(monkeypatch):
+    """MF1: both checks used to sit under `if not is_dc`, while persistence
+    wrote attachment_file_id unconditionally -- so ONE extra JSON field,
+    grn_subtype="DELIVERY_CHALLAN", re-opened the round-5 theft verbatim."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    victim = store.put(
+        content=b"SUPPLIER-INVOICE cost-price Rs.1420/unit Essilor terms 90d",
+        filename="essilor_ranchi_aug26.pdf",
+        mime_type="application/pdf",
+        metadata={
+            "kind": "grn_document",
+            "store_id": "BV-RANCHI-01",
+            "uploaded_by": "acct-ranchi",
+        },
+    )
+    thief = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    _grn_create_ok(monkeypatch, store, thief)
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-DC",
+        items=_grn_items(vendors_router),
+        attachment_file_id=victim,
+        attachment_filename="harmless.pdf",
+        grn_subtype="DELIVERY_CHALLAN",
+        dc_number="DC-1",
+        dc_date="2026-08-01",
+    )
+    with pytest.raises(Exception) as exc:
+        asyncio.run(vendors_router._create_grn_impl(body, thief))
+    assert getattr(exc.value, "detail", {}).get("code") == "ATTACHMENT_INVALID"
+
+
+def test_delivery_challan_without_an_attachment_still_creates(monkeypatch):
+    """Positive control for MF1: a DC is exempt from the REQUIREMENT to attach,
+    and tightening the gate must not break that."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    actor = {
+        "user_id": "sm-jsr",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["WO-JSR-01"],
+        "active_store_id": "WO-JSR-01",
+    }
+    repo = _grn_create_ok(monkeypatch, store, actor)
+    body = vendors_router.GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-DC2",
+        items=_grn_items(vendors_router),
+        grn_subtype="DELIVERY_CHALLAN",
+        dc_number="DC-2",
+        dc_date="2026-08-01",
+    )
+    asyncio.run(vendors_router._create_grn_impl(body, actor))
+    assert repo.created is not None, "a DC with no attachment must still create"
+    assert repo.created.get("attachment_file_id") is None
+
+
+@pytest.mark.parametrize(
+    "label,actor,blob_store,po_store,expected_grn_store",
+    [
+        (
+            "ADMIN active at A receiving store B's PO",
+            {"user_id": "adm", "roles": ["ADMIN"], "store_ids": [],
+             "active_store_id": "BV-RANCHI-01"},
+            "BV-RANCHI-01", "WO-JSR-01", "WO-JSR-01",
+        ),
+        (
+            "AREA_MANAGER spanning both stores",
+            {"user_id": "am", "roles": ["AREA_MANAGER"],
+             "store_ids": ["WO-JSR-01", "BV-RANCHI-01"],
+             "active_store_id": "WO-JSR-01"},
+            "WO-JSR-01", "BV-RANCHI-01", "BV-RANCHI-01",
+        ),
+        (
+            "HQ ADMIN with no active store",
+            {"user_id": "hq", "roles": ["ADMIN"], "store_ids": [],
+             "active_store_id": None},
+            None, "WO-JSR-01", "WO-JSR-01",
+        ),
+    ],
+)
+def test_cross_store_receiving_is_not_blocked_by_the_attachment_bind(
+    label, actor, blob_store, po_store, expected_grn_store, monkeypatch
+):
+    """MF2: my round-6 bind compared the blob's stamp to the POST-re-point
+    store, so an ADMIN active at A receiving store B's PO was 400'd -- and
+    re-uploading reproduced the same stamp, an unescapable loop. No GRN means
+    no stock, no payable, no reconciliation. test_po_store_boundary states the
+    intent: the GRN must book to the PO's store."""
+    import asyncio
+
+    from api.routers import vendors as vendors_router
+    from api.services import file_store as fs_module
+
+    store = fs_module.InMemoryFileStore()
+    meta = {"kind": "grn_document", "uploaded_by": actor["user_id"]}
+    if blob_store is not None:
+        meta["store_id"] = blob_store
+    fid = store.put(
+        content=b"doc", filename="inv.pdf", mime_type="application/pdf", metadata=meta
+    )
+
+    from api.routers import vendors as vr
+
+    monkeypatch.setattr(vr, "get_file_store", lambda: store)
+
+    class _PoRepo:
+        def find_by_id(self, po_id):
+            return {
+                "po_id": po_id, "po_number": "PO-1", "vendor_id": "V1",
+                "vendor_name": "Acme", "status": "SENT",
+                "delivery_store_id": po_store,
+                "items": [{"product_id": "P1", "quantity": 5}],
+            }
+
+        def find_one(self, _q):
+            return self.find_by_id("PO1")
+
+        def update(self, *_a, **_k):
+            return True
+
+    class _GrnRepo:
+        created = None
+
+        def find_one(self, _q):
+            return None
+
+        def create(self, doc):
+            _GrnRepo.created = doc
+            return doc
+
+        def find_many(self, *_a, **_k):
+            return []
+
+    _GrnRepo.created = None
+    monkeypatch.setattr(vr, "get_grn_repository", lambda: _GrnRepo())
+    monkeypatch.setattr(vr, "get_purchase_order_repository", lambda: _PoRepo())
+
+    body = vendors_router.GRNCreate(
+        po_id="PO1", vendor_invoice_no="INV-X",
+        items=_grn_items(vendors_router), attachment_file_id=fid,
+    )
+    asyncio.run(vendors_router._create_grn_impl(body, actor))
+    assert _GrnRepo.created is not None, f"{label}: receiving was blocked"
+    assert _GrnRepo.created.get("store_id") == expected_grn_store
 
 
 def test_same_store_foreign_kind_cannot_be_bound_to_a_grn(monkeypatch):
@@ -1855,10 +2034,12 @@ def test_omitting_require_kind_raises_at_runtime():
     fid = store.put(
         content=b"B", filename="f", mime_type="text/plain", metadata={"kind": "x"}
     )
-    # NOTE: `pylint --errors-only` ALSO flags these as E1125 missing-kwoa --
-    # a third enforcement layer (CI lint) on top of the runtime signature and
-    # the AST guard. Disabled only here, where omitting the argument is the
-    # thing under test.
+    # NOTE: pylint does NOT reliably flag a missing require_kind at a real call
+    # site -- get_file_store() is typed Optional[FileStore], so astroid cannot
+    # resolve the receiver and never emits E1125. An earlier round claimed CI
+    # lint as a third enforcement layer; that claim was FALSE and is retracted.
+    # There are exactly TWO layers: the runtime signature and the AST guard.
+    # The local disables below are only for these deliberate negative calls.
     with pytest.raises(TypeError):
         store.get(fid)  # pylint: disable=missing-kwoa
     # Every evasion spelling routes through the same signature.
@@ -1871,19 +2052,53 @@ def test_omitting_require_kind_raises_at_runtime():
         getattr(alias, "get")(fid2)  # pylint: disable=missing-kwoa
 
 
-def test_any_kind_is_counted_as_unscoped_by_the_static_guard():
-    """The guard must check the VALUE of require_kind, not the presence of the
-    token -- the panel restored the round-4 P0 as `require_kind=ANY_KIND` and
-    the old guard passed it."""
-    import ast
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "fs.get(file_id)",
+        "fs.get(file_id, require_kind=ANY_KIND)",
+        "fs.get(file_id, require_kind=None)",
+        "fs.get(file_id, require_kind=file_store.ANY_KIND)",
+        "fid = file_id\n    return fs.get(fid)",
+        "return get_file_store().get(file_id)",
+    ],
+)
+def test_guard_reports_an_unscoped_read(spelling, tmp_path):
+    """Drives the REAL guard against a fixture module.
 
-    src = "fs.get(file_id, require_kind=ANY_KIND)"
-    call = ast.parse(src).body[0].value
-    kw = call.keywords[0]
-    unscoped = (isinstance(kw.value, ast.Name) and kw.value.id == "ANY_KIND") or (
-        isinstance(kw.value, ast.Constant) and kw.value.value is None
+    The previous version of this test ast.parsed a STRING and re-implemented
+    the isinstance checks inline, so the panel deleted the ANY_KIND arm from
+    the guard and the whole suite still passed -- 104 green, nothing red. This
+    one calls scan_file_store_reads, so removing any arm makes it fail."""
+    module = tmp_path / "zz_probe.py"
+    module.write_text(
+        "from api.services.file_store import get_file_store, ANY_KIND\n\n\n"
+        "def _probe(file_id):\n"
+        "    fs = get_file_store()\n"
+        f"    {spelling}\n",
+        encoding="utf-8",
     )
-    assert unscoped, "ANY_KIND must be classified as an unscoped read"
+    detected, unscoped = scan_file_store_reads(tmp_path)
+    assert detected == 1, f"guard did not detect the call site: {spelling}"
+    assert "zz_probe.py" in unscoped, (
+        f"guard treated this as SCOPED, it is not: {spelling}"
+    )
+
+
+def test_guard_accepts_a_genuinely_scoped_read(tmp_path):
+    """The negative control: a real kind must NOT be reported, or the guard
+    would be trivially satisfied by flagging everything."""
+    module = tmp_path / "zz_ok.py"
+    module.write_text(
+        "from api.services.file_store import get_file_store\n\n\n"
+        "def _ok(file_id):\n"
+        "    fs = get_file_store()\n"
+        '    return fs.get(file_id, require_kind="business_logo")\n',
+        encoding="utf-8",
+    )
+    detected, unscoped = scan_file_store_reads(tmp_path)
+    assert detected == 1
+    assert unscoped == {}, f"a kind-scoped read was wrongly flagged: {unscoped}"
 
 
 def test_grn_document_route_still_serves_a_real_grn_document(monkeypatch):

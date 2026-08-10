@@ -218,7 +218,7 @@ def test_upload_file_returns_file_id(fs):
     assert body["file_id"]
     assert body["persisted"] is True
     # The bytes are actually retrievable from the store.
-    assert fs.get(body["file_id"]) is not None
+    assert fs.get(body["file_id"], require_kind="task_attachment") is not None
 
 
 def test_upload_file_rejects_bad_mime(fs):

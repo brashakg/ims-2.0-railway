@@ -1981,13 +1981,28 @@ async def upload_grn_doc(
         raise HTTPException(status_code=503, detail="File storage unavailable")
 
     sha256 = hashlib.sha256(content).hexdigest()
+    # The stamped store is what authorises this blob at GRN-create time, so a
+    # blob we cannot stamp is a blob that will be refused later with a message
+    # that reads like a forged id. Fail LOUD here instead of minting it: the
+    # caller can pick a store and retry, rather than looping on an upload that
+    # can never be attached.
+    upload_store = current_user.get("active_store_id")
+    if not upload_store:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select a store before uploading a goods-receipt document -- "
+                "the document is filed against the receiving store."
+            ),
+        )
+
     file_id = store.put(
         content=content,
         filename=file.filename,
         mime_type=mime,
         metadata={
             "kind": "grn_document",
-            "store_id": current_user.get("active_store_id"),
+            "store_id": upload_store,
             "uploaded_by": current_user.get("user_id"),
             "sha256": sha256,
         },
@@ -2113,7 +2128,16 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
     # by 400'ing). A live store whose get() finds nothing == a forged/stale id
     # -> 400 ATTACHMENT_INVALID.
-    if not is_dc:
+    #
+    # P0 (security panel round 6): this gate used to run under `if not is_dc`,
+    # while the persistence below wrote attachment_file_id UNCONDITIONALLY -- so
+    # adding one JSON field, grn_subtype="DELIVERY_CHALLAN", skipped BOTH the
+    # kind check and the store bind and re-opened the round-5 theft verbatim.
+    # The gate now runs whenever an attachment id is PRESENT, whatever the
+    # subtype; the DC exemption is only from the REQUIREMENT to attach (above),
+    # never from authorising an attachment that was sent anyway.
+    _attachment_meta = None
+    if grn.attachment_file_id and str(grn.attachment_file_id).strip():
         store = get_file_store()
         if store is None:
             raise HTTPException(status_code=503, detail="File storage unavailable")
@@ -2179,15 +2203,24 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # foreclose an ops-uploads / accountant-creates split -- but "don't bind the
     # uploader" never implied "bind nothing".
     #
-    # Strict: the blob must CARRY a store_id and it must equal the receiving
-    # store. A blob with no store_id is refused rather than allowed through, so
-    # this cannot fail open on an odd upload; the fix is one re-upload, which
-    # stamps the current store. (Prod probe: all live grn_document blobs carry
-    # store_id.) Same indistinguishable message as every other attachment
-    # rejection, so this is not an existence oracle over the bucket.
-    if not is_dc:
-        _blob_store = (_attachment_meta or {}).get("store_id")
-        if not _blob_store or _blob_store != store_id:
+    # The test is the caller's REACHABLE stores, not the receiving store.
+    # Comparing the blob's stamp to the post-re-point store_id (my round-6
+    # attempt) BROKE THE FORWARD RECEIVING FLOW: upload-doc stamps the uploader's
+    # ACTIVE store, while a PO-backed GRN is re-pointed to the PO's delivery
+    # store, so an ADMIN active at A receiving store B's PO was 400'd -- and
+    # re-uploading produced the same stamp, an unescapable loop, with the
+    # deliberately indistinguishable message making an outage look like a forged
+    # id. The repo's own test_po_store_boundary states that intent.
+    #
+    # can_access_store_scoped is the canonical helper and gets both directions
+    # right: a store-level thief cannot reach the victim's store, so the round-5
+    # theft is still refused; a cross-store ADMIN/AREA_MANAGER is granted nothing
+    # they could not already read through the download route. A blob with no
+    # store_id resolves the same way -- unreachable for a store-level caller,
+    # readable by a cross-store one -- so there is no fail-open either.
+    if _attachment_meta is not None:
+        _blob_store = _attachment_meta.get("store_id")
+        if not can_access_store_scoped(_blob_store, current_user):
             raise HTTPException(
                 status_code=400,
                 detail=_ATTACHMENT_INVALID_DETAIL,
@@ -2312,10 +2345,13 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "vendor_invoice_date": grn.vendor_invoice_date,
         # F-S3: the receipt document the ops user attached (file_store id +
         # metadata). The accountant reconciliation console reads these to render
-        # the "view document" link. None for a DC (attached later).
-        "attachment_file_id": grn.attachment_file_id,
-        "attachment_filename": grn.attachment_filename,
-        "attachment_mime": grn.attachment_mime,
+        # the "view document" link. None for a DC (attached later) -- and that
+        # is now ENFORCED, not merely documented: this dict used to persist the
+        # caller's id unconditionally, which is what made the DC subtype a
+        # bypass of the authorisation gate above.
+        "attachment_file_id": None if is_dc else grn.attachment_file_id,
+        "attachment_filename": None if is_dc else grn.attachment_filename,
+        "attachment_mime": None if is_dc else grn.attachment_mime,
         "items": item_docs,
         "total_received": total_received,
         "total_accepted": total_accepted,

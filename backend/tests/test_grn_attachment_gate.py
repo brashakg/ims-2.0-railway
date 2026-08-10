@@ -255,7 +255,7 @@ def test_upload_doc_persists_and_returns_file_id(monkeypatch):
     assert res["file_id"]
     assert res["mime"] == "application/pdf"
     # The bytes are actually retrievable from the store.
-    rec = store.get(res["file_id"])
+    rec = store.get(res["file_id"], require_kind="grn_document")
     assert rec is not None
     assert rec[0] == b"%PDF-1.4 fake"
 

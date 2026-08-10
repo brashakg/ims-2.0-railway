@@ -138,7 +138,8 @@ class _FileStore:
         return (b"x", "inv.pdf", "application/pdf")
 
     def get_metadata(self, _fid):
-        return {"kind": "grn_document", "uploaded_by": "u1"}
+        return {"kind": "grn_document", "uploaded_by": "u1",
+                "store_id": "STORE-A"}
 
 
 class _EmptyFileStore:
