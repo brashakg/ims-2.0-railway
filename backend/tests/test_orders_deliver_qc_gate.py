@@ -27,6 +27,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -337,6 +338,99 @@ def test_unworked_ghost_sibling_does_not_strand_a_finished_job(monkeypatch):
     assert orepo.status_updates == ["DELIVERED"]
 
 
+def _worked_pending(**kw):
+    """A PENDING job that walked the WHOLE bench.
+
+    Reachable through the real scan path: only INTAKE advances the status, and
+    PENDING is not in lab_routing._TERMINAL_JOB_STATUSES, so when the INTAKE leg
+    is HELD (SALES_CONFIRM_REQUIRED) the job still routes through
+    EDGING/COATING/QC_LAB -- which carry advances_job_status=None and hit no gate
+    at all -- and on to DISPATCH and PICKUP, while its status stays PENDING.
+    """
+    doc = _wjob(
+        job_id="JID-W",
+        job_number="WS-WORKED",
+        status="PENDING",
+        current_station="PICKUP",
+        scan_history=[
+            {"station": s}
+            for s in ("INTAKE", "EDGING", "COATING", "QC_LAB", "DISPATCH", "PICKUP")
+        ],
+        station_timestamps={
+            s: "2026-08-10T10:00:00"
+            for s in ("INTAKE", "EDGING", "COATING", "QC_LAB", "DISPATCH", "PICKUP")
+        },
+    )
+    doc.update(kw)
+    return doc
+
+
+@pytest.mark.parametrize(
+    "sibling_label, sibling",
+    [
+        ("qc_passed", {"qc_passed": True}),
+        ("qc_waived", {"qc_waived": True}),
+        # B5 is the real prod duplicate shape: one job already handed over.
+        ("delivered_and_qcd", {"status": "DELIVERED", "qc_passed": True}),
+    ],
+)
+def test_worked_pending_is_not_a_ghost(monkeypatch, sibling_label, sibling):
+    """THE ROUND-3 BLOCKER. The ghost carve-out keyed on the STATUS STRING alone,
+    so a PENDING job that had actually been ground at the bench was waved through
+    as if it had produced nothing -- as long as some sibling was QC-cleared.
+
+    Patient consequence: a two-job order where one job is QC'd and the other was
+    ground but never inspected. The counter hands over BOTH at 200, and the
+    un-QC'd lens is the one the patient walks out wearing, while the bench
+    scanner is simultaneously refusing that same document with QC_REQUIRED."""
+    jobs = [_worked_pending(), _wjob(job_id="JID-1", job_number="WS-1", **sibling)]
+
+    client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), jobs)
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 400, f"{sibling_label}: {resp.text}"
+    assert "WS-WORKED" in resp.json()["detail"]
+    assert orepo.status_updates == []
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [{"qc_passed": True}, {"qc_waived": True}, {"status": "DELIVERED", "qc_passed": True}],
+)
+def test_worked_pending_blocks_ready_and_shipping_too(monkeypatch, sibling):
+    """All three handover doors agree on the worked-PENDING shape."""
+    jobs = [_worked_pending(), _wjob(job_id="JID-1", job_number="WS-1", **sibling)]
+
+    client, orepo = _client(
+        monkeypatch, _order(status="CONFIRMED", workshop_job_id="JID-1"), jobs
+    )
+    assert client.post("/api/v1/orders/ORD-1/ready").status_code == 400
+    assert orepo.status_updates == []
+
+    ship = _shipping_client(monkeypatch, _order(workshop_job_id="JID-1"), jobs)
+    assert ship.post("/api/v1/shipping/shipments", json=_SHIPMENT_BODY).status_code == 400
+
+
+def test_bench_evidence_predicate_matches_the_real_doc_shapes(monkeypatch):
+    """Pins WHY the carve-out is safe: the fields it tests are exactly the ones a
+    genuinely unworked ghost lacks. orders._ensure_workshop_job_for_order writes
+    status=PENDING with none of them, and both live prod PENDING rows read
+    current_station=None, scan_history=[], station_timestamps={}."""
+    assert wm._has_bench_evidence(_worked_pending()) is True
+    # Any ONE of the three is enough.
+    assert wm._has_bench_evidence({"current_station": "EDGING"}) is True
+    assert wm._has_bench_evidence({"scan_history": [{"station": "INTAKE"}]}) is True
+    assert wm._has_bench_evidence({"station_timestamps": {"INTAKE": "x"}}) is True
+    # The live prod / safety-net ghost shape.
+    assert wm._has_bench_evidence(_wjob(status="PENDING")) is False
+    assert (
+        wm._has_bench_evidence(
+            {"status": "PENDING", "current_station": None,
+             "scan_history": [], "station_timestamps": {}}
+        )
+        is False
+    )
+
+
 def test_cross_order_pointer_is_ignored(monkeypatch):
     """find_by_id is keyed on job_id alone, so a stale/cross-order pointer used
     to make the gate judge a DIFFERENT order's QC record -- failing open here."""
@@ -474,7 +568,17 @@ def test_gate_blocks_only_states_with_a_real_remedy(monkeypatch):
     its own named non-QC remedy. What must never happen is a block pointing at an
     API that refuses. (Blocking with the wrong message is fixed by fixing the
     message; removing the block is what re-opened the hole.)"""
-    blocked = set(wm.VALID_JOB_TRANSITIONS) - set(wm._HANDOVER_GATE_SKIP_STATUSES)
+    # NON-DERIVED. The skip set is asserted against a LITERAL, not read into the
+    # expectation -- this test used to compute `blocked` FROM
+    # _HANDOVER_GATE_SKIP_STATUSES, so any status ADDED to that set silently
+    # stopped being tested while every assertion still held. That is exactly how
+    # a one-word edit adding PENDING to the skip set reached a chair with a green
+    # suite. Widening the skip set must now be a RED test, not a silent policy
+    # change.
+    assert set(wm._HANDOVER_GATE_SKIP_STATUSES) == {"CANCELLED", "DELIVERED"}
+    assert set(wm._HANDOVER_NON_QC_REMEDY_STATUSES) == {"PENDING"}
+
+    blocked = set(wm.VALID_JOB_TRANSITIONS) - {"CANCELLED", "DELIVERED"}
     assert blocked
     assert (blocked - set(wm._HANDOVER_NON_QC_REMEDY_STATUSES)) <= set(
         wm._QC_INPUT_STATUSES
@@ -499,7 +603,7 @@ def test_both_doors_agree_on_one_shared_document(monkeypatch):
     """THE TEST THAT WOULD HAVE CAUGHT THE LAST ROUND. The bench scan gate and
     the counter gate must reach the SAME verdict on the SAME job doc -- the
     regression shipped a PR whose two gates contradicted each other."""
-    for status in ("PENDING", "IN_PROGRESS", "COMPLETED", "READY"):
+    for status in ("PENDING", "IN_PROGRESS", "COMPLETED", "QC_FAILED", "READY"):
         job = _wjob(status=status)  # un-QC'd
 
         bench_blocks = (
@@ -593,7 +697,12 @@ def test_every_scan_role_can_close_a_handover(monkeypatch):
 
 
 def test_out_of_scope_roles_are_still_refused(monkeypatch):
-    for role in ("ACCOUNTANT", "CATALOG_MANAGER", "INVESTOR"):
+    """OPTOMETRIST is deliberately included: it is in NEITHER scan tuple, so by
+    the rule above it does not close handovers. The decision is pinned on the
+    FRONTEND side too -- frontend/src/pages/orders/handoverRoles.ts hides the
+    Mark Delivered button for exactly this set, because it previously rendered
+    enabled for OPTOMETRIST and 403'd in front of the customer."""
+    for role in ("ACCOUNTANT", "CATALOG_MANAGER", "INVESTOR", "OPTOMETRIST"):
         client, orepo = _client(
             monkeypatch,
             _order(workshop_job_id="JID-1"),

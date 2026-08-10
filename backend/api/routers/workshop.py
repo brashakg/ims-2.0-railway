@@ -441,6 +441,30 @@ assert not (_QC_REQUIRED_TARGETS & _NON_PATIENT_FACING_STATUSES), (
 )
 
 
+def _has_bench_evidence(job: dict) -> bool:
+    """True when this job shows ANY sign of having been through the lab.
+
+    The ghost carve-out below exists for a row that produced NOTHING -- the
+    duplicate the POS safety net creates and nobody works. Keying that carve-out
+    on the status string alone was wrong: PENDING is not in
+    lab_routing._TERMINAL_JOB_STATUSES and only INTAKE advances the status, so a
+    job whose INTAKE leg was HELD walks EDGING/COATING/QC_LAB (which carry
+    advances_job_status=None and hit no gate at all) all the way to PICKUP,
+    accumulating real bench work, while its status stays PENDING. Such a job has
+    ground lenses behind it and must never be waved through as a ghost.
+
+    A genuinely unworked ghost has none of these fields:
+    orders._ensure_workshop_job_for_order writes status=PENDING with no
+    current_station, no scan_history and no station_timestamps -- and both live
+    production PENDING rows read exactly that.
+    """
+    return bool(
+        job.get("scan_history")
+        or job.get("station_timestamps")
+        or job.get("current_station")
+    )
+
+
 def _handover_block_detail(job: dict) -> str:
     """The counter-facing sentence for a blocked handover, branched on WHY the
     job is blocked so it always names a step that actually exists."""
@@ -488,13 +512,16 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
         it terminal), so a legacy delivered job would strand its order forever
         for every role including SUPERADMIN. Safe because no NEW job can reach
         DELIVERED without QC now.
-      * a PENDING job ON AN ORDER THAT ALREADY HAS A QC-CLEARED JOB -- the
-        duplicate "ghost" shape. The safety-net created a second job nobody
+      * an UNWORKED PENDING job on an order that already has a QC-cleared job --
+        the duplicate "ghost" shape. The safety net created a second job nobody
         worked; the real job is QC'd and its glasses are finished and on the
         shelf. Blocking there strands a customer for a row that produced nothing.
-        A LONE PENDING job is still BLOCKED (it is the live prod shape and it can
-        have walked the whole bench to PICKUP) -- it just gets its own sentence
-        from _handover_block_detail naming the real remedy: start the job.
+        "Unworked" is tested with _has_bench_evidence, NOT with the status
+        string: a PENDING job can have walked the whole bench to PICKUP (see that
+        helper), and such a job has ground lenses behind it.
+        A LONE PENDING job is still BLOCKED (it is the live prod shape) -- it
+        just gets its own sentence from _handover_block_detail naming the real
+        remedy: start the job.
     The invariant "every blocked state has a remedy that exists" is an
     import-time assert plus a test.
 
@@ -546,9 +573,12 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
         status = (job.get("status") or "").strip().upper()
         if status in _HANDOVER_GATE_SKIP_STATUSES:
             continue
-        # Ghost duplicate ONLY: an unworked PENDING row alongside a job that is
-        # genuinely QC-cleared. A lone PENDING job falls through and blocks.
-        if status == "PENDING" and has_cleared_job:
+        # Ghost duplicate ONLY: a PENDING row that shows NO sign of bench work,
+        # alongside a job that is genuinely QC-cleared. A lone PENDING job, or
+        # one carrying any bench evidence, falls through and blocks -- otherwise
+        # a two-job order could hand over a lens that was ground but never
+        # inspected, while the bench scanner refuses that same document.
+        if status == "PENDING" and has_cleared_job and not _has_bench_evidence(job):
             continue
         if not _qc_cleared(job):
             raise HTTPException(
