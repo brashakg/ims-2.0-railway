@@ -820,35 +820,56 @@ def _order_line_tax(order: Dict[str, Any]) -> Optional[float]:
     return round(total, 2) if seen else None
 
 
-def _lines_prove_zero_rated(order: Dict[str, Any]) -> bool:
-    """True only when EVERY line positively proves a 0% rate.
+def _has_line_items(order: Dict[str, Any]) -> bool:
+    """True when the document carries line detail at all. An imported invoice
+    normally does NOT (techcherry_import._map_order writes
+    `"items": row.get("items") or []`), and that absence is what decides which
+    corroboration path a zero-tax sale is judged on."""
+    items = order.get("items")
+    return isinstance(items, list) and bool(items)
 
-    A line proves it by carrying `gst_rate == 0` together with a
-    `taxable_value` that equals its `item_total` -- i.e. the pricing engine
-    itself concluded there was no tax component. Absence of evidence (no items,
-    or lines with no rate stamped) is NOT proof and returns False.
+
+def _lines_prove_zero_rated(order: Dict[str, Any], grand: float) -> bool:
+    """True only when the lines POSITIVELY prove a 0% rate for the WHOLE sale.
+
+    Every line must carry `gst_rate == 0` and `tax_amount == 0` -- i.e. the
+    pricing engine itself concluded there was no tax component -- AND the lines
+    must ACCOUNT FOR THE INVOICE: `sum(taxable_value) + sum(tax_amount)` has to
+    land on `grand_total`. Without that coverage test a single Re 1 line proved
+    a Rs 1,180 bill exempt (0.08% of the invoice blessing the whole thing),
+    which is worthless as the one control separating a genuine exempt sale from
+    an unresolved tax.
+
+    Coverage is measured on `taxable_value + tax_amount`, NOT on `item_total`:
+    `item_total` is the PRE-cart-discount line value, so an `item_total` test
+    would refuse every discounted 0%-rated bill. taxable + tax == grand_total
+    is the identity `orders._compute_per_category_gst` guarantees in both the
+    inclusive and exclusive pricing modes, discount or no discount.
+
+    Absence of evidence is NOT proof: no items, an unstamped rate, or a missing
+    taxable_value all return False.
     """
     items = order.get("items")
     if not isinstance(items, list) or not items:
         return False
+    covered = 0.0
     for it in items:
         if not isinstance(it, dict):
             return False
         rate = it.get("gst_rate")
         taxable = it.get("taxable_value")
-        gross = it.get("item_total")
-        if rate is None or taxable is None or gross is None:
+        if rate is None or taxable is None:
             return False
         try:
             if float(rate) != 0.0:
                 return False
-            if abs(float(taxable) - float(gross)) > 0.01:
+            line_tax = float(it.get("tax_amount") or 0)
+            if abs(line_tax) > 0.01:
                 return False
-            if abs(float(it.get("tax_amount") or 0)) > 0.01:
-                return False
+            covered += float(taxable) + line_tax
         except (TypeError, ValueError):
             return False
-    return True
+    return abs(round(covered, 2) - round(grand, 2)) <= _TALLY_TAX_TOLERANCE
 
 
 def _order_declared_tax(order: Dict[str, Any]) -> float:
@@ -1047,34 +1068,56 @@ def _reshape_one_order(
 
     emitted_net = round(grand - tax, 2)
 
-    # HARD STOP 2 -- the document's own taxable contradicts the Sales figure we
-    # would emit. Two arrangements, both live:
-    #   (a) declared_net BELOW the gross: the doc says Rs 1,000 taxable on a
-    #       Rs 1,180 sale while the split would emit Sales Rs 1,180.
-    #   (b) declared_net EQUAL to the gross with zero tax: a tax-inclusive gross
-    #       standing in for the taxable. Only a per-line 0-rate PROOF (every
-    #       line taxable_value == item_total at gst_rate 0) makes that honest.
-    # A POS order's `subtotal` is the pre-cart-discount tax-INCLUSIVE gross and
-    # is therefore >= grand, so a discounted POS bill can never trip (a); (b) is
-    # exactly the shape a genuine exempt sale has, hence the per-line proof.
+    # HARD STOP 2a -- the document's own taxable is BELOW the gross while we
+    # would book the whole gross as Sales: the doc says Rs 1,000 taxable on a
+    # Rs 1,180 sale. A POS order's `subtotal` is the pre-cart-discount
+    # tax-INCLUSIVE gross and is therefore >= grand, so a discounted POS bill
+    # can never trip this.
     if 0 < declared_net < grand and (emitted_net - declared_net) > _TALLY_TAX_TOLERANCE:
         raise TallyExportError(
             f"order {oid!r}: voucher would book Sales Rs {emitted_net:.2f} but "
             f"the document's own subtotal declares Rs {declared_net:.2f} taxable "
             f"on a Rs {grand:.2f} sale -- unresolved output GST"
         )
-    if (
-        grand > 0
-        and tax == 0
-        and net_key is not None
-        and abs(declared_net - grand) <= _TALLY_TAX_TOLERANCE
-        and not _lines_prove_zero_rated(row)
-    ):
-        raise TallyExportError(
-            f"order {oid!r}: gross Rs {grand:.2f} equals the declared taxable "
-            f"Rs {declared_net:.2f} with Rs 0.00 GST, and no line proves a 0% "
-            "rate -- the tax is unresolved, not exempt"
-        )
+
+    # HARD STOP 2b -- a ZERO-TAX sale on a positive gross must be CORROBORATED.
+    # Optical genuinely sells 0%-rated lines (eye tests, hearing aids) and those
+    # must keep shipping, so this is NOT "tax == 0 -> refuse". But an
+    # UNcorroborated zero books 100% of the invoice as Sales with no GST, which
+    # is the defect this module exists to kill.
+    #
+    # WHICH corroboration is required depends on whether the document carries
+    # line detail at all -- keying it on `net_key`/`declared_net` was what let
+    # BOTH live escapes through, because a blank taxable column is written as
+    # None (key skipped) or 0.0 (nowhere near the gross), so the stop simply
+    # never ran:
+    #   * LINES PRESENT -> the lines are the authority and must prove it
+    #     (0% rate on every line AND coverage of the whole invoice). Line detail
+    #     that cannot account for the invoice is a broken document; a header
+    #     figure must not rescue it, or a single Re 1 line blesses a Rs 1,180
+    #     bill.
+    #   * NO LINES (the normal imported-invoice shape) -> the header's declared
+    #     taxable equalling the gross IS the corroboration. Refusing that
+    #     refused the textbook honest exempt import while the uncorroborated one
+    #     shipped -- the two stops were inverted.
+    if grand > 0 and tax == 0:
+        if _has_line_items(row):
+            corroborated = _lines_prove_zero_rated(row, grand)
+            how = "no line proves a 0% rate for the whole invoice"
+        else:
+            corroborated = (
+                declared_net > 0
+                and abs(declared_net - grand) <= _TALLY_TAX_TOLERANCE
+            )
+            how = (
+                f"the declared taxable Rs {declared_net:.2f} does not corroborate "
+                f"the gross and there is no line detail"
+            )
+        if not corroborated:
+            raise TallyExportError(
+                f"order {oid!r}: gross Rs {grand:.2f} with Rs 0.00 GST and "
+                f"{how} -- the tax is unresolved, not exempt"
+            )
 
     # HARD STOP 3 -- an arithmetically impossible voucher. These all BALANCE
     # (the legs net to zero) and pass the coverage gate, so nothing else catches

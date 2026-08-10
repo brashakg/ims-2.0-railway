@@ -206,11 +206,15 @@ def test_zero_tax_order_still_balances():
 
 
 def test_voucher_balances_across_every_odd_paise_tax():
-    """Rs 1,000 gross, tax sweeping 0.00 -> 9.99 (every paise residue).
+    """Rs 1,000 gross, tax sweeping 0.01 -> 10.00 (every paise residue).
 
     A naive round(tax/2) on BOTH heads over-states by a paisa on odd-paise tax
     (100.01 -> 50.01 + 50.01), which imbalances the voucher and Tally rejects
     the whole import. One export, 1000 vouchers, all must net to zero.
+
+    The sweep starts at 1 paise deliberately: a ZERO-tax sale is not a split
+    question at all, it is the corroboration question, and an uncorroborated
+    zero is refused (see the 0%-rated tests above).
     """
     orders = [
         _raw_order(
@@ -224,15 +228,15 @@ def test_voucher_balances_across_every_odd_paise_tax():
             # (separately tested) hard stop.
             with_subtotal=False,
         )
-        for paise in range(0, 1000)
+        for paise in range(1, 1001)
     ]
     xml, _priced, _rejected = tally_build_day_voucher_xml_checked(None, orders)
 
     root = ET.fromstring(xml)
     vouchers = root.findall(".//VOUCHER")
     assert len(vouchers) == 1000
-    for paise, voucher in enumerate(vouchers):
-        tax = round(paise / 100.0, 2)
+    for idx, voucher in enumerate(vouchers):
+        tax = round((idx + 1) / 100.0, 2)
         legs = {}
         for entry in voucher.findall("ALLLEDGERENTRIES.LIST"):
             legs[entry.findtext("LEDGERNAME")] = float(entry.findtext("AMOUNT"))
@@ -401,16 +405,90 @@ def test_real_techcherry_blank_tax_column_is_REFUSED():
     assert "TC-1001" in msg, "the owner must be told WHICH invoice was refused"
 
 
-def test_real_techcherry_taxable_equal_to_gross_is_REFUSED():
-    """The second live escape: TaxableAmount == GrandTotal with a blank tax
-    column. Both figures agree, the legs balance, and the voucher would still
-    book Rs 1,180 of Sales with Rs 0.00 GST."""
+def test_real_techcherry_taxable_equal_to_gross_with_BLANK_tax_is_REFUSED():
+    """TaxableAmount == GrandTotal with a BLANK tax column: the two figures
+    agree and the legs balance, but nothing states the tax at all, so the
+    voucher would book Rs 1,180 of Sales with Rs 0.00 GST."""
     doc = _techcherry_doc(
         InvoiceNo="TC-1002", GrandTotal="1180", TaxableAmount="1180", TaxAmount=""
     )
+    assert doc["tax_amount"] is None
     with pytest.raises(TallyExportError) as exc:
         tally_build_day_voucher_xml_checked(None, [doc])
     assert "TC-1002" in str(exc.value)
+
+
+# --- MUST-FIX 1 + 3: the two stops were INVERTED on imported invoices ---------
+
+
+def test_real_techcherry_blank_taxable_with_EXPLICIT_zero_tax_is_REFUSED():
+    """MUST-FIX 1 (P0-A). The importer writes `subtotal: None` for a blank
+    TaxableAmount -- and keying the zero-tax stop on that key's presence
+    switched the stop OFF, so a Rs 11,800 invoice emitted Sales 11800.00 /
+    CGST 0.00 / SGST 0.00. Rs 1,800 of output GST omitted per invoice, in a
+    file the accountant reads as green.
+
+    The line detail here carries `gst_rate 18` with `tax_amount 0.0` -- it
+    positively contradicts the zero, and nothing compared the two before.
+    """
+    doc = _techcherry_doc(
+        InvoiceNo="TC-P0A",
+        GrandTotal="11800.00",
+        TaxableAmount="",
+        TaxAmount="0",
+        items=[
+            {
+                "item_total": 11800,
+                "taxable_value": 11800,
+                "tax_amount": 0.0,
+                "gst_rate": 18,
+            }
+        ],
+    )
+    assert doc["subtotal"] is None and doc["tax_amount"] == 0.0
+
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [doc])
+    assert "TC-P0A" in str(exc.value)
+
+
+def test_real_techcherry_zero_taxable_with_EXPLICIT_zero_tax_is_REFUSED():
+    """MUST-FIX 1 (P0-D). A literal `0` in the taxable column resolves to
+    Rs 0.00 -- nowhere near the gross -- so the old `abs(declared - grand) <=
+    0.50` arm never fired either."""
+    doc = _techcherry_doc(
+        InvoiceNo="TC-P0D", GrandTotal="11800.00", TaxableAmount="0", TaxAmount="0"
+    )
+    assert doc["subtotal"] == 0.0 and doc["tax_amount"] == 0.0
+
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [doc])
+    assert "TC-P0D" in str(exc.value)
+
+
+def test_real_techcherry_honest_exempt_invoice_SHIPS():
+    """MUST-FIX 3 (P0-C). The textbook honest exempt import -- taxable ==
+    gross with an EXPLICIT zero tax and no line detail -- was being REFUSED
+    while the uncorroborated shapes above shipped. The two stops were inverted,
+    and the over-block was permanent for TechCherry (the importer never stamps
+    a per-line gst_rate), so genuinely exempt sales dropped out of the file.
+    """
+    doc = _techcherry_doc(
+        InvoiceNo="TC-P0C",
+        GrandTotal="11800.00",
+        TaxableAmount="11800.00",
+        TaxAmount="0",
+    )
+    assert doc["items"] == [], "an imported invoice normally carries no lines"
+
+    xml, priced, rejected = tally_build_day_voucher_xml_checked(None, [doc])
+    legs = _ledger_amounts(xml)
+    assert rejected == []
+    assert legs["Sales A/c"] == 11800.00
+    assert legs["CGST Output"] == 0.00 and legs["SGST Output"] == 0.00
+    assert legs["Walk-in Customer"] == -11800.00
+    assert round(sum(legs.values()), 2) == 0.00
+    assert priced[0]["order_number"] == "TC-P0C"
 
 
 def test_real_techcherry_with_a_declared_tax_prices_correctly():
@@ -492,9 +570,10 @@ def test_unclassifiable_order_is_refused_rather_than_booked_as_all_sales():
 
 def test_genuine_zero_rated_sale_still_ships():
     """A Rs 500 EYE TEST: real 0%-rated optical supply. Its lines positively
-    prove the rate (`gst_rate: 0`, `taxable_value == item_total`), so it must
-    keep exporting. A blanket 'gross > 0 and tax == 0 -> refuse' would have
-    quietly dropped real sales out of the accountant's file."""
+    prove the rate (`gst_rate: 0`, zero line tax) AND account for the whole
+    invoice, so it must keep exporting. A blanket 'gross > 0 and tax == 0 ->
+    refuse' would have quietly dropped real sales out of the accountant's
+    file."""
     order = {
         "order_id": "ORD-EYETEST",
         "created_at": "2026-08-09T10:00:00+00:00",
@@ -518,21 +597,74 @@ def test_genuine_zero_rated_sale_still_ships():
     assert legs["Walk-in Customer"] == -500.00
 
 
-def test_tax_inclusive_gross_posing_as_the_taxable_is_REFUSED():
-    """Same rupees as the eye test, but NOTHING proves the 0% rate. This is the
-    TechCherry 'taxable == gross' shape; absence of evidence is not exemption."""
+def test_zero_tax_with_no_taxable_and_no_lines_is_REFUSED():
+    """Same rupees as the eye test, but NOTHING corroborates the zero -- no
+    taxable near the gross and no line detail. Absence of evidence is not
+    exemption."""
     order = {
         "order_id": "ORD-NOPROOF",
         "created_at": "2026-08-09T10:00:00+00:00",
         "customer_name": "Walk-in Customer",
         "grand_total": 500.0,
-        "subtotal": 500.0,
+        "subtotal": 0.0,
         "tax_amount": 0.0,
         "items": [],
     }
     with pytest.raises(TallyExportError) as exc:
         tally_build_day_voucher_xml_checked(None, [order])
     assert "ORD-NOPROOF" in str(exc.value)
+
+
+def test_one_tiny_line_cannot_prove_a_whole_invoice_exempt():
+    """MUST-FIX 2. `_lines_prove_zero_rated` never checked that the lines
+    ACCOUNT for the invoice, so a single Re 1 line -- 0.08% of a Rs 1,180 bill
+    -- blessed the whole thing. This is the one control separating a genuine
+    exempt sale from an unresolved tax, and the proving line could be
+    arbitrarily small."""
+    order = {
+        "order_id": "ORD-TINYPROOF",
+        "created_at": "2026-08-09T10:00:00+00:00",
+        "customer_name": "Walk-in Customer",
+        "grand_total": 1180.0,
+        "tax_amount": 0.0,
+        "subtotal": 1180.0,
+        "items": [
+            {"gst_rate": 0, "taxable_value": 1.0, "item_total": 1.0, "tax_amount": 0.0}
+        ],
+    }
+    with pytest.raises(TallyExportError) as exc:
+        tally_build_day_voucher_xml_checked(None, [order])
+    assert "ORD-TINYPROOF" in str(exc.value)
+
+
+def test_zero_rated_sale_with_a_cart_discount_still_ships():
+    """Coverage is measured on `taxable_value + tax_amount`, NOT `item_total`.
+    `item_total` is the PRE-cart-discount line value, so an item_total-based
+    coverage test would refuse every discounted 0%-rated bill -- Rs 1,000 of
+    eye tests at a 10% cart discount."""
+    order = {
+        "order_id": "ORD-EXEMPT-DISC",
+        "created_at": "2026-08-09T10:00:00+00:00",
+        "customer_name": "Walk-in Customer",
+        "subtotal": 1000.0,  # pre-cart-discount gross
+        "cart_discount_percent": 10.0,
+        "grand_total": 900.0,
+        "tax_amount": 0.0,
+        "items": [
+            {
+                "item_total": 1000.0,
+                "gst_rate": 0.0,
+                "taxable_value": 900.0,
+                "tax_amount": 0.0,
+            }
+        ],
+    }
+    xml, _p, rejected = tally_build_day_voucher_xml_checked(None, [order])
+    legs = _ledger_amounts(xml)
+    assert rejected == []
+    assert legs["Sales A/c"] == 900.00
+    assert legs["CGST Output"] == 0.00 and legs["SGST Output"] == 0.00
+    assert round(sum(legs.values()), 2) == 0.00
 
 
 def test_order_priced_from_its_lines_when_the_header_carries_no_tax_key():

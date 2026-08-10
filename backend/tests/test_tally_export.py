@@ -653,3 +653,64 @@ def test_role_gate_rejects_non_admin(admin_client, staff_token):
     ]:
         r = client.get(path, headers={"Authorization": f"Bearer {staff_token}"})
         assert r.status_code == 403, f"{path} should be 403 for SALES_STAFF, got {r.status_code}"
+
+
+def test_regenerate_poisons_the_row_the_reader_actually_serves(
+    admin_client, super_token, monkeypatch
+):
+    """MUST-FIX 4. `/regenerate` anchored the date NAIVE while every reader
+    normalises to '...+00:00', so a regenerate that correctly REFUSED the day's
+    orders wrote its poison row under a key no reader can match -- and the
+    superseded green file kept downloading. The poison/supersede mechanism was
+    inert on the only path a human can trigger.
+    """
+    client, coll = admin_client
+
+    # Stand in for NEXUS: record the anchor it is handed, and poison the row
+    # under `anchor.isoformat()` exactly as _write_poison_export_row does.
+    seen = {}
+
+    class _FakeNexus:
+        async def _build_tally_export(self, target_date=None, store_id=None):
+            seen["anchor"] = target_date
+            coll.update_one(
+                {"export_date": target_date.isoformat(), "store_id": store_id},
+                {"$set": {
+                    "export_date": target_date.isoformat(),
+                    "store_id": store_id,
+                    "store_code": "GK1",
+                    "voucher_count": 0,
+                    "xml": "",
+                    "balanced": False,
+                    "gate_error": "all 1 order(s) failed the Tally voucher gate",
+                }},
+                upsert=True,
+            )
+            return type("R", (), {"ok": False, "items_synced": 0, "notes": "",
+                                  "error": "gate refused"})()
+
+    import agents.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "get_agent", lambda _n: _FakeNexus())
+
+    r = client.post(
+        "/api/v1/admin/integrations/tally/regenerate",
+        json={"date": "2026-05-08", "store_id": "BV-GK1"},
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    assert r.status_code == 200 and r.json()["ok"] is False
+
+    # The anchor handed to NEXUS must be UTC-aware, so its isoformat matches
+    # the key every reader normalises to.
+    assert seen["anchor"].tzinfo is not None
+    assert seen["anchor"].isoformat() == "2026-05-08T00:00:00+00:00"
+
+    # ...and the download must now serve the POISON row, not the superseded one.
+    dl = client.get(
+        "/api/v1/admin/integrations/tally/voucher.xml?date=2026-05-08&store_id=BV-GK1",
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    assert dl.status_code == 200
+    assert "_UNBALANCED" in dl.headers["content-disposition"]
+    assert dl.headers["X-Tally-Balanced"] == "0"
+    assert dl.text == "", "the superseded green voucher XML must not be served"
