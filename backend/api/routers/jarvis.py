@@ -3034,7 +3034,11 @@ _JARVIS_QUERYABLE_COLLECTIONS = frozenset(
         "workshop_jobs",
         "walkouts",
         "walk_in_counters",
-        # People (own-data, no customer PII fields shown)
+        # People. NOTE: "no customer PII" is not the same as "no PII" -- `users`
+        # (and the payroll collections below) carry STAFF credentials and
+        # statutory IDs. Those are removed by _ALWAYS_EXCLUDED_FIELDS below,
+        # which also blocks filtering/sorting on them, NOT by the customer
+        # scrubber (_CUSTOMER_PII_COLLECTIONS deliberately does not list users).
         "users",
         "stores",
         "vendors",
@@ -3097,6 +3101,62 @@ _CUSTOMER_PII_COLLECTIONS = frozenset(
         "eye_tests",
     }
 )
+
+# Per-collection EXCLUSION projections applied to the raw read below.
+#
+# The customer scrubber above never covered `users`, so this browser returned
+# every employee's approval_pin_hash -- the bcrypt of the 4-6 digit maker-checker
+# PIN written onto the user document by services/approvals.py -- plus their
+# password_hash and raw statutory IDs, for the whole org in one paginated call.
+# The route is SUPERADMIN-only, but maker-checker separation of duty means the
+# SUPERADMIN can be the MAKER, so they must never hold every manager's CHECKER
+# credential. Excluded here rather than gated, because nothing downstream reads
+# these fields: jarvis's own staff surface (get_staff_insights) uses a separate
+# INCLUSION projection that names none of them.
+# Field names NEVER returned by the raw browser, on ANY collection. Global by
+# name rather than per-collection so a collection added to the allow-list later
+# cannot default to exposed -- the same deny-list-by-default argument that
+# _PICKER_FIELDS makes in the users router. Covers users (credentials + statutory
+# IDs) and the payroll collections salary_config / payslips, which are on the
+# same allow-list and carry pan / uan / esi_ip_number / bank_account_no /
+# bank_ifsc.
+_ALWAYS_EXCLUDED_FIELDS = (
+    # credentials
+    "password",
+    "password_hash",
+    "approval_pin_hash",
+    "approval_pin_set_at",
+    "pin_attempts",
+    # statutory identity numbers, in every spelling used across the app
+    "aadhaar_no",
+    "aadhaar",
+    "pan_no",
+    "pan",
+    "uan_no",
+    "uan",
+    "pf_no",
+    "esic_no",
+    "esi_ip_number",
+    # banking
+    "bank_account_no",
+    "bank_account",
+    "bank_ifsc",
+)
+
+# Per-collection extras on top of the global list. Empty today; kept so a
+# collection-specific field can be added without weakening the global rule.
+_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {}
+
+
+def _excluded_fields_for(collection: str) -> tuple:
+    """Every field name the raw browser must neither return NOR be interrogated
+    about for ``collection``."""
+    return tuple(
+        sorted(
+            set(_ALWAYS_EXCLUDED_FIELDS)
+            | set(_COLLECTION_FIELD_EXCLUSIONS.get(collection, ()))
+        )
+    )
 
 
 def _coerce_mongo_value(s: str) -> Any:
@@ -3162,6 +3222,42 @@ async def jarvis_read_collection(
     limit = max(1, min(int(limit), 500))
     skip = max(0, int(skip))
 
+    # INPUT VALIDATION FIRST -- before the collection handle is resolved, so a
+    # rejected query is rejected identically whether or not the database happens
+    # to be reachable. (Putting it after the `col is None` early-return meant a
+    # DB-less deploy answered 200 to a query this route must refuse, and made
+    # the guard's own behaviour depend on connection state.)
+    #
+    # A field we refuse to RETURN must also be a field we refuse to be
+    # INTERROGATED about. `total` is a count over the caller's filter, so a
+    # $regex prefix walk on approval_pin_hash or aadhaar_no reads the hidden
+    # bytes back one character at a time -- a projection invertible by a count
+    # is not a projection. Reject the excluded names (and any operator-shaped
+    # name) on both the filter and the sort key.
+    excluded_fields = _excluded_fields_for(collection)
+    for param_name, field_name in (("filter_field", filter_field), ("sort_by", sort_by)):
+        if not field_name:
+            continue
+        root = str(field_name).split(".", 1)[0]
+        if str(field_name).startswith("$") or root in excluded_fields:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{param_name} '{field_name}' is not queryable on {collection}",
+            )
+
+    flt: Dict[str, Any] = {}
+    if filter_field and filter_value is not None:
+        coerced = _coerce_mongo_value(filter_value)
+        # _coerce_mongo_value is a bare json.loads, so a dict/list value lands a
+        # LIVE Mongo operator -- {"$regex": "..."} rebuilds the oracle above, and
+        # $where / $expr / $function are server-side execution. Scalars only.
+        if isinstance(coerced, (dict, list)):
+            raise HTTPException(
+                status_code=400,
+                detail="filter_value must be a scalar; query operators are not allowed",
+            )
+        flt[filter_field] = coerced
+
     col = get_db_collection(collection)
     if col is None:
         return {
@@ -3173,17 +3269,17 @@ async def jarvis_read_collection(
             "as_of": datetime.now().isoformat(),
         }
 
-    flt: Dict[str, Any] = {}
-    if filter_field and filter_value is not None:
-        flt[filter_field] = _coerce_mongo_value(filter_value)
-
     try:
         total = col.count_documents(flt)
     except Exception:
         total = 0
 
+    projection: Dict[str, Any] = {"_id": 0}
+    for excluded in excluded_fields:
+        projection[excluded] = 0
+
     try:
-        cursor = col.find(flt, {"_id": 0})
+        cursor = col.find(flt, projection)
         if sort_by:
             cursor = cursor.sort(sort_by, -1 if sort_desc else 1)
         rows = list(cursor.skip(skip).limit(limit))

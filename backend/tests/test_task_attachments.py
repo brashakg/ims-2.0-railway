@@ -117,6 +117,19 @@ def fs():
     set_file_store(None)
 
 
+# The metadata POST /tasks/upload-file actually stamps. A test double that puts
+# bytes WITHOUT it is not a faithful stand-in for the upload endpoint -- it
+# stands in for "some blob that exists somewhere in the shared bucket", which
+# the router must now refuse (a caller-supplied file_id is AUTHORISED by kind +
+# uploader, not merely checked for existence). Seed through this helper so the
+# fixture mirrors production.
+_UPLOAD_META = {"kind": "task_attachment", "uploaded_by": "u-test", "store_id": "S1"}
+
+
+def _put_uploaded(fs, **kwargs):
+    return fs.put(metadata=dict(_UPLOAD_META), **kwargs)
+
+
 def _future_due() -> str:
     return (datetime.now() + timedelta(hours=2)).isoformat()
 
@@ -127,7 +140,7 @@ def _future_due() -> str:
 
 
 def test_create_task_with_attachment_persists(fs):
-    file_id = fs.put(content=b"hello", filename="note.pdf", mime_type="application/pdf")
+    file_id = _put_uploaded(fs, content=b"hello", filename="note.pdf", mime_type="application/pdf")
     repo = _FakeRepo()
     app = _make_app()
     with patch.object(tasks_mod, "get_task_repository", return_value=repo):
@@ -205,7 +218,7 @@ def test_upload_file_returns_file_id(fs):
     assert body["file_id"]
     assert body["persisted"] is True
     # The bytes are actually retrievable from the store.
-    assert fs.get(body["file_id"]) is not None
+    assert fs.get(body["file_id"], require_kind="task_attachment") is not None
 
 
 def test_upload_file_rejects_bad_mime(fs):
@@ -234,7 +247,7 @@ def test_upload_file_storage_down_returns_503():
 
 
 def test_download_attachment_for_task_owner(fs):
-    file_id = fs.put(content=b"abc123", filename="x.png", mime_type="image/png")
+    file_id = _put_uploaded(fs, content=b"abc123", filename="x.png", mime_type="image/png")
     repo = _FakeRepo(
         [_task(attachment={"file_id": file_id, "filename": "x.png", "mime_type": "image/png"})]
     )
@@ -290,7 +303,7 @@ def test_download_missing_task_404(fs):
 
 
 def test_patch_attach_file_to_existing_task(fs):
-    file_id = fs.put(content=b"later", filename="late.pdf", mime_type="application/pdf")
+    file_id = _put_uploaded(fs, content=b"later", filename="late.pdf", mime_type="application/pdf")
     repo = _FakeRepo([_task()])
     app = _make_app()
     with patch.object(tasks_mod, "get_task_repository", return_value=repo):
