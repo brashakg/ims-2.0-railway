@@ -329,13 +329,28 @@ class TestNoOvertime:
         assert names == [], f"engine leaked overtime symbols: {names}"
 
     def test_engine_does_not_import_payroll(self):
-        # Record/report only: the pure engine must not IMPORT or call the payroll
-        # engine. (The word "payroll" appears in the module docstring explaining
-        # this contract, so we scan import statements specifically, not prose.)
+        # STILL A SOURCE-LEVEL CHECK -- justified.
+        #
+        # "module A must never import module B" is a STATIC architectural
+        # constraint: there is no runtime observable to assert on, because the
+        # violation would be a dependency that simply exists. (Asserting
+        # `"payroll" not in sys.modules` would be wrong -- other routers import
+        # payroll legitimately, so the name is present regardless.) So this
+        # stays an AST scan, but of the WHOLE module rather than of a
+        # line-offset-addressed function body, and via `verified_source`, which
+        # refuses an implausibly short/truncated read instead of vacuously
+        # finding no imports. See tests/source_guard.py.
+        #
+        # (The word "payroll" appears in the module docstring explaining this
+        # contract, so we scan import statements specifically, not prose.)
         import ast
-        import inspect
 
-        tree = ast.parse(inspect.getsource(ae))
+        from source_guard import verified_source
+
+        tree = ast.parse(verified_source(ae))
+        assert any(
+            isinstance(n, (ast.Import, ast.ImportFrom)) for n in ast.walk(tree)
+        ), "the parsed module has no imports at all -- the source read looks truncated"
         imported = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

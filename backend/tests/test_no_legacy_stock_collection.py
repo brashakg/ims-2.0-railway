@@ -83,6 +83,7 @@ def test_no_legacy_stock_collection_reads():
     it back.
     """
     offenders: list = []
+    scanned = 0
     for sub in SCAN_DIRS:
         base = BACKEND_ROOT / sub
         if not base.exists():
@@ -94,9 +95,19 @@ def test_no_legacy_stock_collection_reads():
                 continue
             if py.name in ALLOWED_BASENAMES:
                 continue
+            scanned += 1
             hits = _legacy_calls_in_file(py)
             for line_no, _src in hits:
                 offenders.append(f"{py.relative_to(BACKEND_ROOT)}:{line_no}")
+
+    # Coverage floor: a repo-wide scan that walked ZERO files would pass this
+    # test while proving nothing (a moved directory, a renamed package, a
+    # tightened filter). Assert the sweep actually read a plausible number of
+    # modules before trusting its verdict.
+    assert scanned >= 100, (
+        f"the scan only walked {scanned} file(s) under {SCAN_DIRS} -- the guard "
+        f"is not covering the codebase, so its 'clean' verdict is meaningless"
+    )
 
     assert not offenders, (
         "Legacy `get_collection(\"stock\")` reads found:\n"

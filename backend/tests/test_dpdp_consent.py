@@ -17,7 +17,6 @@ Extended tests cover:
 
 from __future__ import annotations
 
-import inspect
 import os
 import sys
 from typing import List
@@ -68,15 +67,37 @@ def test_consent_text_update_model_bounds():
         ConsentTextUpdate(text="short")  # < 10 chars
 
 
-def test_consent_text_endpoints_are_correctly_gated():
-    """GET is open to any authenticated user (the create form needs it); PUT is
-    ADMIN-gated (editing legal wording is privileged)."""
-    import api.routers.marketing as mk
+def test_consent_text_read_is_open_to_any_authenticated_user(client, staff_headers):
+    """BEHAVIOURAL: the customer-create form needs the wording, so SALES_STAFF
+    must be able to READ it. Replaces a source grep for "get_current_user"
+    (which appears in the module regardless of how this endpoint is wired)."""
+    anon = client.get("/api/v1/marketing/consent-text")
+    assert anon.status_code == 401, anon.text
 
-    get_src = inspect.getsource(mk.get_consent_text)
-    put_src = inspect.getsource(mk.update_consent_text)
-    assert "get_current_user" in get_src
-    assert 'require_roles("ADMIN")' in put_src
+    resp = client.get("/api/v1/marketing/consent-text", headers=staff_headers)
+    assert resp.status_code == 200, resp.text
+    assert "text" in resp.json()
+
+
+def test_consent_text_edit_is_admin_only(client, staff_headers, auth_headers):
+    """BEHAVIOURAL: editing the legal wording is privileged, so a SALES_STAFF
+    PUT must be REFUSED by the server -- proven by calling it, not by grepping
+    for the literal 'require_roles("ADMIN")' in the source."""
+    body = {"text": "We store your details to service your order."}
+
+    assert client.put("/api/v1/marketing/consent-text", json=body).status_code == 401
+
+    denied = client.put(
+        "/api/v1/marketing/consent-text", json=body, headers=staff_headers
+    )
+    assert denied.status_code == 403, denied.text
+
+    # An ADMIN-capable caller must NOT be refused (503/500 from a missing DB is
+    # acceptable here -- the point is that the ROLE gate lets them through).
+    allowed = client.put(
+        "/api/v1/marketing/consent-text", json=body, headers=auth_headers
+    )
+    assert allowed.status_code != 403, allowed.text
 
 
 def test_default_consent_text_is_sensible():
@@ -329,15 +350,25 @@ def test_retention_windows_present_and_positive():
 
 
 # ---------------------------------------------------------------------------
-# Pending-purge endpoint -- ADMIN gate check (source inspection)
+# Pending-purge endpoint -- ADMIN gate, asserted by CALLING it
 # ---------------------------------------------------------------------------
 
-def test_pending_purge_endpoint_is_admin_gated():
-    """list_pending_purge must use require_roles('ADMIN'), not just get_current_user."""
-    import api.routers.customers as cust_mod
+def test_pending_purge_endpoint_is_admin_gated(client, staff_headers, auth_headers):
+    """BEHAVIOURAL: the pending-purge list exposes customers whose consent has
+    lapsed, so it is ADMIN-only. Call it and assert the server refuses
+    SALES_STAFF -- a source grep could not tell whether the decorator was ever
+    actually applied to THIS route."""
+    assert client.get("/api/v1/customers/consent/pending-purge").status_code == 401
 
-    src = inspect.getsource(cust_mod.list_pending_purge)
-    assert 'require_roles("ADMIN")' in src
+    denied = client.get(
+        "/api/v1/customers/consent/pending-purge", headers=staff_headers
+    )
+    assert denied.status_code == 403, denied.text
+
+    allowed = client.get(
+        "/api/v1/customers/consent/pending-purge", headers=auth_headers
+    )
+    assert allowed.status_code != 403, allowed.text
 
 
 def test_pending_purge_returns_retention_windows():

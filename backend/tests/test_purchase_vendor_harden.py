@@ -418,21 +418,64 @@ class TestCancelPOLifecycle:
         # 404 from DB or 503 (no DB) is acceptable; a 200 would be a bug.
         assert r.status_code not in (200, 201), r.text
 
-    def test_cancel_blocked_statuses_in_router_logic(self):
-        """Pure check: the set of blocked statuses includes PARTIALLY_RECEIVED."""
-        # Import the router source to verify the guard covers all blocked states.
-        import inspect
-        import api.routers.vendors as v
+    @pytest.mark.parametrize(
+        "status", ["PARTIALLY_RECEIVED", "PARTIAL", "RECEIVED", "CANCELLED"]
+    )
+    def test_cancel_is_refused_for_received_states(self, monkeypatch, status):
+        """BEHAVIOURAL: actually POST the cancel and assert the server refuses
+        it AND leaves the PO untouched.
 
-        src = inspect.getsource(v.cancel_po)
-        assert "PARTIALLY_RECEIVED" in src, (
-            "cancel_po must block PARTIALLY_RECEIVED status to prevent orphaning "
-            "already-received stock"
+        Replaces a grep of cancel_po's source for the strings
+        "PARTIALLY_RECEIVED" and "PARTIAL" -- which would have passed on a
+        function that merely MENTIONED those statuses (e.g. in the comment that
+        explains the rule) while cancelling anyway.
+        """
+        import api.routers.vendors as v
+        from database.repositories.vendor_repository import PurchaseOrderRepository
+        from strict_fakes import StrictCollection
+
+        coll = StrictCollection(
+            "purchase_orders",
+            [{"po_id": "po-1", "delivery_store_id": "S1", "status": status}],
         )
-        # The legacy alias 'PARTIAL' must also be blocked.
-        assert "PARTIAL" in src, (
-            "cancel_po must also block the legacy 'PARTIAL' status alias"
+        monkeypatch.setattr(
+            v, "get_purchase_order_repository", lambda: PurchaseOrderRepository(coll)
         )
+
+        r = _cli.post(
+            "/api/v1/vendors/purchase-orders/po-1/cancel",
+            params={"reason": "changed my mind"},
+        )
+        assert r.status_code == 400, r.text
+        assert "cannot be cancelled" in r.text.lower()
+        assert coll.docs[0]["status"] == status, (
+            "a refused cancel must not mutate the PO"
+        )
+        assert "cancelled_at" not in coll.docs[0]
+
+    @pytest.mark.parametrize("status", ["DRAFT", "SENT", "APPROVED"])
+    def test_cancel_still_works_for_uncommitted_states(self, monkeypatch, status):
+        """The block must be status-specific, not a blanket refusal -- otherwise
+        the test above would pass on an endpoint that never cancels anything."""
+        import api.routers.vendors as v
+        from database.repositories.vendor_repository import PurchaseOrderRepository
+        from strict_fakes import StrictCollection
+
+        coll = StrictCollection(
+            "purchase_orders",
+            [{"po_id": "po-2", "delivery_store_id": "S1", "status": status}],
+        )
+        monkeypatch.setattr(
+            v, "get_purchase_order_repository", lambda: PurchaseOrderRepository(coll)
+        )
+
+        r = _cli.post(
+            "/api/v1/vendors/purchase-orders/po-2/cancel",
+            params={"reason": "vendor out of stock"},
+        )
+        assert r.status_code == 200, r.text
+        assert coll.docs[0]["status"] == "CANCELLED"
+        assert coll.docs[0]["cancellation_reason"] == "vendor out of stock"
 
 
 # ===========================================================================
@@ -552,15 +595,66 @@ class TestDuplicateVendorBill:
                 total_amount=0.0,
             )
 
-    def test_duplicate_check_logic_present_in_router(self):
-        """Code-level regression: the router must contain a duplicate check."""
-        import inspect
+    def _bill_env(self, monkeypatch):
+        """Wire the vendors router to a strict in-memory AP database."""
         import api.routers.vendors as v
+        from strict_fakes import StrictDB
 
-        src = inspect.getsource(v.create_vendor_bill)
-        assert "bill_number" in src and "409" in src, (
-            "create_vendor_bill must include a 409 guard for duplicate bill_number"
+        db = StrictDB()
+        db.seed(
+            "vendors",
+            [{"vendor_id": "v-1", "legal_name": "Acme", "credit_days": 30}],
         )
+        monkeypatch.setattr(v, "_get_db", lambda: db)
+
+        class _VendorRepo:
+            def find_by_id(self, vendor_id):
+                return db.get_collection("vendors").find_one({"vendor_id": vendor_id})
+
+        monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
+        return db
+
+    def _payload(self, bill_number="INV-77"):
+        return {
+            "bill_number": bill_number,
+            "bill_date": "2026-01-15",
+            "taxable_amount": 1000.0,
+            "tax_amount": 180.0,
+            "total_amount": 1180.0,
+        }
+
+    def test_duplicate_bill_number_is_rejected_with_409(self, monkeypatch):
+        """BEHAVIOURAL: recording the same vendor invoice twice must 409 and
+        must NOT double the payable.
+
+        Replaces a source grep for the substrings "bill_number" and "409",
+        both of which appear in the function for unrelated reasons -- that
+        assertion could not fail even if the guard were deleted.
+        """
+        db = self._bill_env(monkeypatch)
+
+        first = _cli.post("/api/v1/vendors/v-1/bills", json=self._payload())
+        assert first.status_code == 201, first.text
+
+        second = _cli.post("/api/v1/vendors/v-1/bills", json=self._payload())
+        assert second.status_code == 409, second.text
+        assert "already recorded" in second.text.lower()
+
+        rows = db.get_collection("vendor_bills").docs
+        assert len(rows) == 1, f"the duplicate must not be stored: {rows!r}"
+        assert sum(r["outstanding"] for r in rows) == 1180.0
+
+    def test_same_bill_number_for_a_different_vendor_is_allowed(self, monkeypatch):
+        """The guard is per-(vendor, bill_number) -- two vendors may legitimately
+        both issue an invoice numbered INV-77."""
+        db = self._bill_env(monkeypatch)
+        db.get_collection("vendors").insert_one(
+            {"vendor_id": "v-2", "legal_name": "Beta", "credit_days": 15}
+        )
+
+        assert _cli.post("/api/v1/vendors/v-1/bills", json=self._payload()).status_code == 201
+        assert _cli.post("/api/v1/vendors/v-2/bills", json=self._payload()).status_code == 201
+        assert len(db.get_collection("vendor_bills").docs) == 2
 
 
 # ===========================================================================
