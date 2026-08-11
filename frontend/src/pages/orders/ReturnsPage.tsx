@@ -61,6 +61,42 @@ function billedUnitGross(item: any): number {
   return Number(item?.unitPrice ?? item?.unit_price ?? 0);
 }
 
+/**
+ * The replacement unit price to SEND, straight from the catalog and UNROUNDED.
+ *
+ * Math.round() here was a real refusal: the server treats the catalog price as
+ * an exact ceiling, so a catalog 4241.50 rounded to 4242 came back
+ * "above the catalog price Rs 4241.50" for a cashier who picked from search and
+ * typed nothing. Display may round; the wire may not.
+ */
+export function replacementUnitPrice(p: any): number {
+  const raw = p?.offer_price ?? p?.price ?? p?.mrp ?? 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Build a replacement line from a CATALOG product, or null when the product
+ * carries no id.
+ *
+ * A line without a product_id can never be priced server-side (the exchange
+ * difference feeds the cash drawer, so a typed price is a drawer input), which
+ * is why the old free-text "Manual" button was a dead control: every payload it
+ * produced was refused pre-claim. Returning null keeps that impossible line
+ * unconstructable rather than letting the UI offer it.
+ */
+export function buildReplacementLine(p: any): ReplacementItem | null {
+  const productId = p?.product_id || p?.id || p?._id;
+  if (!productId) return null;
+  return {
+    productId,
+    name: p?.name || p?.model || p?.product_name || 'Item',
+    sku: p?.sku || '',
+    quantity: 1,
+    unitPrice: replacementUnitPrice(p),
+  };
+}
+
 interface ReplacementItem {
   productId?: string;
   name: string;
@@ -379,32 +415,20 @@ export default function ReturnsPage() {
   };
 
   const addReplacementFromProduct = (p: any) => {
-    const pid = p.product_id || p.id || p._id;
+    const line = buildReplacementLine(p);
+    if (!line) return;   // uncatalogued -> unpriceable server-side; never added
     // DEDUPE. Two clicks on the same frame used to append two lines, and the
     // per-line quantity cap did not see the total, so the exchange collected
     // double and the drawer moved with it. Bump the quantity instead.
     setReplacementItems(prev => {
-      const at = prev.findIndex(r => r.productId && r.productId === pid);
+      const at = prev.findIndex(r => r.productId && r.productId === line.productId);
       if (at >= 0) {
         return prev.map((r, i) => (i === at ? { ...r, quantity: r.quantity + 1 } : r));
       }
-      return [
-      ...prev,
-      {
-        productId: pid,
-        name: p.name || p.model || p.product_name || 'Item',
-        sku: p.sku || '',
-        quantity: 1,
-        unitPrice: Math.round(p.offer_price || p.price || p.mrp || 0),
-      },
-      ];
+      return [...prev, line];
     });
     setProductResults([]);
     setProductQuery('');
-  };
-
-  const addBlankReplacement = () => {
-    setReplacementItems(prev => [...prev, { name: '', sku: '', quantity: 1, unitPrice: 0 }]);
   };
 
   const updateReplacement = (index: number, updates: Partial<ReplacementItem>) => {
@@ -767,10 +791,6 @@ export default function ReturnsPage() {
                 <button onClick={searchProducts} disabled={productSearching}
                   className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50">
                   {productSearching ? 'Searching...' : 'Search'}
-                </button>
-                <button onClick={addBlankReplacement}
-                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm flex items-center gap-1">
-                  <Plus className="w-4 h-4" /> Manual
                 </button>
               </div>
 

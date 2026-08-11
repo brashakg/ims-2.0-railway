@@ -2446,37 +2446,6 @@ async def create_return(
             )
         claimed.append(rl)
 
-    # BUG-099: reverse loyalty for this return -- claw back points earned on the
-    # original order + restore points redeemed on it. Fail-soft (never blocks the
-    # return); a genuine failure flags the return doc for reconciliation. Walk-in /
-    # no customer -> skip (walk-ins never earn loyalty).
-    loyalty_reversal_failed = False
-    _cust = customer_id
-    if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
-        try:
-            from .loyalty import reverse_for_return as _reverse_loyalty
-
-            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
-            if _lr.get("ok"):
-                logger.info(
-                    "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
-                    return_id,
-                    _lr.get("earned_clawed", 0),
-                    _lr.get("redeemed_restored", 0),
-                )
-            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
-                loyalty_reversal_failed = True
-                logger.error(
-                    "[RETURNS] loyalty reversal FAILED for %s: %s",
-                    return_id,
-                    _lr.get("reason"),
-                )
-        except Exception as exc:  # noqa: BLE001
-            loyalty_reversal_failed = True
-            logger.error(
-                "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
-            )
-
     def _issue_credit_or_fail(
         amount: float,
         *,
@@ -2573,12 +2542,19 @@ async def create_return(
     elif body.return_type == "CREDIT_NOTE":
         credit_amount = net_amount
         refund_method = "STORE_CREDIT"
-        credit_entry = _issue_credit_or_fail(
-            net_amount,
-            reason=f"Credit note for return {return_id}",
-            gross=gross_refund,
-            fee=restocking_fee,
-        )
+        # SAME GUARD AS THE RETURN BRANCH ABOVE. A restocking fee equal to the
+        # gross is legitimate ("take the goods back, issue nothing") and the FE
+        # permits it -- its max IS the gross. Calling the issuer with 0 made
+        # _issue_store_credit return None (it refuses amount <= 0), which the
+        # fail-loud path then reported as a ledger outage, sending the cashier
+        # into an infinite retry against a perfectly healthy ledger.
+        if net_amount > 0:
+            credit_entry = _issue_credit_or_fail(
+                net_amount,
+                reason=f"Credit note for return {return_id}",
+                gross=gross_refund,
+                fee=restocking_fee,
+            )
 
     else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
         refund_method = body.refund_method or _order_payment_method(order)
@@ -2591,6 +2567,46 @@ async def create_return(
                 settlement["difference"],
                 reason=f"Exchange refund for return {return_id}",
             )
+
+    # BUG-099 loyalty reversal. ORDER MATTERS: this runs AFTER the credit
+    # issuance above, which is the only step here that can HARD-FAIL. The
+    # reversal is fail-soft and is NEVER undone, and its idempotency is keyed on
+    # return_id -- and every retry mints a fresh return_id. So when it ran first,
+    # a credit failure released the qty claim but left an ORPHANED reversal, and
+    # each retry clawed back real points again with no return doc to reconcile
+    # against. General rule: when one step can hard-fail and another cannot be
+    # undone, do the hard-failing one FIRST.
+    #
+    # Claw back points earned on the original order + restore points redeemed on
+    # it. A genuine failure flags the return doc for reconciliation. Walk-in /
+    # no customer -> skip (walk-ins never earn loyalty).
+    loyalty_reversal_failed = False
+    _cust = customer_id
+    if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
+        try:
+            from .loyalty import reverse_for_return as _reverse_loyalty
+
+            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
+            if _lr.get("ok"):
+                logger.info(
+                    "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
+                    return_id,
+                    _lr.get("earned_clawed", 0),
+                    _lr.get("redeemed_restored", 0),
+                )
+            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
+                loyalty_reversal_failed = True
+                logger.error(
+                    "[RETURNS] loyalty reversal FAILED for %s: %s",
+                    return_id,
+                    _lr.get("reason"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            loyalty_reversal_failed = True
+            logger.error(
+                "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
+            )
+
 
     # 3. Restock resellable (GOOD) units back into serialized stock (fail-soft).
     #    (resolved_order_id already computed during the quantity-integrity guard.)

@@ -1473,3 +1473,132 @@ def test_price_floor_fires_when_the_direction_guard_would_not(ctx):
     assert r.status_code == 400, r.text
     assert "below the catalog price" in r.text.lower()
     assert c["returns"].docs == []
+
+
+# ===========================================================================
+# ROUND-7. Same sibling/other-side question run over round 6's OWN diff:
+#   - _issue_credit_or_fail gained a guard on the RETURN branch and none on its
+#     CREDIT_NOTE sibling ten lines below        -> MF1
+#   - the new hard-fail path releases the qty claim, but the loyalty reversal
+#     that ran BEFORE it is never undone         -> MF4
+#   - the FE dedupe fixed one replacement-line producer; its sibling
+#     (addBlankReplacement) builds a line the server must refuse -> MF2
+#   - the price CEILING is exact; the client sends a ROUNDED price -> MF3
+# ===========================================================================
+
+
+@pytest.mark.parametrize("fee", [0.00, 2950.00, 5899.99, 5900.00])
+def test_credit_note_completes_at_every_restocking_fee(ctx, fee):
+    """MF1. CREDIT_NOTE called _issue_credit_or_fail UNCONDITIONALLY, and
+    _issue_store_credit returns None when the amount is <= 0. A fee equal to the
+    gross (permitted by the FE, whose max IS the gross) therefore 503'd with
+    'the credit ledger could not be written - retry shortly' against a HEALTHY
+    ledger: 'take the goods back, issue nothing' became un-recordable and the
+    message sent the cashier into an infinite retry."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_payload(return_type="CREDIT_NOTE", restocking_fee=fee),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), (fee, r.status_code, r.text)
+    expected_net = round(_BILLED_GROSS - fee, 2)
+    assert r.json()["net_refund"] == expected_net
+    issued = [d["amount"] for d in c["ledger"].docs if d.get("type") == "ISSUED"]
+    if expected_net > 0:
+        assert issued == [expected_net], (fee, c["ledger"].docs)
+    else:
+        assert issued == [], (fee, c["ledger"].docs)   # nothing to issue
+    # The goods came back in EVERY case -- the claim must stand, not be released.
+    assert _returned_qty(c["order"]) == 1.0, fee
+
+
+@pytest.mark.parametrize("fee", [0.00, 5900.00])
+def test_quote_and_post_agree_on_a_full_fee_credit_note(ctx, fee):
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}])
+    body = _payload(return_type="CREDIT_NOTE", restocking_fee=fee)
+    q = c["client"].post("/api/v1/returns/quote", json=body, headers=_HDR)
+    assert q.status_code == 200, q.text
+    r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
+    assert r.status_code in (200, 201), r.text
+    assert q.json()["net_refund"] == r.json()["net_refund"]
+
+
+# --- MF4: the hard-fail path must not orphan the loyalty reversal ---
+
+
+@pytest.mark.parametrize("kind", ["CREDIT_NOTE", "EXCHANGE_REFUND"])
+def test_credit_failure_leaves_no_orphaned_loyalty_reversal(ctx, kind):
+    """The loyalty reversal is keyed on return_id and each retry mints a NEW
+    one, so an un-undone reversal re-claws real value on every attempt with no
+    return doc to reconcile against. The hard-failing step must run FIRST."""
+    if kind == "EXCHANGE_REFUND":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}],
+                catalog_price=1000.00, ledger_down=True)
+        body = _exchange_refund_payload()
+    else:
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], ledger_down=True)
+        body = _credit_note_payload()
+    r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
+    assert r.status_code >= 400, (kind, r.text)
+    assert c["returns"].docs == [], kind
+    assert _returned_qty(c["order"]) == 0.0, kind
+    assert c["loyalty"] == [], (kind, c["loyalty"])
+
+
+@pytest.mark.parametrize("kind", ["CREDIT_NOTE", "EXCHANGE_REFUND"])
+def test_repeated_credit_failures_never_accumulate_loyalty_reversals(ctx, kind):
+    if kind == "EXCHANGE_REFUND":
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}],
+                catalog_price=1000.00, ledger_down=True)
+        body = _exchange_refund_payload()
+    else:
+        c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], ledger_down=True)
+        body = _credit_note_payload()
+    for _ in range(2):
+        assert c["client"].post(
+            "/api/v1/returns", json=body, headers=_HDR
+        ).status_code >= 400
+    assert c["loyalty"] == [], (kind, c["loyalty"])
+    assert len({call[0] for call in c["loyalty"]}) == 0
+
+
+def test_successful_return_still_reverses_loyalty(ctx):
+    """The reorder must not silently drop the reversal on the happy path."""
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_payload(refund_tenders=[{"method": "CASH", "amount": _BILLED_GROSS}]),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    assert len(c["loyalty"]) == 1, c["loyalty"]
+
+
+# --- MF3: the exact catalog price must be accepted (the FE must send it) ---
+
+
+def test_exact_catalog_price_with_paise_is_accepted(ctx):
+    """catalog 4241.50. The FE used to Math.round the picked price to 4242 and
+    the server's exact ceiling refused it -- the cashier picked from search,
+    typed nothing, and was told the price was above catalog."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], catalog_price=4241.50)
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_qty_payload(2, collect_method="CASH", client_price=4241.50),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["settlement"]["replacement_total"] == 8483.00
+
+
+def test_a_rounded_up_price_is_still_refused(ctx):
+    """The server stays strict; it is the CLIENT that must stop rounding."""
+    c = ctx([{"method": "CARD", "amount": _BILLED_GROSS}], catalog_price=4241.50)
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_qty_payload(2, collect_method="CASH", client_price=4242.00),
+        headers=_HDR,
+    )
+    assert r.status_code == 400, r.text
+    assert "above the catalog price" in r.text.lower()
