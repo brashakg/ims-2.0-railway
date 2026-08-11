@@ -1233,6 +1233,31 @@ _NON_SERIALIZED_ITEM_TYPES = {
 _LENS_RESERVED_ITEM_TYPES = {"LENS"}
 
 
+def _takes_serialized_stock(line: dict) -> bool:
+    """Does this order line consume a SERIALIZED stock_units row?
+
+    THE single predicate for that question. It previously existed three times,
+    written three slightly different ways, and they drifted: the availability
+    assert and the line-release both excluded LENS lines while _mark_units_sold
+    did NOT. POSLayout maps OPTICAL_LENS to item_type 'LENS' and sends the REAL
+    catalog product_id, so a stock-lens line had its unit flipped SOLD on the
+    way in, was never availability-checked, and was never released when the line
+    was removed -- stranded permanently once the order reached DELIVERED.
+
+    Reserved-by-the-lens-hook lines and non-stocked service lines are excluded;
+    so are virtual POS ids that have no stock_units row at all.
+    """
+    if not isinstance(line, dict):
+        return False
+    item_type = (line.get("item_type") or "").upper()
+    if item_type in _NON_SERIALIZED_ITEM_TYPES or item_type in _LENS_RESERVED_ITEM_TYPES:
+        return False
+    pid = line.get("product_id") or ""
+    if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
+        return False
+    return True
+
+
 def _assert_serialized_stock_available(
     items_data: List[dict], store_id: Optional[str]
 ) -> None:
@@ -1243,13 +1268,19 @@ def _assert_serialized_stock_available(
     Only enforced for a product that IS serialized-tracked at this store
     (count(any status) > 0); a product with no stock_units row (a service, a
     virtual item, or simply not unit-tracked) is left UNAFFECTED so a legit sale is
-    never false-blocked. Lens lines are gated by the lens reserve; a line carrying
-    an explicit stock_id flows through the mark_sold path.
+    never false-blocked. Lens lines are gated by the lens reserve.
+
+    F7: a line carrying an EXPLICIT stock_id (barcode-scan flow) used to be
+    skipped entirely here and then handed to an UNGUARDED mark_sold -- so
+    scanning a unit that was already SOLD / TRANSFERRED / QUARANTINED / DAMAGED
+    silently "succeeded" and overwrote that unit's sale lineage. Those lines are
+    now validated HERE, pre-persist, so the POS gets a real, readable 409 instead
+    of a silent corruption.
 
     NOTE: this is a pre-persist availability ASSERT -- a strict improvement over
     the silent oversell, but check-then-act, so two highly-concurrent orders for
-    the last unit can still both pass. A fully-atomic reserve (find_one_and_update
-    with a status=AVAILABLE filter, mirroring the lens hook) is the follow-up.
+    the last unit can still both pass. The atomic guards (claim_one_available /
+    the now-guarded mark_sold) are what actually make the WRITE safe.
     """
     if not store_id or not items_data:
         return
@@ -1262,18 +1293,19 @@ def _assert_serialized_stock_available(
         return  # no stock backend -> fail-soft (pre-existing behaviour)
 
     need: Dict[str, int] = {}
+    explicit_units: List[tuple] = []
     for line in items_data:
-        if not isinstance(line, dict):
-            continue
-        it = (line.get("item_type") or "").upper()
-        if it in _NON_SERIALIZED_ITEM_TYPES or it in _LENS_RESERVED_ITEM_TYPES:
+        if not _takes_serialized_stock(line):
             continue
         pid = line.get("product_id") or ""
-        if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
-            continue
-        if line.get("stock_id"):
-            continue  # explicit unit -> handled by mark_sold
+        sid = line.get("stock_id")
+        if sid:
+            explicit_units.append((str(sid), pid, line.get("product_name") or pid))
+            continue  # explicit unit -> validated by _assert_explicit_unit_sellable
         need[pid] = need.get(pid, 0) + int(line.get("quantity") or 1)
+
+    for sid, pid, label in explicit_units:
+        _assert_explicit_unit_sellable(stock_repo, sid, pid, label, store_id)
 
     for pid, qty in need.items():
         try:
@@ -1287,13 +1319,190 @@ def _assert_serialized_stock_available(
         except Exception:  # noqa: BLE001
             continue  # availability lookup failed -> fail-soft
         if avail < qty:
+            # F2: when the shortfall is caused by the EXPIRY FLOOR, say so --
+            # "0 available" on a shelf with 6 visible boxes is not an actionable
+            # message. Fail-soft: an unsupported/old repo just omits the hint.
+            expired = 0
+            try:
+                counter = getattr(stock_repo, "count_expired", None)
+                if callable(counter):
+                    expired = int(counter(pid, store_id) or 0)
+            except Exception:  # noqa: BLE001
+                expired = 0
+            hint = ""
+            if expired > 0:
+                logger.warning(
+                    "[STOCK] %s expired unit(s) held back from sale for %s @ %s",
+                    expired,
+                    pid,
+                    store_id,
+                )
+                hint = (
+                    f" {expired} unit(s) are PAST THEIR EXPIRY DATE and cannot "
+                    f"be sold -- quarantine them."
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"Insufficient stock for '{pid}': {avail} available at this "
-                    f"store, {qty} requested. Cannot oversell."
+                    f"store, {qty} requested. Cannot oversell.{hint}"
                 ),
             )
+
+
+def _assert_explicit_unit_sellable(
+    stock_repo,
+    stock_id: str,
+    product_id: str,
+    label: str,
+    store_id: str,
+) -> None:
+    """F7: pre-persist gate for the barcode-scan path -- the SPECIFIC unit the
+    POS named must actually be sellable HERE and NOW, or the sale is refused
+    with a message a shop-floor user can act on.
+
+    Fail-soft on infrastructure (unit not found / lookup error) so a stock-data
+    gap can never block revenue; fail-LOUD on a real conflict (already sold,
+    transferred out, quarantined/damaged, wrong store, expired). The atomic
+    guard inside StockRepository.mark_sold is the authoritative write-side
+    check -- this exists so the user sees WHY.
+    """
+    try:
+        unit = stock_repo.find_by_id(stock_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] explicit unit %s lookup failed: %s", stock_id, exc)
+        return
+    if not unit:
+        # Unknown id -> the FIFO path can still serve this line; don't block.
+        logger.warning(
+            "[STOCK] explicit stock_id %s not found (product %s) -- not blocking",
+            stock_id,
+            product_id,
+        )
+        return
+
+    status = str(unit.get("status") or "").upper()
+    if status != "AVAILABLE":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{label}' (unit {stock_id}) cannot be sold: this unit is "
+                f"{status or 'in an unknown state'}, not available. Scan a "
+                f"different unit."
+            ),
+        )
+
+    unit_store = unit.get("store_id")
+    if unit_store and store_id and unit_store != store_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{label}' (unit {stock_id}) belongs to store {unit_store}, "
+                f"not this store. It cannot be sold here."
+            ),
+        )
+
+    # A product-id mismatch is LOGGED, never blocked. product_id canonicalisation
+    # (the products vs catalog_products convergence) means an older stock_units
+    # row can legitimately carry the pre-canonical id for the same physical item;
+    # 409-ing on that would false-block real scans at the counter. The unit's own
+    # status/store/expiry -- checked above -- are the safety-relevant facts.
+    unit_pid = unit.get("product_id")
+    if unit_pid and product_id and unit_pid != product_id:
+        logger.warning(
+            "[STOCK] scanned unit %s is product %s but the line says %s "
+            "(id canonicalisation drift?) -- selling the scanned unit",
+            stock_id,
+            unit_pid,
+            product_id,
+        )
+
+    # F2 (patient safety): an in-date check for the scan path too -- FEFO only
+    # governs auto-allocation, so without this a staffer could still scan an
+    # expired contact-lens box straight through the till. Only DATED units are
+    # affected; a frame has no expiry_date and is never touched.
+    #
+    # ONLY a canonical ISO date may block the sale (panel must-fix 8). A raw
+    # string compare is lexicographic, not chronological: "15-08-2027" is a
+    # VALID FUTURE date that sorts below today and would have blocked real
+    # in-date stock, while "31/12/2025" is genuinely expired and would have
+    # sailed through. Anything we cannot parse with certainty is SOLD with a
+    # warning -- the fail-soft direction must be "never false-block the
+    # counter", consistently. The durable fix is normalising at the GRN door.
+    expiry = unit.get("expiry_date")
+    if expiry not in (None, ""):
+        try:
+            from database.repositories.product_repository import StockRepository
+            from ..utils.ist import ist_today
+
+            if not StockRepository.is_iso_expiry(expiry):
+                logger.warning(
+                    "[STOCK] unit %s has an UNPARSEABLE expiry_date %r -- selling "
+                    "it (fail-open); normalise this value at the GRN door",
+                    stock_id,
+                    expiry,
+                )
+            elif expiry[:10] < ist_today().isoformat():
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{label}' (unit {stock_id}) EXPIRED on {expiry[:10]} "
+                        f"and cannot be sold. Quarantine this unit."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- clock/parse issue: never block
+            logger.warning("[STOCK] expiry check skipped for %s: %s", stock_id, exc)
+
+
+def _lens_reservation_key(line: dict, fallback_position: int):
+    """The lens-reservation key component for one order line.
+
+    The lens hook builds its idempotency / release id as
+    "{order_id}#{line_index}", so whatever we pass as `line_index` IS the key.
+
+    It must be UNIQUE-FOR-EVER within the order and STABLE across edits:
+      * POSITION is not stable -- removing a line shifts every later line, so a
+        cancel would release someone else's cell and leak this line's;
+      * a monotonic max+1 counter is not unique-for-ever either -- deleting the
+        HIGHEST line makes the next append REUSE that number, and the hook then
+        short-circuits on the deleted line's stale audit row, so the new line
+        reserves NOTHING (no 409 even at zero stock). That was panel must-fix 7.
+
+    `item_id` is a uuid4 minted once when the line is created and never reused,
+    so it is the only correct key. Legacy lines written before this change have
+    no usable item_id and fall back to their POSITION -- byte-identical to the
+    pre-change behaviour for those orders.
+    """
+    try:
+        item_id = (line or {}).get("item_id")
+    except AttributeError:
+        return fallback_position
+    if isinstance(item_id, str) and item_id.strip():
+        return item_id.strip()
+    return fallback_position
+
+
+def _legacy_lens_reservation_key(line: dict, fallback_position: int):
+    """The key a line's reservation MAY have been written under before the
+    item_id switch: its persisted `line_index`, else its position.
+
+    Release paths try this as well as the item_id key, so a cell reserved by the
+    older code is still released instead of leaking forever. Returns None when
+    it would duplicate the primary key (nothing extra to try).
+    """
+    raw = (line or {}).get("line_index") if isinstance(line, dict) else None
+    if isinstance(raw, bool) or raw is None:
+        legacy = fallback_position
+    else:
+        try:
+            legacy = int(raw)
+        except (TypeError, ValueError):
+            legacy = fallback_position
+    if legacy == _lens_reservation_key(line, fallback_position):
+        return None
+    return legacy
 
 
 def _mark_units_sold(
@@ -1334,14 +1543,13 @@ def _mark_units_sold(
     used: set = set()
 
     for line in items_data or []:
-        if not isinstance(line, dict):
-            continue
-        item_type = (line.get("item_type") or "").upper()
-        if item_type in _NON_SERIALIZED_ITEM_TYPES:
+        # ONE shared predicate with the availability assert and the line
+        # release. This used to omit the LENS exclusion the other two applied,
+        # so a stock-lens line was marked SOLD here but never checked and never
+        # released -- the drift the shared predicate exists to prevent.
+        if not _takes_serialized_stock(line):
             continue
         pid = line.get("product_id") or ""
-        if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
-            continue
         qty = int(line.get("quantity") or 1)
         if qty < 1:
             continue
@@ -1362,6 +1570,25 @@ def _mark_units_sold(
                     ok = False
                 if ok:
                     sid = explicit_sid
+                else:
+                    # F7: mark_sold is now an ATOMIC guarded write -- False means
+                    # the unit was NOT AVAILABLE (already sold / transferred /
+                    # quarantined / expired) and NOTHING was written, so a prior
+                    # sale's lineage is intact. The pre-persist gate
+                    # (_assert_explicit_unit_sellable) normally catches this, so
+                    # reaching here means we lost a real race. We deliberately do
+                    # NOT silently substitute a different unit: the scanned
+                    # barcode IS the physical item handed over, and swapping in
+                    # another serial would corrupt warranty-by-serial lineage.
+                    logger.error(
+                        "[STOCK] SCANNED UNIT NOT SELLABLE: stock_id=%s product=%s "
+                        "store=%s order=%s -- unit left untouched, this line did "
+                        "NOT decrement stock. Reconcile manually.",
+                        explicit_sid,
+                        pid,
+                        store_id,
+                        order_id,
+                    )
                 # Only consume the explicit stock_id once per line; the
                 # remaining qty falls through to FIFO.
                 explicit_sid = None
@@ -2245,15 +2472,26 @@ async def create_order(
 
         try:
             for idx, oi in enumerate(items_data):
+                # STABLE RESERVATION KEY: the lens hook's idempotency /
+                # release key is "{order_id}#{line_index}", so whatever we pass
+                # here IS the key. We pass the line's IMMUTABLE item_id (uuid4,
+                # minted once, never reused) rather than its position: positions
+                # shift when a DRAFT line is removed, and a max+1 counter gets
+                # REUSED when the highest line is removed -- either way a later
+                # reserve/release hits the wrong cell. `line_index` is still
+                # persisted purely so orders written by the older code can still
+                # be released under their original key.
+                oi["line_index"] = idx
+                res_key = _lens_reservation_key(oi, idx)
                 rec = await reserve_for_order_item(
                     order_item=oi,
                     order_id=precomputed_order_id,
-                    line_index=idx,
+                    line_index=res_key,
                     store_id=store_id or "",
                     user=current_user,
                 )
                 if rec is not None:
-                    lens_reservations.append({"line_index": idx, **rec})
+                    lens_reservations.append({"line_index": res_key, **rec})
                     if rec.get("status") == "failed":
                         lens_reserve_failed = True
         except HTTPException as exc:
@@ -2267,7 +2505,7 @@ async def create_order(
                             await release_for_cancel(
                                 order_item=prev_oi,
                                 order_id=precomputed_order_id,
-                                line_index=prev_idx,
+                                line_index=_lens_reservation_key(prev_oi, prev_idx),
                                 store_id=store_id or "",
                                 user=current_user,
                             )
@@ -2464,7 +2702,7 @@ async def create_order(
                         await release_for_cancel(
                             order_item=oi,
                             order_id=precomputed_order_id,
-                            line_index=idx,
+                            line_index=_lens_reservation_key(oi, idx),
                             store_id=store_id or "",
                             user=current_user,
                         )
@@ -3385,12 +3623,31 @@ async def add_order_item(
             "item_total": item_subtotal,
             "prescription_id": item.prescription_id,
             "lens_options": item.lens_options,
+            # F15: the stock/lens identity of the line. WITHOUT these the
+            # appended line could not be reserved (a LENS line had no cell
+            # coordinates to reserve) nor released on cancel, and an explicitly
+            # scanned unit lost its lineage. Deliberately does NOT add
+            # `category` -- that feeds _compute_per_category_gst and would
+            # change this path's tax resolution.
+            "lens_details": item.lens_details,
+            "stock_id": getattr(item, "stock_id", None),
+            "lens_line_id": getattr(item, "lens_line_id", None),
+            "sph": getattr(item, "sph", None),
+            "cyl": getattr(item, "cyl", None),
+            "add": getattr(item, "add", None),
+            "axis": getattr(item, "axis", None),
         }
 
         # Add item and recalculate totals — preserves per-category GST
         # (Phase 6.15 fix) instead of stamping the order's old flat
         # tax_rate. Mirrors the frontend's getGrandTotal exactly.
-        items = order.get("items", []) + [item_data]
+        _existing_items = order.get("items", [])
+        # The lens-reservation key for the appended line is its OWN item_id
+        # (uuid4, above) -- never a positional or max+1 index, both of which can
+        # be reused by a later append after a delete. `line_index` is still
+        # stamped for continuity with orders written by the older code.
+        item_data["line_index"] = len(_existing_items)
+        items = _existing_items + [item_data]
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
         gst = _compute_per_category_gst(items, cart_discount_percent)
         grand_total = round(gst["taxable"] + gst["tax"], 2)
@@ -3421,19 +3678,100 @@ async def add_order_item(
             ),
         )
 
-        repo.update(
-            order_id,
-            {
-                "items": items,
-                "subtotal": gst["subtotal"],
-                "cart_discount_amount": gst["cart_discount_amount"],
-                "tax_rate": gst["dominant_rate"],
-                "tax_amount": gst["tax"],
-                "total_discount": gst["total_discount"],
-                "grand_total": grand_total,
-                "balance_due": grand_total - order.get("amount_paid", 0),
-            },
+        # ------------------------------------------------------------------
+        # F15 (P3 STOCK): RESERVE THE APPENDED LINE, exactly like create_order.
+        # This path enforced pricing/GST/caps/floor but never touched stock:
+        # a frame added to a DRAFT order stayed AVAILABLE (double-sellable by
+        # the next customer) and an added LENS never reserved its power-grid
+        # cell. Same order of operations as create: availability assert ->
+        # lens reserve (BEFORE persist, so a 409 leaves the order untouched)
+        # -> persist -> mark serialized units SOLD (after persist, fail-soft).
+        # ------------------------------------------------------------------
+        _store_id = order.get("store_id")
+        _assert_serialized_stock_available([item_data], _store_id)
+
+        from ..services.lens_stock_hook import (
+            reserve_for_order_item,
+            release_for_cancel,
         )
+
+        _line_idx = _lens_reservation_key(item_data, item_data["line_index"])
+        try:
+            await reserve_for_order_item(
+                order_item=item_data,
+                order_id=order_id,
+                line_index=_line_idx,
+                store_id=_store_id or "",
+                user=current_user,
+            )
+        except HTTPException as exc:
+            # Insufficient lens stock (409) -- compensating release for this one
+            # line, then re-raise so POS shows "available=N". The order doc has
+            # NOT been touched.
+            if exc.status_code == 409:
+                try:
+                    await release_for_cancel(
+                        order_item=item_data,
+                        order_id=order_id,
+                        line_index=_line_idx,
+                        store_id=_store_id or "",
+                        user=current_user,
+                    )
+                except Exception as rb_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[LENS_HOOK] add-item compensating release failed "
+                        "(order %s line %s): %s",
+                        order_id,
+                        _line_idx,
+                        rb_exc,
+                    )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Transient hook failure -- never block adding the line.
+            logger.warning(
+                "[LENS_HOOK] add-item reserve fail-soft (order %s): %s",
+                order_id,
+                exc,
+            )
+
+        try:
+            persisted = repo.update(
+                order_id,
+                {
+                    "items": items,
+                    "subtotal": gst["subtotal"],
+                    "cart_discount_amount": gst["cart_discount_amount"],
+                    "tax_rate": gst["dominant_rate"],
+                    "tax_amount": gst["tax"],
+                    "total_discount": gst["total_discount"],
+                    "grand_total": grand_total,
+                    "balance_due": grand_total - order.get("amount_paid", 0),
+                },
+            )
+        except Exception as upd_exc:  # noqa: BLE001
+            persisted = False
+            logger.error("[ORDERS] add-item persist failed for %s: %s", order_id, upd_exc)
+        if not persisted:
+            # The line never landed on the order -> give the lens cell back so
+            # the reservation cannot leak against a line that does not exist.
+            try:
+                await release_for_cancel(
+                    order_item=item_data,
+                    order_id=order_id,
+                    line_index=_line_idx,
+                    store_id=_store_id or "",
+                    user=current_user,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # fail-soft compensating action
+            raise HTTPException(status_code=500, detail="Failed to add item to order")
+
+        # Serialized units -> SOLD with this order_id stamped (fail-soft: a
+        # stock-side failure must never lose the line the user just added).
+        try:
+            _mark_units_sold(order_id, [item_data], _store_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK] add-item mark_units_sold failed: %s", exc)
 
         return {"message": "Item added to order", "item_id": item_data["item_id"]}
 
@@ -3461,28 +3799,113 @@ async def remove_order_item(
                 status_code=400, detail="Can only remove items from DRAFT orders"
             )
 
-        items = [i for i in order.get("items", []) if i.get("item_id") != item_id]
-        if len(items) == len(order.get("items", [])):
+        _all_items = order.get("items", [])
+        items = [i for i in _all_items if i.get("item_id") != item_id]
+        if len(items) == len(_all_items):
             raise HTTPException(status_code=404, detail="Item not found in order")
+
+        _removed_pos, _removed = next(
+            (
+                (pos, line)
+                for pos, line in enumerate(_all_items)
+                if line.get("item_id") == item_id
+            ),
+            (0, {}),
+        )
 
         # Recalculate totals (per-category GST, mirrors create_order).
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
         gst = _compute_per_category_gst(items, cart_discount_percent)
         grand_total = round(gst["taxable"] + gst["tax"], 2)
 
-        repo.update(
-            order_id,
-            {
-                "items": items,
-                "subtotal": gst["subtotal"],
-                "cart_discount_amount": gst["cart_discount_amount"],
-                "tax_rate": gst["dominant_rate"],
-                "tax_amount": gst["tax"],
-                "total_discount": gst["total_discount"],
-                "grand_total": grand_total,
-                "balance_due": grand_total - order.get("amount_paid", 0),
-            },
+        # PERSIST FIRST, THEN RELEASE (panel must-fix 6). This used to release
+        # the stock BEFORE the write and discard repo.update's return value --
+        # and base_repository.update swallows exceptions and returns False, so a
+        # failed persist answered 200 "Item removed" with the line STILL BILLED
+        # to the customer AND its frame back on the sellable shelf. Releasing
+        # only after a CONFIRMED write means the worst case is the mirror of the
+        # one we can actually recover from: the line is gone and the stock is
+        # still SOLD, which the cancel/re-run path can reclaim.
+        try:
+            persisted = repo.update(
+                order_id,
+                {
+                    "items": items,
+                    "subtotal": gst["subtotal"],
+                    "cart_discount_amount": gst["cart_discount_amount"],
+                    "tax_rate": gst["dominant_rate"],
+                    "tax_amount": gst["tax"],
+                    "total_discount": gst["total_discount"],
+                    "grand_total": grand_total,
+                    "balance_due": grand_total - order.get("amount_paid", 0),
+                },
+            )
+        except Exception as upd_exc:  # noqa: BLE001
+            persisted = False
+            logger.error(
+                "[ORDERS] item-remove persist failed for %s/%s: %s",
+                order_id,
+                item_id,
+                upd_exc,
+            )
+        if not persisted:
+            # Nothing was removed -> release NOTHING. The line is still billed
+            # and its unit must stay SOLD to match.
+            raise HTTPException(
+                status_code=500, detail="Failed to remove item from order"
+            )
+
+        # F15 (symmetry): the removed line's stock must go BACK. create_order /
+        # add_order_item flip serialized units SOLD and reserve lens cells at the
+        # moment the line is added, so deleting the line without releasing them
+        # would strand a sellable frame as SOLD forever and leak the lens cell --
+        # the same permanent-loss bug F3 fixes for cancel.
+        try:
+            from ..services.lens_stock_hook import release_for_cancel
+
+            await _release_lens_lines(
+                [_removed],
+                order_id=order_id,
+                store_id=order.get("store_id") or "",
+                user=current_user,
+                release=release_for_cancel,
+                # The removed line's TRUE position in the pre-removal order.
+                # Legacy reservations are keyed on exactly this number, so
+                # defaulting to 0 released the wrong cell (or someone else's).
+                positions=[_removed_pos],
+            )
+        except Exception as rel_exc:  # noqa: BLE001
+            logger.warning(
+                "[LENS_HOOK] release on item-remove failed (order %s item %s): %s",
+                order_id,
+                item_id,
+                rel_exc,
+            )
+
+        _freed_units, _restock_failed = _release_line_units(
+            order_id, item_id, _removed, surviving_lines=items,
+            store_id=order.get("store_id"),
         )
+        if _restock_failed:
+            # PERSIST the failure so it is discoverable, mirroring what cancel
+            # does. Previously `incomplete` reached only a log line and the
+            # endpoint answered 200 "Item removed" regardless.
+            try:
+                repo.update(
+                    order_id,
+                    {
+                        "line_remove_stock_release_failed": True,
+                        "line_remove_stock_failed_item_id": item_id,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[ORDERS] could not stamp item-remove restock failure "
+                    "(order %s item %s): %s",
+                    order_id,
+                    item_id,
+                    exc,
+                )
 
         # Audit alert (May 2026) — flag the deleted item even on DRAFT
         # so the audit trail is complete; severity HIGH for DRAFT.
@@ -3506,7 +3929,11 @@ async def remove_order_item(
         except Exception:
             pass
 
-        return {"message": "Item removed from order"}
+        return {
+            "message": "Item removed from order",
+            "stock_units_released": len(_freed_units),
+            "stock_release_failed": _restock_failed,
+        }
 
     return {"message": "Item removed from order"}
 
@@ -3702,7 +4129,11 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
                 status_code=400, detail="Cannot confirm order with no items"
             )
 
-        if repo.update_status(order_id, "CONFIRMED", current_user.get("user_id")):
+        # Guarded claim, not a blind stamp: a cancel that wins its own claim
+        # between this handler's read and this write must NOT be overwritten.
+        if _claim_order_status(
+            repo, order_id, "CONFIRMED", ("DRAFT",), current_user.get("user_id")
+        ):
             # POS operational-wins: guarantee a fitting order has a workshop/lab
             # job once it's committed. Idempotent + fail-soft (the POS client may
             # already have created it; a non-POS confirm path may not have).
@@ -3922,15 +4353,54 @@ async def add_payment(
             # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue
             refreshed = repo.find_by_id(order_id)
             auto_confirmed = False
+            workshop_job_id = None
             if refreshed and refreshed.get("status") == "DRAFT":
-                repo.update_status(order_id, "CONFIRMED", current_user.get("user_id"))
+                # Same guarded claim as /confirm -- the auto-confirm door is
+                # not exempt from a concurrent cancel.
+                if not _claim_order_status(
+                    repo, order_id, "CONFIRMED", ("DRAFT",),
+                    current_user.get("user_id"),
+                ):
+                    logger.warning(
+                        "[ORDERS] auto-confirm on payment skipped for %s -- "
+                        "its status changed (likely cancelled)", order_id,
+                    )
+                    refreshed = repo.find_by_id(order_id) or refreshed
+                    return {
+                        "payment_id": payment_data["payment_id"],
+                        "message": "Payment recorded",
+                        "amount": payment.amount,
+                        "workshop_job_id": None,
+                        "order_status": (refreshed or {}).get("status", "DRAFT"),
+                        "payment_status": (refreshed or {}).get(
+                            "payment_status", "PARTIAL"
+                        ),
+                    }
                 auto_confirmed = True
+                # F16: this auto-confirm bypassed confirm_order, so the workshop
+                # safety-net never ran and a paid spectacle order NEVER reached
+                # the lab queue -- the job simply did not exist. Run the exact
+                # same idempotent, fail-soft helper confirm_order runs (it skips
+                # non-fitting orders, never duplicates an existing job, and never
+                # raises), so both confirm paths behave identically.
+                try:
+                    workshop_job_id = _ensure_workshop_job_for_order(
+                        refreshed, current_user.get("user_id")
+                    )
+                except Exception as exc:  # noqa: BLE001 -- must never block a payment
+                    logger.warning(
+                        "[ORDERS] workshop auto-link skipped on payment "
+                        "auto-confirm for %s: %s",
+                        order_id,
+                        exc,
+                    )
 
             return {
                 "payment_id": payment_data["payment_id"],
                 "message": "Payment recorded"
                 + (" — order auto-confirmed" if auto_confirmed else ""),
                 "amount": payment.amount,
+                "workshop_job_id": workshop_job_id,
                 "order_status": (
                     "CONFIRMED"
                     if auto_confirmed
@@ -3970,7 +4440,12 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
                 detail=f"Cannot mark as ready — current status is {order.get('status')}. Valid transitions: {', '.join(VALID_TRANSITIONS.get(order.get('status', ''), set()))}",
             )
 
-        if repo.update_status(order_id, "READY", current_user.get("user_id")):
+        # READY is exactly the precondition the deliver guard requires, so a
+        # resurrected order would deliver cleanly straight afterwards. Claim it.
+        if _claim_order_status(
+            repo, order_id, "READY", ("CONFIRMED", "PROCESSING"),
+            current_user.get("user_id"),
+        ):
             return {
                 "order_id": order_id,
                 "status": "READY",
@@ -4014,7 +4489,28 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
                 detail="Order must have at least partial payment before delivery",
             )
 
-        if repo.update_status(order_id, "DELIVERED", current_user.get("user_id")):
+        # ATOMIC DELIVER CLAIM. update_status writes update_one({order_id}, ...)
+        # with NO status precondition, and the window from the read above to
+        # this write spans the store-access, Rx-hold, transition and payment
+        # checks. A cancel that wins its own claim mid-window would then be
+        # OVERWRITTEN back to DELIVERED here.
+        #
+        # That race is pre-existing, but THIS PR sharpens its consequence: cancel
+        # now releases stock, so losing it leaves a frame that is physically in
+        # the customer's bag reading AVAILABLE and re-sellable -- and on a pooled
+        # ONLINE store that feeds a Shopify oversell. Before, the unit stayed
+        # correctly SOLD and only loyalty was wrong.
+        if not _claim_order_status(
+            repo, order_id, "DELIVERED", "READY", current_user.get("user_id")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot deliver this order -- its status changed (it may "
+                    "have just been cancelled). Refresh and try again."
+                ),
+            )
+        if True:
             # CRM-9: Auto-trigger NPS survey on delivery (fail-soft — a survey
             # failure must NEVER block the delivery confirmation).
             try:
@@ -4031,6 +4527,406 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         raise HTTPException(status_code=500, detail="Failed to deliver order")
 
     return {"order_id": order_id, "status": "DELIVERED"}
+
+
+def _is_unit_tracked(stock_repo, product_id: str, store_id: Optional[str]) -> bool:
+    """Does this product have ANY serialized stock_units row at this store?
+
+    Same question the availability assert asks before it will block a sale
+    (`if not tracked: continue`). A product that is not unit-tracked can never
+    strand a unit, so it must never raise the restock-failure signal.
+    Fail-soft TRUE-ish only when we genuinely cannot tell: a lookup error
+    returns False so we do not invent an alarm.
+    """
+    if not product_id or not store_id or stock_repo is None:
+        return False
+    try:
+        return bool(stock_repo.count({"product_id": product_id, "store_id": store_id}))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _release_line_units(
+    order_id: str,
+    item_id: str,
+    line: dict,
+    surviving_lines: Optional[List[dict]] = None,
+    store_id: Optional[str] = None,
+) -> tuple:
+    """Give back the serialized stock of ONE removed DRAFT line.
+
+    Targeting matters (panel must-fix 5). When the line names its own
+    `stock_id` -- the barcode the staffer actually scanned -- we release THAT
+    EXACT unit. Releasing an arbitrary unit of the same product instead is a
+    real counter failure: staff scan the wrong unit of the same frame model,
+    remove the line, and now the customer walks out with a serial the system
+    shows AVAILABLE (double-sellable) while an identical frame sitting on the
+    shelf reads SOLD and 409s at the till. Only a line that never named a unit
+    falls back to the product+quantity sweep.
+
+    Skipped entirely for line kinds that never took serialized stock -- decided
+    by the SHARED `_takes_serialized_stock` predicate, the same one
+    _mark_units_sold and the availability assert use, so the way in and the way
+    out can never disagree again.
+
+    Returns (released_ids, failed) so the caller can persist and surface the
+    outcome. The cancel door already reports an incomplete restock; this door
+    used to swallow it into a log line and answer 200 regardless.
+    """
+    if not _takes_serialized_stock(line):
+        return [], False
+    pid = line.get("product_id") or ""
+    sid = line.get("stock_id") or ""
+    qty = max(int(line.get("quantity") or 1), 1)
+    freed: List[str] = []
+    incomplete = False
+    try:
+        stock_repo = get_stock_repository()
+        if stock_repo is None or not hasattr(
+            stock_repo, "release_sold_units_for_order"
+        ):
+            return [], False
+        # SERIALIZED OVERSELL GUARD: never hand back a serial that a SURVIVING
+        # line is still billing. Two lines of the same product, one scanned, the
+        # other FIFO -- releasing blind could free the scanned line's unit.
+        keep = [
+            str(other.get("stock_id"))
+            for other in (surviving_lines or [])
+            if other.get("stock_id")
+        ]
+        if sid:
+            result = stock_repo.release_sold_units_for_order(
+                order_id, stock_id=str(sid), reason="ORDER_LINE_REMOVED"
+            )
+            freed += list(getattr(result, "released", result) or [])
+            incomplete = bool(getattr(result, "incomplete", False)) or incomplete
+            # A qty>1 line consumed its NAMED unit once and FIFO-allocated the
+            # rest on the way in, so releasing only the named one strands the
+            # remainder -- and used to report a clean success while doing it.
+            if qty > 1:
+                rest = stock_repo.release_sold_units_for_order(
+                    order_id,
+                    product_id=pid,
+                    exclude_stock_ids=keep + [str(sid)],
+                    limit=qty - 1,
+                    reason="ORDER_LINE_REMOVED",
+                )
+                freed += list(getattr(rest, "released", rest) or [])
+                incomplete = bool(getattr(rest, "incomplete", False)) or incomplete
+        else:
+            result = stock_repo.release_sold_units_for_order(
+                order_id,
+                product_id=pid,
+                exclude_stock_ids=keep,
+                limit=qty,
+                reason="ORDER_LINE_REMOVED",
+            )
+            freed += list(getattr(result, "released", result) or [])
+            incomplete = bool(getattr(result, "incomplete", False)) or incomplete
+        # GROUND TRUTH beats the return value, exactly as the cancel door does:
+        # fewer units back than the line consumed means something is still SOLD
+        # against a line that no longer exists.
+        #
+        # ...but ONLY for a product that is actually unit-tracked at this store.
+        # A plain ACCESSORY has no stock_units rows at all, so it releases
+        # nothing and is not a failure -- and the availability gate 3,000 lines
+        # earlier exempts exactly these products (`if not tracked: continue`).
+        # Without this the door cried wolf on every non-tracked line and
+        # poisoned the very signal it was built to raise.
+        if len(freed) < qty and _is_unit_tracked(stock_repo, pid, store_id):
+            incomplete = True
+        if incomplete:
+            logger.error(
+                "[STOCK] item-remove restock INCOMPLETE (order %s item %s) -- "
+                "released %d of %d; unit(s) may be stranded SOLD",
+                order_id,
+                item_id,
+                len(freed),
+                qty,
+            )
+        logger.info(
+            "[STOCK] item-remove %s/%s reactivated %d unit(s)%s",
+            order_id,
+            item_id,
+            len(freed),
+            f" (explicit unit {sid})" if sid else "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        incomplete = True
+        logger.error(
+            "[STOCK] item-remove restock FAILED (order %s item %s): %s",
+            order_id,
+            item_id,
+            exc,
+        )
+    return freed, incomplete
+
+
+def _lens_line_already_committed(order_id: str, keys: List) -> bool:
+    """Has the lens for this line already been CUT (committed) under ANY of its
+    candidate reservation keys?
+
+    lens_stock_hook.release_for_cancel checks the commit marker under only the
+    single key it is passed. The workshop MOUNTED commit writes that marker
+    under the POSITIONAL index while reserve/release now key on item_id, so the
+    guard misses and an already-mounted cell gets released. We therefore check
+    every candidate key here, before any release is attempted.
+
+    Reads through the lens_stock router's own _get_db seam -- the same one the
+    hook uses -- so there is exactly one place to stub. Fail-soft: if we cannot
+    tell, we do NOT block the release (a stuck reservation is recoverable; the
+    normal cancel path must keep working when the audit store is unavailable).
+    """
+    if not order_id or not keys:
+        return False
+    source_ids = ["{0}#{1}#commit".format(order_id, k) for k in keys]
+    try:
+        from ..routers import lens_stock as stock_router
+
+        db = stock_router._get_db()  # noqa: SLF001 -- intentional shared seam
+        if db is None:
+            return False
+        coll = db.get_collection("lens_stock_audit")
+        if coll is None:
+            return False
+        row = coll.find_one(
+            {"source_id": {"$in": source_ids}, "action": "commit"}
+        )
+        return row is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[LENS_HOOK] commit-marker lookup failed for %s (%s): %s",
+            order_id,
+            source_ids,
+            exc,
+        )
+        return False
+
+
+async def _release_lens_lines(
+    lines: List[dict],
+    *,
+    order_id: str,
+    store_id: str,
+    user: dict,
+    release,
+    positions: Optional[List[int]] = None,
+) -> List[dict]:
+    """Release the lens cell of every line, under BOTH the current key and the
+    key the older code may have used.
+
+    An order reserved before the item_id switch holds its cell under
+    "{order_id}#{position}" -- origin/main passed `line_index=idx`, i.e. the
+    POSITION, and those legacy lines carry an item_id but NO line_index. So the
+    legacy key is the line's TRUE POSITION IN THE ORDER, which is why
+    `positions` MUST be supplied whenever `lines` is not the whole order.
+
+    Passing a one-element list without `positions` made every caller release
+    under position 0: for a legacy order, removing the lens line at position 1
+    emitted keys [item_id, 0] while the live reservation sat at key 1 -- the
+    removed line's cell was never released (the exact leak this exists to close)
+    and the key-0 call could CONSUME the neighbouring line's live reservation,
+    leaking that one on the later cancel.
+
+    Both calls are idempotent no-ops when no such reservation exists. Fully
+    fail-soft per line.
+    """
+    seq = (
+        list(positions)
+        if positions is not None
+        else list(range(len(lines or [])))
+    )
+    for pos, line in zip(seq, lines or []):
+        keys = [_lens_reservation_key(line, pos)]
+        legacy = _legacy_lens_reservation_key(line, pos)
+        if legacy is not None:
+            keys.append(legacy)
+        # COMMIT GUARD ACROSS BOTH KEYS. The workshop MOUNTED commit still
+        # writes its audit row under the POSITIONAL index, while reserve/release
+        # now key on item_id. release_for_cancel only checks the ONE key it is
+        # handed, so the item_id call sails past the "already committed" guard
+        # and releases a cell whose lens is ALREADY CUT AND MOUNTED in the
+        # customer's frame -- and when another pending order holds a reservation
+        # on the same power cell (routine for common powers) the CAS succeeds
+        # and silently decrements THAT order's reservation. One physical lens,
+        # two customers. Checking every candidate key BEFORE releasing under any
+        # of them is the release-side half of the fix.
+        if _lens_line_already_committed(order_id, keys):
+            logger.info(
+                "[LENS_HOOK] order %s line %s already COMMITTED (lens cut) -- "
+                "skipping release under keys %s",
+                order_id,
+                pos,
+                keys,
+            )
+            continue
+        for key in keys:
+            try:
+                await release(
+                    order_item=line,
+                    order_id=order_id,
+                    line_index=key,
+                    store_id=store_id,
+                    user=user,
+                )
+            except Exception as rel_exc:  # noqa: BLE001
+                logger.warning(
+                    "[LENS_HOOK] release failed (order %s line %s key %s): %s",
+                    order_id,
+                    pos,
+                    key,
+                    rel_exc,
+                )
+    return list(lines or [])
+
+
+def _claim_order_status(
+    repo, order_id: str, new_status: str, required_status, user_id
+) -> bool:
+    """Atomically move an order to `new_status` ONLY while its status is still
+    one of `required_status`. Returns False when the precondition no longer
+    holds. `required_status` may be a single status or any collection of them.
+
+    THE PRECONDITION IS THE POINT. OrderRepository.update_status writes
+    update_one({order_id}, ...) filtered on the id ALONE, so every door that
+    calls it directly will happily overwrite a status another request just
+    claimed. _claim_order_for_cancel wins its claim correctly and these doors
+    used to stamp straight over it: the cancel's stock release and loyalty
+    clawback both STAND while the order comes back alive, so a frame that is
+    physically in the customer's bag reads AVAILABLE and is re-sellable -- and
+    on a pooled ONLINE store that is a Shopify oversell.
+
+    Falls back to a plain read-check-update when the collection has no
+    find_one_and_update, so a legacy/mock backend still works (that fallback
+    enforces the SAME set membership -- it is a narrower window, not an open
+    door).
+    """
+    wanted = (
+        [required_status]
+        if isinstance(required_status, str)
+        else list(required_status)
+    )
+    now = datetime.now()
+    payload = {
+        "status": new_status,
+        "status_updated_at": now,
+        "status_updated_by": user_id,
+    }
+    # update_status sets this and orders.py surfaces it; folding the write in
+    # means we must carry it or silently drop it.
+    if new_status == "DELIVERED":
+        payload["delivered_at"] = now
+    # status_history feeds the CUSTOMER-FACING portal tracking view, the online
+    # order mirror and the order detail response. It is part of the claim, not
+    # an afterthought.
+    history_entry = {
+        "status": new_status,
+        "timestamp": now.isoformat(),
+        "changed_by": user_id or "system",
+    }
+    coll = getattr(repo, "collection", None)
+    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
+    if callable(updater):
+        try:
+            doc = updater(
+                {"order_id": order_id, "status": {"$in": wanted}},
+                {"$set": payload, "$push": {"status_history": history_entry}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] atomic %s claim unavailable for %s (%s); falling back",
+                new_status, order_id, exc,
+            )
+        else:
+            # ONE round trip, and NOTHING after it. The previous version won the
+            # claim here and then called repo.update_status four lines later --
+            # which is update_one({id}, ...) with NO status precondition, the
+            # exact primitive this helper's docstring diagnoses as the bug. A
+            # cancel committing in that gap was stamped straight back over, and
+            # since _claim_order_for_cancel filters $nin [CANCELLED, DELIVERED],
+            # both CONFIRMED and READY stayed claimable. Losing that race used to
+            # leave the unit SOLD; now that cancel releases it, it leaves a frame
+            # in the customer's bag reading AVAILABLE.
+            return doc is not None
+    # NON-ATOMIC FALLBACK -- only for a collection with no find_one_and_update.
+    # Real pymongo has it and so does MockCollection, so this is unreachable in
+    # production and in local no-Mongo mode alike; it exists for hand-rolled
+    # doubles. We still narrow it as far as the surface allows: a guarded
+    # update_one carrying the SAME status precondition, so the window is the
+    # read-modify-write of one statement rather than two round trips. Only when
+    # even that is missing do we fall back to a bare read-check.
+    existing = repo.find_by_id(order_id)
+    if not existing or existing.get("status") not in wanted:
+        return False
+    guarded = getattr(coll, "update_one", None) if coll is not None else None
+    if callable(guarded):
+        try:
+            res = guarded(
+                {"order_id": order_id, "status": {"$in": wanted}},
+                {"$set": payload, "$push": {"status_history": history_entry}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] guarded %s fallback failed for %s: %s",
+                new_status, order_id, exc,
+            )
+        else:
+            return bool(getattr(res, "modified_count", 0))
+    return bool(repo.update_status(order_id, new_status, user_id))
+
+
+def _claim_order_for_cancel(
+    repo, order_id: str, reason: str, current_user: dict
+) -> Optional[dict]:
+    """Atomically flip ONE order to CANCELLED, only if it is not already
+    CANCELLED or DELIVERED. Returns the PRE-IMAGE doc when this caller won the
+    claim, else None.
+
+    This is what makes cancel single-shot: the stock reactivation and the
+    loyalty clawback must run for exactly one caller, and a check-then-act
+    status test cannot promise that under two concurrent cancels.
+
+    Fail-soft: a collection that cannot do find_one_and_update (legacy mock)
+    falls back to the previous read-check-update behaviour rather than blocking
+    a cancel outright.
+    """
+    payload = {
+        "status": "CANCELLED",
+        "cancellation_reason": reason,
+        "cancelled_by": current_user.get("user_id"),
+        "cancelled_at": datetime.now().isoformat(),
+    }
+    coll = getattr(repo, "collection", None)
+    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
+    if callable(updater):
+        try:
+            return updater(
+                {
+                    "order_id": order_id,
+                    "status": {"$nin": ["CANCELLED", "DELIVERED"]},
+                },
+                {"$set": payload},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] atomic cancel claim unavailable for %s (%s); "
+                "falling back to read-check-update",
+                order_id,
+                exc,
+            )
+    existing = repo.find_by_id(order_id)
+    if not existing or existing.get("status") in ("CANCELLED", "DELIVERED"):
+        return None
+    # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
+    # False, so discarding this result meant a FAILED status write still ran the
+    # whole stock + loyalty undo and reported the order cancelled -- stock back
+    # on the shelf and points clawed for an order still sitting CONFIRMED.
+    if not repo.update(order_id, payload):
+        logger.error(
+            "[ORDERS] cancel status write failed for %s; undo NOT run", order_id
+        )
+        return None
+    return existing
 
 
 @router.post("/{order_id}/cancel")
@@ -4063,19 +4959,82 @@ async def cancel_order(
                 status_code=400, detail="Cannot cancel delivered orders"
             )
 
-        if order.get("status") == "CANCELLED":
-            raise HTTPException(status_code=400, detail="Order is already cancelled")
-
-        # Update status and add cancellation reason
-        repo.update(
-            order_id,
-            {
-                "status": "CANCELLED",
-                "cancellation_reason": reason,
-                "cancelled_by": current_user.get("user_id"),
-                "cancelled_at": datetime.now().isoformat(),
-            },
-        )
+        # ------------------------------------------------------------------
+        # ATOMIC SINGLE-SHOT CANCEL (panel must-fix 3). find_by_id + status
+        # check + update is check-then-act: two concurrent cancels of the same
+        # order BOTH passed the check and BOTH ran the stock + loyalty undo.
+        # The claim below is ONE guarded find_one_and_update whose filter
+        # excludes CANCELLED/DELIVERED, so exactly one caller can flip the
+        # order -- and only that caller runs the undo.
+        #
+        # RE-RUN PATH (panel must-fix 4): an order already CANCELLED whose
+        # previous undo did not finish (cancel_stock_release_failed /
+        # loyalty_reversal_failed) is allowed BACK IN to retry, because both
+        # undos are idempotent by construction. Without this, a partial restock
+        # was permanent: the 400 below refused every retry forever.
+        # ------------------------------------------------------------------
+        claimed = _claim_order_for_cancel(repo, order_id, reason, current_user)
+        is_retry = False
+        if claimed is None:
+            fresh = repo.find_by_id(order_id) or {}
+            if fresh.get("status") != "CANCELLED":
+                if fresh and fresh.get("status") != "DELIVERED":
+                    # Still cancellable -> we did not lose a race, the STATUS
+                    # WRITE ITSELF failed. Fail loudly; the order is untouched
+                    # and no stock/loyalty undo has run.
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Could not cancel the order -- please retry.",
+                    )
+                # Lost the race to a DELIVER (or the doc vanished).
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot cancel this order -- its status changed.",
+                )
+            # RETRY DOOR ON GROUND TRUTH, not on a flag. The failure stamp goes
+            # through base_repository.update, which swallows exceptions and
+            # returns False -- so the very Mongo blip that fails the stock
+            # release ALSO fails the stamp. Gating the retry on the flag alone
+            # meant the doc carried no marker, the door never opened, and the
+            # operator log told staff to re-POST a cancel that 400s forever with
+            # units still SOLD. stock_units still SOLD against this order is the
+            # fact that cannot be lost.
+            _still_sold = 0
+            try:
+                _sr = get_stock_repository()
+                _counter = getattr(_sr, "count_sold_units_for_order", None)
+                if callable(_counter):
+                    _still_sold = int(_counter(order_id) or 0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ORDERS] retry-door ground-truth check failed for %s: %s",
+                    order_id,
+                    exc,
+                )
+            if not (
+                _still_sold
+                or fresh.get("cancel_stock_release_failed")
+                or fresh.get("loyalty_reversal_failed")
+                # A doc that never received the stamp at all is also suspect --
+                # a completed cancel always writes this key.
+                or "cancel_stock_released" not in fresh
+            ):
+                raise HTTPException(
+                    status_code=400, detail="Order is already cancelled"
+                )
+            # Already cancelled WITH an unfinished undo -> retry it.
+            is_retry = True
+            order = fresh
+            logger.warning(
+                "[ORDERS] re-running the cancel undo for %s (still_sold=%s "
+                "stock_failed=%s loyalty_failed=%s)",
+                order_id,
+                _still_sold,
+                fresh.get("cancel_stock_release_failed"),
+                fresh.get("loyalty_reversal_failed"),
+            )
+        else:
+            order = claimed
 
         # Branch B' sub-PR 4 -- release any lens-stock reservations on
         # the cancelled order so the cells return to AVAILABLE. Fully
@@ -4085,30 +5044,178 @@ async def cancel_order(
         try:
             from ..services.lens_stock_hook import release_for_cancel
 
-            items_for_release = order.get("items") or []
-            for idx, oi in enumerate(items_for_release):
-                try:
-                    await release_for_cancel(
-                        order_item=oi,
-                        order_id=order_id,
-                        line_index=idx,
-                        store_id=order.get("store_id") or "",
-                        user=current_user,
-                    )
-                except Exception as rel_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[LENS_HOOK] release on cancel failed "
-                        "(order %s line %s): %s",
-                        order_id,
-                        idx,
-                        rel_exc,
-                    )
+            items_for_release = await _release_lens_lines(
+                order.get("items") or [],
+                order_id=order_id,
+                store_id=order.get("store_id") or "",
+                user=current_user,
+                release=release_for_cancel,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[LENS_HOOK] cancel release outer error %s: %s",
                 order_id,
                 exc,
             )
+
+        # F3 (P1 STOCK) -- put the SERIALIZED units back on the shelf.
+        # _mark_units_sold flips frame/sunglass stock_units to SOLD at CREATE
+        # (even for a DRAFT), and cancel used to release ONLY the lens cells
+        # above: every cancellation therefore removed a sellable frame from
+        # AVAILABLE *permanently*. The repo helper is an ATOMIC guarded update
+        # per unit (status=="SOLD" AND order_id==this order) that clears the
+        # order_id in the same write, so it is idempotent by construction -- a
+        # retried / double cancel reactivates nothing. Fail-soft (a stock write
+        # must never break the cancel) but LOUD, and the outcome is stamped on
+        # the order so reconciliation can find failures.
+        stock_released: List[str] = []
+        stock_release_failed = False
+        stock_still_sold = 0
+        try:
+            stock_repo = get_stock_repository()
+            if stock_repo is not None and hasattr(
+                stock_repo, "release_sold_units_for_order"
+            ):
+                result = stock_repo.release_sold_units_for_order(order_id)
+                # The helper reports PARTIAL completion explicitly (must-fix 4):
+                # a mid-loop write failure used to return a short list that was
+                # indistinguishable from a clean run, so the API said "cancelled"
+                # while units stayed SOLD against a CANCELLED order -- and the
+                # already-cancelled 400 then refused every retry.
+                stock_released = list(getattr(result, "released", result) or [])
+                stock_release_failed = bool(getattr(result, "incomplete", False))
+                # Ground truth beats the return value: anything STILL SOLD
+                # against this order after the sweep is stranded stock.
+                counter = getattr(stock_repo, "count_sold_units_for_order", None)
+                if callable(counter):
+                    stock_still_sold = int(counter(order_id) or 0)
+                    if stock_still_sold:
+                        stock_release_failed = True
+                logger.info(
+                    "[STOCK] cancel %s reactivated %d serialized unit(s): %s "
+                    "(still SOLD: %d)",
+                    order_id,
+                    len(stock_released),
+                    stock_released,
+                    stock_still_sold,
+                )
+                if stock_release_failed:
+                    logger.error(
+                        "[STOCK] CANCEL RESTOCK INCOMPLETE for order %s -- %d "
+                        "unit(s) still SOLD against a CANCELLED order. Re-POST "
+                        "the cancel to retry (the release is idempotent).",
+                        order_id,
+                        stock_still_sold,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            stock_release_failed = True
+            logger.error(
+                "[STOCK] CANCEL RESTOCK FAILED for order %s: %s -- units may be "
+                "stranded SOLD against a cancelled order",
+                order_id,
+                exc,
+            )
+
+        # F4 (P1 MONEY) -- reverse loyalty on the cancelled order: claw back the
+        # points EARNED at create (unfunded redeemable value + a farm-and-cancel
+        # vector) and RESTORE any points the customer REDEEMED against it
+        # (otherwise the cancel silently burns their balance). Idempotent on the
+        # order id inside reverse_for_cancel. Fail-soft + stamped, mirroring how
+        # returns.py records loyalty_reversal_failed.
+        loyalty_reversal_failed = False
+        loyalty_reversal: Dict[str, Any] = {}
+        try:
+            from .loyalty import reverse_for_cancel
+
+            loyalty_reversal = (
+                reverse_for_cancel(order_id, order.get("customer_id")) or {}
+            )
+            if loyalty_reversal.get("ok"):
+                logger.info(
+                    "[ORDERS] loyalty reversed on cancel %s: clawed=%s restored=%s",
+                    order_id,
+                    loyalty_reversal.get("earned_clawed", 0),
+                    loyalty_reversal.get("redeemed_restored", 0),
+                )
+            elif loyalty_reversal.get("reason") not in (
+                "missing_ids",
+                "loyalty_db_unavailable",
+            ):
+                loyalty_reversal_failed = True
+                logger.error(
+                    "[ORDERS] loyalty reversal FAILED on cancel %s: %s",
+                    order_id,
+                    loyalty_reversal.get("reason"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            loyalty_reversal_failed = True
+            logger.error(
+                "[ORDERS] loyalty reversal exception on cancel %s: %s", order_id, exc
+            )
+
+        # Stamp the reversal outcome on the order doc so a failed clawback /
+        # restock is discoverable by reconciliation instead of living only in
+        # the logs. Fail-soft: the cancel itself already succeeded.
+        _stamp_ok = False
+        try:
+            _stamp_ok = repo.update(
+                order_id,
+                {
+                    "cancel_stock_released": stock_released,
+                    "cancel_stock_release_failed": stock_release_failed,
+                    "cancel_stock_units_still_sold": stock_still_sold,
+                    "loyalty_reversal_failed": loyalty_reversal_failed,
+                    "loyalty_reversal": {
+                        k: v
+                        for k, v in loyalty_reversal.items()
+                        if k
+                        in (
+                            "ok",
+                            "reason",
+                            "earned_clawed",
+                            "redeemed_restored",
+                            "net_delta",
+                            "already_reversed",
+                            "txn_id",
+                        )
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDERS] cancel reconciliation stamp skipped for %s: %s",
+                order_id,
+                exc,
+            )
+        if not _stamp_ok:
+            # GATE THE STAMP. base_repository.update swallows exceptions and
+            # returns False, and this return value used to be discarded -- so
+            # the blip that failed the release also lost its own failure marker.
+            # One bounded retry, then a loud log carrying everything a human
+            # needs, because the doc may hold nothing.
+            try:
+                _stamp_ok = repo.update(
+                    order_id,
+                    {
+                        "cancel_stock_release_failed": stock_release_failed,
+                        "cancel_stock_units_still_sold": stock_still_sold,
+                        "loyalty_reversal_failed": loyalty_reversal_failed,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                _stamp_ok = False
+            if not _stamp_ok:
+                logger.error(
+                    "[ORDERS] CANCEL RECONCILIATION STAMP LOST for %s -- "
+                    "stock_release_failed=%s still_sold=%s loyalty_failed=%s "
+                    "released=%s. The order doc carries NO marker; the retry "
+                    "door falls back to the stock_units ground truth.",
+                    order_id,
+                    stock_release_failed,
+                    stock_still_sold,
+                    loyalty_reversal_failed,
+                    stock_released,
+                )
 
         # Audit alert (May 2026) — every cancellation is CRITICAL severity
         try:
@@ -4129,7 +5236,13 @@ async def cancel_order(
         return {
             "order_id": order_id,
             "status": "CANCELLED",
-            "message": "Order cancelled",
+            "message": (
+                "Cancel undo re-run" if is_retry else "Order cancelled"
+            ),
+            "stock_units_released": len(stock_released),
+            "stock_release_failed": stock_release_failed,
+            "stock_units_still_sold": stock_still_sold,
+            "loyalty_reversal_failed": loyalty_reversal_failed,
         }
 
     return {"order_id": order_id, "status": "CANCELLED"}
