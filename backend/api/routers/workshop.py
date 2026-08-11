@@ -441,15 +441,15 @@ assert not (_QC_REQUIRED_TARGETS & _NON_PATIENT_FACING_STATUSES), (
 )
 
 
-# Every key a freshly-created workshop job can legitimately carry. The union of
-# the two create doors' shapes -- orders._ensure_workshop_job_for_order (the POS
-# safety net) and workshop.create_job (the client door) -- plus the three keys
-# BaseRepository.create stamps (job_id, created_at, updated_at) and Mongo's _id.
+# Every key a freshly-created workshop job carries. The union of the two create
+# doors' shapes -- orders._ensure_workshop_job_for_order (the POS safety net) and
+# workshop.create_job (the client door) -- plus the keys BaseRepository.create
+# stamps (job_id, created_at, updated_at) and Mongo's _id.
 #
-# This set is pinned against the REAL creation path by
+# Pinned against the REAL creation path by
 # test_pristine_key_set_matches_what_creation_actually_writes: add a field to
 # either create door and that test goes red, telling you to update this set.
-_PRISTINE_GHOST_KEYS = frozenset(
+_CREATION_KEYS = frozenset(
     {
         "_id",
         "job_id",
@@ -470,6 +470,26 @@ _PRISTINE_GHOST_KEYS = frozenset(
         "auto_created",
     }
 )
+
+# Keys written by actions that record NO physical progress on the lens: editing
+# notes or the expected date (PUT /jobs/{id} stamps updated_by), and assigning
+# the job to a technician (a work-queue decision -- nothing has been cut).
+#
+# Adding a key here is a SAFETY DECISION, not bookkeeping. See the asymmetry note
+# in _is_pristine_ghost: a key missing from this set costs a false BLOCK, which
+# is recoverable at the counter; a key wrongly ADDED here re-opens the bypass
+# this whole predicate exists to close. Only add one when writing it provably
+# means no lens was touched.
+_ADMINISTRATIVE_KEYS = frozenset(
+    {
+        "updated_by",     # PUT /jobs/{id} -- notes / expected_date edit
+        "technician_id",  # assign_technician
+        "assigned_at",
+        "assigned_to",    # legacy alias for the same assignment
+    }
+)
+
+_PRISTINE_GHOST_KEYS = _CREATION_KEYS | _ADMINISTRATIVE_KEYS
 
 
 def _is_pristine_ghost(job: dict) -> bool:
@@ -494,49 +514,68 @@ def _is_pristine_ghost(job: dict) -> bool:
     found. So the question is now the positive one: is this doc EXACTLY what a
     create door produced, with nothing added and nothing changed?
 
-    Two independent signals, either of which is enough to disqualify:
-      * ANY key outside _PRISTINE_GHOST_KEYS carrying a TRUTHY value. Recording
-        progress means writing something; whatever field a future writer invents,
-        it lands here. (Falsy extras -- scan_history=[], station_timestamps={},
-        current_station=None -- record nothing and are ignored, so an empty-but-
-        present container still reads as pristine.)
-      * updated_at having moved past created_at. BaseRepository.update stamps
-        updated_at on EVERY write and BaseRepository.create sets created_at ==
-        updated_at, so any mutation of an existing field -- even one that adds no
-        new key -- shows up here. lab_routing's direct find_one_and_update stamps
-        it too.
+    THE TEST: any key outside _PRISTINE_GHOST_KEYS carrying a TRUTHY value
+    disqualifies the row. Recording progress means writing it down somewhere, and
+    whatever field a future writer invents lands here without anyone updating a
+    list. (Falsy extras -- scan_history=[], station_timestamps={},
+    current_station=None -- record nothing and are ignored, so an empty-but-
+    present container still reads as pristine.)
 
-    A genuinely unworked ghost trips neither: the safety net writes the creation
-    shape and nothing touches it again.
+    AN EARLIER VERSION ALSO COMPARED updated_at AGAINST created_at, and that was
+    wrong -- it made the carve-out unreachable for 100% of the live population.
+    BaseRepository.update stamps updated_at on EVERY write, so the check could
+    not tell "someone recorded work" from "someone confirmed the fitting" or
+    "someone assigned a technician". Both live PENDING rows carried NO extra
+    keys at all and were still disqualified purely by a moved timestamp, and a
+    single administrative PATCH flipped a real ghost from deliverable to blocked
+    forever. A signal that fires on every write is not a signal.
+
+    Why the key test alone is sufficient:
+      * Progress is NEW information, so it needs somewhere new to live. The
+        allowlist is the set of fields that exist for reasons OTHER than
+        progress, so any progress record is outside it by construction.
+      * The one allowlisted field that could encode progress is `status`, and the
+        carve-out already requires PENDING. Every status write additionally goes
+        through WorkshopJobRepository.update_status, which writes
+        status_updated_at / status_updated_by / status_history -- none of them
+        allowlisted -- so even a status that returned to PENDING leaves a trace
+        this test sees.
+
+    NOTE ON THE ASYMMETRY, because this is enumeration too and the difference is
+    the whole point: forgetting a key in _ADMINISTRATIVE_KEYS causes a false
+    BLOCK -- the handover refuses and staff run QC or cancel the duplicate. That
+    is the SAFE direction. Forgetting an entry in the old evidence list caused a
+    BYPASS: un-QC'd lenses handed to a patient. Same technique, opposite failure
+    mode. So when adding to the allowlist, the only question that matters is:
+    does writing this key mean NO physical progress happened? If unsure, leave it
+    out and accept the false block.
     """
     for key, value in job.items():
         if key not in _PRISTINE_GHOST_KEYS and value:
             return False
-    return not _timestamp_moved(job.get("created_at"), job.get("updated_at"))
-
-
-def _timestamp_moved(created_at, updated_at) -> bool:
-    """True when updated_at is present and differs from created_at.
-
-    Tolerant of the shapes these fields take across the codebase (datetime from
-    BaseRepository, ISO strings from some callers and from JSON round-trips):
-    compares by value first, then by string form. A missing updated_at means the
-    doc was never updated -> not moved.
-    """
-    if updated_at is None:
-        return False
-    if created_at is None:
-        return True
-    if updated_at == created_at:
-        return False
-    return str(updated_at) != str(created_at)
+    return True
 
 
 def _handover_block_detail(job: dict) -> str:
     """The counter-facing sentence for a blocked handover, branched on WHY the
-    job is blocked so it always names a step that actually exists."""
+    job is blocked so it always names a step that is actually PERFORMABLE.
+
+    The PENDING branch is split because "Start the job" is refused for a job
+    whose fitting sales-confirmation is missing: /start, PATCH -> IN_PROGRESS,
+    /complete, PATCH -> READY and /qc ALL 400 in that state, so the counter was
+    handed an instruction every door rejects. The remedy that does work is
+    confirming the fitting details first (PATCH /jobs/{id}/fitting-details, then
+    /start succeeds), so that is what the message says.
+    """
     label = job.get("job_number") or job.get("job_id") or "linked"
     if (job.get("status") or "").strip().upper() in _HANDOVER_NON_QC_REMEDY_STATUSES:
+        if not (job.get("fitting_details") or {}).get("confirmed_by_sales"):
+            return (
+                f"Workshop job {label} is still waiting for sales to confirm the "
+                f"fitting details, so it cannot be started or QC'd yet. Confirm "
+                f"the fitting details on the job, then start it, complete it and "
+                f"record QC before handing it to the customer."
+            )
         return (
             f"Workshop job {label} has not been started yet, so it has no QC "
             f"record. Start the job, complete it and record QC before handing it "

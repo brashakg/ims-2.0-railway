@@ -439,21 +439,22 @@ def test_pristine_predicate_is_inverted_and_channel_agnostic():
     assert wm._is_pristine_ghost({**ghost, "teleporter_status": "BEAMED"}) is False
     assert wm._is_pristine_ghost({**ghost, "some_future_channel": 1}) is False
 
-    # A mutation that adds NO new key is caught by the second signal.
+    # A moved updated_at is NOT disqualifying on its own -- see
+    # test_administrative_touches_do_not_disqualify_a_ghost for why that check
+    # was removed (it fired on every write, including purely administrative ones,
+    # and rejected 100% of the live population).
     assert (
         wm._is_pristine_ghost(
             {**ghost, "created_at": "2026-08-10T10:00:00",
              "updated_at": "2026-08-10T11:00:00"}
         )
-        is False
-    )
-    assert (
-        wm._is_pristine_ghost(
-            {**ghost, "created_at": "2026-08-10T10:00:00",
-             "updated_at": "2026-08-10T10:00:00"}
-        )
         is True
     )
+    # A status write leaves non-allowlisted traces, so the one allowlisted field
+    # that could encode progress is still caught even if status returned to
+    # PENDING.
+    assert wm._is_pristine_ghost({**ghost, "status_history": [{"status": "READY"}]}) is False
+    assert wm._is_pristine_ghost({**ghost, "status_updated_at": "2026-08-10T11:00:00"}) is False
 
     # Falsy extras record nothing -- an empty-but-present container is still
     # pristine (behaviour the panel confirmed correct).
@@ -464,6 +465,74 @@ def test_pristine_predicate_is_inverted_and_channel_agnostic():
         )
         is True
     )
+
+
+def test_administrative_touches_do_not_disqualify_a_ghost():
+    """A signal that fires on every write is not a signal.
+
+    An earlier version also compared updated_at against created_at. Because
+    BaseRepository.update stamps updated_at on EVERY write, that could not tell
+    "someone recorded work" from "someone confirmed the fitting", and it
+    disqualified 100% of the live population: both live PENDING rows carried NO
+    extra keys at all (n_extra_truthy=0) and were rejected purely on a moved
+    timestamp 30s / 80s after creation."""
+    ghost = {
+        "job_id": "JID-G", "job_number": "WS-G", "order_id": "ORD-1",
+        "store_id": STORE, "status": "PENDING", "auto_created": True,
+        "created_at": "2026-08-10T10:00:00",
+    }
+
+    # BOTH live prod PENDING shapes: no extra keys, updated_at moved after an
+    # administrative touch. These must be handleable.
+    assert wm._is_pristine_ghost({**ghost, "updated_at": "2026-08-10T10:00:31"}) is True
+    assert wm._is_pristine_ghost({**ghost, "updated_at": "2026-08-10T10:01:20"}) is True
+
+    # Confirming the fitting writes only an allowlisted key.
+    assert (
+        wm._is_pristine_ghost(
+            {**ghost, "updated_at": "2026-08-10T11:00:00",
+             "fitting_details": {"confirmed_by_sales": True}}
+        )
+        is True
+    )
+    # Assigning a technician is a work-queue decision -- nothing has been cut.
+    assert (
+        wm._is_pristine_ghost(
+            {**ghost, "updated_at": "2026-08-10T11:00:00",
+             "technician_id": "u7", "assigned_at": "2026-08-10T11:00:00"}
+        )
+        is True
+    )
+    # Editing notes / expected date stamps updated_by.
+    assert (
+        wm._is_pristine_ghost(
+            {**ghost, "updated_at": "2026-08-10T11:00:00", "updated_by": "u7",
+             "special_notes": "call before pickup"}
+        )
+        is True
+    )
+
+    # ...but the two known work channels still disqualify, timestamp or not.
+    assert wm._is_pristine_ghost({**ghost, "lens_status": "MOUNTED"}) is False
+    assert wm._is_pristine_ghost({**ghost, "vendor_status": "RECEIVED"}) is False
+    # ...and so does a channel nobody has written yet. THE GUARD SURVIVES.
+    assert wm._is_pristine_ghost({**ghost, "teleporter_status": "BEAMED"}) is False
+
+
+def test_administrative_ghost_still_delivers_end_to_end(monkeypatch):
+    """The carve-out must actually fire for a real, administratively-touched
+    ghost -- otherwise it exists on paper only."""
+    ghost = _wjob(
+        job_id="JID-G", job_number="WS-G", status="PENDING",
+        created_at="2026-08-10T10:00:00", updated_at="2026-08-10T10:00:31",
+        fitting_details={"confirmed_by_sales": True},
+        technician_id="u7",
+    )
+    sibling = _wjob(job_id="JID-1", job_number="WS-1", qc_passed=True)
+    client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), [ghost, sibling])
+    resp = client.post("/api/v1/orders/ORD-1/deliver")
+    assert resp.status_code == 200, resp.text
+    assert orepo.status_updates == ["DELIVERED"]
 
 
 def test_pristine_key_set_matches_what_creation_actually_writes(monkeypatch):
@@ -734,12 +803,88 @@ def test_lone_pending_job_blocks_the_handover(monkeypatch):
     assert orepo.status_updates == []
 
 
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_pending_block_message_names_a_performable_remedy(monkeypatch, confirmed):
+    """A PENDING job whose fitting was never sales-confirmed cannot be started,
+    completed or QC'd -- /start, PATCH IN_PROGRESS, /complete, PATCH READY and
+    /qc ALL 400 -- so telling the counter to "Start the job" named an instruction
+    every door refuses. The two sentences must differ, and the one for the
+    unconfirmed case must name the step that actually works."""
+    fitting = {"confirmed_by_sales": True} if confirmed else None
+    job = _wjob(status="PENDING", fitting_details=fitting)
+    client, orepo = _client(monkeypatch, _order(workshop_job_id="JID-1"), [job])
+    detail = client.post("/api/v1/orders/ORD-1/deliver").json()["detail"]
+    assert orepo.status_updates == []
+
+    if confirmed:
+        assert "Start the job" in detail
+        assert "fitting" not in detail.lower()
+    else:
+        assert "fitting details" in detail
+        assert "Start the job" not in detail
+
+
+def test_unconfirmed_pending_remedy_is_actually_performable(monkeypatch):
+    """Drive the remedy the message names: confirm the fitting, then start the
+    job. Both must succeed, or the block is a deadlock again."""
+    from api.routers.auth import get_current_user as _gcu
+
+    job = _wjob(status="PENDING", fitting_details=None)
+
+    class _Repo:
+        def find_by_id(self, jid):
+            return job if job["job_id"] == jid else None
+
+        def update(self, jid, data):
+            job.update(data)
+            return True
+
+        def update_status(self, jid, status, *a, **k):
+            job["status"] = status
+            return True
+
+    app = FastAPI()
+    app.include_router(wm.router, prefix="/api/v1/workshop")
+    monkeypatch.setattr(wm, "get_workshop_repository", lambda: _Repo())
+    monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(wm, "get_db", lambda: None)
+
+    async def _user():
+        return {
+            "user_id": "u1", "roles": ["STORE_MANAGER"],
+            "store_ids": [STORE], "active_store_id": STORE,
+        }
+
+    app.dependency_overrides[_gcu] = _user
+    client = TestClient(app)
+
+    # Before: the job cannot be started -- this is the deadlock.
+    assert client.post("/api/v1/workshop/jobs/JID-1/start").status_code == 400
+
+    # The remedy the message names.
+    patched = client.patch(
+        "/api/v1/workshop/jobs/JID-1/fitting-details",
+        json={"fitting_details": {"confirmed_by_sales": True, "dia": "65"}},
+    )
+    assert patched.status_code == 200, patched.text
+
+    # After: it works.
+    started = client.post("/api/v1/workshop/jobs/JID-1/start")
+    assert started.status_code == 200, started.text
+    assert job["status"] == "IN_PROGRESS"
+
+
 def test_lone_pending_job_names_the_real_remedy(monkeypatch):
     """The round-1 defect was that the 400 named a remedy the API refuses. The
     fix is an honest MESSAGE, not a skip: QC rejects PENDING, so the sentence
     must say 'start the job', never 'run QC'."""
+    # Sales HAVE confirmed the fitting, so "start the job" is the true next step
+    # (the unconfirmed case gets a different sentence -- see
+    # test_pending_block_message_names_a_performable_remedy).
     client, _orepo = _client(
-        monkeypatch, _order(workshop_job_id="JID-1"), [_wjob(status="PENDING")]
+        monkeypatch,
+        _order(workshop_job_id="JID-1"),
+        [_wjob(status="PENDING", fitting_details={"confirmed_by_sales": True})],
     )
     detail = client.post("/api/v1/orders/ORD-1/deliver").json()["detail"]
     assert "not been started" in detail

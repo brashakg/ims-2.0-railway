@@ -41,6 +41,8 @@ import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import { LensFittingFormModal } from '../../components/pos/LensFittingFormModal';
+import type { LensFittingFormValue } from '../../components/pos/LensFittingFormModal';
 import {
   hasQcOnFile,
   awaitingHandoverQc,
@@ -190,6 +192,32 @@ export function WorkshopPage() {
   // (power verification is optometry-adjacent). Plain cashiers/sales don't.
   const QC_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST', 'WORKSHOP_STAFF'];
   const canRunQc = QC_ROLES.includes(user?.activeRole || '');
+
+  // Fitting-details modal — opened from a PENDING job that sales never confirmed.
+  // Mirrors the backend's _FITTING_ROLES (workshop.py): confirming the fitting is
+  // a SALES act, so workshop staff are deliberately absent from this list.
+  const [fittingJob, setFittingJob] = useState<Job | null>(null);
+  const [fittingSaving, setFittingSaving] = useState(false);
+  const FITTING_ROLES = [
+    'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER',
+    'SALES_STAFF', 'SALES_CASHIER', 'CASHIER',
+  ];
+  const canConfirmFitting = FITTING_ROLES.includes(user?.activeRole || '');
+
+  const handleFittingSave = async (jobId: string, value: LensFittingFormValue) => {
+    setFittingSaving(true);
+    try {
+      await workshopApi.updateFittingDetails(jobId, value);
+      toast.success('Fitting details confirmed — the job can now be started');
+      setFittingJob(null);
+      setSelectedJob(null);
+      await loadJobs();
+    } catch (err) {
+      toast.error(backendMessage(err, 'Failed to save fitting details'));
+    } finally {
+      setFittingSaving(false);
+    }
+  };
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -1082,6 +1110,23 @@ const loadJobs = async () => {
 
                 {/* Status Transition Buttons */}
                 <div className="flex gap-2 flex-wrap">
+                  {/* A PENDING job whose fitting sales-confirmation is missing
+                      cannot be started, completed or QC'd -- every one of those
+                      doors 400s -- and the handover gate then blocks the order.
+                      Until now the ONLY UI that could write fitting details was
+                      the post-sale POS modal, so dismissing that modal (or
+                      creating the job from this page, which sends none) left the
+                      job permanently stuck with no in-app way out. Same modal,
+                      same PATCH; the backend roles already allow it. */}
+                  {selectedJob.status === 'PENDING' && canConfirmFitting
+                    && !selectedJob.fitting_details?.confirmed_by_sales && (
+                    <button
+                      onClick={() => setFittingJob(selectedJob)}
+                      className="btn-primary text-sm flex items-center gap-1"
+                    >
+                      <ClipboardCheck className="w-4 h-4" /> Confirm fitting details
+                    </button>
+                  )}
                   {selectedJob.status === 'PENDING' && (
                     // Bug fix: was sending 'PROCESSING' which the backend state machine
                     // doesn't recognise (it uses 'IN_PROGRESS'). Backend now also
@@ -1261,6 +1306,17 @@ const loadJobs = async () => {
             store_address: [storeInfo?.address, storeInfo?.city, storeInfo?.state, storeInfo?.pincode].filter(Boolean).join(', '),
           }}
           onClose={() => setLabelSpec(null)}
+        />
+      )}
+
+      {/* Fitting-details modal — the SAME component POS uses post-sale, surfaced
+          here so a job whose fitting was never confirmed has an in-app remedy.
+          Saving it unblocks /start, which unblocks completion, QC and handover. */}
+      {fittingJob && (
+        <LensFittingFormModal
+          isSaving={fittingSaving}
+          onSave={(v: LensFittingFormValue) => handleFittingSave(fittingJob.id, v)}
+          onBack={() => setFittingJob(null)}
         />
       )}
 
