@@ -70,6 +70,30 @@ POS_WRITE_ROLES = (
     "SALES_STAFF",
 )
 
+# Roles permitted to CLOSE A HANDOVER (mark an order ready / delivered). This is
+# deliberately NOT POS_WRITE_ROLES: that set's exclusion is scoped to order
+# CREATION ("CASHIER is payment-only -> may record payments but not create
+# orders"), and delivering is not creating.
+#
+# THE RULE, stated once so it is applied consistently: whoever this codebase lets
+# SCAN A JOB TO DELIVERED at the pickup counter must also be able to CLOSE the
+# order. Anything else leaves someone able to physically hand the glasses over
+# but unable to finish the transaction -- revenue and NPS stuck at READY with no
+# in-app escalation, and (because the Orders screen renders Mark Delivered with
+# no role condition) a visible button that 403s in front of the customer.
+#
+# The scan roles are labels.SCAN_ROLES and workshop._LAB_SCAN_ROLES. Both carry
+# CASHIER ("included so a front-desk cashier can scan a job to DELIVERED at
+# pickup") AND WORKSHOP_STAFF. An earlier round applied this reasoning to CASHIER
+# and missed WORKSHOP_STAFF, which sits in the identical position in the identical
+# two tuples -- so both are here now. The QC gate, not the role list, is the real
+# patient-safety control on this path.
+#
+# NOTE (open, owner decision): OPTOMETRIST is on the Orders nav in the frontend
+# but is in NEITHER scan-role tuple, so it is deliberately not added here. That
+# FE/BE mismatch predates this change and is flagged, not decided.
+HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
+
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product
 # master in products.py so a product's master rate == what POS bills it).
@@ -4419,6 +4443,13 @@ async def add_payment(
 @router.post("/{order_id}/ready")
 async def mark_ready(order_id: str, current_user: dict = Depends(get_current_user)):
     """Mark order as ready for delivery"""
+    # RBAC: previously ANY authenticated role could do this. HANDOVER_ROLES (not
+    # POS_WRITE_ROLES) -- see its definition for why the front-desk CASHIER must
+    # keep this.
+    if not any(r in current_user.get("roles", []) for r in HANDOVER_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to mark orders ready."
+        )
     repo = get_order_repository()
 
     if repo is not None:
@@ -4440,6 +4471,28 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
                 detail=f"Cannot mark as ready — current status is {order.get('status')}. Valid transitions: {', '.join(VALID_TRANSITIONS.get(order.get('status', ''), set()))}",
             )
 
+        # PATIENT SAFETY: an order whose linked workshop job has no QC record may
+        # not be advertised to the customer as ready. Imports the SAME predicate
+        # the workshop gate uses -- never re-derive it here. Runs AFTER the
+        # legality check so an order in the wrong status is told THAT, rather
+        # than being handed a QC instruction it does not yet need.
+        #
+        # ORDERING IS LOAD-BEARING -- QC CHECK FIRST, THEN CLAIM THE STATUS, and
+        # never the reverse. READY is EXACTLY the precondition the deliver guard
+        # requires (see the claim's own comment below), so claiming first would
+        # leave the order fully deliverable, with lens work never inspected, for
+        # the entire interval between the claim and the check -- recreating the
+        # hole this gate exists to close, out of a merge resolution. A failing
+        # check would also force an unwind of a status already committed.
+        # QC-first has no equivalent cost: if the claim then fails because the
+        # order was cancelled concurrently, the only wasted work is a read. Its
+        # residual race -- a NEW un-QC'd job attached between check and claim --
+        # is caught at the deliver door, which re-runs this same predicate.
+        # Defence in depth holds in this direction and not in the other.
+        from .workshop import assert_linked_job_qc_cleared
+
+        assert_linked_job_qc_cleared(order)
+
         # READY is exactly the precondition the deliver guard requires, so a
         # resurrected order would deliver cleanly straight afterwards. Claim it.
         if _claim_order_status(
@@ -4460,6 +4513,13 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
 @router.post("/{order_id}/deliver")
 async def deliver_order(order_id: str, current_user: dict = Depends(get_current_user)):
     """Deliver order to customer"""
+    # RBAC: previously ANY authenticated role could deliver. HANDOVER_ROLES (not
+    # POS_WRITE_ROLES) -- see its definition for why the front-desk CASHIER must
+    # keep this.
+    if not any(r in current_user.get("roles", []) for r in HANDOVER_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to deliver orders."
+        )
     repo = get_order_repository()
 
     if repo is not None:
@@ -4480,6 +4540,17 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
                 status_code=400,
                 detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY.",
             )
+
+        # PATIENT SAFETY: THIS is the handover door the counter actually uses --
+        # payment and invoice live on the Orders screen, so its green "Mark
+        # Delivered" is the likelier of the two. Gating only the Workshop screen
+        # let a job the workshop gate was actively holding walk out in one click.
+        # Imports the SAME predicate the workshop gate uses -- never re-derive it.
+        # Runs AFTER the legality check so an order in the wrong status is told
+        # THAT, rather than being handed a QC instruction it does not yet need.
+        from .workshop import assert_linked_job_qc_cleared
+
+        assert_linked_job_qc_cleared(order)
 
         # Check payment status (allow partial for B2B customers)
         payment_status = order.get("payment_status", "UNPAID")

@@ -89,6 +89,25 @@ DEFAULT_STATIONS: List[dict] = [
 # Status values that mean the job can no longer be routed (terminal / branch).
 _TERMINAL_JOB_STATUSES = {"DELIVERED", "CANCELLED"}
 
+# PATIENT SAFETY: the ONLY statuses a station may be configured to advance a job
+# to. `advances_job_status` is written straight into workshop_jobs.status by a
+# scan, so an unvalidated value was a fail-open on two fronts:
+#   * an arbitrary string (e.g. "COLLECTED") landed in workshop_jobs.status,
+#     which is outside VALID_JOB_TRANSITIONS -- the job became unmovable by the
+#     PATCH (empty allowed-set) AND sailed past the QC handover gate, which only
+#     recognised the two canonical patient-facing names; and
+#   * it is editable at STORE_MANAGER tier, so a patient-safety gate could be
+#     configured away with no audit trail.
+# A safety gate must not be switchable off by config. PENDING / QC_FAILED /
+# CANCELLED are deliberately NOT here: a forward bench scan never moves a job
+# backwards or onto the QC-fail branch (that is the QC endpoints' job).
+VALID_ADVANCES_JOB_STATUS = (
+    "IN_PROGRESS",
+    "COMPLETED",
+    "READY",
+    "DELIVERED",
+)
+
 
 # ---------------------------------------------------------------------------
 # Station registry (lab_stations collection)
@@ -199,7 +218,9 @@ def upsert_station(
     """Create or update a single station config (keyed on store_id+code).
 
     Returns (ok, station_doc, error_reason). Validates `code` against the
-    canonical vocabulary -> UNKNOWN_STATION on a bad code. Fail-soft on no DB.
+    canonical vocabulary -> UNKNOWN_STATION on a bad code, and
+    `advances_job_status` against VALID_ADVANCES_JOB_STATUS ->
+    INVALID_ADVANCE_STATUS. Fail-soft on no DB.
     """
     coll = _stations_collection(db)
     if coll is None or not store_id:
@@ -207,6 +228,16 @@ def upsert_station(
     code_u = (code or "").strip().upper()
     if code_u not in VALID_STATION_CODES:
         return False, None, "UNKNOWN_STATION"
+
+    # PATIENT SAFETY: reject a status this station may not advance a job to
+    # BEFORE anything is written. An empty string still clears the flag (that is
+    # the documented way to make a station status-neutral), but an arbitrary
+    # value can no longer be persisted into workshop_jobs.status -- see
+    # VALID_ADVANCES_JOB_STATUS.
+    if advances_job_status is not None:
+        wanted = (advances_job_status or "").strip().upper()
+        if wanted and wanted not in VALID_ADVANCES_JOB_STATUS:
+            return False, None, "INVALID_ADVANCE_STATUS"
 
     # Ensure the store has its full default sequence BEFORE editing one station,
     # so a manager deactivating (say) COATING on a never-configured store does
@@ -480,15 +511,36 @@ def advance_lab_station(
     gate_block = None
     if advances_to:
         advances_to = str(advances_to).strip().upper() or None
+        # RE-VALIDATE ON READ, not just on write. upsert_station now rejects a
+        # value outside VALID_ADVANCES_JOB_STATUS, but any row written BEFORE
+        # that validation existed is still sitting in lab_stations and would be
+        # copied straight into workshop_jobs.status by the line below. Treating
+        # an unknown value as status-neutral makes the fix retroactive with no
+        # migration: the scan is still recorded, the status simply does not move.
+        if advances_to not in VALID_ADVANCES_JOB_STATUS:
+            logger.warning(
+                "[LAB_ROUTING] station %s for store %s has an invalid "
+                "advances_job_status %r - ignoring it (status left unchanged)",
+                code,
+                store_id,
+                advances_to,
+            )
+            advances_to = None
     if advances_to and advances_to != job_status:
         # SAFETY GATES (BUG-116c / BUG-116a / F9): the scan-driven status flip
         # must enforce the SAME gates as the workshop PATCH handler -- a scan may
         # NOT start a job (-> IN_PROGRESS) until sales confirm the fitting AND
         # (for an external-lab ORDERED lens) a Delivery Challan covers its SKU,
-        # nor mark it READY (-> patient pickup) without a QC pass/waiver. On a
-        # gate fail we keep the physical-station scan but DO NOT flip status and
-        # DO NOT auto-notify. Delegated to the single shared scan gate in
-        # workshop.py so this path and labels.scan_advance cannot drift apart.
+        # nor mark it READY (-> pickup shelf) or DELIVERED (-> handed to the
+        # patient at the PICKUP station) without a QC pass/waiver. On a gate fail
+        # we keep the physical-station scan but DO NOT flip status and DO NOT
+        # auto-notify. Delegated to the single shared scan gate in workshop.py so
+        # this path and labels.scan_advance cannot drift apart.
+        #
+        # PATIENT SAFETY: the PICKUP leg (-> DELIVERED) is the LAST gate before
+        # the glasses leave the store. A hold here is deliberately NOT a failed
+        # scan (a physical scan is always recorded) -- the caller surfaces
+        # status_gate_blocked=QC_REQUIRED and the job stays un-delivered.
         from ..routers.workshop import evaluate_scan_transition_gate
 
         gate_block = evaluate_scan_transition_gate(db, updated, advances_to)
@@ -504,7 +556,12 @@ def advance_lab_station(
                 logger.warning("[LAB_ROUTING] status transition failed: %s", e)
 
     _gate_msg = {
-        "QC_REQUIRED": " Status held: record/waive lens QC before marking READY.",
+        # Covers BOTH patient-facing legs: DISPATCH -> READY (pickup shelf) and
+        # PICKUP -> DELIVERED (handover). Do NOT hand the job over on this hold.
+        "QC_REQUIRED": (
+            " Status held: record/waive lens QC before marking READY or handing"
+            " the job to the customer."
+        ),
         "SALES_CONFIRM_REQUIRED": " Status held: sales must confirm the fitting before work starts.",
         "DC_REQUIRED": (
             " Status held: no Delivery Challan logged for this lens. Ask the"
