@@ -48,6 +48,7 @@ from ..dependencies import (
     get_audit_repository,
 )
 from ..services.file_store import (
+    ANY_KIND,
     get_file_store,
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
@@ -515,7 +516,10 @@ async def download_handoff_file(
     fs = get_file_store()
     if fs is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    blob = fs.get(file_id)
+    # ANY_KIND is deliberate: file_id is not from the request -- it was
+    # minted by fs.put() at upload and read back off the handoff after the
+    # uploader/recipient check, so the record IS the authorisation.
+    blob = fs.get(file_id, require_kind=ANY_KIND)
     if blob is None:
         raise HTTPException(status_code=404, detail="File no longer available")
 

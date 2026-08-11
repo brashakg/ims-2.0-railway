@@ -1020,22 +1020,45 @@ def test_resold_returned_unit_attributes_to_one_order_only(ctx):
     assert r.status_code == 201
 
     # Resell the same physical unit on ORD-2 via the real at-sale atomic claim.
+    # NOTE: claim_one_available now carries the F2 expiry floor, so the fake
+    # matcher must understand $gte (in-date phase) and the $or fallback branch
+    # (undated / legacy). These units carry no expiry_date, so they match the
+    # undated branch exactly as before.
     class _Coll:
         def __init__(self, units):
             self.units = units
 
+        @staticmethod
+        def _matches(d, flt):
+            for k, v in (flt or {}).items():
+                if k == "$or":
+                    if not any(_Coll._matches(d, c) for c in v):
+                        return False
+                elif isinstance(v, dict):
+                    val = d.get(k)
+                    for op, arg in v.items():
+                        if op == "$nin" and val in arg:
+                            return False
+                        if op == "$in" and val not in arg:
+                            return False
+                        if op == "$gte" and not (
+                            isinstance(val, str)
+                            and isinstance(arg, str)
+                            and val >= arg
+                        ):
+                            return False
+                        if op == "$not" and not isinstance(val, str):
+                            # {"$not": {"$type": "string"}} -- true for non-strings
+                            continue
+                        if op == "$not":
+                            return False
+                elif d.get(k) != v:
+                    return False
+            return True
+
         def find_one_and_update(self, flt, upd, **kw):
             for d in self.units:
-                ok = True
-                for k, v in flt.items():
-                    if isinstance(v, dict) and "$nin" in v:
-                        if d.get(k) in v["$nin"]:
-                            ok = False
-                            break
-                    elif d.get(k) != v:
-                        ok = False
-                        break
-                if ok:
+                if self._matches(d, flt):
                     d.update(upd.get("$set", {}))
                     return dict(d)
             return None

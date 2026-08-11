@@ -985,6 +985,71 @@ def test_both_doors_agree_on_one_shared_document(monkeypatch):
     assert orepo.status_updates == ["DELIVERED"]
 
 
+@pytest.mark.parametrize(
+    "endpoint, order_status, claimed",
+    [("deliver", "READY", "DELIVERED"), ("ready", "CONFIRMED", "READY")],
+)
+def test_qc_check_runs_before_the_status_claim(
+    monkeypatch, endpoint, order_status, claimed
+):
+    """PINS THE ORDER OF THE TWO OPERATIONS, not merely that both happen.
+
+    READY is EXACTLY the precondition the deliver guard requires, so claiming the
+    status before checking QC would leave the order fully deliverable -- with its
+    lens work never inspected -- for the whole interval between the claim and the
+    check, and a failing check would then have to unwind a status already
+    committed. This test exists because that reversal is one merge-conflict
+    resolution away: a future refactor that swaps the two lines goes RED here."""
+    calls: List[str] = []
+    real_qc = wm.assert_linked_job_qc_cleared
+
+    def spy_qc(order):
+        calls.append("qc")
+        return real_qc(order)
+
+    def spy_claim(repo, order_id, new_status, required_status, user_id):
+        calls.append(f"claim:{new_status}")
+        repo.update_status(order_id, new_status, user_id)
+        return True
+
+    monkeypatch.setattr(wm, "assert_linked_job_qc_cleared", spy_qc)
+    monkeypatch.setattr(om, "_claim_order_status", spy_claim)
+
+    client, orepo = _client(
+        monkeypatch,
+        _order(status=order_status, workshop_job_id="JID-1"),
+        [_wjob(qc_passed=True)],
+    )
+    resp = client.post(f"/api/v1/orders/ORD-1/{endpoint}")
+    assert resp.status_code == 200, resp.text
+    assert calls == ["qc", f"claim:{claimed}"], calls
+    assert orepo.status_updates == [claimed]
+
+
+@pytest.mark.parametrize(
+    "endpoint, order_status", [("deliver", "READY"), ("ready", "CONFIRMED")]
+)
+def test_blocked_qc_never_reaches_the_status_claim(monkeypatch, endpoint, order_status):
+    """The other half: when QC refuses, the claim must never run at all -- no
+    status is written that would then need unwinding."""
+    calls: List[str] = []
+
+    def spy_claim(repo, order_id, new_status, required_status, user_id):
+        calls.append(f"claim:{new_status}")
+        return True
+
+    monkeypatch.setattr(om, "_claim_order_status", spy_claim)
+
+    client, orepo = _client(
+        monkeypatch,
+        _order(status=order_status, workshop_job_id="JID-1"),
+        [_wjob()],  # un-QC'd
+    )
+    assert client.post(f"/api/v1/orders/ORD-1/{endpoint}").status_code == 400
+    assert calls == []
+    assert orepo.status_updates == []
+
+
 def test_ready_gate_runs_after_the_legality_check(monkeypatch):
     """An order in the wrong status must be told THAT, not handed a QC
     instruction it does not yet need."""

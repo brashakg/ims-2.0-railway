@@ -16,6 +16,7 @@ from .auth import get_current_user, require_roles
 from ..dependencies import get_expense_repository, get_advance_repository, get_db
 from ..dependencies import validate_store_access
 from ..services.file_store import (
+    ANY_KIND,
     get_file_store,
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
@@ -896,7 +897,10 @@ async def download_bill(
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
 
-    rec = store.get(file_id)
+    # ANY_KIND is deliberate: file_id is not from the request -- it was
+    # minted by store.put() at bill upload and read back off this expense
+    # after _assert_expense_object_access, so the record IS the authorisation.
+    rec = store.get(file_id, require_kind=ANY_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="Bill file no longer available")
 

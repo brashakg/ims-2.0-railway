@@ -49,17 +49,29 @@ def test_no_pymongo_collection_truthiness_in_routers() -> None:
     `if collection is not None:` instead.
     """
     bad: list[str] = []
+    scanned = 0
     scan_dirs = [_BACKEND_ROOT / "routers", _BACKEND_ROOT / "services"]
     for scan_dir in scan_dirs:
-        if not scan_dir.exists():
-            continue
+        assert scan_dir.exists(), (
+            f"{scan_dir} does not exist -- this guard would silently scan "
+            f"nothing and pass. Fix the path, do not skip the directory."
+        )
         for py_file in scan_dir.rglob("*.py"):
             text = py_file.read_text(encoding="utf-8")
+            scanned += 1
             for pattern in _PATTERNS:
                 for match in pattern.finditer(text):
                     # Locate the line number for a useful error message.
                     line_no = text[: match.start()].count("\n") + 1
                     bad.append(f"{py_file.relative_to(_BACKEND_ROOT.parent)}:{line_no}: {match.group(0).strip()}")
+
+    # Coverage floor -- see the note in test_no_legacy_stock_collection.py: a
+    # sweep that reads no files passes vacuously.
+    assert scanned >= 50, (
+        f"the scan only read {scanned} file(s) under routers/ + services/ -- "
+        f"its 'clean' verdict cannot be trusted"
+    )
+
     assert not bad, (
         "PyMongo 4.x raises on `bool(collection)`. Use `if X is not None:` instead.\n"
         "Found:\n  " + "\n  ".join(bad)

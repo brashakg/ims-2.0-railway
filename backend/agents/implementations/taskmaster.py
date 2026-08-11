@@ -34,6 +34,19 @@ from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 
 logger = logging.getLogger(__name__)
 
+# SLA auto-escalation scan bounds (F14) -- MIRRORS
+# api/routers/tasks.py:ESCALATION_SCAN_* so the 5-minute tick and the
+# /tasks/auto-escalate-overdue endpoint scan the same way. The old
+# `.limit(200)` over an UNORDERED query meant a genuinely breached P0/P1
+# outside that arbitrary slice never escalated. (Duplicated rather than
+# imported: an agent must not import an API router -- circular import.)
+_ESCALATION_SCAN_PAGE_SIZE = 500
+_ESCALATION_SCAN_MAX_PAGES = 40  # 40 * 500 = 20,000 candidates per tick
+_ESCALATION_SCAN_MAX_ACTIONS = 1000
+# Most-overdue first; a task with no due_at sorts first (Mongo orders
+# missing/null before values) -- those are ack-clock candidates, oldest first.
+_ESCALATION_SCAN_SORT = [("due_at", 1), ("created_at", 1)]
+
 
 class TaskmasterAgent(JarvisAgent):
     """Real execution — SLA escalation, auto-reorder, SOP enforcement."""
@@ -240,13 +253,22 @@ class TaskmasterAgent(JarvisAgent):
         the exact same decision AND pick the same next owner. Honours any
         persisted SLA overrides (task_sla_config). Reassigns ownership to the
         resolved manager (Store Manager -> Area Manager -> Admin -> Superadmin),
-        scoped to the task's store."""
+        scoped to the task's store.
+
+        The candidate scan is ORDERED (most-overdue first) and PAGED across the
+        whole non-terminal set -- see _ESCALATION_SCAN_* at module top. It used
+        to read one unordered `.limit(200)` slice, so a breached P0 outside that
+        slice never escalated at all."""
         coll = self.get_collection("tasks")
         if coll is None:
             return []
         # Lazy import (matches nexus.py) -- `api.*` is on path at runtime.
         try:
-            from api.services.task_sla import should_escalate, DEFAULT_SLA
+            from api.services.task_sla import (
+                should_escalate,
+                DEFAULT_SLA,
+                MAX_ESCALATION_LEVEL,
+            )
             from api.services.task_escalation import resolve_escalation_target
             from api.services.task_notify import notify_escalation
         except Exception as e:
@@ -284,29 +306,55 @@ class TaskmasterAgent(JarvisAgent):
         actions = []
         try:
             now = datetime.now()
-            candidates = list(
-                coll.find(
-                    {
-                        # Incl. ESCALATED: an ignored task climbs the ladder
-                        # again on each fresh breach (multi-hop). should_escalate
-                        # gates cadence + level so this can't storm.
-                        "status": {
-                            "$in": [
-                                "OPEN",
-                                "IN_PROGRESS",
-                                "ESCALATED",
-                                "open",
-                                "in_progress",
-                                "escalated",
-                            ]
-                        },
-                    }
-                ).limit(200)
-            )
-            for task in candidates:
-                flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
-                if not flag:
-                    continue
+            query = {
+                # Incl. ESCALATED: an ignored task climbs the ladder
+                # again on each fresh breach (multi-hop). should_escalate
+                # gates cadence + level so this can't storm.
+                "status": {
+                    "$in": [
+                        "OPEN",
+                        "IN_PROGRESS",
+                        "ESCALATED",
+                        "open",
+                        "in_progress",
+                        "escalated",
+                    ]
+                },
+                # Server-side: drop tasks that have topped out the ladder --
+                # should_escalate always says False at/above the cap, so they
+                # are scan ballast that would crowd live breaches out of the
+                # page window. $not/$gte so a doc with no field still matches.
+                "escalation_level": {"$not": {"$gte": MAX_ESCALATION_LEVEL}},
+            }
+            # Pass 1 -- READ-ONLY: page through the WHOLE candidate set,
+            # most-overdue first, keeping only genuine breaches. Nothing is
+            # written here on purpose: escalating mid-scan would move documents
+            # relative to the skip window and could push an un-scanned breach
+            # past the cursor. Memory stays bounded to one page + the breach
+            # list (itself capped).
+            breached = []
+            for page in range(_ESCALATION_SCAN_MAX_PAGES):
+                batch = list(
+                    coll.find(query)
+                    .sort(_ESCALATION_SCAN_SORT)
+                    .skip(page * _ESCALATION_SCAN_PAGE_SIZE)
+                    .limit(_ESCALATION_SCAN_PAGE_SIZE)
+                )
+                if not batch:
+                    break
+                for task in batch:
+                    flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
+                    if flag:
+                        breached.append((task, reason))
+                if len(breached) >= _ESCALATION_SCAN_MAX_ACTIONS:
+                    breached = breached[:_ESCALATION_SCAN_MAX_ACTIONS]
+                    break
+                if len(batch) < _ESCALATION_SCAN_PAGE_SIZE:
+                    break
+
+            # Pass 2 -- act. Behaviour below is unchanged (same role ladder,
+            # same audit log, same notification); only WHICH tasks reach it.
+            for task, reason in breached:
                 new_level = task.get("escalation_level", 0) + 1
                 before = {
                     "status": task.get("status"),
