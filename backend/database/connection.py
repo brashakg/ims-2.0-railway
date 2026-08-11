@@ -283,6 +283,21 @@ class DatabaseConnection:
             background=True,
         )
 
+        # Returns: the Day-End drawer readers scan this collection on every
+        # cash-register preview poll and every Z-Read, and the per-tender refund
+        # cap + the returnable-qty scan hit it by order_id on every debounced
+        # refund quote keystroke. The collection also carries the bulk Shopify
+        # historical import, so an unindexed scan is a real hot-path cost at a
+        # busy counter (measured in prod: only _id_ and uniq_shopify_refund_id
+        # existed). Window scan is (store_id, status, created_at desc); the
+        # per-order lookups are order_id.
+        _idx(
+            "returns",
+            [("store_id", 1), ("status", 1), ("created_at", -1)],
+            background=True,
+        )
+        _idx("returns", "order_id", background=True)
+
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.
         # (product_id, store_id, status) covers both filtering + grouping in the

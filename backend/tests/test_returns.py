@@ -36,6 +36,30 @@ from api.routers import auth as auth_mod  # noqa: E402
 # ============================================================================
 
 
+
+class _FakeProductRepoForExchange:
+    """Catalog stand-in for EXCHANGE replacement pricing.
+
+    The server resolves a replacement line's price from the product master
+    (never the client payload) because the settlement difference drives a real
+    cash collection. Keyed by SKU so each test can price its own replacement.
+    """
+
+    _CATALOG = {
+        "OK-9": 2500.0,
+        "LF-9": 900.0,
+    }
+
+    def find_by_id(self, pid):
+        return None
+
+    def find_by_sku(self, sku):
+        price = self._CATALOG.get(str(sku))
+        if price is None:
+            return None
+        return {"product_id": "PRD-9", "sku": sku, "offer_price": price}
+
+
 def test_returned_value_basic():
     items = [
         {"return_qty": 2, "unit_price": 1500},
@@ -369,7 +393,10 @@ def ctx(monkeypatch):
     monkeypatch.setattr(
         returns_router, "get_customer_repository", lambda: customer_repo
     )
-    monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
+    monkeypatch.setattr(
+        returns_router, "get_product_repository",
+        lambda: _FakeProductRepoForExchange(),
+    )
     # Patch the local get_db import target used by _get_db().
     monkeypatch.setattr(
         "api.dependencies.get_db", lambda: fake_db, raising=False

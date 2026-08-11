@@ -467,6 +467,21 @@ function ReconcileView({
             </div>
           </dl>
 
+          {/* Double-count advisory: a recorded cash refund AND a manual cash
+              payout/expense in the window may be the same money entered twice. */}
+          {preview?.refund_double_entry_advisory && (
+            <div className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{preview.refund_double_entry_advisory.message}</span>
+            </div>
+          )}
+          {preview?.negative_expected_advisory && (
+            <div className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{preview.negative_expected_message}</span>
+            </div>
+          )}
+
           {/* Variance banner */}
           <div
             className={`mt-4 rounded-lg px-3 py-3 flex items-center gap-2 text-sm font-medium ${
