@@ -677,6 +677,16 @@ class TestFinancePayrollHrRoutes:
         ("POST", "/api/v1/payroll/salary/calculate", ["ADMIN"],
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"],
          {"employee_id": "EMP-DUMMY-1", "month": 5, "year": 2026, "working_days": 26}),
+        # Round-6: the salary-ADVANCE writes, the write twins of the advances
+        # read gated in round 3. Pinned here immediately so they cannot become
+        # the next unpinned pair.
+        ("POST", "/api/v1/payroll/advances", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"],
+         {"employee_id": "EMP-DUMMY-1", "amount": 1000.0,
+          "date_requested": "2026-05-04", "reason": "dummy"}),
+        ("POST", "/api/v1/payroll/advances/ADV-DUMMY-1/settle", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"],
+         {"advance_id": "ADV-DUMMY-1", "settlement_month": 5, "settlement_year": 2026}),
     ]
 
     @pytest.mark.parametrize(

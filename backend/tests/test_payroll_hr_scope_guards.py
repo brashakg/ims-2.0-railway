@@ -161,6 +161,9 @@ class _FakeColl:
     def __init__(self, docs=None):
         self.docs = [dict(d) for d in (docs or [])]
         self.inserted = []
+        # Every mutation counted, so a gate test can assert "403 AND nothing
+        # was written" -- a 403 with a write behind it is not a closed door.
+        self.writes = 0
 
     def find_one(self, query=None, projection=None):
         for d in self.docs:
@@ -174,6 +177,7 @@ class _FakeColl:
     def insert_one(self, doc):
         self.inserted.append(dict(doc))
         self.docs.append(dict(doc))
+        self.writes += 1
         return type("_R", (), {"inserted_id": "fake"})()
 
     def update_many(self, query=None, update=None):
@@ -183,7 +187,16 @@ class _FakeColl:
             if _matches(d, query or {}):
                 d.update((update or {}).get("$set", {}))
                 changed += 1
+        self.writes += changed
         return type("_R", (), {"modified_count": changed})()
+
+    def update_one(self, query=None, update=None):
+        for d in self.docs:
+            if _matches(d, query or {}):
+                d.update((update or {}).get("$set", {}))
+                self.writes += 1
+                return type("_R", (), {"modified_count": 1})()
+        return type("_R", (), {"modified_count": 0})()
 
 
 class _FakeDb:
@@ -306,7 +319,13 @@ def _payroll_db():
                         "employee_id": OTHER_ID,
                         "amount": 5000.0,
                         "status": "PENDING",
-                    }
+                    },
+                    {
+                        "advance_id": "adv-other",
+                        "employee_id": OTHER_ID,
+                        "amount": 7500.0,
+                        "status": "pending",
+                    },
                 ]
             ),
             "incentives": _FakeColl(
@@ -1370,3 +1389,99 @@ def test_salary_calculate_still_works_for_admin(payroll_client):
         headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
     )
     assert r.status_code in (200, 201), r.text
+
+
+# ===========================================================================
+# E. SALARY-ADVANCE WRITES (round 6)
+# ===========================================================================
+# The read GET /payroll/advances/{id} was gated in round 3 with the docstring
+# "an outstanding advance is a deduction from pay, so it is salary data." Its
+# two WRITE twins, twelve lines away, stayed on Depends(get_current_user): any
+# manager-tier caller could CREATE an advance against any employee org-wide
+# (_get_employee_details does a bare find_one with no store scope, and the row
+# is stamped with the CALLER's active_store_id, so it crosses stores AND legal
+# entities) and could mark any advance settled -- while being unable to read
+# either back. No money moves today (nothing in the payroll run reads
+# salary_advances), but settle answers "Advance settled and will be deducted
+# from salary", a promise the code does not yet keep. Gating it now is what
+# stops that becoming real the day someone wires the deduction.
+
+
+def _advances_coll(payroll_client):
+    """The seeded salary_advances collection behind the client fixture."""
+    return payroll_mod._get_db().get_collection("salary_advances")
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_advance_create_is_admin_only(payroll_client, role):
+    """403 AND zero writes -- a 403 with a row behind it is not a closed door."""
+    coll = _advances_coll(payroll_client)
+    before = coll.writes
+    r = payroll_client.post(
+        "/payroll/advances",
+        json={
+            "employee_id": OTHER_ID,
+            "amount": 4000.0,
+            "date_requested": "2026-05-04",
+            "reason": "fabricated by a non-admin",
+        },
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    assert coll.writes == before, f"{role} wrote {coll.writes - before} advance row(s)"
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_advance_create_refuses_even_your_own_id(payroll_client, role):
+    """ADMIN-only, not self-or-admin: authoring a deduction against yourself is
+    still authoring pay data (and would be the obvious way to launder one)."""
+    coll = _advances_coll(payroll_client)
+    before = coll.writes
+    r = payroll_client.post(
+        "/payroll/advances",
+        json={
+            "employee_id": SELF_ID,
+            "amount": 4000.0,
+            "date_requested": "2026-05-04",
+            "reason": "own id",
+        },
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    assert coll.writes == before
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_advance_settle_is_admin_only(payroll_client, role):
+    coll = _advances_coll(payroll_client)
+    before = coll.writes
+    r = payroll_client.post(
+        "/payroll/advances/adv-other/settle",
+        json={"advance_id": "adv-other", "settlement_month": 5, "settlement_year": 2026},
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    assert coll.writes == before, f"{role} settled an advance it cannot read"
+    # ... and the row is untouched.
+    assert coll.find_one({"advance_id": "adv-other"})["status"] == "pending"
+
+
+@pytest.mark.parametrize("role", ADMIN_PAY_ROLES)
+def test_advance_writes_still_work_for_admin(payroll_client, role):
+    created = payroll_client.post(
+        "/payroll/advances",
+        json={
+            "employee_id": OTHER_ID,
+            "amount": 4000.0,
+            "date_requested": "2026-05-04",
+            "reason": "legitimate",
+        },
+        headers=_auth(_token([role], user_id="u-admin", store_ids=[])),
+    )
+    assert created.status_code == 201, f"{role}: {created.text}"
+    settled = payroll_client.post(
+        "/payroll/advances/adv-1/settle",
+        json={"advance_id": "adv-1", "settlement_month": 5, "settlement_year": 2026},
+        headers=_auth(_token([role], user_id="u-admin", store_ids=[])),
+    )
+    assert settled.status_code == 200, f"{role}: {settled.text}"

@@ -1018,7 +1018,26 @@ async def calculate_salary(
 async def record_salary_advance(
     advance: SalaryAdvance, current_user: dict = Depends(get_current_user)
 ):
-    """Record a salary advance"""
+    """Record a salary advance.
+
+    OWNER RULING 2026-08-09/10, WRITE side: ADMIN/SUPERADMIN only, matching the
+    read twin twelve lines below (GET /payroll/advances/{employee_id}), whose
+    own docstring is the argument -- "an outstanding advance is a deduction from
+    pay, so it is salary data". Gating one direction of the same data was the
+    repo's dominant defect shape landing inside the file that had just swept
+    for it.
+
+    Reach before this gate: ANY manager-tier caller could author an advance
+    against ANY employee ORG-WIDE. _get_employee_details resolves the name with
+    a bare find_one({"user_id": ...}) and no store scope, and the row is stamped
+    with the CALLER's active_store_id -- so the record crossed stores and legal
+    entities, and its author could not read it back.
+
+    ADMIN-only rather than self-or-admin, for the same reason as
+    /salary/calculate: seeing your own pay is harmless, AUTHORING a deduction
+    against yourself is the obvious way to launder one.
+    """
+    _assert_salary_admin(current_user, "record a salary advance")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1101,7 +1120,16 @@ async def settle_salary_advance(
     settlement: AdvanceSettlement = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Settle advance against salary"""
+    """Settle advance against salary.
+
+    OWNER RULING 2026-08-09/10, WRITE side: ADMIN/SUPERADMIN only, matching the
+    read twin. Before this gate any manager-tier caller could mark ANY advance
+    settled without being able to read it -- and the response says "Advance
+    settled and will be deducted from salary", a promise nothing in the payroll
+    run currently keeps. Gating it now is what stops that becoming a real
+    deduction the day someone wires it up.
+    """
+    _assert_salary_admin(current_user, "settle a salary advance")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

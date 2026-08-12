@@ -5073,12 +5073,12 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/advances",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/payroll/advances/{advance_id}/settle",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
