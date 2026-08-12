@@ -1724,8 +1724,16 @@ class TestLensPowerComboCreateGate:
         assert body["created_by"] == "u-" + role.lower()
         assert body["store_id"] == "BV-MATRIX-01"
 
+    # AREA_MANAGER leads the list deliberately: it is the ONE role whose access
+    # this PR actually decided, and the only one a future edit is likely to put
+    # back. The other four were never in dispute. Without AREA_MANAGER here the
+    # complete revert -- AREA_MANAGER re-added to _CLINICAL_ROLES and to both
+    # POLICY rows -- ships GREEN (measured: 619 passed, zero red) while a
+    # supervisory Area Manager silently regains create/delete on other stores'
+    # shared clinical Rx templates. See feedback_hollow_tests.md.
     @pytest.mark.parametrize(
-        "role", ["SALES_STAFF", "CASHIER", "SALES_CASHIER", "WORKSHOP_STAFF"]
+        "role",
+        ["AREA_MANAGER", "SALES_STAFF", "CASHIER", "SALES_CASHIER", "WORKSHOP_STAFF"],
     )
     def test_non_clinical_role_is_forbidden(self, matrix_client, monkeypatch, role):
         col = _stub_combo_col(monkeypatch, _FakeComboCol())
@@ -1808,7 +1816,11 @@ class TestLensPowerComboDeleteGate:
         )
         assert resp.status_code == 404, resp.text
 
-    @pytest.mark.parametrize("role", ["SALES_STAFF", "CASHIER"])
+    # AREA_MANAGER first, for the same reason as the create door: it is the only
+    # role this PR's decision moved, so it is the only one whose denial protects
+    # that decision. A combo is a SHARED clinical template -- an Area Manager
+    # regaining delete would reach OTHER stores' templates.
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "SALES_STAFF", "CASHIER"])
     def test_non_clinical_role_is_forbidden(self, matrix_client, monkeypatch, role):
         col = _stub_combo_col(
             monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
@@ -1909,6 +1921,17 @@ class TestNoMalformedRoleGateAnywhere:
 
         gates, inspected, _malformed = self._scan(_app)
         assert gates > 100, f"expected hundreds of require_roles gates, saw {gates}"
+        # NOTE on reach: this is a GLOBAL SUM, so it is only equivalent to the
+        # per-gate invariant "every gate yielded exactly one allow-collection"
+        # while every gate really does hold exactly one. That holds today -- the
+        # real-app per-gate histogram is exactly {1: 539} -- so a 2-cell gate
+        # paired with a 0-cell one would currently cancel out and hide. What
+        # would break the equivalence: a require_roles closure gaining a second
+        # collection cell, an app.mount() sub-app (api/main.py has zero), or a
+        # second Depends(require_*( gate factory (require_roles is the only one
+        # across 401 sites). If any of those lands, switch this to a per-gate
+        # assertion. The scan also cannot see a comma-joined or misspelled role
+        # STRING -- that is a different class, covered by the role matrices above.
         assert inspected == gates, (
             f"the malformed-gate scan walked {gates} require_roles gates but "
             f"could only read an allow-collection out of {inspected} of them. "
@@ -2240,15 +2263,40 @@ class TestLensPowerComboListGate:
                         call, "__qualname__", ""
                     ).startswith("require_roles.<locals>"):
                         for cell in call.__closure__ or ():
-                            if isinstance(cell.cell_contents, (set, frozenset)):
+                            # Same widened container check as _scan above. This
+                            # sibling was left on (set, frozenset) for a round,
+                            # so the production-PRESERVING refactor
+                            # `allowed = list(...)` + `roles & set(allowed)` made
+                            # this assertion fire and claim the gate was missing
+                            # -- a false diagnostic pointing at a file the
+                            # developer never touched. Keep the two in step.
+                            if isinstance(
+                                cell.cell_contents, (set, frozenset, list, tuple)
+                            ):
                                 gate_sets.append(set(cell.cell_contents))
                     stack.extend(getattr(node, "dependencies", None) or [])
                 assert gate_sets, (
                     "GET /lens-power-combos has no require_roles gate -- it is "
                     "relying on its POLICY row alone, the asymmetry that "
-                    "produced the malformed-tuple bug on its write twins."
+                    "produced the malformed-tuple bug on its write twins. "
+                    "(If require_roles' closure shape changed, widen the "
+                    "container check just above before believing this message.)"
                 )
                 assert set(_COMBO_READ_ROLES) in gate_sets, gate_sets
+                # ...and the constant must AGREE with the POLICY row it claims to
+                # mirror. Asserting only `set(_COMBO_READ_ROLES) in gate_sets`
+                # imports the very constant under test, so widening the constant
+                # moves the expectation with the subject and nothing fails. Pin
+                # it to the POLICY literal instead: the handler gate can then
+                # never drift from the middleware row while outside access looks
+                # unchanged.
+                _row = policy_for("GET", _COMBOS_PATH)
+                assert set(_COMBO_READ_ROLES) == set(_row["allowed"]), (
+                    "clinical._COMBO_READ_ROLES and the GET POLICY row have "
+                    "drifted apart",
+                    sorted(_COMBO_READ_ROLES),
+                    sorted(_row["allowed"]),
+                )
                 break
         else:  # pragma: no cover - route must exist
             pytest.fail("GET /lens-power-combos route not found")
