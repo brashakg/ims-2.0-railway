@@ -182,18 +182,87 @@ def test_budget_empty_state_has_no_budget_set_flag():
         ), f"category {cat} has fabricated budget {vals['budget']}"
 
 
-def test_budget_empty_state_not_fabricated():
-    """Verify the OLD fabricated values (50000, 200000, etc.) are NOT in the new code."""
-    import inspect
-    from api.routers import finance as fin_mod
+def test_budget_endpoint_returns_zeroes_when_none_configured(
+    client, auth_headers, monkeypatch
+):
+    """BEHAVIOURAL: with no budget row for the period the endpoint must return
+    an honest empty skeleton -- every category at 0 and no_budget_set True --
+    not the old fabricated allocations (50000 / 200000 / 500000).
 
-    src = inspect.getsource(fin_mod.get_budget)
-    # The old code hardcoded these amounts; they must NOT appear in the new code.
-    for bad_val in ("50000", "200000", "500000"):
-        assert bad_val not in src, (
-            f"Found fabricated budget amount {bad_val} in get_budget source -- "
-            "should be 0 for honest empty state"
-        )
+    Replaces a grep of get_budget's source for those literals, which would keep
+    passing if the fabricated numbers were merely moved into a helper or a
+    module-level constant.
+    """
+    from api.routers import finance as fin_mod
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+
+    resp = client.get("/api/v1/finance/budget?month=6&year=2026", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["no_budget_set"] is True, body
+    assert body["categories"], "the skeleton must still name the categories"
+    for cat, vals in body["categories"].items():
+        assert vals["budget"] == 0, f"category {cat} has fabricated budget {vals['budget']}"
+        assert vals["actual"] == 0, f"category {cat} has fabricated actual {vals['actual']}"
+
+
+def test_budget_endpoint_uses_a_configured_budget_when_present(
+    client, auth_headers, monkeypatch
+):
+    """The zero skeleton must be the EMPTY-state answer, not an unconditional
+    one -- otherwise the test above would pass on a permanently broken reader."""
+    from api.routers import finance as fin_mod
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.seed(
+        "budgets",
+        [
+            {
+                "month": 6,
+                "year": 2026,
+                "mode": "full",
+                "categories": {"rent": {"budget": 40000, "actual": 0}},
+            }
+        ],
+    )
+    monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+
+    body = client.get(
+        "/api/v1/finance/budget?month=6&year=2026", headers=auth_headers
+    ).json()
+    assert body.get("no_budget_set") is not True, body
+    assert body["categories"]["rent"]["budget"] == 40000, body
+
+
+def test_budget_actuals_come_from_recorded_expenses(client, auth_headers, monkeypatch):
+    """Actuals are read from APPROVED/PAID expenses dated in the period."""
+    from api.routers import finance as fin_mod
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.seed(
+        "expenses",
+        [
+            {"expense_id": "e1", "category": "rent", "amount": 12000.0,
+             "expense_date": "2026-06-05", "status": "APPROVED"},
+            # Out of period -- must not be counted.
+            {"expense_id": "e2", "category": "rent", "amount": 99000.0,
+             "expense_date": "2026-05-05", "status": "APPROVED"},
+            # In period but still pending approval -- must not be counted.
+            {"expense_id": "e3", "category": "rent", "amount": 55000.0,
+             "expense_date": "2026-06-07", "status": "PENDING"},
+        ],
+    )
+    monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+
+    body = client.get(
+        "/api/v1/finance/budget?month=6&year=2026", headers=auth_headers
+    ).json()
+    assert body["categories"]["rent"]["actual"] == 12000.0, body
 
 
 # ============================================================================
@@ -201,21 +270,73 @@ def test_budget_empty_state_not_fabricated():
 # ============================================================================
 
 
-def test_nps_followup_uses_scheduled_date():
-    """The NPS-detractor follow-up insert must use 'scheduled_date' (not 'due_date')
-    and include 'customer_phone' so the follow-ups dashboard renders it."""
-    import inspect
+def _nps_env(monkeypatch):
+    """Strict DB behind the marketing router, pre-seeded with one NPS survey."""
     from api.routers import marketing as mkt_mod
+    from strict_fakes import StrictDB
 
-    src = inspect.getsource(mkt_mod.submit_nps_response)
-    # The fix adds scheduled_date and customer_phone to the insert block.
-    assert "scheduled_date" in src, "NPS follow-up must use 'scheduled_date'"
-    assert "customer_phone" in src, "NPS follow-up must include 'customer_phone'"
-    # 'due_date' may appear in comments but the insert dict must not use it.
-    # Check the insert block specifically by looking for both key patterns.
-    # The fix uses 'scheduled_date': ...; the old code used 'due_date': ...
-    assert '"scheduled_date"' in src, "insert dict must have 'scheduled_date' key"
-    assert '"due_date"' not in src, "insert dict must NOT use 'due_date' key"
+    db = StrictDB()
+    db.seed(
+        "nps_responses",
+        [
+            {
+                "nps_id": "NPS-1",
+                "customer_id": "cust-9",
+                "customer_name": "Asha",
+                "store_id": "BV-TEST-01",
+                "status": "SENT",
+            }
+        ],
+    )
+    db.seed(
+        "customers",
+        [{"customer_id": "cust-9", "name": "Asha", "mobile": "9876500011"}],
+    )
+    monkeypatch.setattr(mkt_mod, "_get_db", lambda: db)
+    return db
+
+
+def test_nps_detractor_writes_a_renderable_followup(client, auth_headers, monkeypatch):
+    """BEHAVIOURAL: submit a detractor score and inspect the follow-up row that
+    was actually written.
+
+    The follow-ups dashboard reads `scheduled_date` and `customer_phone`; the
+    original bug wrote `due_date` and no phone, so the row existed but rendered
+    blank. Replaces a source grep whose ``'"due_date"' not in src`` clause was
+    additionally fragile -- an unrelated comment mentioning the field would
+    have failed it, and moving the insert into a helper would have passed it.
+    """
+    db = _nps_env(monkeypatch)
+
+    resp = client.post(
+        "/api/v1/marketing/nps-response",
+        headers=auth_headers,
+        json={"nps_id": "NPS-1", "score": 3, "feedback": "Long wait"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    rows = db.get_collection("follow_ups").docs
+    assert len(rows) == 1, f"a detractor must raise exactly one follow-up: {rows!r}"
+    row = rows[0]
+    assert row.get("scheduled_date"), f"follow-up must carry scheduled_date: {row!r}"
+    assert "due_date" not in row, f"follow-up must not use the legacy due_date: {row!r}"
+    assert row.get("customer_phone") == "9876500011", row
+    assert row.get("customer_id") == "cust-9"
+    assert row.get("status") == "pending"
+    assert "3" in (row.get("notes") or ""), row
+
+
+def test_nps_promoter_raises_no_followup(client, auth_headers, monkeypatch):
+    """Only detractors (score <= 6) generate follow-ups."""
+    db = _nps_env(monkeypatch)
+
+    resp = client.post(
+        "/api/v1/marketing/nps-response",
+        headers=auth_headers,
+        json={"nps_id": "NPS-1", "score": 9},
+    )
+    assert resp.status_code == 200, resp.text
+    assert db.get_collection("follow_ups").docs == []
 
 
 # ============================================================================

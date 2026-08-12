@@ -5763,6 +5763,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/returns/",
         "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
+    # Read-only authoritative money preview for a return (no side effects). Same
+    # role set as creating the return -- it echoes order money + tender figures.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/quote",
+        "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/returns/{return_id}",

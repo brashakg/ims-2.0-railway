@@ -5,33 +5,97 @@ StockRepository.claim_one_available must claim exactly one AVAILABLE unit per
 call via find_one_and_update(status="AVAILABLE"), flip it SOLD, and never hand
 the SAME unit to two callers. This is the data-integrity guard behind the POS
 _mark_units_sold FIFO path (replacing the prior find-then-mark check-then-act).
+
+F2 (2026-08 audit) updated this harness twice over:
+  * the FEFO fixtures used HARD-CODED expiry dates that have since gone past,
+    so they were silently asserting "the most-expired unit is dispensed first" --
+    the very defect F2 fixes. Every expiry is now RELATIVE to IST today, so the
+    intent (earliest-expiry-first among IN-DATE units) is what is actually
+    tested, forever;
+  * the fake matcher now models $in / $gte / $or / $not+$type with Mongo's BSON
+    type-bracketing, because the expiry floor relies on it.
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
+from datetime import date, datetime, timedelta
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from api.utils.ist import ist_today  # noqa: E402
+
+_MISSING = object()
+
+
+def _iso(delta_days: int) -> str:
+    """An ISO expiry date relative to IST today (negative == already expired)."""
+    return (ist_today() + timedelta(days=delta_days)).isoformat()
+
+
+def _same_bson_type(a, b) -> bool:
+    """Mongo compares only values of the same BSON type ('type bracketing')."""
+    if isinstance(a, str) and isinstance(b, str):
+        return True
+    if isinstance(a, (datetime, date)) and isinstance(b, (datetime, date)):
+        return True
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool)
+    return isinstance(a, (int, float)) and isinstance(b, (int, float))
+
+
+def _op(val, op, arg) -> bool:
+    if op == "$in":
+        return (None if val is _MISSING else val) in arg
+    if op == "$nin":
+        return (None if val is _MISSING else val) not in arg
+    if op == "$ne":
+        return not (val is not _MISSING and val == arg)
+    if op == "$gte":
+        return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
+    if op == "$type":
+        if arg == "string":
+            return isinstance(val, str)
+        if arg == "date":
+            # BSON date-typed values -- the shape inventory._parse_expiry reads
+            # natively and buckets as EXPIRED, so the floor must reach them too.
+            return isinstance(val, (datetime, date)) and not isinstance(val, bool)
+        return False
+    if op == "$regex":
+        # Mongo $regex only ever matches STRING values -- that type-bracketing is
+        # exactly what makes the ISO-shape branch of the expiry floor work.
+        return isinstance(val, str) and re.search(arg, val) is not None
+    raise AssertionError("fake collection: unsupported operator " + op)
+
 
 def _matches(doc, flt):
-    for k, v in flt.items():
-        if isinstance(v, dict):
-            if "$nin" in v and doc.get(k) in v["$nin"]:
+    for k, v in (flt or {}).items():
+        if k == "$or":
+            if not any(_matches(doc, c) for c in v):
                 return False
-            if "$exists" in v and bool(v["$exists"]) != (k in doc):
-                return False
-            if "$ne" in v and k in doc and doc.get(k) == v["$ne"]:
-                return False
-        elif doc.get(k) != v:
+            continue
+        if isinstance(v, dict) and any(str(o).startswith("$") for o in v):
+            val = doc.get(k, _MISSING)
+            for op, arg in v.items():
+                if op == "$exists":
+                    if bool(arg) != (k in doc):
+                        return False
+                elif op == "$not":
+                    if all(_op(val, o2, a2) for o2, a2 in arg.items()):
+                        return False
+                elif not _op(val, op, arg):
+                    return False
+            continue
+        if doc.get(k) != v:
             return False
     return True
 
 
 class _FakeColl:
-    """Minimal find_one_and_update with $set + $nin/$exists/$ne + sort,
-    mutating in place (mirrors the pymongo surface the FEFO claim uses)."""
+    """Minimal find_one_and_update with $set + the operators the claim uses,
+    mutating in place (mirrors the pymongo surface the FEFO claim relies on)."""
 
     def __init__(self, docs):
         self.docs = docs
@@ -41,7 +105,7 @@ class _FakeColl:
         if sort:
             for key, direction in reversed(list(sort)):
                 candidates.sort(
-                    key=lambda d, k=key: d.get(k), reverse=direction == -1
+                    key=lambda d, k=key: str(d.get(k)), reverse=direction == -1
                 )
         if not candidates:
             return None
@@ -112,9 +176,9 @@ def _unit(sid, expiry=..., status="AVAILABLE"):
 def test_fefo_dated_units_claimed_earliest_expiry_first():
     # Natural (insertion) order deliberately NOT the expiry order.
     docs = [
-        _unit("U-LATE", "2027-01-01"),
-        _unit("U-EARLY", "2026-08-01"),
-        _unit("U-MID", "2026-12-15"),
+        _unit("U-LATE", _iso(365)),
+        _unit("U-EARLY", _iso(20)),
+        _unit("U-MID", _iso(120)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-EARLY"
@@ -127,7 +191,7 @@ def test_fefo_undated_claimed_only_after_dated_exhausted():
     # Undated unit sits FIRST in natural order; the dated one must still win.
     docs = [
         _unit("U-UNDATED"),
-        _unit("U-DATED", "2026-09-30"),
+        _unit("U-DATED", _iso(60)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-DATED"
@@ -140,7 +204,7 @@ def test_fefo_null_expiry_treated_as_undated():
     # claim avoids.
     docs = [
         _unit("U-NULL", None),
-        _unit("U-DATED", "2026-09-30"),
+        _unit("U-DATED", _iso(60)),
     ]
     repo = _repo(docs)
     assert repo.claim_one_available("P", "S", "O1") == "U-DATED"
@@ -151,8 +215,8 @@ def test_fefo_exclude_ids_applies_to_dated_units():
     # The used-set exclusion must hold in the FEFO phase too: two lines of the
     # same order never grab the same dated unit.
     docs = [
-        _unit("U-EARLY", "2026-08-01"),
-        _unit("U-LATE", "2027-01-01"),
+        _unit("U-EARLY", _iso(20)),
+        _unit("U-LATE", _iso(365)),
     ]
     repo = _repo(docs)
     sid = repo.claim_one_available("P", "S", "O1", exclude_ids={"U-EARLY"})
@@ -223,11 +287,11 @@ def test_fefo_works_over_real_mock_collection_no_mongo():
     )
     coll.insert_one(
         {"_id": "D-LATE", "stock_id": "D-LATE", "product_id": "P", "store_id": "S",
-         "status": "AVAILABLE", "expiry_date": "2027-03-01"}
+         "status": "AVAILABLE", "expiry_date": _iso(365)}
     )
     coll.insert_one(
         {"_id": "D-EARLY", "stock_id": "D-EARLY", "product_id": "P", "store_id": "S",
-         "status": "AVAILABLE", "expiry_date": "2026-08-01"}
+         "status": "AVAILABLE", "expiry_date": _iso(20)}
     )
     repo = StockRepository(coll)
 
@@ -235,3 +299,112 @@ def test_fefo_works_over_real_mock_collection_no_mongo():
     assert repo.claim_one_available("P", "S", "O2") == "D-LATE"
     assert repo.claim_one_available("P", "S", "O3") == "N1"
     assert repo.claim_one_available("P", "S", "O4") is None
+
+
+def test_expiry_floor_is_real_over_the_mock_collection_not_a_no_op():
+    """MockCollection._matches_filter used to treat UNKNOWN operators as
+    MATCHING, so every branch of the expiry $or matched and the floor was a
+    complete NO-OP in no-Mongo mode -- a test asserting it over a MockCollection
+    would have passed with the floor DELETED. $not / $type / $regex are modelled
+    now, so this asserts real behaviour: an expired unit is neither claimable
+    nor counted, while an undated one beside it is untouched."""
+    from database.connection import MockCollection
+    from database.repositories.product_repository import StockRepository
+
+    coll = MockCollection("stock")
+    coll.insert_one(
+        {"_id": "EXPIRED", "stock_id": "EXPIRED", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE", "expiry_date": _iso(-5)}
+    )
+    coll.insert_one(
+        {"_id": "FRAME", "stock_id": "FRAME", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE"}
+    )
+    # A DATETIME-valued expiry. Without MockCollection's type guard a raw
+    # str-vs-datetime $gte raises TypeError, BaseRepository.count swallows it
+    # and returns 0, and EVERY unit for this product vanishes -- including the
+    # undated frame above. This row is what makes that regression visible.
+    coll.insert_one(
+        {"_id": "DTYPED", "stock_id": "DTYPED", "product_id": "P", "store_id": "S",
+         "status": "AVAILABLE",
+         "expiry_date": datetime(ist_today().year + 2, 1, 1)}
+    )
+    repo = StockRepository(coll)
+
+    # The floor BITES: the undated frame AND the in-date datetime unit are
+    # sellable, the ISO-expired one is held back -- and nothing raised, so the
+    # neighbours did not vanish with it.
+    assert repo.find_available("P", "S") == 2
+    assert repo.count_expired("P", "S") == 1
+    # The claim takes the in-date units and never the expired one.
+    claimed = {
+        repo.claim_one_available("P", "S", "O1"),
+        repo.claim_one_available("P", "S", "O2"),
+    }
+    assert claimed == {"FRAME", "DTYPED"}
+    assert coll.find_one({"stock_id": "EXPIRED"})["status"] == "AVAILABLE"
+    assert repo.claim_one_available("P", "S", "O3") is None
+    # And the guarded scan-sell refuses it too.
+    assert repo.mark_sold("EXPIRED", "O3") is False
+
+
+def test_mock_collection_models_not_and_type_operators():
+    """Direct guard on the mock itself: if these regress to 'unknown operator ->
+    matches', every expiry assertion above silently stops proving anything."""
+    from database.connection import MockCollection
+
+    coll = MockCollection("probe")
+    assert coll._matches_filter({"v": "2026-01-01"}, {"v": {"$type": "string"}}) is True
+    assert coll._matches_filter({"v": 5}, {"v": {"$type": "string"}}) is False
+    assert coll._matches_filter({"v": 5}, {"v": {"$not": {"$type": "string"}}}) is True
+    assert (
+        coll._matches_filter({"v": "2026-01-01"}, {"v": {"$not": {"$type": "string"}}})
+        is False
+    )
+    assert coll._matches_filter({}, {"v": {"$not": {"$regex": "^[0-9]{4}-"}}}) is True
+
+
+def test_mock_range_operator_survives_mixed_types_on_an_ungated_query():
+    """Pins MockCollection's BSON type bracketing on a query with NO $type gate.
+
+    The expiry floor short-circuits on $type before any comparison, so it can
+    never exercise the guard -- which is why reverting the guard failed no
+    expiry test. find_expiring is the exposure that CAN: it compares expiry_date
+    against STRING bounds with no type gate at all.
+
+    SCOPE -- corrected after the claim was tested against production. REAL
+    MongoDB TYPE-BRACKETS: a cross-type comparison simply does not match, it
+    does NOT raise. Verified read-only against the live cluster (server 8.3.2)
+    by feeding this exact predicate through a $documents stage over an ISO
+    string, a BSON date, a malformed string, a null and an absent field: no
+    error, and the readable string-dated unit was returned. Production also
+    holds zero date-typed expiry rows, and MockCollection is structurally
+    unreachable there (connection.py returns None in production rather than
+    serving the mock).
+
+    So this pins MOCK FIDELITY, not a production outage: without the guard the
+    mock raises where Mongo would not, BaseRepository.find_many swallows it, and
+    LOCAL no-Mongo runs see an empty report -- which is exactly the kind of
+    divergence that makes a test lie about production. find_expiring itself is
+    byte-identical to origin/main and is untouched by this PR.
+    """
+    from database.connection import MockCollection
+    from database.repositories.product_repository import StockRepository
+
+    coll = MockCollection("stock")
+    coll.insert_one(
+        {"_id": "STR-SOON", "stock_id": "STR-SOON", "product_id": "P",
+         "store_id": "S", "status": "AVAILABLE",
+         "expiry_date": (ist_today() + timedelta(days=10)).isoformat()}
+    )
+    coll.insert_one(
+        {"_id": "DATE-TYPED", "stock_id": "DATE-TYPED", "product_id": "P",
+         "store_id": "S", "status": "AVAILABLE",
+         "expiry_date": datetime(ist_today().year + 2, 1, 1)}
+    )
+    repo = StockRepository(coll)
+
+    rows = repo.find_expiring("S", days=30)
+
+    # The readable, genuinely-expiring unit must still be reported.
+    assert [r["stock_id"] for r in rows] == ["STR-SOON"]

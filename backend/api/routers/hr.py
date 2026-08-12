@@ -25,6 +25,7 @@ from ..dependencies import (
 )
 from ..services import attendance_engine
 from ..services.file_store import (
+    ANY_KIND,
     get_file_store,
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
@@ -2661,7 +2662,11 @@ async def download_employee_document(
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
 
-    rec = store.get(file_id)
+    # ANY_KIND is deliberate: file_id is not from the request -- it was
+    # minted by store.put() at document upload and read back off the
+    # employee's documents[] row behind this route's ADMIN-only gate, so the
+    # record IS the authorisation.
+    rec = store.get(file_id, require_kind=ANY_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="Document file no longer available")
 
