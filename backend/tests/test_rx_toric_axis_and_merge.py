@@ -306,11 +306,11 @@ class TestF11ToricRequiresAxis:
         assert rx_repo.created[0]["right_eye"]["axis"] is None
 
     def test_lens_power_combo_rejects_toric_without_axis(self, monkeypatch):
-        # NOTE: this endpoint's role gate is malformed upstream
-        # (require_roles(_CLINICAL_ROLES) passes the tuple as ONE role), so only
-        # SUPERADMIN's hardcoded bypass gets through today. Left alone on
-        # purpose -- an RBAC change does not belong in a clinical-safety fix.
-        client = _clinical_client(monkeypatch, roles=("SUPERADMIN",))
+        # Driven as a NORMAL clinical role (the endpoint's role gate is now a
+        # correctly splatted require_roles(*_CLINICAL_ROLES)), so this asserts
+        # the axis rule on the path a real optometrist actually takes -- not on
+        # SUPERADMIN's bypass.
+        client = _clinical_client(monkeypatch, roles=("OPTOMETRIST",))
         resp = client.post(
             "/clinical/lens-power-combos",
             json={

@@ -1088,7 +1088,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/manufacturability-check",
         "allowed": "AUTHENTICATED",
     },
-    # CLI-9 — named lens-power combos (save-and-reuse Rx templates)
+    # CLI-9 — named lens-power combos (save-and-reuse Rx templates).
+    # The two WRITE rows mirror clinical.py _CLINICAL_ROLES exactly (ADMIN /
+    # STORE_MANAGER / OPTOMETRIST + SUPERADMIN via check_access). AREA_MANAGER is
+    # deliberately NOT a write role here -- it is a supervisory READ role across
+    # clinical (cf. _ABUSE_VIEW_ROLES / _CONVERSION_VIEW_ROLES), so it keeps the
+    # GET row. Narrowing these two rows broadens nothing: the clinical:write
+    # capability union already carries AREA_MANAGER via the redo route
+    # (_REDO_ROLES), so no dedicated capability key is warranted here.
     {
         "method": "GET",
         "path": "/api/v1/clinical/lens-power-combos",
@@ -1097,12 +1104,12 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/clinical/lens-power-combos",
-        "allowed": ["ADMIN", "AREA_MANAGER", "OPTOMETRIST", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
     {
         "method": "DELETE",
         "path": "/api/v1/clinical/lens-power-combos/{combo_id}",
-        "allowed": ["ADMIN", "AREA_MANAGER", "OPTOMETRIST", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
     # CLI-12: ophthalmic device CSV import (autorefractor / lensmeter -> Rx).
     # Same role gate as clinical write operations (clinical_device_import.py
