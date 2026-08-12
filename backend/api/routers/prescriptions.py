@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
+from ..services.rx_print_values import is_absent_rx_value, rx_text_or
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -1542,50 +1543,23 @@ _PRINT_STYLE = """
 """
 
 
-# Junk tokens that must never reach a patient's Rx card. These are the LITERAL
-# strings you get from stringifying an empty value in Python ("None" -- exactly
-# what the pre-#969 `str(data.right_eye.get("pd", ""))` wrote), in JavaScript
-# ("null" / "undefined"), or from a float NaN ("nan"). They arrive from legacy
-# rows, CSV/Excel imports, integrations and device feeds, so the PRINT path has
-# to defend itself rather than trust the writers upstream.
-_ABSENT_RX_TOKENS = frozenset({"", "none", "null", "undefined", "nan"})
-
-
+# The absence rule lives in ONE place (services/rx_print_values.py) because
+# there is more than one patient-facing Rx card -- this router renders two, and
+# clinical.py renders a third that PrescriptionsPage offers on the SAME screen.
+# A local copy here is how the rule drifted and a card printed "PD: None".
 def _is_absent_rx_value(value) -> bool:
-    """True when a stored Rx cell carries nothing a patient should be shown.
-
-    CLINICALLY LOAD-BEARING: a genuine 0 / 0.0 / "0" is a REAL prescription
-    value -- a cylinder of 0, an axis of 0 and a prism of 0 each mean
-    something specific -- so this is an explicit emptiness test and NEVER a
-    truthiness test. `if not value` here would silently erase real clinical
-    data from a patient's card, which is worse than printing junk.
-    """
-    if value is None:
-        return True
-    if isinstance(value, str):
-        # .strip() catches whitespace-only; .lower() catches "NONE"/"Null".
-        return value.strip().lower() in _ABSENT_RX_TOKENS
-    return False
+    """Thin alias for the shared rule; see services/rx_print_values.py."""
+    return is_absent_rx_value(value)
 
 
 def _cell(value) -> str:
     """Render a stored Rx cell value, falling back to '-' when absent."""
-    if _is_absent_rx_value(value):
-        return "-"
-    return str(value)
+    return rx_text_or(value, "-")
 
 
 def _text(value, fallback: str = "-") -> str:
-    """Render a free-text Rx field (lens/coating recommendation, remarks...).
-
-    `prescription.get("lens_recommendation", "N/A")` does NOT protect this: the
-    create path always WRITES the key, with a None value when the optometrist
-    left it blank, so dict.get's default never fires and the card printed the
-    literal "None" to the patient. Route through the same absence check.
-    """
-    if _is_absent_rx_value(value):
-        return fallback
-    return str(value)
+    """Render a free-text Rx field (lens/coating recommendation, remarks...)."""
+    return rx_text_or(value, fallback)
 
 
 def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
@@ -1598,14 +1572,14 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Prescription {prescription.get('prescription_number')}</title>
+            <title>Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Eye Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <table>
@@ -1658,14 +1632,14 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Contact Lens Prescription {prescription.get('prescription_number')}</title>
+            <title>Contact Lens Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}

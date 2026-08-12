@@ -373,16 +373,19 @@ export function PrescriptionPrint({
             </div>
           )}
 
-          {/* Lens recommendation + notes */}
-          {(prescription.lensRecommendation || prescription.notes) && (
+          {/* Lens recommendation + notes. Truthiness-gated `&&` let the junk
+              string "None" through -- the backend guards exactly these fields
+              via `_text`, so the same rule has to hold on this side too. */}
+          {(!isAbsentRxValue(prescription.lensRecommendation) ||
+            !isAbsentRxValue(prescription.notes)) && (
             <div style={{ padding: '0 14px 10px' }}>
-              {prescription.lensRecommendation && (
+              {!isAbsentRxValue(prescription.lensRecommendation) && (
                 <div style={{ fontSize: 10.5, marginTop: 4 }}>
                   <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Lens type:</span>{' '}
                   <span style={{ color: '#1a1a19' }}>{prescription.lensRecommendation}</span>
                 </div>
               )}
-              {prescription.notes && (
+              {!isAbsentRxValue(prescription.notes) && (
                 <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 4, padding: '6px 8px', border: '1px solid #aaa9a3', background: '#f6f5f0' }}>
                   <span style={{ fontWeight: 600, color: '#1a1a19' }}>Remarks: </span>
                   {prescription.notes}

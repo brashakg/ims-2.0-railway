@@ -161,6 +161,65 @@ describe('PrescriptionPrint - junk values never reach the patient', () => {
   });
 });
 
+describe('PrescriptionPrint - free-text blocks are guarded like the backend', () => {
+  // The backend fixed exactly this via `_text`; the React card was left
+  // truthiness-gated, so `"None"` was truthy and rendered. Same rule, other side.
+  it.each(['None', 'null', 'undefined', 'NaN', '   '])(
+    'does not render the lens-recommendation block for the junk token %j',
+    (junk) => {
+      const container = renderCard({ lensRecommendation: junk, notes: null });
+      expect(container.textContent).not.toContain('Lens type:');
+      // Guarded: `not.toContain('')` is vacuously false for the whitespace
+      // token, which would make this assertion fail for the wrong reason.
+      if (junk.trim() !== '') expect(container.textContent).not.toContain(junk.trim());
+    },
+  );
+
+  it.each(['None', 'null', 'undefined', 'NaN', '   '])(
+    'does not render the remarks block for the junk token %j',
+    (junk) => {
+      const container = renderCard({ lensRecommendation: null, notes: junk });
+      expect(container.textContent).not.toContain('Remarks:');
+    },
+  );
+
+  // The two tests above are suppressed by the OUTER gate, so on their own they
+  // cannot tell whether the INNER per-field gates are guarded. These two force
+  // the outer gate open with a real sibling value, isolating each inner gate.
+  it.each(['None', 'null', 'undefined', 'NaN', '   '])(
+    'suppresses only the junk remarks block when the lens block is real (%j)',
+    (junk) => {
+      const container = renderCard({
+        lensRecommendation: 'Progressive 1.6',
+        notes: junk,
+      });
+      expect(container.textContent).toContain('Progressive 1.6');
+      expect(container.textContent).not.toContain('Remarks:');
+    },
+  );
+
+  it.each(['None', 'null', 'undefined', 'NaN', '   '])(
+    'suppresses only the junk lens block when the remarks block is real (%j)',
+    (junk) => {
+      const container = renderCard({
+        lensRecommendation: junk,
+        notes: 'Review in 6 months',
+      });
+      expect(container.textContent).toContain('Review in 6 months');
+      expect(container.textContent).not.toContain('Lens type:');
+    },
+  );
+
+  it('still renders real free text', () => {
+    const container = renderCard({
+      lensRecommendation: 'Progressive 1.6',
+      notes: 'Review in 6 months',
+    });
+    expect(container.textContent).toContain('Progressive 1.6');
+    expect(container.textContent).toContain('Review in 6 months');
+  });
+});
+
 describe('PrescriptionPrint - a genuine zero is REAL clinical data', () => {
   it('keeps a numeric 0 for CYL / AXIS / ADD / PD instead of blanking it', () => {
     const container = renderCard({

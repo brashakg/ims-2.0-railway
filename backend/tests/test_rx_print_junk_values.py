@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from api.routers.clinical import _build_rx_card_html  # noqa: E402
 from api.routers.prescriptions import (  # noqa: E402
     _build_cl_print_html,
     _build_spectacle_print_html,
@@ -188,6 +189,87 @@ def test_contact_lens_header_fields_never_print_junk():
     assert "undefined" not in html
     # A junk colour must drop the whole Color row, not print "Color: None".
     assert "Color:" not in html
+
+
+# --------------------------------------------------------------------------
+# THE SECOND PATIENT PRINT CARD (clinical.py `_build_rx_card_html`)
+# --------------------------------------------------------------------------
+# PrescriptionsPage offers BOTH print paths on the SAME screen -- <Prescription
+# Print> and the buttons that hit this card's route -- so guarding only the
+# other renderer left the patient just as exposed. Same rule, sibling door.
+
+
+def _rx_card_pd(rx: dict) -> str:
+    """The rendered PD block of the clinical Rx card, or '' when omitted."""
+    html = _build_rx_card_html(rx, None)
+    match = re.search(r"<div class='pd'>.*?</div>", html)
+    return match.group(0) if match else ""
+
+
+def test_second_card_never_prints_pd_none_mm():
+    """The live document shape: per-eye pd is the string "None"."""
+    pd_block = _rx_card_pd({"right_eye": {"pd": "None"}, "left_eye": {"pd": "None"}})
+    assert "None" not in pd_block
+    # Nothing real to show, so the PD line is omitted entirely.
+    assert pd_block == ""
+
+
+def test_second_card_keeps_a_real_top_level_pd_of_zero():
+    """`if pd in (None, "", 0)` discarded a REAL 0 and then fell through to junk."""
+    assert _rx_card_pd({"pd": 0, "right_eye": {"pd": "None"}, "left_eye": {"pd": "None"}}) == (
+        "<div class='pd'><b>PD:</b> 0 mm</div>"
+    )
+
+
+def test_second_card_does_not_let_the_left_eye_override_a_real_right_zero():
+    """`od.get("pd") or os_.get("pd")` -- `or` swallowed a real right-eye 0."""
+    assert _rx_card_pd({"right_eye": {"pd": 0}, "left_eye": {"pd": 64}}) == (
+        "<div class='pd'><b>PD:</b> 0 mm</div>"
+    )
+
+
+def test_second_card_control_a_real_pd_still_prints():
+    assert _rx_card_pd({"pd": 62, "right_eye": {}, "left_eye": {}}) == (
+        "<div class='pd'><b>PD:</b> 62 mm</div>"
+    )
+
+
+@pytest.mark.parametrize("junk", ["None", "null", "undefined", "NaN", "   ", ""])
+def test_second_card_treats_every_junk_token_as_absent(junk):
+    assert _rx_card_pd({"right_eye": {"pd": junk}, "left_eye": {"pd": junk}}) == ""
+
+
+def test_second_card_falls_through_junk_to_the_other_eye():
+    """A junk right-eye PD must not mask a REAL left-eye PD."""
+    assert _rx_card_pd({"right_eye": {"pd": "None"}, "left_eye": {"pd": 64}}) == (
+        "<div class='pd'><b>PD:</b> 64 mm</div>"
+    )
+
+
+# --------------------------------------------------------------------------
+# sibling call sites inside the block this PR already edits
+# --------------------------------------------------------------------------
+def test_missing_prescription_number_does_not_print_none():
+    """`prescription.get('prescription_number')` had no guard at all -- a
+    missing number rendered "<title>Prescription None</title>"."""
+    # Control: a real number still prints.
+    assert "RX-TEST-0001" in _spectacle(right={"sph": "-1.00"})
+    bare = _build_spectacle_print_html(
+        {"prescription_date": "2026-08-10T00:00:00", "expiry_date": "", "right_eye": {}, "left_eye": {}}
+    )
+    assert "None" not in bare
+    bare_cl = _build_cl_print_html(
+        {"prescription_date": "2026-08-10T00:00:00", "expiry_date": "", "cl_right": {}, "cl_left": {}}
+    )
+    assert "None" not in bare_cl
+
+
+def test_float_nan_is_absent_like_the_frontend_guard_treats_it():
+    """The JS guard returns true for NaN; the Python twin returned False and
+    printed the literal "nan" on the card. Same rule, both sides."""
+    html = _spectacle(right={"sph": float("nan"), "cyl": float("nan")})
+    assert "nan" not in html.lower().replace("</span>", "")
+    assert _row_cells(html, "RE")[SPH] == "-"
 
 
 def test_contact_lens_card_renders_dash_for_junk_and_keeps_zero():
