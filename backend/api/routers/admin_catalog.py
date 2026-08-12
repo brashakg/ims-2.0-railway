@@ -36,7 +36,7 @@ from datetime import datetime
 import uuid
 
 from .admin import _require_admin_role
-from ..services.file_store import get_file_store, MAX_FILE_SIZE_BYTES
+from ..services.file_store import ANY_KIND, get_file_store, MAX_FILE_SIZE_BYTES
 from ..services.gst_rates import (
     seed_hsn_gst_master,
     invalidate_cache as invalidate_gst_cache,
@@ -1093,7 +1093,10 @@ async def download_bulk_import_file(job_id: str):
     store = get_file_store()
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    rec = store.get(file_id)
+    # ANY_KIND is deliberate: file_id is not from the request -- it was
+    # minted by store.put() when this job was created and read back off the
+    # job document the caller just fetched, so the job IS the authorisation.
+    rec = store.get(file_id, require_kind=ANY_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="Import file no longer available")
 

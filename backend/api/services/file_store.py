@@ -49,6 +49,41 @@ ALLOWED_MIME_TYPES = frozenset(
 MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 
 
+# ---------------------------------------------------------------------------
+# SECURITY CONTRACT for FileStore.get -- read this before adding a serve route
+# ---------------------------------------------------------------------------
+# ONE GridFS bucket holds every binary the app stores: product images, company
+# logos, GRN attachments, expense bills, task attachments, handoff files, and
+# employee Aadhaar / PAN / UAN / ESIC SCANS. A file_id is therefore a bearer
+# capability over the whole bucket -- whoever can name one can read it unless
+# the read is scoped.
+#
+# THE RULE:
+#   * If the endpoint takes the file_id from the REQUEST (path/query/body), it
+#     MUST pass require_kind="<the kind stamped at upload>". Anything else is a
+#     universal read of the bucket. This is not hypothetical: the company-logo
+#     serve omitted it and could stream any employee's Aadhaar scan.
+#   * If the endpoint derives the file_id from a record the caller has ALREADY
+#     been authorised to read (the expense doc, the GRN, the task, the handoff,
+#     the employee document row), the record is the authorisation and the read
+#     may be unscoped -- pass require_kind=ANY_KIND to say so DELIBERATELY.
+#
+# ENFORCEMENT IS AT RUNTIME, NOT IN A LINTER. `require_kind` is a REQUIRED
+# keyword-only argument: omit it and the call raises TypeError immediately.
+# An earlier round tried to enforce this with an AST guard instead; a security
+# panel evaded it with 11 of 16 spellings (`fid = file_id`, a handle passed as a
+# parameter, a handle on `self.`, an aliased import, a walrus, a tuple-unpack,
+# `getattr(fs, "get")`, ...) and shipped a LIVE route that streamed any blob.
+# Static analysis has to enumerate spellings; the signature does not care how
+# the call is spelled. The static guard is kept as a second layer, but it is no
+# longer the thing standing between the bucket and a new serve endpoint.
+#
+# ANY_KIND is the DELIBERATE opt-out, and it is deliberately NOT the path of
+# least resistance: it must be named at the call site, and the guard test
+# treats it as unscoped rather than as "argument present, therefore fine".
+ANY_KIND = "__any_kind__"
+
+
 class FileStore:
     """Abstract file-store interface."""
 
@@ -64,16 +99,30 @@ class FileStore:
         raise NotImplementedError
 
     def get(
-        self, file_id: str, *, require_kind: Optional[str] = None
+        self, file_id: str, *, require_kind: str
     ) -> Optional[Tuple[bytes, str, str]]:
         """Return (content, filename, mime_type) or None when missing.
 
-        `require_kind`: when set, ALSO return None unless the stored file's
-        metadata.kind matches. This lets a PUBLIC per-kind serve endpoint (e.g.
-        product images) refuse to hand back a DIFFERENT kind of file from the
-        shared store -- without it, a public image serve could be handed a GRN
-        attachment / expense bill file_id and leak it. Callers that don't pass
-        require_kind get the original unscoped behaviour."""
+        `require_kind`: when set to a kind string, ALSO return None unless the
+        stored file's metadata.kind matches, so a serve endpoint refuses to hand
+        back a DIFFERENT kind of file from the shared bucket -- without it, an
+        image serve handed a GRN attachment / expense bill / employee ID-scan
+        file_id would leak it.
+
+        MANDATORY whenever the file_id comes from the request. Pass the module
+        sentinel ``ANY_KIND`` (or None, its legacy equivalent) ONLY when the
+        caller has already been authorised against the record that owns the
+        file_id. See the SECURITY CONTRACT block at the top of this module."""
+        raise NotImplementedError
+
+    def get_metadata(self, file_id: str) -> Optional[dict]:
+        """Return the stored metadata dict, or None when the file is missing.
+
+        Exists so a handler that ACCEPTS a file_id from the request can
+        AUTHORISE it -- check its kind, its owner, its store -- before binding
+        it to a record. Proving a file merely EXISTS is not authorisation: the
+        bucket is shared, so "it exists" is true of every other feature's
+        documents too. Never returns bytes."""
         raise NotImplementedError
 
     def delete(self, file_id: str) -> bool:
@@ -102,13 +151,20 @@ class InMemoryFileStore(FileStore):
         }
         return file_id
 
-    def get(self, file_id, *, require_kind=None):
+    def get(self, file_id, *, require_kind):
         rec = self._files.get(file_id)
         if rec is None:
             return None
-        if require_kind is not None and (rec.get("metadata") or {}).get("kind") != require_kind:
-            return None
+        if require_kind not in (None, ANY_KIND):
+            if (rec.get("metadata") or {}).get("kind") != require_kind:
+                return None
         return (rec["content"], rec["filename"], rec["mime_type"])
+
+    def get_metadata(self, file_id) -> Optional[dict]:
+        rec = self._files.get(file_id)
+        if rec is None:
+            return None
+        return dict(rec.get("metadata") or {})
 
     def delete(self, file_id) -> bool:
         return self._files.pop(file_id, None) is not None
@@ -156,7 +212,7 @@ class GridFSFileStore(FileStore):
             logger.warning(f"[FILESTORE] put failed: {e}")
             return None
 
-    def get(self, file_id, *, require_kind=None):
+    def get(self, file_id, *, require_kind):
         fs = self._bucket()
         if fs is None:
             return None
@@ -164,7 +220,7 @@ class GridFSFileStore(FileStore):
             from bson import ObjectId
 
             grid_out = fs.get(ObjectId(file_id))
-            if require_kind is not None:
+            if require_kind not in (None, ANY_KIND):
                 meta = getattr(grid_out, "metadata", None) or {}
                 if meta.get("kind") != require_kind:
                     return None
@@ -175,6 +231,19 @@ class GridFSFileStore(FileStore):
             )
         except Exception as e:
             logger.debug(f"[FILESTORE] get failed for {file_id}: {e}")
+            return None
+
+    def get_metadata(self, file_id) -> Optional[dict]:
+        fs = self._bucket()
+        if fs is None:
+            return None
+        try:
+            from bson import ObjectId
+
+            grid_out = fs.get(ObjectId(file_id))
+            return dict(getattr(grid_out, "metadata", None) or {})
+        except Exception as e:
+            logger.debug(f"[FILESTORE] get_metadata failed for {file_id}: {e}")
             return None
 
     def delete(self, file_id) -> bool:

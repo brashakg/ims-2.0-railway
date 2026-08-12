@@ -20,7 +20,9 @@ tests assert every existing receiving control is PRESERVED, not re-implemented:
     path re-asserts it via _load_standard_grn) -- express stops at a DRAFT
     (no vendor_bills write, no AP booking).
   * Failure atomicity: an accept failure AFTER the GRN exists surfaces as
-    500 EXPRESS_PARTIAL carrying the grn_id (the pending panel recovers it).
+    409 EXPRESS_PARTIAL carrying the grn_id (the pending panel recovers it).
+    409, not 5xx: the api client auto-retries every 5xx POST, and each retry
+    creates a NEW grn_id that mints the whole delivery again.
   * RBAC: gated to the SAME receiving roles as create/accept GRN, with a
     matching rbac_policy row.
 
@@ -128,16 +130,26 @@ class _FakeTaskRepo:
 
 
 class _FileStore:
-    """Live store whose get() finds the attachment (gate passes)."""
+    """Live store whose reads find the attachment (gate passes).
 
-    def get(self, _fid):
+    get_metadata returns what POST /vendors/grn/upload-doc actually stamps: the
+    GRN create path now AUTHORISES a caller-supplied file_id by its kind rather
+    than merely proving it exists, so a faithful stub must carry the metadata."""
+
+    def get(self, _fid, **_kw):
         return (b"x", "inv.pdf", "application/pdf")
+
+    def get_metadata(self, _fid):
+        return {"kind": "grn_document", "uploaded_by": "u1", "store_id": "STORE-A"}
 
 
 class _EmptyFileStore:
-    """Live store whose get() finds NOTHING (forged/stale id -> BUG-010)."""
+    """Live store that finds NOTHING (forged/stale id -> BUG-010)."""
 
-    def get(self, _fid):
+    def get(self, _fid, **_kw):
+        return None
+
+    def get_metadata(self, _fid):
         return None
 
 
@@ -317,7 +329,12 @@ def test_express_rejected_qty_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 5, "accepted_qty": 4, "rejected_qty": 1}
+            {
+                "product_id": "P1",
+                "received_qty": 5,
+                "accepted_qty": 4,
+                "rejected_qty": 1,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -331,7 +348,12 @@ def test_express_short_accept_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 5, "accepted_qty": 3, "rejected_qty": 0}
+            {
+                "product_id": "P1",
+                "received_qty": 5,
+                "accepted_qty": 3,
+                "rejected_qty": 0,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -345,7 +367,12 @@ def test_express_zero_received_is_not_clean(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
     body = _body(
         items=[
-            {"product_id": "P1", "received_qty": 0, "accepted_qty": 0, "rejected_qty": 0}
+            {
+                "product_id": "P1",
+                "received_qty": 0,
+                "accepted_qty": 0,
+                "rejected_qty": 0,
+            }
         ]
     )
     with pytest.raises(HTTPException) as e:
@@ -372,7 +399,9 @@ def test_express_rejects_delivery_challan(monkeypatch):
 
 def test_express_missing_attachment_400(monkeypatch):
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
-    body = _body(attachment_file_id=None, attachment_filename=None, attachment_mime=None)
+    body = _body(
+        attachment_file_id=None, attachment_filename=None, attachment_mime=None
+    )
     with pytest.raises(HTTPException) as e:
         _run(body, _user())
     assert e.value.status_code == 400
@@ -440,13 +469,47 @@ def test_express_accept_failure_surfaces_partial_with_grn_id(monkeypatch):
     monkeypatch.setattr(vendors_mod, "_accept_grn_impl", _boom)
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
-    assert e.value.status_code == 500
+    # 409, NOT 5xx: the frontend api client auto-retries every 5xx POST three
+    # times, and each retry runs _create_grn_impl again with a fresh grn_id (no
+    # duplicate guard exists for STANDARD receipts), minting the WHOLE delivery
+    # again under a source_id the per-unit unique index cannot correlate. The
+    # GRN row already exists, so this is a conflict, not a server fault.
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
     detail = e.value.detail
     assert detail["code"] == "EXPRESS_PARTIAL"
     # The stranded GRN is addressable (the pending panel recovers it).
     assert detail["grn_id"] in grn_repo.docs
     assert grn_repo.docs[detail["grn_id"]]["status"] == "PENDING"
     assert "accept or void" in detail["message"]
+
+
+def test_express_mid_mint_503_is_downgraded_to_a_conflict(monkeypatch):
+    """The `except HTTPException` exit -- the one the accept path's own
+    mid-mint 503s travel through (the count-verify abort and the unverifiable
+    heartbeat), which fire AFTER real units are on the shelf.
+
+    This is the exit that made the 500 dangerous: a 5xx here is auto-retried by
+    the api client, and each retry creates a NEW grn_id with no duplicate guard
+    for STANDARD receipts, minting the delivery again. The sibling test above
+    covers the generic `except Exception` exit; this covers the HTTPException
+    one, so all three express failure exits are pinned behaviourally rather
+    than by grepping the handler's source."""
+    grn_repo, _po_repo, _stock, _t = _wire(monkeypatch)
+
+    async def _mid_mint_503(grn_id, current_user):
+        raise HTTPException(
+            status_code=503,
+            detail="Some units were received before the stock store stopped responding.",
+        )
+
+    monkeypatch.setattr(vendors_mod, "_accept_grn_impl", _mid_mint_503)
+    with pytest.raises(HTTPException) as e:
+        _run(_body(), _user())
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
+    assert e.value.detail["code"] == "EXPRESS_PARTIAL"
+    assert grn_repo.docs[e.value.detail["grn_id"]]["status"] == "PENDING"
 
 
 def test_express_held_lines_surface_partial_not_false_success(monkeypatch):
@@ -462,7 +525,10 @@ def test_express_held_lines_surface_partial_not_false_success(monkeypatch):
     )
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
-    assert e.value.status_code == 500
+    # 409 for the same stock-safety reason: this receipt already holds real
+    # units, so it must never be auto-retried into a second one.
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
     detail = e.value.detail
     assert detail["code"] == "EXPRESS_PARTIAL"
     assert detail["grn_status"] == "PARTIALLY_ACCEPTED"
@@ -527,11 +593,7 @@ def test_express_gated_by_vendor_roles():
 def test_rbac_row_catalogued():
     from api.services import rbac_policy as rbac
 
-    rows = [
-        p
-        for p in rbac.POLICY
-        if p.get("path") == "/api/v1/vendors/grn/express"
-    ]
+    rows = [p for p in rbac.POLICY if p.get("path") == "/api/v1/vendors/grn/express"]
     assert len(rows) == 1
     assert rows[0]["method"] == "POST"
     assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._VENDOR_ROLES)

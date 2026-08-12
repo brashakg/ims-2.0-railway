@@ -41,6 +41,16 @@ import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import { LensFittingFormModal } from '../../components/pos/LensFittingFormModal';
+import type { LensFittingFormValue } from '../../components/pos/LensFittingFormModal';
+import {
+  hasQcOnFile,
+  awaitingHandoverQc,
+  handoverBlockerMessage,
+  QC_ACTIONABLE_STATUSES,
+  resolveItemPrescriptionId,
+  backendMessage,
+} from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 
 // Job type
@@ -71,7 +81,23 @@ interface Job {
   // F2 -- in-house lab station the job is currently at (snake_case, passes
   // through job_to_frontend as-is). Null until the first lab scan.
   current_station?: string | null;
+  // QC record (snake_case, passes through job_to_frontend as-is). Absent on a
+  // job that has never been QC'd -- see hasQcOnFile below.
+  qc_passed?: boolean;
+  qc_waived?: boolean;
+  // Sales confirmation of the fitting. A PENDING job without it cannot start
+  // work at all -- see isAwaitingSalesConfirmation in ./qcHandover.
+  fitting_details?: { confirmed_by_sales?: boolean } | null;
 }
+
+// PATIENT SAFETY: a job is cleared for handover only when lens QC PASSED or was
+// explicitly (audited) waived -- the SAME rule the backend gate enforces
+// (workshop._qc_cleared / _QC_REQUIRED_TARGETS), which now blocks -> DELIVERED,
+// not just -> READY. Both fields are absent on a job that was never QC'd, so an
+// absent field reads as "not recorded". Used only to steer the UI toward the
+// right next action; the backend remains the authority.
+// Pure QC-handover helpers live in ./qcHandover so they can be unit tested
+// without mounting this page. See that module for the reasoning behind each.
 
 // Lens-order lifecycle: forward-only NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED.
 type LensStatus = 'NOT_ORDERED' | 'ORDERED' | 'RECEIVED' | 'MOUNTED';
@@ -166,6 +192,32 @@ export function WorkshopPage() {
   // (power verification is optometry-adjacent). Plain cashiers/sales don't.
   const QC_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST', 'WORKSHOP_STAFF'];
   const canRunQc = QC_ROLES.includes(user?.activeRole || '');
+
+  // Fitting-details modal — opened from a PENDING job that sales never confirmed.
+  // Mirrors the backend's _FITTING_ROLES (workshop.py): confirming the fitting is
+  // a SALES act, so workshop staff are deliberately absent from this list.
+  const [fittingJob, setFittingJob] = useState<Job | null>(null);
+  const [fittingSaving, setFittingSaving] = useState(false);
+  const FITTING_ROLES = [
+    'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER',
+    'SALES_STAFF', 'SALES_CASHIER', 'CASHIER',
+  ];
+  const canConfirmFitting = FITTING_ROLES.includes(user?.activeRole || '');
+
+  const handleFittingSave = async (jobId: string, value: LensFittingFormValue) => {
+    setFittingSaving(true);
+    try {
+      await workshopApi.updateFittingDetails(jobId, value);
+      toast.success('Fitting details confirmed — the job can now be started');
+      setFittingJob(null);
+      setSelectedJob(null);
+      await loadJobs();
+    } catch (err) {
+      toast.error(backendMessage(err, 'Failed to save fitting details'));
+    } finally {
+      setFittingSaving(false);
+    }
+  };
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -324,7 +376,7 @@ const loadJobs = async () => {
         order_id: createSelectedOrder.id,
         frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category))) },
         lens_details: rxItem?.lens_details || { type: 'STANDARD' },
-        prescription_id: rxItem?.prescription_id || '',
+        prescription_id: resolveItemPrescriptionId(rxItem),
         fitting_instructions: createFitting || undefined,
         special_notes: createNotes || undefined,
         expected_date: createExpectedDate,
@@ -356,7 +408,11 @@ const loadJobs = async () => {
             'No Delivery Challan logged for this lens.',
         );
       } else {
-        toast.error('Failed to create workshop job');
+        // The create-time Rx 422s (unknown / WRONG-PATIENT / expired) return a
+        // plain-string detail. The wrong-patient sentence and the "a Store
+        // Manager must approve" instruction are the most important strings this
+        // screen can show — a generic toast hid both and left staff retrying.
+        toast.error(typeof detail === 'string' ? detail : 'Failed to create workshop job');
       }
     } finally {
       setCreateLoading(false);
@@ -391,21 +447,36 @@ const loadJobs = async () => {
           /* settings unavailable -> skip auto-print, never block */
         }
       }
-    } catch {
-      toast.error('Failed to update job status');
+    } catch (err) {
+      // Surface the BACKEND's sentence. The QC handover gate deliberately leaves
+      // "Mark Delivered" enabled on the reasoning that the server returns a
+      // plain-English 400 naming the remedy ("...run QC on it (or record an
+      // audited waiver) before handing it to the customer") — that reasoning is
+      // only true if we actually render it. A bare catch turned every refusal
+      // into "Failed to update job status", which reads like a server fault and
+      // sends staff hunting for a manager instead of running QC.
+      toast.error(backendMessage(err, 'Failed to update job status'));
     }
   };
 
   // Submit a structured QC checklist via the /qc-checklist endpoint (Phase 6.9).
   // Each checklist item (key, label, passed, note) is stored server-side with
   // reviewer identity + timestamp. Pass -> READY, fail -> QC_FAILED.
+  //
+  // `previousStatus` is the job's status BEFORE this submission. QC is now also
+  // run on a job that is ALREADY READY (ongoing workflow: the handover gate
+  // needs a QC record, and a job routinely reaches the pickup shelf without
+  // one), and that case differs in two ways -- the toast copy and the pickup
+  // label auto-print. Both are handled below.
   const [qcBusy, setQcBusy] = useState(false);
   const handleQcSubmit = async (
     jobId: string,
     passed: boolean,
     notes: string,
     checklistItems?: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+    previousStatus?: JobStatus,
   ) => {
+    const wasAlreadyReady = previousStatus === 'READY';
     setQcBusy(true);
     try {
       let res;
@@ -420,13 +491,37 @@ const loadJobs = async () => {
         // Fallback to the simple /qc endpoint (no structured items).
         res = await workshopApi.qcJob(jobId, passed, notes);
       }
-      toast.success(passed ? 'QC passed — job ready for pickup' : 'QC failed — job flagged for rework');
+      // Copy has to be true for a job that was ALREADY on the pickup shelf:
+      // "now ready for pickup" would be wrong there (it never moved), and a
+      // fail is not a generic "flagged for rework" — it pulls the job back OFF
+      // the shelf, which the counter needs to understand immediately.
+      if (passed) {
+        toast.success(
+          wasAlreadyReady
+            ? 'QC recorded — job cleared for handover'
+            : 'QC passed — job ready for pickup',
+        );
+      } else {
+        // A FAILURE is not a success: at a busy counter colour is read before
+        // text, and a green flash after a QC fail reads as "done, all good" —
+        // exactly backwards for a job that just left the pickup shelf.
+        toast.error(
+          wasAlreadyReady
+            ? 'QC failed — job pulled off the pickup shelf for rework'
+            : 'QC failed — job flagged for rework',
+        );
+      }
       setQcModalJob(null);
       setSelectedJob(null);
       await loadJobs();
-      // On a pass the job is now READY — auto-print the pickup label, honouring
-      // the auto_print_stage_sticker setting (fail-soft, mirrors handleStatusChange).
-      if (res?.status === 'READY') {
+      // On a pass from COMPLETED / QC_FAILED the job has JUST reached the pickup
+      // shelf — auto-print the pickup label, honouring the
+      // auto_print_stage_sticker setting (fail-soft, mirrors handleStatusChange).
+      // A job that was ALREADY READY is deliberately excluded: its pickup label
+      // was printed when it first became READY, and silently spitting out a
+      // duplicate every time QC is recorded at the shelf would confuse the
+      // counter. Staff can still reprint on demand via the Pickup label button.
+      if (res?.status === 'READY' && !wasAlreadyReady) {
         try {
           const s = await settingsApi.getPrinterSettings();
           if ((s as any)?.auto_print_stage_sticker !== false) {
@@ -1015,6 +1110,23 @@ const loadJobs = async () => {
 
                 {/* Status Transition Buttons */}
                 <div className="flex gap-2 flex-wrap">
+                  {/* A PENDING job whose fitting sales-confirmation is missing
+                      cannot be started, completed or QC'd -- every one of those
+                      doors 400s -- and the handover gate then blocks the order.
+                      Until now the ONLY UI that could write fitting details was
+                      the post-sale POS modal, so dismissing that modal (or
+                      creating the job from this page, which sends none) left the
+                      job permanently stuck with no in-app way out. Same modal,
+                      same PATCH; the backend roles already allow it. */}
+                  {selectedJob.status === 'PENDING' && canConfirmFitting
+                    && !selectedJob.fitting_details?.confirmed_by_sales && (
+                    <button
+                      onClick={() => setFittingJob(selectedJob)}
+                      className="btn-primary text-sm flex items-center gap-1"
+                    >
+                      <ClipboardCheck className="w-4 h-4" /> Confirm fitting details
+                    </button>
+                  )}
                   {selectedJob.status === 'PENDING' && (
                     // Bug fix: was sending 'PROCESSING' which the backend state machine
                     // doesn't recognise (it uses 'IN_PROGRESS'). Backend now also
@@ -1050,6 +1162,28 @@ const loadJobs = async () => {
                       </button>
                     </>
                   )}
+                  {/* PATIENT SAFETY: the backend blocks -> DELIVERED without a
+                      QC pass/waiver, so QC late in the lifecycle is ongoing
+                      workflow, not a legacy shim. Crucially this is NOT limited
+                      to READY: no station in the scan flow ever sets COMPLETED,
+                      so a job whose DISPATCH -> READY leg is HELD for missing QC
+                      keeps the IN_PROGRESS it got at INTAKE and walks on to the
+                      PICKUP station. That held job is the state this gate
+                      actually produces, and offering the remedy only at READY
+                      left the counter with no visible action for it.
+                      Same canRunQc role gate, same modal + submit path as the
+                      COMPLETED / QC_FAILED buttons above (which keep their own
+                      labels). When QC is already on file this is a secondary
+                      re-run, so it steps back to btn-outline and Mark Delivered
+                      stays the primary green action. */}
+                  {QC_ACTIONABLE_STATUSES.includes(selectedJob.status) && canRunQc && (
+                    <button
+                      onClick={() => setQcModalJob(selectedJob)}
+                      className={`${hasQcOnFile(selectedJob) ? 'btn-outline' : 'btn-primary'} text-sm flex items-center gap-1`}
+                    >
+                      <ClipboardCheck className="w-4 h-4" /> Run QC before handover
+                    </button>
+                  )}
                   {selectedJob.status === 'READY' && (
                     <div className="flex items-center gap-2 flex-wrap">
                       <input
@@ -1060,8 +1194,18 @@ const loadJobs = async () => {
                         className="input-field text-sm w-56"
                         maxLength={80}
                       />
+                      {/* Deliberately NOT disabled when QC is missing: the
+                          backend gate is the authority and returns a plain
+                          English 400, and a client-side block driven by a field
+                          that may simply be absent on an older job would be a
+                          fake refusal. The note below states the real state. */}
                       <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
                     </div>
+                  )}
+                  {awaitingHandoverQc(selectedJob) && (
+                    <p className="text-xs text-amber-700 w-full">
+                      {handoverBlockerMessage(selectedJob)}
+                    </p>
                   )}
                   {['COMPLETED', 'READY'].includes(selectedJob.status) && (
                     <button
@@ -1165,6 +1309,17 @@ const loadJobs = async () => {
         />
       )}
 
+      {/* Fitting-details modal — the SAME component POS uses post-sale, surfaced
+          here so a job whose fitting was never confirmed has an in-app remedy.
+          Saving it unblocks /start, which unblocks completion, QC and handover. */}
+      {fittingJob && (
+        <LensFittingFormModal
+          isSaving={fittingSaving}
+          onSave={(v: LensFittingFormValue) => handleFittingSave(fittingJob.id, v)}
+          onBack={() => setFittingJob(null)}
+        />
+      )}
+
       {/* QC checklist modal — posts to /qc-checklist (structured items) -> READY or QC_FAILED */}
       {qcModalJob && (
         <QcChecklistModal
@@ -1172,7 +1327,9 @@ const loadJobs = async () => {
           busy={qcBusy}
           onCancel={() => setQcModalJob(null)}
           onSubmit={(passed, notes, checklistItems) =>
-            handleQcSubmit(qcModalJob.id, passed, notes, checklistItems)
+            // Pass the PRE-submit status so the handler can tell "just reached
+            // the shelf" from "QC'd at the shelf" (toast copy + label reprint).
+            handleQcSubmit(qcModalJob.id, passed, notes, checklistItems, qcModalJob.status)
           }
         />
       )}

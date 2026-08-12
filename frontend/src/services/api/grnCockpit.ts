@@ -205,9 +205,12 @@ export const grnCockpitApi = {
    *   400 {code:"EXPRESS_NOT_CLEAN"}     -> fall back to two-step create+accept
    *   400 {code:"EXPRESS_STANDARD_ONLY"} -> DC attempted; use the classic flow
    *   400 {code:"ATTACHMENT_REQUIRED"|"ATTACHMENT_INVALID"} -> re-upload bill
-   *   500 {code:"EXPRESS_PARTIAL", grn_id, grn_number, message, grn_status?}
+   *   409 {code:"EXPRESS_PARTIAL", grn_id, grn_number, message, grn_status?}
    *       -> the GRN EXISTS but is not (fully) accepted: send the user to the
    *          pending-receipts panel (it handles accept/void).
+   *          409 and NOT 5xx on purpose: the shared client auto-retries every
+   *          5xx POST three times, and each retry creates a new grn_id that
+   *          mints the whole delivery again.
    */
   expressReceive: async (payload: {
     po_id: string;
