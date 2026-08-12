@@ -15,6 +15,11 @@ from .auth import get_current_user, require_roles
 from ..services import power_grid
 from ..services import barcode as barcode_svc
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
+
+# F9 / W1.4 / OS-006: the ONE backend detector for "is this store ONLINE?"
+# (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from
+# the POS / PO / GRN / till guards -- do NOT add a second detector here.
+from ..services.stores_util import is_online_store
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -151,6 +156,30 @@ def _get_db():
     except Exception:
         pass
     return None
+
+
+def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> None:
+    """F9: refuse to mint physical stock_units onto an ONLINE store.
+
+    BV-ONLINE-01 / WO-ONLINE-01 are POOLED and STOCKLESS by design -- the
+    storefront sells the physical shops' combined stock and the online store
+    must never own serialized units of its own (they would be invisible to every
+    shop, unsellable at any POS, and would double the on-hand rollups).
+
+    Uses the shared ``is_online_store`` detector -- the same one behind the POS,
+    PO delivery-store, GRN-accept and till guards -- so there is exactly ONE
+    definition of "online store" in the backend, including its fail-open
+    convention (an unknown id / flaky lookup never false-blocks a physical
+    shop, while the two known online ids are caught with no DB at all)."""
+    if is_online_store(_get_db(), store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an online store, which holds no stock of its own -- it "
+                "sells the physical shops' pooled inventory. Switch to a "
+                f"physical shop to {action}."
+            ),
+        )
 
 
 def _on_hand_by_product(
@@ -1513,6 +1542,11 @@ async def add_stock(
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")
 
+    # F9: never mint physical units onto a pooled, stockless ONLINE store.
+    # Runs BEFORE the repo checks so the answer is the same 400 whether or not
+    # the DB is reachable.
+    _reject_stock_mint_on_online_store(active_store, "add stock")
+
     if stock_repo is not None and product_repo is not None:
         # Verify product exists
         product = product_repo.find_by_id(request.product_id)
@@ -1776,6 +1810,12 @@ async def opening_stock_commit(
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")
+
+    # F9: an ONLINE store is pooled + stockless -- a bulk opening-stock seed
+    # would strand thousands of units on a store that can never sell them and
+    # would double every pooled on-hand rollup.
+    _reject_stock_mint_on_online_store(active_store, "import opening stock")
+
     if stock_repo is None or product_repo is None:
         raise HTTPException(status_code=503, detail="Inventory store not available")
 

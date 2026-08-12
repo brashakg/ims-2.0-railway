@@ -343,6 +343,47 @@ class DatabaseConnection:
             name="stock_units_transfer_in_transit",
             background=True,
         )
+        # F8: DB-level backstop behind the GRN accept claim (vendors.py
+        # _accept_grn_claimed). Every unit minted for a goods receipt now carries
+        # a per-line ordinal `line_unit_seq` derived from the count already
+        # minted for that line, so (source_id, grn_line_index, line_unit_seq)
+        # names exactly ONE physical unit of exactly one GRN line. UNIQUE, so an
+        # insert that was already in flight inside a worker which got declared
+        # stale and taken over lands as a DuplicateKeyError instead of becoming
+        # an extra unit on the shelf. PARTIAL on all three fields existing: every
+        # legacy stock_unit predates `line_unit_seq` and is therefore exempt (so
+        # the build cannot fail on existing data), and so is every non-GRN unit
+        # (transfers, returns, opening stock) which never carries grn_line_index.
+        # NOTE the ordinal is load-bearing: an index on (source_id,
+        # grn_line_index) alone would collide on the 2nd..Nth unit of every
+        # multi-quantity line and silently receive 1 unit instead of N.
+        _grn_idx_failures_before = len(failures)
+        _idx(
+            "stock_units",
+            [("source_id", 1), ("grn_line_index", 1), ("line_unit_seq", 1)],
+            unique=True,
+            partialFilterExpression={
+                "source_id": {"$exists": True},
+                "grn_line_index": {"$exists": True},
+                "line_unit_seq": {"$exists": True},
+            },
+            name="uniq_grn_line_unit_seq",
+            background=True,
+        )
+        if len(failures) > _grn_idx_failures_before:
+            # LOUD, not just the aggregated stdout summary at the end of this
+            # method: a safety net whose absence is invisible is not a safety
+            # net. (An IndexOptionsConflict here would mean the same key pattern
+            # was already created under a different name.) Non-fatal by design --
+            # the router's claim + fail-closed heartbeat still hold, and it also
+            # verifies this index's presence at accept time and logs an error.
+            import logging
+
+            logging.getLogger(__name__).error(
+                "[DB] CRITICAL: the GRN duplicate-unit backstop index "
+                "uniq_grn_line_unit_seq FAILED to build: %s",
+                failures[-1],
+            )
 
         # Users
         _idx("users", "user_id", unique=True, background=True)
