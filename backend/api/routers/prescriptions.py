@@ -554,6 +554,14 @@ def _merge_eye_subdoc(stored, patch):
     `patch` holds only the keys the caller set (Pydantic exclude_unset), so an
     explicit null still CLEARS a field while an omitted field keeps its stored
     value. A non-dict patch (or a non-dict stored eye) is returned as-is.
+
+    The alias sync runs in BOTH directions because the two Rx doors are keyed
+    differently: the spectacle doors patch sph/cyl/add while the 4-version door
+    patches sphere/cylinder/addition, and a stored eye can carry either shape
+    (or both). Whichever twin the caller supplied, the other is re-pointed at
+    the new value -- otherwise `_canonical_eye`, which reads `sph` BEFORE
+    `sphere`, would mirror the PRE-EDIT power into the dispensing record on
+    finalize. An alias is only ever updated, never invented.
     """
     if not isinstance(patch, dict):
         return patch
@@ -562,7 +570,84 @@ def _merge_eye_subdoc(stored, patch):
     for canonical, alias in _EYE_KEY_ALIASES.items():
         if canonical in patch and alias in base:
             merged[alias] = patch[canonical]
+        elif alias in patch and canonical in base:
+            merged[canonical] = patch[alias]
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Partial VERSION patches: deep-merge the SLOT, not replace it
+# ---------------------------------------------------------------------------
+# `prescription_versions.merge_version` assigns `versions[name] = payload`, i.e.
+# it REPLACES the whole version sub-document -- the same bug class as the eye
+# replace above, one level deeper. A PATCH carrying only right_eye.sphere used
+# to drop that slot's left_eye / pd / source AND blank the rest of right_eye.
+# That matters clinically because `versions.final` is MIRRORED into the
+# top-level right_eye/left_eye that POS and the workshop read (finalize), so a
+# blanked version power can propagate into the dispensing record.
+#
+# Merge here at the router, exactly like the PUT door: the merged slot is what
+# gets validated and what gets written, in that order.
+_VERSION_EYE_KEYS = (("right_eye", "Right eye"), ("left_eye", "Left eye"))
+
+# Provenance is re-stamped on every write (who captured THIS edit), so it is
+# never carried over from the stored slot by the merge.
+_VERSION_PROVENANCE_KEYS = ("captured_at", "captured_by")
+
+
+def _merge_version_slot(stored, patch):
+    """Deep-merge ONE version slot (before_testing/after_testing/manual/final).
+
+    Slot-level keys (pd, source, override_reason, signed_off_by) merge the same
+    way the eyes do: `patch` holds only what the caller set (exclude_unset), so
+    an omitted key keeps its stored value while an explicit null still CLEARS
+    it. Each eye sub-document is deep-merged with `_merge_eye_subdoc` so a
+    single-power edit cannot blank the rest of that eye; an eye sent as an
+    explicit null still clears the whole eye.
+
+    `captured_at` / `captured_by` are dropped from the merged slot so
+    `merge_version` re-stamps them with the clinician making THIS edit -- a
+    partial edit must not stay attributed to whoever first filled the slot.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    base = dict(stored) if isinstance(stored, dict) else {}
+    merged = {**base, **patch}
+    for eye_key, _label in _VERSION_EYE_KEYS:
+        if isinstance(patch.get(eye_key), dict):
+            merged[eye_key] = _merge_eye_subdoc(base.get(eye_key), patch[eye_key])
+    for provenance_key in _VERSION_PROVENANCE_KEYS:
+        merged.pop(provenance_key, None)
+    return merged
+
+
+def _validate_version_eye(eye_label: str, eye) -> None:
+    """Validate ONE eye of a version slot. Raises HTTPException(422).
+
+    Always call this on the MERGED eye, never on the raw patch -- what is about
+    to be STORED is what has to be clinically valid. Validating the patch alone
+    is how `{"axis": null}` sailed through on an eye whose stored cylinder is
+    -1.25, leaving an un-grindable toric Rx one finalize away from the workshop.
+
+    `_eye_value` resolves either field-name shape: a version eye is keyed
+    sphere/cylinder/addition, but a slot backfilled from a legacy doc (or
+    written by the finalize mirror) carries the canonical sph/cyl/add twin.
+
+    Per-eye PD is deliberately NOT range-checked here: VersionEyeData has no
+    `pd` field, so a merged per-eye pd can only have come from storage, and a
+    stale one must not lock the clinician out of correcting the powers.
+    """
+    if not isinstance(eye, dict):
+        return
+    cyl = _eye_value(eye, "cylinder", "cyl")
+    try:
+        _validate_rx_number(_eye_value(eye, "sphere", "sph"), "sph")
+        _validate_rx_number(cyl, "cyl")
+        _validate_rx_number(_eye_value(eye, "addition", "add"), "add")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label}: {exc}")
+    # PATIENT SAFETY: toric (non-zero CYL) needs a whole-degree axis 1-180.
+    _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=422)
 
 
 def _validate_cl_eye(eye_label: str, eye):
@@ -1696,8 +1781,22 @@ async def patch_prescription_version(
     payload: PrescriptionVersionPayload,
     current_user: dict = Depends(get_current_user),
 ):
-    """Write or overwrite one of the 4 Rx versions. Only writable
-    while status='in_progress'. Use POST /finalize to lock the record.
+    """Write one of the 4 Rx versions. Only writable while
+    status='in_progress'. Use POST /finalize to lock the record.
+
+    PATIENT SAFETY -- this is a PARTIAL update: the slot is DEEP-merged with
+    the stored one (`_merge_version_slot`), not replaced. `merge_version` writes
+    `versions[name] = payload`, so a PATCH carrying only right_eye.sphere used
+    to drop that slot's left_eye / pd / source and blank the rest of right_eye.
+    `versions.final` is mirrored into the top-level right_eye/left_eye that POS
+    and the workshop read, so a blanked version power could propagate into the
+    DISPENSING record. Now every power the caller does not mention survives,
+    while an explicitly-sent null still CLEARS a field (exclude_unset
+    distinguishes "not sent" from "sent as null").
+
+    The three steps below run in this order and no other: MERGE, then VALIDATE
+    THE MERGED SLOT, then WRITE. Validating the raw patch instead is how
+    `{"axis": null}` passed on an eye whose stored cylinder is -1.25.
 
     Gated identically to PUT /{prescription_id} (audit P1): this path writes
     clinical Rx data (and the `final` slot is mirrored to top-level on
@@ -1735,21 +1834,30 @@ async def patch_prescription_version(
 
     body = payload.model_dump(exclude_unset=True)
 
-    # PATIENT SAFETY: the `final` version is mirrored into top-level
-    # right_eye/left_eye on finalize, so a version eye must obey the SAME
-    # toric-axis rule as the create / PUT doors -- a non-zero cylinder with no
-    # axis is un-grindable. Checked here (not on VersionEyeData) so the caller
-    # gets a plain-English string detail instead of a Pydantic error list.
-    for eye_key, eye_label in (("right_eye", "Right eye"), ("left_eye", "Left eye")):
-        eye = body.get(eye_key)
-        if isinstance(eye, dict):
-            _validate_eye_axis(
-                eye_label, eye.get("cylinder"), eye.get("axis"), status_code=422
-            )
+    # --- STEP 1: MERGE ------------------------------------------------------
+    # Deep-merge the patch onto the STORED slot first. `merge_version` writes
+    # `versions[name] = payload`, which replaces the whole sub-document, so a
+    # partial PATCH would otherwise blank every power it did not resend.
+    stored_slot = (doc.get("versions") or {}).get(version_name)
+    merged_slot = _merge_version_slot(stored_slot, body)
 
+    # --- STEP 2: VALIDATE THE MERGED SLOT -----------------------------------
+    # Never the raw patch: the merged slot is what is about to be stored, and
+    # `versions.final` is mirrored into the top-level right_eye/left_eye that
+    # POS and the workshop read on finalize. Checked here (not on
+    # VersionEyeData) so the caller gets a plain-English string detail instead
+    # of a Pydantic error list. An eye the PATCH did not touch is not
+    # re-validated -- it is being rewritten byte-identical.
+    for eye_key, eye_label in _VERSION_EYE_KEYS:
+        if isinstance(body.get(eye_key), dict):
+            _validate_version_eye(eye_label, merged_slot.get(eye_key))
+
+    # --- STEP 3: WRITE ------------------------------------------------------
+    # Nothing above this line touches the repository, so a rejected patch
+    # leaves the stored Rx byte-identical (no write-then-rollback).
     try:
         new_doc = merge_version(
-            doc, version_name, body, captured_by=current_user.get("user_id")
+            doc, version_name, merged_slot, captured_by=current_user.get("user_id")
         )
     except ValueError as e:
         if "finalized" in str(e):
