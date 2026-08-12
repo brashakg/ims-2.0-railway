@@ -35,6 +35,7 @@ from ..dependencies import (
 )
 from ..services import clinical_abuse as _abuse
 from ..services import conversion_analytics as _conversion
+from ..services.rx_print_values import first_present_rx_value, is_absent_rx_value
 
 router = APIRouter()
 
@@ -1756,10 +1757,18 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     os_ = _eye_block(rx, "left_eye")
 
     # PD: prefer a top-level pd, else fall back to per-eye pd values.
-    pd = rx.get("pd")
-    if pd in (None, "", 0):
-        pd = od.get("pd") or os_.get("pd")
-    pd_str = "" if pd in (None, "") else str(pd)
+    #
+    # This block used to read `if pd in (None, "", 0)` then `od.get("pd") or
+    # os_.get("pd")`, which failed three ways on a patient's card:
+    #   * a stored junk string ("None") is truthy, so it won the `or` and the
+    #     card printed "PD: None mm";
+    #   * a REAL top-level PD of 0 was in the discard tuple and was thrown away;
+    #   * `or` between the eyes swallowed a REAL right-eye 0 and silently
+    #     printed the LEFT eye's number in its place.
+    # `first_present_rx_value` keeps the same preference order while treating
+    # only genuinely-absent values as absent. A PD of 0 is real clinical data.
+    pd = first_present_rx_value(rx.get("pd"), od.get("pd"), os_.get("pd"))
+    pd_str = "" if is_absent_rx_value(pd) else str(pd)
 
     def row(label: str, eye: dict) -> str:
         return (
@@ -1777,7 +1786,11 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     phone_html = (
         f"<span><b>Phone:</b> {esc(phone)}</span>" if phone not in (None, "") else ""
     )
-    pd_html = f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str else ""
+    # `if pd_str` would be a truthiness test again; "0" is truthy so it happens
+    # to work, but the explicit form is the one that stays correct.
+    pd_html = (
+        f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str != "" else ""
+    )
     gstin_html = (
         f"<div class='clinic-gstin'>GSTIN: {esc(clinic_gstin)}</div>"
         if clinic_gstin

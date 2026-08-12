@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
+from ..services.rx_print_values import is_absent_rx_value, rx_text_or
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -1542,11 +1543,23 @@ _PRINT_STYLE = """
 """
 
 
+# The absence rule lives in ONE place (services/rx_print_values.py) because
+# there is more than one patient-facing Rx card -- this router renders two, and
+# clinical.py renders a third that PrescriptionsPage offers on the SAME screen.
+# A local copy here is how the rule drifted and a card printed "PD: None".
+def _is_absent_rx_value(value) -> bool:
+    """Thin alias for the shared rule; see services/rx_print_values.py."""
+    return is_absent_rx_value(value)
+
+
 def _cell(value) -> str:
-    """Render a stored Rx cell value, falling back to '-' for None/empty."""
-    if value is None or value == "":
-        return "-"
-    return str(value)
+    """Render a stored Rx cell value, falling back to '-' when absent."""
+    return rx_text_or(value, "-")
+
+
+def _text(value, fallback: str = "-") -> str:
+    """Render a free-text Rx field (lens/coating recommendation, remarks...)."""
+    return rx_text_or(value, fallback)
 
 
 def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
@@ -1559,14 +1572,14 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Prescription {prescription.get('prescription_number')}</title>
+            <title>Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Eye Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <table>
@@ -1590,9 +1603,9 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
-            <p><strong>Lens Recommendation:</strong> {prescription.get('lens_recommendation', 'N/A')}</p>
-            <p><strong>Coating:</strong> {prescription.get('coating_recommendation', 'N/A')}</p>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Lens Recommendation:</strong> {_text(prescription.get('lens_recommendation'), 'N/A')}</p>
+            <p><strong>Coating:</strong> {_text(prescription.get('coating_recommendation'), 'N/A')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
@@ -1607,23 +1620,26 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
     `identity_html` prepends the issuing store/entity supplier block."""
     right = prescription.get("cl_right") or {}
     left = prescription.get("cl_left") or {}
-    brand = prescription.get("cl_brand") or "-"
-    series = prescription.get("cl_series") or "-"
-    modality = prescription.get("modality") or "-"
+    brand = _text(prescription.get("cl_brand"))
+    series = _text(prescription.get("cl_series"))
+    modality = _text(prescription.get("modality"))
     color = prescription.get("color")
-    color_row = f"<p><strong>Color:</strong> {color}</p>" if color else ""
+    # `if color` alone let the junk string "None" through as truthy.
+    color_row = (
+        "" if _is_absent_rx_value(color) else f"<p><strong>Color:</strong> {color}</p>"
+    )
     return f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Contact Lens Prescription {prescription.get('prescription_number')}</title>
+            <title>Contact Lens Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}
@@ -1653,7 +1669,7 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
                     <td>{_cell(left.get('diameter'))}</td>
                 </tr>
             </table>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
