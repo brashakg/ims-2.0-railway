@@ -281,6 +281,19 @@ def wired(monkeypatch):
     monkeypatch.setattr(deps, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(deps, "get_store_repository", lambda: _StoreRepo())
 
+    # The refund CONFIRM path re-reads the original order to learn which
+    # physical shop shipped each unit. get_order_repository() reaches for
+    # `db.orders` (attribute access) which this fake connection does not expose,
+    # so the read failed and the restock ran on an UNVERIFIED order -- now
+    # refused. Serve the seeded order (it already carries fulfillment_stores).
+    _orders_coll = db.get_collection("orders")
+
+    class _OrderRepo:
+        def find_by_id(self, oid):
+            return _orders_coll.find_one({"order_id": oid})
+
+    monkeypatch.setattr(returns_router, "get_order_repository", lambda: _OrderRepo())
+
     return {
         "db": db,
         "customer_repo": customer_repo,
