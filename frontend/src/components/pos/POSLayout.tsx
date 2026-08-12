@@ -1211,8 +1211,11 @@ export function POSLayout() {
           }}
           onBack={() => {
             // "Back" dismisses the modal but still advances to Complete —
-            // the order + workshop job are already created; fitting details
-            // can be filled later from the Workshop page.
+            // the order + workshop job are already created. Fitting details can
+            // then be confirmed from the Workshop page job detail ("Confirm
+            // fitting details"), which is the ONLY other place that writes them;
+            // until they are, the job cannot be started, completed or QC'd, and
+            // the handover gate will refuse the order.
             setFittingJobId(null);
             setFittingCoating('');
             store.setStep('complete');
