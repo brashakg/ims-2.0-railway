@@ -4090,18 +4090,32 @@ async def void_grn(
                 )
 
         # TERMINAL WRITE -- guarded exactly like the accept path's, because
-        # holding the claim is NOT the same as writing under it. Each filter
-        # closes a defect measured on the previous build:
-        #   * status PENDING -- the PENDING assertion above read the doc BEFORE
-        #     the claim, and the claim admits PARTIALLY_ACCEPTED as well, so
-        #     without this a colleague's accept landing in between let a
-        #     PARTIALLY_ACCEPTED receipt be voided with a green 200. No stall
-        #     required, just two clerks.
-        #   * accept_lock_token -- this handler may have been parked (its stock
-        #     count on a blackholed socket, the very premise the stale window
-        #     exists for) while an accept took the claim over, minted the whole
-        #     delivery and flipped it ACCEPTED. A takeover invalidates our token,
-        #     so a stale reply can no longer void a receipt that now holds stock.
+        # holding the claim is NOT the same as writing under it. Each element
+        # closes a DIFFERENT measured defect; the attribution below was checked
+        # by mutation (remove one filter, see which probe reopens), because an
+        # earlier version of this comment credited the wrong filter and would
+        # have led the next reader to delete the one that is doing real work.
+        #
+        #   * status PENDING -- carries BOTH the "no stall, two clerks" shape
+        #     and the parked-count shape. The PENDING assertion above reads the
+        #     doc fetched BEFORE the claim, and the claim itself admits
+        #     PARTIALLY_ACCEPTED, so without this filter a colleague's accept
+        #     landing in between voids a receipt that now holds stock. Measured
+        #     with the token filter REMOVED: both of those still 409 here,
+        #     because by then the doc is ACCEPTED / PARTIALLY_ACCEPTED and no
+        #     longer matches.
+        #
+        #   * accept_lock_token -- its UNIQUE job is the shape where the doc is
+        #     still PENDING when the parked void wakes up, so the status filter
+        #     cannot help: an accept takes the stale claim over, mints every
+        #     unit, and its terminal flip CANNOT be written (see
+        #     _advance_grn_terminal_status -- "the receipt stays in its previous
+        #     status"), then _finalise_grn_accept_metadata clears the token.
+        #     Doc PENDING, stock on the shelf, token gone. Measured with this
+        #     filter removed: 200 {"grn_status": "VOID"} over 24 real units.
+        #     Regression-tested by
+        #     test_a_parked_void_cannot_void_a_receipt_whose_flip_failed.
+        #
         # And branching on the RESULT is what stops a swallowed write answering
         # a green "GRN voided" over a doc that is still PENDING.
         void_patch = {
@@ -4119,12 +4133,17 @@ async def void_grn(
             {"$set": void_patch},
         )
         if written is _GRN_WRITE_ERROR:
+            # Deliberately does NOT claim "nothing was voided": the write may
+            # have applied server-side and only its reply been lost, in which
+            # case the receipt IS void. The stock gate above already proved zero
+            # units, so no stock is at risk either way -- but the message must
+            # not assert an outcome we cannot see.
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "The goods receipt could not be voided -- the database did "
-                    "not confirm the change. Refresh and try again; nothing was "
-                    "voided."
+                    "The database did not confirm whether this goods receipt "
+                    "was voided. Refresh to see its current state before trying "
+                    "again -- no stock was affected."
                 ),
             )
         if written is None:

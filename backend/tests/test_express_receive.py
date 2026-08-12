@@ -140,8 +140,7 @@ class _FileStore:
         return (b"x", "inv.pdf", "application/pdf")
 
     def get_metadata(self, _fid):
-        return {"kind": "grn_document", "uploaded_by": "u1",
-                "store_id": "STORE-A"}
+        return {"kind": "grn_document", "uploaded_by": "u1", "store_id": "STORE-A"}
 
 
 class _EmptyFileStore:
@@ -483,6 +482,34 @@ def test_express_accept_failure_surfaces_partial_with_grn_id(monkeypatch):
     assert detail["grn_id"] in grn_repo.docs
     assert grn_repo.docs[detail["grn_id"]]["status"] == "PENDING"
     assert "accept or void" in detail["message"]
+
+
+def test_express_mid_mint_503_is_downgraded_to_a_conflict(monkeypatch):
+    """The `except HTTPException` exit -- the one the accept path's own
+    mid-mint 503s travel through (the count-verify abort and the unverifiable
+    heartbeat), which fire AFTER real units are on the shelf.
+
+    This is the exit that made the 500 dangerous: a 5xx here is auto-retried by
+    the api client, and each retry creates a NEW grn_id with no duplicate guard
+    for STANDARD receipts, minting the delivery again. The sibling test above
+    covers the generic `except Exception` exit; this covers the HTTPException
+    one, so all three express failure exits are pinned behaviourally rather
+    than by grepping the handler's source."""
+    grn_repo, _po_repo, _stock, _t = _wire(monkeypatch)
+
+    async def _mid_mint_503(grn_id, current_user):
+        raise HTTPException(
+            status_code=503,
+            detail="Some units were received before the stock store stopped responding.",
+        )
+
+    monkeypatch.setattr(vendors_mod, "_accept_grn_impl", _mid_mint_503)
+    with pytest.raises(HTTPException) as e:
+        _run(_body(), _user())
+    assert e.value.status_code == 409
+    assert e.value.status_code < 500, "must not be auto-retryable"
+    assert e.value.detail["code"] == "EXPRESS_PARTIAL"
+    assert grn_repo.docs[e.value.detail["grn_id"]]["status"] == "PENDING"
 
 
 def test_express_held_lines_surface_partial_not_false_success(monkeypatch):

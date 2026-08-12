@@ -1593,18 +1593,17 @@ def test_a_duplicate_is_still_skipped_not_treated_as_a_failure(wired):
 
 
 # --- MF3: express must not be auto-retried into a second receipt -----------
-def test_express_partial_is_a_conflict_not_a_server_error():
-    """The frontend api client auto-retries every 5xx POST three times, and
-    _create_grn_impl has no duplicate guard for STANDARD receipts -- so each
-    retry created a NEW grn_id and minted the whole delivery again, which the
-    per-(grn, line, unit) index cannot catch because it keys on source_id.
-
-    Asserted at the source so nobody can quietly restore the 500."""
-    import inspect
-
-    src = inspect.getsource(vd.express_receive_grn)
-    assert "status_code=500" not in src, "express must not raise a retryable 5xx"
-    assert src.count("status_code=409") >= 3
+# NOTE: an earlier version of this file asserted the express 409 contract by
+# grepping the source text of vd.express_receive_grn. PR #980 removed fifteen
+# such assertions repo-wide and shipped backend/tests/source_guard.py because a
+# shifted co_firstlineno can land the lookup on a DIFFERENT function whose text
+# happens to contain the asserted substring -- passing while proving nothing.
+# source_guard's own guidance is to prefer a behavioural test wherever the
+# guarantee has a runtime observable. This one does: all three of
+# express_receive_grn's failure exits are driven end to end in
+# test_express_receive.py, each asserting `status_code == 409` AND
+# `status_code < 500, "must not be auto-retryable"` -- which pins the REASON, so
+# it survives a later 409 -> 400/422 move that a text grep would not.
 
 
 # --- Ship-with-note hardening (all inside files already being edited) ------
@@ -1860,9 +1859,16 @@ def test_a_failed_void_write_is_never_reported_as_success(wired, monkeypatch):
     assert grn_repo.doc["status"] == "PENDING"
 
 
-def test_the_heartbeat_clock_is_seeded_at_claim_time_not_after_the_po_fetch(wired):
-    """The mechanism behind shape (b), asserted directly: a claim time older
-    than the heartbeat cadence must make the FIRST tick due."""
+def test_an_overdue_tick_refuses_a_claim_that_is_no_longer_ours(wired):
+    """Unit-level: given a state whose clock is already older than the cadence,
+    the tick is due and refuses a claim somebody else now holds.
+
+    NAMING NOTE: this does NOT pin WHERE the clock is seeded. It hands the tick
+    a state dict, so the fixture supplies that half of the answer -- it passes
+    even with the seeding bug live. The claim-time seeding is pinned
+    behaviourally by
+    test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover,
+    which is the test that fails when the seeding is moved back."""
     grn_repo, stock_repo = wired(_grn(qty=2))
     grn_repo.doc["po_id"] = "PO-1"
     token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
@@ -1886,3 +1892,106 @@ def test_a_normal_accept_still_makes_no_extra_heartbeat_write(wired):
     assert out["units_added"] == 5
     # claim + terminal status flip + metadata/release == 3 guarded writes.
     assert grn_repo.collection.calls - before == 3
+
+
+# ===========================================================================
+# ROUND 7 -- the ONE shape only the accept_lock_token filter can refuse.
+#
+# Mutation-checked: removing ONLY `"accept_lock_token": claim_token` from
+# void's terminal write left the whole 73-test suite green. The status filter
+# carries every other void race (by the time the parked void wakes, the doc is
+# ACCEPTED or PARTIALLY_ACCEPTED and no longer matches). This is the shape
+# where the doc is STILL PENDING, so status cannot help and only the token can:
+#
+#   void claims -> its stock count parks -> the lock ages -> an accept takes
+#   the claim over and mints EVERY unit -> its terminal flip CANNOT be written
+#   (_advance_grn_terminal_status returns False; "the receipt stays in its
+#   previous status") -> _finalise_grn_accept_metadata clears the token ->
+#   void's parked reply finally lands against a PENDING doc with no token.
+#
+# Measured with the filter removed: 200 {"grn_status": "VOID"} over 24 real
+# sellable units. With it: 409, doc PENDING, units intact, re-accept heals.
+# ===========================================================================
+
+
+def test_a_parked_void_cannot_void_a_receipt_whose_flip_failed(wired, monkeypatch):
+    """THE discriminating test for the accept_lock_token filter.
+
+    Delete that filter and this test must fail -- it is the only one that
+    does."""
+    grn_repo, stock_repo = wired(_grn(qty=24))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    state = {"parked": False}
+    real_count = stock_repo.count
+
+    def _parking_count(flt):
+        if not state["parked"]:
+            state["parked"] = True
+            # The count's reply is stuck on a blackholed socket. While it is
+            # parked the lock ages and an accept takes the claim over.
+            grn_repo.doc["accept_lock_at"] = _aged_lock()
+            # That accept mints everything, but its terminal flip cannot be
+            # written -- so the receipt is left in its PREVIOUS status, PENDING.
+            monkeypatch.setattr(
+                vd, "_advance_grn_terminal_status", lambda *a, **k: False
+            )
+            accepted = _run(vd.accept_grn("GRN-1", _ADMIN))
+            assert accepted["status_flip_failed"] is True
+            assert accepted["units_added"] == 24
+            return 0  # the STALE reply, from before any of that happened
+        return real_count(flt)
+
+    stock_repo.count = _parking_count
+
+    # Preconditions for the shape: doc still PENDING, stock on the shelf,
+    # token cleared by the accept's token-guarded metadata write. If any of
+    # these is not true the test is not exercising what it claims.
+    def _assert_shape():
+        assert grn_repo.doc["status"] == "PENDING", "status filter must NOT apply"
+        assert len(stock_repo.rows) == 24
+        assert grn_repo.doc.get("accept_lock_token") is None
+
+    with pytest.raises(HTTPException) as err:
+        try:
+            _run(vd.void_grn("GRN-1", _ADMIN))
+        finally:
+            _assert_shape()
+
+    assert err.value.status_code == 409
+    assert "PENDING" in err.value.detail
+    # The receipt is NOT void and the 24 units are still attached to it, so a
+    # re-accept can finish the job.
+    assert grn_repo.doc["status"] == "PENDING"
+    assert len(stock_repo.rows) == 24
+
+
+def test_the_flipfail_shape_is_refused_by_the_token_filter_alone(wired, monkeypatch):
+    """Proves the ATTRIBUTION in the router comment, not just the outcome.
+
+    The same parked-void shape where the accept's flip SUCCEEDS is refused by
+    the status filter (the doc is ACCEPTED by then). Only when the flip fails
+    does the doc stay PENDING, and then the token is the sole discriminator."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    _void_env(monkeypatch, grn_repo, stock_repo)
+
+    state = {"parked": False}
+    real_count = stock_repo.count
+
+    def _parking_count(flt):
+        if not state["parked"]:
+            state["parked"] = True
+            grn_repo.doc["accept_lock_at"] = _aged_lock()
+            _run(vd.accept_grn("GRN-1", _ADMIN))  # flip SUCCEEDS this time
+            return 0
+        return real_count(flt)
+
+    stock_repo.count = _parking_count
+
+    with pytest.raises(HTTPException) as err:
+        _run(vd.void_grn("GRN-1", _ADMIN))
+
+    # Status filter territory: the doc is no longer PENDING.
+    assert grn_repo.doc["status"] == "ACCEPTED"
+    assert err.value.status_code == 409
+    assert "ACCEPTED" in err.value.detail
