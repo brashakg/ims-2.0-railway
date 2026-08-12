@@ -1652,6 +1652,27 @@ class _FakeComboCol:
         ]
         return type("_Del", (), {"deleted_count": before - len(self.docs)})()
 
+    def find(self, flt, _projection=None):
+        """Cursor stand-in supporting the router's .sort(...).limit(...) chain.
+
+        Honours the filter EXACTLY as Mongo would, so a test can tell an
+        all-stores read apart from a store-scoped one.
+        """
+        selected = [
+            dict(d)
+            for d in self.docs
+            if all(d.get(k) == v for k, v in (flt or {}).items())
+        ]
+
+        class _Cursor(list):
+            def sort(self, *_a, **_k):
+                return self
+
+            def limit(self, *_a, **_k):
+                return list(self)
+
+        return _Cursor(selected)
+
 
 _COMBOS_PATH = "/api/v1/clinical/lens-power-combos"
 _COMBO_BODY = {
@@ -1811,11 +1832,25 @@ class TestNoMalformedRoleGateAnywhere:
 
     (Verified to have teeth: on the pre-fix tree it reported exactly the two
     /clinical/lens-power-combos routes.)
+
+    The scan reads ANY collection in the closure -- set, frozenset, list or
+    tuple -- not just a set. An earlier version matched sets only, so the
+    entirely plausible refactor ``allowed = list(allowed_roles)`` (production
+    still works) made it inspect ZERO allow-sets and pass green while a
+    re-broken gate was live. Hence the counting contract below.
     """
 
     @staticmethod
-    def _malformed_gates(app):
-        found = []
+    def _scan(app):
+        """Return ``(gates, inspected, malformed)`` over every route.
+
+        ``gates``     -- require_roles dependencies reached.
+        ``inspected`` -- allow-collections actually READ out of those closures.
+        ``malformed`` -- allow-collections holding a non-string member.
+        """
+        gates = 0
+        inspected = 0
+        malformed = []
         for route in app.routes:
             dependant = getattr(route, "dependant", None)
             if dependant is None:
@@ -1826,12 +1861,17 @@ class TestNoMalformedRoleGateAnywhere:
                 call = getattr(node, "call", None)
                 qualname = getattr(call, "__qualname__", "") if call else ""
                 if qualname.startswith("require_roles.<locals>"):
+                    gates += 1
                     for cell in getattr(call, "__closure__", None) or ():
-                        value = cell.cell_contents
-                        if isinstance(value, (set, frozenset)) and any(
-                            not isinstance(item, str) for item in value
-                        ):
-                            found.append(
+                        try:
+                            value = cell.cell_contents
+                        except ValueError:  # pragma: no cover - empty cell
+                            continue
+                        if not isinstance(value, (set, frozenset, list, tuple)):
+                            continue
+                        inspected += 1
+                        if any(not isinstance(item, str) for item in value):
+                            malformed.append(
                                 (
                                     sorted(getattr(route, "methods", None) or []),
                                     getattr(route, "path", "?"),
@@ -1839,22 +1879,25 @@ class TestNoMalformedRoleGateAnywhere:
                                 )
                             )
                 stack.extend(getattr(node, "dependencies", None) or [])
-        return found
+        return gates, inspected, malformed
 
     def test_every_require_roles_gate_holds_only_role_strings(self):
         from api.main import app as _app
 
-        malformed = self._malformed_gates(_app)
+        _gates, _inspected, malformed = self._scan(_app)
         assert malformed == [], (
             "require_roles() was handed a collection instead of splatted role "
             "strings -- these routes 403 EVERYONE except SUPERADMIN:\n  "
             + "\n  ".join(f"{m} {p} -> {v!r}" for m, p, v in malformed)
         )
 
-    def test_the_tripwire_can_actually_see_the_gates(self):
-        # Guard against the introspection silently matching nothing (e.g. if
-        # require_roles is ever renamed), which would make the test above pass
-        # vacuously forever.
+    def test_the_tripwire_reads_an_allow_set_for_every_gate_it_finds(self):
+        # THE anti-vacuity contract. The test above can only be trusted if the
+        # scan actually read an allow-collection out of EVERY gate it walked
+        # past. require_roles' closure holds exactly one cell (``allowed``), so
+        # inspected MUST equal gates. If a refactor changes the closure shape,
+        # this goes RED and someone updates the scan -- instead of the malformed
+        # check silently inspecting nothing and passing forever.
         from api.main import app as _app
         from api.routers.auth import require_roles
 
@@ -1863,18 +1906,382 @@ class TestNoMalformedRoleGateAnywhere:
             "require_roles' inner dependency was renamed -- update the "
             "malformed-gate tripwire's qualname match."
         )
-        gates = 0
-        for route in _app.routes:
-            dependant = getattr(route, "dependant", None)
-            if dependant is None:
-                continue
-            stack = [dependant]
-            while stack:
-                node = stack.pop()
-                call = getattr(node, "call", None)
-                if call is not None and getattr(
-                    call, "__qualname__", ""
-                ).startswith("require_roles.<locals>"):
-                    gates += 1
-                stack.extend(getattr(node, "dependencies", None) or [])
+
+        gates, inspected, _malformed = self._scan(_app)
         assert gates > 100, f"expected hundreds of require_roles gates, saw {gates}"
+        assert inspected == gates, (
+            f"the malformed-gate scan walked {gates} require_roles gates but "
+            f"could only read an allow-collection out of {inspected} of them. "
+            "Any gate it cannot read is a gate it cannot check, so "
+            "test_every_require_roles_gate_holds_only_role_strings is passing "
+            "vacuously. Update _scan for require_roles' new closure shape."
+        )
+
+    def test_the_scan_detects_a_planted_malformed_gate(self):
+        # Positive control: prove the detector fires on the real bug shape and
+        # is not merely returning [] because it looks in the wrong place.
+        from fastapi import Depends, FastAPI
+        from api.routers.auth import require_roles
+
+        roles = ("ADMIN", "STORE_MANAGER", "OPTOMETRIST")
+        planted = FastAPI()
+
+        @planted.post("/planted")
+        async def _planted(_u: dict = Depends(require_roles(roles))):  # the BUG
+            return {}
+
+        @planted.post("/correct")
+        async def _correct(_u: dict = Depends(require_roles(*roles))):
+            return {}
+
+        gates, inspected, malformed = self._scan(planted)
+        assert gates == 2 and inspected == 2, (gates, inspected)
+        assert [p for _m, p, _v in malformed] == ["/planted"], malformed
+
+
+# ---------------------------------------------------------------------------
+# Round 2 - the ownership guard must FAIL CLOSED on an ambiguous identity
+# ---------------------------------------------------------------------------
+# The first cut of the guard was `doc.get("created_by") != user.get("user_id")`.
+# A bare `!=` reads None == None as a MATCH, so a combo with no creator, deleted
+# by a caller whose token carries no user_id claim, sailed through:
+#     no created_by + no user_id claim -> 200 {"deleted": "c-1"}
+# Separately the store leg used _store_scope_or_404, which fails OPEN on a doc
+# with no store_id (correct for legacy eye tests, wrong for a brand-new
+# collection), so an out-of-store STORE_MANAGER deleted an unattributed combo:
+#     UNATTRIBUTED + other-store STORE_MANAGER -> 200 remaining=0
+# Both are locked below. Every ambiguous identity must DENY.
+
+# Creator shapes that must never satisfy the ownership test. "deleted user" and
+# "disabled user" are spelled out even though this endpoint never resolves a
+# user record -- from the handler's side they are simply a created_by that does
+# not match the caller, and saying so beats implying a lookup that is not there.
+_UNOWNED_CREATORS = [
+    pytest.param(None, id="creator-null"),
+    pytest.param("", id="creator-empty-string"),
+    pytest.param("opto-somebody-else", id="creator-different-user"),
+    pytest.param("u-deleted-9999", id="creator-deleted-user"),
+    pytest.param("u-disabled-4242", id="creator-disabled-user"),
+]
+
+# The four roles the route admits, plus SUPERADMIN.
+_PERMITTED_ROLES = ["OPTOMETRIST", "STORE_MANAGER", "ADMIN", "SUPERADMIN"]
+_MANAGER_ROLES = {"STORE_MANAGER", "ADMIN", "SUPERADMIN"}
+
+
+def _combo_missing_creator(combo_id="c-1", store_id="BV-MATRIX-01"):
+    """A combo doc with NO created_by key at all (not merely a null one)."""
+    doc = _combo_doc(combo_id, "placeholder", store_id=store_id)
+    doc.pop("created_by")
+    return doc
+
+
+class TestLensPowerComboDeleteOwnershipFailsClosed:
+    """DELETE ownership: absent / null / empty / foreign creator must DENY."""
+
+    @pytest.mark.parametrize("creator", _UNOWNED_CREATORS)
+    @pytest.mark.parametrize("role", _PERMITTED_ROLES)
+    def test_unowned_combo(self, matrix_client, monkeypatch, role, creator):
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", creator)])
+        )
+        token = _mint_token([role], uid="caller-1")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        if role in _MANAGER_ROLES:
+            # A manager owns the store's shared templates -- allowed by design,
+            # and this is the control proving the denials below are about
+            # OWNERSHIP and not about the request failing for some other reason.
+            assert resp.status_code == 200, resp.text
+            assert col.docs == []
+        else:
+            assert resp.status_code == 403, (
+                f"{role} must not delete a combo it does not own "
+                f"(created_by={creator!r}), got {resp.status_code}: {resp.text[:200]}"
+            )
+            assert len(col.docs) == 1, "denied delete must leave the collection UNTOUCHED"
+
+    @pytest.mark.parametrize("role", _PERMITTED_ROLES)
+    def test_combo_with_no_created_by_key(self, matrix_client, monkeypatch, role):
+        col = _stub_combo_col(monkeypatch, _FakeComboCol([_combo_missing_creator()]))
+        token = _mint_token([role], uid="caller-1")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        if role in _MANAGER_ROLES:
+            assert resp.status_code == 200, resp.text
+        else:
+            assert resp.status_code == 403, resp.text
+            assert len(col.docs) == 1
+
+    @pytest.mark.parametrize("creator", [None, "", "opto-a"])
+    def test_caller_without_a_user_id_claim_can_never_own(
+        self, matrix_client, monkeypatch, creator
+    ):
+        # THE regression: a token with no user_id claim yields caller=None, and
+        # `None != None` is False -> the old guard read that as ownership.
+        # auth.py's refresh path builds user_id with .get(), so a claimless
+        # token is reachable, not hypothetical.
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", creator)])
+        )
+        payload = {
+            "sub": "opto-nouid",
+            "username": "opto-nouid",
+            "roles": ["OPTOMETRIST"],
+            "store_ids": ["BV-MATRIX-01"],
+            "active_store_id": "BV-MATRIX-01",
+            "exp": datetime.utcnow() + timedelta(hours=2),
+        }
+        assert "user_id" not in payload
+        token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 403, (
+            f"a caller with no user_id claim must never satisfy the ownership "
+            f"test (created_by={creator!r}), got {resp.status_code}: {resp.text[:200]}"
+        )
+        assert len(col.docs) == 1, "denied delete must leave the collection UNTOUCHED"
+
+    def test_creator_still_may_delete_own_combo(self, matrix_client, monkeypatch):
+        # The guard must not have been tightened into refusing the real owner.
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        token = _mint_token(["OPTOMETRIST"], uid="opto-a")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, resp.text
+        assert col.docs == []
+
+
+class TestLensPowerComboUnattributedStore:
+    """An unattributed combo (store_id absent/null) must be OUT of scope for a
+    store-level caller -- 404, never 403, so the two legs of the guard cannot be
+    used together to probe which combos exist.
+    """
+
+    @pytest.mark.parametrize(
+        "stored", [pytest.param(None, id="store-null"), pytest.param("MISSING", id="store-key-absent")]
+    )
+    @pytest.mark.parametrize("role", ["OPTOMETRIST", "STORE_MANAGER"])
+    def test_store_level_caller_gets_404_on_unattributed_combo(
+        self, matrix_client, monkeypatch, role, stored
+    ):
+        doc = _combo_doc("c-1", "opto-a", store_id=None)
+        if stored == "MISSING":
+            doc.pop("store_id")
+        else:
+            doc["store_id"] = None
+        col = _stub_combo_col(monkeypatch, _FakeComboCol([doc]))
+        token = _mint_token([role], uid="caller-1", store_id="BV-MATRIX-01")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 404, (
+            f"{role} must not reach an unattributed combo, got "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+        assert len(col.docs) == 1, "denied delete must leave the collection UNTOUCHED"
+
+    def test_other_store_manager_cannot_delete_unattributed_combo(
+        self, matrix_client, monkeypatch
+    ):
+        # The chair's exact reproduction: before the fix this returned
+        # 200 remaining=0.
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a", store_id=None)])
+        )
+        token = _mint_token(["STORE_MANAGER"], uid="mgr-b", store_id="BV-OTHER-99")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 404, resp.text
+        assert len(col.docs) == 1
+
+    def test_store_scope_denial_is_404_not_403(self, matrix_client, monkeypatch):
+        # Existence-hiding: the store leg and the ownership leg must not return
+        # different statuses in a way that reveals whether a combo exists.
+        col = _stub_combo_col(
+            monkeypatch,
+            _FakeComboCol([_combo_doc("c-1", "opto-a", store_id="BV-OTHER-99")]),
+        )
+        token = _mint_token(["STORE_MANAGER"], uid="mgr-a", store_id="BV-MATRIX-01")
+        present = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        absent = matrix_client.delete(
+            _COMBOS_PATH + "/does-not-exist",
+            headers={"Authorization": "Bearer " + token},
+        )
+        assert present.status_code == 404, present.text
+        assert absent.status_code == 404, absent.text
+        assert present.json() == absent.json(), (
+            "an out-of-store combo must be indistinguishable from a missing one"
+        )
+        assert len(col.docs) == 1
+
+    def test_admin_may_still_delete_an_unattributed_combo(
+        self, matrix_client, monkeypatch
+    ):
+        # ADMIN/SUPERADMIN are cross-store by design -- somebody has to be able
+        # to clean up an orphan.
+        col = _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a", store_id=None)])
+        )
+        token = _mint_token(["ADMIN"], uid="adm-1", store_id="BV-MATRIX-01")
+        resp = matrix_client.delete(
+            _COMBOS_PATH + "/c-1", headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, resp.text
+        assert col.docs == []
+
+
+class TestLensPowerComboCreateStampsAStore:
+    """The other side of the unattributed-combo guard: never MINT one.
+
+    The delete guard now refuses unattributed combos, so the create door must
+    not manufacture them -- otherwise the feature creates rows only a SUPERADMIN
+    can ever remove. auth.py yields active_store_id=None for a store-less
+    session, which is a normal ADMIN account.
+    """
+
+    def test_post_without_an_active_store_is_rejected(self, matrix_client, monkeypatch):
+        col = _stub_combo_col(monkeypatch, _FakeComboCol())
+        payload = {
+            "sub": "adm-nostore",
+            "user_id": "adm-nostore",
+            "username": "adm-nostore",
+            "roles": ["ADMIN"],
+            "store_ids": [],
+            "active_store_id": None,
+            "exp": datetime.utcnow() + timedelta(hours=2),
+        }
+        token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        resp = matrix_client.post(
+            _COMBOS_PATH,
+            headers={"Authorization": "Bearer " + token},
+            json=_COMBO_BODY,
+        )
+        assert resp.status_code == 400, (
+            f"a store-less session must not mint an unattributed combo, got "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+        assert col.inserted == [], "nothing may be written without a store"
+
+    def test_every_created_combo_carries_a_store_id(self, matrix_client, monkeypatch):
+        col = _stub_combo_col(monkeypatch, _FakeComboCol())
+        token = _mint_token(["OPTOMETRIST"], uid="opto-a", store_id="BV-MATRIX-01")
+        resp = matrix_client.post(
+            _COMBOS_PATH,
+            headers={"Authorization": "Bearer " + token},
+            json=_COMBO_BODY,
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(col.inserted) == 1
+        assert col.inserted[0]["store_id"] == "BV-MATRIX-01"
+        assert col.inserted[0]["created_by"] == "opto-a"
+
+
+class TestLensPowerComboListGate:
+    """GET now states its own role gate instead of leaning on the POLICY row,
+    and its store filter fails closed.
+    """
+
+    @pytest.mark.parametrize(
+        "role", ["OPTOMETRIST", "STORE_MANAGER", "ADMIN", "AREA_MANAGER", "SUPERADMIN"]
+    )
+    def test_read_roles_allowed(self, matrix_client, monkeypatch, role):
+        _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        token = _mint_token([role], uid="caller-1")
+        resp = matrix_client.get(
+            _COMBOS_PATH, headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, (
+            f"{role} must keep its combo read access, got "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+
+    @pytest.mark.parametrize(
+        "role", ["SALES_STAFF", "CASHIER", "SALES_CASHIER", "WORKSHOP_STAFF",
+                 "ACCOUNTANT", "CATALOG_MANAGER", "DESIGN_MANAGER"]
+    )
+    def test_non_read_roles_forbidden(self, matrix_client, monkeypatch, role):
+        _stub_combo_col(
+            monkeypatch, _FakeComboCol([_combo_doc("c-1", "opto-a")])
+        )
+        resp = matrix_client.get(_COMBOS_PATH, headers=ALL_ROLE_HEADERS[role])
+        assert resp.status_code == 403, (
+            f"{role} must not read clinical templates, got {resp.status_code}"
+        )
+
+    def test_get_gate_is_explicit_not_policy_only(self):
+        # Pin the handler-level gate itself: the POLICY row is defence in depth,
+        # not the only lock. Reached through the route's dependency tree, so a
+        # deleted Depends() fails this even though the middleware still passes.
+        from api.main import app as _app
+        from api.routers.clinical import _COMBO_READ_ROLES
+
+        for route in _app.routes:
+            if getattr(route, "path", None) == _COMBOS_PATH and "GET" in (
+                getattr(route, "methods", None) or set()
+            ):
+                gate_sets = []
+                stack = [route.dependant]
+                while stack:
+                    node = stack.pop()
+                    call = getattr(node, "call", None)
+                    if call is not None and getattr(
+                        call, "__qualname__", ""
+                    ).startswith("require_roles.<locals>"):
+                        for cell in call.__closure__ or ():
+                            if isinstance(cell.cell_contents, (set, frozenset)):
+                                gate_sets.append(set(cell.cell_contents))
+                    stack.extend(getattr(node, "dependencies", None) or [])
+                assert gate_sets, (
+                    "GET /lens-power-combos has no require_roles gate -- it is "
+                    "relying on its POLICY row alone, the asymmetry that "
+                    "produced the malformed-tuple bug on its write twins."
+                )
+                assert set(_COMBO_READ_ROLES) in gate_sets, gate_sets
+                break
+        else:  # pragma: no cover - route must exist
+            pytest.fail("GET /lens-power-combos route not found")
+
+    def test_store_level_caller_without_a_store_sees_nothing(
+        self, matrix_client, monkeypatch
+    ):
+        # The read-side sibling of the unattributed-combo guard: an empty filter
+        # would return EVERY store's templates.
+        _stub_combo_col(
+            monkeypatch,
+            _FakeComboCol(
+                [
+                    _combo_doc("c-a", "opto-a", store_id="BV-MATRIX-01"),
+                    _combo_doc("c-b", "opto-b", store_id="BV-OTHER-99"),
+                ]
+            ),
+        )
+        payload = {
+            "sub": "mgr-nostore",
+            "user_id": "mgr-nostore",
+            "username": "mgr-nostore",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": [],
+            "active_store_id": None,
+            "exp": datetime.utcnow() + timedelta(hours=2),
+        }
+        token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        resp = matrix_client.get(
+            _COMBOS_PATH, headers={"Authorization": "Bearer " + token}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"combos": [], "total": 0}, (
+            "a store-level caller with no resolvable store must not receive "
+            "every store's templates"
+        )
