@@ -5,7 +5,7 @@ MongoDB connection management with connection pooling
 """
 
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, date as _date
 import os
 
 # MongoDB driver
@@ -283,6 +283,21 @@ class DatabaseConnection:
             background=True,
         )
 
+        # Returns: the Day-End drawer readers scan this collection on every
+        # cash-register preview poll and every Z-Read, and the per-tender refund
+        # cap + the returnable-qty scan hit it by order_id on every debounced
+        # refund quote keystroke. The collection also carries the bulk Shopify
+        # historical import, so an unindexed scan is a real hot-path cost at a
+        # busy counter (measured in prod: only _id_ and uniq_shopify_refund_id
+        # existed). Window scan is (store_id, status, created_at desc); the
+        # per-order lookups are order_id.
+        _idx(
+            "returns",
+            [("store_id", 1), ("status", 1), ("created_at", -1)],
+            background=True,
+        )
+        _idx("returns", "order_id", background=True)
+
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.
         # (product_id, store_id, status) covers both filtering + grouping in the
@@ -379,6 +394,27 @@ class DatabaseConnection:
         _idx("workshop_jobs", "job_id", unique=True, background=True)
         _idx("workshop_jobs", "job_number", unique=True, background=True)
         _idx("workshop_jobs", [("store_id", 1), ("status", 1)], background=True)
+        # ONE lab job per order (panel must-fix 1; backs PR #971's create_job
+        # dedup, which owns workshop.py). Two doors create jobs -- the POS client
+        # (POSLayout) and the backend confirm/auto-confirm safety net -- so a
+        # duplicate job means a duplicate lens grind / duplicate external-lab
+        # order, i.e. real rupees on every Rx sale.
+        # PARTIAL on a string order_id so the legacy/manual jobs that carry no
+        # order (or a null one) are exempt and cannot collide on a missing value.
+        # NOTE for whoever merges this: the build is fail-soft (each _idx is
+        # individually try/except'd), and it will NOT build while duplicate jobs
+        # already exist for the same order -- which is exactly the bug #971 is
+        # fixing, so prod almost certainly holds some today. The index only
+        # starts enforcing after those duplicates are cleaned up; it is a
+        # backstop for the application-level dedup, never a substitute for it.
+        _idx(
+            "workshop_jobs",
+            [("order_id", 1)],
+            unique=True,
+            partialFilterExpression={"order_id": {"$type": "string"}},
+            name="uniq_workshop_job_per_order",
+            background=True,
+        )
 
         # Attendance -- one row PER (employee, day). The UNIQUE (employee_id, date)
         # index is the DB-level backstop against the "same user recorded twice"
@@ -514,6 +550,59 @@ class DatabaseConnection:
                 "order_id": {"$type": "string"},
             },
             name="uniq_loyalty_earn_customer_order",
+            background=True,
+        )
+        # Idempotent REVERSAL (panel must-fix 2): exactly one ADJUST reversal row
+        # per (customer, cancelled order) and per (customer, return). These are
+        # the DB-level backstop behind loyalty._reverse_order_loyalty's atomic
+        # claim -- the Python ledger scan there is a check-then-write, so without
+        # these indexes two concurrent cancels DOUBLE-RESTORE (minting redeemable
+        # rupees) or DOUBLE-CLAW (burning the customer's points). The reversal now
+        # inserts with raise_on_duplicate=True and maps DuplicateKeyError to
+        # already_reversed BEFORE moving any balance.
+        # PARTIAL on type=ADJUST + a string marker so manual /loyalty/adjust rows
+        # (which carry neither field) and every EARN/REDEEM/EXPIRE row are exempt
+        # and can never collide on a missing value. Fail-soft build, like the
+        # EARN index above.
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("cancel_of_order_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "type": "ADJUST",
+                "cancel_of_order_id": {"$type": "string"},
+            },
+            name="uniq_loyalty_cancel_reversal",
+            background=True,
+        )
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("return_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "type": "ADJUST",
+                "return_id": {"$type": "string"},
+            },
+            name="uniq_loyalty_return_reversal",
+            background=True,
+        )
+        # CANONICAL per-ORDER reversal guard. The two indexes above key on the
+        # per-flow id, which makes a RETRY of the same cancel/return idempotent
+        # but does NOT stop a SECOND PARTIAL RETURN of the same order: partial
+        # returns are cumulative by design, so return #2 carries a different
+        # return_id, collides with nothing, and re-reverses the WHOLE order --
+        # minting points and driving lifetime_redeemed negative. Both flows now
+        # stamp reversal_of_order_id, so an order's loyalty can be reversed
+        # exactly once no matter which door does it.
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("reversal_of_order_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "type": "ADJUST",
+                "reversal_of_order_id": {"$type": "string"},
+            },
+            name="uniq_loyalty_order_reversal",
             background=True,
         )
 
@@ -937,6 +1026,21 @@ class MockCursor:
         return list(self.__iter__())
 
 
+def _mock_type_comparable(a, b) -> bool:
+    """True when Mongo would compare these two values at all (BSON type
+    bracketing). Numbers compare with numbers, strings with strings, dates with
+    dates; everything else is a non-match rather than an error."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool)
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return True
+    if isinstance(a, str) and isinstance(b, str):
+        return True
+    if isinstance(a, (datetime, _date)) and isinstance(b, (datetime, _date)):
+        return True
+    return False
+
+
 class MockCollection:
     """Mock collection for testing without MongoDB"""
 
@@ -958,6 +1062,16 @@ class MockCollection:
             inserted_ids.append(result.inserted_id)
         return type("obj", (object,), {"inserted_ids": inserted_ids})()
 
+    # Operators this mock understands. Anything NOT listed here is IGNORED (the
+    # clause is treated as matching) -- the historical lenient behaviour, kept so
+    # an unmodelled operator never hard-fails local no-Mongo mode. That leniency
+    # is a TRAP for guards built on newer operators: the serialized-stock EXPIRY
+    # FLOOR (product_repository._not_expired_or) is expressed with $not/$type/
+    # $regex, and while those were unmodelled every branch silently matched, so
+    # the floor was a complete no-op in mock mode AND any test asserting it over
+    # a MockCollection would have passed with the floor deleted. $not / $type are
+    # therefore modelled below. (Additive: no previously-supported operator
+    # changes behaviour.)
     def _matches_filter(self, doc: Dict, filter: Dict) -> bool:
         """Check if document matches the filter"""
         if not filter:
@@ -976,23 +1090,58 @@ class MockCollection:
                 # Handle operators like $regex, $gt, $lt, etc.
                 doc_value = doc.get(key, "")
                 for op, op_value in value.items():
-                    if op == "$regex":
+                    if op == "$not":
+                        # {field: {$not: {<ops>}}} -- true when the inner
+                        # condition does NOT match. Mongo also matches $not when
+                        # the field is missing; doc.get's "" default preserves
+                        # that for the string operators we model.
+                        if self._matches_filter(doc, {key: op_value}):
+                            return False
+                    elif op == "$type":
+                        types = op_value if isinstance(op_value, list) else [op_value]
+                        present = key in doc
+                        ok = False
+                        for t in types:
+                            if t in ("string", 2) and isinstance(doc_value, str) and present:
+                                ok = True
+                            elif t in ("date", 9) and present and isinstance(
+                                doc_value, (datetime, _date)
+                            ):
+                                ok = True
+                            elif t in ("bool", 8) and present and isinstance(
+                                doc_value, bool
+                            ):
+                                ok = True
+                            elif t in ("int", 16, "long", 18, "double", 1) and present:
+                                if isinstance(doc_value, (int, float)) and not isinstance(
+                                    doc_value, bool
+                                ):
+                                    ok = True
+                        if not ok:
+                            return False
+                    elif op == "$regex":
                         import re
 
                         flags = re.IGNORECASE if value.get("$options") == "i" else 0
                         if not re.search(op_value, str(doc_value), flags):
                             return False
-                    elif op == "$gt":
-                        if not (doc_value > op_value):
+                    elif op in ("$gt", "$lt", "$gte", "$lte"):
+                        # BSON TYPE BRACKETING. Mongo compares only values of
+                        # the same type and simply does not match across types;
+                        # it never errors. Python raises TypeError instead
+                        # (str vs datetime), and because BaseRepository.count
+                        # swallows exceptions and returns 0, ONE unparseable
+                        # row made an entire product+store read as zero stock --
+                        # taking the undated frames beside it off sale too.
+                        if not _mock_type_comparable(doc_value, op_value):
                             return False
-                    elif op == "$lt":
-                        if not (doc_value < op_value):
+                        if op == "$gt" and not (doc_value > op_value):
                             return False
-                    elif op == "$gte":
-                        if not (doc_value >= op_value):
+                        if op == "$lt" and not (doc_value < op_value):
                             return False
-                    elif op == "$lte":
-                        if not (doc_value <= op_value):
+                        if op == "$gte" and not (doc_value >= op_value):
+                            return False
+                        if op == "$lte" and not (doc_value <= op_value):
                             return False
                     elif op == "$in":
                         if doc_value not in op_value:

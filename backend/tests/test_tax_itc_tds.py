@@ -90,10 +90,36 @@ def test_tds_rates_update_model_validates():
         TdsRatesUpdate(rates={"194H": 99.0})       # out of 0-30 band
 
 
-def test_tds_rate_endpoints_gated_correctly():
-    import inspect
+def test_tds_rates_are_readable_by_any_authenticated_user(client, staff_headers):
+    """BEHAVIOURAL: the AP/payment screens show the rates, so a SALES_STAFF read
+    must succeed -- and an unauthenticated one must not.
 
-    import api.routers.settings as s
+    Replaces a grep for "get_current_user" in the handler source, which appears
+    throughout settings.py regardless of how THIS route is wired.
+    """
+    assert client.get("/api/v1/settings/tds-rates").status_code == 401
+    resp = client.get("/api/v1/settings/tds-rates", headers=staff_headers)
+    assert resp.status_code == 200, resp.text
 
-    assert "get_current_user" in inspect.getsource(s.get_tds_rates)      # read: any auth
-    assert 'require_roles("SUPERADMIN")' in inspect.getsource(s.update_tds_rates)  # edit: superadmin
+
+def test_tds_rate_edit_is_superadmin_only(client, staff_headers, auth_headers):
+    """BEHAVIOURAL: editing a statutory deduction rate is SUPERADMIN-only.
+
+    A wrong TDS rate silently under-deducts on every vendor payment, so prove
+    the server refuses the write rather than grepping for the decorator text.
+    """
+    body = {"rates": {"194H": 2.0}}
+
+    assert client.put("/api/v1/settings/tds-rates", json=body).status_code == 401
+
+    denied = client.put(
+        "/api/v1/settings/tds-rates", json=body, headers=staff_headers
+    )
+    assert denied.status_code == 403, denied.text
+
+    # The SUPERADMIN token from conftest must clear the gate (a 5xx from the
+    # absent DB is fine -- what matters is that it is NOT refused by RBAC).
+    allowed = client.put(
+        "/api/v1/settings/tds-rates", json=body, headers=auth_headers
+    )
+    assert allowed.status_code != 403, allowed.text

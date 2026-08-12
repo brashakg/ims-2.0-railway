@@ -291,7 +291,9 @@ class TestValidateAdvisory:
         assert resp.status_code == 200
         body = resp.json()
         assert body["valid"] is False
-        assert any("out of range (1-180)" in iss for iss in body["issues"])
+        # Wording now comes from the canonical validator (F19): the endpoint no
+        # longer keeps its own copy of the ranges.
+        assert any("(1-180)" in iss for iss in body["issues"])
 
     def test_sph_out_of_range_flagged(self, monkeypatch):
         repo = _FakeRxRepo(
@@ -305,4 +307,6 @@ class TestValidateAdvisory:
         assert resp.status_code == 200
         body = resp.json()
         assert body["valid"] is False
-        assert any("SPH" in iss for iss in body["issues"])
+        # 99 is beyond the canonical +/-25 limit. The message is the canonical
+        # validator's (field name lower-case: "sph value 99.0 is outside ...").
+        assert any("sph" in iss.lower() for iss in body["issues"])

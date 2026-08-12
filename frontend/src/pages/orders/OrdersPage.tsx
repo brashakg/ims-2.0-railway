@@ -29,6 +29,7 @@ import { orderApi, storeApi } from '../../services/api';
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
+import { canCloseHandover } from './handoverRoles';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -804,7 +805,13 @@ export function OrdersPage() {
                     <Truck className="w-4 h-4" />
                     Delivery Challan
                   </button>
-                  {selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
+                  {/* Hidden for roles the backend's HANDOVER_ROLES refuses. This
+                      button 403'd for OPTOMETRIST while rendering fully enabled
+                      with no role condition -- a green control that fails in
+                      front of the customer with no in-app escalation. The
+                      backend stays the authority; this only stops offering an
+                      action it will reject. */}
+                  {canCloseHandover(user) && selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
                     <button
                       onClick={() => openDeliverModal(selectedOrder)}
                       disabled={isOnRxHold(selectedOrder)}

@@ -50,6 +50,18 @@ export interface ExpectedPreview {
   cash_expenses: number;
   bank_deposit: number;
   expected: number;
+  // Present when a manual CASH expense MATCHES a recorded cash refund to the
+  // paisa (or is refund-flavoured) — probably the same money entered twice.
+  // Amount-matched, not a bare co-occurrence, so it does not fire every day.
+  refund_double_entry_advisory?: {
+    matched_amount: number;
+    cash_refunds: number;
+    reason: 'AMOUNT_MATCH' | 'REFUND_CATEGORY';
+    message: string;
+  } | null;
+  // True when the expected drawer computes NEGATIVE (a cash-in is missing).
+  negative_expected_advisory?: boolean;
+  negative_expected_message?: string | null;
 }
 
 export interface SessionsResponse {

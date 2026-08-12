@@ -272,6 +272,17 @@ async def book_shipment(
         from .orders import assert_no_active_rx_hold
 
         assert_no_active_rx_hold(order)
+
+        # PATIENT SAFETY: booking a shipment IS a handover -- the goods leave for
+        # the patient by courier and an ONLINE order also gets a "Fulfilled" push
+        # back to Shopify, so the buyer is told it shipped. This is the THIRD door
+        # in the guard family the comment above names, and it was the one left
+        # open: a job the Orders-screen gate refuses can simply be shipped
+        # instead, by a strictly WIDER role set (_FULFILMENT_ROLES includes
+        # CASHIER). Same predicate, same 400, never re-derived.
+        from .workshop import assert_linked_job_qc_cleared
+
+        assert_linked_job_qc_cleared(order)
     if order is None:
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
         logger.info(

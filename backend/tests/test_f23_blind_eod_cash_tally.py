@@ -334,10 +334,13 @@ def test_compute_expected_matches_zread_identity(db):
     # Opening 1000.00 (100000 paisa). CASH 700.00 + 333.33 + a 200.00 refund.
     _seed_order(db, order_id="O1", store_id="BV-1",
                 payments=[_pay("CASH", 700.0), _pay("CASH", 333.33), _pay("CASH", -200.0)])
-    # net CASH = 700 + 333.33 - 200 = 833.33 -> 83333 paisa.
     exp = till.compute_expected(db, "BV-1", WS, WE, 100000, cash_payouts_paisa=5000)
-    assert exp["cash_sales_paisa"] == 83333
-    # expected = opening + cash_sales - payouts = 100000 + 83333 - 5000 = 178333
+    # cash_sales_paisa is now GROSS collected (700 + 333.33 = 1033.33 -> 103333);
+    # the 200.00 refund is surfaced separately as cash_refunds_paisa (20000).
+    assert exp["cash_sales_paisa"] == 103333
+    assert exp["cash_refunds_paisa"] == 20000
+    # Identity: opening + collected - refunded - payouts
+    #         = 100000 + 103333 - 20000 - 5000 = 178333 (unchanged).
     assert exp["expected_cash_paisa"] == 178333
 
 
