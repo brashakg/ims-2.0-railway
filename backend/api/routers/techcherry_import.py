@@ -85,6 +85,26 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
+def _safe_float_opt(v: Any) -> Optional[float]:
+    """Like `_safe_float` but returns None when the source said NOTHING.
+
+    MONEY/GST: coercing a blank TaxAmount / TaxableAmount column to 0.0 makes
+    the imported order AFFIRMATIVELY assert "this sale carried no GST". The
+    nightly Tally export reads that assertion and books the whole gross as
+    Sales with zero output GST -- sales overstated, GST liability understated.
+    Optical genuinely has 0%-rated lines (eye tests, hearing aids), so the
+    export cannot simply treat every zero as suspicious; it MUST be able to
+    tell "the source said zero" from "the source said nothing". None is that
+    distinction. Readers that do `float(x or 0)` are unaffected.
+    """
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_int(v: Any) -> int:
     return int(_safe_float(v))
 
@@ -333,8 +353,17 @@ def _map_order(
         )
         or datetime.now(timezone.utc),
         "grand_total": _safe_float(row.get("grand_total") or row.get("GrandTotal")),
-        "subtotal": _safe_float(row.get("taxable_amount") or row.get("TaxableAmount")),
-        "tax_amount": _safe_float(row.get("tax_amount") or row.get("TaxAmount")),
+        # None (NOT 0.0) when the source column is blank/absent -- see
+        # _safe_float_opt. A manufactured 0.0 here is read downstream as "this
+        # sale was exempt" and books the full gross as Sales with no output GST.
+        "subtotal": _safe_float_opt(
+            row.get("taxable_amount") if row.get("taxable_amount") not in (None, "")
+            else row.get("TaxableAmount")
+        ),
+        "tax_amount": _safe_float_opt(
+            row.get("tax_amount") if row.get("tax_amount") not in (None, "")
+            else row.get("TaxAmount")
+        ),
         "total_discount": _safe_float(row.get("discount") or row.get("Discount")),
         "payment_method": (
             row.get("payment_mode") or row.get("PaymentMode") or ""

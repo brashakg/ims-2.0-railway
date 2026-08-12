@@ -422,6 +422,56 @@ class TestCashRegisterEndpoints:
         )
         assert r.status_code == 404
 
+    def test_negative_expected_verdict_is_not_overwritten_with_a_phantom_overage(self):
+        """ROUND-3 MUST-FIX 4. build_close_summary withholds the over/short
+        verdict when the expected drawer is NEGATIVE (more cash refunded than
+        the till took in -- a cash-in is missing). The close handler then
+        RE-DERIVED the status from the raw variance and persisted 'OVER', a
+        phantom overage sitting next to its own amber note saying the verdict
+        was withheld."""
+        db = _FakeDB()
+        c = _client(db)
+        sid = c.post(
+            "/finance/cash-register/open",
+            json={"store_id": "store-001", "denominations": [], "opening_float": 0},
+        ).json()["session_id"]
+        opened_at = db.get_collection("cash_register_sessions").docs[0]["opened_at"]
+        # A recorded CASH refund with NO cash sales -> expected goes negative.
+        db.get_collection("returns").docs.append(
+            {
+                "return_id": "RET-NEG-1",
+                "store_id": "store-001",
+                "return_type": "RETURN",
+                "status": "COMPLETED",
+                "created_at": opened_at,
+                "refund_tenders": [{"method": "CASH", "amount": 3900.0}],
+                "drawer_auto_netted": True,
+            }
+        )
+        r = c.post(
+            "/finance/cash-register/close",
+            json={"session_id": sid, "denominations": [], "tolerance": 0},
+        )
+        assert r.status_code == 200, r.text
+        closed = r.json()
+        assert closed["cash_refunds"] == 3900.0
+        assert closed["expected"] == -3900.0          # the real number is shown
+        assert closed["variance"] == 3900.0
+        # THE REGRESSION: the verdict must stay withheld, not become 'OVER'.
+        assert closed["variance_status"] == "NEGATIVE_EXPECTED"
+        assert closed["negative_expected_advisory"] is True
+
+        # ... and the manager console must not re-derive it into OVERAGE either
+        # (the grid recomputes the verdict a SECOND time from the raw variance).
+        rows = c.get(
+            "/finance/cash-reconciliation-summary", params={"store_id": "store-001"}
+        )
+        assert rows.status_code == 200, rows.text
+        row = next((x for x in rows.json()["rows"] if x["session_id"] == sid), None)
+        assert row is not None, rows.text
+        assert row["variance_status"] == "NEGATIVE_EXPECTED"
+        assert row["cash_refunds"] == 3900.0
+
 
 # ===========================================================================
 # 3. Real-Mongo round trip (skips fail-soft when Mongo is unreachable)

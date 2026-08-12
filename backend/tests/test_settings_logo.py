@@ -62,7 +62,7 @@ def test_admin_can_upload_logo_and_get_url(client, auth_headers, fake_file_store
     # Back-compat alias retained.
     assert body["url"] == body["logo_url"]
     # The blob actually landed in the store.
-    assert fake_file_store.get(file_id) is not None
+    assert fake_file_store.get(file_id, require_kind="business_logo") is not None
 
 
 def test_uploaded_logo_can_be_served_back(client, auth_headers, fake_file_store):
