@@ -310,14 +310,31 @@ export function GoodsReceiptCockpit() {
       await loadCockpit(vendorId);
       void loadInbox();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : `Failed to accept GRN ${grnNumber}`);
+      // These recovery messages are long and load-bearing ("the units already
+      // received are safe and will not be counted twice", "clears automatically
+      // in about 5 minute(s)"). The default 5s toast is not enough time to read
+      // them, and the state they describe persists.
+      toast.error(
+        err instanceof Error ? err.message : `Failed to accept GRN ${grnNumber}`,
+        20000,
+      );
     } finally {
       setGrnActionBusy(null);
     }
   };
 
   const voidPendingGrn = async (grnId: string, grnNumber: string) => {
-    if (!window.confirm(`Void ${grnNumber}? Use this for duplicates — no stock was added by it.`)) return;
+    // Do NOT promise "no stock was added": the accept flow flips the status only
+    // after minting, so a receipt killed mid-accept sits at PENDING with real
+    // units already on the shelf. The backend refuses the void in that case
+    // (409) — this copy tells the operator what to do instead.
+    if (
+      !window.confirm(
+        `Void ${grnNumber}? Use this only for a duplicate or mistake that never put stock on the shelf. ` +
+          `If an earlier acceptance was interrupted, this will be refused — accept it again instead.`,
+      )
+    )
+      return;
     setGrnActionBusy(grnId);
     try {
       await vendorsApi.voidGRN(grnId);
@@ -325,7 +342,13 @@ export function GoodsReceiptCockpit() {
       if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : `Failed to void GRN ${grnNumber}`);
+      // The void refusal is the ONLY guidance for a receipt that holds
+      // unaccounted stock, and its actionable clause is at the end — give it
+      // long enough to actually be read.
+      toast.error(
+        err instanceof Error ? err.message : `Failed to void GRN ${grnNumber}`,
+        20000,
+      );
     } finally {
       setGrnActionBusy(null);
     }

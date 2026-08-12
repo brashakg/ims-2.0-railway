@@ -151,6 +151,21 @@ def variance_status(variance: float, tolerance: float = 0.0) -> str:
     return "OVER" if v > 0 else "SHORT"
 
 
+# Advisory raised when the arithmetic says the drawer should hold LESS THAN
+# NOTHING. That is never a real expectation -- it means cash left the drawer
+# that it never took in (e.g. a refund funded from the safe, which IMS has no
+# cash-in concept for). Presenting the resulting "overage" as a verdict would
+# credit the cashier with money they never held, so the verdict is suppressed
+# and this advisory is surfaced instead. The number itself is NEVER clamped or
+# hidden -- a real figure is always shown.
+NEGATIVE_EXPECTED = "NEGATIVE_EXPECTED"
+NEGATIVE_EXPECTED_MESSAGE = (
+    "More cash was refunded than this drawer took in - a cash-in is missing "
+    "(e.g. a refund funded from the safe). Record the cash-in before trusting "
+    "this variance."
+)
+
+
 def build_close_summary(
     opening_float: float,
     cash_sales: float,
@@ -163,13 +178,18 @@ def build_close_summary(
     """One-shot reconciliation block for the close endpoint + the Z-report.
 
     Computes counted (from denominations), expected, variance, and a
-    tolerance-aware status. Pure -- the router stamps identity/time."""
+    tolerance-aware status. Pure -- the router stamps identity/time.
+
+    When `expected` is NEGATIVE the variance verdict is suppressed
+    (variance_status = NEGATIVE_EXPECTED) rather than reporting a phantom
+    OVERAGE: see NEGATIVE_EXPECTED_MESSAGE."""
     norm = normalize_denominations(denominations)
     counted = float(sum(r["line_total"] for r in norm))
     expected = compute_expected_cash(
         opening_float, cash_sales, cash_refunds, cash_expenses, bank_deposit
     )
     variance = compute_variance(counted, expected)
+    negative_expected = expected < 0
     return {
         "opening_float": round(float(opening_float or 0), 2),
         "cash_sales": round(float(cash_sales or 0), 2),
@@ -180,6 +200,13 @@ def build_close_summary(
         "counted": round(counted, 2),
         "expected": expected,
         "variance": variance,
-        "variance_status": variance_status(variance, tolerance),
+        "variance_status": (
+            NEGATIVE_EXPECTED if negative_expected
+            else variance_status(variance, tolerance)
+        ),
+        "negative_expected_advisory": negative_expected,
+        "negative_expected_message": (
+            NEGATIVE_EXPECTED_MESSAGE if negative_expected else None
+        ),
         "tolerance": round(abs(float(tolerance or 0)), 2),
     }

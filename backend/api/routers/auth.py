@@ -407,10 +407,126 @@ def _mint_access_token(token_data: dict) -> Tuple[str, int]:
     return create_access_token(token_data, lifetime), int(lifetime.total_seconds())
 
 
+# ============================================================================
+# LIVE ACCOUNT CHECK (F18) - a sacked employee's token must stop working NOW
+# ============================================================================
+# A JWT is a self-contained bearer credential: it stays valid until its `exp`
+# no matter what happens to the account behind it. Deactivating a user
+# (DELETE /api/v1/users/{user_id} -> is_active=False) therefore did NOT end
+# their session - the token they were already holding kept working for the
+# remainder of its lifetime (up to ACCESS_TOKEN_EXPIRE_MINUTES, 45 min). The
+# /refresh path already re-checked the live record (_resolve_refresh_claims
+# raises 403 for a disabled account); the per-request path did not.
+#
+# PERFORMANCE: get_current_user runs on EVERY authenticated request and did no
+# database work at all, so an unconditional find_one would add a Mongo
+# round-trip to the entire API surface. Two things keep this cheap:
+#   1. The ALLOW verdict is memoised in the shared cache (api.services.cache -
+#      Redis in prod, so all four uvicorn workers share it; in-memory in dev)
+#      for _USER_STATUS_TTL_SECONDS. Steady-state cost is one Redis GET, next
+#      to the one _token_blacklist.is_revoked already performs.
+#   2. The lookup itself is a PROJECTED find_one on the indexed `user_id`.
+# The DENY verdict is deliberately NOT cached: a stale "disabled" entry would
+# lock out a legitimate user, and a rejected caller costs nothing worth saving.
+# users.py drops the cached ALLOW entry whenever an account is deactivated.
+#
+# THE GUARANTEED BOUND IS THE TTL, NOT "the next request". Usually the
+# invalidation makes it land on the very next request, but there is a
+# write-after-delete race: a request already in flight can read is_active=True,
+# have the admin's DELETE + cache.delete land, and only THEN execute its own
+# cache.set -- re-arming a stale ALLOW for a full TTL. So the honest promise to
+# an owner handling a sacking is "gone within _USER_STATUS_TTL_SECONDS", which
+# is still a 45x improvement on the 45-minute token lifetime this replaces. Do
+# not let this comment drift back into promising more than the code delivers.
+#
+# FAILURE MODE (deliberate): #726's convention is that the app fails LOUD when
+# Mongo is unreachable - and it still does, at the routes that actually need
+# data. This guard is ADDITIVE on a path that previously touched no DB, so it
+# must never become a new single point of total lockout: if the repository is
+# unavailable or the query raises, we log a warning and let the request through
+# on its token claims (exactly the pre-existing behaviour) and cache nothing.
+# Only a DEFINITE answer - a live record that says is_active is false - 401s.
+# A record that is simply ABSENT is also allowed through: the product's own
+# deactivation path is a SOFT delete (users.py sets is_active=False and never
+# removes the document), so "absent" means a token minted for something that
+# was never a users row (tests, tooling), and treating it as revoked would be
+# a lockout risk with no security gain.
+_USER_STATUS_CACHE_PREFIX = "user_active:"
+_USER_STATUS_TTL_SECONDS = max(
+    1, int(os.getenv("USER_STATUS_CACHE_TTL_SECONDS", "60") or "60")
+)
+
+
+def _user_status_cache_key(user_id: str) -> str:
+    return f"{_USER_STATUS_CACHE_PREFIX}{user_id}"
+
+
+def invalidate_user_status(user_id: Optional[str]) -> None:
+    """Forget the memoised live-status ALLOW entry for ``user_id``.
+
+    Called by the users router whenever an account's active flag changes, so a
+    deactivation is enforced on the very next request instead of waiting out
+    _USER_STATUS_TTL_SECONDS. Fail-soft: a cache problem never breaks the
+    deactivation itself (the TTL then bounds the exposure)."""
+    if not user_id:
+        return
+    try:
+        from api.services.cache import cache
+
+        cache.delete(_user_status_cache_key(user_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("User-status cache invalidation failed: %s", e)
+
+
+def _account_is_disabled(payload: dict) -> bool:
+    """True ONLY when the live user record positively says the account is off.
+
+    Every other outcome (no user_id claim, no repository, lookup error, record
+    absent) returns False = allow, matching the fail-soft posture documented
+    above. Only the allow verdict is cached."""
+    user_id = (payload or {}).get("user_id")
+    if not user_id:
+        return False
+
+    key = _user_status_cache_key(user_id)
+    try:
+        from api.services.cache import cache
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Live account check: cache unavailable: %s", e)
+        cache = None
+
+    if cache is not None and cache.get(key):
+        return False
+
+    try:
+        from ..dependencies import get_user_repository
+
+        repo = get_user_repository()
+        if repo is None or getattr(repo, "collection", None) is None:
+            return False
+        record = repo.collection.find_one(
+            {"user_id": user_id}, {"user_id": 1, "is_active": 1}
+        )
+    except Exception as e:  # noqa: BLE001
+        # DB blip: do NOT lock the whole app out, and do NOT cache the miss.
+        logger.warning("Live account check unavailable, allowing on claims: %s", e)
+        return False
+
+    # Disabled iff the flag is explicitly False -- the same reading as the
+    # ``{"is_active": {"$ne": False}}`` filter the user queries use elsewhere,
+    # so a legacy document with no is_active field still counts as active.
+    if record is not None and record.get("is_active", True) is False:
+        return True
+
+    if cache is not None:
+        cache.set(key, 1, ttl=_USER_STATUS_TTL_SECONDS)
+    return False
+
+
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> dict:
-    """Get current user from JWT token"""
+    """Get current user from JWT token (and confirm the account is still live)"""
     try:
         if not credentials:
             raise HTTPException(
@@ -428,6 +544,15 @@ async def get_current_user(
             )
 
         payload = decode_token(token)
+        # F18: a valid signature is not enough -- the account behind it must
+        # still be active. See the block comment above for the cost and the
+        # deliberate fail-soft behaviour when the lookup cannot be made.
+        if _account_is_disabled(payload):
+            raise HTTPException(
+                status_code=401,
+                detail="Account is disabled",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return payload
     except HTTPException:
         # Re-raise HTTPException as-is

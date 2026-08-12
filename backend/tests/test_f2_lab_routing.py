@@ -325,6 +325,141 @@ def test_3c_intake_blocked_without_sales_confirm(client, auth_headers, fake_env)
     assert job["status"] != "IN_PROGRESS"  # held until sales confirm
 
 
+def _stub_whatsapp(monkeypatch):
+    """Stub the WhatsApp provider so the DISPATCH auto-notify is SIMULATED."""
+
+    async def _fake_wa(phone, text):
+        return type("R", (), {"status": "SIMULATED"})()
+
+    import agents.providers as prov
+
+    monkeypatch.setattr(prov, "send_whatsapp", _fake_wa)
+
+
+def test_3d_pickup_blocked_without_qc(client, auth_headers, fake_env, monkeypatch):
+    """P1 (PATIENT SAFETY): the PICKUP station advances a job straight to
+    DELIVERED -- the physical handover. A job with NO QC pass/waiver must be HELD
+    there.
+
+    This is the regression for the QC-bypass-at-pickup hole: the DISPATCH ->
+    READY leg was already gated, but a gate block on the scan path is a HOLD (the
+    station still advances, only the status is withheld), so the job kept moving
+    down the bench and the very NEXT scan (PICKUP -> DELIVERED) handed unverified
+    glasses to the patient with zero QC record."""
+    db, repo = fake_env
+    _stub_whatsapp(monkeypatch)
+
+    _mk_job(db, "j3d")  # qc_passed / qc_waived absent
+    for st in ("INTAKE", "EDGING", "COATING", "QC_LAB"):
+        assert _scan(client, auth_headers, "WS-j3d", st)["ok"] is True
+
+    # DISPATCH is held for missing QC -- but the job still reaches the station.
+    dispatch = _scan(client, auth_headers, "WS-j3d", "DISPATCH")
+    assert dispatch["ok"] is True
+    assert dispatch.get("status_gate_blocked") == "QC_REQUIRED"
+    assert repo.find_by_id("j3d")["status"] != "READY"
+
+    body = _scan(client, auth_headers, "WS-j3d", "PICKUP")
+    assert body["ok"] is True  # the PHYSICAL scan is always recorded
+    assert body.get("status_gate_blocked") == "QC_REQUIRED"
+    assert body.get("advanced_status") is None
+    assert "QC" in body["message"]
+    job = repo.find_by_id("j3d")
+    assert job["current_station"] == "PICKUP"   # scan recorded
+    assert job["status"] != "DELIVERED"         # but NOT handed to the patient
+
+
+def test_3e_pickup_allowed_when_qc_passed(client, auth_headers, fake_env, monkeypatch):
+    """The SAME walk on a job that PASSED QC delivers normally at PICKUP."""
+    db, repo = fake_env
+    _stub_whatsapp(monkeypatch)
+
+    _mk_job(db, "j3e", qc_passed=True)
+    for st in ("INTAKE", "EDGING", "COATING", "QC_LAB", "DISPATCH"):
+        assert _scan(client, auth_headers, "WS-j3e", st)["ok"] is True
+    assert repo.find_by_id("j3e")["status"] == "READY"
+
+    body = _scan(client, auth_headers, "WS-j3e", "PICKUP")
+    assert body["ok"] is True
+    assert body.get("status_gate_blocked") is None
+    assert body.get("advanced_status") == "DELIVERED"
+    assert repo.find_by_id("j3e")["status"] == "DELIVERED"
+
+
+def test_3f_pickup_allowed_when_qc_waived(client, auth_headers, fake_env, monkeypatch):
+    """An explicit (audited) QC waiver is the ONLY other way past the handover
+    gate -- qc_waived is written solely by the QC endpoints, which demand a
+    waive_reason and write an audit row."""
+    db, repo = fake_env
+    _stub_whatsapp(monkeypatch)
+
+    _mk_job(db, "j3f", qc_waived=True)
+    for st in ("INTAKE", "EDGING", "COATING", "QC_LAB", "DISPATCH"):
+        assert _scan(client, auth_headers, "WS-j3f", st)["ok"] is True
+
+    body = _scan(client, auth_headers, "WS-j3f", "PICKUP")
+    assert body["ok"] is True
+    assert body.get("advanced_status") == "DELIVERED"
+    assert repo.find_by_id("j3f")["status"] == "DELIVERED"
+
+
+def test_3g_out_of_vocabulary_advance_status_is_ignored_on_read(
+    client, auth_headers, fake_env, monkeypatch
+):
+    """PINS THE READ-SIDE RE-VALIDATION, which was unpinned: deleting the whole
+    block left the suite green.
+
+    upsert_station now rejects an out-of-vocabulary advances_job_status, but any
+    row written BEFORE that validation existed is still in lab_stations and would
+    be copied straight into workshop_jobs.status by a scan -- landing a value
+    outside VALID_JOB_TRANSITIONS (unmovable by the PATCH) and sailing past a QC
+    gate that only knows the real statuses. Re-validating on read makes the fix
+    retroactive with no migration: the scan is still RECORDED, the status simply
+    does not move."""
+    db, repo = fake_env
+    _stub_whatsapp(monkeypatch)
+
+    # Seed a pre-validation station row directly (bypassing upsert_station, which
+    # would now reject it) for the whole default sequence, with PICKUP poisoned.
+    from api.services import lab_routing
+
+    for spec in lab_routing.DEFAULT_STATIONS:
+        db.get_collection("lab_stations").insert_one(
+            {
+                "station_id": f"ST-{spec['code']}",
+                "store_id": "BV-TEST-01",
+                "code": spec["code"],
+                "label": spec["code"],
+                "sequence_order": spec["sequence_order"],
+                "is_active": True,
+                "target_dwell_minutes": 0,
+                "advances_job_status": (
+                    "COLLECTED" if spec["code"] == "PICKUP" else spec["advances_job_status"]
+                ),
+                "auto_notify_customer": False,
+            }
+        )
+
+    _mk_job(db, "j3g", qc_passed=True)  # QC'd, so ONLY the bad value can matter
+    for st in ("INTAKE", "EDGING", "COATING", "QC_LAB", "DISPATCH"):
+        assert _scan(client, auth_headers, "WS-j3g", st)["ok"] is True
+
+    body = _scan(client, auth_headers, "WS-j3g", "PICKUP")
+    assert body["ok"] is True  # the physical scan is still recorded
+    job = repo.find_by_id("j3g")
+    assert job["current_station"] == "PICKUP"
+    assert any(h.get("station") == "PICKUP" for h in job["scan_history"])
+    # ...but the junk status never reached workshop_jobs.
+    assert job["status"] != "COLLECTED"
+    assert job["status"] in wm_valid_statuses()
+
+
+def wm_valid_statuses():
+    from api.routers import workshop as wm
+
+    return set(wm.VALID_JOB_TRANSITIONS)
+
+
 def test_4_concurrency_one_winner(client, auth_headers, fake_env):
     """Two scans to EDGING (current=INTAKE): exactly one wins, one CONCURRENT.
     Exactly one EDGING scan_history entry; INTAKE dwell recorded exactly once."""

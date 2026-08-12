@@ -812,7 +812,13 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
     payment_mode = _ONDC_PAYMENT_MAP.get(payment_type, "UPI")
     payment_status = "PAID" if payment_type in ("PRE-PAID", "ON-ORDER") else "UNPAID"
 
-    total_amount = _f((payments.get("params") or {}).get("amount", subtotal))
+    # `payment.params.amount` is what the buyer app says was charged. When the
+    # BAP omits it we fall back to the line subtotal -- but we REMEMBER that we
+    # did, because the difference (total - subtotal) is the only "gst_amount"
+    # this path can produce, and a fabricated 0.00 there is read downstream as
+    # an affirmative "this sale carried no GST".
+    _payment_amount_declared = (payments.get("params") or {}).get("amount")
+    total_amount = _f(_payment_amount_declared, subtotal)
 
     # --- Fulfillment / delivery ---
     fulfillments = order.get("fulfillments") or [{}]
@@ -862,7 +868,19 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
         "items": ims_items,
         "subtotal": subtotal,
         "total_amount": total_amount,
-        "gst_amount": round(total_amount - subtotal, 2),
+        # NOT a computed tax. ONDC lines never go through the IMS GST engine at
+        # ingest (`gst_rate` above is a hardcoded placeholder), so this is the
+        # CHARGES RESIDUAL between what the buyer app said was charged and the
+        # line subtotal -- it can be delivery/packing, or zero. It is None when
+        # the BAP declared no amount at all, so no downstream consumer can read
+        # a fabricated 0.00 as "this sale was exempt". The nightly Tally export
+        # deliberately does NOT treat this key as tax; an ONDC order is
+        # quarantined (loudly, by order id) rather than booked with no GST.
+        "gst_amount": (
+            round(total_amount - subtotal, 2)
+            if _payment_amount_declared not in (None, "")
+            else None
+        ),
         "discount_amount": 0.0,
         # CLINICAL FLAG & HOLD: a prescription-lens line without a valid Rx (or an
         # out-of-range power) marks the order rx_pending + fulfillment_hold so it

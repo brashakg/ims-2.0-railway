@@ -77,9 +77,61 @@ interface PrescriptionPrintProps {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatPower(value: number | null | undefined): string {
-  if (value === null || value === undefined) return '-';
-  return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
+// Junk tokens that must never reach a patient's Rx card. These are the LITERAL
+// strings you get from stringifying an empty value in Python ("None" -- exactly
+// what the pre-#969 writer stored for a blank per-eye PD), in JavaScript
+// ("null" / "undefined"), or from a NaN. The prop TYPES below say
+// `number | null`, but types do not survive the wire: legacy rows, CSV imports,
+// integrations and device feeds all deliver these as strings, so this
+// patient-facing component must defend at RUNTIME.
+const ABSENT_RX_TOKENS = new Set(['', 'none', 'null', 'undefined', 'nan']);
+
+/**
+ * True when an Rx cell carries nothing the patient should be shown.
+ *
+ * CLINICALLY LOAD-BEARING: a genuine 0 / "0" is a REAL prescription value -- a
+ * cylinder of 0, an axis of 0 and a prism of 0 each mean something specific --
+ * so this is an explicit emptiness test and NEVER a truthiness test. `!value`
+ * here would silently erase real clinical data from a patient's card, which is
+ * worse than printing junk.
+ */
+function isAbsentRxValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'number') return Number.isNaN(value);
+  if (typeof value === 'string') return ABSENT_RX_TOKENS.has(value.trim().toLowerCase());
+  return false;
+}
+
+/**
+ * First value that is actually PRESENT, else null.
+ *
+ * This is what makes the binocular-PD fallback work: a per-eye PD stored as the
+ * string "None" is non-null, so plain `??` keeps it AND suppresses the fallback
+ * -- the card then reads "PD: None" while the correct binocular number sits
+ * unused one field away. `firstPresent` falls through junk to the real value.
+ */
+function firstPresent<T>(...values: T[]): T | null {
+  for (const value of values) {
+    if (!isAbsentRxValue(value)) return value;
+  }
+  return null;
+}
+
+function formatPower(value: number | string | null | undefined): string {
+  if (isAbsentRxValue(value)) return '-';
+  // Stored powers are a mix of numbers and numeric strings. Coerce, and bail to
+  // '-' rather than crashing on `.toFixed` when the value is not numeric at all
+  // (a raw "None" reaching the old code threw and blanked the whole card).
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isFinite(n)) return '-';
+  // 0 lands here deliberately and renders "+0.00" -- it is a real power.
+  return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
+}
+
+/** Axis with its degree sign, '-' when absent. An axis of 0 renders "0deg". */
+function formatAxis(value: number | string | null | undefined): string {
+  if (isAbsentRxValue(value)) return '-';
+  return `${value}°`;
 }
 
 function generateRxNumber(id: string, dateStr: string): string {
@@ -105,13 +157,18 @@ export function PrescriptionPrint({
 
   const rxNumber = generateRxNumber(prescription.id, prescription.prescribedAt);
 
+  // `add !== null` was true for BOTH undefined and the junk string "None", so a
+  // patient with no near Rx could be handed a bogus Near Vision table.
   const hasNearVision =
-    prescription.nearVisionRight || prescription.nearVisionLeft ||
-    prescription.rightEye.add !== null || prescription.leftEye.add !== null;
-  const rightPD = prescription.rightEye.pd ?? prescription.pd ?? null;
-  const leftPD = prescription.leftEye.pd ?? prescription.pd ?? null;
-  const rightVA = prescription.rightEye.va ?? null;
-  const leftVA = prescription.leftEye.va ?? null;
+    !!prescription.nearVisionRight || !!prescription.nearVisionLeft ||
+    !isAbsentRxValue(prescription.rightEye.add) ||
+    !isAbsentRxValue(prescription.leftEye.add);
+  // firstPresent, not `??`: a per-eye PD of "None" must fall THROUGH to the
+  // binocular PD instead of masking it.
+  const rightPD = firstPresent(prescription.rightEye.pd, prescription.pd);
+  const leftPD = firstPresent(prescription.leftEye.pd, prescription.pd);
+  const rightVA = firstPresent(prescription.rightEye.va);
+  const leftVA = firstPresent(prescription.leftEye.va);
 
   const handlePrint = () => {
     window.print();
@@ -244,8 +301,7 @@ export function PrescriptionPrint({
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.rightEye.sphere)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.rightEye.cylinder)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                    {prescription.rightEye.axis ?? '-'}
-                    {prescription.rightEye.axis !== null && prescription.rightEye.axis !== undefined ? '°' : ''}
+                    {formatAxis(prescription.rightEye.axis)}
                   </td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.rightEye.add)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rightPD ?? '-'}</td>
@@ -256,8 +312,7 @@ export function PrescriptionPrint({
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.leftEye.sphere)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.leftEye.cylinder)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                    {prescription.leftEye.axis ?? '-'}
-                    {prescription.leftEye.axis !== null && prescription.leftEye.axis !== undefined ? '°' : ''}
+                    {formatAxis(prescription.leftEye.axis)}
                   </td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatPower(prescription.leftEye.add)}</td>
                   <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{leftPD ?? '-'}</td>
@@ -286,31 +341,31 @@ export function PrescriptionPrint({
                   <tr>
                     <td style={{ ...tblCell, fontWeight: 700, textAlign: 'left', paddingLeft: 12 }}>OD (R)</td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionRight?.sphere ?? prescription.rightEye.sphere)}
+                      {formatPower(firstPresent(prescription.nearVisionRight?.sphere, prescription.rightEye.sphere))}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionRight?.cylinder ?? prescription.rightEye.cylinder)}
+                      {formatPower(firstPresent(prescription.nearVisionRight?.cylinder, prescription.rightEye.cylinder))}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {(prescription.nearVisionRight?.axis ?? prescription.rightEye.axis) ?? '-'}
+                      {firstPresent(prescription.nearVisionRight?.axis, prescription.rightEye.axis) ?? '-'}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionRight?.add ?? prescription.rightEye.add)}
+                      {formatPower(firstPresent(prescription.nearVisionRight?.add, prescription.rightEye.add))}
                     </td>
                   </tr>
                   <tr>
                     <td style={{ ...tblCell, fontWeight: 700, textAlign: 'left', paddingLeft: 12 }}>OS (L)</td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionLeft?.sphere ?? prescription.leftEye.sphere)}
+                      {formatPower(firstPresent(prescription.nearVisionLeft?.sphere, prescription.leftEye.sphere))}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionLeft?.cylinder ?? prescription.leftEye.cylinder)}
+                      {formatPower(firstPresent(prescription.nearVisionLeft?.cylinder, prescription.leftEye.cylinder))}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {(prescription.nearVisionLeft?.axis ?? prescription.leftEye.axis) ?? '-'}
+                      {firstPresent(prescription.nearVisionLeft?.axis, prescription.leftEye.axis) ?? '-'}
                     </td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
-                      {formatPower(prescription.nearVisionLeft?.add ?? prescription.leftEye.add)}
+                      {formatPower(firstPresent(prescription.nearVisionLeft?.add, prescription.leftEye.add))}
                     </td>
                   </tr>
                 </tbody>
@@ -318,16 +373,19 @@ export function PrescriptionPrint({
             </div>
           )}
 
-          {/* Lens recommendation + notes */}
-          {(prescription.lensRecommendation || prescription.notes) && (
+          {/* Lens recommendation + notes. Truthiness-gated `&&` let the junk
+              string "None" through -- the backend guards exactly these fields
+              via `_text`, so the same rule has to hold on this side too. */}
+          {(!isAbsentRxValue(prescription.lensRecommendation) ||
+            !isAbsentRxValue(prescription.notes)) && (
             <div style={{ padding: '0 14px 10px' }}>
-              {prescription.lensRecommendation && (
+              {!isAbsentRxValue(prescription.lensRecommendation) && (
                 <div style={{ fontSize: 10.5, marginTop: 4 }}>
                   <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Lens type:</span>{' '}
                   <span style={{ color: '#1a1a19' }}>{prescription.lensRecommendation}</span>
                 </div>
               )}
-              {prescription.notes && (
+              {!isAbsentRxValue(prescription.notes) && (
                 <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 4, padding: '6px 8px', border: '1px solid #aaa9a3', background: '#f6f5f0' }}>
                   <span style={{ fontWeight: 600, color: '#1a1a19' }}>Remarks: </span>
                   {prescription.notes}

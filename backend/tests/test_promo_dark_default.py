@@ -246,3 +246,58 @@ def test_on_path_applies_and_commits_atomically():
     assert apps[0]["total_discount_given"] == 100.0
     assert apps[0]["estimated_cogs"] == 400.0
     assert apps[0]["cogs_is_estimated"] is False
+
+
+def test_uses_cap_guard_blocks_when_exhausted():
+    """The `uses_count < max_uses_total` guard in the commit filter must REFUSE
+    to count a further use once the cap is reached.
+
+    This case was UNTESTABLE until the fakes stopped ignoring `$lt`. The old
+    tests/test_walkouts matcher understood only $gte/$lte/$ne/$exists, so
+    commit_promo_application's `flt["uses_count"] = {"$lt": cap}`
+    (api/routers/promotions.py:646) was silently dropped and the guarded
+    find_one_and_update matched EVERY time -- an exhausted promo would still
+    have incremented. test_on_path_applies_and_commits_atomically never noticed
+    because it seeds uses_count=0 against a cap of 100, where the clause could
+    not discriminate either way.
+
+    A promo that keeps counting past its cap is a real rupee leak (unbounded
+    redemption of a capped offer), so the negative branch is asserted here.
+    """
+    from api.routers import promotions
+
+    db = _AtomicDB()
+    db.get_collection("promo_rules").insert_one({
+        "promo_id": "PR-CAPPED", "name": "10% over 500", "promo_type": "THRESHOLD",
+        "reward_value": 10, "min_cart_value": 500, "active": True,
+        "stackable": False, "store_ids": None,
+        # Already at the cap: the guard must refuse the next increment.
+        "uses_count": 5, "max_uses_total": 5,
+    })
+    items = [{"product_id": "a", "item_id": "a", "quantity": 1,
+              "unit_price": 1000.0, "discount_category": "MASS",
+              "item_total": 1000.0, "cost_at_sale": 400.0}]
+
+    promotions.commit_promo_application(
+        db, order_id="ORD-CAP", order_number="BV-CAP", store_id="BV-TEST-01",
+        customer_id="cust-x", cashier_id="u-1", items=items,
+        evaluation={
+            "applied": True,
+            "fired": ["PR-CAPPED"],
+            "names": {"PR-CAPPED": "10% over 500"},
+            "breakdown": {"PR-CAPPED": 100.0},
+            "total_discount": 100.0,
+            "raw_total_discount": 100.0,
+            "per_line_discount": {"a": 100.0},
+        },
+    )
+
+    # The counter did NOT move past the cap.
+    rule = db.get_collection("promo_rules").find_one({"promo_id": "PR-CAPPED"})
+    assert rule["uses_count"] == 5, "capped promo incremented past max_uses_total"
+
+    # The audit row still records the sale, flagged as not counted (the order
+    # was already billed the discount; we never claw back a completed sale).
+    apps = list(db.get_collection("promo_applications").find({}))
+    assert len(apps) == 1
+    assert apps[0]["applied_promos"][0]["uses_counted"] is False

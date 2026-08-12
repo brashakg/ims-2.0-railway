@@ -35,6 +35,7 @@ import {
   type DenomKind,
   type VarianceStatus,
 } from '../../services/api/till';
+import { returnsApi } from '../../services/api/returns';
 
 const NOTE_FACES = [500, 200, 100, 50, 20, 10];
 const COIN_FACES = [20, 10, 5, 2, 1];
@@ -137,6 +138,13 @@ export default function BlindEodTallyPage() {
   const [payouts, setPayouts] = useState('');
   const [confirming, setConfirming] = useState(false);
 
+  // Customer CASH refunds already recorded for this store today. These are
+  // auto-deducted from the expected drawer, so keying them again into "cash
+  // paid out" double-counts them (the pre-fix workaround did exactly that).
+  // Sourced from the returns history the cashier can already see, so this
+  // never leaks a system-expected figure -- blind enforcement is preserved.
+  const [recordedCashRefunds, setRecordedCashRefunds] = useState(0);
+
   // Reopen state
   const [reopenReason, setReopenReason] = useState('');
 
@@ -165,6 +173,31 @@ export default function BlindEodTallyPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Today's recorded customer CASH refunds for this store (auto-deducted from
+  // the drawer). Drives the conditional double-entry warning by the payout box.
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await returnsApi.list({ store_id: storeId, return_type: 'RETURN', limit: 100 });
+        const today = new Date().toISOString().slice(0, 10);
+        const total = (res?.returns || []).reduce((sum: number, r: any) => {
+          if (String(r?.created_at || '').slice(0, 10) !== today) return sum;
+          if (String(r?.status || '').toUpperCase() !== 'COMPLETED') return sum;
+          if (!r?.drawer_auto_netted) return sum;
+          return sum + (r?.refund_tenders || [])
+            .filter((t: any) => String(t?.method || '').toUpperCase() === 'CASH')
+            .reduce((s: number, t: any) => s + (Number(t?.amount) || 0), 0);
+        }, 0);
+        if (!cancelled) setRecordedCashRefunds(Math.round(total * 100) / 100);
+      } catch {
+        if (!cancelled) setRecordedCashRefunds(0);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [storeId]);
 
   // The session this user is actively working (OPEN or BLIND_SUBMITTED), if any.
   const activeSession = useMemo(
@@ -353,7 +386,7 @@ export default function BlindEodTallyPage() {
           </p>
           <DenomGrid rows={blindDenoms} onChange={setBlindPieces} disabled={confirming} />
           <div className="flex items-center gap-3 mt-3">
-            <label className="text-sm text-gray-600">Cash paid out (₹)</label>
+            <label className="text-sm text-gray-600">Cash paid out — petty cash / vendor (₹)</label>
             <input
               type="number"
               min={0}
@@ -363,6 +396,21 @@ export default function BlindEodTallyPage() {
               className="w-28 px-2 py-1 border border-gray-300 rounded text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-bv disabled:bg-gray-50"
             />
           </div>
+          {recordedCashRefunds > 0 ? (
+            <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>
+                <span className="font-semibold">{paisaToInr(Math.round(recordedCashRefunds * 100))}</span>{' '}
+                of customer cash refunds were recorded on the Returns screen today and are{' '}
+                <span className="font-semibold">already deducted</span> from this drawer. Do not
+                enter them here — this box is for petty cash / vendor payouts only.
+              </span>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500 mt-1">
+              Petty cash / vendor payouts only. Customer refunds recorded on the Returns screen are deducted automatically.
+            </p>
+          )}
           <div className="flex items-center justify-between mt-4">
             <span className="text-sm text-gray-600">
               Counted: <span className="font-semibold text-gray-900 tabular-nums">{paisaToInr(blindTotalPaisa)}</span>
@@ -426,9 +474,19 @@ export default function BlindEodTallyPage() {
                     </button>
                   )}
                 </div>
-                <div className="grid grid-cols-3 gap-3 mt-3 text-sm">
+                {/* Z-Read identity, visible so a manager can foot it by eye:
+                    opening + cash sales - cash refunds - cash paid out = expected.
+                    cash_sales_paisa is GROSS; recorded customer cash refunds are
+                    their OWN line, never merged into the manual payout figure. */}
+                <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
+                  <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
+                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
+                  <Figure label="Cash paid out" value={paisaToInr(s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 mt-3 text-sm">
                   <Figure
                     label="Variance"
                     value={paisaToInr(s.variance_paisa)}
@@ -436,6 +494,25 @@ export default function BlindEodTallyPage() {
                     badge={s.variance_status ?? undefined}
                   />
                 </div>
+                {s.variance_status === 'NEGATIVE_EXPECTED' && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>
+                      More cash was refunded than this drawer took in - a cash-in is missing
+                      (e.g. a refund funded from the safe). Record the cash-in before trusting this variance.
+                    </span>
+                  </div>
+                )}
+                {s.refund_double_entry_advisory && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>
+                      This session has BOTH recorded cash refunds ({paisaToInr(s.cash_refunds_paisa)}) and a
+                      manual cash payout ({paisaToInr(s.cash_payouts_paisa)}). If they are the same money, the
+                      refund has been counted twice - check before signing off.
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -461,9 +538,19 @@ export default function BlindEodTallyPage() {
                     )}
                   </span>
                 </div>
-                <div className="grid grid-cols-3 gap-3 mt-3 text-sm">
+                {/* Z-Read identity, visible so a manager can foot it by eye:
+                    opening + cash sales - cash refunds - cash paid out = expected.
+                    cash_sales_paisa is GROSS; recorded customer cash refunds are
+                    their OWN line, never merged into the manual payout figure. */}
+                <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
+                  <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
+                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
+                  <Figure label="Cash paid out" value={paisaToInr(s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 mt-3 text-sm">
                   <Figure
                     label="Variance"
                     value={paisaToInr(s.variance_paisa)}
@@ -471,6 +558,25 @@ export default function BlindEodTallyPage() {
                     badge={s.variance_status ?? undefined}
                   />
                 </div>
+                {s.variance_status === 'NEGATIVE_EXPECTED' && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>
+                      More cash was refunded than this drawer took in - a cash-in is missing
+                      (e.g. a refund funded from the safe). Record the cash-in before trusting this variance.
+                    </span>
+                  </div>
+                )}
+                {s.refund_double_entry_advisory && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>
+                      This session has BOTH recorded cash refunds ({paisaToInr(s.cash_refunds_paisa)}) and a
+                      manual cash payout ({paisaToInr(s.cash_payouts_paisa)}). If they are the same money, the
+                      refund has been counted twice - check before signing off.
+                    </span>
+                  </div>
+                )}
                 {canLock && (
                   <div className="flex items-center gap-2 mt-3">
                     <input

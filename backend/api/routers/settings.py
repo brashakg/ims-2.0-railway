@@ -1071,13 +1071,23 @@ async def get_logo(
 
     Any authenticated user may fetch the logo (it renders in the app
     shell / Settings / invoices). Returns 404 when the blob is gone.
+
+    SECURITY (P0): this route takes the file_id straight from the REQUEST -- no
+    owning record authorises it -- and reads the SHARED GridFS bucket, which
+    also holds employee Aadhaar / PAN / UAN / ESIC scans (written by
+    routers/hr.py's employee-document upload), GRN attachments and expense
+    bills. Without require_kind, any authenticated user holding a file_id could
+    stream any employee's statutory-ID scan, bypassing hr.py's ADMIN-only
+    download gate entirely. Scoping to the kind stamped at upload
+    (settings.py's logo upload sets metadata kind="business_logo") makes a
+    wrong-kind id 404, exactly as products.py does for its public image serve.
     """
     from ..services.file_store import get_file_store
 
     fs = get_file_store()
     if fs is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    blob = fs.get(file_id)
+    blob = fs.get(file_id, require_kind="business_logo")
     if blob is None:
         raise HTTPException(status_code=404, detail="Logo not found")
     content, filename, mime_type = blob
@@ -1814,7 +1824,7 @@ async def update_integration(
 
 @router.post("/integrations/{integration_type}/test")
 async def test_integration(
-    integration_type: str, current_user: dict = Depends(get_current_user)
+    integration_type: str, current_user: dict = Depends(require_roles("ADMIN"))
 ):
     """Report integration readiness honestly (does NOT fake success).
 
@@ -1823,6 +1833,22 @@ async def test_integration(
     present (presence only, never values) plus the current DISPATCH_MODE, so
     the operator can tell configured-vs-dormant. (Was previously a placebo
     that returned success unconditionally.)
+
+    F17: gated to ADMIN/SUPERADMIN, matching every other integration route in
+    this router (GET /integrations, GET/PUT /integrations/{integration_type},
+    /integrations/catalog, /integrations/anthropic/models). This was the one
+    integration endpoint ANY authenticated user could call, and it discloses
+    the org's integration posture -- which providers are wired up and enabled,
+    plus the DISPATCH_MODE that says whether live messaging is armed. The body
+    still returns booleans and the mode only, never a credential value.
+
+    NOTE: the rbac_policy row for this path still declares AUTHENTICATED. That
+    is documentation drift, not a hole -- the RBAC middleware is deny-only (its
+    every allow branch is call_next, which runs this route's own Depends), so it
+    can never grant ahead of this gate; the route gate is authoritative. The row
+    is deliberately NOT narrowed here: narrowing a declared row makes the
+    middleware start denying one layer earlier, which is the lockout direction,
+    and 24 other rows are in the same state. That is one batched follow-up.
     """
     collection = _get_settings_collection("integrations")
     doc = (

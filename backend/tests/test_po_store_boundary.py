@@ -47,10 +47,17 @@ class _GRNRepo:
 
 
 class _FileStore:
-    """A live file store whose get() always finds the attachment (gate passes)."""
+    """A live file store whose reads always find the attachment (gate passes).
 
-    def get(self, _fid):
+    get_metadata returns the metadata POST /vendors/grn/upload-doc actually
+    stamps: the GRN create path now AUTHORISES a caller-supplied file_id by its
+    kind rather than merely proving it exists, so a faithful stub must carry it."""
+
+    def get(self, _fid, **_kw):
         return {"data": b"x", "filename": "inv.pdf"}
+
+    def get_metadata(self, _fid):
+        return {"kind": "grn_document", "uploaded_by": "u1", "store_id": "BV-TEST-01"}
 
 
 def _user(roles, active, stores=None):

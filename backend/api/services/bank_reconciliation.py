@@ -85,6 +85,10 @@ def _mdr_fee_paise(gross_paise: int, mdr_bps: int) -> int:
     """
     if not mdr_bps:
         return 0
+    # A gateway charges MDR on money it SETTLES IN; a non-positive gross (a
+    # refund-dominant net) has no merchant fee -- never a negative "fee credit".
+    if int(gross_paise) <= 0:
+        return 0
     fee = (Decimal(int(gross_paise)) * Decimal(int(mdr_bps)) / Decimal(10000)).quantize(
         Decimal("1"), rounding=ROUND_HALF_UP
     )
@@ -184,6 +188,14 @@ class BankReconciliationEngine:
 
         One expected item per non-cash tender; gross = net (collected - refunded)
         the gateway will settle (less MDR, handled at match time). Read-only.
+
+        PAYMENTS-ONLY: reconcile_window is called WITHOUT include_returns, so the
+        expected settlement stays keyed to captured payments -- a customer refund
+        leaves the gateway as a SEPARATE debit on its own value date and must not
+        shrink the day's expected credit (that fabricated an unmatched variance
+        every refund day). Non-positive nets and the UNKNOWN suspense bucket are
+        skipped so a refund-only tender can never emit a NEGATIVE expected
+        settlement with a negative MDR fee.
         """
         try:
             from api.services import tender_reconciliation as tr
@@ -193,21 +205,29 @@ class BankReconciliationEngine:
             return []
         out: List[Dict[str, Any]] = []
         for tender, agg in (recon.get("by_mode") or {}).items():
-            if str(tender).upper() == "CASH":
+            tkey = str(tender).upper()
+            if tkey == "CASH":
                 continue  # cash is the #23 trail, not a gateway settlement
             net_rupees = agg.get("net", 0.0)
             gross_paise = to_paise(net_rupees)
-            if gross_paise == 0:
+            if gross_paise <= 0:
+                # No negative "expected settlement" nonsense money. The bank line
+                # (if any) still surfaces as unmatched_in_bank -- nothing is lost.
                 continue
-            out.append(
-                {
-                    "kind": KIND_DIGITAL,
-                    "ref_date": end_iso,
-                    "tender": str(tender).upper(),
-                    "expected_paise": gross_paise,
-                    "count": agg.get("count", 0),
-                }
-            )
+            item: Dict[str, Any] = {
+                "kind": KIND_DIGITAL,
+                "ref_date": end_iso,
+                "tender": tkey,
+                "expected_paise": gross_paise,
+                "count": agg.get("count", 0),
+            }
+            if tkey == "UNKNOWN":
+                # WALLET / NETBANKING / a blank method all canonicalize to
+                # UNKNOWN. This is REAL digital money -- keep it visible on the
+                # expected side (a suspense row) instead of silently dropping it,
+                # flagged so the accountant reclassifies the tender.
+                item["needs_reclassification"] = True
+            out.append(item)
         return out
 
     def load_bank_lines(

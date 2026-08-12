@@ -131,7 +131,10 @@ def test_standard_grn_with_attachment_is_created(monkeypatch):
     # real file and reference its id (a forged id is now rejected -- see below).
     store = InMemoryFileStore()
     fid = store.put(
-        content=b"%PDF-1.4 real", filename="invoice.pdf", mime_type="application/pdf"
+        content=b"%PDF-1.4 real", filename="invoice.pdf", mime_type="application/pdf",
+        # Mirror what POST /vendors/grn/upload-doc stamps -- the create + download
+        # paths now authorise the id by kind, not by mere existence.
+        metadata={"kind": "grn_document", "uploaded_by": "u1"},
     )
     monkeypatch.setattr(v, "get_file_store", lambda: store)
     grn = GRNCreate(
@@ -252,7 +255,7 @@ def test_upload_doc_persists_and_returns_file_id(monkeypatch):
     assert res["file_id"]
     assert res["mime"] == "application/pdf"
     # The bytes are actually retrievable from the store.
-    rec = store.get(res["file_id"])
+    rec = store.get(res["file_id"], require_kind="grn_document")
     assert rec is not None
     assert rec[0] == b"%PDF-1.4 fake"
 
@@ -282,7 +285,8 @@ def test_upload_doc_rejects_empty(monkeypatch):
 
 def test_download_doc_streams_in_scope(monkeypatch):
     store = InMemoryFileStore()
-    fid = store.put(content=b"img-bytes", filename="inv.png", mime_type="image/png")
+    fid = store.put(content=b"img-bytes", filename="inv.png", mime_type="image/png",
+                    metadata={"kind": "grn_document", "uploaded_by": "u1"})
     grn = {"grn_id": "G1", "store_id": "BV-TEST-01", "attachment_file_id": fid}
     monkeypatch.setattr(v, "get_grn_repository", lambda: _FakeGRNRepo(preset=grn))
     monkeypatch.setattr(v, "get_file_store", lambda: store)
@@ -300,7 +304,8 @@ def test_download_doc_streams_in_scope(monkeypatch):
 
 def test_download_doc_cross_store_is_404(monkeypatch):
     store = InMemoryFileStore()
-    fid = store.put(content=b"img-bytes", filename="inv.png", mime_type="image/png")
+    fid = store.put(content=b"img-bytes", filename="inv.png", mime_type="image/png",
+                    metadata={"kind": "grn_document", "uploaded_by": "u1"})
     grn = {"grn_id": "G1", "store_id": "BV-OTHER-99", "attachment_file_id": fid}
     monkeypatch.setattr(v, "get_grn_repository", lambda: _FakeGRNRepo(preset=grn))
     monkeypatch.setattr(v, "get_file_store", lambda: store)

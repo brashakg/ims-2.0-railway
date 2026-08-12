@@ -87,6 +87,49 @@ def _ensure_task_store_access(task: dict, current_user: dict) -> None:
         )
 
 
+# The metadata.kind this router's own upload stamps. Anything else in the
+# shared bucket is another feature's document and must never become a task
+# attachment.
+_TASK_ATTACHMENT_KIND = "task_attachment"
+
+
+def _authorise_attachment(file_id: str, current_user: dict) -> None:
+    """AUTHORISE a caller-supplied attachment file_id before binding it to a task.
+
+    P0 (security panel, reproduced end to end): this used to check only that the
+    id EXISTED (``fs.get(fid) is None -> 400``). Existence is not authorisation.
+    ONE GridFS bucket holds every binary in the app, so "it exists" is equally
+    true of a GRN supplier invoice or an employee Aadhaar scan. Because the id
+    is supplied by the CALLER (TaskCreate.attachment_file_id) and both
+    ``POST /tasks`` and ``GET /tasks/{task_id}/file`` are AUTHENTICATED, a
+    SALES_STAFF could attach someone else's file_id to a task they own and
+    stream the bytes back -- the victim's real filename included. Ids are not
+    hard to obtain either: this router's own upload returns live ObjectIds whose
+    5-byte random is shared per process and whose counter simply increments.
+
+    The file must therefore be (a) OUR kind of file, and (b) one THIS caller
+    uploaded. Both facts come from metadata written by upload_task_file below;
+    neither can be forged by the request.
+    """
+    fs = get_file_store()
+    if fs is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    meta = fs.get_metadata(file_id)
+    if (
+        meta is None
+        or meta.get("kind") != _TASK_ATTACHMENT_KIND
+        or not meta.get("uploaded_by")
+        or meta.get("uploaded_by") != current_user.get("user_id")
+    ):
+        # One message for every failure mode: a wrong-kind id, another user's
+        # id and a forged id are indistinguishable to the caller, so this is
+        # not an existence oracle over the bucket.
+        raise HTTPException(
+            status_code=400,
+            detail="attachment_file_id does not reference a file you uploaded",
+        )
+
+
 # Manager-tier roles that may act on ANY task in a store they can reach
 # (the same rungs the escalation ladder climbs). A non-manager who is neither
 # the assignee nor the assigner/creator must not act on someone else's task.
@@ -476,14 +519,7 @@ async def create_task(
     attachment = None
     if task.attachment_file_id and str(task.attachment_file_id).strip():
         fid = str(task.attachment_file_id).strip()
-        fs = get_file_store()
-        if fs is None:
-            raise HTTPException(status_code=503, detail="File storage unavailable")
-        if fs.get(fid) is None:
-            raise HTTPException(
-                status_code=400,
-                detail="attachment_file_id does not reference a stored file",
-            )
+        _authorise_attachment(fid, current_user)
         attachment = {
             "file_id": fid,
             "filename": task.attachment_filename,
@@ -620,7 +656,11 @@ async def download_task_file(
     store = get_file_store()
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
-    rec = store.get(file_id)
+    # Defence in depth behind _authorise_attachment: even if a foreign id were
+    # somehow persisted on a task (a legacy row, a future write path), this
+    # route will only ever stream THIS router's own kind of file. A wrong-kind
+    # id reads as "no longer available", never as bytes.
+    rec = store.get(file_id, require_kind=_TASK_ATTACHMENT_KIND)
     if rec is None:
         raise HTTPException(status_code=404, detail="File no longer available")
 
@@ -810,15 +850,7 @@ async def update_task(
     if update.attachment_file_id is not None:
         fid = str(update.attachment_file_id).strip()
         if fid:
-            # Validate the referenced file exists (forged/missing -> 400).
-            fs = get_file_store()
-            if fs is None:
-                raise HTTPException(status_code=503, detail="File storage unavailable")
-            if fs.get(fid) is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="attachment_file_id does not reference a stored file",
-                )
+            _authorise_attachment(fid, current_user)
             update_data["attachment"] = {
                 "file_id": fid,
                 "filename": update.attachment_filename,
@@ -1203,6 +1235,64 @@ async def escalate_task(
     }
 
 
+# ---------------------------------------------------------------------------
+# SLA auto-escalation scan bounds (F14)
+# ---------------------------------------------------------------------------
+# The scan used to read ONE UNORDERED slice (limit=500 here, .limit(200) in the
+# TASKMASTER tick), so at scale a genuinely SLA-breached P0/P1 that happened to
+# sit outside that arbitrary slice NEVER escalated -- the ladder managers rely
+# on silently stopped working for exactly the busiest stores. It is now ordered
+# (most-overdue first) and PAGED through the whole candidate set:
+#   * PAGE_SIZE   -- candidate docs held in memory at once (bounded memory),
+#   * MAX_PAGES   -- hard stop so a pathological collection can't spin forever,
+#   * MAX_ACTIONS -- hard stop on escalations per run (notification-storm guard).
+# TASKMASTER mirrors these values (agents/implementations/taskmaster.py) so the
+# 5-minute tick and this endpoint scan identically.
+ESCALATION_SCAN_PAGE_SIZE = 500
+ESCALATION_SCAN_MAX_PAGES = 40  # 40 * 500 = 20,000 candidates per run
+ESCALATION_SCAN_MAX_ACTIONS = 1000
+
+# Ordering for the candidate scan: most-overdue first. A task with no due_at
+# sorts first (Mongo orders missing/null before values) -- correct, because
+# those are ack-clock candidates whose breach is measured from created_at, and
+# the secondary key puts the oldest of them first.
+ESCALATION_SCAN_SORT = [("due_at", 1), ("created_at", 1)]
+
+
+def build_escalation_candidate_filter(store_id: Optional[str] = None) -> dict:
+    """Server-side candidate filter for the SLA scan (shared shape with
+    TASKMASTER).
+
+    Every NON-TERMINAL task, including already-ESCALATED ones (an ignored task
+    climbs the ladder again on each fresh breach), but EXCLUDING tasks that have
+    topped out the ladder: should_escalate() always returns False at/above
+    MAX_ESCALATION_LEVEL, so those are pure scan ballast that accumulates
+    forever and would crowd live breaches out of the page window. ``$not/$gte``
+    (rather than ``$lt``) so a doc with no escalation_level field still matches.
+
+    We deliberately do NOT pre-filter on a date: a task can breach its ACK clock
+    long before it is ever past due, and created_at/due_at are string-typed on
+    legacy rows (Mongo type-bracketing would silently drop them from a
+    Date-bounded query -- the same class of bug as F13 above). The precise
+    decision stays with the pure should_escalate()."""
+    filters: dict = {
+        "status": {
+            "$in": [
+                "OPEN",
+                "IN_PROGRESS",
+                "ESCALATED",
+                "open",
+                "in_progress",
+                "escalated",
+            ]
+        },
+        "escalation_level": {"$not": {"$gte": MAX_ESCALATION_LEVEL}},
+    }
+    if store_id:
+        filters["store_id"] = store_id
+    return filters
+
+
 @router.post("/auto-escalate-overdue")
 async def auto_escalate_overdue_tasks(
     store_id: Optional[str] = Query(None),
@@ -1216,41 +1306,54 @@ async def auto_escalate_overdue_tasks(
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
-    # Candidate set: every non-terminal task (incl. already-ESCALATED, which
-    # may climb the ladder again on a fresh breach). The precise decision (ack
-    # clock + overdue grace + re-escalation cadence, per priority) is made by
-    # the pure should_escalate() below -- a task can breach its ack SLA before
-    # it is even past due, so we can't pre-filter on due date alone.
-    filters: dict = {
-        "status": {
-            "$in": [
-                "OPEN",
-                "IN_PROGRESS",
-                "ESCALATED",
-                "open",
-                "in_progress",
-                "escalated",
-            ]
-        },
-    }
-    if active_store:
-        filters["store_id"] = active_store
-
-    candidates = repo.find_many(filters, limit=500)
+    filters = build_escalation_candidate_filter(active_store)
     now = datetime.now()
     sla_cfg = _load_sla_config()
-    escalated_count = 0
 
-    for task in candidates:
-        flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
-        if not flag:
-            continue
+    # Pass 1 -- READ-ONLY. Page through the WHOLE candidate set (most-overdue
+    # first) and keep only the tasks that actually breached. Nothing is written
+    # here on purpose: escalating mid-scan would move documents relative to the
+    # skip window and could push an un-scanned breach past the cursor.
+    breached: List[tuple] = []
+    scanned = 0
+    truncated = False
+    for page in range(ESCALATION_SCAN_MAX_PAGES):
+        batch = (
+            repo.find_many(
+                filters,
+                sort=ESCALATION_SCAN_SORT,
+                skip=page * ESCALATION_SCAN_PAGE_SIZE,
+                limit=ESCALATION_SCAN_PAGE_SIZE,
+            )
+            or []
+        )
+        if not batch:
+            break
+        scanned += len(batch)
+        for task in batch:
+            flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
+            if flag:
+                breached.append((task, reason))
+        if len(breached) >= ESCALATION_SCAN_MAX_ACTIONS:
+            breached = breached[:ESCALATION_SCAN_MAX_ACTIONS]
+            truncated = True
+            break
+        if len(batch) < ESCALATION_SCAN_PAGE_SIZE:
+            break
+    else:
+        # Ran out of pages with a full last page -- more candidates remain.
+        truncated = True
+
+    escalated_count = 0
+    for task, reason in breached:
         # Resolve the next owner up the role ladder + reassign + notify.
         await _escalate_reassign_notify(repo, task, reason=reason, by="system", now=now)
         escalated_count += 1
 
     return {
         "escalated": escalated_count,
+        "scanned": scanned,
+        "truncated": truncated,
         "message": f"Auto-escalated {escalated_count} overdue tasks",
     }
 
@@ -1278,13 +1381,33 @@ async def scan_payment_variance(
         return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    filters: dict = {"created_at": {"$gte": cutoff}}
+    # BUG-031 dual window. `orders.created_at` is a BSON Date on every live
+    # write path (BaseRepository._add_timestamps stamps datetime.now();
+    # shopify_ingest persists naive-UTC datetimes), and Mongo type-bracketing
+    # means a STRING $gte bound NEVER compares against a Date field -- so the
+    # ISO-string cutoff this used matched ZERO orders and the whole
+    # payment-variance scan silently reported a permanently clean "no variances
+    # found". Match BOTH a datetime window (today's Date-typed rows) AND a
+    # string window (any legacy ISO-string created_at, e.g. migrated rows) via
+    # $or, mirroring finance._cash_sales_for_window.
+    cutoff_dt = datetime.now() - timedelta(days=days)
+    cutoff_iso = cutoff_dt.isoformat()
+    filters: dict = {
+        "$or": [
+            {"created_at": {"$gte": cutoff_dt}},
+            {"created_at": {"$gte": cutoff_iso}},
+        ]
+    }
     if active_store:
         filters["store_id"] = active_store
 
     try:
-        orders = order_repo.find_many(filters, limit=2000) or []
+        # Newest-first: now that the window can actually match rows, the 2000
+        # cap truncates the OLDEST tail of the window instead of an arbitrary
+        # unordered slice.
+        orders = (
+            order_repo.find_many(filters, sort=[("created_at", -1)], limit=2000) or []
+        )
     except Exception:  # noqa: BLE001
         orders = []
 
