@@ -118,11 +118,27 @@ class TestLegacyHrPayrollRouteGating:
         )
         assert resp.status_code != 403
 
-    def test_accountant_allowed_on_payroll_generate(self, client):
-        """ACCOUNTANT should be able to trigger payroll generation."""
+    def test_accountant_now_blocked_on_payroll_generate(self, client):
+        """ACCOUNTANT may no longer AUTHOR payroll rows.
+
+        This asserted "not 403" until 2026-08-10. POST /hr/payroll/generate
+        creates DRAFT payroll rows (base_salary/26 * present_days, flat 10%
+        deduction) that the author cannot read back, that an ADMIN approves in
+        bulk, and that feed the PF ECR and the statutory filing. Under the
+        owner's ruling it matches its read sibling GET /hr/payroll: ADMIN only.
+        """
         resp = client.post(
             "/api/v1/hr/payroll/generate",
             headers=_headers(["ACCOUNTANT"]),
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code == 403
+
+    def test_admin_still_allowed_on_payroll_generate(self, client, auth_headers):
+        """...and the role that may author still can."""
+        resp = client.post(
+            "/api/v1/hr/payroll/generate",
+            headers=auth_headers,
             params={"year": 2026, "month": 6},
         )
         assert resp.status_code != 403

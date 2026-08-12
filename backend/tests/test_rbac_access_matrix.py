@@ -656,6 +656,27 @@ class TestFinancePayrollHrRoutes:
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
         ("GET", "/api/v1/payroll/registers/pf-ecr", ["ADMIN"],
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        # Round-5 MUST-FIX 3. These rows were narrowed to ADMIN by the owner's
+        # salary ruling but appeared in NEITHER this table NOR PROBES, so
+        # re-widening them broke no test: the handler still refused, but the
+        # MIDDLEWARE layer of the rule was unpinned. GET /payroll/config was the
+        # only payroll path covered (it is in PROBES).
+        ("GET", "/api/v1/payroll/salary-sheet", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("GET", "/api/v1/payroll/run/rows", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("GET", "/api/v1/payroll/registers/summary", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("GET", "/api/v1/hr/payroll", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("POST", "/api/v1/hr/payroll/PR-DUMMY-1/approve", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        # Round-5 MUST-FIX 2: the two salary WRITES, narrowed in the same round.
+        ("POST", "/api/v1/hr/payroll/generate", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("POST", "/api/v1/payroll/salary/calculate", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"],
+         {"employee_id": "EMP-DUMMY-1", "month": 5, "year": 2026, "working_days": 26}),
     ]
 
     @pytest.mark.parametrize(

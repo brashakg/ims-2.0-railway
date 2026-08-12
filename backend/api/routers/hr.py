@@ -1533,16 +1533,23 @@ async def list_leaves(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """List leave requests"""
+    """List leave requests.
+
+    Store-scoped via _scope_for_request (same helper as the attendance reads).
+    The previous ``validate_store_access(...) or active_store_id`` + truthiness
+    test FAILED OPEN: a store-scoped account with an empty ``store_ids`` and no
+    active store dropped the filter entirely and read every store's leave rows
+    -- including the free-text ``reason`` and the UNPAID leave type.
+    """
     leave_repo = get_leave_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    scope = _scope_for_request(store_id, current_user)
 
     if leave_repo is None:
         return {"leaves": [], "total": 0}
 
     filter_dict = {}
-    if active_store:
-        filter_dict["store_id"] = active_store
+    if scope is not None:
+        filter_dict["store_id"] = scope
     if employee_id:
         filter_dict["employee_id"] = employee_id
     if status:
@@ -1901,7 +1908,20 @@ async def generate_payroll(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
-    """Generate payroll for a month"""
+    """Generate payroll for a month.
+
+    OWNER RULING 2026-08-09/10, applied to the WRITE side: ADMIN/SUPERADMIN only,
+    matching its read sibling GET /hr/payroll.
+
+    This authored DRAFT payroll rows from a naive base_salary/26 * present_days
+    with a flat 10% deduction, for anyone _HR_READ_ROLES admitted. A
+    STORE_MANAGER could therefore create rows they are not allowed to read back,
+    which an ADMIN then approves in bulk (POST /payroll/approve flips every DRAFT
+    row in the month) and which flow into the PF ECR, the Tally JV and the
+    statutory filing. That is the exact inverse of the rubber-stamp argument this
+    module already makes about approving figures you cannot see.
+    """
+    _assert_salary_admin(current_user, "generate payroll")
     payroll_repo = get_payroll_repository()
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
@@ -2178,9 +2198,14 @@ async def late_marks_report(
 
     Reads attendance docs flagged is_late=True and aggregates count +
     total/avg late minutes per employee. Record-only reporting view; never
-    touches payroll. Fail-soft -> empty report."""
+    touches payroll. Fail-soft -> empty report.
+
+    Store-scoped via _scope_for_request: an empty reach now yields {"$in": []}
+    (an empty report) instead of dropping the filter and reporting every store's
+    staff by name.
+    """
     year, mon = _parse_month(month)
-    active_store = validate_store_access(store_id, current_user)
+    scope = _scope_for_request(store_id, current_user)
     attendance_repo = get_attendance_repository()
     if attendance_repo is None:
         return {
@@ -2193,8 +2218,8 @@ async def late_marks_report(
     start = f"{year:04d}-{mon:02d}-01"
     end = f"{year:04d}-{mon:02d}-{n_days:02d}"
     flt: dict = {"date": {"$gte": start, "$lte": end}, "is_late": True}
-    if active_store:
-        flt["store_id"] = active_store
+    if scope is not None:
+        flt["store_id"] = scope
     if employee_id:
         flt["employee_id"] = employee_id
     try:
@@ -2479,8 +2504,13 @@ async def lwp_report(
     into a payroll run. It is deliberately NOT pushed into payroll -- the payroll
     engine still does LWP proration off the manually-entered number.
 
-    Fail-soft -> empty report."""
-    active_store = validate_store_access(store_id, current_user)
+    Fail-soft -> empty report.
+
+    Store-scoped via _scope_for_request. LWP days drive a salary deduction, so a
+    store-less caller reading every store's unpaid-day counts was the same
+    fail-open class as the attendance reads.
+    """
+    scope = _scope_for_request(store_id, current_user)
     attendance_repo = get_attendance_repository()
     leave_repo = get_leave_repository()
     user_repo = get_user_repository()
@@ -2496,8 +2526,8 @@ async def lwp_report(
     if user_repo is not None:
         try:
             rfilter = {"is_active": True}
-            if active_store:
-                rfilter["store_ids"] = active_store
+            if scope is not None:
+                rfilter["store_ids"] = scope
             for u in user_repo.find_many(rfilter, limit=1000) or []:
                 uid = u.get("user_id") or u.get("_id")
                 if uid:
@@ -2506,8 +2536,8 @@ async def lwp_report(
             roster = {}
 
     att_flt: dict = {"date": {"$gte": start, "$lte": end}}
-    if active_store:
-        att_flt["store_id"] = active_store
+    if scope is not None:
+        att_flt["store_id"] = scope
     if employee_id:
         att_flt["employee_id"] = employee_id
     try:
@@ -2518,8 +2548,8 @@ async def lwp_report(
     leaves = []
     if leave_repo is not None:
         lv_flt: dict = {"status": "APPROVED"}
-        if active_store:
-            lv_flt["store_id"] = active_store
+        if scope is not None:
+            lv_flt["store_id"] = scope
         if employee_id:
             lv_flt["employee_id"] = employee_id
         try:

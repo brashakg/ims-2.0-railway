@@ -918,7 +918,20 @@ async def get_salary_sheet(
 async def calculate_salary(
     calc_request: MonthSalaryCalculation, current_user: dict = Depends(get_current_user)
 ):
-    """Calculate salary for a month with all deductions"""
+    """Calculate salary for a month with all deductions.
+
+    OWNER RULING 2026-08-09/10, applied to the WRITE side: ADMIN/SUPERADMIN only,
+    matching its read sibling GET /payroll/salary-sheet, which falls back to the
+    very ``salary_records`` collection this route writes.
+
+    ADMIN-only rather than self-or-admin ON PURPOSE. The other salary reads allow
+    SELF because seeing your own pay is harmless; AUTHORING your own pay is not.
+    This route accepted another employee's id from any caller the mount admitted
+    and stamped the row with the CALLER's store. Its response carries no salary
+    figures, so this was never a disclosure -- it is authorship, and it is a
+    fraud vector rather than a privacy one.
+    """
+    _assert_salary_admin(current_user, "create or recalculate a salary record")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

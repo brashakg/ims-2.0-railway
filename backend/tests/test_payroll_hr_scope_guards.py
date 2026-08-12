@@ -264,6 +264,41 @@ def _payroll_db():
                 ]
             ),
             "entities": _FakeColl([{"entity_id": "ent-1", "name": "BV Opticals"}]),
+            # MF4: commission aggregates from ORDERS. Without these the
+            # commission payload test ran against an empty item list and could
+            # not fail -- the chair injected net_pay + a bank account into every
+            # row and all 135 tests still passed.
+            "orders": _FakeColl(
+                [
+                    {
+                        "order_id": "ORD-1",
+                        "status": "COMPLETED",
+                        "created_at": datetime(2026, 5, 4, 10, 0),
+                        "store_id": STORE_A,
+                        "sales_staff_id": SELF_ID,
+                        "sales_staff_name": "Own Staffer",
+                        "total_amount": 12000.0,
+                    },
+                    {
+                        "order_id": "ORD-2",
+                        "status": "COMPLETED",
+                        "created_at": datetime(2026, 5, 9, 12, 0),
+                        "store_id": STORE_A,
+                        "sales_staff_id": OTHER_ID,
+                        "sales_staff_name": "Colleague",
+                        "total_amount": 8000.0,
+                    },
+                    {
+                        "order_id": "ORD-3",
+                        "status": "DELIVERED",
+                        "created_at": datetime(2026, 5, 21, 16, 30),
+                        "store_id": STORE_A,
+                        "sales_staff_id": SELF_ID,
+                        "sales_staff_name": "Own Staffer",
+                        "total_amount": 5000.0,
+                    },
+                ]
+            ),
             "salary_advances": _FakeColl(
                 [
                     {
@@ -540,7 +575,11 @@ def test_commission_payload_carries_no_salary_figure(payroll_client):
     body = r.text.lower()
     for field in banned:
         assert field not in body, f"commission payload exposed {field}"
-    for item in r.json()["items"]:
+    items = r.json()["items"]
+    # MF4: without this the loop below iterates nothing and the test cannot fail.
+    assert items, "fixture must produce commission rows or this test is vacuous"
+    assert any(i["revenue"] for i in items), "rows must carry real revenue"
+    for item in items:
         assert set(item) <= {
             "employee_id",
             "name",
@@ -1041,3 +1080,293 @@ def test_scope_store_set_shape():
 
 def test_hr_attendance_unauthenticated_still_401(hr_client):
     assert hr_client.get("/hr/attendance").status_code == 401
+
+
+# ===========================================================================
+# D. SIBLING SWEEP (round 5) -- the same two bug classes, one file over
+# ===========================================================================
+# MF1: the falsy-scope fail-open was fixed on three attendance reads and left
+# open on three siblings in the SAME file. MF2: two payroll WRITES were left
+# ungated, so a manager could author rows that an ADMIN then blanket-approves
+# and that feed the PF ECR and the statutory filing -- the exact inverse of
+# this PR's own "an approval on figures you cannot read is a rubber stamp".
+
+
+class _FakeLeaveRepo:
+    def __init__(self, leaves):
+        self._leaves = [dict(x) for x in leaves]
+
+    def find_many(self, filter=None, sort=None, skip=0, limit=100):
+        return [dict(x) for x in self._leaves if _matches(x, filter or {})][:limit]
+
+
+_LATE_RECORDS = [
+    {
+        "attendance_id": "L1",
+        "employee_id": "E1",
+        "employee_name": "Asha Own-Store",
+        "date": "2026-05-06",
+        "status": "PRESENT",
+        "is_late": True,
+        "late_minutes": 20,
+        "store_id": STORE_A,
+    },
+    {
+        "attendance_id": "L2",
+        "employee_id": "E3",
+        "employee_name": "Colleague Person",
+        "date": "2026-05-07",
+        "status": "PRESENT",
+        "is_late": True,
+        "late_minutes": 35,
+        "store_id": STORE_C,
+    },
+]
+
+_LEAVES = [
+    {
+        "leave_id": "LV-1",
+        "employee_id": "E1",
+        "employee_name": "Asha Own-Store",
+        "store_id": STORE_A,
+        "leave_type": "CASUAL",
+        "status": "APPROVED",
+        "from_date": "2026-05-02",
+        "to_date": "2026-05-02",
+        "reason": "own store errand",
+    },
+    {
+        "leave_id": "LV-2",
+        "employee_id": "E3",
+        "employee_name": "Colleague Person",
+        "store_id": STORE_C,
+        "leave_type": "UNPAID",
+        "status": "APPROVED",
+        "from_date": "2026-05-11",
+        "to_date": "2026-05-13",
+        "reason": "family matter",
+    },
+]
+
+
+@pytest.fixture()
+def hr_reports_client(monkeypatch):
+    """hr_client plus a leave repo and late-marked attendance."""
+    monkeypatch.setattr(hr_mod, "get_user_repository", lambda: _FakeUserRepo(_USERS))
+    monkeypatch.setattr(
+        hr_mod,
+        "get_attendance_repository",
+        lambda: _FakeAttendanceRepo(_RECORDS + _LATE_RECORDS),
+    )
+    monkeypatch.setattr(hr_mod, "get_leave_repository", lambda: _FakeLeaveRepo(_LEAVES))
+    return TestClient(_mounted(hr_mod.router, "/hr"))
+
+
+_STORELESS_ACCOUNTANT = ("ACCOUNTANT", [], None)
+
+
+def _storeless(role="ACCOUNTANT"):
+    """The shape hr._store_scope_filter's own docstring calls ordinary: a
+    store-scoped account with an empty store_ids and no active store."""
+    return _token([role], user_id="u-storeless", store_ids=[], active_store=None)
+
+
+def test_storeless_manager_late_marks_report_is_empty_not_org_wide(hr_reports_client):
+    """MF1 sibling 1. Pre-fix this returned WO-MUM-01's staff to a manager with
+    no store at all -- a different chain, city and legal entity."""
+    r = hr_reports_client.get(
+        "/hr/attendance/late-marks",
+        params={"month": "2026-05"},
+        headers=_auth(_storeless()),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["employees"] == []
+    assert body["total_late_marks"] == 0
+    assert "Colleague Person" not in r.text
+    assert STORE_C not in r.text
+
+
+def test_storeless_manager_lwp_report_is_empty_not_org_wide(hr_reports_client):
+    """MF1 sibling 2. Pre-fix this leaked both employees WITH their unpaid-day
+    counts -- the number that drives a salary deduction."""
+    r = hr_reports_client.get(
+        "/hr/reports/lwp",
+        params={"year": 2026, "month": 5},
+        headers=_auth(_storeless()),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["employees"] == []
+    assert body["total_lwp_days"] == 0.0
+    assert "Colleague Person" not in r.text
+
+
+def test_storeless_manager_leaves_list_is_empty_not_org_wide(hr_reports_client):
+    """MF1 sibling 3. Pre-fix this leaked full leave rows including store_id,
+    the UNPAID type and the free-text reason ("family matter")."""
+    r = hr_reports_client.get("/hr/leaves", headers=_auth(_storeless()))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"leaves": [], "total": 0}
+    assert "family matter" not in r.text
+
+
+def test_reports_still_work_inside_the_callers_reach(hr_reports_client):
+    """Availability half: a manager WITH stores still gets their own data, and
+    still does not get the store outside their reach."""
+    tok = _token(
+        ["ACCOUNTANT"], user_id="u-acct", store_ids=[STORE_A], active_store=STORE_A
+    )
+    late = hr_reports_client.get(
+        "/hr/attendance/late-marks", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert late.status_code == 200
+    assert [e["employee_id"] for e in late.json()["employees"]] == ["E1"]
+    assert "Colleague Person" not in late.text
+
+    leaves = hr_reports_client.get("/hr/leaves", headers=_auth(tok))
+    assert leaves.status_code == 200
+    assert [x["leave_id"] for x in leaves.json()["leaves"]] == ["LV-1"]
+    assert "family matter" not in leaves.text
+
+    lwp = hr_reports_client.get(
+        "/hr/reports/lwp", params={"year": 2026, "month": 5}, headers=_auth(tok)
+    )
+    assert lwp.status_code == 200
+    assert {e["employee_id"] for e in lwp.json()["employees"]} == {"E1", "E4"}
+
+
+def test_admin_keeps_org_wide_reach_on_the_reports(hr_reports_client):
+    tok = _token(["ADMIN"], user_id="u-admin", store_ids=[], active_store=None)
+    late = hr_reports_client.get(
+        "/hr/attendance/late-marks", params={"month": "2026-05"}, headers=_auth(tok)
+    )
+    assert {e["employee_id"] for e in late.json()["employees"]} == {"E1", "E3"}
+    leaves = hr_reports_client.get("/hr/leaves", headers=_auth(tok))
+    assert {x["leave_id"] for x in leaves.json()["leaves"]} == {"LV-1", "LV-2"}
+
+
+def test_explicit_cross_store_still_403_on_the_reports(hr_reports_client):
+    tok = _token(
+        ["ACCOUNTANT"], user_id="u-acct", store_ids=[STORE_A], active_store=STORE_A
+    )
+    for path, params in (
+        ("/hr/attendance/late-marks", {"month": "2026-05", "store_id": STORE_C}),
+        ("/hr/reports/lwp", {"year": 2026, "month": 5, "store_id": STORE_C}),
+        ("/hr/leaves", {"store_id": STORE_C}),
+    ):
+        r = hr_reports_client.get(path, params=params, headers=_auth(tok))
+        assert r.status_code == 403, f"{path}: {r.text}"
+
+
+# --------------------------------------------------------------------- MF2 --
+
+
+class _FakePayrollRepo:
+    def __init__(self):
+        self.created = []
+
+    def find_one(self, flt):
+        return None
+
+    def find_many(self, flt=None, sort=None, skip=0, limit=100):
+        return []
+
+    def find_by_id(self, pid):
+        return None
+
+    def create(self, doc):
+        self.created.append(dict(doc))
+        return doc
+
+
+@pytest.fixture()
+def hr_write_client(monkeypatch):
+    repo = _FakePayrollRepo()
+    monkeypatch.setattr(hr_mod, "get_user_repository", lambda: _FakeUserRepo(_USERS))
+    monkeypatch.setattr(
+        hr_mod, "get_attendance_repository", lambda: _FakeAttendanceRepo(_RECORDS)
+    )
+    monkeypatch.setattr(hr_mod, "get_payroll_repository", lambda: repo)
+    client = TestClient(_mounted(hr_mod.router, "/hr"))
+    return client, repo
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_hr_payroll_generate_is_admin_only(hr_write_client, role):
+    """MF2 write 1. A STORE_MANAGER could author DRAFT payroll rows from a naive
+    base_salary/26 * present_days with a flat 10% deduction -- rows they cannot
+    then read back, that an ADMIN blanket-approves, and that feed the PF ECR and
+    the statutory filing. Authoring salary is now ADMIN-only, matching the read
+    sibling GET /hr/payroll."""
+    client, repo = hr_write_client
+    r = client.post(
+        "/hr/payroll/generate",
+        params={"year": 2026, "month": 5},
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+    assert repo.created == [], f"{role} authored {len(repo.created)} payroll rows"
+
+
+def test_hr_payroll_generate_still_works_for_admin(hr_write_client):
+    client, repo = hr_write_client
+    r = client.post(
+        "/hr/payroll/generate",
+        params={"year": 2026, "month": 5},
+        headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
+    )
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_salary_calculate_is_admin_only(payroll_client, role):
+    """MF2 write 2. POST /payroll/salary/calculate returned 201 for ANOTHER
+    employee's id, stamping the row with the CALLER's store. The response body
+    carries no salary, so this is not a disclosure -- it is authorship of a
+    salary_records row that get_salary_sheet then reads back."""
+    r = payroll_client.post(
+        "/payroll/salary/calculate",
+        json={
+            "employee_id": OTHER_ID,
+            "month": 5,
+            "year": 2026,
+            "working_days": 26,
+            "leave_without_pay_days": 0,
+        },
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+
+
+@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
+def test_salary_calculate_refuses_even_your_own_id(payroll_client, role):
+    """ADMIN-only, NOT self-or-admin. Every other salary route allows SELF
+    because seeing your own pay is harmless -- authoring it is not."""
+    r = payroll_client.post(
+        "/payroll/salary/calculate",
+        json={
+            "employee_id": SELF_ID,
+            "month": 5,
+            "year": 2026,
+            "working_days": 26,
+            "leave_without_pay_days": 0,
+        },
+        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
+    )
+    assert r.status_code == 403, f"{role}: {r.text}"
+
+
+def test_salary_calculate_still_works_for_admin(payroll_client):
+    r = payroll_client.post(
+        "/payroll/salary/calculate",
+        json={
+            "employee_id": OTHER_ID,
+            "month": 5,
+            "year": 2026,
+            "working_days": 26,
+            "leave_without_pay_days": 0,
+        },
+        headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
+    )
+    assert r.status_code in (200, 201), r.text

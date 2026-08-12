@@ -3134,7 +3134,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/hr/payroll/generate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
@@ -5187,7 +5187,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/salary/calculate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     # GET /api/v1/payroll/salary/{employee_id} was REMOVED 2026-08-10 with the
     # route itself (owner decision -- it served raw bank_account_no / pan /
