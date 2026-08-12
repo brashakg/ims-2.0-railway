@@ -330,7 +330,12 @@ class _SpineProducts:
 class _SpineStock:
     """stock_units collection: honours the aggregate's product_id + OPTIONAL
     store_id match, so the test proves the write-back does NOT scope the
-    on-hand math to the selling store."""
+    on-hand math to the selling store.
+
+    The pooled path now sends store_id as ``{"$nin": [<online store ids>]}``
+    (F9: a unit stranded on a stockless ONLINE store is unpickable and must not
+    be published) -- honoured here the way Mongo would, so the pooled assertion
+    below still measures the real physical-store total."""
 
     def __init__(self, rows):
         self._rows = rows
@@ -342,11 +347,17 @@ class _SpineStock:
                 match = stage["$match"]
         pid_in = ((match.get("product_id") or {}).get("$in")) or []
         store = match.get("store_id")
+        excluded_stores = set()
+        if isinstance(store, dict):
+            excluded_stores = set(store.get("$nin") or [])
+            store = None
         counts = {}
         for r in self._rows:
             if r.get("product_id") not in pid_in:
                 continue
             if store and r.get("store_id") != store:
+                continue
+            if r.get("store_id") in excluded_stores:
                 continue
             if r.get("status") not in (None, "AVAILABLE"):
                 continue

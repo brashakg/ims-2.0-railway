@@ -367,10 +367,17 @@ class _FakeStockRepo:
 def test_online_order_decrements_physical_stock(wired, monkeypatch):
     """The oversell fix: ingesting an online order FIFO-claims the sold
     serialized units (so a walk-in can't sell the same unit), keyed by the IMS
-    product_id (resolved via SKU), at the fulfillment store."""
+    product_id (resolved via SKU), at the fulfillment store.
+
+    The fulfilment store is pinned to a PHYSICAL shop here. It used to be left
+    to default to the online billing store (BV-ONLINE-01), but an ONLINE store
+    is pooled and stockless -- claiming a unit there fakes a fulfilment nobody
+    can ship -- so that is now refused (see
+    test_online_preferred_store_is_never_claimed_against below)."""
     import api.dependencies as deps
     from api.routers import orders as orders_mod
 
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
     monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
     stock = _FakeStockRepo()
     monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
@@ -380,10 +387,39 @@ def test_online_order_decrements_physical_stock(wired, monkeypatch):
     )
     assert res["status"] == "created"
     # Exactly one unit claimed, by the IMS product_id (NOT the Shopify 7001),
-    # at the fulfillment store (defaults to the online billing store).
+    # at the configured PHYSICAL fulfillment store.
     assert len(stock.claims) == 1
     assert stock.claims[0][0] == "P-RB"
-    assert stock.claims[0][1] == "BV-ONLINE-01"
+    assert stock.claims[0][1] == "ST-BOKARO-2"
+
+
+def test_online_preferred_store_is_never_claimed_against(wired, monkeypatch):
+    """With ONLINE_FULFILLMENT_STORE_ID unset the preferred store defaults to
+    the ONLINE billing store. That store is pooled and stockless, so any
+    AVAILABLE unit on it is a phantom: claiming it would report the order as
+    fulfilled (claimed == expected), file a ship task at a shop with no shelf,
+    and leave the real unit undecremented -- a silent oversell. The claim must
+    skip it and fall through to the physical shops."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.delenv("ONLINE_FULFILLMENT_STORE_ID", raising=False)
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    # The phantom sits on the ONLINE store; a real unit sits at a real shop.
+    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 3, "ST-BOKARO-2": 5})
+    monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(
+        shopify_ingest, "_available_stores_for_product", lambda db, pid: ["ST-BOKARO-2"]
+    )
+    monkeypatch.setattr(deps, "get_task_repository", lambda: _FakeTaskRepo())
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(7150, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    claimed_stores = [c[1] for c in stock.claims]
+    assert "BV-ONLINE-01" not in claimed_stores
+    assert claimed_stores == ["ST-BOKARO-2"]
 
 
 def test_online_order_unmapped_sku_skips_decrement(wired, monkeypatch):
@@ -753,17 +789,22 @@ def test_fallback_claims_from_other_store_and_raises_ship_task(wired, monkeypatc
 
 def test_fallback_prefers_configured_store_when_it_has_stock(wired, monkeypatch):
     """When the preferred store CAN cover the line, no fallback store is
-    touched and no ship task is raised."""
-    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 3, "ST-BOKARO-2": 5})
+    touched and no ship task is raised.
+
+    The preferred store is a PHYSICAL shop here: an ONLINE preferred store is
+    now skipped outright (it holds no pickable stock), so using BV-ONLINE-01
+    would no longer be testing "preferred store wins"."""
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    stock = _FakeStockRepoPerStore({"ST-MAIN-1": 3, "ST-BOKARO-2": 5})
     task_repo = _wire_fallback(monkeypatch, stock, ["ST-BOKARO-2"])
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9101, buyer_state="20"), topic="orders/create"
     )
     assert res["status"] == "created"
-    assert stock.claims == [("P-RB", "BV-ONLINE-01", res["order_id"])]
+    assert stock.claims == [("P-RB", "ST-MAIN-1", res["order_id"])]
     order = wired["orders"].find_one({"shopify_order_id": "9101"})
-    assert order["fulfillment_stores"] == ["BV-ONLINE-01"]
+    assert order["fulfillment_stores"] == ["ST-MAIN-1"]
     assert task_repo.created == []
 
 
