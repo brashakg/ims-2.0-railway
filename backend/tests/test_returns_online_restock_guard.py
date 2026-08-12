@@ -326,6 +326,9 @@ def _build_ctx(monkeypatch, *, order, stock_units, active_store):
         "returns_coll": returns_coll,
         "writeback_calls": writeback_calls,
         "token": _staff_token(["ADMIN"], active_store),
+        # Lazily-created collections (credit_note_ledger, stock_audit, ...) so a
+        # test can assert the GST credit-note leg, not just the stock leg.
+        "extra": extra,
     }
 
 
@@ -1175,20 +1178,27 @@ def test_confirm_door_refuses_to_guess_when_the_order_cannot_be_read(
         },
     )
 
-    # 1. NO phantom anywhere -- not on a physical shelf, not on the online store.
+    # 1. NO silent success. The round-3 harm was a unit left SOLD while the call
+    #    reported it restocked. This runs FIRST and reads restock_applied BEFORE
+    #    it is pinned below -- asserted after the pin it is a tautology that
+    #    holds for either status, and shadowed by the phantom check it can never
+    #    be the assertion that fires.
+    stk_b = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-B"][0]
+    claimed_success = bool(out.get("restock_applied"))
+    assert not (stk_b["status"] == "SOLD" and claimed_success), (
+        "STK-B stranded SOLD while the call claimed success -- the round-3 bug"
+    )
+    # Fact A: the call reports failure...
+    assert claimed_success is False
+    # ...Fact B: and STK-B is genuinely untouched (blocked, not restocked).
+    assert stk_b["status"] == "SOLD"
+    assert out["restock_store_id"] is None
+    assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+    # 2. NO phantom anywhere -- not on a physical shelf, not on the online store.
     minted = [u for u in ctx["stock_repo"].units if u["stock_id"].startswith("NEW-")]
     assert minted == [], f"phantom minted against an unverifiable order: {minted}"
     assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
-
-    # 2. NO silent success. This is the exact round-3 pairing that must be
-    #    impossible: a unit left SOLD while the call reports it was restocked.
-    assert out["restock_applied"] is False
-    assert out["restock_store_id"] is None
-    assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
-    stk_b = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-B"][0]
-    assert not (stk_b["status"] == "SOLD" and out["restock_applied"]), (
-        "STK-B stranded SOLD while the call claimed success -- the round-3 bug"
-    )
 
     # 3. It is VISIBLE and recoverable: a blocked task fires and the persisted
     #    doc keeps the retry surface alive.
@@ -1276,6 +1286,81 @@ def test_unverified_order_is_not_guessed_at_even_when_a_fallback_store_exists(
     )
     assert out["restock_applied"] is False
     assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+
+def test_credit_note_still_posts_when_the_restock_is_blocked(monkeypatch):
+    """"The credit note still posts" is the promise that makes blocking the
+    restock acceptable -- a blocked restock must never cost the customer their
+    refund or the business its GST output-tax reversal.
+
+    Every other test in this file uses gross_refund 0.0, which skips the credit
+    block entirely (`if customer_id and gross_refund > 0`), so the promise was
+    asserted nowhere. This drives a REAL refund amount against an unreadable
+    order: the restock is refused, and the credit note is still issued."""
+    from api.services import shopify_refund as sr
+
+    ctx = _build_ctx(
+        monkeypatch,
+        order=dict(_ONLINE_ORDER, order_id="ORD-ONL-9"),
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda oid: None)
+    monkeypatch.setattr(
+        "api.dependencies.get_task_repository", lambda: None, raising=False
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _ConfirmDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    gross = 3500.0
+    out = sr.post_from_review(
+        _ConfirmDB(),
+        {
+            "review_id": "rev-credit",
+            "shopify_refund_id": "RF-CREDIT-1",
+            "order_id": "ORD-ONL-9",
+            "store_id": ONLINE_STORE,
+            "customer_id": "CUST-1",
+            "credit_note": {
+                "gross_refund": gross,
+                "net_refund": gross,
+                "gst_breakup": {"gross": gross, "taxable": 3333.33, "tax": 166.67,
+                                "gst_rate": 5.0},
+                "lines": [],
+            },
+            "proposed_restock": [
+                {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+                 "product_name": "Ray-Ban", "return_qty": 1, "unit_price": gross,
+                 "condition": "GOOD"},
+            ],
+        },
+    )
+
+    # The MONEY + GST leg completed...
+    assert out["credit_note_issued"] is True, (
+        "blocking the restock also killed the credit note -- the customer loses "
+        "their refund and the GST output-tax reversal never files"
+    )
+    assert out["gross_refund"] == gross
+    ledger = ctx["extra"].get("credit_note_ledger")
+    assert ledger is not None and len(ledger.docs) == 1
+    assert ledger.docs[0]["customer_id"] == "CUST-1"
+
+    # ...while the STOCK leg was correctly refused.
+    assert out["restock_applied"] is False
+    assert out["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+    assert [u for u in ctx["stock_repo"].units if u["stock_id"].startswith("NEW-")] == []
+    doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-CREDIT-1"][0]
+    assert doc["status"] == "COMPLETED"
+    assert doc["credit_note_issued"] is True
+    assert doc["restock_applied"] is False
 
 
 def test_confirm_door_does_not_restock_twice_on_a_re_confirm(monkeypatch):
@@ -1487,6 +1572,154 @@ def test_accountant_confirm_door_routes_each_product_to_its_own_shop(monkeypatch
     assert sorted(out["restock_store_ids"]) == sorted(
         [PHYSICAL_FULFILMENT_STORE, PHYSICAL_COUNTER_STORE]
     )
+
+
+def test_retry_door_refuses_to_guess_when_the_order_cannot_be_read(monkeypatch):
+    """THE RECOVERY DOOR. _raise_restock_blocked_task and the refund-review
+    banner both send the operator to POST /returns/{id}/restock, so this door
+    must hold the same rule as the confirm door.
+
+    It used to pass the caller's active store as a fallback with no
+    verification: with the order unreadable that guess sent every unit to the
+    operator's own shop -- stranding the other shop's real unit SOLD forever and
+    minting a phantom on a LIVE physical shelf (POS-sellable, and it feeds the
+    pooled Shopify on-hand) -- and returned "Restock applied"."""
+    ctx = _build_ctx(
+        monkeypatch,
+        order=dict(_ONLINE_ORDER, order_id="ORD-ONL-9"),
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    # A CREDIT_FAILED / blocked return doc booked to the ONLINE store -- exactly
+    # what the blocked-restock path leaves behind for the operator to retry.
+    ctx["returns_coll"].insert_one(
+        {
+            "return_id": "RET-BLOCKED-1",
+            "order_id": "ORD-ONL-9",
+            "store_id": ONLINE_STORE,
+            "status": "CREDIT_FAILED",
+            "restock_applied": False,
+            "restock_stock_ids": [],
+            "items": [
+                {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+                 "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+                 "condition": "GOOD"},
+                {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+                 "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+                 "condition": "GOOD"},
+            ],
+        }
+    )
+    # The order cannot be read, and prod's actual env has a configured store --
+    # so a fallback IS available and only the guard can refuse it.
+    monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda oid: None)
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", PHYSICAL_FULFILMENT_STORE)
+
+    raised: list = []
+    import api.services.task_triggers as tt
+
+    class _FakeTaskRepo:
+        def find_many(self, _q):
+            return []
+
+        def create(self, doc):
+            return doc
+
+    monkeypatch.setattr(
+        "api.dependencies.get_task_repository", lambda: _FakeTaskRepo(), raising=False
+    )
+    monkeypatch.setattr(
+        tt, "create_system_task", lambda repo, **kw: raised.append(kw) or kw
+    )
+
+    r = ctx["client"].post(
+        "/api/v1/returns/RET-BLOCKED-1/restock",
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    # NOTHING minted -- no source_type=RETURN row on any shelf.
+    minted = [
+        u for u in ctx["stock_repo"].units if u.get("source_type") == "RETURN"
+    ]
+    assert minted == [], f"phantom minted on a live shelf by the retry door: {minted}"
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+
+    # NO false success (the round-3 damage was reported as "Restock applied").
+    assert body["restock_applied"] is False
+    assert body["restock_stock_ids"] == []
+    assert "Restock applied" not in body["message"]
+
+    # VISIBLE + recoverable.
+    assert len(raised) == 1
+    assert raised[0]["dedupe_ref"] == "return_restock_blocked:RET-BLOCKED-1"
+    doc = ctx["returns_coll"].find_one({"return_id": "RET-BLOCKED-1"})
+    assert doc["restock_applied"] is False
+    assert doc["restock_in_progress"] is False  # not deadlocked for the next try
+    assert doc["restock_store_reason"] == returns_router._RESTOCK_ROUTE_UNRESOLVED
+
+
+def test_retry_door_restocks_normally_when_the_order_is_readable(monkeypatch):
+    """Control for the guard above: the SAME route with the order readable must
+    still send both units home to their own shops with zero mints."""
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-9",
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1},
+            {"product_id": "PRD-2", "store_id": PHYSICAL_COUNTER_STORE, "qty": 1},
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {"stock_id": "STK-A", "product_id": "PRD-1",
+             "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+            {"stock_id": "STK-B", "product_id": "PRD-2",
+             "store_id": PHYSICAL_COUNTER_STORE, "status": "SOLD",
+             "order_id": "ORD-ONL-9"},
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    ctx["returns_coll"].insert_one(
+        {
+            "return_id": "RET-OK-1",
+            "order_id": "ORD-ONL-9",
+            "store_id": ONLINE_STORE,
+            "restock_applied": False,
+            "restock_stock_ids": [],
+            "items": [
+                {"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1",
+                 "product_name": "Ray-Ban", "return_qty": 1, "unit_price": 1500,
+                 "condition": "GOOD"},
+                {"order_item_id": "li2", "product_id": "PRD-2", "sku": "OK-2",
+                 "product_name": "Oakley", "return_qty": 1, "unit_price": 2000,
+                 "condition": "GOOD"},
+            ],
+        }
+    )
+    r = ctx["client"].post(
+        "/api/v1/returns/RET-OK-1/restock",
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["restock_applied"] is True
+    by_id = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    assert by_id["STK-A"]["status"] == "AVAILABLE"
+    assert by_id["STK-A"]["store_id"] == PHYSICAL_FULFILMENT_STORE
+    assert by_id["STK-B"]["status"] == "AVAILABLE"
+    assert by_id["STK-B"]["store_id"] == PHYSICAL_COUNTER_STORE
+    assert all(not sid.startswith("NEW-") for sid in by_id)
 
 
 def test_retry_restock_door_redirects_off_the_online_store(monkeypatch):

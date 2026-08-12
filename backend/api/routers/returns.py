@@ -3502,17 +3502,88 @@ async def retry_restock(
     existing_ids = list(claim.get("restock_stock_ids") or [])
     lines = [ReturnLine(**it) for it in (claim.get("items") or [])]
 
+    # F9: the order is the ONLY record of which physical shop shipped each unit.
+    # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
+    # routing evidence exactly like the Shopify confirm door does.
+    claim_store = claim.get("store_id")
+    claim_order_id = claim.get("order_id")
+    retry_order = _load_order_for_restock(claim_order_id)
+
+    # THIS DOOR IS THE RECOVERY PATH. _raise_restock_blocked_task and the refund
+    # -review banner both send the operator here, so it must hold the SAME rule
+    # as the confirm door: when the return bills to a stockless ONLINE store and
+    # the order cannot be read, we do NOT know which shop shipped which unit --
+    # and the caller's active store is a guess, not an answer. Guessing here
+    # strands one shop's real unit SOLD forever and mints a phantom on another
+    # shop's LIVE shelf (POS-sellable, and it feeds the pooled Shopify on-hand),
+    # while reporting "Restock applied". Refuse, and keep it retryable.
+    if retry_order is None and is_online_store(_get_db(), claim_store):
+        logger.error(
+            "[RETURNS] restock retry BLOCKED for %s: order %s could not be read "
+            "and the return bills to ONLINE store %s, so the fulfilling shop for "
+            "each unit is unknown. Nothing restocked (a guess would strand one "
+            "shop's unit and mint a phantom on another).",
+            return_id,
+            claim_order_id,
+            claim_store,
+        )
+        blocked_units = [
+            {
+                "product_id": ln.product_id,
+                "sku": getattr(ln, "sku", "") or "",
+                "product_name": getattr(ln, "product_name", "") or "",
+            }
+            for ln in lines
+        ]
+        _raise_restock_blocked_task(
+            return_id,
+            claim_order_id,
+            claim_store,
+            blocked_units,
+            current_user.get("active_store_id"),
+        )
+        blocked_update = {
+            "restocked": _restock_intent_rows(blocked_units),
+            "restock_applied": False,
+            "restock_stock_ids": existing_ids,
+            "restock_in_progress": False,
+            "restock_store_id": None,
+            "restock_store_ids": [],
+            "restock_store_redirected_from": claim_store,
+            "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
+        try:
+            coll.update_one({"return_id": return_id}, {"$set": blocked_update})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
+        return {
+            "return_id": return_id,
+            "restock_applied": False,
+            "restock_stock_ids": existing_ids,
+            "restock_store_id": None,
+            "restock_store_ids": [],
+            "message": (
+                "Could not restock: the original order could not be read, so "
+                "there is no way to tell which shop each returned item came "
+                "from. Nothing was added to any shop's stock. A task has been "
+                "raised -- retry once the order loads, or add the items at the "
+                "receiving shop."
+            ),
+        }
+
     try:
         restock_result = _restock_good_items(
             lines,
-            claim.get("store_id"),
+            claim_store,
             return_id,
-            order_id=claim.get("order_id"),
+            order_id=claim_order_id,
             already_applied=False,
             user_id=current_user.get("user_id"),
             # F9: same online-store redirect as the create path -- a retry must
             # never be the door that mints a phantom unit on BV/WO-ONLINE-01.
             processing_store_id=current_user.get("active_store_id"),
+            # VERIFIED evidence (non-None was checked above).
+            order=retry_order,
         )
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
