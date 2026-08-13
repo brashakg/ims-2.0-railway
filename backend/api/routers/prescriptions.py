@@ -202,6 +202,24 @@ class EyeData(BaseModel):
     prism: Optional[str] = None
     base: Optional[str] = None
     acuity: Optional[str] = None
+    # PATIENT SAFETY / AUDIT: how THIS eye's axis came to be recorded.
+    #   None (absent)   = recorded by the clinician on the prescription -- normal.
+    #   COUNTER_ENTERED = supplied at the POS counter because the prescription
+    #                     carried a cylinder but no axis. POS never invents an
+    #                     axis; it asks, and stamps the answer here.
+    # It lives on the EYE, not in `remarks`, deliberately: `remarks` is projected
+    # to the OTP-gated CUSTOMER portal (portal._safe_prescription_view -> "notes")
+    # and printed on the patient-facing Rx card, while NO internal staff screen
+    # renders it -- so provenance there would tell the PATIENT their axis was
+    # supplied at the counter and stay invisible to the optician handling the
+    # remake dispute it exists for. Exactly inverted. Per-eye also beats a single
+    # free-text note when only one eye was counter-entered.
+    # Persisted automatically by `right_eye.model_dump()` in create_prescription
+    # -- no router change needed. WHO/WHEN are already on the doc (`created_by`,
+    # `prescription_date`), so they are not duplicated onto the eye.
+    # Add new members to the Literal (do not loosen to a bare str) so a typo can
+    # never masquerade as a valid provenance value.
+    axis_source: Optional[Literal["COUNTER_ENTERED"]] = None
 
     @field_validator("sph")
     @classmethod
@@ -389,6 +407,15 @@ class EyeDataEdit(BaseModel):
     accepted as-is here, then the handler runs the SAME `_validate_rx_value`
     ranges explicitly and raises HTTPException(400). axis stays Field-bounded
     (1-180) because that's a structural constraint, identical to EyeData.
+
+    `axis_source` is deliberately ABSENT here, and must stay absent: this is the
+    CLINIC edit door, and the only defined marker (COUNTER_ENTERED) means "typed
+    at the POS counter", which a clinic edit can never truthfully claim. The
+    clinician does not have to clear it by hand either -- `_merge_eye_subdoc`
+    drops a stale marker automatically whenever the edit actually moves the
+    axis. Adding the field here would give the clinic door a way to stamp a
+    counter marker on a measured axis, which is the exact misattribution the
+    marker exists to prevent.
     """
 
     sph: Optional[str] = None
@@ -547,6 +574,48 @@ _EYE_SUBDOCS = ("right_eye", "left_eye", "cl_right", "cl_left")
 # patch touches its canonical twin. Aliases are never invented.
 _EYE_KEY_ALIASES = {"sph": "sphere", "cyl": "cylinder", "add": "addition"}
 
+# ---------------------------------------------------------------------------
+# A CORRECTED axis must not keep the old axis's provenance
+# ---------------------------------------------------------------------------
+# `axis_source` records how THIS eye's axis came to be recorded -- absent means
+# "recorded by the clinician on the prescription" (the normal case) and
+# COUNTER_ENTERED means "typed at the POS counter because the prescription
+# carried a cylinder but no axis". It describes the AXIS, not the eye, so the
+# moment the axis VALUE changes the old marker is a false statement: after an
+# optometrist re-measures and corrects a counter-entered axis, the record would
+# otherwise go on attributing the clinician's measurement to a counter guess --
+# in a remake dispute, the one place the marker is ever read.
+#
+# We CLEAR it rather than re-stamp a CLINICIAN_CORRECTED marker, deliberately:
+# absence ALREADY means "clinician-recorded", so a second value for the same
+# meaning would give every reader two vocabularies for one fact and let a reader
+# that knows only one of them draw the wrong conclusion. Who and when are
+# already captured by `updated_by` / `updated_at` on the same write, and this
+# door is role-gated to clinical roles, so nothing is lost by clearing.
+#
+# Only an actual CHANGE clears it. Re-sending the same axis unchanged (a
+# full-eye PUT that touches something else) is not a correction, and the marker
+# is still true of the value that is stored.
+_EYE_PROVENANCE_KEYS = ("axis_source",)
+
+
+def _axis_value_changed(stored_axis, patch_axis) -> bool:
+    """True when a patch actually MOVES the axis (not merely re-sends it).
+
+    Compared numerically so a legacy stored "85" and a patched 85 read as the
+    same meridian; falls back to a trimmed string compare for anything
+    non-numeric. Blank-vs-value counts as a change in either direction.
+    """
+    stored_blank, patch_blank = _is_blank(stored_axis), _is_blank(patch_axis)
+    if stored_blank and patch_blank:
+        return False
+    if stored_blank or patch_blank:
+        return True
+    try:
+        return float(str(stored_axis).strip()) != float(str(patch_axis).strip())
+    except (TypeError, ValueError):
+        return str(stored_axis).strip() != str(patch_axis).strip()
+
 
 def _merge_eye_subdoc(stored, patch):
     """Deep-merge ONE eye sub-document: stored values survive unless the caller
@@ -563,6 +632,11 @@ def _merge_eye_subdoc(stored, patch):
     the new value -- otherwise `_canonical_eye`, which reads `sph` BEFORE
     `sphere`, would mirror the PRE-EDIT power into the dispensing record on
     finalize. An alias is only ever updated, never invented.
+
+    Axis PROVENANCE (`axis_source`) is dropped when the patch actually changes
+    the axis, so a corrected axis can never keep the previous axis's marker --
+    see `_axis_value_changed`. A patch that supplies its own provenance keeps
+    it; the caller said something explicit and we do not overrule it.
     """
     if not isinstance(patch, dict):
         return patch
@@ -573,6 +647,10 @@ def _merge_eye_subdoc(stored, patch):
             merged[alias] = patch[canonical]
         elif alias in patch and canonical in base:
             merged[canonical] = patch[alias]
+    if "axis" in patch and _axis_value_changed(base.get("axis"), patch.get("axis")):
+        for provenance_key in _EYE_PROVENANCE_KEYS:
+            if provenance_key not in patch:
+                merged.pop(provenance_key, None)
     return merged
 
 
