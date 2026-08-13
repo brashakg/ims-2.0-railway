@@ -447,6 +447,73 @@ class TestRxView:
         assert ids == {"RX-A1", "RX-A2"}
         assert "RX-B1" not in ids  # never another customer's data
 
+    def test_rx_route_ships_no_internal_fields_to_the_patient(
+        self, client, fake_db, patch_repos
+    ):
+        """Asserts on the WIRE BYTES of the real OTP-gated route, not on the
+        helper.
+
+        `_safe_prescription_view` is what keeps internal data out of this
+        response, but nothing forced the route to keep calling it: replacing
+        `portal.py`'s projection with a bare `dict(r)` left the whole targeted
+        backend suite green. Any future edit to `get_my_prescriptions` -- a
+        "full detail" branch, a cache, a `.copy()` -- would silently re-open the
+        leak. This test fails when that happens.
+
+        `axis_source` records that a staff member typed the astigmatic axis at
+        the counter because the prescribing clinician had not recorded one. A
+        patient reading that flag on their own prescription is precisely the
+        disclosure it must never make -- it is the shop's evidence in a remake
+        dispute, not the customer's.
+        """
+        customers = [
+            {"customer_id": "CUST-A", "name": "Alice A", "mobile": "9000000001"}
+        ]
+        prescriptions = [
+            {
+                "prescription_id": "RX-A1",
+                "customer_id": "CUST-A",
+                "created_by": "u-77",
+                "optometrist_id": "u-77",
+                "right_eye": {
+                    "sph": "-2.00",
+                    "cyl": "-1.25",
+                    "axis": 85,
+                    "axis_source": "COUNTER_ENTERED",
+                },
+                "left_eye": {
+                    "sph": "-1.75",
+                    "cyl": "-0.75",
+                    "axis": 90,
+                    "axis_source": "COUNTER_ENTERED",
+                },
+            }
+        ]
+        patch_repos(customers=customers, prescriptions=prescriptions)
+
+        client.post("/api/v1/portal/rx/request-otp", json={"phone": "9000000001"})
+        token = self._get_token(client, fake_db, "CUST-A", "9000000001")
+
+        resp = client.get(
+            "/api/v1/portal/rx", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200, resp.text
+
+        # The requirement, asserted FIRST so nothing else can shadow it: no
+        # internal field reaches the patient's browser, on EITHER eye.
+        wire = resp.text
+        assert "COUNTER_ENTERED" not in wire
+        assert "axis_source" not in wire
+        assert "optometrist_id" not in wire
+        assert "created_by" not in wire
+
+        # ...and the patient still receives their own clinical values, both
+        # eyes. A projection that leaked nothing by returning nothing would be
+        # no fix at all.
+        rx = resp.json()["prescriptions"][0]
+        assert rx["right_eye"] == {"sph": "-2.00", "cyl": "-1.25", "axis": 85}
+        assert rx["left_eye"] == {"sph": "-1.75", "cyl": "-0.75", "axis": 90}
+
     def test_rx_requires_token(self, client, patch_repos):
         patch_repos(prescriptions=[])
         resp = client.get("/api/v1/portal/rx")
