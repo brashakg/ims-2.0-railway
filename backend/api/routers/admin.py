@@ -702,10 +702,21 @@ async def regenerate_tally_export(
         )
 
     # Validate date format up front so the error message points at the input.
+    # The anchor MUST carry UTC tzinfo, exactly as _normalise_export_date does:
+    # NEXUS keys `tally_exports` on `anchor.isoformat()`, and a naive anchor
+    # writes '2026-05-08T00:00:00' while every reader normalises to
+    # '2026-05-08T00:00:00+00:00'. A regenerate that correctly REFUSED the day's
+    # orders then wrote its poison row under a key no reader can match, and the
+    # superseded green file kept downloading -- i.e. the whole poison/supersede
+    # safety net was inert on the only path a human can trigger.
     try:
+        from datetime import timezone as _tz
+
         anchor = datetime.fromisoformat(payload.date).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=_tz.utc)
     except Exception:
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
 

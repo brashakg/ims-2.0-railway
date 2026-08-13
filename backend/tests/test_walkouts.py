@@ -31,147 +31,42 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ============================================================================
-# In-memory fakes
+# In-memory fakes -- THIN ALIASES over tests/strict_fakes.py
 # ============================================================================
+# This module used to define its OWN Mongo-filter matcher (``_doc_matches``)
+# plus ``FakeCollection`` / ``FakeDB``. That matcher understood only
+# ``$gte`` / ``$lte`` / ``$ne`` / ``$exists`` and a top-level ``$or``. EVERY
+# other operator fell out of its ``isinstance(expected, dict)`` loop without
+# matching a branch, so the clause was SILENTLY DROPPED and the document
+# MATCHED anyway: ``{"expires_at": {"$lt": now}}``,
+# ``{"status": {"$in": [...]}}`` and ``{"x": {"$nin": [...]}}`` were no-ops
+# that returned EVERY document. Its ``update_one`` honoured only ``$set`` and
+# ``$push``, so an ``$inc`` (loyalty points, store credit, a uses counter)
+# silently changed nothing. FIFTEEN test modules import these names -- the
+# order/pricing/GST/stock ones among them -- so any assertion resting on such
+# a clause proved nothing at all.
+#
+# The names are kept EXACTLY as they were so every importer keeps working
+# unchanged; the implementations now come from ``tests/strict_fakes.py``,
+# which emulates $eq/$ne/$gt/$gte/$lt/$lte/$in/$nin/$exists/$regex/$not and
+# $or/$and/$nor, $set/$unset/$push/$inc/$setOnInsert/$addToSet/$pull, and
+# $match/$group/$sort/$limit/$skip/$count faithfully -- and raises
+# ``UnsupportedMongoFeature`` on anything it cannot. Do NOT re-introduce a
+# local matcher here: add the missing operator to strict_fakes.py with real
+# semantics instead, so an unemulated operator can never again read as "match".
 
+from strict_fakes import (  # noqa: E402,F401
+    _MISSING,
+    UnsupportedMongoFeature,
+    StrictCollection,
+    StrictDB,
+    _Cursor as _FakeCursor,
+    matches as _doc_matches,
+)
 
-_MISSING = object()
-
-
-def _doc_matches(doc, filter):
-    """Tiny Mongo-filter matcher — supports plain equality and the
-    operators the walkout repo + the member backfill use ($gte/$lte/$ne/
-    $exists and top-level $or). Doesn't try to be a full Mongo emulator."""
-    if not filter:
-        return True
-    for k, expected in filter.items():
-        # Top-level $or: doc matches when ANY sub-filter matches.
-        if k == "$or" and isinstance(expected, list):
-            if not any(_doc_matches(doc, sub) for sub in expected):
-                return False
-            continue
-        actual = doc.get(k, _MISSING)
-        actual_val = None if actual is _MISSING else actual
-        if isinstance(expected, dict):
-            for op, op_val in expected.items():
-                if op == "$gte" and not (actual_val is not None and actual_val >= op_val):
-                    return False
-                if op == "$lte" and not (actual_val is not None and actual_val <= op_val):
-                    return False
-                if op == "$ne" and actual_val == op_val:
-                    return False
-                if op == "$exists":
-                    present = actual is not _MISSING
-                    if bool(op_val) != present:
-                        return False
-        else:
-            if actual_val != expected:
-                return False
-    return True
-
-
-class _FakeCursor:
-    """Lazy cursor for FakeCollection.find() with chainable
-    sort/skip/limit. Materializes on iter()."""
-
-    def __init__(self, docs):
-        self._docs = list(docs)
-        self._sort_keys = None
-        self._skip = 0
-        self._limit = None
-
-    def sort(self, keys):
-        self._sort_keys = keys
-        return self
-
-    def skip(self, n):
-        self._skip = int(n or 0)
-        return self
-
-    def limit(self, n):
-        self._limit = int(n or 0) or None
-        return self
-
-    def _materialize(self):
-        out = list(self._docs)
-        if self._sort_keys:
-            for key, direction in reversed(self._sort_keys):
-                out.sort(
-                    key=lambda d, k=key: (d.get(k) is None, d.get(k)),
-                    reverse=(direction == -1),
-                )
-        if self._skip:
-            out = out[self._skip :]
-        if self._limit:
-            out = out[: self._limit]
-        return out
-
-    def __iter__(self):
-        return iter(self._materialize())
-
-
-class FakeCollection:
-    """Minimal MongoDB collection stub — supports the calls the
-    Walkout / Customer / Audit repos exercise (Phases 1 + 2)."""
-
-    def __init__(self):
-        self.docs = []
-
-    def insert_one(self, doc):
-        self.docs.append(dict(doc))
-        return type("R", (), {"inserted_id": doc.get("_id")})()
-
-    def find_one(self, filter=None, projection=None):
-        if not filter:
-            return self.docs[0] if self.docs else None
-        for d in self.docs:
-            if _doc_matches(d, filter):
-                return d
-        return None
-
-    def find(self, filter=None, projection=None):
-        return _FakeCursor(d for d in self.docs if _doc_matches(d, filter))
-
-    def count_documents(self, filter=None):
-        return sum(1 for d in self.docs if _doc_matches(d, filter))
-
-    def update_one(self, filter, update):
-        modified = 0
-        for d in self.docs:
-            if _doc_matches(d, filter):
-                set_block = (update or {}).get("$set", {}) or {}
-                push_block = (update or {}).get("$push", {}) or {}
-                d.update(set_block)
-                for k, v in push_block.items():
-                    arr = d.get(k)
-                    if not isinstance(arr, list):
-                        arr = []
-                    arr.append(v)
-                    d[k] = arr
-                modified += 1
-                break  # update_one updates one match
-        return type("R", (), {"modified_count": modified, "matched_count": modified})()
-
-
-class FakeDB:
-    is_connected = True
-
-    def __init__(self):
-        self._collections = {}
-
-    def get_collection(self, name):
-        if name not in self._collections:
-            self._collections[name] = FakeCollection()
-        return self._collections[name]
-
-    def __getattr__(self, name):
-        return self.get_collection(name)
-
-    def __getitem__(self, name):
-        # pymongo Database supports db["coll"] subscript access; mirror it so
-        # code paths that use the subscript form (e.g. the member backfill) work
-        # against the fake too.
-        return self.get_collection(name)
+# Back-compat aliases: the 15 importers reference these names directly.
+FakeCollection = StrictCollection
+FakeDB = StrictDB
 
 
 @pytest.fixture

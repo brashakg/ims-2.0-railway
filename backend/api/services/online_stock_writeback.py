@@ -132,10 +132,45 @@ def skus_from_items(items_data: List[dict]) -> List[str]:
     return seen
 
 
+def _online_store_ids(db) -> List[str]:
+    """Store ids that are ONLINE (pooled + stockless) and therefore must NEVER
+    contribute to the pooled on-hand we publish to Shopify.
+
+    An AVAILABLE unit parked on BV-ONLINE-01 / WO-ONLINE-01 is unpickable: the
+    online store has no shelf and POS is blocked on it (PR #941), so counting it
+    would publish availability that no shop can actually ship. The known-id
+    allow-list from services.stores_util is the floor (it can never be empty, so
+    this never degrades to "exclude nothing"); the `stores` collection is then
+    consulted for any further store_type == ONLINE rows. Fully fail-soft -- a
+    lookup failure falls back to the known ids rather than raising into the
+    STRICT on-hand contract below."""
+    from .stores_util import KNOWN_ONLINE_STORE_IDS, ONLINE_STORE_TYPE
+
+    ids = set(KNOWN_ONLINE_STORE_IDS)
+    if db is None:
+        return sorted(ids)
+    try:
+        coll = db.get_collection("stores")
+        if coll is not None:
+            for row in coll.find(
+                {"store_type": ONLINE_STORE_TYPE}, {"_id": 0, "store_id": 1}
+            ):
+                sid = str((row or {}).get("store_id") or "").strip()
+                if sid:
+                    ids.add(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[STOCK_WRITEBACK] online-store lookup fell back to known ids: %s", exc
+        )
+    return sorted(ids)
+
+
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
     """Map each SKU -> IMS on-hand (AVAILABLE stock_units). store_id=None (the
-    ONLY value the write-back uses) means POOLED across all stores -- the
-    quantity the online listing must reflect.
+    ONLY value the write-back uses) means POOLED across all PHYSICAL stores --
+    the quantity the online listing must reflect. Units sitting on an ONLINE
+    store are excluded (see _online_store_ids): that store has no shelf and no
+    POS, so counting them would publish stock nobody can pick.
 
     STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
     WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
@@ -193,6 +228,14 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
         }
         if store_id:
             match["store_id"] = store_id
+        else:
+            # POOLED count: every PHYSICAL shop's on-hand, but never a unit
+            # stranded on a stockless ONLINE store. Belt-and-braces for the
+            # returns/restock mint door (F9) and a self-heal for any phantom
+            # unit an earlier build already minted there.
+            online_ids = _online_store_ids(db)
+            if online_ids:
+                match["store_id"] = {"$nin": online_ids}
         on_hand_by_pid: Dict[str, int] = {}
         for row in stock_coll.aggregate(
             [

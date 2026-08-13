@@ -377,9 +377,25 @@ def _fallback_enabled() -> bool:
 
 
 def _available_stores_for_product(db, product_id: str) -> List[str]:
-    """Store ids holding AVAILABLE serialized units of this product, most stock
-    first. Fail-soft -> []. Deterministic tie-break on store_id so re-ingests
-    behave identically."""
+    """PHYSICAL store ids holding AVAILABLE serialized units of this product,
+    most stock first. Fail-soft -> []. Deterministic tie-break on store_id so
+    re-ingests behave identically.
+
+    ONLINE stores are EXCLUDED. They are pooled and stockless -- no shelf, no
+    staff, POS blocked -- so a unit sitting on one cannot be picked or shipped.
+    Without this exclusion a phantom AVAILABLE unit on BV-ONLINE-01 is a valid
+    fallback candidate (and 'BV-ONLINE-01' even sorts AHEAD of 'BV-PUN-01' /
+    'BV-RANCHI-01' on a count tie), so the next online sale CLAIMS the phantom:
+    claimed == expected, the under-claim fail-loud below never fires, the ship
+    task goes to a store with no shelf, and the real physical unit is never
+    decremented -- a paid order silently mapped to a unit nobody has.
+
+    Excluding online stores from the pooled count we publish to Shopify
+    (online_stock_writeback) only fixes what Shopify is TOLD; this is what stops
+    IMS from CONSUMING a phantom, converting a silent misroute into a loud miss.
+    """
+    from .stores_util import is_online_store
+
     try:
         coll = (
             db.get_collection("stock_units")
@@ -395,7 +411,22 @@ def _available_stores_for_product(db, product_id: str) -> List[str]:
                 ]
             )
         )
-        return [str(r.get("_id")) for r in rows if r.get("_id")]
+        out: List[str] = []
+        for r in rows:
+            sid = r.get("_id")
+            if not sid:
+                continue
+            if is_online_store(db, str(sid)):
+                logger.warning(
+                    "[SHOPIFY_INGEST] skipping ONLINE store %s as a fulfilment "
+                    "candidate for %s -- it holds no pickable stock (phantom "
+                    "unit on a pooled store)",
+                    sid,
+                    product_id,
+                )
+                continue
+            out.append(str(sid))
+        return out
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] fallback store lookup failed for %s: %s",
@@ -416,11 +447,27 @@ def _claim_units_multistore(
     (largest holding first). Returns (claimed_total, breakdown) where breakdown
     rows are {product_id, store_id, qty}. Reuses the atomic FIFO claim in
     orders._mark_units_sold, so two concurrent orders can never grab the same
-    unit even across the fallback path."""
+    unit even across the fallback path.
+
+    An ONLINE `preferred_store` is skipped for the same reason the fallback
+    candidates are filtered: it is pooled and stockless, so any AVAILABLE unit
+    there is a phantom and claiming it fakes a fulfilment nobody can ship. With
+    it skipped the claim falls through to the real shops, and if none of them
+    hold the units the under-claim guard fires LOUDLY instead of silently
+    "succeeding" against a unit that does not exist."""
     from ..routers.orders import _mark_units_sold
+    from .stores_util import is_online_store
 
     breakdown: List[Dict[str, Any]] = []
     claimed_total = 0
+    if preferred_store and is_online_store(db, preferred_store):
+        logger.warning(
+            "[SHOPIFY_INGEST] preferred fulfilment store %s is an ONLINE "
+            "(stockless) store -- claiming from the physical shops instead. "
+            "Set ONLINE_FULFILLMENT_STORE_ID to a real shop.",
+            preferred_store,
+        )
+        preferred_store = ""
     for line in decrement_items:
         pid = line.get("product_id") or ""
         qty = int(line.get("quantity") or 1)

@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
+from ..services.rx_print_values import is_absent_rx_value, rx_text_or
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -154,6 +155,7 @@ from ..services.rx_validation import (  # noqa: E402
     _RX_LIMITS,
     _validate_rx_value,
     _validate_rx_number,
+    _validate_axis,
 )
 
 # ============================================================================
@@ -259,7 +261,10 @@ class EyeData(BaseModel):
             except (ValueError, TypeError):
                 cyl_num = None
             if cyl_num is not None and abs(cyl_num) > 1e-9 and self.axis is None:
-                raise ValueError("axis (1-180) is required when cylinder is non-zero")
+                raise ValueError(
+                    f"cylinder {_fmt_power(cyl)} recorded but no axis - an axis "
+                    f"(1-180 whole degrees) is required when cylinder is non-zero"
+                )
         return self
 
 
@@ -401,9 +406,10 @@ class PrescriptionUpdate(BaseModel):
 
     Every field is optional: the handler patches ONLY the keys the caller sends
     (exclude_unset), so a partial edit never blanks out fields it didn't touch.
-    The eye blocks are range-checked by the SAME `_validate_rx_value` ranges
-    (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50, 0.25 steps) that
-    guard create -- an out-of-range Rx can't be saved here (rejected 400).
+    The eye blocks are range-checked by the SAME canonical validators
+    (rx_validation: SPH -25..+25, CYL -6..+6, AXIS 1-180 whole, ADD +0.75..+4.00,
+    0.25 steps) that guard create -- an out-of-range Rx can't be saved here
+    (rejected 400). Never restate the numbers; they live in _RX_LIMITS only.
 
     Identity / provenance fields (patient_id, customer_id, store_id, source,
     rx_kind, prescription_number, created_by) are intentionally NOT editable:
@@ -439,17 +445,261 @@ def generate_rx_number() -> str:
     return f"RX-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
 
 
-def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
+# ---------------------------------------------------------------------------
+# PATIENT SAFETY: the toric-axis gate (shared by every Rx write path)
+# ---------------------------------------------------------------------------
+# A cylinder (CYL) is astigmatism correction; it is ground at a specific AXIS.
+# A non-zero CYL with no axis is UN-GRINDABLE -- the lab guesses an axis, the
+# patient gets headaches/blur, and the job comes back as a remake. And the axis
+# is a WHOLE degree: the workshop spec has no fractional degrees, so 90.5 must
+# be REJECTED (an optometrist who typed it made an error worth surfacing) and
+# never silently rounded to 91 while 90.5 is what gets stored.
+#
+# The range/whole-number rule itself lives in the ONE canonical validator
+# (api.services.rx_validation._validate_axis: whole degree 1-180, mandatory when
+# cyl != 0). These helpers only wrap it in a plain-English HTTP error that names
+# the eye and the cylinder, so a clinician sees what to fix. Do NOT re-derive
+# the range here.
+
+
+def _fmt_power(value) -> str:
+    """Render a dioptric power for an error message: -1.25 / +2.00 / raw text."""
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        return str(value)
+    sign = "+" if num > 0 else "-"
+    return f"{sign}{abs(num):.2f}"
+
+
+def _cyl_is_toric(cyl) -> bool:
+    """True when the cylinder is a real (non-zero, numeric) astigmatic power."""
+    if cyl is None or str(cyl).strip() in ("", "0"):
+        return False
+    try:
+        return abs(float(str(cyl).strip())) > 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_blank(value) -> bool:
+    """True for a not-entered value (None or an empty/whitespace string)."""
+    return value is None or str(value).strip() == ""
+
+
+def _eye_value(eye: dict, *keys):
+    """First non-blank value among `keys` on a stored eye.
+
+    A stored eye can carry the canonical sph/cyl/add AND the transitional
+    sphere/cylinder/addition aliases the 4-version finalize mirror writes, and
+    either side may be present-but-null. `eye.get("cylinder", eye.get("cyl"))`
+    returns None whenever the alias key exists with a null value, silently
+    skipping the real power -- this picks the first key that actually has one.
+    """
+    if not isinstance(eye, dict):
+        return None
+    for key in keys:
+        value = eye.get(key)
+        if not _is_blank(value):
+            return value
+    return None
+
+
+def _validate_eye_axis(eye_label: str, cyl, axis, status_code: int = 422) -> None:
+    """Enforce the AXIS rules for ONE eye. Raises HTTPException on a violation.
+
+    * a non-zero CYL with a missing axis is rejected, naming the eye and the
+      cylinder ("Right eye has cylinder -1.25 but no axis - ...");
+    * anything else (out of range, fractional, non-numeric) is delegated to the
+      canonical `rx_validation._validate_axis` so validation and storage agree.
+
+    A zero / absent cylinder is unaffected: an eye with no astigmatism needs no
+    axis and passes straight through.
+    """
+    if _cyl_is_toric(cyl) and _is_blank(axis):
+        raise HTTPException(
+            status_code=status_code,
+            detail=(
+                f"{eye_label} has cylinder {_fmt_power(cyl)} but no axis - "
+                f"an axis (1-180 whole degrees) is required"
+            ),
+        )
+    try:
+        _validate_axis(axis, cyl=cyl)
+    except ValueError as exc:
+        raise HTTPException(status_code=status_code, detail=f"{eye_label} {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Partial eye edits: deep-merge instead of replacing the sub-document
+# ---------------------------------------------------------------------------
+# The prescription eyes are the four sub-documents below. The repository writes
+# with `$set`, which REPLACES a whole sub-document -- so a PUT carrying only one
+# field of an eye would blank that eye's remaining powers. Merge here (at the
+# router), never by changing the shared repository's $set semantics: every other
+# module depends on that behaviour.
+_EYE_SUBDOCS = ("right_eye", "left_eye", "cl_right", "cl_left")
+
+# Transitional alias pairs: the 4-version finalize mirror (_canonical_eye) writes
+# BOTH the canonical sph/cyl/add and the sphere/cylinder/addition aliases that
+# the progression chart reads. A merge must not leave the two disagreeing, so an
+# alias ALREADY PRESENT on the stored eye is re-pointed at the new value when the
+# patch touches its canonical twin. Aliases are never invented.
+_EYE_KEY_ALIASES = {"sph": "sphere", "cyl": "cylinder", "add": "addition"}
+
+
+def _merge_eye_subdoc(stored, patch):
+    """Deep-merge ONE eye sub-document: stored values survive unless the caller
+    actually supplied that field.
+
+    `patch` holds only the keys the caller set (Pydantic exclude_unset), so an
+    explicit null still CLEARS a field while an omitted field keeps its stored
+    value. A non-dict patch (or a non-dict stored eye) is returned as-is.
+
+    The alias sync runs in BOTH directions because the two Rx doors are keyed
+    differently: the spectacle doors patch sph/cyl/add while the 4-version door
+    patches sphere/cylinder/addition, and a stored eye can carry either shape
+    (or both). Whichever twin the caller supplied, the other is re-pointed at
+    the new value -- otherwise `_canonical_eye`, which reads `sph` BEFORE
+    `sphere`, would mirror the PRE-EDIT power into the dispensing record on
+    finalize. An alias is only ever updated, never invented.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    base = dict(stored) if isinstance(stored, dict) else {}
+    merged = {**base, **patch}
+    for canonical, alias in _EYE_KEY_ALIASES.items():
+        if canonical in patch and alias in base:
+            merged[alias] = patch[canonical]
+        elif alias in patch and canonical in base:
+            merged[canonical] = patch[alias]
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Partial VERSION patches: deep-merge the SLOT, not replace it
+# ---------------------------------------------------------------------------
+# `prescription_versions.merge_version` assigns `versions[name] = payload`, i.e.
+# it REPLACES the whole version sub-document -- the same bug class as the eye
+# replace above, one level deeper. A PATCH carrying only right_eye.sphere used
+# to drop that slot's left_eye / pd / source AND blank the rest of right_eye.
+# That matters clinically because `versions.final` is MIRRORED into the
+# top-level right_eye/left_eye that POS and the workshop read (finalize), so a
+# blanked version power can propagate into the dispensing record.
+#
+# Merge here at the router, exactly like the PUT door: the merged slot is what
+# gets validated and what gets written, in that order.
+_VERSION_EYE_KEYS = (("right_eye", "Right eye"), ("left_eye", "Left eye"))
+
+# Provenance is re-stamped on every write (who captured THIS edit), so it is
+# never carried over from the stored slot by the merge.
+_VERSION_PROVENANCE_KEYS = ("captured_at", "captured_by")
+
+
+def _merge_version_slot(stored, patch):
+    """Deep-merge ONE version slot (before_testing/after_testing/manual/final).
+
+    Slot-level keys (pd, source, override_reason, signed_off_by) merge the same
+    way the eyes do: `patch` holds only what the caller set (exclude_unset), so
+    an omitted key keeps its stored value while an explicit null still CLEARS
+    it. Each eye sub-document is deep-merged with `_merge_eye_subdoc` so a
+    single-power edit cannot blank the rest of that eye; an eye sent as an
+    explicit null still clears the whole eye.
+
+    `captured_at` / `captured_by` are dropped from the merged slot so
+    `merge_version` re-stamps them with the clinician making THIS edit -- a
+    partial edit must not stay attributed to whoever first filled the slot.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    base = dict(stored) if isinstance(stored, dict) else {}
+    merged = {**base, **patch}
+    for eye_key, _label in _VERSION_EYE_KEYS:
+        if isinstance(patch.get(eye_key), dict):
+            merged[eye_key] = _merge_eye_subdoc(base.get(eye_key), patch[eye_key])
+    for provenance_key in _VERSION_PROVENANCE_KEYS:
+        merged.pop(provenance_key, None)
+    return merged
+
+
+def _validate_version_eye(eye_label: str, eye) -> None:
+    """Validate ONE eye of a version slot. Raises HTTPException(422).
+
+    Always call this on the MERGED eye, never on the raw patch -- what is about
+    to be STORED is what has to be clinically valid. Validating the patch alone
+    is how `{"axis": null}` sailed through on an eye whose stored cylinder is
+    -1.25, leaving an un-grindable toric Rx one finalize away from the workshop.
+
+    `_eye_value` resolves either field-name shape: a version eye is keyed
+    sphere/cylinder/addition, but a slot backfilled from a legacy doc (or
+    written by the finalize mirror) carries the canonical sph/cyl/add twin.
+
+    Per-eye PD is deliberately NOT range-checked here: VersionEyeData has no
+    `pd` field, so a merged per-eye pd can only have come from storage, and a
+    stale one must not lock the clinician out of correcting the powers.
+    """
+    if not isinstance(eye, dict):
+        return
+    cyl = _eye_value(eye, "cylinder", "cyl")
+    try:
+        _validate_rx_number(_eye_value(eye, "sphere", "sph"), "sph")
+        _validate_rx_number(cyl, "cyl")
+        _validate_rx_number(_eye_value(eye, "addition", "add"), "add")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label}: {exc}")
+    # PATIENT SAFETY: toric (non-zero CYL) needs a whole-degree axis 1-180.
+    _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=422)
+
+
+def _validate_cl_eye(eye_label: str, eye):
     """Validate one eye of a contact-lens Rx. Raises HTTPException(422) on a
     bad value. CL axis is 0-180 (toric); modality is checked separately at the
-    top level. All fields optional -- only present values are range-checked."""
+    top level. All fields optional -- only present values are range-checked.
+
+    `eye` may be a CLEyeData model (create door) OR a plain dict (the MERGED
+    sub-document the edit door is about to $set). Both shapes go through the
+    SAME rules: validating the model while writing the merged dict is how a
+    toric CL slipped through with no axis.
+
+    PATIENT SAFETY -- the contact-lens twin of the spectacle toric gate: a soft
+    toric CL is ORDERED by power/cyl/axis. With a cylinder and no axis the lens
+    cannot be ordered, so the counter guesses (usually 180) and the patient
+    wears a rotationally-wrong toric: blur, ghosting, a refit, a returned box.
+    NOTE the CL axis domain is 0-180 (CLEyeData.cl_axis), NOT the spectacle
+    1-180 -- do not merge the two rules.
+    """
     if eye is None:
         return
-    if eye.cl_axis is not None and (eye.cl_axis < 0 or eye.cl_axis > 180):
+
+    def _field(name):
+        if isinstance(eye, dict):
+            return eye.get(name)
+        return getattr(eye, name, None)
+
+    cl_cyl = _field("cl_cyl")
+    cl_axis = _field("cl_axis")
+
+    if _cyl_is_toric(cl_cyl) and _is_blank(cl_axis):
         raise HTTPException(
             status_code=422,
-            detail=f"{eye_label} CL AXIS must be a whole number between 0 and 180",
+            detail=(
+                f"{eye_label} has contact-lens cylinder {_fmt_power(cl_cyl)} but "
+                f"no axis - a CL axis (0-180) is required"
+            ),
         )
+    if not _is_blank(cl_axis):
+        # A merged dict can carry a string / fractional axis that never went
+        # through CLEyeData's Optional[int] coercion, so re-check it here.
+        try:
+            axis_num = float(cl_axis)
+        except (TypeError, ValueError):
+            axis_num = None
+        bad_axis = axis_num is None or not (0 <= axis_num <= 180)
+        if bad_axis or axis_num != int(axis_num):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} CL AXIS must be a whole number between 0 and 180",
+            )
     for field_name, lo, hi in (
         ("cl_power", *_CL_LIMITS["cl_power"]),
         ("cl_cyl", *_CL_LIMITS["cl_cyl"]),
@@ -457,8 +707,17 @@ def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
         ("base_curve", *_CL_LIMITS["base_curve"]),
         ("diameter", *_CL_LIMITS["diameter"]),
     ):
-        val = getattr(eye, field_name)
-        if val is not None and (val < lo or val > hi):
+        val = _field(field_name)
+        if _is_blank(val):
+            continue
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} {field_name} must be a valid number, got '{val}'",
+            )
+        if num < lo or num > hi:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -905,12 +1164,11 @@ async def create_prescription(
             _validate_rx_value(eye.add, "add")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
-        if eye.axis is not None:
-            if not isinstance(eye.axis, int) or eye.axis < 1 or eye.axis > 180:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"{eye_label} AXIS must be whole number between 1 and 180",
-                )
+        # PATIENT SAFETY: toric (non-zero CYL) Rx must carry a whole-degree axis.
+        # EyeData's model validator already rejects a missing axis at parse time;
+        # this is the same rule enforced at the handler (defense in depth, and it
+        # is what produces the plain-English message when the model is bypassed).
+        _validate_eye_axis(eye_label, eye.cyl, eye.axis, status_code=422)
 
     if rx.rx_kind == "CONTACT_LENS":
         # Contact-lens Rx: validate CL fields (modality + per-eye BC/DIA/power/
@@ -1047,9 +1305,21 @@ async def update_prescription(
     Gated identically to create_prescription (OPTOMETRIST / STORE_MANAGER /
     ADMIN / SUPERADMIN). Re-runs the canonical Rx-range validation
     (`_validate_rx_value`: SPH -25..+25, CYL -6..+6, ADD +0.75..+4.00 in 0.25
-    steps; AXIS 1-180) so an edit can never persist an invalid Rx. Only the keys
-    the caller sends are written (PATCH-style merge), so a partial edit never
-    blanks fields it didn't touch. Identity/provenance fields are immutable.
+    steps; AXIS 1-180 whole) so an edit can never persist an invalid Rx. Only
+    the keys the caller sends are written (PATCH-style merge), so a partial edit
+    never blanks fields it didn't touch. Identity/provenance fields are immutable.
+
+    PATIENT SAFETY -- the eye sub-documents are DEEP-merged (`_merge_eye_subdoc`)
+    with the stored eye before the write. `exclude_unset` only protects TOP-LEVEL
+    keys: sending `{"right_eye": {"sph": "-2.00"}}` used to $set the WHOLE
+    right_eye sub-document, silently blanking that eye's cyl/axis/add/pd -- the
+    corrected prescription then dispensed with missing powers. Now a partial eye
+    edit changes only the fields actually supplied. An explicitly-sent null still
+    CLEARS a field (exclude_unset distinguishes "not sent" from "sent as null").
+
+    Validation runs on the MERGED (effective) eye, not just the supplied keys --
+    what is about to be STORED is what has to be clinically valid. That is what
+    catches a patch adding a cylinder to an eye that has no axis.
     """
     # --- Role gate (same set create_prescription uses) ---
     _require_rx_write_roles(current_user)
@@ -1071,30 +1341,40 @@ async def update_prescription(
         raise HTTPException(status_code=400, detail="No fields to update")
 
     # Re-validate spectacle powers against the canonical clinical ranges. We
-    # call the SAME `_validate_rx_value` the create path / EyeData validators
-    # use, but surface a 400 (deliberate business rejection) instead of 422.
+    # call the SAME validators the create path / EyeData validators use, but
+    # surface a 400 (deliberate business rejection) instead of 422.
+    # `_validate_rx_number` is the tolerant twin of `_validate_rx_value` (same
+    # limits + 0.25 grid) -- needed because a MERGED eye can carry a legacy
+    # numeric value from the stored document, not just the caller's strings.
     def _validate_eye(eye_label: str, eye: dict):
         if not isinstance(eye, dict):
             return
+        # `_eye_value` resolves the canonical key OR its legacy alias, so a
+        # stored eye written by the finalize mirror is validated too.
+        cyl = _eye_value(eye, "cyl", "cylinder")
         try:
-            _validate_rx_value(eye.get("sph"), "sph")
-            _validate_rx_value(eye.get("cyl"), "cyl")
-            _validate_rx_value(eye.get("add"), "add")
+            _validate_rx_number(_eye_value(eye, "sph", "sphere"), "sph")
+            _validate_rx_number(cyl, "cyl")
+            _validate_rx_number(_eye_value(eye, "add", "addition"), "add")
             # Per-eye PD is monocular (~half binocular); use the monocular range.
-            _validate_rx_value(eye.get("pd"), "pd_mono")
+            _validate_rx_number(eye.get("pd"), "pd_mono")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"{eye_label}: {exc}")
-        axis = eye.get("axis")
-        if axis is not None and (not isinstance(axis, int) or axis < 1 or axis > 180):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
-            )
+        # PATIENT SAFETY: toric (non-zero CYL) needs a whole-degree axis 1-180.
+        _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=400)
 
-    if "right_eye" in body:
-        _validate_eye("Right eye", body["right_eye"])
-    if "left_eye" in body:
-        _validate_eye("Left eye", body["left_eye"])
+    # Deep-merge each supplied eye sub-document with the stored one BEFORE
+    # validating or writing, so a single-field eye edit can never blank the rest
+    # of that eye (see the endpoint docstring).
+    merged_eyes = {}
+    for eye_key in _EYE_SUBDOCS:
+        if eye_key in body:
+            merged_eyes[eye_key] = _merge_eye_subdoc(existing.get(eye_key), body[eye_key])
+
+    if "right_eye" in merged_eyes:
+        _validate_eye("Right eye", merged_eyes["right_eye"])
+    if "left_eye" in merged_eyes:
+        _validate_eye("Left eye", merged_eyes["left_eye"])
 
     # Contact-lens block (only when the edit touches CL fields).
     if body.get("modality") and body["modality"] not in CL_MODALITIES:
@@ -1102,14 +1382,23 @@ async def update_prescription(
             status_code=400,
             detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
         )
-    if "cl_right" in body:
-        _validate_cl_eye("Right eye", rx.cl_right)
-    if "cl_left" in body:
-        _validate_cl_eye("Left eye", rx.cl_left)
+    # PATIENT SAFETY: validate the MERGED contact-lens sub-documents, exactly
+    # like the spectacle eyes above. Validating `rx.cl_right` (the raw patch)
+    # while $setting the merged dict is how a toric CL reached storage with no
+    # axis: the patch said only {"cl_axis": null} -- clean on its own -- while
+    # the merge re-supplied the stored cl_cyl, producing a complete-looking
+    # toric CL Rx whose only missing field is the axis.
+    if "cl_right" in merged_eyes:
+        _validate_cl_eye("Right eye", merged_eyes["cl_right"])
+    if "cl_left" in merged_eyes:
+        _validate_cl_eye("Left eye", merged_eyes["cl_left"])
 
     # If validity changed, recompute expiry off the original test/created date
     # so the edit stays internally consistent (expiry = test_date + N months).
     update_doc = dict(body)
+    # The repository writes with $set, which REPLACES a whole sub-document; hand
+    # it the merged eyes so the untouched powers survive the write.
+    update_doc.update(merged_eyes)
     if rx.validity_months is not None:
         base_dt = (
             _parse_dt(
@@ -1169,10 +1458,15 @@ async def get_prescription(
 async def validate_prescription(
     prescription_id: str, current_user: dict = Depends(require_rx_read)
 ):
-    """Validate a prescription's Rx values against the clinical ranges
-    (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50) and report
-    expiry. Frontend prescriptionApi.validatePrescription was 404'ing.
-    Returns {valid, expired, issues:[...]}."""
+    """Advisory check of a STORED prescription: report Rx-value issues + expiry.
+    Returns {valid, expired, issues:[...]}. Never blocks a write.
+
+    Limits come from the ONE canonical validator (api.services.rx_validation),
+    the same one create / PUT / POS order-create enforce. This endpoint used to
+    carry its OWN copy of the ranges (SPH +/-20, ADD <= 3.50) which had drifted
+    below the canonical limits (SPH +/-25, ADD 4.00) -- so a legitimate
+    high-power patient was reported "out of range" and the check lost its
+    credibility. Do NOT reintroduce literal limits here."""
     repo = get_prescription_repository()
     if repo is None:
         return {
@@ -1191,38 +1485,27 @@ async def validate_prescription(
     def _check(eye_label, eye):
         if not isinstance(eye, dict):
             return
-        sph = eye.get("sphere", eye.get("sph"))
-        cyl = eye.get("cylinder", eye.get("cyl"))
+        sph = _eye_value(eye, "sphere", "sph")
+        cyl = _eye_value(eye, "cylinder", "cyl")
         axis = eye.get("axis")
-        add = eye.get("add", eye.get("addition"))
+        add = _eye_value(eye, "add", "addition")
+        # `_validate_rx_number` is the tolerant twin of `_validate_rx_value`
+        # (identical limits + 0.25-diopter grid) -- stored eyes carry a mix of
+        # strings and numbers, so the numeric-safe variant is the right door.
+        for value, field_name in ((sph, "sph"), (cyl, "cyl"), (add, "add")):
+            try:
+                _validate_rx_number(value, field_name)
+            except ValueError as exc:
+                issues.append(f"{eye_label} {exc}")
+        # AXIS: whole degree 1-180, and MANDATORY when the cylinder is non-zero
+        # (a stored toric Rx with no axis is un-grindable -- report it).
         try:
-            if sph is not None and sph != "" and not (-20.0 <= float(sph) <= 20.0):
-                issues.append(f"{eye_label} SPH {sph} out of range (-20..+20)")
-            if cyl is not None and cyl != "" and not (-6.0 <= float(cyl) <= 6.0):
-                issues.append(f"{eye_label} CYL {cyl} out of range (-6..+6)")
-            if axis is not None and axis != "":
-                axis_f = float(axis)
-                # AXIS is a WHOLE degree 1..180. The old check used
-                # int(float(axis)), which truncated 90.5 -> 90 and let a
-                # non-integer axis pass silently. Flag both out-of-range AND
-                # fractional values, matching what create / PUT enforce.
-                if not (1 <= axis_f <= 180):
-                    issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
-                elif axis_f != int(axis_f):
-                    issues.append(
-                        f"{eye_label} AXIS {axis} must be a whole number (1-180)"
-                    )
-            if (
-                add not in (None, "", 0)
-                and float(add) != 0
-                and not (0.75 <= float(add) <= 3.50)
-            ):
-                issues.append(f"{eye_label} ADD {add} out of range (+0.75..+3.50)")
-        except (ValueError, TypeError):
-            issues.append(f"{eye_label} has a non-numeric Rx value")
+            _validate_axis(axis, cyl=cyl)
+        except ValueError as exc:
+            issues.append(f"{eye_label} {exc}")
 
-    _check("Right", rx.get("right_eye") or rx.get("rightEye"))
-    _check("Left", rx.get("left_eye") or rx.get("leftEye"))
+    _check("Right eye", rx.get("right_eye") or rx.get("rightEye"))
+    _check("Left eye", rx.get("left_eye") or rx.get("leftEye"))
 
     # Expiry — 12 months from test/created date unless validity set
     expired = False
@@ -1260,11 +1543,23 @@ _PRINT_STYLE = """
 """
 
 
+# The absence rule lives in ONE place (services/rx_print_values.py) because
+# there is more than one patient-facing Rx card -- this router renders two, and
+# clinical.py renders a third that PrescriptionsPage offers on the SAME screen.
+# A local copy here is how the rule drifted and a card printed "PD: None".
+def _is_absent_rx_value(value) -> bool:
+    """Thin alias for the shared rule; see services/rx_print_values.py."""
+    return is_absent_rx_value(value)
+
+
 def _cell(value) -> str:
-    """Render a stored Rx cell value, falling back to '-' for None/empty."""
-    if value is None or value == "":
-        return "-"
-    return str(value)
+    """Render a stored Rx cell value, falling back to '-' when absent."""
+    return rx_text_or(value, "-")
+
+
+def _text(value, fallback: str = "-") -> str:
+    """Render a free-text Rx field (lens/coating recommendation, remarks...)."""
+    return rx_text_or(value, fallback)
 
 
 def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
@@ -1277,14 +1572,14 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Prescription {prescription.get('prescription_number')}</title>
+            <title>Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Eye Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <table>
@@ -1308,9 +1603,9 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
-            <p><strong>Lens Recommendation:</strong> {prescription.get('lens_recommendation', 'N/A')}</p>
-            <p><strong>Coating:</strong> {prescription.get('coating_recommendation', 'N/A')}</p>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Lens Recommendation:</strong> {_text(prescription.get('lens_recommendation'), 'N/A')}</p>
+            <p><strong>Coating:</strong> {_text(prescription.get('coating_recommendation'), 'N/A')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
@@ -1325,23 +1620,26 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
     `identity_html` prepends the issuing store/entity supplier block."""
     right = prescription.get("cl_right") or {}
     left = prescription.get("cl_left") or {}
-    brand = prescription.get("cl_brand") or "-"
-    series = prescription.get("cl_series") or "-"
-    modality = prescription.get("modality") or "-"
+    brand = _text(prescription.get("cl_brand"))
+    series = _text(prescription.get("cl_series"))
+    modality = _text(prescription.get("modality"))
     color = prescription.get("color")
-    color_row = f"<p><strong>Color:</strong> {color}</p>" if color else ""
+    # `if color` alone let the junk string "None" through as truthy.
+    color_row = (
+        "" if _is_absent_rx_value(color) else f"<p><strong>Color:</strong> {color}</p>"
+    )
     return f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Contact Lens Prescription {prescription.get('prescription_number')}</title>
+            <title>Contact Lens Prescription {_text(prescription.get('prescription_number'), '')}</title>
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             {identity_html}
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
-                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
                 <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
             </div>
             <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}
@@ -1371,7 +1669,7 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
                     <td>{_cell(left.get('diameter'))}</td>
                 </tr>
             </table>
-            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
             <div class="footer">
                 <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
             </div>
@@ -1499,8 +1797,22 @@ async def patch_prescription_version(
     payload: PrescriptionVersionPayload,
     current_user: dict = Depends(get_current_user),
 ):
-    """Write or overwrite one of the 4 Rx versions. Only writable
-    while status='in_progress'. Use POST /finalize to lock the record.
+    """Write one of the 4 Rx versions. Only writable while
+    status='in_progress'. Use POST /finalize to lock the record.
+
+    PATIENT SAFETY -- this is a PARTIAL update: the slot is DEEP-merged with
+    the stored one (`_merge_version_slot`), not replaced. `merge_version` writes
+    `versions[name] = payload`, so a PATCH carrying only right_eye.sphere used
+    to drop that slot's left_eye / pd / source and blank the rest of right_eye.
+    `versions.final` is mirrored into the top-level right_eye/left_eye that POS
+    and the workshop read, so a blanked version power could propagate into the
+    DISPENSING record. Now every power the caller does not mention survives,
+    while an explicitly-sent null still CLEARS a field (exclude_unset
+    distinguishes "not sent" from "sent as null").
+
+    The three steps below run in this order and no other: MERGE, then VALIDATE
+    THE MERGED SLOT, then WRITE. Validating the raw patch instead is how
+    `{"axis": null}` passed on an eye whose stored cylinder is -1.25.
 
     Gated identically to PUT /{prescription_id} (audit P1): this path writes
     clinical Rx data (and the `final` slot is mirrored to top-level on
@@ -1537,9 +1849,31 @@ async def patch_prescription_version(
     doc = backfill_versions_from_top_level(doc)
 
     body = payload.model_dump(exclude_unset=True)
+
+    # --- STEP 1: MERGE ------------------------------------------------------
+    # Deep-merge the patch onto the STORED slot first. `merge_version` writes
+    # `versions[name] = payload`, which replaces the whole sub-document, so a
+    # partial PATCH would otherwise blank every power it did not resend.
+    stored_slot = (doc.get("versions") or {}).get(version_name)
+    merged_slot = _merge_version_slot(stored_slot, body)
+
+    # --- STEP 2: VALIDATE THE MERGED SLOT -----------------------------------
+    # Never the raw patch: the merged slot is what is about to be stored, and
+    # `versions.final` is mirrored into the top-level right_eye/left_eye that
+    # POS and the workshop read on finalize. Checked here (not on
+    # VersionEyeData) so the caller gets a plain-English string detail instead
+    # of a Pydantic error list. An eye the PATCH did not touch is not
+    # re-validated -- it is being rewritten byte-identical.
+    for eye_key, eye_label in _VERSION_EYE_KEYS:
+        if isinstance(body.get(eye_key), dict):
+            _validate_version_eye(eye_label, merged_slot.get(eye_key))
+
+    # --- STEP 3: WRITE ------------------------------------------------------
+    # Nothing above this line touches the repository, so a rejected patch
+    # leaves the stored Rx byte-identical (no write-then-rollback).
     try:
         new_doc = merge_version(
-            doc, version_name, body, captured_by=current_user.get("user_id")
+            doc, version_name, merged_slot, captured_by=current_user.get("user_id")
         )
     except ValueError as e:
         if "finalized" in str(e):
@@ -1594,6 +1928,23 @@ async def finalize_prescription(
         )
 
     new_doc = mirror_final_to_top_level(doc)
+
+    # PATIENT SAFETY: finalize is itself an Rx WRITE -- it copies versions.final
+    # into the top-level right_eye/left_eye that POS and the workshop read. A
+    # `final` captured before the toric-axis gate existed (or backfilled from a
+    # legacy doc) can still carry a cylinder with no axis, so check what is
+    # about to be mirrored rather than trusting its provenance. Fix the axis in
+    # the version editor, then finalize.
+    for eye_key, eye_label in (("right_eye", "Right eye"), ("left_eye", "Left eye")):
+        eye = new_doc.get(eye_key)
+        if isinstance(eye, dict):
+            _validate_eye_axis(
+                eye_label,
+                _eye_value(eye, "cyl", "cylinder"),
+                eye.get("axis"),
+                status_code=422,
+            )
+
     repo.update(
         prescription_id,
         {

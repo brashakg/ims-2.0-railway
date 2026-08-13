@@ -313,10 +313,17 @@ class TestStatusEndpointBodyAndAlias:
 
 class TestDeliveredPickupRecord:
     """READY -> DELIVERED may carry WHO collected the job. Optional record,
-    never a gate: delivery succeeds with or without it."""
+    never a gate: delivery succeeds with or without it.
+
+    The jobs here carry qc_passed=True because the handover itself is now
+    QC-gated (patient safety: no DELIVERED without a QC pass or an audited
+    waiver -- see test_workshop_pickup_qc_and_rx.py). These tests are about the
+    pickup RECORD, so they model a properly QC'd job.
+    """
 
     def test_delivered_with_pickup_name_persists(self, monkeypatch):
         job = _mk_job("j1", "READY")
+        job["qc_passed"] = True
         repo = FakeRepo([job])
         client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
         resp = client.patch(
@@ -335,6 +342,7 @@ class TestDeliveredPickupRecord:
 
     def test_delivered_without_pickup_name_still_succeeds(self, monkeypatch):
         job = _mk_job("j1", "READY")
+        job["qc_passed"] = True
         repo = FakeRepo([job])
         client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
         resp = client.patch("/workshop/jobs/j1/status", json={"status": "DELIVERED"})
@@ -455,7 +463,14 @@ class TestQcChecklistRoleGate:
 
 
 class TestQcChecklistStatusGate:
-    """QC checklist only accepted for COMPLETED / QC_FAILED jobs."""
+    """QC checklist only accepted for COMPLETED / QC_FAILED / READY jobs.
+
+    READY is accepted (it used to be rejected) because the -> DELIVERED handover
+    is now QC-gated: a job that reached the pickup shelf with NO QC record (rows
+    created before the QC gates existed) would otherwise be undeliverable with no
+    in-app remedy. Running QC in place clears it -- and a FAIL correctly pulls it
+    back off the shelf into QC_FAILED for rework.
+    """
 
     def _post(self, monkeypatch, status: str) -> int:
         job = _mk_job("j1", status)
@@ -476,8 +491,8 @@ class TestQcChecklistStatusGate:
     def test_pending_rejected(self, monkeypatch):
         assert self._post(monkeypatch, "PENDING") == 400
 
-    def test_ready_rejected(self, monkeypatch):
-        assert self._post(monkeypatch, "READY") == 400
+    def test_ready_accepted_so_a_shelf_job_can_still_be_qcd(self, monkeypatch):
+        assert self._post(monkeypatch, "READY") == 200
 
     def test_delivered_rejected(self, monkeypatch):
         assert self._post(monkeypatch, "DELIVERED") == 400

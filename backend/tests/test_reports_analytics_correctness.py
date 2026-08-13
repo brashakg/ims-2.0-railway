@@ -316,27 +316,81 @@ def test_calculate_metrics_is_not_capped_at_500():
 # ===========================================================================
 
 
-def test_enterprise_kpis_net_margin_is_none():
-    """net_profit and net_margin_percent must be None (not a hard-coded 10%
-    opex placeholder) because per-store opex is not recorded in the DB."""
-    from api.routers.analytics import (
-        _is_billable,
-        _EXCLUDED_ORDER_STATUSES,
+def test_enterprise_kpis_net_margin_is_none(monkeypatch):
+    """BEHAVIOURAL: call the real endpoint with revenue-bearing orders and
+    assert the returned net_profit / net_margin_percent are NULL.
+
+    Per-store opex is not recorded, so a net figure would be fabricated; the
+    UI renders null as an em-dash, which is honest. The old fabrication was
+    ``net_profit = total_revenue * 0.10`` -- with 10,000 of billable revenue
+    that regression would return 1000.0 here, so this assertion actually
+    discriminates. (It replaces a grep for the literal "total_revenue * 0.10",
+    which any reformatting -- or moving the constant into a helper -- would
+    have defeated, and which pointed at whatever function inspect.getsource
+    happened to return.)
+    """
+    import asyncio
+
+    now = datetime.now()
+    orders = [
+        {
+            "store_id": "S1",
+            "customer_id": "C1",
+            "created_at": now,
+            "total_amount": 10000.0,
+            "grand_total": 10000.0,
+            "status": "CONFIRMED",
+            "items": [{"quantity": 2, "cost_price": 1500.0}],
+        }
+    ]
+    monkeypatch.setattr(an, "get_order_repository", lambda: FakeOrderRepo(orders))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: FakeStockRepo([]))
+    monkeypatch.setattr(an, "get_customer_repository", lambda: FakeCustomerRepo([]))
+
+    res = asyncio.run(
+        an.get_enterprise_kpis(current_user=_admin_user(), period="month", store_id="S1")
     )
-    # Confirm the sentinel constant is unchanged.
+
+    margins = res["margins"]
+    assert margins["net_profit"] is None, (
+        f"net_profit must be null, got {margins['net_profit']!r}"
+    )
+    assert margins["net_margin_percent"] is None, (
+        f"net_margin_percent must be null, got {margins['net_margin_percent']!r}"
+    )
+    assert margins["net_margin_note"], "the null must be explained, not bare"
+    # ...while the honestly-derivable figures ARE computed, proving the
+    # endpoint really ran over the seeded revenue rather than short-circuiting.
+    assert res["revenue"]["total"] == 10000.0, res["revenue"]
+    assert margins["gross_profit"] == 7000.0, margins  # 10000 - (2 * 1500)
+
+
+def test_enterprise_kpis_excludes_cancelled_and_draft_revenue(monkeypatch):
+    """The sentinel status set is enforced, not merely declared."""
+    import asyncio
+    from api.routers.analytics import _EXCLUDED_ORDER_STATUSES
+
     assert "CANCELLED" in _EXCLUDED_ORDER_STATUSES
     assert "DRAFT" in _EXCLUDED_ORDER_STATUSES
-    # Structural check: net_profit = None means the function can't
-    # accidentally produce a float from the old `total_revenue * 0.10` line.
-    # We do a direct call rather than HTTP so no DB is needed.
-    net_profit_result = None  # expected value post-fix
-    assert net_profit_result is None  # documents the intent; real guard is the float() call below
-    # Ensure the old fabrication line no longer exists in the source.
-    import inspect
-    src = inspect.getsource(an.get_enterprise_kpis)
-    assert "total_revenue * 0.10" not in src, (
-        "Fabricated 10% opex placeholder must be removed (RPT-3)"
+
+    now = datetime.now()
+    orders = [
+        {"store_id": "S1", "created_at": now, "total_amount": 1000.0,
+         "grand_total": 1000.0, "status": "CONFIRMED", "items": []},
+        {"store_id": "S1", "created_at": now, "total_amount": 9000.0,
+         "grand_total": 9000.0, "status": "CANCELLED", "items": []},
+        {"store_id": "S1", "created_at": now, "total_amount": 500.0,
+         "grand_total": 500.0, "status": "DRAFT", "items": []},
+    ]
+    monkeypatch.setattr(an, "get_order_repository", lambda: FakeOrderRepo(orders))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: FakeStockRepo([]))
+    monkeypatch.setattr(an, "get_customer_repository", lambda: FakeCustomerRepo([]))
+
+    res = asyncio.run(
+        an.get_enterprise_kpis(current_user=_admin_user(), period="month", store_id="S1")
     )
+    assert res["revenue"]["total"] == 1000.0, res["revenue"]
+    assert res["revenue"]["total_orders"] == 1, res["revenue"]
 
 
 # ===========================================================================

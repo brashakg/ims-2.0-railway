@@ -265,15 +265,29 @@ def test_salary_config_get_store_scoped_blocks_foreign_store(client, auth_header
         == 201
     )
 
-    # STORE_MANAGER of a DIFFERENT store must be 404'd.
+    # OWNER RULING 2026-08-09 ("nobody except admin/superadmin should see anyone
+    # elses salary"): a STORE_MANAGER is now refused ANY other employee's salary
+    # config, in their own store or not. The refusal moved from the store guard's
+    # 404 existence-hide to a flat 403 -- which hides MORE, not less: the answer
+    # no longer varies with whether the employee exists or which store they are
+    # in, so there is nothing left to probe. The store guard stays underneath as
+    # defence in depth (see test_salary_config_get_admin_cross_store_ok).
     r = client.get(
         f"/api/v1/payroll/config/{emp}", headers=_store_manager_headers("BV-STORE-A")
     )
-    assert r.status_code == 404, r.text
+    assert r.status_code == 403, r.text
 
 
-def test_salary_config_get_same_store_manager_ok(client, auth_headers):
-    """A STORE_MANAGER of the employee's OWN store can read the config (200)."""
+def test_salary_config_get_same_store_manager_now_forbidden(client, auth_headers):
+    """A STORE_MANAGER can no longer read a colleague's salary config -- not even
+    for their OWN store's staff.
+
+    This test asserted 200 until 2026-08-09. The owner's ruling ("nobody except
+    admin/superadmin should see anyone elses salary") removed that reach
+    deliberately: a salary config carries CTC, bank account and PAN. The admin
+    path that replaces it is asserted immediately below, and the manager's own
+    pay remains available to them via GET /hr/me/payslip.
+    """
     emp = f"EMP-{uuid.uuid4().hex[:8]}"
     payload = {"employee_id": emp, "store_id": "BV-STORE-A", "basic": 18000}
     assert (
@@ -285,8 +299,13 @@ def test_salary_config_get_same_store_manager_ok(client, auth_headers):
     r = client.get(
         f"/api/v1/payroll/config/{emp}", headers=_store_manager_headers("BV-STORE-A")
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["config"]["basic"] == 18000
+    assert r.status_code == 403, r.text
+    assert "18000" not in r.text
+
+    # The data itself is untouched -- an ADMIN still reads it.
+    ok = client.get(f"/api/v1/payroll/config/{emp}", headers=auth_headers)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["config"]["basic"] == 18000
 
 
 def test_salary_config_get_admin_cross_store_ok(client, auth_headers):
