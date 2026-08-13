@@ -36,6 +36,7 @@ from ..services.payroll_exports import (
     build_pf_ecr,
     build_payslip_html,
 )
+from ..services.salary_visibility import SALARY_ADMIN_ROLES
 
 # Import database connection
 import sys
@@ -309,7 +310,14 @@ def _strip_id(doc: Optional[dict]) -> Optional[dict]:
 # manager tier one layer earlier, and this gate then refuses them on somebody
 # else's id. That is a REAL loss of access for those three roles, taken
 # deliberately on the owner's instruction; the PR body lists the exact screens.
-_SALARY_CROSS_EMPLOYEE_ROLES = ("SUPERADMIN", "ADMIN")
+#
+# The tuple itself now lives in services/salary_visibility.py. It used to be a
+# private constant here, and that is exactly how finance.py and payout.py came
+# to leak the same figures by arithmetic: a rule that lives in one router's
+# private tuple is a rule the next router never hears about. This alias keeps
+# every existing reader in this file (and its tests) working unchanged while
+# there is only ONE definition in the codebase.
+_SALARY_CROSS_EMPLOYEE_ROLES = SALARY_ADMIN_ROLES
 
 # The commission ledger keeps the WIDER manager tier. It is a sales-performance
 # surface aggregated from orders attributed to staff, not salary, so the owner

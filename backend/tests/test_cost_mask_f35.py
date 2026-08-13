@@ -8,6 +8,8 @@ AREA_MANAGER and below never. No emoji.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.services.cost_mask import (  # noqa: E402
@@ -93,20 +95,91 @@ def test_mask_cost_list_pages():
 # --------------------------------------------------------------- P&L (finance G1)
 
 
-def test_pnl_strip_logic_mirrors_endpoint():
-    # The finance.py /pnl handler strips this exact set when not can_see_cost.
-    pnl = {"revenue": 100000, "cogs": 60000, "gross_profit": 40000, "gross_margin": 40.0,
-           "net_profit": 25000, "net_margin": 25.0, "payroll_cost": 8000,
-           "cogs_is_estimated": False, "cogs_estimated_lines": 0, "cogs_total_lines": 50,
-           "tax_collected": 5000, "total_expenses": 7000}
-    strip = ("cogs", "cogs_is_estimated", "cogs_estimated_lines", "cogs_total_lines",
-             "gross_profit", "gross_margin", "net_profit", "net_margin", "payroll_cost")
-    cashier = dict(pnl)
-    if not can_see_cost(_u("SALES_CASHIER")):
-        for f in strip:
-            cashier.pop(f, None)
-    assert "gross_margin" not in cashier and "cogs" not in cashier
-    assert "net_profit" not in cashier
-    assert cashier["revenue"] == 100000 and cashier["tax_collected"] == 5000  # top line stays
-    # ACCOUNTANT keeps everything
+# WHAT USED TO BE HERE, AND WHY IT WAS WORTHLESS
+# ----------------------------------------------
+# `test_pnl_strip_logic_mirrors_endpoint` never imported finance. It declared its
+# OWN copy of the strip tuple, popped from that copy in the test body, and then
+# asserted the copy no longer had the keys it had just popped -- true by
+# construction, incapable of failing. The auditor mutated the REAL guard in
+# finance.py to `if False:` and 56 tests stayed green while a STORE_MANAGER
+# received payroll_cost=47777.0.
+#
+# The replacement below CALLS THE ENDPOINT and asserts on the RESPONSE. The full
+# role matrix, the salary gate and the arithmetic-recovery search live in
+# tests/test_salary_aggregate_leak.py; this one stays here because this file is
+# what a reader looking for "the cost mask test" opens.
+
+
+class _EmptyCol:
+    def find(self, *a, **k):
+        return []
+
+    def aggregate(self, *a, **k):
+        return []
+
+
+class _EmptyDB:
+    def get_collection(self, _name):
+        return _EmptyCol()
+
+
+def _pnl_body(role, monkeypatch):
+    """Drive the real GET /pnl handler as `role` and return the parsed body."""
+    import os as _os
+
+    _os.environ.setdefault("JWT_SECRET_KEY", "test-secret-cost-mask")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routers import finance
+    from api.routers.auth import get_current_user
+
+    monkeypatch.setattr(finance, "_get_db", lambda: _EmptyDB())
+    monkeypatch.setattr(finance, "_cost_by_product", lambda _db: {})
+    monkeypatch.setattr(finance, "_payroll_cost", lambda *a, **k: 8000.0)
+
+    app = FastAPI()
+    app.include_router(finance.router, prefix="/api/v1/finance")
+
+    async def _user():
+        return {
+            "user_id": "u1",
+            "roles": [role],
+            "store_ids": ["S1"],
+            "active_store_id": "S1",
+        }
+
+    app.dependency_overrides[get_current_user] = _user
+    r = TestClient(app).get("/api/v1/finance/pnl?store_id=S1")
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytest.mark.parametrize(
+    "role", ["SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "AREA_MANAGER"]
+)
+def test_pnl_endpoint_strips_cost_for_roles_without_the_cost_grant(role, monkeypatch):
+    body = _pnl_body(role, monkeypatch)
+    for field in ("cogs", "gross_profit", "gross_margin", "cogs_is_estimated"):
+        assert field not in body, f"{role} received {field}"
+    # Top line stays -- the mask must not blank the revenue panel.
+    assert "revenue" in body and "tax_collected" in body
+
+
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN", "ACCOUNTANT"])
+def test_pnl_endpoint_keeps_cost_for_the_cost_grant(role, monkeypatch):
+    body = _pnl_body(role, monkeypatch)
+    for field in ("cogs", "gross_profit", "gross_margin"):
+        assert field in body, f"{role} lost {field}"
+
+
+def test_pnl_endpoint_payroll_answers_to_the_salary_gate_not_the_cost_gate(monkeypatch):
+    """ACCOUNTANT passes can_see_cost and must STILL not get the wage bill: cost
+    and pay are different secrets with different gates (owner ruling
+    2026-08-09). This is the assertion the hollow test could never make, because
+    it never called anything."""
     assert can_see_cost(_u("ACCOUNTANT")) is True
+    body = _pnl_body("ACCOUNTANT", monkeypatch)
+    for field in ("payroll_cost", "net_profit", "net_margin"):
+        assert field not in body, f"ACCOUNTANT received {field}={body.get(field)}"
+    assert _pnl_body("ADMIN", monkeypatch)["payroll_cost"] == 8000.0

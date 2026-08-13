@@ -64,7 +64,35 @@ router = APIRouter()
 # ============================================================================
 _GLOBAL_ROLES = {"SUPERADMIN", "ADMIN"}
 _STORE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
-_VIEW_ROLES = _GLOBAL_ROLES | _STORE_ROLES | {"ACCOUNTANT"}
+
+# OWNER DECISION 2026-08-13: reading a payout is ADMIN / SUPERADMIN only.
+#
+# _VIEW_ROLES used to be _GLOBAL_ROLES | _STORE_ROLES | {"ACCOUNTANT"}. Every
+# payout body carries `staff_payouts` / `manager_bonuses` / `kicker_only_payouts`
+# -- NAMED colleagues with their per-person incentive rupees. scorecard_engine
+# calls that number "every rupee that will be paid this month, in one number per
+# staff" (scorecard_engine.py:404-418) and it is the ONLY incentive path payroll
+# reads, i.e. it is a payslip line. PR #974 already locked the identical figure
+# away on /payroll/incentive-summary/{employee_id}; leaving it readable here
+# would have made that a rule about one URL rather than about pay.
+#
+# WHY NOT REDACT TO SELF instead of closing the routes: the store totals defeat
+# it. `total_team_pool` and `grand_total` are aggregates over 1-5 people, so a
+# manager holding their own row subtracts it from the total and has the rest of
+# a two-person store exactly. An aggregate that contains one person IS that
+# person's pay. There is no partial version of this screen that holds.
+#
+# WHAT A NON-ADMIN KEEPS -- their OWN incentive, on paths that already exist and
+# are unchanged by this PR:
+#   * GET /api/v1/hr/me/payslip     -- the incentive earnings line on their own
+#                                      payslip (this is where the payout snapshot
+#                                      lands once payroll runs).
+#   * GET /api/v1/hr/me/commission  -- their own commission for the month.
+#   * GET /api/v1/incentive/points/mtd + /leaderboard -- their own points and
+#                                      standing (points, not rupees).
+# So nobody loses sight of what they personally earn. What closes is the view of
+# what OTHER named people earn.
+_VIEW_ROLES = _GLOBAL_ROLES
 
 
 def _user_role_set(current_user: dict) -> set:
@@ -89,10 +117,20 @@ def _resolve_store(current_user: dict, override: Optional[str]) -> str:
 
 
 def _check_view_permission(current_user: dict) -> None:
+    """Guard for every route that returns per-person incentive rupees.
+
+    Detail text is plain English because the frontend shows it verbatim, and it
+    names the screen the reader CAN still use for their own number rather than
+    just refusing.
+    """
     if not (_user_role_set(current_user) & _VIEW_ROLES):
         raise HTTPException(
             status_code=403,
-            detail="Only managers / admin / accountant can view payouts",
+            detail=(
+                "Incentive payouts are restricted to administrators because they "
+                "list every colleague's earnings by name. Your own incentive is "
+                "on your payslip under My HR."
+            ),
         )
 
 
@@ -640,12 +678,21 @@ async def payroll_feed(
     slab payout + manager bonus + product incentive per staff. 404 when no
     locked snapshot exists (payroll then uses 0; never estimates).
 
-    ACCOUNTANT / SUPERADMIN / ADMIN only."""
-    roles = _user_role_set(current_user)
-    if not (roles & {"ACCOUNTANT", "SUPERADMIN", "ADMIN"}):
+    ADMIN / SUPERADMIN only. NOT named in the owner's brief -- found by asking
+    the standing question "where are this guard's sibling call sites?". The body
+    is literally {staff_id: total_incentive_rupees} for every member of the
+    store: the SAME per-person figure the four routes above just closed, in its
+    most machine-readable form. It admitted ACCOUNTANT, and the owner declined
+    the accountant carve-out. Payroll itself is unaffected -- it reads
+    scorecard_engine.get_incentive_for_payroll IN-PROCESS, never over HTTP -- and
+    only an ADMIN can run payroll now, so no workflow loses a step."""
+    if not _user_role_set(current_user) & _VIEW_ROLES:
         raise HTTPException(
             status_code=403,
-            detail="Only accountant / admin / superadmin can read the payroll feed",
+            detail=(
+                "The payroll incentive feed lists every colleague's earnings by "
+                "name and is restricted to administrators."
+            ),
         )
     store = _resolve_store(current_user, store_id)
     repo = _snapshot_repo()

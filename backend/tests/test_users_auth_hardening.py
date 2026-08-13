@@ -584,20 +584,43 @@ def _assert_no_credentials(payload_text, doc=None):
 
 
 def test_sanitize_user_strips_the_approval_pin_material():
-    """Unit-level lock on the helper the panel executed to prove the P0."""
-    out = users_router.sanitize_user(
-        {
-            "user_id": "u1",
-            "username": "u1",
-            "aadhaar_no": "111122223333",
-            **_PIN_MATERIAL,
-        }
-    )
+    """Unit-level lock on the helper the panel executed to prove the P0.
+
+    UPDATED 2026-08-13 (owner ruling): sanitize_user is now an ALLOW-list and
+    takes the VIEWER. The statutory IDs are ADMIN / SUPERADMIN only, so this
+    test asserts the admin tier -- the manager tier is asserted below.
+    """
+    doc = {
+        "user_id": "u1",
+        "username": "u1",
+        "aadhaar_no": "111122223333",
+        **_PIN_MATERIAL,
+    }
+    out = users_router.sanitize_user(dict(doc), _ADMIN)
     for field in _CREDENTIAL_FIELDS:
         assert field not in out, f"{field} survived sanitize_user"
-    # Non-credential fields are untouched on this router.
     assert out["user_id"] == "u1"
+    # An ADMIN still gets the statutory IDs: HR has to type PAN / UAN / ESIC in
+    # before payroll can run, so dropping them for everybody would break the
+    # screen that captures them.
     assert out["aadhaar_no"] == "111122223333"
+
+
+def test_sanitize_user_withholds_statutory_ids_from_the_manager_tier():
+    """The other half of the same rule (owner ruling 2026-08-13). Full endpoint
+    coverage for all five routes is in tests/test_salary_aggregate_leak.py."""
+    doc = {
+        "user_id": "u1",
+        "username": "u1",
+        "aadhaar_no": "111122223333",
+        "pan_no": "ABCDE1234F",
+        **_PIN_MATERIAL,
+    }
+    for actor in (_MANAGER_A, _AREA, None):
+        out = users_router.sanitize_user(dict(doc), actor)
+        assert out["user_id"] == "u1", "over-stripped: the record lost its id"
+        assert "aadhaar_no" not in out
+        assert "pan_no" not in out
 
 
 def test_picker_user_is_an_allow_list_not_a_deny_list():

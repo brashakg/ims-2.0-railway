@@ -46,7 +46,14 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
   const cogs = Number(d.cogs || 0);
   const grossProfit = Number(d.gross_profit ?? revenue - cogs);
   const opex = Number(d.total_expenses || 0);
-  const netProfit = Number(d.net_profit ?? grossProfit - opex);
+  // net_profit is ABSENT for any role below ADMIN -- it is revenue - COGS -
+  // expenses - PAYROLL, so the backend strips it as a payroll-derived figure.
+  // This used to fall back to `grossProfit - opex`, which quietly reported a
+  // profit with the whole wage bill missing and labelled it "Net Profit". Show
+  // nothing rather than a number that is wrong by a month's salaries.
+  const netProfit = d.net_profit === undefined || d.net_profit === null
+    ? null
+    : Number(d.net_profit);
   return {
     revenue,
     cost_of_goods: cogs,
@@ -55,7 +62,12 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
     operating_profit: grossProfit - opex,
     tax_expense: 0,
     net_profit: netProfit,
-    profit_margin: Number(d.net_margin ?? (revenue ? (netProfit / revenue) * 100 : 0)),
+    profit_margin:
+      d.net_margin !== undefined && d.net_margin !== null
+        ? Number(d.net_margin)
+        : netProfit !== null && revenue
+          ? (netProfit / revenue) * 100
+          : null,
     period_start: from,
     period_end: to,
   };
@@ -160,6 +172,16 @@ export default function FinanceDashboard() {
   const { user } = useAuth();
   const toast = useToast();
 
+  // OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
+  // SUPERADMIN only, because every row carries that store's monthly wage bill
+  // and a 1-5 person store's payroll total IS an individual's pay. Mirrors the
+  // backend gate (finance.get_pnl_by_store + the rbac_policy row) so a store
+  // manager gets a plain-English explanation instead of a 403 toast or an
+  // empty table that looks broken.
+  const canSeeStorePayroll = (user?.roles || []).some(
+    (r) => r === 'ADMIN' || r === 'SUPERADMIN',
+  );
+
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
 
@@ -235,7 +257,12 @@ export default function FinanceDashboard() {
       try {
         const d = new Date(dateTo);
         const [ps2, pc2, gr2] = await Promise.allSettled([
-          financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo }),
+          // Not requested at all for a non-admin: the endpoint would 403, and
+          // firing a call we know will be refused just to discard the answer
+          // makes the network log look like a bug.
+          canSeeStorePayroll
+            ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
+            : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
           financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
         ]);
@@ -389,7 +416,29 @@ export default function FinanceDashboard() {
           {activeTab === 'revenue-pl' && (
             <>
               <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
-              {pnlByStore.length > 0 && (
+              {!canSeeStorePayroll && (
+                <div className="card mt-4 p-4">
+                  <div className="text-sm font-medium text-gray-700">P&amp;L by store</div>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Not shown for your role. This table includes each store's monthly
+                    salary bill, and with only a few people per store that total would
+                    reveal what individual colleagues are paid. Salary figures are
+                    restricted to administrators.
+                  </p>
+                  {/* Points at a screen that ACTUALLY EXISTS and that this role
+                      can actually open: ReportsPage's Forecast tab renders
+                      /reports/finance/expense-vs-revenue, which is scoped to the
+                      caller's own store and carries revenue, cost and profit
+                      with no payroll term. (/reports/profit/by-store is also
+                      clean and open, but nothing in the UI calls it, so naming
+                      it here would send people somewhere that isn't there.) */}
+                  <p className="text-sm text-gray-500 mt-2">
+                    Your own store's revenue, cost and profit — with no salary line —
+                    are on Reports &rsaquo; Forecast, under "Expense vs Revenue".
+                  </p>
+                </div>
+              )}
+              {canSeeStorePayroll && pnlByStore.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
                   <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by store</div>
                   <table className="min-w-full text-sm">

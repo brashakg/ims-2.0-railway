@@ -26,10 +26,15 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
     revenue && revenue > 0 && grossProfit !== null
       ? `${((grossProfit / revenue) * 100).toFixed(1)}% margin`
       : 'Gross profit';
+  // A withheld net profit (non-admin) says so; an absent P&L keeps the old
+  // generic sub-label. The two look identical on screen otherwise, and "no data
+  // yet" and "you may not see this" are different facts.
   const netMarginPct =
     revenue && revenue > 0 && netProfit !== null
       ? `${((netProfit / revenue) * 100).toFixed(1)}% margin`
-      : 'After tax & opex';
+      : plStatement && netProfit === null
+        ? 'Administrators only (includes salaries)'
+        : 'After tax & opex';
   const opexPct =
     revenue && revenue > 0 && operatingExpenses !== null
       ? `${((operatingExpenses / revenue) * 100).toFixed(1)}% of revenue`
@@ -128,13 +133,21 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
                 </p>
               </div>
 
+              {/* Net profit is revenue - COGS - expenses - PAYROLL, so it is a
+                  payroll-derived figure and the backend withholds it below
+                  ADMIN (owner ruling 2026-08-09). Say so in plain English
+                  rather than rendering a zero or a payroll-free stand-in. */}
               <div className="col-span-2 bg-green-50 p-4 rounded border border-green-200">
                 <p className="text-green-700 text-sm font-medium">Net Profit</p>
                 <p className="text-green-700 text-2xl font-bold mt-1">
-                  {formatCurrency(plStatement.net_profit)}
+                  {plStatement.net_profit === null
+                    ? dash
+                    : formatCurrency(plStatement.net_profit)}
                 </p>
                 <p className="text-green-600 text-xs mt-2">
-                  Profit Margin: {plStatement.profit_margin.toFixed(2)}%
+                  {plStatement.net_profit === null
+                    ? 'Net profit is after salaries, so it is shown to administrators only.'
+                    : `Profit Margin: ${(plStatement.profit_margin ?? 0).toFixed(2)}%`}
                 </p>
               </div>
             </div>

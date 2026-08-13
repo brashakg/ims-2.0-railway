@@ -81,8 +81,14 @@ export interface ProfitLossStatement {
   operating_expenses: number;
   operating_profit: number;
   tax_expense: number;
-  net_profit: number;
-  profit_margin: number;
+  // NULL when the caller is not allowed to see salary figures. Net profit is
+  // revenue - COGS - expenses - PAYROLL, so it is a payroll-derived number and
+  // the backend strips it for anyone below ADMIN (owner ruling 2026-08-09).
+  // It must stay nullable: the alternative the frontend used to do -- fall back
+  // to gross profit minus operating expenses -- silently reports a profit with
+  // the entire wage bill left out, which overstates it.
+  net_profit: number | null;
+  profit_margin: number | null;
   period_start: string;
   period_end: string;
 }
