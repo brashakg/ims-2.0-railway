@@ -79,6 +79,11 @@ export function DailyScorecardPage() {
   const activeRole = (user as any)?.activeRole as string | undefined;
   const canEditAny = (userRoles || []).some(r => ELEVATED_ROLES.has(r))
     || (activeRole && ELEVATED_ROLES.has(activeRole));
+  // The Payout screen lists every colleague's incentive rupees by name, so it
+  // is ADMIN/SUPERADMIN only (owner decision 2026-08-13). Hide the shortcut for
+  // everyone else rather than send them to a screen that refuses them.
+  const canSeePayout = (userRoles || []).some(r => r === 'ADMIN' || r === 'SUPERADMIN')
+    || activeRole === 'ADMIN' || activeRole === 'SUPERADMIN';
 
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [staffList, setStaffList] = useState<Array<{ user_id: string; name: string }>>([]);
@@ -255,12 +260,14 @@ export function DailyScorecardPage() {
           >
             <BarChart3 className="w-4 h-4" /> Leaderboard
           </Link>
-          <Link
-            to="/incentive/payout"
-            className="btn-secondary inline-flex items-center gap-2"
-          >
-            <Calculator className="w-4 h-4" /> Payout
-          </Link>
+          {canSeePayout && (
+            <Link
+              to="/incentive/payout"
+              className="btn-secondary inline-flex items-center gap-2"
+            >
+              <Calculator className="w-4 h-4" /> Payout
+            </Link>
+          )}
           <button
             type="button"
             onClick={loadDay}

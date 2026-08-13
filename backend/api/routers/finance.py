@@ -25,6 +25,10 @@ from ..services import ap_engine, cashflow, itc_reconcile, cash_register, csv_sa
 from ..services.stores_util import is_online_store
 from ..services import survival_cashflow
 from ..services.cost_mask import can_see_cost
+from ..services.salary_visibility import (
+    SALARY_RESTRICTED_MESSAGE,
+    is_salary_admin,
+)
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
 from ..services import je_service
@@ -710,6 +714,48 @@ async def get_revenue(
 # === Profit & Loss ===
 
 
+# The /pnl response is masked by TWO independent gates, because it mixes two
+# different secrets and they do not belong to the same people.
+#
+# 1. COST_ONLY_PNL_FIELDS -- supplier landing prices and the margins derived from
+#    them. Commercially sensitive; gate is services/cost_mask.can_see_cost, which
+#    deliberately includes ACCOUNTANT (the books need COGS). UNCHANGED.
+COST_ONLY_PNL_FIELDS = (
+    "cogs",
+    "cogs_is_estimated",
+    "cogs_estimated_lines",
+    "cogs_total_lines",
+    "gross_profit",
+    "gross_margin",
+)
+
+# 2. PAYROLL_DERIVED_PNL_FIELDS -- the wage bill and every figure it can be
+#    subtracted OUT of. Gate is services/salary_visibility.is_salary_admin
+#    (ADMIN / SUPERADMIN), per the owner ruling of 2026-08-09.
+#
+#    net_profit and net_margin are here even though neither is "a salary": with
+#    net_profit = gross_profit - total_expenses - payroll_cost + je_revenue_adj,
+#    a reader holding the other four recovers payroll_cost with one subtraction.
+#    That is how the ACCOUNTANT would still have had the wage bill after
+#    payroll_cost alone was removed -- they can see gross_profit and
+#    total_expenses. Hiding a number while leaving its addends beside it is not
+#    hiding it. In a 1-5 person store the wage bill IS an individual's pay.
+#
+#    NOT stripped, deliberately: total_expenses, the `expenses` category dict and
+#    je_expense_adjustment. All three are payroll-EXCLUSIVE (payroll is a
+#    separate line; the payroll run writes the `payroll` collection, never
+#    `expenses`), and with the six fields above removed there is no longer any
+#    payroll-INCLUSIVE figure left in the body for them to be subtracted from.
+#    Dropping them would blank the store manager's operating-cost panel and buy
+#    nothing. If a payroll-inclusive figure is ever ADDED to this response, it
+#    belongs in this tuple on the same day.
+PAYROLL_DERIVED_PNL_FIELDS = (
+    "payroll_cost",
+    "net_profit",
+    "net_margin",
+)
+
+
 @router.get("/pnl")
 async def get_pnl(
     store_id: Optional[str] = None,
@@ -837,17 +883,15 @@ async def get_pnl(
     # COST_VISIBLE_ROLES (excludes AREA_MANAGER per DECISIONS sec 9). Revenue + tax
     # (top line) stay visible. Without this, gross_margin/cogs reach every role.
     if not can_see_cost(current_user):
-        for _f in (
-            "cogs",
-            "cogs_is_estimated",
-            "cogs_estimated_lines",
-            "cogs_total_lines",
-            "gross_profit",
-            "gross_margin",
-            "net_profit",
-            "net_margin",
-            "payroll_cost",
-        ):
+        for _f in COST_ONLY_PNL_FIELDS:
+            pnl.pop(_f, None)
+    # SEPARATE GATE, SEPARATE RULE (owner ruling 2026-08-09). The payroll figures
+    # used to ride on can_see_cost, which admits ACCOUNTANT -- the same accountant
+    # /payroll/registers/summary already 403s. Cost is a commercial secret; pay is
+    # somebody's pay packet, and the owner declined the accountant carve-out. So
+    # the wage bill answers to is_salary_admin, never to the cost gate.
+    if not is_salary_admin(current_user):
+        for _f in PAYROLL_DERIVED_PNL_FIELDS:
             pnl.pop(_f, None)
     return pnl
 
@@ -3420,7 +3464,28 @@ async def get_pnl_by_store(
     entity_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """P&L (revenue - COGS - approved expenses - payroll) per store."""
+    """P&L (revenue - COGS - approved expenses - payroll) per store.
+
+    ADMIN / SUPERADMIN only (OWNER DECISION 2026-08-13). Every row carries that
+    store's monthly wage bill in `payroll`, and the business runs 4 stores of
+    1-5 people: a per-store payroll total IS an individual's pay packet at that
+    size, and a two-person store gives up the second person to one subtraction
+    against the reader's own payslip. `net_profit` re-exposes the same figure
+    (revenue - cogs - expenses - payroll) even if `payroll` were dropped, so
+    there is no version of this table that is safe to widen -- the owner was
+    offered a payroll-free variant and chose to close the whole screen instead.
+
+    THE COST, STATED PLAINLY: store managers and area managers lose sight of
+    their own store's performance ON THIS SCREEN. Their store-level trading
+    figures (revenue, cost, profit -- no payroll term anywhere) remain open, and
+    keep a working UI, on GET /api/v1/reports/finance/expense-vs-revenue, which
+    is store-scoped via validate_store_access and is what ReportsPage's Forecast
+    tab renders. GET /api/v1/reports/profit/by-store is likewise clean and
+    likewise left open (verified: store-scoped via user_store_scope, and
+    profit == revenue - cost exactly), but no frontend screen calls it.
+    """
+    if not is_salary_admin(current_user):
+        raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
     db = _get_db()
     s2e, _ = _store_maps(db)
     store_ids = (

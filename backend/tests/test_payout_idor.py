@@ -1,7 +1,21 @@
 """NEW-IDOR-PAYOUT: payout snapshots carry per-store payout money. GET
 /payout/snapshot/{id}, /payout/export/{id}.csv and PATCH .../mark-paid must
 existence-hide (404) a snapshot whose store the caller can't access. Mirrors the
-NEW-IDOR-LABEL pattern."""
+NEW-IDOR-LABEL pattern.
+
+UPDATED 2026-08-13 (owner decision: payout reads are ADMIN / SUPERADMIN only).
+These tests used STORE_MANAGER as the "entitled reader" to reach the store-scope
+branch. That role is now refused at the ROLE gate, one layer earlier, so the
+cross-store 404 branch (payout.py can_access_store_scoped) is currently
+UNREACHABLE: the only roles that get past _check_view_permission are ADMIN and
+SUPERADMIN, and user_store_scope reports both as cross-store.
+
+The guard is kept anyway -- it is correct, it costs nothing, and it is what
+holds if _VIEW_ROLES is ever widened again. But these tests now assert what is
+actually true today (role gate first, admins reach any store) rather than
+pretending to exercise a branch no request can enter. Do not read a green run
+here as coverage of the store-scope branch; it is coverage of the role gate.
+"""
 import os
 import sys
 
@@ -46,19 +60,31 @@ def _client(monkeypatch, roles, store):
     return TestClient(app)
 
 
-def test_get_snapshot_cross_store_404(monkeypatch):
+def test_store_manager_is_refused_for_its_own_store_too(monkeypatch):
+    """Stricter than the IDOR rule this file was written for: a store manager is
+    now refused a payout even for a store they own, because the body names every
+    colleague and states their incentive rupees."""
+    c = _client(monkeypatch, ["STORE_MANAGER"], "BV-BOK-01")  # caller OWNS the store
+    r = c.get("/payout/snapshot/snap_a")
+    assert r.status_code == 403, r.text
+    assert "1500" not in r.text and "1000" not in r.text
+
+
+def test_store_manager_cross_store_is_refused(monkeypatch):
     c = _client(monkeypatch, ["STORE_MANAGER"], "BV-PUN-01")  # caller PUN, snap BOK
-    assert c.get("/payout/snapshot/snap_a").status_code == 404
+    assert c.get("/payout/snapshot/snap_a").status_code == 403
 
 
-def test_export_csv_cross_store_404(monkeypatch):
+def test_export_csv_is_refused_for_a_store_manager(monkeypatch):
     c = _client(monkeypatch, ["STORE_MANAGER"], "BV-PUN-01")
-    assert c.get("/payout/export/snap_a.csv").status_code == 404
+    assert c.get("/payout/export/snap_a.csv").status_code == 403
 
 
-def test_get_snapshot_own_store_ok(monkeypatch):
-    c = _client(monkeypatch, ["STORE_MANAGER"], "BV-BOK-01")  # caller owns the store
-    assert c.get("/payout/snapshot/snap_a").status_code == 200
+def test_accountant_is_refused(monkeypatch):
+    """ACCOUNTANT used to be inside _VIEW_ROLES. The owner declined the
+    accountant carve-out, so this is now the same refusal."""
+    c = _client(monkeypatch, ["ACCOUNTANT"], "BV-BOK-01")
+    assert c.get("/payout/snapshot/snap_a").status_code == 403
 
 
 def test_admin_cross_store_ok(monkeypatch):
@@ -66,8 +92,10 @@ def test_admin_cross_store_ok(monkeypatch):
     assert c.get("/payout/snapshot/snap_a").status_code == 200
 
 
-def test_nonexistent_snapshot_404(monkeypatch):
-    c = _client(monkeypatch, ["STORE_MANAGER"], "BV-BOK-01")
+def test_nonexistent_snapshot_404_for_an_admin(monkeypatch):
+    """404 for a real reader -- proves the not-found path still works and was
+    not swallowed by the new role gate."""
+    c = _client(monkeypatch, ["ADMIN"], "BV-BOK-01")
     assert c.get("/payout/snapshot/nope").status_code == 404
 
 

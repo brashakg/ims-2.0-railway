@@ -924,9 +924,12 @@ function App() {
                   <Route
                     path="incentive/payout"
                     element={
-                      <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
-                      >
+                      // OWNER DECISION 2026-08-13: a payout body lists NAMED
+                      // colleagues with their per-person incentive rupees,
+                      // which is a payslip line. Backend /payout/* reads are
+                      // now ADMIN/SUPERADMIN only; this matches so the screen
+                      // is never reachable-but-403.
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <PayoutDashboardPage />
                       </ProtectedRoute>
                     }
@@ -934,9 +937,12 @@ function App() {
                   <Route
                     path="incentive/payouts"
                     element={
-                      <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
-                      >
+                      // OWNER DECISION 2026-08-13: a payout body lists NAMED
+                      // colleagues with their per-person incentive rupees,
+                      // which is a payslip line. Backend /payout/* reads are
+                      // now ADMIN/SUPERADMIN only; this matches so the screen
+                      // is never reachable-but-403.
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <PayoutSnapshotsPage />
                       </ProtectedRoute>
                     }

@@ -35,6 +35,12 @@ from ..services.user_roles import (
     validate_roles,
 )
 from ..services import permission_audit as _perm_audit
+# The statutory identity fields answer to the SAME role tier as pay -- ADMIN /
+# SUPERADMIN, per the owner ruling. Reusing the one shared predicate (rather
+# than a second local tuple that says "SUPERADMIN", "ADMIN") is the whole point
+# of services/salary_visibility.py: the last time this rule lived in a router's
+# private constant, three other routers never heard about it.
+from ..services.salary_visibility import is_salary_admin
 
 router = APIRouter()
 
@@ -300,6 +306,11 @@ def hash_password(password: str) -> str:
 # services/approvals.py, which queries the users collection directly and never
 # consumes a router response. Stripping them therefore cannot blank a screen,
 # break a picker, or 401 anyone.
+#
+# ``sanitize_user`` no longer READS this tuple -- it is an allow-list now, so
+# these fields are excluded by not being listed. The tuple stays because it is
+# the written-down inventory of what counts as credential material on a user
+# document, and tests/test_users_auth_hardening.py asserts against it by name.
 _CREDENTIAL_FIELDS = (
     "password",
     "password_hash",
@@ -310,13 +321,22 @@ _CREDENTIAL_FIELDS = (
 
 # Statutory / government identity numbers held on the employee record.
 #
-# DOCUMENTATION-ONLY inventory -- deliberately has no readers here. The
-# full-record routes on this router INTENTIONALLY return these values to an
-# in-scope manager (require_manager + the store scope above); whether that bar
-# should be raised to HR/ADMIN, or the values masked to last-4, is an open
-# product decision for the owner, not something to guess at inside a security
-# fix. Named in one place so the PII surface of a user document is written down
-# and the next reviewer is not left guessing which fields are in scope.
+# THE OPEN PRODUCT DECISION NAMED IN THIS COMMENT IS NOW ANSWERED (owner,
+# 2026-08-13): these are ADMIN / SUPERADMIN only. They are no longer
+# documentation -- ``sanitize_user`` reads this tuple.
+#
+# Aadhaar in particular carries statutory handling obligations in India, and the
+# set as a whole (bank account + PAN + UAN + ESIC + PF + date of birth) is
+# everything needed to impersonate an employee to a bank or to the EPFO. It is
+# also the earliest-arming of the three exposures closed in this PR: HR must type
+# PAN / UAN / ESIC in BEFORE payroll can run at all, so these fields hold real
+# values before any payroll figure exists.
+#
+# ``date_of_birth`` is included even though no create/update path on this router
+# writes it: it is a standard KYC field, hr.py may add it, and this tuple is what
+# an allow-list consults. ``bank_account_no`` is likewise not written here (it
+# lives on salary_config) but is listed so that if it ever lands on a user doc it
+# is admin-only from the first byte.
 _GOVT_ID_FIELDS = (
     "aadhaar_no",
     "pan_no",
@@ -324,6 +344,59 @@ _GOVT_ID_FIELDS = (
     "pf_no",
     "esic_no",
     "bank_account_no",
+    "date_of_birth",
+)
+
+# The fields ANY entitled reader of a full user record may see -- an ALLOW-LIST.
+#
+# Round-1 (approval_pin_hash) and round-2 (the statutory IDs) were both caused by
+# the same thing: ``sanitize_user`` was a DENY-list, so a field added to the user
+# document later shipped BY DEFAULT until somebody remembered to pop it. Nobody
+# ever does. The auditor proved it is still live by planting ``salary`` and
+# ``ctc_annual`` -- two fields NO code in this repo writes -- and both travelled
+# straight through to an AREA_MANAGER and a STORE_MANAGER. With an allow-list,
+# the field nobody has thought of yet is hidden by construction; the failure mode
+# flips from "leaks silently" to "a screen is missing a value", which someone
+# reports on day one.
+#
+# Derived by reading every consumer of the five full-record routes
+# (GET /users, /users/{id}, /users/search, /users/store/{id}, /users/role/{r}):
+#   * frontend SettingsAuth.tsx:51 transformUser  -- user_id/_id, username,
+#     email, full_name, phone, roles, store_ids, discount_cap, is_active,
+#     created_at, module_access, permissions
+#   * frontend ActivityLogPage.tsx:138           -- user_id/_id, full_name,
+#     username, roles
+#   * frontend adminUserApi.getUser -> the edit modal, same shape as above.
+# hr.py's employee roster does NOT come through here -- it reads the user repo
+# directly (_roster_from_users) -- so it is untouched by this change.
+#
+# ``_id`` is kept because the repo sets it equal to user_id (base_repository
+# :104) and the frontend id-resolution chain falls back to it; it carries no
+# information user_id does not. ``updated_at`` / ``last_login`` /
+# ``must_change_password`` / ``primary_store_id`` / ``shift_id`` are operational
+# metadata an admin console legitimately shows and none is a credential or an
+# identity number.
+_SANITIZED_USER_FIELDS = (
+    "_id",
+    "user_id",
+    "username",
+    "email",
+    "full_name",
+    "phone",
+    "roles",
+    "store_ids",
+    "primary_store_id",
+    "discount_cap",
+    "is_active",
+    "must_change_password",
+    "module_access",
+    "permissions",
+    "shift_id",
+    "documents",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "last_login",
 )
 
 # The ONLY fields a staff PICKER may receive. This is an ALLOW-LIST on purpose.
@@ -386,21 +459,45 @@ def _safe_documents(documents) -> list:
     ]
 
 
-def sanitize_user(user: dict) -> dict:
-    """Strip credential material from a user document before it leaves the API.
+def sanitize_user(user: dict, viewer: Optional[dict] = None) -> dict:
+    """Project a user document down to what ``viewer`` is entitled to see.
 
     This is the SINGLE definition of "sanitised user" for the full-record
-    routes. It is a deny-list because those routes are meant to return the whole
-    employee record to an entitled reader; the credential fields are the ones
-    that must never appear regardless -- plus the GridFS handles inside
-    `documents`, which are capabilities rather than data.
+    routes. It is an ALLOW-LIST (see ``_SANITIZED_USER_FIELDS`` for why the
+    deny-list it replaced could not hold), and it returns a NEW dict, so no
+    credential, statutory ID, or field invented next year can ride along by
+    omission.
+
+    Two tiers, per the owner ruling of 2026-08-13:
+
+      * everyone entitled to reach these routes (ADMIN / SUPERADMIN /
+        AREA_MANAGER / STORE_MANAGER, further narrowed by store scope) gets
+        ``_SANITIZED_USER_FIELDS``;
+      * ADMIN / SUPERADMIN additionally get ``_GOVT_ID_FIELDS`` -- Aadhaar, PAN,
+        UAN, ESIC, PF, bank account, date of birth.
+
+    Keeping the statutory fields FOR ADMINS rather than dropping them for
+    everybody is deliberate: HR has to type PAN / UAN / ESIC in before payroll
+    can run, and breaking the screen that captures them would be a worse outcome
+    than the leak it fixes.
+
+    ``viewer`` defaults to None and that FAILS CLOSED -- a caller we cannot
+    identify gets the narrow projection, never the identity numbers. Every route
+    in this module passes its real ``current_user``; the default exists only so
+    an unrelated helper cannot accidentally widen the response by forgetting an
+    argument.
     """
-    if user is not None:
-        for field in _CREDENTIAL_FIELDS:
-            user.pop(field, None)
-        if "documents" in user:
-            user["documents"] = _safe_documents(user.get("documents"))
-    return user
+    if user is None:
+        return user
+    out = {f: user[f] for f in _SANITIZED_USER_FIELDS if f in user}
+    if "documents" in out:
+        # GridFS handles are capabilities, not data -- metadata only, always.
+        out["documents"] = _safe_documents(out.get("documents"))
+    if is_salary_admin(viewer):
+        for field in _GOVT_ID_FIELDS:
+            if field in user:
+                out[field] = user[field]
+    return out
 
 
 def picker_user(user: dict) -> dict:
@@ -648,7 +745,7 @@ async def get_store_users(
             users = repo.find_by_role(role, store_id)
         else:
             users = repo.find_by_store(store_id)
-        return [sanitize_user(u) for u in users]
+        return [sanitize_user(u, current_user) for u in users]
 
     return []
 
@@ -669,7 +766,7 @@ async def get_users_by_role(
             else _store_scope_filter(current_user)
         )
         users = repo.find_by_role(role, scope)
-        return [sanitize_user(u) for u in users]
+        return [sanitize_user(u, current_user) for u in users]
 
     return []
 
@@ -690,7 +787,7 @@ async def search_users(
             else _store_scope_filter(current_user)
         )
         users = repo.search_users(q, scope)
-        return {"users": [sanitize_user(u) for u in users]}
+        return {"users": [sanitize_user(u, current_user) for u in users]}
 
     return {"users": []}
 
@@ -749,7 +846,7 @@ async def list_users(
             filter_dict["is_active"] = True
 
         users = repo.find_many(filter_dict, skip=skip, limit=limit)
-        return [sanitize_user(u) for u in users]
+        return [sanitize_user(u, current_user) for u in users]
 
     return []
 
@@ -889,7 +986,7 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
         user = repo.find_by_id(user_id)
         if user is not None:
             _assert_can_read_user(user, current_user)
-            return sanitize_user(user)
+            return sanitize_user(user, current_user)
         raise HTTPException(status_code=404, detail="User not found")
 
     return {"user_id": user_id}

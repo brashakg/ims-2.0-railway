@@ -1918,10 +1918,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/pnl/by-category",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
+    # SUPERADMIN only. Every row carries that store's monthly wage bill, and a
+    # 1-5 person store's payroll total IS an individual's pay. Narrowed at BOTH
+    # layers -- this row and finance.get_pnl_by_store's own is_salary_admin gate.
     {
         "method": "GET",
         "path": "/api/v1/finance/pnl/by-store",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
         "method": "GET",
@@ -5036,29 +5040,43 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     # --- /api/v1/payout ---
+    # OWNER DECISION 2026-08-13: every payout read is ADMIN / SUPERADMIN only.
+    # These bodies list NAMED colleagues with their per-person incentive rupees,
+    # which is a payslip line (payout.py:65-95 has the full reasoning). The four
+    # read rows were "AUTHENTICATED" here while payout._check_view_permission
+    # narrowed them to the manager tier inline; both layers now say the same
+    # thing, so the table no longer understates the real gate.
     {
         "method": "GET",
         "path": "/api/v1/payout/export/{snapshot_id}.csv",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {"method": "POST", "path": "/api/v1/payout/lock", "allowed": ["SUPERADMIN"]},
     {
         "method": "GET",
         "path": "/api/v1/payout/payroll-feed",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
-    {"method": "GET", "path": "/api/v1/payout/preview", "allowed": "AUTHENTICATED"},
+    {
+        "method": "GET",
+        "path": "/api/v1/payout/preview",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/payout/snapshot/{snapshot_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
         "method": "PATCH",
         "path": "/api/v1/payout/snapshot/{snapshot_id}/mark-paid",
         "allowed": ["SUPERADMIN"],
     },
-    {"method": "GET", "path": "/api/v1/payout/snapshots", "allowed": "AUTHENTICATED"},
+    {
+        "method": "GET",
+        "path": "/api/v1/payout/snapshots",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/payroll ---
     {
         "method": "GET",
