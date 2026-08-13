@@ -66,7 +66,13 @@ const MOCK_USER = {
   storeIds: ['BV-BOK-01'],
   discountCap: 20,
 };
-const MOCK_AUTH = { user: MOCK_USER };
+// MUTABLE on purpose: the role-truth banner can only be tested by rendering as
+// a role that CANNOT save. Reset in beforeEach so no test leaks its role.
+const MOCK_AUTH: { user: any } = { user: MOCK_USER };
+/** Render the rest of this test as `roles`. Must be called BEFORE renderPOS. */
+function signInAs(roles: string[]) {
+  MOCK_AUTH.user = { ...MOCK_USER, roles, activeRole: roles[0] };
+}
 vi.mock('../../../context/AuthContext', () => ({ useAuth: () => MOCK_AUTH }));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({
@@ -111,7 +117,7 @@ vi.mock('../PrescriptionForm', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { POSLayout } from '../POSLayout';
+import { POSLayout, RX_SAVE_ROLES } from '../POSLayout';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 import { AXIS_SOURCE_COUNTER } from '../../../utils/rxAxisEntry';
@@ -176,6 +182,7 @@ beforeEach(() => {
   H.stored = [];
   H.createPrescription.mockReset();
   H.createPrescription.mockResolvedValue({ prescription_id: 'RX-TEST-1' });
+  MOCK_AUTH.user = MOCK_USER;
   act(() => usePOSStore.getState().resetTransaction());
 });
 
@@ -286,6 +293,30 @@ describe('a toric Rx with no axis cannot proceed without a value', () => {
     expect(body.remarks).toBe('Dr. Rao');
   });
 
+  // THE ASYMMETRY GUARD FOR THE STAMP ITSELF. The test above pins the RIGHT
+  // eye's stamp; every other left-eye assertion in this file pins the NEGATIVE
+  // case (axis_source undefined), which stays true when the left-eye stamp is
+  // deleted outright. Deleting POSLayout's left-eye `axis_source` therefore
+  // survived the whole suite. This is the positive probe: prompt for the LEFT
+  // eye, answer it, and require the marker to be THERE.
+  it('stamps counter provenance on the LEFT eye when that is the eye prompted', async () => {
+    H.rx = { sph_od: -2, cyl_od: -1.25, axis_od: 10, sph_os: -1, cyl_os: -0.75, axis_os: undefined };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+    await screen.findByText(PROMPT_TITLE);
+
+    fireEvent.change(screen.getByLabelText('Left eye (OS) axis'), { target: { value: '95' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save axis and continue' }));
+
+    await waitFor(() => expect(H.createPrescription).toHaveBeenCalledTimes(1));
+    const body = H.createPrescription.mock.calls[0][0];
+    expect(body.left_eye.axis).toBe(95);
+    expect(body.left_eye.axis_source).toBe(AXIS_SOURCE_COUNTER);
+    // ...and the eye the clinician DID record keeps its axis and no marker.
+    expect(body.right_eye.axis).toBe(10);
+    expect(body.right_eye.axis_source).toBeUndefined();
+  });
+
   // PRIVACY / AUDIT REGRESSION. `remarks` is projected to the OTP-gated customer
   // portal (portal._safe_prescription_view -> "notes", rendered by
   // RxPortalPage) and printed on the patient-facing Rx card, while no internal
@@ -341,6 +372,56 @@ describe('a non-toric Rx with no axis is unaffected', () => {
     const body = H.createPrescription.mock.calls[0][0];
     expect(body.right_eye.axis).toBeNull();
     expect(body.left_eye.axis).toBeNull();
+  });
+});
+
+// ============================================================================
+// The POS STORE copy of the saved prescription
+// ============================================================================
+// saveNewPrescription writes the Rx TWICE: once to the API, and once into
+// usePOSStore via setPrescription. Every assertion above inspects only the API
+// payload, so restoring the original `|| 180` on the STORE copy killed nothing
+// -- on either eye. That copy is the more dangerous of the two: it feeds
+// `rxInput` and the lens auto-suggest panel, so a regression there puts a
+// fabricated axis of 180 ON SCREEN IN FRONT OF THE COUNTER, where staff read it
+// as the customer's prescription. Both eyes, both cases.
+describe('the prescription kept in the POS store is never given a fabricated axis', () => {
+  it('keeps a blank axis blank on BOTH eyes', async () => {
+    H.rx = { sph_od: -2, cyl_od: 0, axis_od: undefined, sph_os: -1.5, cyl_os: 0, axis_os: undefined };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBeNull();
+    expect(rx.leftEye.axis).toBeNull();
+  });
+
+  it('keeps a recorded axis of 0 as 0 on BOTH eyes -- 0 is a real meridian, not "missing"', async () => {
+    H.rx = { sph_od: -2, cyl_od: -1.25, axis_od: 0, sph_os: -1, cyl_os: -0.75, axis_os: 0 };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBe(0);
+    expect(rx.leftEye.axis).toBe(0);
+  });
+
+  it('carries a counter-entered axis into the store as typed, on BOTH eyes', async () => {
+    H.rx = { sph_od: -2, cyl_od: -1.25, axis_od: undefined, sph_os: -1, cyl_os: -0.75, axis_os: undefined };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+    await screen.findByText(PROMPT_TITLE);
+
+    fireEvent.change(screen.getByLabelText('Right eye (OD) axis'), { target: { value: '85' } });
+    fireEvent.change(screen.getByLabelText('Left eye (OS) axis'), { target: { value: '95' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save axis and continue' }));
+
+    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
+    const rx: any = usePOSStore.getState().prescription;
+    expect(rx.rightEye.axis).toBe(85);
+    expect(rx.leftEye.axis).toBe(95);
   });
 });
 
@@ -521,9 +602,56 @@ describe('the prompt is inert to stray scanner and keyboard input', () => {
     expect(H.createPrescription).not.toHaveBeenCalled();
   });
 
-  it('tells a non-clinical role that saving needs a manager, before they type', async () => {
-    await openPrompt();
-    // MOCK_USER is STORE_MANAGER, which CAN save -- no warning.
-    expect(screen.queryByText(/saving a new prescription needs a manager or optometrist/i)).not.toBeInTheDocument();
+});
+
+// ============================================================================
+// The role-truth banner
+// ============================================================================
+// The New Prescription door has NO role gate, but the backend 403s anyone
+// outside CLINICAL_ROLES -- so a cashier could fill in a clinical value and
+// then meet a 403 with the sale stranded. The banner warns them BEFORE they
+// type. It was previously "tested" by a case that asserted the banner is ABSENT
+// for a STORE_MANAGER, a role that CAN save: true whether the banner exists or
+// not, so replacing the guard with `{false && (` survived the whole suite. The
+// test's name claimed the positive case; its body checked the negative one.
+describe('the prompt tells the truth about who can actually save', () => {
+  const BANNER = /saving a new prescription needs a manager or optometrist/i;
+
+  async function openPromptAs(roles: string[]) {
+    signInAs(roles);
+    H.rx = { cyl_od: -1.25, axis_od: undefined };
+    const submit = await openNewRxForm();
+    fireEvent.click(submit);
+    await screen.findByText(PROMPT_TITLE);
+  }
+
+  it('warns a CASHIER that saving needs a manager, before they type', async () => {
+    await openPromptAs(['CASHIER']);
+    expect(screen.getByText(BANNER)).toBeInTheDocument();
+    // The axis box is still there: a cashier MAY supply the value, they just
+    // cannot be the one who saves it. Warning, not a lock-out.
+    expect(screen.getByLabelText('Right eye (OD) axis')).toBeInTheDocument();
+  });
+
+  it('does not nag a STORE_MANAGER, who can save', async () => {
+    await openPromptAs(['STORE_MANAGER']);
+    expect(screen.queryByText(BANNER)).not.toBeInTheDocument();
+  });
+
+  it('does not nag an OPTOMETRIST either', async () => {
+    await openPromptAs(['OPTOMETRIST']);
+    expect(screen.queryByText(BANNER)).not.toBeInTheDocument();
+  });
+
+  // THE MIRROR. RX_SAVE_ROLES exists only to describe what the SERVER allows
+  // (backend/api/routers/prescriptions.py create_prescription -> CLINICAL_ROLES).
+  // If the two drift, the banner lies in one direction or the other: it tells a
+  // role that can save that it cannot, or lets a role that cannot save type a
+  // clinical value into a 403. The server side of this same pair is pinned by
+  // backend/tests/test_rx_axis_source_provenance.py::TestWhoMayCreateAPrescription.
+  it('mirrors the backend clinical-role list exactly', () => {
+    expect([...RX_SAVE_ROLES].sort()).toEqual(
+      ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN'],
+    );
   });
 });

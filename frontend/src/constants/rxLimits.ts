@@ -135,18 +135,60 @@ export interface RxEyeValues {
 }
 
 /**
- * Validate one eye's full set, including the cross-field rules:
- *   - CYL set (non-zero) requires AXIS, and AXIS set requires a CYL.
- *   - ADD plus-only + range; PD/CL ranges; VA in the allowed set.
- * Returns the FIRST error message or null when the whole eye is valid.
+ * Machine-readable reason an eye failed validation.
+ *
+ * Callers that need to treat ONE failure differently must branch on this code,
+ * never on the message text and never by deleting a field and re-validating.
+ * Deleting a field to ask "was that its only problem?" silently removes that
+ * field's OWN range and step checks too (the loop below skips `undefined`), so
+ * an un-grindable CYL of -8.00 or an off-grid -1.30 looked like a clean eye
+ * with a missing axis. Codes make the question answerable without lying.
  */
-export function validateEyePair(eye: RxEyeValues, label = ''): string | null {
+export type RxEyeErrorCode =
+  /** A single field is out of range / off the step grid / not a whole number. */
+  | 'FIELD_INVALID'
+  /** VA is not one of the allowed Snellen values. */
+  | 'VA_INVALID'
+  /** Non-zero CYL recorded with no AXIS. THE toric-axis case. */
+  | 'AXIS_REQUIRED_FOR_CYL'
+  /** AXIS recorded with no CYL -- the mirror-image pairing failure. */
+  | 'CYL_REQUIRED_FOR_AXIS';
+
+export interface RxEyeError {
+  code: RxEyeErrorCode;
+  /** Which field failed, for FIELD_INVALID. */
+  field?: RxLimitField;
+  /** The same plain-English message `validateEyePair` returns. */
+  message: string;
+}
+
+/**
+ * Validate one eye's full set and return the FIRST failure as a coded error,
+ * or null when the whole eye is valid. `validateEyePair` is this function's
+ * message, so the two can never disagree about whether an eye is valid.
+ *
+ * ORDER IS LOAD-BEARING. Every single-field check (including VA) runs BEFORE
+ * the CYL<->AXIS pairing rule, so `AXIS_REQUIRED_FOR_CYL` is returned ONLY when
+ * the eye has no other fault. That is what makes "is the missing axis this
+ * eye's only problem?" answerable as `code === 'AXIS_REQUIRED_FOR_CYL'`.
+ */
+export function validateEyeDetailed(eye: RxEyeValues, label = ''): RxEyeError | null {
   const prefix = label ? `${label} ` : '';
 
   for (const f of ['sph', 'cyl', 'axis', 'add', 'pd', 'base_curve', 'diameter'] as const) {
     if (eye[f] === undefined) continue;
     const err = validateRxField(f, eye[f], prefix);
-    if (err) return err;
+    if (err) return { code: 'FIELD_INVALID', field: f, message: err };
+  }
+
+  // VA restricted to the Snellen set. Checked here, with the other per-field
+  // rules, rather than after the pairing rule: a bad VA is a fault of its own
+  // and must not be masked by the axis prompt taking the eye first.
+  if (eye.va !== undefined && !isValidVA(eye.va)) {
+    return {
+      code: 'VA_INVALID',
+      message: `${prefix}VA must be one of ${VA_SET.join(', ')}`,
+    };
   }
 
   // Cross-field: CYL <-> AXIS pairing.
@@ -155,16 +197,30 @@ export function validateEyePair(eye: RxEyeValues, label = ''): string | null {
   const cylSet = cyl !== null && Number.isFinite(cyl) && Math.abs(cyl) > 1e-9;
   const axisSet = axis !== null && Number.isFinite(axis);
   if (cylSet && !axisSet) {
-    return `${prefix}AXIS is required when CYL is set`;
+    return {
+      code: 'AXIS_REQUIRED_FOR_CYL',
+      message: `${prefix}AXIS is required when CYL is set`,
+    };
   }
   if (axisSet && !cylSet) {
-    return `${prefix}CYL is required when AXIS is set`;
-  }
-
-  // VA restricted to the Snellen set.
-  if (eye.va !== undefined && !isValidVA(eye.va)) {
-    return `${prefix}VA must be one of ${VA_SET.join(', ')}`;
+    return {
+      code: 'CYL_REQUIRED_FOR_AXIS',
+      message: `${prefix}CYL is required when AXIS is set`,
+    };
   }
 
   return null;
+}
+
+/**
+ * Validate one eye's full set, including the cross-field rules:
+ *   - CYL set (non-zero) requires AXIS, and AXIS set requires a CYL.
+ *   - ADD plus-only + range; PD/CL ranges; VA in the allowed set.
+ * Returns the FIRST error message or null when the whole eye is valid.
+ *
+ * Thin wrapper over `validateEyeDetailed` so every existing caller keeps the
+ * same `string | null` contract and the same wording.
+ */
+export function validateEyePair(eye: RxEyeValues, label = ''): string | null {
+  return validateEyeDetailed(eye, label)?.message ?? null;
 }

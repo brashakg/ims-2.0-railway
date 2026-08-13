@@ -169,7 +169,15 @@ function mapCategory(cat: string): string {
 // CLINICAL_ROLES set in backend/api/routers/prescriptions.py create_prescription
 // (which 403s everything else). Used ONLY to tell the truth in the counter-axis
 // prompt -- the server remains the gate. Keep in step with that set.
-const RX_SAVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] as const;
+//
+// EXPORTED so the list itself is pinned by a named test on each side of the
+// mirror: __tests__/POSAxisPrompt.test.tsx asserts these exact four here, and
+// backend/tests/test_rx_axis_source_provenance.py drives the real create door
+// with each of them (201) and with a CASHIER (403). Widening one side without
+// the other therefore fails a test that names the other side, instead of
+// quietly telling a cashier they may save a prescription -- or telling an
+// optometrist they may not.
+export const RX_SAVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] as const;
 
 // ----------------------------------------------------------------------------
 // PATIENT SAFETY: pending counter axis entry

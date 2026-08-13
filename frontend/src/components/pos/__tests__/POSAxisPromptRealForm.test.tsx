@@ -219,6 +219,57 @@ describe('deferring the axis relaxes NOTHING else in the real form', () => {
     expect(H.createPrescription).not.toHaveBeenCalled();
   });
 
+  // THE CYLINDER'S OWN LIMITS. The first cut decided "is the missing axis this
+  // eye's only problem?" by deleting the CYLINDER and re-validating -- which
+  // deleted the cylinder's own range and step checks along with it. An
+  // un-grindable -8.00 and an off-grid -1.30 both opened the counter prompt:
+  // staff were asked to type an axis for a cylinder no lab can grind, and the
+  // server then answered with a raw validation error. The SPH probe above never
+  // caught it because SPH was still being checked.
+  it('still hard-blocks a CYL outside the -6.00..+6.00 range, with no prompt', async () => {
+    await openRealRxForm();
+    typePower('Right eye sphere', '-2.00');
+    typePower('Right eye cylinder', '-8.00');
+    // AXIS deliberately blank -- the exact shape that used to open the prompt.
+    fireEvent.click(screen.getByRole('button', { name: /Add to Order/ }));
+
+    await waitFor(() => expect(screen.queryByText(PROMPT_TITLE)).not.toBeInTheDocument());
+    expect(H.createPrescription).not.toHaveBeenCalled();
+  });
+
+  it('still hard-blocks a CYL off the 0.25 step grid, with no prompt', async () => {
+    await openRealRxForm();
+    typePower('Right eye sphere', '-2.00');
+    typePower('Right eye cylinder', '-1.30');
+    fireEvent.click(screen.getByRole('button', { name: /Add to Order/ }));
+
+    await waitFor(() => expect(screen.queryByText(PROMPT_TITLE)).not.toBeInTheDocument());
+    expect(H.createPrescription).not.toHaveBeenCalled();
+  });
+
+  // ...and the same two faults on the OTHER eye. The deferral is applied per
+  // eye, so a relaxation fixed on one eye only would pass everything above.
+  it('still hard-blocks an out-of-range CYL on the LEFT eye too', async () => {
+    await openRealRxForm();
+    typePower('Left eye sphere', '-1.00');
+    typePower('Left eye cylinder', '-8.00');
+    fireEvent.click(screen.getByRole('button', { name: /Add to Order/ }));
+
+    await waitFor(() => expect(screen.queryByText(PROMPT_TITLE)).not.toBeInTheDocument());
+    expect(H.createPrescription).not.toHaveBeenCalled();
+  });
+
+  it('still prompts for a GENUINE toric-without-axis on the LEFT eye', async () => {
+    await openRealRxForm();
+    typePower('Left eye sphere', '-1.00');
+    typePower('Left eye cylinder', '-0.75');
+    fireEvent.click(screen.getByRole('button', { name: /Add to Order/ }));
+
+    // The control for the four blocks above: a valid cylinder with no axis is
+    // still the ONE case that opens the prompt.
+    expect(await screen.findByText(PROMPT_TITLE, {}, { timeout: SLOW })).toBeInTheDocument();
+  });
+
   it('saves a clean non-toric Rx without any prompt', async () => {
     await openRealRxForm();
     typePower('Right eye sphere', '-2.00');

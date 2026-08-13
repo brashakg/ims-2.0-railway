@@ -672,18 +672,82 @@ async def verify_rx_otp(payload: RxOtpVerify):
     }
 
 
+# ---------------------------------------------------------------------------
+# What a customer may see of ONE eye
+# ---------------------------------------------------------------------------
+# An ALLOWLIST of clinical keys, deliberately NOT a denylist of internal ones.
+#
+# The eye sub-document is written by a whole-model dump on the write side
+# (routers/prescriptions.EyeData -> right_eye.model_dump()), so ANY field added
+# to that model persists with no router change at all. Projecting the stored eye
+# verbatim therefore publishes every future internal field to the patient's
+# browser by default, and a denylist only ever catches the ones someone
+# remembered to add. Listing what a customer MAY see makes the wrong thing
+# impossible instead of merely caught.
+#
+# The field that proved it: `axis_source` ("COUNTER_ENTERED" -- this axis was
+# typed at the shop counter rather than measured by a clinician). It was moved
+# off `remarks` and off both printed Rx cards, but the verbatim projection here
+# still shipped it to the OTP-gated customer endpoint, so a patient reading
+# their own prescription received a machine-readable flag saying their
+# astigmatic axis was a counter entry. That marker exists for the optician
+# handling a remake dispute; it is not a patient disclosure.
+#
+# Add a key here ONLY when it is a clinical value that IS the customer's own
+# data. Provenance, audit, workflow and internal ids never belong on this list.
+_CUSTOMER_EYE_KEYS = frozenset(
+    {
+        # Canonical spectacle powers.
+        "sph",
+        "cyl",
+        "axis",
+        "add",
+        "pd",
+        "prism",
+        "base",
+        "acuity",
+        "va",
+        # Transitional aliases the 4-version finalize mirror writes
+        # (prescriptions._EYE_KEY_ALIASES) -- an older doc may carry only these.
+        "sphere",
+        "cylinder",
+        "addition",
+        # Upper-case shapes the portal page also reads (RxPortalPage.eyeVal
+        # falls back to key.toUpperCase()), kept so legacy rows still render.
+        "SPH",
+        "CYL",
+        "AXIS",
+        "ADD",
+        "PD",
+    }
+)
+
+
+def _safe_eye_view(eye: Any) -> Optional[Dict[str, Any]]:
+    """Project ONE eye sub-document down to the clinical values a customer may
+    see. Anything not on `_CUSTOMER_EYE_KEYS` is dropped, including fields that
+    did not exist when this was written. A missing or malformed eye reads as
+    None rather than leaking whatever shape was stored."""
+    if not isinstance(eye, dict):
+        return None
+    return {k: v for k, v in eye.items() if k in _CUSTOMER_EYE_KEYS}
+
+
 def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
     """Project a prescription to the read-only fields a customer should see.
     Keeps clinical values (SPH/CYL/AXIS/ADD) -- those ARE the customer's own
-    data -- but drops internal optometrist IDs / audit columns."""
+    data -- but drops internal optometrist IDs / audit columns.
+
+    The EYES are projected key-by-key through `_safe_eye_view`, never handed
+    over verbatim: see the note on `_CUSTOMER_EYE_KEYS`."""
     return {
         "prescription_id": rx.get("prescription_id") or rx.get("id"),
         "prescription_number": rx.get("prescription_number"),
         "prescription_date": rx.get("prescription_date"),
         "expiry_date": rx.get("expiry_date"),
         "type": rx.get("type") or rx.get("prescription_type"),
-        "right_eye": rx.get("right_eye") or rx.get("od"),
-        "left_eye": rx.get("left_eye") or rx.get("os"),
+        "right_eye": _safe_eye_view(rx.get("right_eye") or rx.get("od")),
+        "left_eye": _safe_eye_view(rx.get("left_eye") or rx.get("os")),
         "pd": rx.get("pd") or rx.get("pupillary_distance"),
         "add_power": rx.get("add_power") or rx.get("add"),
         "notes": rx.get("remarks") or rx.get("notes"),

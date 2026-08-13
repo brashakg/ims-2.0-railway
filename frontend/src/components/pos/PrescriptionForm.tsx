@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
 import { RxPowerInput } from '../clinical/RxPowerInput';
-import { validateEyePair, type RxEyeValues } from '../../constants/rxLimits';
-import { isAxisMissing, isToricCyl } from '../../utils/rxAxisEntry';
+import { validateEyeDetailed } from '../../constants/rxLimits';
 import { useToast } from '../../context/ToastContext';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
@@ -147,37 +146,43 @@ export function PrescriptionForm({
 
   // Validate the entered powers against the canonical realistic limits before
   // submitting (the backend is the ultimate gate; this gives a fast message).
+  //
   // PATIENT SAFETY: is this eye's ONLY problem "a cylinder with no axis"?
   //
-  // Decided by REMOVING the cylinder and re-validating -- never by inventing a
-  // placeholder axis to satisfy the pairing rule, and never by matching on the
-  // error message text. If the eye is clean once the cylinder is set aside, the
-  // pairing was its only fault and the counter prompt can collect the axis.
-  // Any other fault (out-of-range SPH, bad PD, axis-without-cyl, bad VA) still
-  // fails here, exactly as before.
-  const axisIsTheOnlyProblem = (eye: RxEyeValues, label: string): boolean => {
-    if (!isToricCyl(eye.cyl) || !isAxisMissing(eye.axis)) return false;
-    return validateEyePair({ ...eye, cyl: undefined }, label) === null;
-  };
+  // Answered STRUCTURALLY, by the validator's own error CODE. Not by inventing
+  // a placeholder axis, not by matching the message text, and -- the bug this
+  // replaces -- not by deleting the cylinder and re-validating. That trick
+  // relaxed the cylinder itself: validateEyeDetailed skips `undefined` fields,
+  // so removing CYL removed CYL's own range and step checks with it, and an
+  // un-grindable -8.00 or an off-grid -1.30 opened the counter prompt instead
+  // of being refused. Staff then typed an axis for a cylinder no lab can grind
+  // and met a raw server error -- the stranded sale the prompt exists to stop.
+  //
+  // AXIS_REQUIRED_FOR_CYL is returned only when every single-field check has
+  // already passed (see validateEyeDetailed), so the code alone is the answer.
+  const axisIsTheOnlyProblem = (err: ReturnType<typeof validateEyeDetailed>): boolean =>
+    err?.code === 'AXIS_REQUIRED_FOR_CYL';
 
   const validateBeforeSubmit = (): string | null => {
     if (rxKind === 'SPECTACLE') {
       const odEye = { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
         add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od };
-      const od = validateEyePair(odEye, 'Right eye (OD)');
-      if (od && !(deferAxisPrompt && axisIsTheOnlyProblem(odEye, 'Right eye (OD)'))) return od;
+      const od = validateEyeDetailed(odEye, 'Right eye (OD)');
+      if (od && !(deferAxisPrompt && axisIsTheOnlyProblem(od))) return od.message;
       const osEye = { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
         add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os };
-      const os = validateEyePair(osEye, 'Left eye (OS)');
-      if (os && !(deferAxisPrompt && axisIsTheOnlyProblem(osEye, 'Left eye (OS)'))) return os;
+      const os = validateEyeDetailed(osEye, 'Left eye (OS)');
+      if (os && !(deferAxisPrompt && axisIsTheOnlyProblem(os))) return os.message;
     } else {
       // Contact lens: power/cyl/axis/add + base curve + diameter per eye.
+      // No axis deferral here -- deferAxisPrompt is a POS spectacle path, and
+      // POS hides the CL toggle (allowContactLens=false).
       const check = (eye: CLEyeData | undefined, label: string): string | null =>
-        validateEyePair(
+        validateEyeDetailed(
           { sph: eye?.cl_power, cyl: eye?.cl_cyl, axis: eye?.cl_axis, add: eye?.cl_add,
             base_curve: eye?.base_curve, diameter: eye?.diameter },
           label,
-        );
+        )?.message ?? null;
       const od = check(prescription.cl_right, 'Right eye (OD)');
       if (od) return od;
       const os = check(prescription.cl_left, 'Left eye (OS)');
