@@ -99,10 +99,22 @@ _DEDUPE_TTL_SECONDS = 30 * 24 * 3600
 # subscribed topics, and a checkout-shaped payload was proven to book a real
 # order and consume invoice serial INV/BV-ONLINE-01/26-27/0001.
 
-# Fields only a real Order carries. `name` is included because Orders always
-# have it -- but note a CHECKOUT also carries `name`, which is why the
-# checkout-marker rule below is a separate, earlier test.
-_ORDER_MARKERS = ("order_number", "name", "financial_status", "order_status_url")
+# Fields ONLY a real Order carries. Every entry here must be a field a
+# checkout / draft order can NEVER have -- otherwise the positive test below
+# degrades into "does it look vaguely like an order", and the only thing left
+# standing between a checkout and a booked order is the negative checkout-marker
+# rules, which is exactly the weaker design this test replaced.
+#
+# `name` was in this tuple and has been REMOVED: checkouts and draft orders both
+# carry `name`, so a checkout that happened to lack BOTH checkout markers
+# (no abandoned_checkout_url, no cart_token) passed the positive test on `name`
+# alone and booked a phantom order that burned a GST invoice serial. Nothing on
+# any real-order path depends on `name`: Shopify orders/* webhook bodies always
+# carry order_number + financial_status + order_status_url, and the historical
+# importer selects orders BY financial_status
+# (scripts/import_shopify_order_history.py:36) so it cannot produce a body
+# without one. Do not re-add `name` here.
+_ORDER_MARKERS = ("order_number", "financial_status", "order_status_url")
 
 # Fields that identify an abandoned-checkout payload.
 _CHECKOUT_MARKERS = ("abandoned_checkout_url",)
@@ -136,8 +148,13 @@ def order_payload_refusal(
     if not booking:
         return None
 
-    # 2. Checkout markers. Checked before the order-marker test because a
-    #    checkout also carries `name` and would otherwise pass it.
+    # 2. Checkout markers. These run FIRST only so an obvious checkout gets the
+    #    precise "checkout_payload" reason instead of the generic one. They are
+    #    a diagnosis aid, NOT the thing that stops a checkout being booked --
+    #    rule 3 is. A checkout carrying neither marker still gets refused, and
+    #    that must stay true: these two rules assume cart_token and
+    #    abandoned_checkout_url are always present, and Shopify does not promise
+    #    that.
     if any(payload.get(marker) for marker in _CHECKOUT_MARKERS):
         return "checkout_payload"
     if (
@@ -147,9 +164,10 @@ def order_payload_refusal(
     ):
         return "checkout_payload"
 
-    # 3. Positive assertion: a real order carries at least one order marker.
-    #    This is what catches the repo's own checkout fixture (id + token +
-    #    line_items, no order_number / financial_status / name).
+    # 3. Positive assertion, and the LOAD-BEARING rule: a real order carries at
+    #    least one order marker. This is what catches the repo's own checkout
+    #    fixture (id + token + line_items), a checkout carrying neither checkout
+    #    marker, and a draft order (id + name + line_items, no order_number).
     if not any(payload.get(marker) for marker in _ORDER_MARKERS):
         return "not_order_shaped"
 

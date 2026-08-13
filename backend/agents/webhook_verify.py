@@ -208,9 +208,12 @@ def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
 #      comment overclaimed it: a replay of the same signed bytes is rejected
 #      REGARDLESS OF AGE, BUT ONLY WITHIN ONE SCOPE. The digest mixes in the
 #      scope, so one captured signed body can still be accepted once PER
-#      SCOPE -- up to the size of the closed set below (21 for Shopify: 16
-#      exact topics + 5 family buckets; 1 for every other vendor). It is not
-#      "accepted once, ever".
+#      SCOPE -- up to the size of the closed set below (22 for Shopify: 16
+#      exact topics + 5 family buckets + UNKNOWN_SCOPE, which is a real,
+#      reachable 22nd bucket covering both an ABSENT header and any
+#      unrecognised topic; 1 for every other vendor). Measured: one identical
+#      body yields 22 distinct Shopify fingerprints. It is not "accepted
+#      once, ever".
 #
 #      AND A BOUNDED KEY SPACE IS NOT AUTHENTICATED ROUTING. The topic header
 #      still selects the downstream money handler in NEXUS, and nothing here
@@ -322,8 +325,11 @@ def canonical_scope(vendor: str, raw_scope: Optional[str]) -> str:
     on purpose. Giving "absent" a separate bucket handed an attacker a free
     extra scope for the same signed bytes simply by STRIPPING the header
     (Shiprocket was 2 buckets, not the 1 previously claimed here). Now the
-    closed set is exactly: 16 Shopify topics + 5 family buckets, and 1 bucket
-    for every other vendor.
+    closed set for Shopify is exactly 22: 16 exact topics + 5 family buckets
+    + UNKNOWN_SCOPE. Count UNKNOWN_SCOPE -- it is a real bucket a caller can
+    reach (absent header, or any unrecognised topic), so an earlier "21" here
+    under-stated the key space by one. Every other vendor has exactly 1
+    bucket, UNKNOWN_SCOPE, since none has a published vocabulary.
 
     Pure and total: any input, including None or a 10 KB junk string, yields
     one of the values above.
@@ -568,9 +574,16 @@ def body_fingerprint(vendor: str, raw_body: bytes, scope: str = "") -> str:
     """Content-bound dedupe key over the EXACT bytes the HMAC signed.
 
     This is the load-bearing anti-replay control: a replayed delivery is by
-    definition the same signed bytes, so it produces the same fingerprint
-    and the receiver's unique index rejects it -- for as long as the dedupe
-    store retains the row, and independently of any attacker-mutable header.
+    definition the same signed bytes, so WITHIN ONE SCOPE it produces the
+    same fingerprint and the receiver's unique index rejects it, for as long
+    as the dedupe store retains the row and regardless of the delivery's age.
+
+    NOT "independently of any attacker-mutable header" -- an earlier version
+    of this line said that and it is false. The scope IS derived from an
+    attacker-mutable header (see below), so one captured signed body yields
+    one fingerprint PER SCOPE: 22 of them for Shopify. What the closed
+    allowlist buys is a hard BOUND on that number, not independence from the
+    header.
 
     `scope` should be the vendor's event-TYPE discriminator (Shopify
     `X-Shopify-Topic`, Shiprocket `X-Shiprocket-Event`) so that two

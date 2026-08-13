@@ -52,35 +52,46 @@ from agents import webhook_verify
 # ============================================================================
 
 
-def _doc_matches(doc, filter_):
-    if not filter_:
-        return True
-    for k, expected in filter_.items():
-        actual = doc.get(k)
-        if isinstance(expected, dict):
-            for op, op_val in expected.items():
-                if op == "$exists" and bool(actual is not None) != bool(op_val):
-                    return False
-                if op == "$ne" and actual == op_val:
-                    return False
-                if op == "$in" and actual not in op_val:
-                    return False
-        else:
-            if actual != expected:
-                return False
-    return True
+# The hand-rolled matcher this file used to carry handled $exists/$ne/$in and
+# had NO ELSE BRANCH, so any other operator ($lt, $gt, $regex, $nin, $or) fell
+# through and the document MATCHED -- verbatim the failure mode strict_fakes.py
+# exists to eliminate (a filter that silently becomes a no-op lets a test assert
+# a careful expectation and prove nothing). Reads/writes now go through
+# StrictCollection, which RAISES on any operator it cannot emulate faithfully.
+from tests.strict_fakes import StrictCollection  # noqa: E402
+
+try:  # Prefer the REAL exception prod raises, so the double is not weaker.
+    from pymongo.errors import DuplicateKeyError  # type: ignore[attr-defined]
+except Exception:  # noqa: BLE001 - pymongo optional in some envs
+
+    class DuplicateKeyError(Exception):  # type: ignore[no-redef]
+        """Stand-in for pymongo.errors.DuplicateKeyError (E11000).
+
+        The class NAME matters: webhooks._is_duplicate_key_error does a
+        name-based check first so fakes match without pymongo installed.
+        """
 
 
-class FakeCollection:
-    """Fake with REAL unique-index semantics for the two dedupe keys, so the
-    tests exercise the same guarantee prod gets from Mongo."""
+class FakeCollection(StrictCollection):
+    """StrictCollection PLUS the real unique-index semantics of the three
+    dedupe keys, so the E11000 probes exercise the guarantee prod actually
+    gets from Mongo rather than a decorative one.
 
-    def __init__(self):
-        self.docs: List[Dict[str, Any]] = []
+    Each key mirrors a unique PARTIAL index scoped by vendor: a row with the
+    key absent or empty is not in the index and never collides -- which is
+    exactly why `unverified_fingerprint` being a SEPARATE FIELD (not a filtered
+    read of `body_fingerprint`) is what keeps an unverifiable row out of the
+    authenticated key space.
+    """
+
+    _UNIQUE_KEYS = ("event_id", "body_fingerprint", "unverified_fingerprint")
+
+    def __init__(self, name: str = "collection", docs=None):
+        super().__init__(name=name, docs=docs)
         self.indexes: List[Any] = []
 
     def insert_one(self, doc):
-        for key in ("event_id", "body_fingerprint", "unverified_fingerprint"):
+        for key in self._UNIQUE_KEYS:
             value = doc.get(key)
             if isinstance(value, str) and value:
                 for existing in self.docs:
@@ -88,30 +99,15 @@ class FakeCollection:
                         existing.get("vendor") == doc.get("vendor")
                         and existing.get(key) == value
                     ):
-                        raise type("DuplicateKeyError", (Exception,), {})(
+                        raise DuplicateKeyError(
                             f"E11000 duplicate key error: {key}"
                         )
-        self.docs.append(dict(doc))
+        super().insert_one(doc)
         return type("R", (), {"inserted_id": doc.get("webhook_id")})()
-
-    def find_one(self, filter_=None, projection=None, **kwargs):
-        for d in self.docs:
-            if _doc_matches(d, filter_):
-                return d
-        return None
-
-    def update_one(self, filter_, update, upsert=False):
-        set_block = (update or {}).get("$set", {}) or {}
-        for d in self.docs:
-            if _doc_matches(d, filter_):
-                for k, v in set_block.items():
-                    d[k] = v
-                return type("R", (), {"modified_count": 1, "matched_count": 1})()
-        return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
     def create_index(self, *args, **kwargs):
         self.indexes.append((args, kwargs))
-        return None
+        return "idx"
 
 
 class FakeDB:
@@ -122,7 +118,7 @@ class FakeDB:
 
     def get_collection(self, name):
         if name not in self._collections:
-            self._collections[name] = FakeCollection()
+            self._collections[name] = FakeCollection(name=name)
         return self._collections[name]
 
 
@@ -1134,15 +1130,19 @@ def test_unverifiable_row_does_not_block_the_later_verified_delivery(
     }
 
     # PHASE 1 -- secret not yet configured. The delivery cannot be verified.
+    #
+    # ONLY the precondition is asserted here. The phase-1 FIELD-NAME assertions
+    # (body_fingerprint / unverified_fingerprint) used to sit at this point and
+    # SHADOWED the test: under a regression they failed here, before phases 2
+    # and 3 ran at all, so the assertion that encodes the actual requirement --
+    # that the operator's recovery resend is INGESTED -- was never reached. A
+    # shadowed assertion proves the shape of the code, not the outcome that
+    # matters. Those field assertions now run AFTER phase 3, and
+    # test_unverifiable_row_keeps_its_digest_out_of_the_authenticated_key
+    # pins them on their own.
     phase1 = client.post("/api/v1/webhooks/razorpay", content=body, headers=headers)
     assert phase1.json() == {"status": "skipped", "reason": "secret_not_configured"}
-    rows = fake_db.get_collection("webhook_inbox").docs
-    assert len(rows) == 1
-    assert rows[0]["signature_verified"] is False
-    assert rows[0].get("body_fingerprint") is None, (
-        "an unverifiable row must NOT occupy the authenticated dedupe key"
-    )
-    assert str(rows[0].get("unverified_fingerprint", "")).startswith("sha256:")
+    assert len(fake_db.get_collection("webhook_inbox").docs) == 1
 
     # PHASE 2 -- the operator does exactly what that row exists to prompt.
     integ.insert_one({"type": "razorpay",
@@ -1164,6 +1164,47 @@ def test_unverifiable_row_does_not_block_the_later_verified_delivery(
     assert len(booked) == 1
     assert booked[0]["payload"]["payload"]["payment"]["entity"]["id"] == "pay_live_1"
     assert booked[0]["processed"] is False, "handed to NEXUS, not pre-closed"
+
+    # ONLY NOW the mechanism that makes the above possible: FIELD SEPARATION.
+    # Deliberately last, so it can never shadow the ingestion assertions.
+    skip_row = [r for r in rows if r.get("signature_verified") is False][0]
+    assert skip_row.get("body_fingerprint") is None, (
+        "an unverifiable row must NOT occupy the authenticated dedupe key"
+    )
+    assert str(skip_row.get("unverified_fingerprint", "")).startswith("sha256:")
+
+
+def test_unverifiable_row_keeps_its_digest_out_of_the_authenticated_key(
+    client, monkeypatch
+):
+    """The MECHANISM behind the timeline test above, pinned on its own so the
+    timeline test does not have to assert it early and shadow its own money
+    assertion.
+
+    An unverifiable delivery is recorded under `unverified_fingerprint`, a
+    SEPARATE field with its own unique partial index -- never under
+    `body_fingerprint`. Filtering the READ instead would leave the authenticated
+    unique index able to raise E11000 on the later verified insert, which
+    _is_duplicate_key_error converts into a cheerful 200 'duplicate'.
+    """
+    fake_db = FakeDB()
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+
+    body = b'{"entity":"event","event":"payment.captured","id":"pay_sep_1"}'
+    r = client.post("/api/v1/webhooks/razorpay", content=body, headers={
+        "X-Razorpay-Signature": _hex_sig(body, "not-the-configured-secret"),
+        "content-type": "application/json",
+    })
+    assert r.json() == {"status": "skipped", "reason": "secret_not_configured"}
+
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 1
+    assert rows[0]["signature_verified"] is False
+    assert rows[0].get("body_fingerprint") is None, (
+        "an unverifiable row must NOT occupy the authenticated dedupe key"
+    )
+    assert str(rows[0].get("unverified_fingerprint", "")).startswith("sha256:")
 
 
 def test_unverified_and_verified_fingerprints_use_separate_indexes(
@@ -1611,3 +1652,61 @@ def test_is_replay_still_available_for_legacy_callers():
     old = _iso(datetime.now(timezone.utc) - timedelta(seconds=900))
     assert webhook_verify.is_replay(old, window_seconds=300) is True
     assert webhook_verify.is_replay(_iso(datetime.now(timezone.utc))) is False
+
+
+# ============================================================================
+# The fake itself must not be able to lie
+# ============================================================================
+
+
+class TestTheFakeIsStrict:
+    """This file's fake used to carry a hand-rolled matcher that handled
+    $exists/$ne/$in and had NO ELSE BRANCH -- every other operator fell through
+    and the document MATCHED. A test built on that can assert a careful
+    expectation and prove nothing, because its filter was a silent no-op.
+    These pin that the replacement fails loudly instead, AND that the real
+    unique-index semantics survived the swap."""
+
+    def test_an_unemulated_operator_raises_instead_of_matching_everything(self):
+        from tests.strict_fakes import UnsupportedMongoFeature
+
+        coll = FakeCollection(name="webhook_inbox")
+        coll.insert_one({"vendor": "shopify", "received_at": 100})
+
+        # Under the old matcher this returned the document (filter ignored).
+        with pytest.raises(UnsupportedMongoFeature):
+            coll.find_one({"received_at": {"$regexNotImplemented": "x"}})
+
+    def test_a_real_range_filter_is_actually_evaluated(self):
+        coll = FakeCollection(name="webhook_inbox")
+        coll.insert_one({"vendor": "shopify", "received_at": 100})
+        assert coll.find_one({"received_at": {"$lt": 50}}) is None
+        assert coll.find_one({"received_at": {"$lt": 500}}) is not None
+
+    @pytest.mark.parametrize(
+        "key", ["event_id", "body_fingerprint", "unverified_fingerprint"]
+    )
+    def test_each_dedupe_key_still_enforces_its_unique_index(self, key):
+        coll = FakeCollection(name="webhook_inbox")
+        coll.insert_one({"vendor": "shopify", key: "dup-1"})
+        with pytest.raises(Exception) as exc:
+            coll.insert_one({"vendor": "shopify", key: "dup-1"})
+        assert "E11000" in str(exc.value)
+        # Name-based, because webhooks._is_duplicate_key_error checks the class
+        # NAME first -- a differently-named stand-in would make the router take
+        # its 503 branch and the E11000 probes would stop meaning anything.
+        assert exc.value.__class__.__name__ == "DuplicateKeyError"
+
+    @pytest.mark.parametrize(
+        "key", ["event_id", "body_fingerprint", "unverified_fingerprint"]
+    )
+    def test_the_unique_indexes_are_partial_and_scoped_by_vendor(self, key):
+        coll = FakeCollection(name="webhook_inbox")
+        coll.insert_one({"vendor": "shopify", key: "same"})
+        # A DIFFERENT vendor with the same value does not collide.
+        coll.insert_one({"vendor": "razorpay", key: "same"})
+        # Absent / empty is outside a partial index, so it never collides.
+        coll.insert_one({"vendor": "shopify"})
+        coll.insert_one({"vendor": "shopify", key: ""})
+        coll.insert_one({"vendor": "shopify", key: None})
+        assert len(coll.docs) == 5

@@ -736,6 +736,141 @@ def test_a_real_order_carrying_a_checkout_token_still_books(wired):
     assert res["invoice_number"]
 
 
+# ---------------------------------------------------------------------------
+# `name` IS NOT AN ORDER MARKER (PR #966 round-5 must-fix 1)
+# ---------------------------------------------------------------------------
+# The two tests above pass because their payloads carry a CHECKOUT marker
+# (abandoned_checkout_url / cart_token) -- i.e. via the NEGATIVE rules. `name`
+# was in _ORDER_MARKERS, so a checkout carrying NEITHER checkout marker passed
+# the POSITIVE order-shape test on `name` alone and booked a phantom IMS order
+# under the CHECKOUT id, burning a consecutive GST tax invoice serial in a live
+# filing period. Serials cannot be un-burned.
+#
+# Reachable two ways: (a) checkouts/create + checkouts/update are LIVE subscribed
+# topics, so a captured validly-signed checkout body relabelled via the UNSIGNED
+# X-Shopify-Topic header lands on the order path; (b) with NO attacker at all --
+# online_store_orders.py admits a legacy topicless inbox row on "has line_items
+# AND no order_id", which a stored checkouts/create row satisfies, and the
+# operator's Re-map button then calls map_shopify_order(..., topic="orders/create").
+
+
+def _checkout_without_either_checkout_marker(checkout_id=998899):
+    """The repo's own checkout fixture PLUS `name`, and with BOTH negative
+    checkout markers absent -- no abandoned_checkout_url, no cart_token."""
+    payload = _checkout_payload(checkout_id)
+    payload["name"] = "#%s" % checkout_id
+    payload.pop("abandoned_checkout_url", None)
+    payload.pop("cart_token", None)
+    assert "abandoned_checkout_url" not in payload and "cart_token" not in payload
+    return payload
+
+
+def _draft_order_shape(draft_id=555601):
+    """A Shopify DRAFT order: id + name + line_items, and NO order_number /
+    financial_status / order_status_url. A draft is not a sale."""
+    return {
+        "id": draft_id,
+        "name": "#D%s" % draft_id,
+        "currency": "INR",
+        "total_price": "999.00",
+        "customer": {"id": 42, "first_name": "Asha", "last_name": "R"},
+        "shipping_address": {"province": "20", "province_code": "20"},
+        "line_items": [
+            {"id": 9001, "variant_id": 999001, "sku": "RB-1234", "title": "Aviator",
+             "quantity": 1, "price": "999.00", "total_discount": "0.00"},
+        ],
+        "created_at": "2026-07-22T10:00:00Z",
+    }
+
+
+@pytest.mark.parametrize("builder,payload_id", [
+    (_checkout_without_either_checkout_marker, "998899"),
+    (_draft_order_shape, "555601"),
+])
+def test_name_alone_never_books_an_order_at_the_mapper(wired, builder, payload_id):
+    """MONEY ASSERTION (mapper layer): `name` is not proof of an order. No
+    phantom order, and no GST tax invoice serial burned on one."""
+    before = len(wired["orders"].docs)
+
+    res = online_order_mapper.map_shopify_order(
+        builder(), wired["db"], topic="orders/create"
+    )
+
+    # MONEY ASSERTIONS FIRST, deliberately. If a status/reason assertion ran
+    # first it would shadow these, and a shadowed assertion proves the shape of
+    # the code rather than the outcome that costs money.
+    assert res.get("invoice_number") is None, (
+        "a GST tax invoice serial was burned on a payload that is not an order: %r" % (res,)
+    )
+    assert len(wired["orders"].docs) == before, "no phantom order may be booked"
+    assert not [d for d in wired["orders"].docs
+                if d.get("shopify_order_id") == payload_id]
+    assert res.get("order_id") is None
+    assert res["status"] == "skipped", res
+    assert res["reason"] == "not_order_shaped", res
+
+
+@pytest.mark.parametrize("builder,payload_id", [
+    (_checkout_without_either_checkout_marker, "998899"),
+    (_draft_order_shape, "555601"),
+])
+def test_name_alone_never_books_an_order_at_the_ingest_layer(wired, builder, payload_id):
+    """MONEY ASSERTION (ingest layer): the lower layer must refuse the same
+    shape, because callers reach it without the mapper."""
+    from api.services import shopify_ingest
+
+    before = len(wired["orders"].docs)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], builder(), topic="orders/create"
+    )
+
+    # Money assertions first -- see the note in the mapper-layer test above.
+    assert res.get("invoice_number") is None, (
+        "a GST tax invoice serial was burned on a payload that is not an order: %r" % (res,)
+    )
+    assert len(wired["orders"].docs) == before, "no phantom order may be booked"
+    assert not [d for d in wired["orders"].docs
+                if d.get("shopify_order_id") == payload_id]
+    assert res["status"] == "ignored", res
+    assert res["reason"] == "not_order_shaped", res
+
+
+def test_name_is_not_an_order_marker():
+    """Pins the rule directly, so re-adding `name` to _ORDER_MARKERS as a
+    convenience fails here and names the reason."""
+    from api.services import shopify_ingest
+
+    assert "name" not in shopify_ingest._ORDER_MARKERS, (
+        "checkouts and draft orders both carry `name`; it cannot be a "
+        "positive proof of order shape"
+    )
+
+
+def test_remap_door_refuses_a_stored_checkout_row(wired):
+    """SIBLING CALL SITE, no attacker required. A stored checkouts/create inbox
+    row with no topic header is admitted by the Re-map queue loader ("has
+    line_items AND no order_id"), and Re-map replays it as orders/create. Same
+    classifier, same refusal -- Re-map cannot book it either."""
+    before = len(wired["orders"].docs)
+
+    # Exactly the call online_store_orders.remap_online_order makes at :616
+    # for a legacy topicless row.
+    res = online_order_mapper.map_shopify_order(
+        _checkout_without_either_checkout_marker(998901),
+        wired["db"],
+        webhook_id="wh-remap-1",
+        topic="orders/create",
+    )
+
+    assert res.get("invoice_number") is None, (
+        "Re-map burned a GST tax invoice serial on a stored checkout: %r" % (res,)
+    )
+    assert len(wired["orders"].docs) == before
+    assert res["status"] == "skipped", res
+    assert res["reason"] == "not_order_shaped"
+
+
 def test_status_only_sync_is_not_refused_by_the_shape_guard(wired):
     """A partial orders/updated body carries no line_items and cannot create
     anything, so only the parent-reference rule applies to it -- a status sync

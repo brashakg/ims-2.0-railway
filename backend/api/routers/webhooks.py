@@ -260,13 +260,27 @@ def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:
 #    SCOPED, THOUGH -- and an earlier version of this comment omitted the
 #    qualifier. The fingerprint mixes in the canonical scope, so rejection is
 #    guaranteed WITHIN A SCOPE, not absolutely: one captured signed body can
-#    still be accepted once per scope, bounded by the closed set (21 for
-#    Shopify, 1 elsewhere). That bound caps replay AMPLIFICATION. It does not
+#    still be accepted once per scope, bounded by the closed set (22 for
+#    Shopify -- 16 exact topics + 5 family buckets + UNKNOWN_SCOPE, which
+#    covers both an absent header and any unrecognised topic; 1 elsewhere).
+#    That bound caps replay AMPLIFICATION. It does not
 #    make routing authenticated -- NEXUS still selects the money handler from
 #    the raw unsigned topic header, so a captured body can be relabelled into
 #    a handler it was never meant for. Binding the topic to the signature is
-#    a separate change; the shape guard in online_order_mapper is what stops
-#    the relabel from BOOKING anything.
+#    a separate change.
+#
+#    WHAT THE SHAPE GUARD DOES AND DOES NOT COVER. The shared classifier
+#    (shopify_ingest.order_payload_refusal) stops a relabel in the BOOKING
+#    direction ONLY -- a non-order body cannot be relabelled orders/create and
+#    minted into an IMS order + GST invoice serial. It says nothing about the
+#    DESTRUCTIVE direction, which is still open: nexus routes orders/delete to
+#    shopify_order_delete.handle_shopify_order_delete, which reads the top-level
+#    id with NO shape assertion. A captured, validly-signed orders/create body --
+#    whose top-level id IS a real live order id -- replayed as
+#    X-Shopify-Topic: orders/delete VOIDS that order, and fingerprint dedupe does
+#    not stop it because orders/delete is a DISTINCT canonical scope from the
+#    scope the capture was first seen in. Do not read this paragraph as "the
+#    relabel problem is handled"; only half of it is.
 #
 # Both are receiver-level and additive: shopify_ingest keeps its own
 # order-id + webhook-id idempotency layers untouched.
