@@ -28,6 +28,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .shopify_delete_shape import (
+    KIND_ORDER,
+    delete_payload_refusal,
+    unexpected_delete_keys,
+)
+
 logger = logging.getLogger(__name__)
 
 # The IMS lifecycle status a deleted Shopify order is parked in. VOID is already a
@@ -67,10 +73,37 @@ def handle_shopify_order_delete(
     """
     try:
         payload = payload if isinstance(payload, dict) else {}
-        # The orders/delete payload is just {"id": <order_id>}; there is no
-        # separate order_id field (that is a REFUND-payload shape). Fall back to
-        # order_id defensively for any non-standard sender.
-        shopify_order_id = _norm(payload.get("id")) or _norm(payload.get("order_id"))
+
+        # SHAPE GUARD -- the SAME classifier shopify_customer_delete uses, so the
+        # destructive pair can never drift apart. The Shopify topic comes from the
+        # UNSIGNED X-Shopify-Topic header, so a captured, validly-signed
+        # orders/create body -- whose top-level `id` IS a live order id -- can be
+        # replayed as orders/delete and would void that live order. A genuine
+        # orders/delete body is just {"id": <order_id>}; anything carrying order
+        # CONTENT is a different resource wearing a delete label. We refuse loudly
+        # (a deleted Shopify order left live in IMS is visible and recoverable; a
+        # silently voided live order is not).
+        refusal = delete_payload_refusal(payload, kind=KIND_ORDER)
+        if refusal:
+            logger.warning(
+                "[SHOPIFY_ORDER_DELETE] refusing to void on a non-delete payload: "
+                "reason=%s id=%s unexpected_keys=%s",
+                refusal,
+                payload.get("id"),
+                ",".join(unexpected_delete_keys(payload, kind=KIND_ORDER)) or "-",
+            )
+            return {
+                "status": "skipped",
+                "reason": refusal,
+                "shopify_order_id": _norm(payload.get("id")),
+            }
+
+        # The orders/delete payload is just {"id": <order_id>}. The old
+        # `or payload.get("order_id")` fallback is GONE, deliberately: a top-level
+        # order_id means this is a CHILD resource (refund / fulfillment), which the
+        # guard above now refuses outright -- so the fallback could only ever have
+        # voided a real order off a child payload's parent pointer.
+        shopify_order_id = _norm(payload.get("id"))
         if not shopify_order_id:
             return {"status": "skipped", "reason": "no_order_id"}
         if db is None:
