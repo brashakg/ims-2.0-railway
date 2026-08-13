@@ -9,6 +9,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { payrollApi, grossOf, type SalaryConfig, type PtSlab } from '../../services/api/payroll';
 import { entitiesApi, type Entity } from '../../services/api/entities';
+import { PayrollAccessNotice } from '../../components/hr/PayrollAccessNotice';
+import { isForbiddenError, forbiddenDetail } from '../../utils/errorHandler';
 import { storeApi } from '../../services/api/stores';
 
 interface StoreOption {
@@ -59,6 +61,7 @@ export function SalarySetupPage() {
   const canEdit = roles.includes('ADMIN') || roles.includes('SUPERADMIN');
 
   const [configs, setConfigs] = useState<SalaryConfig[]>([]);
+  const [noAccess, setNoAccess] = useState<string | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [stores, setStores] = useState<StoreOption[]>([]);
   const [ptSlabs, setPtSlabs] = useState<PtSlab[]>([]);
@@ -85,8 +88,17 @@ export function SalarySetupPage() {
       setEntities(ents.entities || []);
       setPtSlabs(pt.pt_slabs || []);
       setStores((st?.stores || st || []) as StoreOption[]);
-    } catch {
-      toast.error('Failed to load salary configs');
+      setNoAccess(null);
+    } catch (e) {
+      setConfigs([]);
+      // Owner ruling 2026-08-09: the salary-config list is ADMIN-only. Without
+      // this branch the page shows "No salary configs yet", which reads as
+      // "payroll was never set up" -- a lie for a manager who simply cannot see it.
+      if (isForbiddenError(e)) {
+        setNoAccess(forbiddenDetail(e, 'Salary setup is restricted to administrators.'));
+      } else {
+        toast.error('Failed to load salary configs');
+      }
     } finally {
       setLoading(false);
     }
@@ -213,6 +225,8 @@ export function SalarySetupPage() {
       <div className="card overflow-x-auto">
         {loading ? (
           <div className="p-6 text-center text-gray-500">Loading…</div>
+        ) : noAccess ? (
+          <PayrollAccessNotice message={noAccess} what="salary setup" />
         ) : configs.length === 0 ? (
           <div className="p-6 text-center text-gray-500">
             No salary configs yet. {canEdit && 'Add one or bulk-import via CSV.'}

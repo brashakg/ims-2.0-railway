@@ -3136,17 +3136,17 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/hr/payroll",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/hr/payroll/generate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/hr/payroll/{payroll_id}/approve",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
@@ -5073,12 +5073,12 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/advances",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/payroll/advances/{advance_id}/settle",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
@@ -5088,12 +5088,24 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/approve",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ["ADMIN"],
     },
+    # OWNER RULING 2026-08-09 ("nobody except admin/superadmin should see anyone
+    # elses salary"), applied 2026-08-10. The AGGREGATE salary routes below --
+    # a whole store's pay, the run register, the statutory exports -- are
+    # ADMIN-only in BOTH layers: the handler enforces it and these rows say so,
+    # rather than leaving the middleware to admit a role the handler then
+    # refuses. SUPERADMIN auto-passes in check_access.
+    #
+    # The PER-EMPLOYEE salary routes (payslip/{id}, config/{id}, advances/{id},
+    # incentive-summary/{id}) deliberately KEEP the manager tier here: a
+    # STORE_MANAGER must get past the middleware to read their OWN payslip, and
+    # payroll._assert_self_or_salary_admin then allows self and refuses everyone
+    # else. Narrowing those rows would break self-service one layer early.
     {
         "method": "GET",
         "path": "/api/v1/payroll/config",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {"method": "POST", "path": "/api/v1/payroll/config", "allowed": ["ADMIN"]},
     {"method": "POST", "path": "/api/v1/payroll/config/bulk", "allowed": ["ADMIN"]},
@@ -5147,27 +5159,27 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/payroll/registers/pf-ecr",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
         "path": "/api/v1/payroll/registers/summary",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/payroll/run",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
         "path": "/api/v1/payroll/run/rows",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
         "path": "/api/v1/payroll/salary-sheet",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",
@@ -5182,17 +5194,17 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/payroll/salary/calculate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN"],
     },
-    {
-        "method": "GET",
-        "path": "/api/v1/payroll/salary/{employee_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-    },
+    # GET /api/v1/payroll/salary/{employee_id} was REMOVED 2026-08-10 with the
+    # route itself (owner decision -- it served raw bank_account_no / pan /
+    # ctc_annual for any employee id). The row must go with the route: the
+    # coverage lock in tests/test_rbac_policy.py checks parity in BOTH
+    # directions, so a stale row for a deleted route fails CI.
     {
         "method": "GET",
         "path": "/api/v1/payroll/tally/salary-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ["ADMIN"],
     },
     # --- /api/v1/portal ---
     {"method": "GET", "path": "/api/v1/portal/rx", "allowed": "PUBLIC"},
