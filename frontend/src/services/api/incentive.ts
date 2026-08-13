@@ -252,7 +252,16 @@ export const incentiveApi = {
     return r.data;
   },
 
-  /** SC Kicker — monthly product-incentive rollup per staff for 'YYYY-MM'. */
+  /**
+   * SC Kicker — monthly product-incentive rollup for 'YYYY-MM'.
+   *
+   * Read `scope` on the response before labelling anything. 'store' = the full
+   * per-staff breakdown, which only ADMIN/SUPERADMIN receive. 'self' = the
+   * signed-in person's own rows, which is what everyone else gets (store
+   * managers included, owner ruling 2026-08-13) — so `total` is THEIR total,
+   * not the store's. `staffId` is honoured only for a 'store'-scope caller;
+   * for anybody else the server narrows it to the caller.
+   */
   getKickerRollup: async (
     ym: string, storeId?: string, staffId?: string,
   ): Promise<KickerRollupResponse> => {

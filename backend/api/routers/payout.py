@@ -717,6 +717,25 @@ async def payroll_feed(
     }
 
 
+def _period_label(doc: Dict) -> str:
+    """'2026-03' for the CSV header, without crashing on a malformed snapshot.
+
+    ROBUSTNESS, NOT A LIVE LEAK OR A LIVE BUG. Every other cell in this export
+    degrades to a blank when a field is missing; ``month`` was the single
+    exception, because ``f"{doc.get('month'):02d}"`` raises TypeError on None and
+    the whole export 500s -- for an ADMIN, on a snapshot that is otherwise fine.
+    Real snapshots always carry an int month (payout.lock validates year/month
+    before create_snapshot), so this was only reachable through a hand-built
+    document; production holds zero payout snapshots today. Fixed anyway because
+    a header cell must never be able to fail an entire money export.
+    """
+    year = doc.get("year")
+    month = doc.get("month")
+    if isinstance(month, int) and not isinstance(month, bool):
+        return f"{year}-{month:02d}"
+    return f"{year}-{month}" if month is not None else str(year or "")
+
+
 @router.get("/export/{snapshot_id}.csv")
 async def export_csv(
     snapshot_id: str,
@@ -744,7 +763,7 @@ async def export_csv(
     w.writerow(
         [
             f"Store: {doc.get('store_id')}",
-            f"Period: {doc.get('year')}-{doc.get('month'):02d}",
+            f"Period: {_period_label(doc)}",
             f"Status: {doc.get('status')}",
         ]
     )

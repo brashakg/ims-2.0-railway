@@ -26,6 +26,7 @@ on a shared CI database. No emoji (Windows cp1252).
 
 from __future__ import annotations
 
+import copy
 import itertools
 import os
 import sys
@@ -728,3 +729,324 @@ def test_every_router_reads_the_same_salary_role_tuple():
     for session in (None, {}, {"roles": []}, {"roles": ["ACCOUNTANT"]}):
         assert is_salary_admin(session) is False
     assert is_salary_admin({"activeRole": "ADMIN"}) is True
+
+
+# ===========================================================================
+# 8. The residual: `expenses` category is FREE TEXT (owner ruling extension,
+#    2026-08-13). #984 reasoned that total_expenses is payroll-EXCLUSIVE, and
+#    that is correct for the AUTOMATED payroll run -- it writes the `payroll`
+#    collection and never `expenses`. But a PERSON can type anything into the
+#    category box, and services/survival_cashflow.py already lists
+#    "salary"/"payroll" among its expense heads, so the shape is anticipated in
+#    this codebase rather than hypothetical. Booked that way, the wage bill
+#    reached a store manager verbatim, by head and by amount.
+# ===========================================================================
+
+SALARY_HEAD_AMOUNT = 33333.0     # distinct from SOLO_CTC and SOLO_EXPENSES
+INNOCENT_HEAD_AMOUNT = 4100.0
+
+_SALARY_SHAPED_EXPENSES = [
+    {
+        "expense_id": "ZZ-E-RENT",
+        "store_id": SOLO_STORE,
+        "category": "RENT",
+        "amount": SOLO_EXPENSES,
+        "status": "APPROVED",
+        "expense_date": "2026-03-15",
+    },
+    {
+        "expense_id": "ZZ-E-SAL",
+        "store_id": SOLO_STORE,
+        # Deliberately awkward casing/punctuation/whitespace: the match is on a
+        # NORMALISED head, so this must be caught exactly like a plain "Salary".
+        "category": "  Salaries & Wages ",
+        "amount": SALARY_HEAD_AMOUNT,
+        "status": "APPROVED",
+        "expense_date": "2026-03-20",
+    },
+    {
+        "expense_id": "ZZ-E-INNOCENT",
+        "store_id": SOLO_STORE,
+        # NOT pay: money recovered FROM staff. A substring or fuzzy match would
+        # eat this and quietly corrupt the manager's operating-cost panel -- a
+        # worse failure than the one the deny-set prevents.
+        "category": "Salary advance recovery",
+        "amount": INNOCENT_HEAD_AMOUNT,
+        "status": "APPROVED",
+        "expense_date": "2026-03-21",
+    },
+]
+
+
+class _SalaryExpenseDB(_FakeDB):
+    _MAP = {
+        "orders": _ORDERS,
+        "expenses": _SALARY_SHAPED_EXPENSES,
+        "payroll": [],          # nobody has run payroll; this is the mis-booking
+    }
+
+
+@pytest.fixture
+def finance_db_with_salary_expense(monkeypatch):
+    monkeypatch.setattr(finance, "_get_db", lambda: _SalaryExpenseDB())
+    monkeypatch.setattr(finance, "_cost_by_product", lambda _db: {"ZZ-P1": SOLO_COGS})
+    monkeypatch.setattr(finance, "_store_maps", lambda db: ({SOLO_STORE: "ENT1"}, {}))
+    monkeypatch.setattr(finance, "_store_name_map", lambda db: {SOLO_STORE: "Solo Store"})
+
+
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+def test_an_admin_still_sees_a_salary_expense_broken_out(
+    finance_db_with_salary_expense, role
+):
+    """POSITIVE CONTROL. The books must still show what was actually booked --
+    an admin who cannot see the head cannot correct the mis-posting."""
+    body = _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS).json()
+    assert body["expenses"]["  Salaries & Wages "] == SALARY_HEAD_AMOUNT
+    assert body["total_expenses"] == (
+        SOLO_EXPENSES + SALARY_HEAD_AMOUNT + INNOCENT_HEAD_AMOUNT
+    )
+    assert "expenses_partially_restricted" not in body
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_a_salary_shaped_expense_head_is_withheld_below_admin(
+    finance_db_with_salary_expense, role
+):
+    """THE REQUIREMENT. Somebody typed "Salaries & Wages" into the category box;
+    that is pay, whatever collection it landed in."""
+    r = _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS)
+    assert r.status_code == 200, r.text
+    assert "Salaries" not in r.text, f"{role} received the salary expense head"
+    assert str(SALARY_HEAD_AMOUNT) not in r.text
+    assert str(int(SALARY_HEAD_AMOUNT)) not in r.text
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_withheld_head_is_also_out_of_total_expenses(
+    finance_db_with_salary_expense, role
+):
+    """Dropping the LINE while leaving the TOTAL is the fix that looks right and
+    is not: total_expenses minus the heads still shown is the head removed. That
+    is the aggregate-of-one arithmetic this whole file exists to close, and it is
+    why the fix does not merely re-label the head as "Other"."""
+    body = _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS).json()
+    assert body["total_expenses"] == SOLO_EXPENSES + INNOCENT_HEAD_AMOUNT
+    # The panel still adds up, so it reads as a smaller pay-free panel rather
+    # than a broken one.
+    assert round(sum(body["expenses"].values()), 2) == body["total_expenses"]
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_reader_is_told_their_expense_panel_is_incomplete(
+    finance_db_with_salary_expense, role
+):
+    """A short total that pretends to be the whole truth is its own defect
+    (the "honest error states" rule). A flag, never a figure."""
+    body = _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS).json()
+    assert body["expenses_partially_restricted"] is True
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_an_innocent_head_that_merely_mentions_salary_survives(
+    finance_db_with_salary_expense, role
+):
+    """GUARD AGAINST OVER-REACH, which is the failure mode of a deny-list.
+    "Salary advance recovery" is money coming back FROM staff, not pay going
+    out. If this fails, somebody widened the match to a substring and started
+    silently deleting real operating costs from the manager's panel."""
+    body = _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS).json()
+    assert body["expenses"]["Salary advance recovery"] == INNOCENT_HEAD_AMOUNT
+    assert body["expenses"]["RENT"] == SOLO_EXPENSES
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_salary_expense_is_not_recoverable_by_arithmetic(
+    finance_db_with_salary_expense, role
+):
+    """Same attack as the wage-bill test above, aimed at the mis-booked head."""
+    numbers = _numeric_leaves(
+        _finance_client(role).get("/api/v1/finance/pnl" + _PNL_QS).json()
+    )
+    for size in (1, 2, 3):
+        for combo in itertools.combinations(numbers, size):
+            for signs in itertools.product((1, -1), repeat=size):
+                total = sum(sign * value for sign, (_, value) in zip(signs, combo))
+                if abs(abs(total) - SALARY_HEAD_AMOUNT) < 0.005:
+                    terms = " ".join(
+                        f"{'+' if sign > 0 else '-'}{name}({value})"
+                        for sign, (name, value) in zip(signs, combo)
+                    )
+                    pytest.fail(
+                        f"{role}: the mis-booked salary {SALARY_HEAD_AMOUNT} is "
+                        f"recoverable as {terms}"
+                    )
+
+
+def test_nothing_changes_when_no_expense_is_payroll_shaped(finance_db):
+    """The ordinary case -- RENT only -- must be exactly what it was, or this
+    fix has quietly narrowed every store manager's cost panel."""
+    body = _finance_client("STORE_MANAGER").get("/api/v1/finance/pnl" + _PNL_QS).json()
+    assert body["expenses"] == {"RENT": SOLO_EXPENSES}
+    assert body["total_expenses"] == SOLO_EXPENSES
+    assert "expenses_partially_restricted" not in body
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "Salary",
+        "SALARY",
+        "  salary  ",
+        "Staff Wages",
+        "staff-wages",
+        "Payroll",
+        "Salaries and Wages",
+        "EPF Contribution",
+        "ESIC",
+        "Gratuity",
+        "Staff Incentives",
+    ],
+)
+def test_the_heads_a_person_actually_reaches_for_are_matched(head):
+    """Unit-level, on the real helper -- the endpoint tests above prove the
+    helper is WIRED IN, this proves the list is worth having."""
+    assert finance._is_payroll_shaped_expense(head) is True
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "RENT",
+        "Electricity",
+        "Salary advance recovery",
+        "Commission to broker",
+        "Marketing",
+        "",
+        None,
+        123,
+    ],
+)
+def test_ordinary_heads_are_left_alone(head):
+    """The limit of the deny-set, asserted rather than only claimed: this is an
+    EXACT match on a normalised head, so "Sal Mar-26" or "Ramesh payment" would
+    sail through. That limit is documented at the deny-set itself."""
+    assert finance._is_payroll_shaped_expense(head) is False
+
+
+# ===========================================================================
+# 9. THE TWIN. GET /api/v1/finance/budget feeds the Budgets tab of the same
+#    FinanceDashboard whose P&L tab section 8 just closed, and it carries the
+#    salaries head from the SAME free-text expenses collection -- plus the
+#    PLANNED wage bill, which nothing before this PR touched. Fixing one tab
+#    and not the one next to it is the failure this repo keeps repeating.
+# ===========================================================================
+
+PLANNED_SALARIES = 41000.0
+ACTUAL_SALARIES = 37500.0
+PLANNED_RENT = 26000.0
+
+_BUDGET_DOC = {
+    "month": 3,
+    "year": 2026,
+    "mode": "full",
+    "categories": {
+        "rent": {"budget": PLANNED_RENT, "actual": 0},
+        "salaries": {"budget": PLANNED_SALARIES, "actual": 0},
+        "utilities": {"budget": 9000.0, "actual": 0},
+    },
+}
+
+_BUDGET_EXPENSES = [
+    {
+        "expense_id": "ZZ-B-RENT",
+        "store_id": SOLO_STORE,
+        "category": "rent",
+        "amount": PLANNED_RENT,
+        "status": "APPROVED",
+        "expense_date": "2026-03-05",
+    },
+    {
+        "expense_id": "ZZ-B-SAL",
+        "store_id": SOLO_STORE,
+        "category": "Salaries",
+        "amount": ACTUAL_SALARIES,
+        "status": "APPROVED",
+        "expense_date": "2026-03-06",
+    },
+]
+
+
+class _BudgetCol(_Col):
+    def find_one(self, query=None, projection=None, *a, **k):
+        # DEEP copy, deliberately. A shallow dict() shares the nested
+        # `categories` object between calls, so the first request's strip
+        # mutates the fixture and every later request sees a head that was
+        # never there -- the tests then pass for the wrong reason. Caught by
+        # the flag assertion below failing while the head assertions "passed".
+        return copy.deepcopy(_BUDGET_DOC)
+
+
+class _BudgetDB(_FakeDB):
+    def get_collection(self, name):
+        if name == "budgets":
+            return _BudgetCol([])
+        if name == "expenses":
+            return _Col(_BUDGET_EXPENSES)
+        return _Col([])
+
+
+@pytest.fixture
+def budget_db(monkeypatch):
+    monkeypatch.setattr(finance, "_get_db", lambda: _BudgetDB())
+
+
+def _budget(role):
+    return _finance_client(role).get("/api/v1/finance/budget?month=3&year=2026")
+
+
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+def test_an_admin_still_sees_the_salaries_budget_line(budget_db, role):
+    """POSITIVE CONTROL. Planning the wage bill is an admin job and the screen
+    that does it must keep working."""
+    cats = _budget(role).json()["categories"]
+    assert cats["salaries"]["budget"] == PLANNED_SALARIES
+    assert cats["salaries"]["actual"] == ACTUAL_SALARIES
+    assert cats["rent"]["budget"] == PLANNED_RENT
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_salaries_budget_line_is_withheld_below_admin(budget_db, role):
+    """THE REQUIREMENT. BOTH numbers go: `actual` is the same expense figure
+    /pnl now withholds, and `budget` is the PLANNED wage bill, which in a 1-5
+    person store is an individual's pay to within a rounding."""
+    r = _budget(role)
+    assert r.status_code == 200, r.text
+    assert "salaries" not in r.json()["categories"], f"{role} kept the head"
+    assert str(PLANNED_SALARIES) not in r.text
+    assert str(int(PLANNED_SALARIES)) not in r.text
+    assert str(ACTUAL_SALARIES) not in r.text
+    assert str(int(ACTUAL_SALARIES)) not in r.text
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_rest_of_the_budget_table_survives(budget_db, role):
+    """Guard against over-stripping: the manager keeps every non-pay head, so
+    the Budgets tab is narrower, not blank."""
+    cats = _budget(role).json()["categories"]
+    assert cats["rent"]["budget"] == PLANNED_RENT
+    assert cats["rent"]["actual"] == PLANNED_RENT
+    assert "utilities" in cats
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_the_budget_reader_is_told_a_head_was_withheld(budget_db, role):
+    body = _budget(role).json()
+    assert body["categories_partially_restricted"] is True
+
+
+def test_the_budget_policy_row_still_admits_the_manager_tier():
+    """The FIGURE is gated, not the route -- a store manager still plans rent,
+    utilities and marketing. Recorded so a later tidy-up does not close the
+    screen instead."""
+    allowed = _allowed("GET", "/api/v1/finance/budget")
+    assert {"STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"} <= set(allowed)

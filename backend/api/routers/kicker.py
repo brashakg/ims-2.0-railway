@@ -13,7 +13,37 @@ Mounted at /api/v1/incentive/kicker.
 
   POST /product-sale     log a kicker (manual by manager / sales staff own;
                          POS auto-attach is feature-flagged, off by default)
-  GET  /{ym}             monthly rollup per staff (own-only for sales staff)
+  GET  /{ym}             monthly rollup -- OWN ROW ONLY unless ADMIN/SUPERADMIN
+
+WHO MAY READ SOMEBODY ELSE'S KICKER (owner ruling, answered 2026-08-13)
+-----------------------------------------------------------------------
+The owner was offered self-only / admins-only / leave-open and chose SELF-ONLY:
+a store manager sees their OWN incentive but not a colleague's. He accepted the
+cost -- his managers can no longer check the incentive figure on a sale they
+personally entered, and will ask him instead.
+
+A kicker is rupees paid to a named person, i.e. an earning line on that person's
+payslip, so it answers to the ONE definition in services/salary_visibility --
+NOT to a role tuple private to this file. Reading and writing are now two
+different rules and must not be confused:
+
+  * READ  (GET /{ym})        -> is_salary_admin, else forced to the caller's
+                                own staff_id. This is the same branch sales
+                                staff have always taken; there is no second
+                                redaction rule to keep in step with the first.
+  * WRITE (POST /product-sale)-> _LOG_FOR_OTHERS_ROLES. A manager still logs a
+                                kicker for their staff: that is how the sale
+                                gets recorded, and the response only echoes the
+                                amount the manager just typed, so it tells them
+                                nothing they did not already supply.
+
+THE GRAND TOTAL GOES WITH THE ROWS. `total` is a sum over the store's 1-5
+people; a manager who knows their own row subtracts it and, in a two-person
+store, has the other person exactly. Because the redaction happens by narrowing
+the QUERY (not by filtering the assembled rows), every aggregate below is built
+from the caller's own entries only -- there is no team-level number left in the
+response to subtract from. Any team-level figure added here later must be
+gated on the same call, not merely removed from `items`.
 
 No emoji (Windows cp1252).
 """
@@ -31,6 +61,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..dependencies import get_audit_repository, get_db, get_user_repository
+from ..services.salary_visibility import is_salary_admin
 
 from database.repositories.product_incentive_log_repository import (
     ProductIncentiveLogRepository,
@@ -42,7 +73,10 @@ router = APIRouter()
 
 _GLOBAL_ROLES = {"SUPERADMIN", "ADMIN"}
 _STORE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
-_MANAGER_ROLES = _GLOBAL_ROLES | _STORE_ROLES | {"ACCOUNTANT"}
+# WRITE-side only: who may log a kicker on behalf of another staff member.
+# Renamed from _MANAGER_ROLES so nobody re-uses it as a READ gate again -- the
+# read rule is services/salary_visibility.is_salary_admin and nothing else.
+_LOG_FOR_OTHERS_ROLES = _GLOBAL_ROLES | _STORE_ROLES | {"ACCOUNTANT"}
 _SALES_ROLES = {"SALES_STAFF", "SALES_CASHIER", "CASHIER"}
 _YM_RE = re.compile(r"^\d{4}-\d{2}$")
 
@@ -154,7 +188,7 @@ async def log_product_sale(
     roles = _user_role_set(current_user)
     store = _resolve_store(current_user, store_id)
 
-    if not (roles & _MANAGER_ROLES):
+    if not (roles & _LOG_FOR_OTHERS_ROLES):
         # Sales staff: own entries only.
         if current_user.get("user_id") != payload.staff_id:
             raise HTTPException(
@@ -221,20 +255,43 @@ async def kicker_rollup(
     store_id: Optional[str] = Query(None),
     staff_id: Optional[str] = Query(None),
 ):
-    """Monthly product-incentive rollup per staff for 'YYYY-MM'. Sales staff
-    see only their own; managers/admin/accountant see all."""
+    """Monthly product-incentive rollup for 'YYYY-MM'.
+
+    ADMIN/SUPERADMIN get the full per-staff breakdown and the store total.
+    EVERYONE ELSE -- including STORE_MANAGER, AREA_MANAGER and ACCOUNTANT --
+    gets their own row only, and every total in the body is therefore their own
+    number (owner ruling 2026-08-13, self-only). A `staff_id` naming somebody
+    else is silently narrowed to the caller rather than refused, which is what
+    sales staff have always experienced on this route.
+    """
     if not _YM_RE.match(ym or ""):
         raise HTTPException(status_code=400, detail="ym must be YYYY-MM")
-    roles = _user_role_set(current_user)
     store = _resolve_store(current_user, store_id)
 
-    if not (roles & _MANAGER_ROLES):
-        # Sales staff: force own-only.
+    self_only = not is_salary_admin(current_user)
+    if self_only:
         staff_id = current_user.get("user_id")
+        # FAIL CLOSED. list_for_ym treats a falsy staff_id as "no filter", so a
+        # session we cannot identify would otherwise be handed the WHOLE store's
+        # rollup by the very branch meant to restrict it. Refuse instead of
+        # showing a zero, which would read as "you earned nothing this month".
+        if not staff_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "We could not tell which staff account you are signed in "
+                    "as, so we cannot show your incentive. Please sign in "
+                    "again, or ask an administrator."
+                ),
+            )
 
+    scope = "self" if self_only else "store"
     repo = _kicker_repo()
     if repo is None:
-        return {"store_id": store, "ym": ym, "items": [], "total": 0.0}
+        return {
+            "store_id": store, "ym": ym, "items": [], "total": 0.0,
+            "scope": scope,
+        }
 
     entries = repo.list_for_ym(store, ym, staff_id=staff_id)
     by_staff: Dict[str, Dict] = {}
@@ -258,5 +315,15 @@ async def kicker_rollup(
 
     items: List[Dict] = list(by_staff.values())
     items.sort(key=lambda s: -float(s.get("total_rupees") or 0.0))
+    # Sums the rows ABOVE, which for a self-only reader are their own rows -- so
+    # this is the reader's own total, never the team's. See the module docstring.
     grand = round(sum(float(s["total_rupees"]) for s in items), 2)
-    return {"store_id": store, "ym": ym, "items": items, "total": grand}
+    return {
+        "store_id": store,
+        "ym": ym,
+        "items": items,
+        "total": grand,
+        # Honest label so the screen can say "your own incentive" instead of
+        # implying it is showing the whole store. Carries no rupee figure.
+        "scope": scope,
+    }

@@ -4,6 +4,7 @@ import calendar
 import csv
 import io
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, date
 from ..utils.ist import (
@@ -755,6 +756,91 @@ PAYROLL_DERIVED_PNL_FIELDS = (
     "net_margin",
 )
 
+# 3. The one hole in "the `expenses` dict is payroll-EXCLUSIVE" above: `category`
+#    is FREE TEXT typed by whoever books the expense. The automated payroll run
+#    genuinely never writes here -- but a person can, and if anybody books
+#    "Salary" or "Staff wages" as an ordinary expense it reaches a store manager
+#    verbatim, by head and by amount. services/survival_cashflow.py already lists
+#    "salary"/"payroll" among its expense heads, so this shape is anticipated in
+#    this codebase, not hypothetical.
+#
+#    WHAT THIS COVERS, EXACTLY: a category whose NORMALISED form (lower-cased,
+#    punctuation folded to spaces, runs of whitespace collapsed -- see
+#    _normalise_expense_category) is one of the strings below. So "Salary",
+#    " SALARY ", "Salaries & Wages" and "staff-wages" are all caught.
+#
+#    WHAT IT DOES NOT COVER, and cannot: free text is free. "Sal Mar-26",
+#    "Ramesh payment", "Staff", a misspelling, a Hindi or transliterated head, or
+#    whatever head somebody invents next month all sail through. An exact-match
+#    list is still worth having because it catches the heads a person actually
+#    reaches for, and because the alternative -- substring or fuzzy matching --
+#    would silently swallow innocent heads ("commission to broker", "salary
+#    advance recovery" from a customer) and quietly corrupt the manager's
+#    operating-cost panel, which is a worse failure than the one it prevents.
+#    The durable fix is a controlled expense-category list; this is the cheap
+#    guard until that exists.
+PAYROLL_SHAPED_EXPENSE_CATEGORIES = frozenset(
+    {
+        "salary",
+        "salaries",
+        "salary wages",
+        "salaries wages",
+        "salary and wages",
+        "salaries and wages",
+        "wage",
+        "wages",
+        "staff salary",
+        "staff salaries",
+        "staff wage",
+        "staff wages",
+        "staff cost",
+        "staff costs",
+        "staff pay",
+        "employee salary",
+        "employee salaries",
+        "employee cost",
+        "employee costs",
+        "payroll",
+        "payroll cost",
+        "payroll costs",
+        "payroll expense",
+        "payroll expenses",
+        "remuneration",
+        "staff remuneration",
+        "staff incentive",
+        "staff incentives",
+        "staff bonus",
+        "employee bonus",
+        "staff commission",
+        "gratuity",
+        "pf",
+        "epf",
+        "pf contribution",
+        "epf contribution",
+        "employer pf",
+        "esi",
+        "esic",
+        "esi contribution",
+        "esic contribution",
+    }
+)
+
+
+def _normalise_expense_category(category) -> str:
+    """Lower-case, fold punctuation to spaces, collapse whitespace.
+
+    "Salaries & Wages" -> "salaries wages"; "  STAFF-SALARY " -> "staff salary".
+    A non-string (None, a number) normalises to "" and therefore never matches.
+    """
+    text = str(category or "").lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _is_payroll_shaped_expense(category) -> bool:
+    """Whether this free-text expense head means 'this is somebody's pay'."""
+    return _normalise_expense_category(category) in PAYROLL_SHAPED_EXPENSE_CATEGORIES
+
 
 @router.get("/pnl")
 async def get_pnl(
@@ -893,6 +979,40 @@ async def get_pnl(
     if not is_salary_admin(current_user):
         for _f in PAYROLL_DERIVED_PNL_FIELDS:
             pnl.pop(_f, None)
+        # Same gate, same reason: an expense head somebody TYPED as "Salary" is
+        # pay, whatever collection it landed in. Remove the head AND its
+        # contribution to total_expenses.
+        #
+        # WHY NOT BUCKET IT INTO "Other", which is the obvious move: renaming a
+        # head does not hide the amount. An "Other" bucket built from the
+        # payroll-shaped heads alone IS the wage bill under a new label, and even
+        # if it were merged into a real "Other" head, the reader subtracts the
+        # named heads from total_expenses and has it back. That is precisely the
+        # aggregate-of-one arithmetic PR #984 exists to close, so this drops the
+        # figure out of the body entirely instead.
+        #
+        # sum(expenses.values()) + je_expense_adjustment == total_expenses still
+        # holds afterwards, so the manager's operating-cost panel stays
+        # internally consistent -- it is simply a smaller, pay-free panel.
+        _restricted = {
+            head: amount
+            for head, amount in (pnl.get("expenses") or {}).items()
+            if _is_payroll_shaped_expense(head)
+        }
+        if _restricted:
+            pnl["expenses"] = {
+                head: amount
+                for head, amount in pnl["expenses"].items()
+                if head not in _restricted
+            }
+            pnl["total_expenses"] = round(
+                float(pnl.get("total_expenses") or 0.0)
+                - sum(float(v or 0.0) for v in _restricted.values()),
+                2,
+            )
+            # Tell the reader their panel is incomplete rather than letting a
+            # short total read as the truth. A flag, never a figure.
+            pnl["expenses_partially_restricted"] = True
     return pnl
 
 
@@ -2264,6 +2384,23 @@ async def get_budget(
                 "month-to-date revenue, not the requested historical period."
             )
 
+    # THE TWIN OF THE /pnl EXPENSE STRIP ABOVE, and the reason it is here rather
+    # than in a later ticket: the Budgets tab of FinanceDashboard renders this
+    # response beside the P&L tab that /pnl feeds. Closing "Salary" on one tab
+    # while the tab next to it shows the same rupees under `categories.salaries`
+    # would be the rule applied in one place and not its twin -- the failure this
+    # codebase keeps repeating.
+    #
+    # BOTH numbers go, not just the actual: `budget` is the PLANNED wage bill for
+    # the month, which in a 1-5 person store is an individual's pay to within a
+    # rounding, and `actual` is the same expense figure /pnl now withholds.
+    if not is_salary_admin(current_user):
+        _cats = budget.get("categories") or {}
+        _dropped = [c for c in list(_cats) if _is_payroll_shaped_expense(c)]
+        for _c in _dropped:
+            _cats.pop(_c, None)
+        if _dropped:
+            budget["categories_partially_restricted"] = True
     return budget
 
 

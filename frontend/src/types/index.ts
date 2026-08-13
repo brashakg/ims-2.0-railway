@@ -1018,6 +1018,14 @@ export interface KickerEntry {
 export interface KickerRollupResponse {
   store_id: string;
   ym: string;
+  /**
+   * Whose numbers this body describes. 'store' = the full per-staff breakdown
+   * (ADMIN/SUPERADMIN only). 'self' = the signed-in person's own rows, which is
+   * what everyone else gets, including store managers -- so `total` below is
+   * THEIR total, not the store's. Label any screen accordingly rather than
+   * captioning it "store incentive".
+   */
+  scope?: 'self' | 'store';
   total: number;
   items: Array<{
     staff_id: string;

@@ -3209,10 +3209,19 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/incentive/kicker/product-sale",
         "allowed": "AUTHENTICATED",
     },
+    # SELF-ONLY BELOW ADMIN (owner ruling 2026-08-13), which is a data condition
+    # this table cannot express -- see the CAVEATS note in the module docstring.
+    # The ROUTE stays open to every authenticated user ON PURPOSE: the owner kept
+    # each person's view of their OWN incentive, so closing the route to
+    # ADMIN/SUPERADMIN would delete the sales-staff self-view he asked to keep.
+    # What is gated is the FIGURE, inside routers/kicker.py: anyone who is not
+    # is_salary_admin has `staff_id` forced to their own, so items AND every
+    # total are their own numbers. Do not "tidy" this row to a role list.
     {
         "method": "GET",
         "path": "/api/v1/incentive/kicker/{ym}",
         "allowed": "AUTHENTICATED",
+        "store_scoped": True,
     },
     {
         "method": "GET",
