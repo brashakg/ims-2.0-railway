@@ -15,6 +15,7 @@ import type { Prescription, Patient } from '../../types';
 import { prescriptionApi } from '../../services/api';
 import { mapRx } from '../../services/api/sales';
 import { handoffsApi, type ClinicalHandover } from '../../services/api/handoffs';
+import { hasRecordedPower, formatPowerOrDash } from '../../utils/rxPowerValue';
 
 interface FamilyMember {
   patient_id: string | null;
@@ -102,10 +103,13 @@ export function PrescriptionSelectModal({
     }
   };
 
-  const formatPower = (value: number | null | undefined) => {
-    if (value === null || value === undefined) return '-';
-    return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
-  };
+  // Powers render through the shared `formatPowerOrDash` / `hasRecordedPower`
+  // pair, NOT a local copy. The copy that used to live here took
+  // `number | null | undefined` and called `.toFixed` on it directly, so any
+  // row whose powers arrive as STRINGS (which is how the backend stores them --
+  // clinical._power_for_storage writes str(), and sales._rxStr re-stringifies)
+  // threw `value.toFixed is not a function` and blanked this whole modal.
+  const formatPower = formatPowerOrDash;
 
   // The /family payload already annotates each Rx with expiry_date + is_valid
   // (mapRx preserves them as snake_case). Prefer those; fall back to the
@@ -353,7 +357,11 @@ export function PrescriptionSelectModal({
                               <span className="text-gray-500 text-xs">AXIS</span>
                               <p className="font-medium">{rightEye.axis || '-'}</p>
                             </div>
-                            {rightEye.add && (
+                            {/* NEVER `{rightEye.add && (`: a recorded ADD of 0
+                                is a finding the optician must see, and `0 &&`
+                                both hides the cell AND renders a bare "0" here,
+                                which reads as part of the AXIS above it. */}
+                            {hasRecordedPower(rightEye.add) && (
                               <div>
                                 <span className="text-gray-500 text-xs">ADD</span>
                                 <p className="font-medium">{formatPower(rightEye.add)}</p>
@@ -378,7 +386,8 @@ export function PrescriptionSelectModal({
                               <span className="text-gray-500 text-xs">AXIS</span>
                               <p className="font-medium">{leftEye.axis || '-'}</p>
                             </div>
-                            {leftEye.add && (
+                            {/* Same rule on the LEFT eye -- see the note above. */}
+                            {hasRecordedPower(leftEye.add) && (
                               <div>
                                 <span className="text-gray-500 text-xs">ADD</span>
                                 <p className="font-medium">{formatPower(leftEye.add)}</p>
