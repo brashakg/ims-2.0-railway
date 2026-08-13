@@ -8,9 +8,11 @@ WITHOUT hard-deleting the record or the PII-linked sales/GST history, which IMS
 is legally required to retain for tax + returns.
 
 CONTRACT:
-  * Match the IMS customer by shopify_customer_id (the payload is essentially
-    {"id": <customer_id>, ...}). NOT found -> log + no-op (nothing to erase;
-    fail-soft, never crash the NEXUS drain loop).
+  * Match the IMS customer by shopify_customer_id. Shopify's documented
+    customers/delete body is near-empty -- {"id", "tax_exemptions",
+    "admin_graphql_api_id"} -- and shopify_delete_shape refuses anything richer.
+    NOT found -> log + no-op (nothing to erase; fail-soft, never crash the NEXUS
+    drain loop).
   * $set shopify_erasure_requested=True + shopify_erasure_requested_at. We do NOT
     null out PII here and NEVER delete the customer doc or its order history --
     the flag records erasure INTENT for the scrub job / the compliance surface.
@@ -26,6 +28,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+from .shopify_delete_shape import (
+    KIND_CUSTOMER,
+    delete_payload_refusal,
+    unexpected_delete_keys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +70,35 @@ def handle_shopify_customer_delete(
     """
     try:
         payload = payload if isinstance(payload, dict) else {}
-        shopify_customer_id = _norm(payload.get("id")) or _norm(
-            payload.get("customer_id")
-        )
+
+        # SHAPE GUARD -- the SAME classifier shopify_order_delete uses, so the
+        # destructive pair can never drift apart. The Shopify topic comes from the
+        # UNSIGNED X-Shopify-Topic header, so a captured, validly-signed
+        # customers/create body -- whose top-level `id` IS a live customer id --
+        # can be replayed as customers/delete and would flag that real buyer for
+        # data erasure. Shopify's DOCUMENTED customers/delete body is near-empty
+        # -- {"id", "tax_exemptions", "admin_graphql_api_id"} -- so anything
+        # carrying customer CONTENT is a different resource wearing a delete
+        # label. Refusing loudly is the recoverable direction.
+        refusal = delete_payload_refusal(payload, kind=KIND_CUSTOMER)
+        if refusal:
+            logger.warning(
+                "[SHOPIFY_CUSTOMER_DELETE] refusing to flag erasure on a non-delete "
+                "payload: reason=%s id=%s unexpected_keys=%s",
+                refusal,
+                payload.get("id"),
+                ",".join(unexpected_delete_keys(payload, kind=KIND_CUSTOMER)) or "-",
+            )
+            return {
+                "status": "skipped",
+                "reason": refusal,
+                "shopify_customer_id": _norm(payload.get("id")),
+            }
+
+        # The `or payload.get("customer_id")` fallback is GONE, deliberately: a
+        # top-level customer_id means this is a CHILD resource naming its parent,
+        # which the guard above refuses outright.
+        shopify_customer_id = _norm(payload.get("id"))
         if not shopify_customer_id:
             return {"status": "skipped", "reason": "no_customer_id"}
         if db is None:
