@@ -21,6 +21,8 @@ import {
 import clsx from 'clsx';
 import { PrescriptionPrint } from './PrescriptionPrint';
 import type { PrescriptionPrintData } from './PrescriptionPrint';
+// PATIENT SAFETY: a recorded 0 power is a finding, not a blank.
+import { powerNumberOrNull } from '../../utils/rxPowerValue';
 import { useAuth } from '../../context/AuthContext';
 import { resolveStoreIdentity, type StoreIdentity } from '../print/storeIdentity';
 
@@ -134,23 +136,37 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     patientAge: patient.age ?? null,
     customerPhone: patient.phone,
     prescribedAt: examDate,
+    // PATIENT SAFETY -- the POWERS go through powerNumberOrNull, not
+    // `parseFloat(x) || null`. `parseFloat("0") || null` is NULL, so a
+    // clinician who recorded a plano sphere, a zero cylinder or a zero add got
+    // a DASH on the patient's printed prescription card instead of 0.00: the
+    // card denied a finding that had actually been made. See utils/rxPowerValue.
+    //
+    // AXIS and PD keep `parseFloat(x) || null` DELIBERATELY -- they are not
+    // oversights left next to the fixed lines. An axis is a meridian notated
+    // 1-180 (0 and 180 name the same one; the backend enforces ge=1) and a PD
+    // of 0mm is anatomically impossible, so for those two a 0 is not a real
+    // recorded value and collapsing it to "not recorded" loses nothing.
     rightEye: {
-      sphere: parseFloat(finalRxData.rightEye.sphere) || null,
-      cylinder: parseFloat(finalRxData.rightEye.cylinder) || null,
-      axis: parseFloat(finalRxData.rightEye.axis) || null,
-      add: parseFloat(finalRxData.rightAdd) || null,
-      pd: parseFloat(finalRxData.rightEye.pd) || null,
+      sphere: powerNumberOrNull(finalRxData.rightEye.sphere),
+      cylinder: powerNumberOrNull(finalRxData.rightEye.cylinder),
+      axis: parseFloat(finalRxData.rightEye.axis) || null, // 0 is not a real axis - see above
+      add: powerNumberOrNull(finalRxData.rightAdd),
+      pd: parseFloat(finalRxData.rightEye.pd) || null, // 0mm is not a real PD - see above
       va: finalRxData.rightEye.va || null,
     },
     leftEye: {
-      sphere: parseFloat(finalRxData.leftEye.sphere) || null,
-      cylinder: parseFloat(finalRxData.leftEye.cylinder) || null,
-      axis: parseFloat(finalRxData.leftEye.axis) || null,
-      add: parseFloat(finalRxData.leftAdd) || null,
-      pd: parseFloat(finalRxData.leftEye.pd) || null,
+      // Identical treatment to the right eye, field for field. The axis fix in
+      // the previous round shipped with the LEFT eye unpinned; a per-eye
+      // asymmetry is the failure mode this whole block is watched for.
+      sphere: powerNumberOrNull(finalRxData.leftEye.sphere),
+      cylinder: powerNumberOrNull(finalRxData.leftEye.cylinder),
+      axis: parseFloat(finalRxData.leftEye.axis) || null, // 0 is not a real axis - see above
+      add: powerNumberOrNull(finalRxData.leftAdd),
+      pd: parseFloat(finalRxData.leftEye.pd) || null, // 0mm is not a real PD - see above
       va: finalRxData.leftEye.va || null,
     },
-    pd: parseFloat(finalRxData.ipd) || null,
+    pd: parseFloat(finalRxData.ipd) || null, // 0mm is not a real PD - see above
     lensRecommendation: finalRxData.lensType || null,
     notes: finalRxData.remarks || null,
     optometristName: optometrist || null,

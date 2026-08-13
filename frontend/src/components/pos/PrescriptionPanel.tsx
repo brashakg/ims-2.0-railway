@@ -6,6 +6,9 @@
 import { useState } from 'react';
 import { Eye, Edit3, Check, X, Link2 } from 'lucide-react';
 import type { Prescription, EyePower } from '../../types';
+// PATIENT SAFETY: a recorded 0 power is a finding, not a blank -- never
+// `value={x || ''}` and never `{x && <row/>}` on a power. See rxPowerValue.
+import { hasRecordedPower, powerInputValue } from '../../utils/rxPowerValue';
 
 interface PrescriptionPanelProps {
   prescription: Prescription;
@@ -94,7 +97,7 @@ export function PrescriptionPanel({
                 <span className="text-gray-500">AXIS</span>
                 <p className="font-semibold">{prescription.rightEye.axis || '-'}</p>
               </div>
-              {prescription.rightEye.add && (
+              {hasRecordedPower(prescription.rightEye.add) && (
                 <div>
                   <span className="text-gray-500">ADD</span>
                   <p className="font-semibold">{formatPower(prescription.rightEye.add)}</p>
@@ -119,7 +122,7 @@ export function PrescriptionPanel({
                 <span className="text-gray-500">AXIS</span>
                 <p className="font-semibold">{prescription.leftEye.axis || '-'}</p>
               </div>
-              {prescription.leftEye.add && (
+              {hasRecordedPower(prescription.leftEye.add) && (
                 <div>
                   <span className="text-gray-500">ADD</span>
                   <p className="font-semibold">{formatPower(prescription.leftEye.add)}</p>
@@ -208,7 +211,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.rightEye.sphere || ''}
+                  value={powerInputValue(editedPrescription.rightEye.sphere)}
                   onChange={(e) => handleEyeChange('rightEye', 'sphere', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />
@@ -222,7 +225,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.rightEye.cylinder || ''}
+                  value={powerInputValue(editedPrescription.rightEye.cylinder)}
                   onChange={(e) => handleEyeChange('rightEye', 'cylinder', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />
@@ -251,7 +254,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.rightEye.add || ''}
+                  value={powerInputValue(editedPrescription.rightEye.add)}
                   onChange={(e) => handleEyeChange('rightEye', 'add', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />
@@ -286,7 +289,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.leftEye.sphere || ''}
+                  value={powerInputValue(editedPrescription.leftEye.sphere)}
                   onChange={(e) => handleEyeChange('leftEye', 'sphere', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />
@@ -300,7 +303,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.leftEye.cylinder || ''}
+                  value={powerInputValue(editedPrescription.leftEye.cylinder)}
                   onChange={(e) => handleEyeChange('leftEye', 'cylinder', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />
@@ -329,7 +332,7 @@ export function PrescriptionPanel({
                 <input
                   type="number"
                   step="0.25"
-                  value={editedPrescription.leftEye.add || ''}
+                  value={powerInputValue(editedPrescription.leftEye.add)}
                   onChange={(e) => handleEyeChange('leftEye', 'add', e.target.value)}
                   className="w-full px-2 py-1 text-sm border rounded"
                 />

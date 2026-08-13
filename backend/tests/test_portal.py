@@ -514,6 +514,116 @@ class TestRxView:
         assert rx["right_eye"] == {"sph": "-2.00", "cyl": "-1.25", "axis": 85}
         assert rx["left_eye"] == {"sph": "-1.75", "cyl": "-0.75", "axis": 90}
 
+    def test_rx_zero_add_power_reaches_the_patient(
+        self, client, fake_db, patch_repos
+    ):
+        """PATIENT SAFETY: a recorded ADD of 0 is "no reading addition", and it
+        must reach the customer's own prescription page.
+
+        `_safe_prescription_view` projected it as
+        `rx.get("add_power") or rx.get("add")`, and `or` is a truthiness test:
+        a stored 0 is falsy, so it fell through to the alias and, when that was
+        absent too, the field left as None. The patient then read a blank where
+        a real finding had been recorded -- on the OTP-gated page that IS their
+        copy of the prescription, so the wrong answer is read by the customer.
+
+        Asserted on the WIRE BYTES of the real route, not on the helper: a
+        future edit to `get_my_prescriptions` that stops calling the projection
+        must not be able to pass this by accident.
+        """
+        customers = [
+            {"customer_id": "CUST-A", "name": "Alice A", "mobile": "9000000001"}
+        ]
+        prescriptions = [
+            {
+                "prescription_id": "RX-ZERO-ADD",
+                "customer_id": "CUST-A",
+                # Measured, and it is zero. No `add` alias to rescue it.
+                "add_power": 0,
+                "right_eye": {"sph": "-2.00"},
+                "left_eye": {"sph": "-1.75"},
+            }
+        ]
+        patch_repos(customers=customers, prescriptions=prescriptions)
+
+        client.post("/api/v1/portal/rx/request-otp", json={"phone": "9000000001"})
+        token = self._get_token(client, fake_db, "CUST-A", "9000000001")
+
+        resp = client.get(
+            "/api/v1/portal/rx", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200, resp.text
+
+        # THE REQUIREMENT, asserted first: the recorded zero survives.
+        rx = resp.json()["prescriptions"][0]
+        assert rx["add_power"] == 0
+        assert rx["add_power"] is not None
+
+    def test_rx_absent_add_power_stays_absent(self, client, fake_db, patch_repos):
+        """The other half of the rule, and the control for the test above: a
+        prescription that recorded NO add must not gain one. A fix that
+        defaulted the field to 0 would swap the conflation round rather than
+        remove it -- the patient would be told they need no reading addition
+        when nobody measured for one.
+        """
+        customers = [
+            {"customer_id": "CUST-A", "name": "Alice A", "mobile": "9000000001"}
+        ]
+        prescriptions = [
+            {
+                "prescription_id": "RX-NO-ADD",
+                "customer_id": "CUST-A",
+                "right_eye": {"sph": "-2.00"},
+                "left_eye": {"sph": "-1.75"},
+            }
+        ]
+        patch_repos(customers=customers, prescriptions=prescriptions)
+
+        client.post("/api/v1/portal/rx/request-otp", json={"phone": "9000000001"})
+        token = self._get_token(client, fake_db, "CUST-A", "9000000001")
+
+        resp = client.get(
+            "/api/v1/portal/rx", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200, resp.text
+
+        rx = resp.json()["prescriptions"][0]
+        assert rx["add_power"] is None
+        assert rx["add_power"] != 0
+
+    def test_rx_add_power_falls_through_a_blank_to_the_alias(
+        self, client, fake_db, patch_repos
+    ):
+        """A canonical key that is present but EMPTY must not shadow the alias
+        that holds the real value -- the fall-through the `or` chain provided is
+        still wanted, it just must not trigger on a recorded 0.
+        """
+        customers = [
+            {"customer_id": "CUST-A", "name": "Alice A", "mobile": "9000000001"}
+        ]
+        prescriptions = [
+            {
+                "prescription_id": "RX-ALIAS-ADD",
+                "customer_id": "CUST-A",
+                "add_power": "",
+                "add": "+2.00",
+                "right_eye": {"sph": "-2.00"},
+                "left_eye": {"sph": "-1.75"},
+            }
+        ]
+        patch_repos(customers=customers, prescriptions=prescriptions)
+
+        client.post("/api/v1/portal/rx/request-otp", json={"phone": "9000000001"})
+        token = self._get_token(client, fake_db, "CUST-A", "9000000001")
+
+        resp = client.get(
+            "/api/v1/portal/rx", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200, resp.text
+
+        rx = resp.json()["prescriptions"][0]
+        assert rx["add_power"] == "+2.00"
+
     def test_rx_requires_token(self, client, patch_repos):
         patch_repos(prescriptions=[])
         resp = client.get("/api/v1/portal/rx")

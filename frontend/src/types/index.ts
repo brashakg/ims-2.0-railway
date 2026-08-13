@@ -245,8 +245,15 @@ export interface Patient {
 // Prescription Types
 // ============================================================================
 
+// PATIENT SAFETY: `sphere` is NULLABLE, like cylinder and add beside it.
+// It used to be a plain `number`, which forced every producer to spell
+// `sph || 0` -- so an Rx that recorded NO sphere was read back by the counter,
+// the Rx panel and the lens suggester as a confident plano. "Not recorded" and
+// "recorded as 0" are different clinical facts and the type must be able to
+// tell them apart. `pd` stays non-null on purpose: a PD of 0mm is
+// anatomically impossible, so there is no zero to confuse with an absence.
 export interface EyePower {
-  sphere: number;
+  sphere: number | null;
   cylinder: number | null;
   axis: number | null;
   add: number | null;

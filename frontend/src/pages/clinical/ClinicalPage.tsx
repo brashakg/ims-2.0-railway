@@ -32,11 +32,14 @@ import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { AbuseDetection } from '../../components/clinical/AbuseDetection';
-import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
+import { PrescriptionCard, type PrescriptionData } from '../../components/clinical/PrescriptionCard';
 import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
 import { ConversionTab } from './ConversionTab';
 import clsx from 'clsx';
 import { readEyePower } from '../../utils/rxEye';
+// PATIENT SAFETY: a blank power is not a recorded 0. See utils/rxPowerValue.
+import { formatPowerOrDash, powerNumberOrNull } from '../../utils/rxPowerValue';
+import { axisOrNull } from '../../utils/rxAxisEntry';
 
 // Types
 interface QueueItem {
@@ -117,7 +120,11 @@ export function ClinicalPage() {
   const [printToken, setPrintToken] = useState<any>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
   const [storeEntity, setStoreEntity] = useState<EntityLike | null>(null);
-  const [printRxCard, setPrintRxCard] = useState<any>(null);
+  // Typed with the card's own props, not `any`: `any` here silently discarded
+  // PrescriptionCard's nullable-power contract, so nothing stopped this call
+  // site from going back to `readEyePower(...) || 0` and printing a fabricated
+  // plano on a patient's card. See components/clinical/PrescriptionCard.
+  const [printRxCard, setPrintRxCard] = useState<PrescriptionData | null>(null);
 
   // F50: clinical -> retail handover. `sendToFloorFor` opens the drawer for a
   // completed test; `sentTestIds` tracks which rows have already been sent so
@@ -425,10 +432,14 @@ export function ClinicalPage() {
     });
   };
 
-  const formatPower = (value: number | null) => {
-    if (value === null) return '-';
-    return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
-  };
+  // PATIENT SAFETY / CRASH. This is fed by `readEyePower`, which is typed `any`
+  // and returns UNDEFINED when the field is absent -- and the previous body
+  // tested only `value === null`, so an undefined sailed past the guard into
+  // `.toFixed` and threw, taking the whole "Completed today" tab down for any
+  // eye test whose stored Rx simply omits a key (a Mongo doc without the field,
+  // an import, a device feed). One absence predicate for every spelling of
+  // absence, and a recorded 0 still renders "+0.00". See utils/rxPowerValue.
+  const formatPower = formatPowerOrDash;
 
   return (
     <div className="inv-body">
@@ -811,9 +822,23 @@ export function ClinicalPage() {
                           patientName: test.patientName,
                           date: test.completedAt,
                           optometristName: user?.name || 'Optometrist',
-                          rightEye: { sphere: readEyePower(test, 'right', 'sphere') || 0, cylinder: readEyePower(test, 'right', 'cylinder') || 0, axis: readEyePower(test, 'right', 'axis') || 0, add: 0 },
-                          leftEye: { sphere: readEyePower(test, 'left', 'sphere') || 0, cylinder: readEyePower(test, 'left', 'cylinder') || 0, axis: readEyePower(test, 'left', 'axis') || 0, add: 0 },
-                          pd: 0,
+                          // PATIENT SAFETY: `|| 0` here PRINTED a fabricated
+                          // 0.00 on the card handed to the patient whenever a
+                          // power had not been recorded -- and hard-coded
+                          // `add: 0` / `pd: 0` claimed "no reading addition"
+                          // for every card ever printed from this button.
+                          // A power that was not recorded now prints as a dash;
+                          // one recorded AS 0 still prints 0.00. Both eyes get
+                          // identical treatment. See utils/rxPowerValue.
+                          // The AXIS goes through axisOrNull, not the power
+                          // parser: rxAxisEntry owns the axis (a meridian
+                          // notated 1-180), rxPowerValue owns the dioptric
+                          // powers, and each states in its header that it does
+                          // not govern the other. Same answer today; one owner
+                          // per concept is what keeps it that way.
+                          rightEye: { sphere: powerNumberOrNull(readEyePower(test, 'right', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'right', 'cylinder')), axis: axisOrNull(readEyePower(test, 'right', 'axis')), add: powerNumberOrNull(readEyePower(test, 'right', 'add')) },
+                          leftEye: { sphere: powerNumberOrNull(readEyePower(test, 'left', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'left', 'cylinder')), axis: axisOrNull(readEyePower(test, 'left', 'axis')), add: powerNumberOrNull(readEyePower(test, 'left', 'add')) },
+                          pd: null,
                           visualAcuity: '',
                           notes: '',
                           storeName: storeInfo?.storeName || storeInfo?.storeCode || '',

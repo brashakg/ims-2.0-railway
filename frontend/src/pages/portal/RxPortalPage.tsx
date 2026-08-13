@@ -323,6 +323,16 @@ const EYE_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'add', label: 'ADD' },
 ];
 
+/**
+ * Was this field actually recorded? EXPLICIT emptiness only -- a recorded 0
+ * (a plano, no astigmatism, no reading addition) is PRESENT and must return
+ * true. Same predicate `eyeVal` already applies per cell, and the same rule the
+ * backend applies when projecting (portal._first_recorded).
+ */
+function recorded(v: unknown): boolean {
+  return v !== null && v !== undefined && v !== '';
+}
+
 function eyeVal(eye: Record<string, unknown> | null | undefined, key: string): string {
   if (!eye) return '—';
   const v = eye[key] ?? eye[key.toUpperCase()];
@@ -378,7 +388,16 @@ function RxCard({ p }: { p: PortalPrescription }) {
           </tbody>
         </table>
 
-        {(p.pd || p.add_power || p.optometrist_name || p.store_name) && (
+        {/* PATIENT SAFETY: the two value fields are gated by `!= null && !== ''`
+            just below, deliberately, because a recorded ADD of 0 means "no
+            reading addition" and is a real finding. This outer gate used to be
+            a plain truthiness test, so a patient whose ONLY extra field was a
+            0 ADD had the whole block removed and read nothing at all -- the
+            inner check never got the chance to run. It now asks the same
+            question the inner ones do. (`recorded()` is local on purpose: this
+            page renders the raw portal payload, where a field is a string, a
+            number or absent, and it is the only consumer of that shape.) */}
+        {(recorded(p.pd) || recorded(p.add_power) || p.optometrist_name || p.store_name) && (
           <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
             {p.pd != null && p.pd !== '' && (
               <div><p className="text-gray-500 text-xs">PD</p><p className="text-gray-800">{String(p.pd)}</p></div>

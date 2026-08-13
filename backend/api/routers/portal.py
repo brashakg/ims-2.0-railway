@@ -733,6 +733,24 @@ def _safe_eye_view(eye: Any) -> Optional[Dict[str, Any]]:
     return {k: v for k, v in eye.items() if k in _CUSTOMER_EYE_KEYS}
 
 
+def _first_recorded(*values: Any) -> Any:
+    """First value that was actually RECORDED, else None.
+
+    Absence is tested EXPLICITLY -- None, or a string that is empty once
+    trimmed. It is never a truthiness test, because a recorded 0 (a plano
+    sphere, an eye with no astigmatism, no reading addition) is a real clinical
+    finding and `x or y` throws it away. This mirrors the frontend rule in
+    utils/rxPowerValue.ts; keep the two in step.
+    """
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip() == "":
+            continue
+        return value
+    return None
+
+
 def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
     """Project a prescription to the read-only fields a customer should see.
     Keeps clinical values (SPH/CYL/AXIS/ADD) -- those ARE the customer's own
@@ -749,7 +767,13 @@ def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
         "right_eye": _safe_eye_view(rx.get("right_eye") or rx.get("od")),
         "left_eye": _safe_eye_view(rx.get("left_eye") or rx.get("os")),
         "pd": rx.get("pd") or rx.get("pupillary_distance"),
-        "add_power": rx.get("add_power") or rx.get("add"),
+        # PATIENT SAFETY: `or` is a truthiness test, and a recorded ADD of 0 is
+        # falsy -- so a patient whose prescription says "no reading addition"
+        # had that finding silently dropped and read a blank on their own Rx
+        # page. A 0 is a RECORDED value here (unlike `pd`, where 0mm is
+        # anatomically impossible, so the `or` above is safe). Fall through to
+        # the alias only when the canonical key holds nothing at all.
+        "add_power": _first_recorded(rx.get("add_power"), rx.get("add")),
         "notes": rx.get("remarks") or rx.get("notes"),
         "optometrist_name": rx.get("optometrist_name"),
         "store_name": rx.get("store_name"),
