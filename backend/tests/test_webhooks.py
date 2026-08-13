@@ -435,8 +435,17 @@ def test_shiprocket_bad_signature_returns_401(client, patched_webhooks):
 
 def test_no_secret_returns_200_skipped(client, monkeypatch):
     """When webhook_secret isn't configured, return 200 + skipped so the
-    vendor doesn't pile up retries. Inbox row NOT written (we never had
-    enough trust to store it)."""
+    vendor doesn't pile up retries (no amount of retrying fixes a config gap).
+
+    CHANGED (PR #966): this used to assert NO inbox row. The module contract
+    has always promised operators would see this skip in webhook_inbox with a
+    skipped_reason, and nothing ever wrote one — so a misconfigured
+    integration swallowed live orders leaving only a log line, and the
+    docstring made that read as safe. A metadata-only row is now written.
+    The PAYLOAD is deliberately not stored: with no secret we cannot
+    authenticate the sender, so persisting bodies would make the inbox an
+    unauthenticated blob store and give the Re-map recovery path a forgeable
+    source."""
     fake_db = FakeDB()  # no integrations seeded
     from api.routers import webhooks as wh_module
     monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
@@ -449,8 +458,15 @@ def test_no_secret_returns_200_skipped(client, monkeypatch):
     body_json = r.json()
     assert body_json["status"] == "skipped"
     assert body_json["reason"] == "secret_not_configured"
+
     inbox = fake_db.get_collection("webhook_inbox")
-    assert len(inbox.docs) == 0
+    assert len(inbox.docs) == 1, "the skip must leave a durable record"
+    row = inbox.docs[0]
+    assert row["skipped_reason"] == "secret_not_configured"
+    assert row["signature_verified"] is False
+    assert row["processed"] is True, "never drained as real work"
+    assert row["payload"] is None, "unauthenticated content must not be stored"
+    assert row["raw_body_size"] == len(body)
 
 
 # ----- inbox doc shape ----------------------------------------------------

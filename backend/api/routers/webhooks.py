@@ -18,26 +18,48 @@ Fail-soft contract:
 - Over the per-vendor+IP rate limit → 429 with a generic detail (checked
   FIRST, before the body is read or any secret is looked up, so unsigned
   garbage can't be used to burn Mongo lookups + HMAC computes).
-- Secret missing in DB → return 200 with `{"status":"skipped"}` so the
-  vendor's retry queue treats this as "delivered, ignored". Returning
-  4xx/5xx would cause Razorpay/Shopify/Shiprocket to retry every minute
-  for 24 h — bad for everyone. Operators see the skip in `webhook_inbox`
-  with `processed=false, skipped_reason=secret_not_configured`.
+- Secret genuinely not configured → 200 `{"status":"skipped"}` so the vendor's
+  retry queue treats this as "delivered, ignored". Returning 4xx/5xx would
+  cause Razorpay/Shopify/Shiprocket to retry every minute for 24 h, and no
+  amount of retrying fixes a missing config value. Operators see the skip in
+  `webhook_inbox` with `processed=true, skipped_reason=secret_not_configured,
+  signature_verified=false` — metadata only, NO payload, because without a
+  secret we cannot authenticate the sender (see `_record_unverifiable`).
+- Secret LOOKUP FAILED (Mongo unreachable / raised) → 503, NOT the skip above.
+  These were indistinguishable until this PR: `_load_secret` returned a bare
+  None for both, so a Mongo blip 2xx-dropped correctly-signed Razorpay and
+  Shiprocket deliveries — real payments and their GST — with no record and no
+  resend. `_load_secret` now returns `(secret, lookup_ok)`.
 - Bad signature → 401 + `{"detail":"invalid signature"}`. Vendors that
   re-attempt on 401 will be silently swallowed but the legitimate
   delivery is rejected so a leaked URL can't be abused.
-- Replayed delivery (same vendor event id already ingested) → 200 with
-  `{"status":"duplicate"}` and NO re-dispatch. Webhooks must 2xx or the
-  vendor retries forever; the original inbox row is the durable record.
+- Replayed delivery (same vendor event id, or the same signed bytes,
+  already ingested) → 200 with `{"status":"duplicate"}` and NO second inbox
+  row. Webhooks must 2xx or the vendor retries forever; the original row is
+  the durable record. This is ALSO how a vendor's retry of a delivery we
+  already stored is handled — acked, never double-booked. The ONE case where
+  a duplicate does more than ack: if the matched row is still
+  `processed=false` (its original dispatch failed), we re-dispatch it, because
+  nothing else in the system will (see below).
+- Delivery older than the staleness cap → 200 `{"status":"skipped",
+  "reason":"delivery_too_old"}`, but the row IS persisted with
+  `processed=true, skipped_reason="delivery_too_old"`. A correctly-signed
+  delivery is never discarded without a durable record.
 - Persist failure (inbox collection/DB unavailable, or a non-duplicate insert
   error) → 503. We must NEVER ack-without-persist: a 2xx tells the vendor the
   delivery is permanently handled, so Shopify/Razorpay/Shiprocket never resend
   it and a real inbound order would be lost forever. 503 makes the vendor
   RETRY (Shopify backs off for ~48h). We only ACK 200 AFTER the row is durably
   written (or it's a verified duplicate whose original row is the record).
-- Event dispatch failure → still 200 (the inbox row is ALREADY durable; NEXUS
-  re-discovers unprocessed rows on its next tick, and re-acking would make the
-  vendor resend a delivery we already persisted).
+- Event dispatch failure → still 200 (the inbox row is ALREADY durable, and
+  re-acking would make the vendor resend a delivery we already persisted).
+  NOTE, because an earlier version of this docstring claimed otherwise:
+  NOTHING SWEEPS `webhook_inbox` FOR `processed=false`.
+  `NexusAgent._handle_inbox_webhook` is reachable only from
+  `on_event("webhook.received")`; `_do_background_work` iterates
+  INTEGRATION_SCHEDULES and never touches this collection. A dispatch failure
+  is therefore logged at ERROR, and the only automatic recovery is a later
+  vendor retry, which the duplicate path re-dispatches.
 
 The inbox doc shape:
 
@@ -51,6 +73,8 @@ The inbox doc shape:
       "processed": false,
       "processed_at": None,
       "skipped_reason": None | str,
+      "event_id": None | str,          # vendor delivery id header, if any
+      "body_fingerprint": "sha256:..." # content-bound replay key
     }
 
 NEXUS subscribes to `webhook.received` and reads the doc by `webhook_id`
@@ -118,6 +142,9 @@ _KEEP_HEADERS = frozenset(
         "x-shopify-topic",
         "x-shopify-shop-domain",
         "x-shopify-webhook-id",
+        # Delivery clock — the ONLY timestamp the freshness check may use.
+        # Kept on the row so an operator can audit a staleness decision.
+        "x-shopify-triggered-at",
         "x-shiprocket-signature",
         "x-shiprocket-event",
     }
@@ -211,22 +238,79 @@ def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:
 
 
 # ============================================================================
-# Event-id replay dedupe
+# Replay dedupe — two keys, both backed by unique partial indexes
 # ============================================================================
-# Vendor delivery-id headers — when present we dedupe on them so a replayed,
-# correctly-signed envelope inside the timestamp window (webhook_verify.
-# is_replay allows ~5 min) can't be re-ingested as a second inbox row and
-# re-dispatched (the Razorpay reconcile hook reads the most recent unprocessed
-# inbox row, so replay duplicates would feed payment reconciliation).
-# Shiprocket sends no delivery-id header (x-shiprocket-event is the event
-# TYPE, shared by many deliveries) so it keeps timestamp-window-only cover —
-# same as today. This is receiver-level and additive: shopify_ingest keeps its
-# own order-id + webhook-id idempotency layers untouched.
+# 1. VENDOR DELIVERY ID (`_EVENT_ID_HEADERS`). Stable across a vendor's own
+#    retries of the same delivery, so it is what makes a retry idempotent:
+#    retry -> 200 duplicate, no second inbox row, no second dispatch, no
+#    double-booked order/GST invoice. Shiprocket sends no delivery-id header
+#    (x-shiprocket-event is the event TYPE, shared by many deliveries).
+#
+# 2. BODY FINGERPRINT (`webhook_verify.body_fingerprint`). SHA-256 over the
+#    exact bytes the HMAC signed, scoped by vendor + event-type header. This
+#    is the load-bearing anti-replay control, because unlike the id header it
+#    is INSIDE the signature's coverage: an attacker replaying a captured
+#    delivery cannot alter one byte without invalidating the HMAC, so the
+#    fingerprint matches an existing row and is rejected even if they rotate
+#    X-Shopify-Webhook-Id to a fresh value, and regardless of how old the
+#    capture is. It also covers the vendors that send no delivery id at all
+#    (Shiprocket), which previously had NO replay cover beyond a timestamp
+#    window that never fired.
+#
+#    SCOPED, THOUGH -- and an earlier version of this comment omitted the
+#    qualifier. The fingerprint mixes in the canonical scope, so rejection is
+#    guaranteed WITHIN A SCOPE, not absolutely: one captured signed body can
+#    still be accepted once per scope, bounded by the closed set (22 for
+#    Shopify -- 16 exact topics + 5 family buckets + UNKNOWN_SCOPE, which
+#    covers both an absent header and any unrecognised topic; 1 elsewhere).
+#    That bound caps replay AMPLIFICATION. It does not
+#    make routing authenticated -- NEXUS still selects the money handler from
+#    the raw unsigned topic header, so a captured body can be relabelled into
+#    a handler it was never meant for. Binding the topic to the signature is
+#    a separate change.
+#
+#    WHAT THE SHAPE GUARD DOES AND DOES NOT COVER. The shared classifier
+#    (shopify_ingest.order_payload_refusal) stops a relabel in the BOOKING
+#    direction ONLY -- a non-order body cannot be relabelled orders/create and
+#    minted into an IMS order + GST invoice serial. It says nothing about the
+#    DESTRUCTIVE direction, which is still open: nexus routes orders/delete to
+#    shopify_order_delete.handle_shopify_order_delete, which reads the top-level
+#    id with NO shape assertion. A captured, validly-signed orders/create body --
+#    whose top-level id IS a real live order id -- replayed as
+#    X-Shopify-Topic: orders/delete VOIDS that order, and fingerprint dedupe does
+#    not stop it because orders/delete is a DISTINCT canonical scope from the
+#    scope the capture was first seen in. Do not read this paragraph as "the
+#    relabel problem is handled"; only half of it is.
+#
+# Both are receiver-level and additive: shopify_ingest keeps its own
+# order-id + webhook-id idempotency layers untouched.
+#
+# Retention: the inbox TTL (webhook_verify.DEDUPE_RETENTION_SECONDS, 30 days
+# on received_at) is the dedupe window, and the delivery staleness cap is
+# pinned to the same constant.
+#
+# READ THIS BEFORE LEANING ON THAT ALIGNMENT: it is a real age bound for
+# RAZORPAY ONLY, whose clock rides inside the HMAC-signed envelope. Shopify's
+# X-Shopify-Triggered-At is an unsigned header an attacker can rewrite or
+# simply OMIT (no header -> no clock -> no cap), and Shiprocket publishes no
+# clock at all. For those two vendors there is NO enforceable age bound and
+# the fingerprint/id dedupe carries 100% of the replay defence. Accepting a
+# delivery we cannot date is the deliberate fail-safe direction — dropping a
+# real GST-bearing order is worse — but do not mistake the alignment for a
+# universal guarantee.
 # ============================================================================
 
 _EVENT_ID_HEADERS = {
     "razorpay": "x-razorpay-event-id",
     "shopify": "x-shopify-webhook-id",
+}
+
+# Vendor event-TYPE headers. Used only to scope the body fingerprint so that
+# two different topics carrying a byte-identical body are not collapsed into
+# one dedupe key (e.g. Shopify orders/paid vs orders/updated).
+_EVENT_TYPE_HEADERS = {
+    "shopify": "x-shopify-topic",
+    "shiprocket": "x-shiprocket-event",
 }
 
 
@@ -294,51 +378,127 @@ def _get_db():
         return None
 
 
+def _ensure_index(coll, keys, **kwargs) -> bool:
+    """create_index that NEVER raises but is never silent either.
+
+    These builds used to be `except Exception: pass` with zero logging — the
+    only fully silent failure in this module. That matters: if a pre-index
+    deploy-window race writes two rows sharing (vendor, body_fingerprint),
+    every later build fails E11000 forever, the hard multi-worker replay
+    backstop is permanently absent, and nobody ever finds out. The receiver
+    must still serve (the find_one fast paths keep working), so we log and
+    carry on rather than failing the request.
+    """
+    try:
+        coll.create_index(keys, **kwargs)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[WEBHOOKS] webhook_inbox index %s could not be ensured: %s — "
+            "dedupe falls back to the find_one fast path (no multi-worker "
+            "race backstop) until this is resolved",
+            kwargs.get("name") or keys,
+            e,
+        )
+        return False
+
+
 def _get_inbox_collection():
     db = _get_db()
     if db is None:
         return None
     try:
         coll = db.get_collection("webhook_inbox")
-        # Ensure a TTL on received_at — 30 days. Idempotent + cheap.
-        try:
-            coll.create_index("received_at", expireAfterSeconds=30 * 24 * 3600)
-        except Exception:
-            pass
+        # Ensure a TTL on received_at. Idempotent + cheap. The retention is
+        # imported from webhook_verify because the delivery staleness cap is
+        # pinned to the SAME number -- see the invariant note there. Changing
+        # one must change the other, so there is only one number.
+        _ensure_index(
+            coll,
+            "received_at",
+            expireAfterSeconds=webhook_verify.DEDUPE_RETENTION_SECONDS,
+        )
         # Lookup index — we look up by webhook_id from NEXUS
-        try:
-            coll.create_index("webhook_id", unique=False)
-        except Exception:
-            pass
+        _ensure_index(coll, "webhook_id", unique=False)
         # Replay dedupe — UNIQUE partial index on (vendor, event_id) so a
         # replayed delivery carrying the same vendor event id is physically
         # impossible to double-insert even under a multi-worker race.
         # PARTIAL: only docs that actually carry an event_id string, so
         # vendors without a delivery-id header (and all legacy rows) are
         # unaffected. Mirrors shopify_ingest.ensure_shopify_order_index.
-        try:
-            coll.create_index(
-                [("vendor", 1), ("event_id", 1)],
-                unique=True,
-                partialFilterExpression={"event_id": {"$type": "string"}},
-                name="uniq_webhook_event_id",
-            )
-        except Exception:
-            pass
+        _ensure_index(
+            coll,
+            [("vendor", 1), ("event_id", 1)],
+            unique=True,
+            partialFilterExpression={"event_id": {"$type": "string"}},
+            name="uniq_webhook_event_id",
+        )
+        # Content-bound replay dedupe — UNIQUE partial index on
+        # (vendor, body_fingerprint). The fingerprint hashes the exact bytes
+        # the HMAC signed, so a replayed delivery physically cannot be
+        # double-inserted even if the attacker rewrites every header, and
+        # even under a multi-worker race. PARTIAL so pre-existing rows
+        # (which carry no fingerprint) are untouched and the index builds
+        # without a backfill.
+        _ensure_index(
+            coll,
+            [("vendor", 1), ("body_fingerprint", 1)],
+            unique=True,
+            partialFilterExpression={"body_fingerprint": {"$type": "string"}},
+            name="uniq_webhook_body_fingerprint",
+        )
+        # SEPARATE namespace for rows we could not authenticate (no secret
+        # configured). It collapses repeat identical posts onto one row exactly
+        # like the index above, but it MUST NOT be the same field: an
+        # unverifiable row sharing the authenticated key would answer
+        # "duplicate" to the operator's own recovery resend once the secret is
+        # finally configured. See _record_unverifiable.
+        _ensure_index(
+            coll,
+            [("vendor", 1), ("unverified_fingerprint", 1)],
+            unique=True,
+            partialFilterExpression={"unverified_fingerprint": {"$type": "string"}},
+            name="uniq_webhook_unverified_fingerprint",
+        )
         return coll
     except Exception as e:
         logger.warning(f"[WEBHOOKS] webhook_inbox collection unavailable: {e}")
         return None
 
 
-def _load_secret(vendor: str) -> Optional[str]:
+def _load_secret(vendor: str) -> tuple[Optional[str], bool]:
+    """Pull the per-vendor `webhook_secret` from the `integrations` doc.
+
+    Returns `(secret, lookup_ok)`.
+
+    THE SECOND ELEMENT IS THE POINT. This used to return a bare Optional, so
+    "this integration genuinely has no secret configured" and "the lookup
+    BLEW UP / Mongo was unreachable" were the same value: None. The caller
+    read that None as the former and returned 200
+    {"status":"skipped","reason":"secret_not_configured"} with no inbox row —
+    so a Mongo blip lasting a second or two would 2xx-drop a correctly-signed,
+    first-time Razorpay or Shiprocket delivery (a real payment and its GST),
+    the vendor would treat it as permanently handled and never resend, and the
+    only trace was a logger.debug line. Shopify partially escaped through the
+    env fallback below; the other two had nothing. Meanwhile the SAME Mongo
+    outage a few lines later, at the inbox-collection check, correctly returned
+    503 so the vendor retries.
+
+    So: `lookup_ok=False` means "we could not determine whether a secret
+    exists" and the caller MUST 503 rather than ack. It is True only when we
+    actually reached the config (or resolved the secret from env), whether or
+    not a secret was found.
+
+    Never logs the secret value — only the vendor and, on failure, the error.
     """
-    Pull the per-vendor `webhook_secret` from the `integrations` doc.
-    Mirrors `nexus_providers._load_integration_config` shape.
-    """
-    secret: Optional[str] = None
     db = _get_db()
-    if db is not None:
+    secret: Optional[str] = None
+    lookup_ok = True
+
+    if db is None:
+        # Not "no secret" — we never got to look. Storage is down.
+        lookup_ok = False
+    else:
         try:
             coll = db.get_collection("integrations")
             doc = coll.find_one({"type": vendor.lower()})
@@ -355,25 +515,345 @@ def _load_secret(vendor: str) -> Optional[str]:
                 pass
             secret = cfg.get("webhook_secret") or None
         except Exception as e:
-            logger.debug(f"[WEBHOOKS] secret lookup failed for {vendor}: {e}")
+            # ERROR, not debug: this branch now changes the HTTP status.
+            logger.error(
+                "[WEBHOOKS] %s: webhook_secret lookup FAILED (%s) — treating as "
+                "storage-unavailable so the vendor retries, NOT as "
+                "'no secret configured'",
+                vendor,
+                e,
+            )
             secret = None
+            lookup_ok = False
+
     # Shopify env fallback: a custom app's webhook HMAC signing key IS its API
     # secret key (== the OAuth client secret used by shopify_auth). When the
     # integrations doc carries no explicit webhook_secret, use the app secret
     # already on the server so inbound HMAC verification works without anyone
     # pasting a key. Mirrors the #916 auth-fix philosophy (env-first creds).
+    # This also rescues the lookup-failure case: if the env secret is present
+    # we can verify the signature without the DB, so the lookup outcome is
+    # moot and we proceed normally.
     if not secret and vendor.lower() == "shopify":
         secret = (
             os.getenv("SHOPIFY_CLIENT_SECRET")
             or os.getenv("SHOPIFY_API_SECRET")
             or None
         )
-    return secret
+        if secret:
+            lookup_ok = True
+    return secret, lookup_ok
 
 
 # ============================================================================
 # Common pipeline
 # ============================================================================
+
+
+async def _dispatch_webhook_received(webhook_id: str, vendor: str) -> bool:
+    """Fire `webhook.received` for a durably-persisted inbox row.
+
+    Returns True when THE PUBLISH CALL DID NOT RAISE — which is not the same
+    as "NEXUS processed it", and is weaker than it looks: `registry.
+    dispatch_event` catches every exception itself and never re-raises, so in
+    practice this returns True even when the bus publish and its local
+    fallback both failed. Treat `redispatched: true` as "we asked again", not
+    as proof of delivery. Making this signal honest needs a dispatch_event
+    variant that can report failure; that is its own change.
+
+    Never raises: the row is already durable, so a dispatch hiccup must not
+    fail the request (that would make the vendor resend a delivery we already
+    stored).
+    """
+    try:
+        from agents.registry import dispatch_event
+
+        await dispatch_event(
+            "webhook.received",
+            {"webhook_id": webhook_id, "vendor": vendor},
+            source="webhooks_router",
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "[WEBHOOKS] dispatch_event failed for %s webhook_id=%s: %s — the row "
+            "is durable but UNPROCESSED. Nothing sweeps webhook_inbox for "
+            "processed=false, so it will only be drained if the vendor retries "
+            "(which now re-dispatches) or an operator replays it by hand.",
+            vendor,
+            webhook_id,
+            e,
+        )
+        return False
+
+
+# How long a row may sit processed=false before a duplicate treats it as
+# stranded rather than in-flight.
+#
+# WHAT THIS WINDOW IS AND IS NOT. It is NOT what protects the money, and an
+# earlier version of this comment wrongly implied it was by claiming "the
+# event-bus fan-out completes in milliseconds" — that describes the PUBLISH.
+# The DRAIN is serialised per worker (_listen_loop awaits _dispatch_local
+# inline, behind every other bus event) and map_shopify_order is synchronous,
+# pymongo-heavy work, so a row can legitimately sit unprocessed well past a
+# minute during a flash sale or a post-redeploy backlog. The number is a
+# heuristic, not a bound.
+#
+# What actually prevents a double-booked order + GST invoice is downstream and
+# CLAIM-FIRST: shopify_ingest._webhook_already_seen takes an atomic insert-claim
+# on _id='shopify:<webhook-id>' and returns 'replayed' BEFORE any invoice serial
+# is allocated, plus the orders.find_one({shopify_order_id}) guard and the
+# unique partial index with its E11000 branch; refunds claim first on a unique
+# shopify_refund_id. A premature re-dispatch therefore resolves to 'replayed',
+# not to a second booking.
+#
+# So this window is belt-and-braces over those claims: it costs only latency of
+# rescue, and it keeps the common case from generating pointless duplicate
+# drains. Do not let anything come to depend on it as a guarantee.
+_REDISPATCH_MIN_AGE_SECONDS = 60
+
+
+def _is_stranded(existing: Dict[str, Any]) -> bool:
+    """True when an inbox row's dispatch demonstrably never landed.
+
+    Requires BOTH processed is false AND the row to be older than
+    `_REDISPATCH_MIN_AGE_SECONDS` — see `_duplicate_response` for why the age
+    check is not optional. Unparseable/missing `received_at` returns False:
+    we would rather miss a rescue than risk a concurrent second drain.
+    """
+    if existing.get("processed") is not False:
+        return False
+    received_at = existing.get("received_at")
+    if isinstance(received_at, str):
+        from agents.webhook_verify import _parse_iso
+
+        received_at = _parse_iso(received_at)
+    if not isinstance(received_at, datetime):
+        return False
+    if received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - received_at).total_seconds()
+    return age >= _REDISPATCH_MIN_AGE_SECONDS
+
+
+async def _duplicate_response(
+    existing: Dict[str, Any],
+    vendor: str,
+    event_id: Optional[str],
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """ACK a duplicate delivery, re-dispatching if the original never drained.
+
+    Why the re-dispatch: this module used to justify ACKing a failed dispatch
+    with "NEXUS's hourly tick re-discovers unprocessed rows". IT DOES NOT —
+    `NexusAgent._handle_inbox_webhook` is reachable only from
+    `on_event("webhook.received")`, and `_do_background_work` iterates
+    INTEGRATION_SCHEDULES and never queries webhook_inbox for
+    {processed: False}. So a row whose dispatch failed just sat there. The
+    vendor's retry used to be the accidental rescue; now that dedupe
+    correctly rejects that retry, the rescue has to be deliberate.
+
+    A row that is still processed=false is therefore re-dispatched here — but
+    ONLY after a grace period, and that qualifier is load-bearing:
+
+      * `dispatch_event` publishes through the event bus. With Redis
+        configured (as in prod) the fan-out is ASYNCHRONOUS, so processed=false
+        immediately after a 200 is the NORMAL in-flight state, not evidence of
+        stranding. Re-dispatching on the flag alone would let a fast vendor
+        retry run a second concurrent drain of the same row — trading a
+        stranded row for double-processing on a money path.
+      * `NexusAgent._handle_inbox_webhook` sets processed=true even when the
+        vendor handler raises (it records `handler_error`). So a row that is
+        still false after the grace window genuinely never reached NEXUS,
+        which is the only case worth rescuing. A handler that failed is NOT
+        re-run here; replaying a failed money handler on every duplicate
+        would be worse than leaving it for an operator.
+
+    Re-dispatch is otherwise safe: the drain is keyed on webhook_id, re-checks
+    `processed` before doing any work, and the downstream ingest layers are
+    idempotent on the business object id. We keep status="duplicate" (no
+    second inbox row, and the Razorpay inline reconcile stays gated off).
+    """
+    webhook_id = existing.get("webhook_id")
+    out: Dict[str, Any] = {
+        "status": "duplicate",
+        "vendor": vendor,
+        "event_id": event_id,
+        # Echoed so an operator (or Shopify's "Send test notification", whose
+        # canned payload is byte-stable and so always dedupes after the first
+        # send) can see WHICH row matched instead of reading it as a failure.
+        "webhook_id": webhook_id,
+    }
+    if reason:
+        out["reason"] = reason
+
+    if webhook_id and _is_stranded(existing):
+        logger.warning(
+            "[WEBHOOKS] %s: duplicate matched a row still unprocessed after "
+            "%ss (webhook_id=%s) — its dispatch never landed; re-dispatching "
+            "so the delivery is not stranded",
+            vendor,
+            _REDISPATCH_MIN_AGE_SECONDS,
+            webhook_id,
+        )
+        out["redispatched"] = await _dispatch_webhook_received(webhook_id, vendor)
+    return out
+
+
+def _record_unverifiable(
+    request: Request, vendor: str, raw_body: bytes
+) -> Dict[str, Any]:
+    """Record a delivery we cannot authenticate because no secret is set.
+
+    The module contract has always promised that operators see this skip in
+    `webhook_inbox` with a `skipped_reason`. Nothing ever wrote such a row —
+    the only value ever persisted was 'delivery_too_old' — so the promise was
+    false and a misconfigured integration swallowed live orders leaving only a
+    log line. This makes the promise true.
+
+    WHAT IS DELIBERATELY NOT STORED: the payload. With no secret we cannot
+    verify the sender, so anyone who learns the URL can post arbitrary bytes
+    here. Persisting those bodies would turn the inbox into an unauthenticated
+    blob store AND give the operator recovery surfaces (Re-map) a forgeable
+    source. We keep only metadata — size, headers, a fingerprint — which is
+    exactly what answers the operator's question ("deliveries ARE arriving and
+    we are dropping them; go configure the secret") and nothing an attacker
+    can weaponise. `signature_verified: False` is stamped so no future reader
+    mistakes these rows for trusted data.
+
+    Bounded: the fingerprint carries the unique index, so repeated identical
+    posts collapse to ONE row, and the per-vendor+IP rate limit caps the rest.
+
+    Fail-soft on purpose: if the inbox is unavailable we still ACK 200. A
+    missing secret is a configuration gap that no amount of vendor retrying
+    can fix, so 503-storming the vendor would be worse than a log line.
+    """
+    fingerprint = webhook_verify.body_fingerprint(
+        vendor,
+        raw_body,
+        scope=webhook_verify.canonical_scope(
+            vendor, request.headers.get(_EVENT_TYPE_HEADERS.get(vendor) or "") or ""
+        ),
+    )
+    coll = _get_inbox_collection()
+    if coll is None:
+        logger.error(
+            "[WEBHOOKS] %s: no webhook_secret configured AND the inbox is "
+            "unavailable — this delivery leaves no record at all",
+            vendor,
+        )
+        return {"status": "skipped", "reason": "secret_not_configured"}
+
+    now = datetime.now(timezone.utc)
+    try:
+        coll.insert_one(
+            {
+                "webhook_id": str(uuid.uuid4()),
+                "vendor": vendor,
+                "received_at": now,
+                "headers": _filter_headers(request),
+                # No payload: unauthenticated content is never stored.
+                "payload": None,
+                "raw_body_size": len(raw_body or b""),
+                "processed": True,
+                "processed_at": now,
+                "skipped_reason": "secret_not_configured",
+                "signature_verified": False,
+                "event_id": None,
+                # DELIBERATELY *NOT* `body_fingerprint`. That field is the
+                # AUTHENTICATED dedupe key, and writing an unverifiable row
+                # into it made this row poison the very recovery it exists to
+                # prompt: operator sees the row -> pastes the secret -> the
+                # vendor resends the identical bytes, now correctly signed ->
+                # the fingerprint dedupe matched THIS row and answered 200
+                # duplicate. Never dispatched, payload never stored,
+                # processed=True so _is_stranded would not rescue it, blocked
+                # for the full 30-day TTL. Strictly worse than doing nothing,
+                # and it hit exactly the two vendors with no env fallback:
+                # Razorpay (payments) and Shiprocket (shipments).
+                #
+                # A separate field + its own unique index keeps repeats
+                # collapsed onto one row without ever answering for a
+                # verified delivery.
+                "unverified_fingerprint": fingerprint,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        if not _is_duplicate_key_error(e):
+            logger.error(
+                "[WEBHOOKS] %s: could not record the unverifiable delivery: %s",
+                vendor,
+                e,
+            )
+    return {"status": "skipped", "reason": "secret_not_configured"}
+
+
+def _persist_skipped(
+    coll,
+    *,
+    request: Request,
+    vendor: str,
+    payload: Any,
+    raw_body: bytes,
+    event_id: Optional[str],
+    fingerprint: str,
+    skipped_reason: str,
+) -> Dict[str, Any]:
+    """Durably record a correctly-signed delivery we deliberately will NOT
+    process, then ACK it.
+
+    Nothing correctly-signed may ever be discarded without a trace. The row
+    carries processed=True (so no drain ever picks it up) plus the reason, and
+    it keeps both dedupe keys so a vendor retry of the same delivery matches
+    it instead of writing a second skip row.
+
+    If the write fails we do NOT ack — 503 makes the vendor retry, exactly as
+    for a failed ingest.
+    """
+    webhook_id = str(uuid.uuid4())
+    doc = {
+        "webhook_id": webhook_id,
+        "vendor": vendor,
+        "received_at": datetime.now(timezone.utc),
+        "headers": _filter_headers(request),
+        "payload": payload,
+        "raw_body_size": len(raw_body or b""),
+        "processed": True,
+        "processed_at": datetime.now(timezone.utc),
+        "skipped_reason": skipped_reason,
+        "event_id": event_id,
+        "body_fingerprint": fingerprint,
+        # Stamped on EVERY verified row so the field is total across the
+        # collection. It used to appear only on unverifiable rows, so a future
+        # operator surface filtering {"signature_verified": True} would have
+        # matched nothing and reported "no verified webhooks".
+        "signature_verified": True,
+    }
+    try:
+        coll.insert_one(dict(doc))
+    except Exception as e:  # noqa: BLE001
+        if _is_duplicate_key_error(e):
+            # Already recorded (vendor retried the same stale delivery).
+            return {
+                "status": "skipped",
+                "reason": skipped_reason,
+                "vendor": vendor,
+            }
+        logger.error(
+            "[WEBHOOKS] %s: could not persist the skipped (%s) delivery: %s — "
+            "returning 503 rather than dropping it without a record",
+            vendor,
+            skipped_reason,
+            e,
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    return {
+        "status": "skipped",
+        "reason": skipped_reason,
+        "vendor": vendor,
+        "webhook_id": webhook_id,
+    }
 
 
 async def _ingest(
@@ -392,12 +872,19 @@ async def _ingest(
       2. Look up secret. Missing → 200 skipped (vendor must not retry).
       3. Verify signature. Bad → 401.
       4. Parse JSON.
-      5. Replay-check via payload['event_timestamp'] (best-effort).
-      6. Event-id dedupe (vendors that send a delivery-id header).
-         Already ingested → 200 duplicate, no re-dispatch.
-      7. Persist inbox doc (unique partial index backstops the race).
-      8. Dispatch event. Returns webhook_id.
-      9. 200.
+      5. Compute both dedupe keys; resolve the inbox collection (503 if it
+         is unavailable — never ack what we cannot store).
+      6. Replay dedupe on the vendor delivery id AND on the body fingerprint.
+         Already ingested → 200 duplicate, no second row (re-dispatched only
+         if the matched row never drained). Runs BEFORE the staleness check
+         so a retry of an already-recorded delivery resolves as a duplicate
+         instead of writing a second skip row.
+      7. Staleness cap on the DELIVERY's own timestamp (never on a business
+         object's created_at). No delivery clock → no cap, delivery accepted.
+         Over the cap → persist a skipped row, then 200.
+      8. Persist inbox doc (unique partial indexes backstop the race).
+      9. Dispatch event. Returns webhook_id.
+     10. 200.
     """
     _enforce_webhook_rate_limit(request, vendor)
 
@@ -406,14 +893,31 @@ async def _ingest(
         signature_header_name.lower()
     )
 
-    secret = _load_secret(vendor)
-    if not secret:
-        # Vendor's perspective: 200 OK, don't retry. Operator's perspective:
-        # plain log line they'll grep for.
-        logger.info(
-            f"[WEBHOOKS] {vendor}: no webhook_secret configured — skipping verification"
+    secret, lookup_ok = _load_secret(vendor)
+    if not lookup_ok:
+        # We could not determine whether a secret exists — storage is down, not
+        # "unconfigured". 503 so the vendor RETRIES, exactly like the
+        # inbox-unavailable branch below. Acking here would 2xx-drop a real,
+        # correctly-signed payment with no record and no resend.
+        logger.error(
+            "[WEBHOOKS] %s: cannot resolve the webhook secret (storage "
+            "unavailable) — returning 503 so the vendor retries",
+            vendor,
         )
-        return {"status": "skipped", "reason": "secret_not_configured"}
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    if not secret:
+        # Genuinely unconfigured integration. Vendor's perspective: 200 OK,
+        # don't retry — a config gap is not something a retry storm can fix.
+        # Operator's perspective: a WARNING plus a durable inbox row, because
+        # "we silently swallowed your live orders for three days" must be
+        # discoverable in the data, not just in a log ring buffer.
+        logger.warning(
+            "[WEBHOOKS] %s: no webhook_secret configured — CANNOT verify this "
+            "delivery; recording it as skipped and processing nothing",
+            vendor,
+        )
+        return _record_unverifiable(request, vendor, raw_body)
 
     if not sig:
         raise HTTPException(status_code=401, detail="invalid signature")
@@ -432,35 +936,45 @@ async def _ingest(
             "_unparseable_body": raw_body[:1024].decode("utf-8", errors="replace")
         }
 
-    # Replay window — purely best-effort. Vendors don't always set a
-    # consistent timestamp field; we look in three common spots.
-    ts = (
-        (payload.get("event_timestamp") if isinstance(payload, dict) else None)
-        or (payload.get("created_at") if isinstance(payload, dict) else None)
-        or (payload.get("timestamp") if isinstance(payload, dict) else None)
-        or ""
-    )
-    replay_flag = False
-    try:
-        if ts:
-            replay_flag = webhook_verify.is_replay(str(ts))
-    except Exception:
-        replay_flag = False
-    if replay_flag:
-        logger.warning(
-            f"[WEBHOOKS] {vendor}: stale event timestamp {ts} — outside replay window"
-        )
-        return {"status": "skipped", "reason": "replay_window_exceeded"}
-
-    # Event-id replay dedupe — only for vendors that send a delivery-id
-    # header, and only AFTER the signature verified (an attacker without the
-    # secret can't use forged ids to suppress legitimate deliveries). The
-    # find_one is the fast path; the unique partial index on
-    # (vendor, event_id) is the hard backstop under a multi-worker race.
+    # Replay dedupe keys, computed only AFTER the signature verified (an
+    # attacker without the secret can't use forged keys to suppress
+    # legitimate deliveries).
+    #   - event_id: the vendor's delivery id header, stable across the
+    #     vendor's own retries. Absent for Shiprocket. STRIPPED, so a
+    #     whitespace-padded id cannot dodge the (vendor, event_id) unique
+    #     index the way an unnormalised value would.
+    #   - fingerprint: SHA-256 over the exact signed bytes — always present,
+    #     and unforgeable, so it is the control that actually holds.
+    #     body_fingerprint normalises vendor + scope internally.
+    # The find_one calls are the fast path; the unique partial indexes are
+    # the hard backstop under a multi-worker race.
     event_id_header = _EVENT_ID_HEADERS.get(vendor)
     event_id: Optional[str] = None
     if event_id_header:
-        event_id = request.headers.get(event_id_header) or None
+        event_id = (request.headers.get(event_id_header) or "").strip() or None
+
+    event_type_header = _EVENT_TYPE_HEADERS.get(vendor)
+    raw_event_type = (
+        (request.headers.get(event_type_header) or "") if event_type_header else ""
+    )
+    # CLOSED ALLOWLIST, not the raw header. The header is unsigned, so feeding
+    # it straight in let ONE signed body mint an unbounded number of dedupe
+    # keys (5000 random topic strings -> 5000 keys); normalising its case
+    # alone, as the first cut did, only closed the spelling axis.
+    # canonical_scope maps it onto a fixed set: real topics keep their
+    # identity, edit-only families share one bucket each, everything else
+    # becomes "unknown".
+    event_type = webhook_verify.canonical_scope(vendor, raw_event_type)
+    if raw_event_type and event_type == webhook_verify.UNKNOWN_SCOPE:
+        logger.warning(
+            "[WEBHOOKS] %s: unrecognised event-type header %r — bucketing it as "
+            "'%s' for dedupe (a real new vendor topic belongs in "
+            "webhook_verify.SHOPIFY_TOPIC_ALLOWLIST)",
+            vendor,
+            raw_event_type[:80],
+            webhook_verify.UNKNOWN_SCOPE,
+        )
+    fingerprint = webhook_verify.body_fingerprint(vendor, raw_body, scope=event_type)
 
     coll = _get_inbox_collection()
 
@@ -470,9 +984,11 @@ async def _ingest(
     # a real inbound order would be lost forever. Return 503 so the vendor
     # RETRIES (Shopify backs off for ~48h; the others similarly). We only ever
     # ACK 200 AFTER the row is durably persisted, or when it's a verified
-    # duplicate (its original row is already the durable record). The "no secret
-    # configured -> 200 skipped" and "replay window -> 200 skipped" paths above
-    # are deliberate, safe skips and are unaffected.
+    # duplicate (its original row is already the durable record). The two skip
+    # paths both leave a durable row of their own: "no secret configured"
+    # writes a metadata-only unverifiable row, and the staleness skip below
+    # writes a full one. A secret lookup that FAILED never reaches here — it
+    # 503s above, so a DB blip can no longer masquerade as "unconfigured".
     if coll is None:
         logger.error(
             "[WEBHOOKS] %s: inbox collection unavailable — returning 503 so the "
@@ -488,15 +1004,97 @@ async def _ingest(
             existing = None
         if existing is not None:
             # 200, not 4xx: webhooks must be ACKed or the vendor retries
-            # forever. The original inbox row is the durable record; we do
-            # NOT re-dispatch.
+            # forever. The original inbox row is the durable record.
             logger.warning(
                 "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
-                "(already ingested)",
+                "(already ingested as webhook_id=%s)",
                 vendor,
                 event_id,
+                existing.get("webhook_id"),
             )
-            return {"status": "duplicate", "vendor": vendor, "event_id": event_id}
+            return await _duplicate_response(existing, vendor, event_id)
+
+    # Content-bound dedupe. Catches a verbatim replay whose delivery-id
+    # header was rotated, and gives Shiprocket (no delivery id at all) real
+    # replay cover for the first time.
+    try:
+        existing_body = coll.find_one(
+            {"vendor": vendor, "body_fingerprint": fingerprint}
+        )
+    except Exception:  # noqa: BLE001
+        existing_body = None
+    if existing_body is not None:
+        logger.warning(
+            "[WEBHOOKS] %s: duplicate delivery body fingerprint=%s ignored "
+            "(already ingested as webhook_id=%s)",
+            vendor,
+            fingerprint,
+            existing_body.get("webhook_id"),
+        )
+        return await _duplicate_response(
+            existing_body, vendor, event_id, reason="duplicate_body"
+        )
+
+    # ------------------------------------------------------------------
+    # Delivery staleness cap.
+    #
+    # P1 FIX: this used to read payload['event_timestamp'|'created_at'|
+    # 'timestamp'] — i.e. the BUSINESS OBJECT's clock. For a Shopify order
+    # `created_at` is when the CUSTOMER PLACED THE ORDER, so with the old
+    # 300 s window every payment update / fulfillment / cancellation /
+    # refund webhook about an order older than five minutes was classified
+    # a "replay" and silently dropped, as was every vendor retry. Orders
+    # placed more than 5 minutes before delivery were unprocessable.
+    #
+    # We now use the DELIVERY's own clock only (Shopify
+    # X-Shopify-Triggered-At; Razorpay's signed envelope epoch). No delivery
+    # clock -> no cap: we ACCEPT and let dedupe carry the replay defence,
+    # because dropping a real GST-bearing order is the worse failure.
+    #
+    # The cap is pinned to the dedupe retention (30 d), so it can only bite
+    # where dedupe genuinely cannot help — a delivery whose dedupe row has
+    # already expired. An earlier cut of this fix used 7 days, which bought
+    # nothing (dedupe covers everything under 30 d) and handed Razorpay a
+    # new silent-drop path: its clock is INSIDE the HMAC, so unlike a
+    # Shopify header it cannot be omitted, and an owner clicking Resend in
+    # the Razorpay dashboard after a >7-day outage would have lost a
+    # GST-bearing payment with no trace.
+    #
+    # And even here we do NOT drop silently: the row is persisted with
+    # processed=True + skipped_reason so a correctly-signed delivery always
+    # leaves a durable, greppable record. It is simply never dispatched.
+    # ------------------------------------------------------------------
+    delivery_ts: Optional[str] = None
+    try:
+        delivery_ts = webhook_verify.extract_delivery_timestamp(
+            vendor, request.headers, payload
+        )
+    except Exception:  # noqa: BLE001
+        delivery_ts = None
+    stale_flag = False
+    try:
+        if delivery_ts:
+            stale_flag = webhook_verify.is_stale_delivery(str(delivery_ts))
+    except Exception:  # noqa: BLE001
+        stale_flag = False
+    if stale_flag:
+        logger.error(
+            "[WEBHOOKS] %s: delivery timestamp %s is older than the staleness "
+            "cap (%ss) — recording it as skipped, NOT dispatching",
+            vendor,
+            delivery_ts,
+            webhook_verify.delivery_max_age_seconds(),
+        )
+        return _persist_skipped(
+            coll,
+            request=request,
+            vendor=vendor,
+            payload=payload,
+            raw_body=raw_body,
+            event_id=event_id,
+            fingerprint=fingerprint,
+            skipped_reason="delivery_too_old",
+        )
 
     webhook_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
@@ -511,20 +1109,29 @@ async def _ingest(
         "processed_at": None,
         "skipped_reason": None,
         "event_id": event_id,
+        "body_fingerprint": fingerprint,
+        "signature_verified": True,
     }
 
     try:
         coll.insert_one(dict(inbox_doc))
     except Exception as e:
-        if event_id and _is_duplicate_key_error(e):
-            # Race backstop: a concurrent worker ingested the same
-            # delivery between our pre-check and this insert. ACK it and
-            # do NOT re-dispatch — the winner's row is the record.
+        # A duplicate-key error means a concurrent worker already persisted
+        # this delivery — under EITHER unique index (event_id or
+        # body_fingerprint). Either way the winner's row is the durable
+        # record, so ACK and do not re-dispatch.
+        if _is_duplicate_key_error(e):
+            # Race backstop: a concurrent worker ingested the same delivery
+            # between our pre-check and this insert. ACK and do NOT dispatch —
+            # the winner owns the row and is dispatching it right now. (If the
+            # winner's own dispatch then fails, the next vendor retry takes the
+            # find_one path above and re-dispatches the unprocessed row.)
             logger.warning(
-                "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
-                "(unique index race backstop)",
+                "[WEBHOOKS] %s: duplicate delivery event_id=%s fingerprint=%s "
+                "ignored (unique index race backstop)",
                 vendor,
                 event_id,
+                fingerprint,
             )
             return {
                 "status": "duplicate",
@@ -538,20 +1145,12 @@ async def _ingest(
         raise HTTPException(status_code=503, detail="storage temporarily unavailable")
 
     # The row is now durably persisted. ONLY now do we dispatch + ACK 200.
-    # Dispatch the event so NEXUS picks it up immediately / on its next tick.
-    try:
-        from agents.registry import dispatch_event
-
-        await dispatch_event(
-            "webhook.received",
-            {"webhook_id": webhook_id, "vendor": vendor},
-            source="webhooks_router",
-        )
-    except Exception as e:
-        # The inbox row is already durable — NEXUS's hourly tick re-discovers
-        # unprocessed rows — so a dispatch hiccup must NOT fail the request
-        # (that would make the vendor resend a delivery we already persisted).
-        logger.warning(f"[WEBHOOKS] dispatch_event failed for {vendor}: {e}")
+    # A dispatch failure must NOT fail the request (that would make the vendor
+    # resend a delivery we already persisted, and the resend would now be
+    # rejected as a duplicate anyway). It is logged at ERROR, and a later
+    # vendor retry re-dispatches the still-unprocessed row via
+    # _duplicate_response — there is NO background sweep to fall back on.
+    await _dispatch_webhook_received(webhook_id, vendor)
 
     return {
         "status": "received",
@@ -617,7 +1216,15 @@ async def receive_msg91_delivery(request: Request):
         "x-msg91-signature"
     )
 
-    secret = _load_secret("msg91")
+    secret, lookup_ok = _load_secret("msg91")
+    if not lookup_ok:
+        # Same rule as the vendor receivers: a lookup we could not complete is
+        # storage-unavailable, not "unconfigured". 503 so MSG91 retries.
+        logger.error(
+            "[WEBHOOKS] msg91: cannot resolve the webhook secret (storage "
+            "unavailable) -- returning 503 so the vendor retries"
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
     if not secret:
         logger.info(
             "[WEBHOOKS] msg91: no webhook_secret configured -- skipping verification"

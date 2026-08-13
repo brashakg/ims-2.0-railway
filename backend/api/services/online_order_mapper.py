@@ -1114,7 +1114,58 @@ def map_shopify_order(
     try:
         payload = payload if isinstance(payload, dict) else {}
 
-        shopify_order_id = _norm(payload.get("id")) or _norm(payload.get("order_id"))
+        # ORDER-SHAPE GUARD -- must come before anything reads payload["id"].
+        #
+        # Delegates to shopify_ingest.order_payload_refusal, the SINGLE
+        # classifier both layers share, so the mapper and the ingest layer can
+        # never disagree about what is bookable. The full rationale lives with
+        # that function; the short version:
+        #
+        #   - refunds / fulfillments / transactions carry their own "id" PLUS
+        #     the parent's "order_id", so `payload["id"]` is a CHILD id;
+        #   - CHECKOUTS carry "id" + "line_items" and NO "order_id" at all,
+        #     because a checkout PRECEDES the order and has no parent to name
+        #     -- which is why a "does it name a parent" test alone was not
+        #     enough, and why the guard is now a POSITIVE order-shape test;
+        #   - either way, booking one mints a PHANTOM IMS order and burns a
+        #     consecutive GST tax invoice serial, and none of the three
+        #     downstream idempotency layers fire because that id was never
+        #     booked.
+        #
+        # Reachable from the live webhook path: X-Shopify-Topic is UNSIGNED, so
+        # a captured, validly-signed fulfillment/refund/checkout body relabelled
+        # as orders/create routes straight here. online_store_orders.py:274-291
+        # already guards this for its Re-map queue ("could book a DUPLICATE
+        # order + GST invoice under the fulfillment id"); this is that guard on
+        # the create path.
+        #
+        # `booking=` keeps a legitimate status-only sync working: a partial
+        # orders/updated body with no line_items cannot create anything, so
+        # only the parent-reference rule applies to it.
+        from .shopify_ingest import order_payload_refusal
+
+        refusal = order_payload_refusal(
+            payload, booking=bool(payload.get("line_items"))
+        )
+        if refusal:
+            logger.warning(
+                "[ONLINE_MAP] refusing to book a non-order payload: reason=%s "
+                "id=%s parent_order_id=%s",
+                refusal,
+                _norm(payload.get("id")),
+                _norm(payload.get("order_id")),
+            )
+            return {
+                "status": "skipped",
+                "reason": refusal,
+                # Echo the CHILD's own id too: the parent is empty for a
+                # checkout (it has none), so returning only the parent left the
+                # operator with a refusal and no identifier to chase.
+                "child_id": _norm(payload.get("id")),
+                "shopify_order_id": _norm(payload.get("order_id")),
+            }
+
+        shopify_order_id = _norm(payload.get("id"))
         # A cancelled / updated webhook for an order we already booked may not carry
         # line_items; in that case we still want to SYNC status. Otherwise (no id, or
         # a create with no lines) there is nothing to do.

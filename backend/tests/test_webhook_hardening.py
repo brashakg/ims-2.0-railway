@@ -16,7 +16,8 @@ Covers the two receiver-level protections added to api/routers/webhooks.py:
     - duplicate x-shopify-webhook-id -> same
     - DuplicateKeyError race backstop (concurrent worker won the insert)
       -> 200 duplicate, no second dispatch
-    - absent event-id header keeps today's behavior (both deliveries ingested)
+    - absent event-id header falls back to content-bound body-fingerprint
+      dedupe (identical signed bytes -> duplicate; distinct bodies -> both in)
     - unique partial index (vendor, event_id) is ensured on the inbox
 
 Fixture style mirrors tests/test_webhooks.py (self-contained fakes).
@@ -233,8 +234,16 @@ def test_over_limit_returns_429_before_secret_lookup(client, monkeypatch):
     for word in ("mongo", "redis", "cache", "integrations", "secret", "hmac", "60"):
         assert word not in detail, f"429 detail leaks internals: {word}"
 
-    # Nothing persisted either way (garbage never got past the secret gate).
-    assert len(fake_db.get_collection("webhook_inbox").docs) == 0
+    # The RATE-LIMITED request persisted nothing — it never reached storage.
+    # The first (in-budget) request now leaves a metadata-only
+    # secret_not_configured row (PR #966: the module contract promised that
+    # record and nothing wrote it). Its payload is NOT stored, so unsigned
+    # garbage still cannot put content in the inbox.
+    rows = fake_db.get_collection("webhook_inbox").docs
+    assert len(rows) == 1, "one row for the admitted request, none for the 429"
+    assert rows[0]["skipped_reason"] == "secret_not_configured"
+    assert rows[0]["payload"] is None
+    assert rows[0]["signature_verified"] is False
 
 
 def test_limiter_isolates_vendors(client, monkeypatch):
@@ -383,20 +392,41 @@ def test_duplicate_key_error_race_backstop(client, patched_webhooks, monkeypatch
     assert len(patched_webhooks["dispatched"]) == 1, "race loser must not dispatch"
 
 
-def test_absent_event_id_keeps_todays_behavior(client, patched_webhooks):
+def test_absent_event_id_falls_back_to_body_fingerprint(client, patched_webhooks):
     """No delivery-id header (e.g. Shiprocket, or a vendor omitting it) ->
-    timestamp-window-only cover, exactly as before: both deliveries ingested
-    and dispatched."""
+    the content-bound body fingerprint carries the dedupe instead.
+
+    This used to ingest BOTH deliveries (the timestamp window never fired),
+    so a captured envelope from a vendor with no delivery id could be
+    replayed at will. Now the second delivery of identical signed bytes is
+    ACKed as a duplicate: one inbox row, one dispatch."""
     body = b'{"event":"payment.captured","payload":{"amount":99}}'
 
     r1 = _post_razorpay(client, body)
     r2 = _post_razorpay(client, body)
     assert r1.status_code == 200 and r1.json()["status"] == "received"
-    assert r2.status_code == 200 and r2.json()["status"] == "received"
+    assert r2.status_code == 200 and r2.json()["status"] == "duplicate"
+
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1
+    assert inbox.docs[0].get("event_id") is None
+    assert str(inbox.docs[0].get("body_fingerprint", "")).startswith("sha256:")
+    assert len(patched_webhooks["dispatched"]) == 1
+
+
+def test_absent_event_id_distinct_bodies_both_ingested(client, patched_webhooks):
+    """The fingerprint must only collapse IDENTICAL signed bytes. Two
+    genuinely different deliveries with no delivery-id header are both
+    ingested and both dispatched."""
+    r1 = _post_razorpay(client, b'{"event":"payment.captured","payload":{"amount":99}}')
+    r2 = _post_razorpay(client, b'{"event":"payment.captured","payload":{"amount":100}}')
+    assert r1.json()["status"] == "received"
+    assert r2.json()["status"] == "received"
 
     inbox = patched_webhooks["db"].get_collection("webhook_inbox")
     assert len(inbox.docs) == 2
-    assert all(d.get("event_id") is None for d in inbox.docs)
+    prints = {d["body_fingerprint"] for d in inbox.docs}
+    assert len(prints) == 2, "distinct bodies must produce distinct fingerprints"
     assert len(patched_webhooks["dispatched"]) == 2
 
 
