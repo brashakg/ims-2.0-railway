@@ -84,6 +84,14 @@ import {
   EYE_LABEL,
   type EyeKey,
 } from '../../utils/rxAxisEntry';
+// PATIENT SAFETY: a blank power is not a recorded 0, in EITHER direction.
+// See utils/rxPowerValue.
+import {
+  firstRecordedPower,
+  formatPowerOrDash,
+  powerNumberOrNull,
+  powerOrNull,
+} from '../../utils/rxPowerValue';
 
 import { useToast } from '../../context/ToastContext';
 import { walkoutsApi } from '../../services/api/walkouts';
@@ -526,8 +534,14 @@ export function POSLayout() {
         source,
         optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
         validity_months: 12,
-        right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: axisOrNull(rxData.axis_od), add: String(rxData.add_od || 0), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined, axis_source: axisSourceFor('od', counterAxisEyes) },
-        left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: axisOrNull(rxData.axis_os), add: String(rxData.add_os || 0), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined, axis_source: axisSourceFor('os', counterAxisEyes) },
+        // `powerOrNull`, never `String(x || 0)`: an empty SPH / CYL / ADD box
+        // used to leave the counter as the string "0", asserting that this
+        // patient needs no correction / has no astigmatism / needs no reading
+        // add. A blank now travels as null (EyeData declares these Optional),
+        // and a recorded 0 is preserved exactly. `pd` keeps its own shape --
+        // a PD of 0mm is anatomically impossible, so truthiness is safe there.
+        right_eye: { sph: powerOrNull(rxData.sph_od), cyl: powerOrNull(rxData.cyl_od), axis: axisOrNull(rxData.axis_od), add: powerOrNull(rxData.add_od), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined, axis_source: axisSourceFor('od', counterAxisEyes) },
+        left_eye: { sph: powerOrNull(rxData.sph_os), cyl: powerOrNull(rxData.cyl_os), axis: axisOrNull(rxData.axis_os), add: powerOrNull(rxData.add_os), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined, axis_source: axisSourceFor('os', counterAxisEyes) },
         ipd: rxData.ipd || undefined,
         lens_recommendation: rxData.lens_type || undefined,
         next_checkup: rxData.next_checkup || undefined,
@@ -541,8 +555,12 @@ export function POSLayout() {
           customerId: store.customer?.id || '',
           storeId: store.store_id,
           testDate: new Date().toISOString(),
-          rightEye: { sphere: rxData.sph_od || 0, cylinder: rxData.cyl_od || null, axis: axisOrNull(rxData.axis_od), add: rxData.add_od || null, pd: rxData.pd_od || 0 },
-          leftEye: { sphere: rxData.sph_os || 0, cylinder: rxData.cyl_os || null, axis: axisOrNull(rxData.axis_os), add: rxData.add_os || null, pd: rxData.pd_os || 0 },
+          // Same rule on the local echo the Rx panel reads back: this line
+          // carried BOTH halves of the bug at once -- `sph || 0` invented a
+          // plano for a blank, while `cyl || null` and `add || null` deleted a
+          // recorded one. `pd` keeps truthiness: a PD of 0mm is impossible.
+          rightEye: { sphere: powerNumberOrNull(rxData.sph_od), cylinder: powerNumberOrNull(rxData.cyl_od), axis: axisOrNull(rxData.axis_od), add: powerNumberOrNull(rxData.add_od), pd: rxData.pd_od || 0 },
+          leftEye: { sphere: powerNumberOrNull(rxData.sph_os), cylinder: powerNumberOrNull(rxData.cyl_os), axis: axisOrNull(rxData.axis_os), add: powerNumberOrNull(rxData.add_os), pd: rxData.pd_os || 0 },
           status: 'COMPLETED',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -1556,8 +1574,14 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
         source: latestRx.source || 'TESTED_AT_STORE',
         optometristName: latestRx.optometristName || latestRx.optometrist_name || '',
         rightEye: {
-          sphere: parseFloat(latestRx.rightEye?.sph || latestRx.right_eye?.sph || latestRx.rightEye?.sphere || '0'),
-          cylinder: parseFloat(latestRx.rightEye?.cyl || latestRx.right_eye?.cyl || latestRx.rightEye?.cylinder || '0'),
+          // PATIENT SAFETY (same rule as the axis note below, for the POWERS):
+          // the old `parseFloat(... || '0')` turned an Rx that recorded NO
+          // sphere / cylinder / add into a confident 0.00 on the counter's
+          // panel and in the lens suggestions. `firstRecordedPower` falls
+          // through the key aliases to the first value actually recorded and
+          // stops at a recorded 0 instead of skipping past it as falsy.
+          sphere: firstRecordedPower(latestRx.rightEye?.sph, latestRx.right_eye?.sph, latestRx.rightEye?.sphere),
+          cylinder: firstRecordedPower(latestRx.rightEye?.cyl, latestRx.right_eye?.cyl, latestRx.rightEye?.cylinder),
           // PATIENT SAFETY: no `|| 180`, on EITHER eye. An Rx with no recorded
           // axis stays axis-less here (null) instead of being shown to the
           // counter -- and fed to the lens suggestions -- as a fabricated 180.
@@ -1565,15 +1589,17 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
           // falsy. Both eyes MUST be treated identically: a per-eye asymmetry
           // would be invisible in a way uniform fabrication at least is not.
           axis: axisOrNull(latestRx.rightEye?.axis ?? latestRx.right_eye?.axis),
-          add: parseFloat(latestRx.rightEye?.add || latestRx.right_eye?.add || '0'),
+          add: firstRecordedPower(latestRx.rightEye?.add, latestRx.right_eye?.add),
           pd: latestRx.rightEye?.pd || latestRx.right_eye?.pd || undefined,
         },
         leftEye: {
-          sphere: parseFloat(latestRx.leftEye?.sph || latestRx.left_eye?.sph || latestRx.leftEye?.sphere || '0'),
-          cylinder: parseFloat(latestRx.leftEye?.cyl || latestRx.left_eye?.cyl || latestRx.leftEye?.cylinder || '0'),
-          // PATIENT SAFETY: see the right eye above -- identical treatment.
+          // PATIENT SAFETY: see the right eye above -- identical treatment, for
+          // the powers as well as the axis. A per-eye asymmetry here would be
+          // invisible in a way uniform fabrication at least is not.
+          sphere: firstRecordedPower(latestRx.leftEye?.sph, latestRx.left_eye?.sph, latestRx.leftEye?.sphere),
+          cylinder: firstRecordedPower(latestRx.leftEye?.cyl, latestRx.left_eye?.cyl, latestRx.leftEye?.cylinder),
           axis: axisOrNull(latestRx.leftEye?.axis ?? latestRx.left_eye?.axis),
-          add: parseFloat(latestRx.leftEye?.add || latestRx.left_eye?.add || '0'),
+          add: firstRecordedPower(latestRx.leftEye?.add, latestRx.left_eye?.add),
           pd: latestRx.leftEye?.pd || latestRx.left_eye?.pd || undefined,
         },
         lensRecommendation: latestRx.lensRecommendation || latestRx.lens_recommendation || '',
@@ -2147,22 +2173,33 @@ function StepPrescription({ onShowModal, onShowNew, onAccessoryOnlyChange }: { o
       patientId: rx.patientId || rx.patient_id || lookupId || '',
       source: rx.source || 'TESTED_AT_STORE',
       optometristName: rx.optometristName || rx.optometrist_name || '',
+      // PATIENT SAFETY -- this is the function that ATTACHES a stored Rx to a
+      // live sale, so what it invents here is what the lab grinds. The powers
+      // used to read `parseFloat(a || b || c || '0')`, which fabricated a
+      // confident plano 0.00 for an Rx that recorded no sphere / cylinder / add
+      // at all, and ALSO skipped past a recorded 0 in the first key alias to
+      // whatever the next alias happened to hold. `firstRecordedPower` stops at
+      // the first value actually recorded -- including 0 -- and returns null
+      // when nothing was. Both eyes, field for field, identically.
+      // (This is the twin of the RxAvailableBadge mapper above; the two are
+      // separate copies of the same mapping and must be changed together.)
       rightEye: {
-        sphere: parseFloat(rx.rightEye?.sph || rx.right_eye?.sph || rx.rightEye?.sphere || '0'),
-        cylinder: parseFloat(rx.rightEye?.cyl || rx.right_eye?.cyl || rx.rightEye?.cylinder || '0'),
+        sphere: firstRecordedPower(rx.rightEye?.sph, rx.right_eye?.sph, rx.rightEye?.sphere),
+        cylinder: firstRecordedPower(rx.rightEye?.cyl, rx.right_eye?.cyl, rx.rightEye?.cylinder),
         // PATIENT SAFETY: no `|| 180`, on EITHER eye -- see handleSwitchToRx.
         // A stored Rx with no recorded axis attaches to the sale axis-less
         // (null), never as a fabricated 180. `??` keeps a recorded axis of 0.
         axis: axisOrNull(rx.rightEye?.axis ?? rx.right_eye?.axis),
-        add: parseFloat(rx.rightEye?.add || rx.right_eye?.add || '0'),
+        add: firstRecordedPower(rx.rightEye?.add, rx.right_eye?.add),
         pd: rx.rightEye?.pd || rx.right_eye?.pd || undefined,
       },
       leftEye: {
-        sphere: parseFloat(rx.leftEye?.sph || rx.left_eye?.sph || rx.leftEye?.sphere || '0'),
-        cylinder: parseFloat(rx.leftEye?.cyl || rx.left_eye?.cyl || rx.leftEye?.cylinder || '0'),
-        // PATIENT SAFETY: see the right eye above -- identical treatment.
+        // PATIENT SAFETY: see the right eye above -- identical treatment, for
+        // the powers as well as the axis.
+        sphere: firstRecordedPower(rx.leftEye?.sph, rx.left_eye?.sph, rx.leftEye?.sphere),
+        cylinder: firstRecordedPower(rx.leftEye?.cyl, rx.left_eye?.cyl, rx.leftEye?.cylinder),
         axis: axisOrNull(rx.leftEye?.axis ?? rx.left_eye?.axis),
-        add: parseFloat(rx.leftEye?.add || rx.left_eye?.add || '0'),
+        add: firstRecordedPower(rx.leftEye?.add, rx.left_eye?.add),
         pd: rx.leftEye?.pd || rx.left_eye?.pd || undefined,
       },
       lensRecommendation: rx.lensRecommendation || rx.lens_recommendation || '',
@@ -2189,11 +2226,14 @@ function StepPrescription({ onShowModal, onShowNew, onAccessoryOnlyChange }: { o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recentRx, rxLoading, store.prescription]);
 
-  const fmtPower = (v: any) => {
-    const n = parseFloat(v);
-    if (!n || isNaN(n)) return '0.00';
-    return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
-  };
+  // PATIENT SAFETY: this row is how staff choose WHICH prescription to attach,
+  // so it must not answer "0.00" for a power nobody recorded. It used to:
+  // `if (!n || isNaN(n)) return '0.00'` printed a confident plano for a blank
+  // AND collapsed a genuinely recorded 0 into the same string, so absence and
+  // plano looked identical at the point of choosing. Not recorded now reads as
+  // a dash; a recorded 0 reads "+0.00". Shared with the printed Rx card so
+  // staff and patient meet one formatting voice -- see utils/rxPowerValue.
+  const fmtPower = (v: any) => formatPowerOrDash(v);
 
   // PATIENT SAFETY: this row is where staff decide whether an Rx is usable, so
   // it must not claim an axis the prescription does not carry. It used to print
@@ -2301,9 +2341,12 @@ function StepPrescription({ onShowModal, onShowNew, onAccessoryOnlyChange }: { o
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-900">
-                    R: {fmtPower(re.sph || re.sphere)}/{fmtPower(re.cyl || re.cylinder)}{'\u00D7'}{fmtAxis(re.axis)}
+                    {/* firstRecordedPower, not `a || b`: a recorded 0 in the
+                        canonical key is falsy, so the old chain skipped past a
+                        plano to whatever the alias held. */}
+                    R: {fmtPower(firstRecordedPower(re.sph, re.sphere))}/{fmtPower(firstRecordedPower(re.cyl, re.cylinder))}{'\u00D7'}{fmtAxis(re.axis)}
                     {' \u00B7 '}
-                    L: {fmtPower(le.sph || le.sphere)}/{fmtPower(le.cyl || le.cylinder)}{'\u00D7'}{fmtAxis(le.axis)}
+                    L: {fmtPower(firstRecordedPower(le.sph, le.sphere))}/{fmtPower(firstRecordedPower(le.cyl, le.cylinder))}{'\u00D7'}{fmtAxis(le.axis)}
                   </p>
                   <p className="text-xs text-gray-500">
                     {rx.optometristName || rx.optometrist_name ? `By ${rx.optometristName || rx.optometrist_name}` : 'Eye test'}
