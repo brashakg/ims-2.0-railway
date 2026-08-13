@@ -35,6 +35,7 @@ from ..dependencies import (
 )
 from ..services import clinical_abuse as _abuse
 from ..services import conversion_analytics as _conversion
+from ..services.rx_print_values import first_present_rx_value, is_absent_rx_value
 
 router = APIRouter()
 
@@ -79,6 +80,12 @@ def _audit_clinical(
 # Roles permitted to mutate the optometry queue + eye-test records. Mirrors the
 # frontend Clinical route guard. SUPERADMIN auto-passes via require_roles.
 _CLINICAL_ROLES = ("ADMIN", "STORE_MANAGER", "OPTOMETRIST")
+
+# Roles permitted to READ the saved lens-power combos (CLI-9). The clinical
+# write roles plus AREA_MANAGER, who is a supervisory clinical READER across
+# this router (cf. _ABUSE_VIEW_ROLES / _CONVERSION_VIEW_ROLES) but never a
+# combo author. Kept byte-identical to the GET row in rbac_policy.py.
+_COMBO_READ_ROLES = _CLINICAL_ROLES + ("AREA_MANAGER",)
 
 # Roles permitted to record a redo on a prescription. Wider than the queue
 # mutators on purpose: an Area Manager auditing a botched dispense should be
@@ -1756,10 +1763,18 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     os_ = _eye_block(rx, "left_eye")
 
     # PD: prefer a top-level pd, else fall back to per-eye pd values.
-    pd = rx.get("pd")
-    if pd in (None, "", 0):
-        pd = od.get("pd") or os_.get("pd")
-    pd_str = "" if pd in (None, "") else str(pd)
+    #
+    # This block used to read `if pd in (None, "", 0)` then `od.get("pd") or
+    # os_.get("pd")`, which failed three ways on a patient's card:
+    #   * a stored junk string ("None") is truthy, so it won the `or` and the
+    #     card printed "PD: None mm";
+    #   * a REAL top-level PD of 0 was in the discard tuple and was thrown away;
+    #   * `or` between the eyes swallowed a REAL right-eye 0 and silently
+    #     printed the LEFT eye's number in its place.
+    # `first_present_rx_value` keeps the same preference order while treating
+    # only genuinely-absent values as absent. A PD of 0 is real clinical data.
+    pd = first_present_rx_value(rx.get("pd"), od.get("pd"), os_.get("pd"))
+    pd_str = "" if is_absent_rx_value(pd) else str(pd)
 
     def row(label: str, eye: dict) -> str:
         return (
@@ -1777,7 +1792,11 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     phone_html = (
         f"<span><b>Phone:</b> {esc(phone)}</span>" if phone not in (None, "") else ""
     )
-    pd_html = f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str else ""
+    # `if pd_str` would be a truthiness test again; "0" is truthy so it happens
+    # to work, but the explicit form is the one that stays correct.
+    pd_html = (
+        f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str != "" else ""
+    )
     gstin_html = (
         f"<div class='clinic-gstin'>GSTIN: {esc(clinic_gstin)}</div>"
         if clinic_gstin
@@ -2370,13 +2389,19 @@ def _get_lens_power_combos_col():
 @router.get("/lens-power-combos")
 async def list_lens_power_combos(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_COMBO_READ_ROLES)),
 ):
     """List saved lens-power combos visible to the caller.
 
     Returns the caller's own combos plus any combos created by anyone in the
     same store — so shared institutional templates surface automatically.
     Fail-soft: empty list if DB absent.
+
+    The role gate is EXPLICIT (_COMBO_READ_ROLES) rather than leaning on the
+    POLICY row alone. It is byte-identical to that row, so the effective access
+    is unchanged -- but every sibling in this router states its own gate, and a
+    gate that lives in only one layer is exactly the asymmetry that produced the
+    malformed-tuple bug on the write twins.
     """
     col = _get_lens_power_combos_col()
     if col is None:
@@ -2385,6 +2410,12 @@ async def list_lens_power_combos(
     flt: dict = {}
     if active_store:
         flt["store_id"] = active_store
+    elif not user_store_scope(current_user)[0]:
+        # A store-level caller whose store did not resolve (no ?store_id and a
+        # null active_store_id -- reachable, see auth.py's token builders). An
+        # empty filter would list EVERY store's templates, so fail CLOSED. Only
+        # cross-store roles (SUPERADMIN/ADMIN) get the unfiltered all-stores read.
+        return {"combos": [], "total": 0}
     try:
         docs = list(col.find(flt, {"_id": 0}).sort("created_at", -1).limit(200))
     except Exception:
@@ -2396,7 +2427,7 @@ async def list_lens_power_combos(
 async def create_lens_power_combo(
     payload: LensPowerComboCreate,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Save a named lens-power combination for reuse.
 
@@ -2418,6 +2449,17 @@ async def create_lens_power_combo(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    # Refuse to MINT an unattributed combo. A store-less session (auth.py yields
+    # active_store_id=None for a user with no store, e.g. a plain ADMIN) would
+    # otherwise stamp store_id=None, and an unattributed doc is precisely the
+    # shape the delete guard has to fail closed on. Never create the ambiguity
+    # in the first place -- the combo is a per-store shared template, so a store
+    # is part of its identity, not an optional decoration.
+    if not active_store:
+        raise HTTPException(
+            status_code=400,
+            detail="Select an active store before saving a lens-power combo",
+        )
     now_iso = datetime.utcnow().isoformat()
     combo_id = str(uuid.uuid4())
 
@@ -2447,16 +2489,67 @@ async def create_lens_power_combo(
 @router.delete("/lens-power-combos/{combo_id}")
 async def delete_lens_power_combo(
     combo_id: str,
-    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Delete a named lens-power combo.
 
-    Only the creator or a manager/admin may delete. Fail-soft 404 if the
-    combo doesn't exist (idempotent).
+    Only the creator or a manager/admin may delete -- and only within their own
+    store. Fail-soft 404 if the combo doesn't exist (idempotent).
+
+    DELETE is deliberately NARROWER than the create gate even though both share
+    _CLINICAL_ROLES: a combo is a SHARED store template, so one optometrist must
+    not be able to bin a colleague's (or another store's) template. The role
+    gate admits the clinical roles; these per-OBJECT checks -- store scope, then
+    ownership -- are the data-level half the middleware never evaluates:
+
+      * store scope  -> 404 (never 403), same existence-hiding posture as
+        _store_scope_or_404, so an out-of-scope caller cannot even probe for the
+        combo's existence by id.
+      * ownership    -> OPTOMETRIST may delete only combos they created;
+        STORE_MANAGER / ADMIN / SUPERADMIN may delete any in-scope combo (they
+        own the store's shared templates).
+
+    Deleting a combo cannot orphan clinical data: a combo is COPIED into an Rx
+    when applied and nothing stores a combo_id reference, so no prescription or
+    lens spec points back at it.
     """
     col = _get_lens_power_combos_col()
     if col is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        doc = col.find_one({"combo_id": combo_id}, {"_id": 0})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Could not delete combo") from exc
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Combo not found")
+
+    # Per-object store scope first -- 404 hides existence from other stores.
+    # can_access_store_scoped, NOT _store_scope_or_404: the latter fails OPEN on
+    # a doc with no store_id (deliberately, so pre-store-stamp legacy EYE TESTS
+    # stay servable). lens_power_combos is a brand-new collection with no legacy
+    # rows to protect, so an unattributed combo must be treated as OUT of scope
+    # for a store-level caller -- otherwise a store manager silently bins another
+    # store's shared template. Cross-store roles (SUPERADMIN/ADMIN) still pass.
+    if not can_access_store_scoped(doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Combo not found")
+
+    roles = set(current_user.get("roles") or [])
+    is_manager = bool(roles & {"STORE_MANAGER", "ADMIN", "SUPERADMIN"})
+    # BOTH sides must be truthy AND equal. A bare `!=` compares None to None as
+    # a MATCH: a combo with no created_by, deleted by a caller whose token has no
+    # user_id claim (auth.py's refresh path builds it from .get(), so it can be
+    # None), would satisfy the check and delete. Absent / null / empty on either
+    # side is an ambiguous identity and must DENY -- an ownership test that
+    # cannot identify the owner has not established ownership.
+    creator = doc.get("created_by")
+    caller = current_user.get("user_id")
+    if not is_manager and not (creator and caller and creator == caller):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the creator or a manager may delete this combo",
+        )
+
     try:
         result = col.delete_one({"combo_id": combo_id})
     except Exception as exc:

@@ -295,6 +295,140 @@ def _strip_id(doc: Optional[dict]) -> Optional[dict]:
     return doc
 
 
+# ============================================================================
+# SELF-OR-ADMIN GATE for the payslip routes that take a FREE employee id
+# ============================================================================
+# OWNER RULING 2026-08-09, verbatim: "nobody except admin/superadmin should see
+# anyone elses salary."
+#
+# So reading ANOTHER employee's payslip is ADMIN / SUPERADMIN only. ACCOUNTANT,
+# AREA_MANAGER and STORE_MANAGER get their OWN payslip and nothing else. This is
+# STRICTER than both layers above it -- the rbac_policy rows for these paths
+# (ACCOUNTANT / ADMIN / AREA_MANAGER / STORE_MANAGER) and the router-level mount
+# gate at main.py:1509 (``require_roles(*_FINANCE_ROLES)``) still admit the whole
+# manager tier one layer earlier, and this gate then refuses them on somebody
+# else's id. That is a REAL loss of access for those three roles, taken
+# deliberately on the owner's instruction; the PR body lists the exact screens.
+_SALARY_CROSS_EMPLOYEE_ROLES = ("SUPERADMIN", "ADMIN")
+
+# The commission ledger keeps the WIDER manager tier. It is a sales-performance
+# surface aggregated from orders attributed to staff, not salary, so the owner
+# ruling above does not reach it and this PR leaves its behaviour byte-identical.
+# Deliberately its OWN constant: the two rules are genuinely different now, and a
+# single shared tuple would silently drag commission along the next time the
+# salary rule moves (which is exactly what just happened to this file).
+_COMMISSION_MANAGER_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "ACCOUNTANT",
+)
+
+
+def _is_commission_manager(current_user: dict) -> bool:
+    """True when the caller may see commission rows for staff other than self."""
+    caller_roles = current_user.get("roles") or []
+    return any(r in caller_roles for r in _COMMISSION_MANAGER_ROLES)
+
+
+def _is_salary_admin(current_user: dict) -> bool:
+    """True for the only roles allowed to see other people's salary data."""
+    caller_roles = current_user.get("roles") or []
+    return any(r in caller_roles for r in _SALARY_CROSS_EMPLOYEE_ROLES)
+
+
+def _assert_salary_admin(current_user: dict, action: str = "") -> None:
+    """ADMIN / SUPERADMIN only -- for the AGGREGATE salary reads and the
+    payroll SIGN-OFF writes.
+
+    A store's salary sheet, the payroll-run grid, the statutory registers and
+    the Tally / PF-ECR exports have no "self" row to fall back to: they are
+    other people's pay by construction. Under the owner ruling they are simply
+    closed to everyone below ADMIN.
+
+    The totals-only exports (registers/summary, tally/salary-jv) are included
+    DELIBERATELY even though they carry no per-employee row: these stores run
+    1-5 staff, so a monthly net-pay total IS an individual's salary by
+    subtraction, and a single-employee store's total is that person's pay
+    exactly. Closing the per-employee routes while leaving the totals open
+    would be a rule that only looks strict.
+
+    OWNER RULING 2026-08-10 extends this to payroll SIGN-OFF: whoever approves
+    payroll must be able to see what they are approving. An approval on figures
+    the approver cannot read is a rubber stamp, not a control -- so the approve
+    writes carry this same gate even though their responses contain no salary.
+    ``action`` names the attempted action in the 403 so the toast reads as a
+    permission message rather than a failure.
+
+    ``detail`` is written in plain English because the frontend shows it to a
+    store manager verbatim.
+    """
+    if _is_salary_admin(current_user):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Only an administrator may {action}. Please ask an administrator."
+            if action
+            else (
+                "Payroll and salary data is restricted to administrators. "
+                "Please ask an administrator."
+            )
+        ),
+    )
+
+
+def _assert_self_or_salary_admin(
+    employee_id: str, current_user: dict, what: str = "payslip"
+) -> None:
+    """Authorize a read of ``employee_id``'s payslip (owner ruling + P1 panel).
+
+    The three payslip routes took the employee id as a FREE path parameter with
+    ``Depends(get_current_user)`` only -- no gate of their own -- so every caller
+    the router-level mount admits (main.py:1509: ADMIN / AREA_MANAGER /
+    STORE_MANAGER / ACCOUNTANT, plus SUPERADMIN, which ``require_roles``
+    auto-passes) could read anyone's NET PAY, full CTC breakdown and BANK ACCOUNT
+    by typing an id. The adversarial panel reproduced both halves of that in the
+    real app: a store-less ACCOUNTANT received a body byte-identical to ADMIN's,
+    and a STORE_MANAGER pinned to one store read employees of other stores and
+    other legal entities.
+
+    NOTE on what this does NOT fix: floor roles (CASHIER, SALES_STAFF,
+    OPTOMETRIST, ...) never reached these routes in the first place -- the mount
+    gate stops them -- and a per-user capability GRANT of ``payroll:read`` does
+    not get them in either (it defeats the RBAC middleware but is then stopped by
+    that same mount gate, verified pre-fix and post-fix). The exposure this gate
+    closes is manager-tier and self-service, not floor staff.
+
+    Rule (owner, 2026-08-09): SELF always; anyone ELSE is ADMIN / SUPERADMIN only.
+
+    ``employee_id`` IS the user_id -- ``_get_employee_details`` looks it up as
+    ``users.user_id`` -- so the self comparison is against the token's user_id.
+
+    Rejects with 403 rather than silently rewriting the id to the caller's own: a
+    PATH parameter names whose slip this is, and serving someone else's URL with
+    your own numbers would be a lie the FE renders as fact.
+
+    NOT additionally store-scoped. ``can_access_store_scoped`` returns False for
+    EVERY store when an account carries no ``store_ids``, so that guard would
+    404 such an admin outright; the panel verified it. Role + self is the whole
+    rule.
+    """
+    caller_id = current_user.get("user_id") or current_user.get("id")
+    if employee_id and caller_id and employee_id == caller_id:
+        return
+    if _is_salary_admin(current_user):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Only an administrator may view another employee's {what}. "
+            "You can always see your own."
+        ),
+    )
+
+
 def _calculate_tds(gross_salary: float, month: int, year: int) -> float:
     """
     Calculate TDS as per Indian income tax slabs.
@@ -467,7 +601,12 @@ async def get_salary_config(
     store reach doesn't cover it. SUPERADMIN/ADMIN (cross-store) pass; a
     legacy config with NO store_id is readable only by those cross-store
     admins, never by store-scoped staff.
+
+    OWNER RULING 2026-08-09: on top of that store guard, salary details for
+    ANOTHER employee are ADMIN/SUPERADMIN only. A manager can still open their
+    own config; the store guard below is kept as defence in depth.
     """
+    _assert_self_or_salary_admin(employee_id, current_user, "salary details")
     db = _get_db()
     if not db:
         return {"config": None}
@@ -530,7 +669,12 @@ async def list_salary_configs(
     include_inactive: bool = Query(False),
     current_user: dict = Depends(get_current_user),
 ):
-    """List salary configurations (optionally scoped by store or entity)."""
+    """List salary configurations (optionally scoped by store or entity).
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only -- every row is somebody
+    else's CTC, bank account and PAN.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"configs": [], "total": 0}
@@ -709,7 +853,12 @@ async def get_salary_sheet(
     Reads from the ``payroll`` collection (written by POST /payroll/run).
     Falls back to the legacy ``salary_records`` collection so data is never
     silently missing on installs that still have the old schema.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. A store's salary sheet is
+    every colleague's pay in one table; there is no "self" version of it (staff
+    use GET /hr/me/payslip).
     """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"salaries": [], "total": 0, "store_id": store_id}
@@ -744,41 +893,20 @@ async def get_salary_sheet(
         )
 
 
-@router.get("/salary/{employee_id}")
-async def get_employee_salary(
-    employee_id: str,
-    month: Optional[int] = Query(None, ge=1, le=12),
-    year: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Get individual employee salary breakdown for a specific month or latest"""
-    db = _get_db()
-    if not db:
-        return {"salary": None}
-
-    try:
-        salary_records_coll = db.get_collection("salary_records")
-
-        if month and year:
-            # Get specific month
-            record = salary_records_coll.find_one(
-                {"employee_id": employee_id, "month": month, "year": year}
-            )
-        else:
-            # Get latest
-            records = list(
-                salary_records_coll.find({"employee_id": employee_id})
-                .sort("created_at", -1)
-                .limit(1)
-            )
-            record = records[0] if records else None
-
-        return {"salary": record or {}}
-    except Exception as e:
-        logger.error("Payroll operation failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="Payroll operation failed. Please try again."
-        )
+# REMOVED 2026-08-10 (owner decision): GET /payroll/salary/{employee_id}.
+#
+# It returned the RAW, unprojected ``salary_records`` document for any employee
+# id -- bank_account_no, pan and ctc_annual included -- to any caller the router
+# mount admitted, with no store check and no self check. The security panel
+# pulled a Bokaro employee's bank account and PAN with a Pune manager's token.
+#
+# The owner chose REMOVAL over restriction: the route had NO frontend caller
+# (verified across frontend/src), everything it served is available from
+# GET /payroll/payslip/{employee_id} (self-or-admin) and GET /hr/me/payslip
+# (self), and a deleted surface cannot be re-opened by a future capability
+# grant, a policy-row edit or a mis-scoped refactor. Its rbac_policy row is
+# deleted with it, so the route/policy parity check stays green in both
+# directions.
 
 
 # ============================================================================
@@ -790,7 +918,20 @@ async def get_employee_salary(
 async def calculate_salary(
     calc_request: MonthSalaryCalculation, current_user: dict = Depends(get_current_user)
 ):
-    """Calculate salary for a month with all deductions"""
+    """Calculate salary for a month with all deductions.
+
+    OWNER RULING 2026-08-09/10, applied to the WRITE side: ADMIN/SUPERADMIN only,
+    matching its read sibling GET /payroll/salary-sheet, which falls back to the
+    very ``salary_records`` collection this route writes.
+
+    ADMIN-only rather than self-or-admin ON PURPOSE. The other salary reads allow
+    SELF because seeing your own pay is harmless; AUTHORING your own pay is not.
+    This route accepted another employee's id from any caller the mount admitted
+    and stamped the row with the CALLER's store. Its response carries no salary
+    figures, so this was never a disclosure -- it is authorship, and it is a
+    fraud vector rather than a privacy one.
+    """
+    _assert_salary_admin(current_user, "create or recalculate a salary record")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -877,7 +1018,26 @@ async def calculate_salary(
 async def record_salary_advance(
     advance: SalaryAdvance, current_user: dict = Depends(get_current_user)
 ):
-    """Record a salary advance"""
+    """Record a salary advance.
+
+    OWNER RULING 2026-08-09/10, WRITE side: ADMIN/SUPERADMIN only, matching the
+    read twin twelve lines below (GET /payroll/advances/{employee_id}), whose
+    own docstring is the argument -- "an outstanding advance is a deduction from
+    pay, so it is salary data". Gating one direction of the same data was the
+    repo's dominant defect shape landing inside the file that had just swept
+    for it.
+
+    Reach before this gate: ANY manager-tier caller could author an advance
+    against ANY employee ORG-WIDE. _get_employee_details resolves the name with
+    a bare find_one({"user_id": ...}) and no store scope, and the row is stamped
+    with the CALLER's active_store_id -- so the record crossed stores and legal
+    entities, and its author could not read it back.
+
+    ADMIN-only rather than self-or-admin, for the same reason as
+    /salary/calculate: seeing your own pay is harmless, AUTHORING a deduction
+    against yourself is the obvious way to launder one.
+    """
+    _assert_salary_admin(current_user, "record a salary advance")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -923,7 +1083,12 @@ async def get_salary_advances(
     status: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get salary advance history for an employee"""
+    """Get salary advance history for an employee.
+
+    OWNER RULING 2026-08-09: an outstanding advance is a deduction from pay, so
+    it is salary data -- SELF, or ADMIN/SUPERADMIN for anyone else.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user, "salary advances")
     db = _get_db()
     if not db:
         return {"advances": [], "total": 0}
@@ -955,7 +1120,16 @@ async def settle_salary_advance(
     settlement: AdvanceSettlement = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Settle advance against salary"""
+    """Settle advance against salary.
+
+    OWNER RULING 2026-08-09/10, WRITE side: ADMIN/SUPERADMIN only, matching the
+    read twin. Before this gate any manager-tier caller could mark ANY advance
+    settled without being able to read it -- and the response says "Advance
+    settled and will be deducted from salary", a promise nothing in the payroll
+    run currently keeps. Gating it now is what stops that becoming a real
+    deduction the day someone wires it up.
+    """
+    _assert_salary_admin(current_user, "settle a salary advance")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1039,7 +1213,14 @@ async def get_payslip(
     back to the legacy ``salary_records`` collection so existing data is never
     lost.  A payslip record is materialised in ``payslips`` collection only
     once; subsequent calls return the cached version.
+
+    Self-or-ADMIN: see _assert_self_or_salary_admin. Live caller is the payslip
+    tab of PayrollDashboard; under the owner ruling an ACCOUNTANT / AREA_MANAGER
+    / STORE_MANAGER now only gets their own row there.
     """
+    # Authorize BEFORE touching the DB so the answer is the same whether or not
+    # Mongo is reachable (the fail-soft branch below returns 200/None).
+    _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1105,7 +1286,13 @@ async def get_latest_payslip(
 
     Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
     see their slip even before a manager has clicked 'generate payslip'.
+
+    Self-or-ADMIN: see _assert_self_or_salary_admin. Staff self-service on the
+    /my-work page goes through GET /hr/me/payslip (self-only, mounted WITHOUT
+    the finance-roles gate) and is untouched. The live caller here is the HR
+    page's own-slip card, which passes the caller's own id -- still allowed.
     """
+    _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1159,7 +1346,12 @@ async def get_incentive_summary(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Get incentive earned for a month (integrated from incentives module)"""
+    """Get incentive earned for a month (integrated from incentives module).
+
+    OWNER RULING 2026-08-09: an incentive is an earning line on the payslip, so
+    it is salary data -- SELF, or ADMIN/SUPERADMIN for anyone else.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user, "incentive earnings")
     db = _get_db()
     if not db:
         return {"incentive": None}
@@ -1333,6 +1525,13 @@ async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
 # PAYROLL RUN (compute -> DRAFT -> APPROVED -> PAID/locked)
 # ============================================================================
 
+# OUTER gate for the payroll-run family. Since the owner rulings of 2026-08-09
+# and 2026-08-10, ACCOUNTANT passes this gate but is then refused inside the
+# handler by _assert_salary_admin on every route that returns salary or signs
+# payroll off (run, approve, tally-jv, pf-ecr). The wider outer gate is kept on
+# purpose: it lets the handler answer with a plain-English 403 that the payroll
+# screens show verbatim, instead of require_roles' generic message. Do not read
+# this tuple as "the accountant can run payroll" -- they cannot.
 _RUN_ROLES = ("ADMIN", "ACCOUNTANT")  # SUPERADMIN auto-passes
 
 
@@ -1473,7 +1672,14 @@ async def run_payroll(
 
     Persists DRAFT rows (idempotent per employee+month+year) unless dry_run.
     Already APPROVED/PAID rows are never overwritten.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. This is a WRITE, but its
+    RESPONSE returns ``rows`` -- the full per-employee breakdown for everyone in
+    scope -- so leaving it open to the ACCOUNTANT would hand back exactly the
+    data the read routes now refuse. Running payroll is therefore an ADMIN task
+    from here on; that operating cost is written up in the PR body.
     """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1604,7 +1810,12 @@ async def list_payroll_rows(
     entity_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """The salary register: saved payroll rows for a month + scope."""
+    """The salary register: saved payroll rows for a month + scope.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only -- this is the whole run,
+    every employee's gross, deductions and net pay.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {"rows": [], "total": 0, "totals": {}}
@@ -1643,7 +1854,14 @@ async def approve_payroll(
     req: PayrollBatchAction,
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """Move DRAFT payroll rows to APPROVED for a month + scope."""
+    """Move DRAFT payroll rows to APPROVED for a month + scope.
+
+    OWNER RULING 2026-08-10: ADMIN/SUPERADMIN only. The response carries no
+    salary, so this is not a disclosure fix -- it is a controls fix. The
+    ACCOUNTANT can no longer see the register (owner ruling 2026-08-09), and
+    signing off figures you cannot read is a rubber stamp.
+    """
+    _assert_salary_admin(current_user, "approve a payroll run")
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1736,7 +1954,14 @@ async def payroll_statutory_summary(
     entity_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid)."""
+    """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid).
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. These are TOTALS, not rows,
+    but a 1-5 person store's monthly net total is an individual's salary by
+    inference (exactly so when a store has one employee), which is why the
+    aggregate exports are closed alongside the per-employee ones.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         return {
@@ -1770,7 +1995,13 @@ async def payroll_tally_jv(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """Balanced Tally salary Journal Voucher (XML) for a month + entity."""
+    """Balanced Tally salary Journal Voucher (XML) for a month + entity.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. The JV carries ledger
+    TOTALS rather than employee rows, but "Salary Payable" for a 1-5 person
+    store is an individual's net pay by inference -- see _assert_salary_admin.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1809,7 +2040,13 @@ async def payroll_pf_ecr(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_RUN_ROLES)),
 ):
-    """EPFO PF ECR text file for a month + scope."""
+    """EPFO PF ECR text file for a month + scope.
+
+    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. The ECR is the single most
+    salary-bearing export in this module -- one line PER EMPLOYEE carrying UAN,
+    name, gross wages, EPF/EPS wages and each contribution.
+    """
+    _assert_salary_admin(current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1850,7 +2087,15 @@ async def payslip_print(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Branded, printable HTML payslip from the computed payroll row."""
+    """Branded, printable HTML payslip from the computed payroll row.
+
+    Self-or-ADMIN: see _assert_self_or_salary_admin. The live caller is
+    PayrollRunPage's Print button (screen gated to SUPERADMIN/ADMIN/ACCOUNTANT).
+    Under the owner ruling the ACCOUNTANT on that screen can no longer print
+    another employee's slip -- this is the sharpest access loss in the change
+    and is called out in the PR body for an explicit owner exception.
+    """
+    _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -1889,8 +2134,10 @@ async def payslip_print(
 # configured the response returns zero commission but still shows the sales
 # tally -- useful as a leaderboard even before commission rates are set up.
 #
-# Roles: any manager tier + accountant (same as salary-sheet).
-_COMMISSION_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# Roles: any manager tier + accountant (same as salary-sheet). The tuple itself
+# lives at the top of this module as _COMMISSION_MANAGER_ROLES, next to the
+# stricter salary rule it must NOT be confused with; the local literal that used
+# to sit here was left dead by an earlier edit and is removed.
 
 
 @router.get("/commission/summary")
@@ -1913,10 +2160,11 @@ async def get_commission_summary(
     """
     db = _get_db()
     caller_id = current_user.get("user_id") or current_user.get("id")
-    caller_roles = current_user.get("roles") or []
 
-    # Self-service gate: staff may only read their own data.
-    is_manager = any(r in caller_roles for r in ("SUPERADMIN", *_COMMISSION_ROLES))
+    # Self-service gate: staff may only read their own data. Commission is a
+    # sales-performance surface, so it keeps the WIDER manager tier -- the
+    # owner's salary ruling deliberately does not reach it.
+    is_manager = _is_commission_manager(current_user)
     if not is_manager:
         # Non-manager: restrict to self only.
         employee_id = caller_id

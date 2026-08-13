@@ -231,6 +231,45 @@ def ctx(monkeypatch):
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)
     monkeypatch.setattr(deps, "get_audit_repository", lambda: None, raising=False)
 
+    # The confirm path RE-READS the original order to learn which physical shop
+    # shipped each unit (fulfillment_stores / fulfillment_breakdown). This
+    # harness never wired an order repo, so the read failed and the restock ran
+    # on an UNVERIFIED order -- it passed only because the old code fell back to
+    # a single guessed store. That fallback is now refused, so serve the real
+    # order: an online sale fulfilled from BV-GANGA-01, matching the seeded
+    # SOLD unit.
+    class _FakeOrderRepo:
+        ORDERS = {
+            "ord-abc": {
+                "order_id": "ord-abc",
+                "order_number": "ONL-5001",
+                "store_id": "BV-ONLINE-01",
+                "channel": "ONLINE",
+                "fulfillment_stores": ["BV-GANGA-01"],
+                "fulfillment_breakdown": [
+                    {"product_id": "IMS-P-1", "store_id": "BV-GANGA-01", "qty": 1}
+                ],
+            },
+            "ord-nc": {
+                "order_id": "ord-nc",
+                "order_number": "ONL-5050",
+                "store_id": "BV-ONLINE-01",
+                "channel": "ONLINE",
+                "fulfillment_stores": ["BV-GANGA-01"],
+                "fulfillment_breakdown": [
+                    {"product_id": "IMS-P-1", "store_id": "BV-GANGA-01", "qty": 1}
+                ],
+            },
+        }
+
+        def find_by_id(self, oid):
+            doc = self.ORDERS.get(oid)
+            return dict(doc) if doc else None
+
+    monkeypatch.setattr(
+        returns_router, "get_order_repository", lambda: _FakeOrderRepo()
+    )
+
     return {
         "client": TestClient(app),
         "db": db,
@@ -365,6 +404,16 @@ def test_confirm_posts_from_stored_doc_and_resolves(ctx):
     ret = ctx["returns"].find_one({"shopify_refund_id": "700001"})
     assert ret is not None and ret["status"] == "COMPLETED"
     assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+    # WHICH shop, and REACTIVATED not minted. Asserting only "some unit is
+    # AVAILABLE" let a mis-route stay green: the original unit could sit SOLD
+    # at its own shop while a phantom was minted somewhere else.
+    assert ctx["stock_repo"].units[0]["stock_id"] == "stk-1"
+    assert ctx["stock_repo"].units[0]["store_id"] == "BV-GANGA-01"
+    assert len(ctx["stock_repo"].units) == 1  # nothing minted
+    # The persisted doc records where the units actually landed -- never the
+    # stockless online store.
+    assert ret["restock_store_id"] == "BV-GANGA-01"
+    assert ret["restock_store_ids"] == ["BV-GANGA-01"]
     # The review row is stamped resolved / POSTED.
     row = ctx["review"].find_one({"review_id": "rev-1"})
     assert row["status"] == "POSTED" and row["resolved"] is True

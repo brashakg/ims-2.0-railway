@@ -55,6 +55,12 @@ from ..dependencies import (
 from ..services import restock_engine
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
+from ..services.tender_routing import canonicalize_tender
+
+# F9 (returns half): the ONE backend detector for "is this store ONLINE?"
+# (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Same detector the
+# POS / PO / GRN / till / add-stock guards use -- do NOT add a second one here.
+from ..services.stores_util import is_online_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -122,6 +128,20 @@ class ReplacementLine(BaseModel):
     gst_rate: Optional[float] = Field(default=None, ge=0)
 
 
+class RefundTenderLine(BaseModel):
+    """One leg of HOW a money refund is physically handed back (drawer-truth).
+
+    The money panel proved that GUESSING the refund tender from the original
+    sale regresses split-tender days (a UPI+CASH sale whose cash-back keeps a
+    false shortage; a CASH+CARD sale whose whole refund is cut from CASH ->
+    negative drawer). So the Returns screen now CAPTURES the actual refund
+    tender(s), and the Day-End readers net off THIS breakdown only -- never off
+    the inferred ``refund_method``. Codes: CASH / UPI / CARD / BANK."""
+
+    method: str = Field(..., description="CASH / UPI / CARD / BANK")
+    amount: float = Field(..., ge=0)
+
+
 class ReturnCreate(BaseModel):
     order_id: Optional[str] = None
     order_number: Optional[str] = None
@@ -131,7 +151,20 @@ class ReturnCreate(BaseModel):
     items: List[ReturnLine] = Field(default_factory=list)
     replacement_items: List[ReplacementLine] = Field(default_factory=list)
     approval_note: Optional[str] = None
+    # Legacy metadata / Tally hint (the ORIGINAL sale's tender). NOT used by the
+    # Day-End drawer readers anymore -- they consume refund_tenders (RETURN) /
+    # collect_method (EXCHANGE COLLECT). Kept for display + backward-compat.
     refund_method: Optional[str] = None
+    # RETURN only: the explicit per-tender breakdown of the cash actually
+    # returned. Sum MUST equal the net refund. When present + valid the return
+    # is stamped drawer_auto_netted=True and the CASH legs feed the drawer;
+    # ABSENT -> the refund is UNKNOWN to the drawer and netted NOWHERE (staff
+    # keep the manual "cash paid out" workaround -- never fabricated).
+    refund_tenders: Optional[List[RefundTenderLine]] = None
+    # EXCHANGE COLLECT only: the tender the price DIFFERENCE was collected in at
+    # the till (a NEW cash-in, not a reversal of the original sale). ABSENT ->
+    # the collect is UNKNOWN and added to no drawer/gateway figure.
+    collect_method: Optional[str] = None
     # Optional absolute Rs deduction for damaged / opened goods. 0 = full
     # refund. Must be >= 0 and <= the GST-inclusive gross refund (enforced in
     # the handler -> 422). Net refund = gross - restocking_fee.
@@ -622,6 +655,550 @@ def _order_payment_method(order: Optional[Dict[str, Any]]) -> str:
     return "SOURCE"
 
 
+# Cash-in tenders a refund/collect leg may be recorded against (canonical form).
+# ONLY these ever move a drawer or a gateway, so ONLY these are netted by the
+# Day-End readers.
+_REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
+
+# Instruments a customer can PAY with that cannot be refunded back to
+# themselves as drawer/gateway money (a gift voucher cannot be un-spent, loyalty
+# points and EMI/credit settle elsewhere). A sale part-paid with one of these
+# used to be UN-REFUNDABLE: the cash-in legs could never sum to the net refund,
+# every payload 400'd or 422'd, and the only way out was a second same-tender
+# CASH row -- which (before the aggregation fix) silently over-netted the
+# drawer. The refundable substitute is STORE_CREDIT, which is RECORDED on the
+# breakdown but NEVER netted into a drawer.
+_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "LOYALTY", "EMI", "CREDIT")
+
+# Non-drawer tenders a refund leg may legitimately name. STORE_CREDIT is the
+# standard substitute for any non-refundable instrument; the instrument itself
+# is accepted too (a voucher reissued as a voucher).
+_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
+
+# Every tender a refund leg may name.
+_REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
+
+# Ceilings on an EXCHANGE replacement. The exchange difference feeds the cash
+# drawer, so every client-supplied factor of it is a drawer input.
+#
+# _MAX_REPLACEMENT_QTY bounds ONE line; _MAX_REPLACEMENT_UNITS bounds the WHOLE
+# order. The per-line bound alone was bypassable by splitting: 50 lines x qty 1
+# each passed the line check and produced a Rs 344,100 COLLECT (the FE's
+# add-replacement button had no dedupe, so two clicks on one frame already made
+# two lines). _MAX_EXCHANGE_COLLECT is the belt-and-braces on the OUTPUT, so no
+# future factor of the difference can move the drawer without tripping it.
+# A genuine bulk swap is a separate sale, not a counter exchange.
+_MAX_REPLACEMENT_QTY = 20
+_MAX_REPLACEMENT_UNITS = 20
+_MAX_EXCHANGE_COLLECT = 100000.0
+
+# Floor on a negotiated replacement price, as a percentage OFF the catalog
+# price. The catalog is a ceiling (an above-catalog price is refused); without a
+# floor a dropped digit turned a Rs 1,100 COLLECT into Rs 5,899.99 of
+# POS-redeemable store credit while the customer kept the frame -- and because
+# the settlement flipped to REFUND the drawer never moved, so Day-End could not
+# flag it. A discount deeper than this belongs on a fresh sale, not an exchange.
+_MAX_EXCHANGE_DISCOUNT_PCT = 50.0
+
+
+def _normalize_refund_tenders(
+    raw: Optional[List["RefundTenderLine"]], net_amount: float
+):
+    """Validate + canonicalize an explicit refund-tender breakdown against the
+    net refund. Returns (list_or_None, drawer_auto_netted).
+
+    The Day-End drawer readers net off THIS breakdown only (never the inferred
+    refund_method). ABSENT/empty -> (None, False): the refund is UNKNOWN to the
+    drawer and netted nowhere (staff keep the manual workaround). A recognized,
+    balanced breakdown -> (normalized_rows, True). Raises 400 on an unrecognized
+    tender or a split whose sum does not equal the net refund (drawer integrity:
+    a fabricated or unbalanced breakdown must never reach a money reader)."""
+    if not raw:
+        return None, False
+    # FOLD same-method legs into ONE canonical row. Two {CASH, 2950} legs are
+    # the same Rs 5,900 of cash as one {CASH, 5900} leg, and must be capped as
+    # such: a per-leg cap gave EACH leg the full allowance, so splitting a
+    # refund across rows bought a fresh allowance every time and let a cashier
+    # over-net the drawer by the difference (a cash skim that reconciles clean).
+    # Folding here also makes the PERSISTED breakdown canonical for the readers.
+    folded: Dict[str, float] = {}
+    order_seen: List[str] = []
+    for t in raw:
+        method = str(getattr(t, "method", "") or "").strip().upper()
+        canon = canonicalize_tender(method)
+        if canon not in _REFUND_ALLOWED:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unrecognized refund tender '{method}'. Use CASH / UPI / "
+                    "CARD / BANK, or STORE_CREDIT for the part of the sale paid "
+                    "with a gift voucher / loyalty / EMI / credit."
+                ),
+            )
+        try:
+            amt = round(float(getattr(t, "amount", 0) or 0), 2)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if amt <= 0:
+            continue
+        if canon not in folded:
+            order_seen.append(canon)
+        folded[canon] = round(folded.get(canon, 0.0) + amt, 2)
+    out: List[Dict[str, Any]] = [
+        {"method": m, "amount": folded[m]} for m in order_seen
+    ]
+    total = round(sum(folded.values()), 2)
+    if not out:
+        return None, False
+    # Paise-exact, with a float-noise guard so a legitimate 1-paisa rounding
+    # (5899.99 vs 5900.00) is not rejected by binary-float representation error.
+    # The FE uses the SAME 0.01 constant, so a split the till shows as balanced
+    # is never 400'd here.
+    if abs(round(total, 2) - round(float(net_amount or 0), 2)) > 0.01 + 1e-9:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refund tender split (Rs {round(total, 2)}) must equal the net "
+                f"refund (Rs {round(float(net_amount or 0), 2)})."
+            ),
+        )
+    return out, True
+
+
+def _normalize_collect_method(raw: Optional[str]) -> Optional[str]:
+    """Canonicalize the EXCHANGE-COLLECT tender (the tender the price difference
+    was taken in). ABSENT -> None (the collect is UNKNOWN to every money reader,
+    never fabricated). Raises 400 on an unrecognized tender."""
+    if not raw:
+        return None
+    canon = canonicalize_tender(str(raw).strip().upper())
+    if canon not in _REFUND_CASH_IN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unrecognized collect tender '{raw}'. "
+                "Use CASH / UPI / CARD / BANK."
+            ),
+        )
+    return canon
+
+
+def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    """What each CASH-IN tender ACTUALLY collected on the source order.
+
+    Sums ``order.payments[]`` by canonical tender (a negative row -- a legacy
+    captured reversal -- reduces that tender). Only cash-in tenders are kept:
+    they are the only ones that can be refunded back as drawer/gateway money.
+    An order with NO payments[] (legacy / imported) yields {} -- the caller then
+    treats the refund tender as UNVERIFIABLE."""
+    out: Dict[str, float] = {}
+    for p in (order or {}).get("payments") or []:
+        if not isinstance(p, dict):
+            continue
+        canon = canonicalize_tender(p.get("method"), p.get("mode"))
+        if canon not in _REFUND_CASH_IN:
+            continue
+        try:
+            amt = float(p.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    return {k: v for k, v in out.items() if v > 0}
+
+
+def _order_non_refundable_tenders(
+    order: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    """What the order collected on instruments that CANNOT be refunded back to
+    themselves as drawer/gateway money (gift voucher / loyalty / EMI / credit).
+
+    This portion is legitimately refundable only as STORE_CREDIT (or a reissued
+    instrument), and it is what makes an otherwise-DOA refund completable on a
+    part-voucher sale."""
+    out: Dict[str, float] = {}
+    for p in (order or {}).get("payments") or []:
+        if not isinstance(p, dict):
+            continue
+        canon = canonicalize_tender(p.get("method"), p.get("mode"))
+        if canon not in _ORDER_NON_REFUNDABLE:
+            continue
+        try:
+            amt = float(p.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    return {k: v for k, v in out.items() if v > 0}
+
+
+def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
+    """Per-tender refunds ALREADY issued against an order (COMPLETED returns
+    carrying an explicit ``refund_tenders`` breakdown). Feeds the per-tender
+    refund cap so two half refunds cannot together exceed what a tender
+    collected. Fail-soft -> {}."""
+    out: Dict[str, float] = {}
+    if not order_id:
+        return out
+    coll = _returns_coll()
+    if coll is None:
+        return out
+    try:
+        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+            if doc.get("status") != "COMPLETED":
+                continue
+            for leg in doc.get("refund_tenders") or []:
+                if not isinstance(leg, dict):
+                    continue
+                canon = canonicalize_tender(leg.get("method"))
+                try:
+                    amt = float(leg.get("amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt > 0:
+                    out[canon] = round(out.get(canon, 0.0) + amt, 2)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[RETURNS] _prior_refund_tenders lookup failed: %s", exc)
+    return out
+
+
+def _resolve_replacement_prices(
+    replacement_dump: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Re-price EXCHANGE replacement lines from the PRODUCT MASTER.
+
+    The exchange settlement (replacement total - returned value) now drives real
+    money: a COLLECT feeds the expected drawer. A client-typed replacement price
+    is therefore a drawer input, and a single fat-finger manufactures a phantom
+    shortage against the closing cashier -- a Rs 59,000 replacement typed against
+    a Rs 5,900 return produced a Rs 53,100 COLLECT and moved the drawer by it.
+    So the server resolves the price exactly as it resolves the refund side:
+    ``product_id`` -> catalog ``offer_price``/``price``/``mrp``.
+
+    A line whose product cannot be resolved is REJECTED (400) rather than
+    trusted: an exchange swaps for a real catalogued item, and the alternative
+    is letting an unverifiable number reach a till figure. Returns a NEW list;
+    the caller's input is not mutated."""
+    if not replacement_dump:
+        return replacement_dump
+    repo = None
+    try:
+        repo = get_product_repository()
+    except Exception:  # noqa: BLE001
+        repo = None
+    if repo is None:
+        # No catalog available (mock / degraded): do NOT silently trust the
+        # client price for a drawer figure.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Product catalog unavailable - an exchange cannot be priced "
+                "right now. Try again shortly."
+            ),
+        )
+    out: List[Dict[str, Any]] = []
+    total_units = 0
+    for line in replacement_dump:
+        row = dict(line)
+        pid = str(row.get("product_id") or "").strip()
+        name = row.get("name") or pid or "replacement item"
+        product = None
+        if pid:
+            try:
+                product = repo.find_by_id(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if product is None and row.get("sku"):
+            try:
+                product = repo.find_by_sku(str(row.get("sku")).strip())
+            except Exception:  # noqa: BLE001
+                product = None
+        if product is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' is not in the catalog, so its "
+                    "price cannot be verified. Pick the replacement from the "
+                    "product search (a typed price cannot be used for an "
+                    "exchange - it would move the cash drawer)."
+                ),
+            )
+        catalog_price = None
+        for key in ("offer_price", "price", "mrp"):
+            val = product.get(key)
+            if val not in (None, ""):
+                try:
+                    catalog_price = round(float(val), 2)
+                except (TypeError, ValueError):
+                    catalog_price = None
+                if catalog_price is not None:
+                    break
+        if catalog_price is None or catalog_price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' has no price in the catalog, so "
+                    "the exchange difference cannot be computed."
+                ),
+            )
+        # ---- QUANTITY: the OTHER half of the drawer input -----------------
+        # unit_price was made server-authoritative; quantity was not, and the
+        # drawer figure is unit_price x quantity. Measured before this guard:
+        # quantity 50 -> collect_amount 344100.00 (a Rs 343,000 phantom
+        # shortage from one fat-finger on the adjacent input box), 1e6 ->
+        # 6,999,994,100.00, and 2.5 was accepted.
+        raw_qty = row.get("quantity", 1)
+        try:
+            qty = float(raw_qty)
+        except (TypeError, ValueError):
+            qty = -1.0
+        if qty <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement item '{name}' needs a quantity of at least 1."
+                ),
+            )
+        if abs(qty - round(qty)) > 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement quantity for '{name}' must be a whole number "
+                    f"(got {qty:g})."
+                ),
+            )
+        qty = int(round(qty))
+        if qty > _MAX_REPLACEMENT_QTY:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement quantity {qty} for '{name}' exceeds the "
+                    f"per-line limit of {_MAX_REPLACEMENT_QTY} for an exchange. "
+                    "Raise a separate sale for a bulk swap - a quantity this "
+                    "large moves the cash drawer by the difference."
+                ),
+            )
+        row["quantity"] = qty
+
+        # ---- PRICE: the catalog is a CEILING, not an override -------------
+        # Optical retail discounts routinely. Forcing the catalog price made a
+        # frame sold at 15% off and swapped for the SAME sku manufacture a
+        # COLLECT the customer never owed, with no honest payload available. So
+        # a client price AT OR BELOW the catalog is honoured (the real
+        # negotiated number) and anything ABOVE it is refused -- the drawer can
+        # never be moved upward by a typed figure.
+        client_price = None
+        raw_price = row.get("unit_price")
+        if raw_price not in (None, ""):
+            try:
+                client_price = round(float(raw_price), 2)
+            except (TypeError, ValueError):
+                client_price = None
+        if client_price is not None and client_price > catalog_price + 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement price Rs {client_price:.2f} for '{name}' is "
+                    f"above the catalog price Rs {catalog_price:.2f}. A price "
+                    "above catalog cannot be charged on an exchange - it would "
+                    "move the cash drawer by the difference."
+                ),
+            )
+        # FLOOR. The ceiling above stops a price being typed UP; without this a
+        # price typed DOWN was equally free, and a deep one flips the settlement
+        # into REFUND and mints store credit invisibly.
+        floor_price = round(catalog_price * (1 - _MAX_EXCHANGE_DISCOUNT_PCT / 100.0), 2)
+        if client_price is not None and 0 < client_price < floor_price - 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Replacement price Rs {client_price:.2f} for '{name}' is more "
+                    f"than {_MAX_EXCHANGE_DISCOUNT_PCT:.0f}% below the catalog "
+                    f"price Rs {catalog_price:.2f} (floor Rs {floor_price:.2f}). "
+                    "A discount that deep must go through a fresh sale, not an "
+                    "exchange - here it would move the cash drawer."
+                ),
+            )
+        if client_price is not None and client_price > 0:
+            row["unit_price"] = client_price
+            row["price_source"] = (
+                "CATALOG" if abs(client_price - catalog_price) <= 0.01
+                else "NEGOTIATED"
+            )
+            row["catalog_price"] = catalog_price
+            row["discount_from_catalog"] = round(catalog_price - client_price, 2)
+        else:
+            row["unit_price"] = catalog_price
+            row["price_source"] = "CATALOG"
+            row["catalog_price"] = catalog_price
+            row["discount_from_catalog"] = 0.0
+        total_units += qty
+        out.append(row)
+
+    # PER-ORDER unit cap. The per-line cap above is bypassable by splitting the
+    # same units across rows, which is exactly what the FE's un-deduped
+    # add-replacement button produces.
+    if total_units > _MAX_REPLACEMENT_UNITS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This exchange replaces {total_units} units, above the limit of "
+                f"{_MAX_REPLACEMENT_UNITS} for a counter exchange. Raise a "
+                "separate sale for a bulk swap - a swap this large moves the "
+                "cash drawer by the difference."
+            ),
+        )
+    return out
+
+
+def _gate_exchange_settlement(
+    settlement: Optional[Dict[str, Any]],
+    replacement_priced: List[Dict[str, Any]],
+    gross_refund: float,
+) -> None:
+    """Guard the OUTPUT of the exchange settlement, not just its inputs.
+
+    Two failures the input guards cannot see:
+
+    * DIRECTION FLIP -- a negotiated (discounted) replacement price may reduce
+      what the customer owes, but it must never turn a COLLECT into a REFUND.
+      That flip is how a typed Rs 0.01 minted Rs 5,899.99 of POS-redeemable
+      store credit while the customer kept a Rs 7,000 frame, and because the
+      drawer does not move on a REFUND, Day-End could never flag it.
+    * ABSURD COLLECT -- the difference is a drawer input, so it carries its own
+      ceiling regardless of which factor (price, quantity, line count) inflated
+      it. This is the backstop that makes a future new factor safe by default.
+    """
+    if not settlement:
+        return
+    direction = settlement.get("direction")
+    difference = float(settlement.get("difference") or 0)
+
+    if direction == engine.REFUND:
+        # What WOULD the direction have been at catalog prices?
+        catalog_total = round(
+            sum(
+                float(r.get("quantity") or 0) * float(r.get("catalog_price") or 0)
+                for r in replacement_priced
+            ),
+            2,
+        )
+        if catalog_total + 0.01 >= gross_refund:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The replacement prices entered turn this exchange into a "
+                    f"Rs {difference:.2f} REFUND, but at catalog prices "
+                    f"(Rs {catalog_total:.2f}) the customer owes money. Check the "
+                    "replacement price - a discount cannot create store credit "
+                    "on an exchange."
+                ),
+            )
+
+    if direction == engine.COLLECT and difference > _MAX_EXCHANGE_COLLECT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This exchange would collect Rs {difference:.2f}, above the "
+                f"Rs {_MAX_EXCHANGE_COLLECT:.2f} limit for a counter exchange. "
+                "Check the replacement items - a figure this large moves the "
+                "cash drawer by the difference."
+            ),
+        )
+
+
+def _gate_refund_tenders_against_order(
+    refund_tenders: Optional[List[Dict[str, Any]]],
+    *,
+    order: Optional[Dict[str, Any]],
+    order_id: Optional[str],
+):
+    """AUTHORITATIVE server-side cross-check of a declared refund breakdown.
+
+    A UI rule is not a control: a direct POST of ``{refund_tenders:[{CASH, 8000}]}``
+    against a 100%-CARD sale would otherwise be accepted, stamp
+    ``drawer_auto_netted`` and lower the expected drawer by Rs 8,000 -- a
+    cash-skim that reconciles clean. So a tender may only be refunded up to what
+    THAT tender actually collected on the source order, net of prior per-tender
+    refunds. A leg naming a tender the order never collected, or exceeding its
+    remaining captured amount, is rejected 422 TENDER_MISMATCH (the same shape
+    the F27 original-tender lock already uses).
+
+    NON-DRAWER legs (STORE_CREDIT, or a reissued gift voucher / loyalty / EMI /
+    credit) are capped against what the order took on those NON-REFUNDABLE
+    instruments -- that is the portion which legitimately cannot come back as
+    cash. They are recorded but never netted into a drawer by the readers.
+
+    UNVERIFIABLE orders (no captured payments[] at all -- legacy / imported)
+    are NOT blocked (that would break legitimate legacy refunds) but are
+    DOWNGRADED to UNKNOWN: the breakdown is dropped so no drawer or gateway
+    figure is moved by a claim the server could not verify.
+
+    Returns ``(refund_tenders_or_None, drawer_auto_netted)``."""
+    if not refund_tenders:
+        return None, False
+    captured = _order_captured_tenders(order)
+    non_refundable = _order_non_refundable_tenders(order)
+    if not captured and not non_refundable:
+        # Cannot verify -> record the refund but never auto-net it.
+        logger.info(
+            "[RETURNS] refund tender unverifiable (order %s has no captured "
+            "payments) -- recorded as UNKNOWN, not auto-netted",
+            order_id,
+        )
+        return None, False
+    prior = _prior_refund_tenders(order_id)
+    # AGGREGATE THE WHOLE REQUEST PER TENDER BEFORE CAPPING. Capping per LEG
+    # handed every leg the full allowance, so N legs of the same tender bought N
+    # allowances: [{CASH,2950},{CASH,2950}] passed on an order that only ever
+    # took Rs 3,000 in cash, dropping the expected drawer Rs 2,900 below what
+    # the till received -- the cashier refunds the customer on UPI, lifts the
+    # notes, and still closes BALANCED. Callers fold same-method legs upstream;
+    # this re-aggregation is the belt-and-braces that makes the cap correct for
+    # ANY caller, including a future one that skips the fold.
+    requested: Dict[str, float] = {}
+    for leg in refund_tenders:
+        method = str(leg.get("method") or "")
+        try:
+            amount = float(leg.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        requested[method] = round(requested.get(method, 0.0) + amount, 2)
+
+    # The non-drawer pool: the part of the sale paid with an instrument that
+    # cannot come back as cash. STORE_CREDIT draws on the WHOLE pool (it is the
+    # standard substitute); a reissued instrument draws on its own bucket.
+    non_refundable_total = round(sum(non_refundable.values()), 2)
+
+    def _allowance(method: str) -> float:
+        if method == "STORE_CREDIT":
+            return non_refundable_total
+        if method in _ORDER_NON_REFUNDABLE:
+            return non_refundable.get(method, 0.0)
+        return captured.get(method, 0.0)
+
+    for method, amount in requested.items():
+        remaining = round(_allowance(method) - prior.get(method, 0.0), 2)
+        if remaining <= 0 or amount > remaining + 0.01:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "TENDER_MISMATCH",
+                    "requested_method": method,
+                    "requested_amount": round(amount, 2),
+                    "captured_on_tender": round(_allowance(method), 2),
+                    "already_refunded_on_tender": round(prior.get(method, 0.0), 2),
+                    "refundable_on_tender": max(remaining, 0.0),
+                    "message": (
+                        f"Cannot refund Rs {amount:.2f} to {method}: this order "
+                        f"allows Rs {_allowance(method):.2f} on that tender and "
+                        f"Rs {prior.get(method, 0.0):.2f} has already been "
+                        "refunded to it. A refund can only go back to a tender "
+                        "the customer actually paid with."
+                    ),
+                },
+            )
+    return refund_tenders, True
+
+
 def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
     """Ledger is authoritative once it has entries; otherwise bridge from the
     legacy customer.store_credit number (same rule as the customers router)."""
@@ -761,6 +1338,7 @@ def _reactivate_original_unit(
     store_id: Optional[str],
     order_id: Optional[str],
     used_ids: set,
+    exact_order_only: bool = False,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
@@ -769,6 +1347,18 @@ def _reactivate_original_unit(
       1. a unit for (product_id, store_id) tied to THIS order_id with status
          SOLD - i.e. the exact unit that was sold on this order;
       2. any SOLD unit for (product_id, store_id).
+
+    ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
+    the store the sale was booked against -- i.e. the F9 online-order redirect.
+    Step 2 is only safe when the caller's store IS the store the sale happened
+    at (an ordinary counter return): there, "some SOLD unit of this product at
+    this shop" is a reasonable stand-in for a lost row. On the redirected path
+    it is not: the sale was booked against the ONLINE store, so step 1 misses
+    for every historical import, and step 2 would then grab an UNRELATED
+    walk-in customer's SOLD unit -- flipping a frame that is on somebody's face
+    to AVAILABLE, erasing that customer's sale lineage, and still leaving the
+    frame that actually came back with no stock row. The caller mints instead,
+    which is the honest record for goods whose original row is untraceable.
 
     IMPORTANT: only status=="SOLD" units are eligible. Earlier code used
     `$ne: AVAILABLE`, which would happily resurrect DAMAGED / SCRAPPED /
@@ -793,7 +1383,7 @@ def _reactivate_original_unit(
             q["order_id"] = order_id
             q.update(sold_only)
             candidates = stock_repo.find_many(q) or []
-        if not candidates:
+        if not candidates and not exact_order_only:
             q = dict(base)
             q.update(sold_only)
             candidates = stock_repo.find_many(q) or []
@@ -887,6 +1477,374 @@ def _audit_stock_transition(
         logger.debug("[RETURNS] stock_audit insert skipped: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# F9 (returns half) -- a returned unit NEVER lands on a pooled, stockless
+# ONLINE store.
+# ---------------------------------------------------------------------------
+# The refund's store is DERIVED FROM THE ORDER (see the IDOR guard in
+# create_return), and an online order's `store_id` is the VIRTUAL online billing
+# bucket -- shopify_ingest._online_store_id() stamps BV-ONLINE-01 while the
+# serialized units are claimed at a PHYSICAL fulfilment store
+# (_online_fulfillment_store_id / _claim_units_multistore). So for a return
+# against an online order the restock below used to:
+#   * look for the original SOLD unit AT the online store -> never finds one
+#     (the online store owns no serialized stock at all), therefore
+#   * ALWAYS mint a fresh AVAILABLE unit ON the online store.
+# That is wrong three ways: the real returned unit stays SOLD at the shop
+# forever (permanent on-hand loss there), the minted unit sits on a store with
+# no shelf and no POS (PR #941 blocks POS on online stores) so nobody can ever
+# sell it, and it still counts toward the POOLED on-hand that
+# online_stock_writeback pushes to Shopify -- Shopify then offers a unit that no
+# shop can pick. Worse, shopify_ingest._available_stores_for_product does not
+# exclude online stores, so the next online sale silently CLAIMS the phantom
+# (claimed == expected -> no under-claim / oversell miss recorded).
+#
+# The fix is NOT to block the mint: a returned unit is real goods, and blocking
+# would silently lose it. We REDIRECT it to a physical store and stamp where +
+# why. If no physical store can be resolved we FAIL LOUD (nothing minted,
+# restock_applied stays False so the existing retry surface picks it up) rather
+# than minting on a stockless store or dropping the unit on the floor.
+
+# Why a particular physical store was chosen (stamped on the return doc).
+_RESTOCK_ROUTE_DIRECT = "PHYSICAL_STORE"
+_RESTOCK_ROUTE_FULFILMENT = "ONLINE_ORDER_FULFILMENT_STORE"
+_RESTOCK_ROUTE_PROCESSING = "ONLINE_ORDER_PROCESSING_STORE"
+_RESTOCK_ROUTE_CONFIGURED = "ONLINE_ORDER_CONFIGURED_FULFILMENT_STORE"
+_RESTOCK_ROUTE_UNRESOLVED = "ONLINE_ORDER_NO_PHYSICAL_STORE"
+
+
+def _first_physical_store(db, candidates: List[Optional[str]]) -> Optional[str]:
+    """First candidate that is a real, non-ONLINE store. Order is preference."""
+    for cand in candidates:
+        sid = str(cand or "").strip()
+        if not sid:
+            continue
+        if is_online_store(db, sid):
+            continue
+        return sid
+    return None
+
+
+def _order_fulfilment_stores(
+    order: Optional[Dict[str, Any]], product_id: Optional[str] = None
+) -> List[str]:
+    """Store ids that actually shipped this order's serialized units, best
+    candidate first. Empty for an in-store sale / a historical import that never
+    ran the decrement. Pure; never raises.
+
+    Online fulfilment can SPAN SHOPS (shopify_ingest._claim_units_multistore
+    falls back to whichever store held the units, ON by default), so when a
+    ``product_id`` is given the `fulfillment_breakdown` row for THAT product
+    wins -- otherwise a two-shop order would book every returned unit back to
+    one shop and leave the other shop's unit stranded SOLD."""
+    for_product: List[str] = []
+    other_breakdown: List[str] = []
+    breakdown = (order or {}).get("fulfillment_breakdown")
+    if isinstance(breakdown, list):
+        for row in breakdown:
+            if not isinstance(row, dict):
+                continue
+            sid = str(row.get("store_id") or "").strip()
+            if not sid:
+                continue
+            matches = product_id is not None and str(
+                row.get("product_id") or ""
+            ) == str(product_id)
+            bucket = for_product if matches else other_breakdown
+            if sid not in bucket:
+                bucket.append(sid)
+
+    listed: List[str] = []
+    stores = (order or {}).get("fulfillment_stores")
+    if isinstance(stores, list):
+        for s in stores:
+            sid = str(s or "").strip()
+            if sid and sid not in listed:
+                listed.append(sid)
+
+    out: List[str] = []
+    for sid in for_product + listed + other_breakdown:
+        if sid not in out:
+            out.append(sid)
+    return out
+
+
+def _load_order_for_restock(order_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Fetch the original order ONLY on the online-store branch (so the ordinary
+    in-store restock does no extra work). Fail-soft -> None."""
+    if not order_id:
+        return None
+    try:
+        repo = get_order_repository()
+        if repo is None:
+            return None
+        return repo.find_by_id(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock-store order lookup failed: %s", exc)
+        return None
+
+
+def _configured_online_fulfilment_store() -> Optional[str]:
+    """ONLINE_FULFILLMENT_STORE_ID -- the physical shop shopify_ingest draws
+    online stock from by default. Read here (not imported from shopify_ingest)
+    so the returns path has no import edge onto the ingest module."""
+    import os
+
+    return (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip() or None
+
+
+def _resolve_restock_store(
+    store_id: Optional[str],
+    order_id: Optional[str],
+    processing_store_id: Optional[str] = None,
+    order: Optional[Dict[str, Any]] = None,
+    product_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Decide WHICH store a returned unit is put back on, and record why.
+
+    Returns ``{"store_id", "redirected_from", "reason"}``. ``reason`` is
+    _RESTOCK_ROUTE_UNRESOLVED (and store_id None) ONLY when the return is
+    against an ONLINE store and no physical store could be resolved -- the
+    caller must then fail loud instead of minting.
+
+    Anything that is not an ONLINE store passes straight through UNCHANGED --
+    including a blank/None store_id on a legacy order, which keeps its
+    existing (store-agnostic) restock behaviour rather than being newly
+    blocked by this guard. The ordinary counter return therefore short-circuits
+    on the first line (one indexed `stores` lookup at most, fail-open like every
+    other is_online_store guard).
+
+    Preference order for an ONLINE order, most-evidenced first:
+      1. the order's fulfilment store(s) -- where the sold units were CLAIMED,
+         narrowed to THIS ``product_id``'s breakdown row when known (online
+         fulfilment can span shops). Restocking here also lets
+         _reactivate_original_unit find and flip the EXACT unit that left,
+         instead of minting a duplicate.
+      2. ``processing_store_id`` -- the caller-supplied physical fallback. On
+         the counter door that is the operator's active store (where the goods
+         were physically handed back); on the Shopify-refund door it is the
+         store the stored review row proposed to the accountant. Either way it
+         is only consulted when the order carries no usable fulfilment stamp,
+         and it is still rejected if it is itself an ONLINE store.
+      3. ONLINE_FULFILLMENT_STORE_ID -- the configured default physical shop.
+    Any candidate that is itself an ONLINE store is skipped at every step.
+    """
+    db = _get_db()
+    if not is_online_store(db, store_id):
+        return {
+            "store_id": store_id,
+            "redirected_from": None,
+            "reason": _RESTOCK_ROUTE_DIRECT,
+        }
+
+    if order is None:
+        order = _load_order_for_restock(order_id)
+
+    target = _first_physical_store(db, _order_fulfilment_stores(order, product_id))
+    reason = _RESTOCK_ROUTE_FULFILMENT
+    if not target:
+        target = _first_physical_store(db, [processing_store_id])
+        reason = _RESTOCK_ROUTE_PROCESSING
+    if not target:
+        target = _first_physical_store(db, [_configured_online_fulfilment_store()])
+        reason = _RESTOCK_ROUTE_CONFIGURED
+    if not target:
+        return {
+            "store_id": None,
+            "redirected_from": store_id,
+            "reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
+    return {
+        "store_id": target,
+        "redirected_from": store_id,
+        "reason": reason,
+    }
+
+
+def _fulfilment_unit_queue(
+    db, order: Optional[Dict[str, Any]], product_id: Optional[str]
+) -> List[str]:
+    """ONE physical store id PER UNIT this product was actually shipped from,
+    in breakdown order, honouring each row's ``qty``.
+
+    `_claim_units_multistore` splits a SINGLE order line across shops whenever
+    the preferred shop is short (fallback is ON by default), stamping one
+    `fulfillment_breakdown` row per (product, store) with its qty. Routing at
+    product granularity would send BOTH returned units of a 2-way split back to
+    one shop -- minting a phantom there while the other shop's real unit stayed
+    SOLD forever. Expanding qty into a per-unit queue mirrors how the units were
+    originally claimed, so each one goes home. Online stores are dropped.
+    """
+    out: List[str] = []
+    breakdown = (order or {}).get("fulfillment_breakdown")
+    if not isinstance(breakdown, list) or not product_id:
+        return out
+    for row in breakdown:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("product_id") or "") != str(product_id):
+            continue
+        sid = str(row.get("store_id") or "").strip()
+        if not sid or is_online_store(db, sid):
+            continue
+        # A breakdown row with no qty still means at least one unit was claimed
+        # there; an explicit 0 means none were.
+        raw_qty = row.get("qty", 1)
+        try:
+            qty = int(raw_qty)
+        except (TypeError, ValueError):
+            qty = 1
+        out.extend([sid] * max(0, qty))
+    return out
+
+
+def _has_order_scoped_sold_unit(
+    stock_repo: Any,
+    product_id: Optional[str],
+    store_id: Optional[str],
+    order_id: Optional[str],
+    used_ids: set,
+) -> bool:
+    """True when THIS order still has an un-reclaimed SOLD unit of this product
+    at this shop. Strictly order-scoped -- it can never see another order's
+    unit, so it adds no hijack risk. Fail-soft -> False."""
+    if stock_repo is None or not product_id or not store_id or not order_id:
+        return False
+    try:
+        rows = (
+            stock_repo.find_many(
+                {
+                    "product_id": product_id,
+                    "store_id": store_id,
+                    "order_id": order_id,
+                    "status": "SOLD",
+                }
+            )
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] outstanding-unit lookup failed: %s", exc)
+        return False
+    for unit in rows:
+        sid = unit.get("stock_id") or unit.get("_id")
+        if sid and sid not in used_ids:
+            return True
+    return False
+
+
+def _take_fulfilment_slot(
+    stock_repo: Any,
+    queue: List[str],
+    product_id: Optional[str],
+    order_id: Optional[str],
+    used_ids: set,
+) -> str:
+    """Consume the queue slot whose shop STILL holds an outstanding SOLD unit
+    for this order, not blindly the first one.
+
+    The queue is rebuilt from the (unchanged) order on every call, so it has no
+    memory of earlier PARTIAL returns -- ordinary when a courier returns the two
+    halves of a split line on different days. Popping blindly re-picked the same
+    first shop on the second return: its unit was already back, the order-scoped
+    lookup missed, and (correctly refusing the order-agnostic fallback) it MINTED
+    a phantom there while the other shop's real unit stayed SOLD forever. Picking
+    the slot that still has something outstanding makes the queue reflect what is
+    still OWED rather than what originally shipped."""
+    for idx, candidate in enumerate(queue):
+        if _has_order_scoped_sold_unit(
+            stock_repo, product_id, candidate, order_id, used_ids
+        ):
+            return queue.pop(idx)
+    # Nothing outstanding anywhere (every shop's unit already came back, or the
+    # units were never stamped): keep the original order for a stable, honest
+    # fallback -- the caller mints there.
+    return queue.pop(0)
+
+
+def _restock_intent_rows(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-product summary rows for a restock that recorded INTENT but applied
+    nothing (no stock repo, or no physical store to restock to).
+
+    Carries the same keys as an APPLIED row (including ``store_id``, None here)
+    so a consumer reading row["store_id"] does not blow up on exactly the
+    failure path an operator is looking at."""
+    per_line: Dict[str, Dict[str, Any]] = {}
+    for u in units:
+        pid = u.get("product_id")
+        row = per_line.setdefault(
+            pid,
+            {
+                "product_id": pid,
+                "sku": u.get("sku", ""),
+                "product_name": u.get("product_name", ""),
+                "quantity": 0,
+                "applied": False,
+                "store_id": None,
+                "store_ids": [],
+            },
+        )
+        row["quantity"] += 1
+    return list(per_line.values())
+
+
+def _raise_restock_blocked_task(
+    return_id: str,
+    order_id: Optional[str],
+    store_id: Optional[str],
+    units: List[Dict[str, Any]],
+    processing_store_id: Optional[str] = None,
+) -> None:
+    """Put a BLOCKED restock in front of a human.
+
+    Without this the fail-loud branch is one Railway log line while real goods
+    sit on the counter with no stock row -- developer-only recovery on a live
+    system whose owner is not a developer. Deduped on the return id so a retry
+    never files a second task. Fully fail-soft: the task is a side channel and
+    must never break the return."""
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        lines = ", ".join(
+            sorted(
+                {
+                    f"{u.get('sku') or u.get('product_id')}"
+                    for u in units
+                    if u.get("sku") or u.get("product_id")
+                }
+            )
+        )
+        create_system_task(
+            get_task_repository(),
+            title=f"Return {return_id}: {len(units)} unit(s) NOT back in stock",
+            description=(
+                f"The refund for return {return_id} (order {order_id}) is "
+                f"recorded and paid, but the returned goods could NOT be put "
+                f"back into stock: the order bills to the online store "
+                f"{store_id}, which holds no stock, and no physical shop could "
+                f"be resolved to receive them. The items are physically with "
+                f"the person who processed the return and have NO stock row. "
+                f"Fix: set ONLINE_FULFILLMENT_STORE_ID, or add them at the "
+                f"receiving shop and re-run the restock for this return. "
+                f"Items: {lines or 'see the return'}."
+            ),
+            priority="P1",
+            category="Inventory",
+            store_id=processing_store_id,
+            dedupe_ref=f"return_restock_blocked:{return_id}",
+            extra={
+                "link": "/returns",
+                "payload": {"return_id": return_id, "order_id": order_id},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[RETURNS] restock-blocked task could not be raised for %s: %s",
+            return_id,
+            exc,
+        )
+
+
 def _restock_good_items(
     items: List[ReturnLine],
     store_id: Optional[str],
@@ -894,6 +1852,8 @@ def _restock_good_items(
     order_id: Optional[str] = None,
     already_applied: bool = False,
     user_id: Optional[str] = None,
+    processing_store_id: Optional[str] = None,
+    order: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Put GOOD-condition returned units BACK into sellable serialized stock.
 
@@ -911,8 +1871,17 @@ def _restock_good_items(
     breaking the return record. Damaged / opened / opted-out units are skipped
     and listed under `skipped`.
 
+    F9: the unit is ALWAYS put back on a PHYSICAL store. When the return is
+    against an online order (its store_id is the virtual online billing bucket)
+    the restock is REDIRECTED to the fulfilling / processing physical shop --
+    see _resolve_restock_store -- and the redirect is stamped on the result.
+    An online order with no resolvable physical store restocks NOTHING and
+    leaves applied=False (loud, retryable) rather than minting a phantom unit.
+
     Returns a dict with `restocked` (per-line summary for the return doc),
-    `restock_stock_ids` (every stock row touched), `applied`, and `skipped`.
+    `restock_stock_ids` (every stock row touched), `applied`, `skipped`, and the
+    routing stamp (`restock_store_id` / `restock_store_redirected_from` /
+    `restock_store_reason`).
     """
     plan = restock_engine.plan_restock(
         [it.model_dump() for it in (items or [])],
@@ -924,6 +1893,12 @@ def _restock_good_items(
         "restock_stock_ids": [],
         "applied": False,
         "skipped": plan.get("skipped", []),
+        # F9 routing stamp -- stays None until a store is actually resolved, so
+        # a return that restocked nothing never claims units landed somewhere.
+        "restock_store_id": None,
+        "restock_store_ids": [],
+        "restock_store_redirected_from": None,
+        "restock_store_reason": None,
     }
     if plan.get("already_applied"):
         result["applied"] = True
@@ -943,30 +1918,112 @@ def _restock_good_items(
 
     # No DB / stock repo -> record intent only, leave applied=False to retry.
     if stock_repo is None:
-        per_line: Dict[str, Dict[str, Any]] = {}
-        for u in units:
-            pid = u.get("product_id")
-            row = per_line.setdefault(
-                pid,
-                {
-                    "product_id": pid,
-                    "sku": u.get("sku", ""),
-                    "product_name": u.get("product_name", ""),
-                    "quantity": 0,
-                    "applied": False,
-                },
-            )
-            row["quantity"] += 1
-        result["restocked"] = list(per_line.values())
+        result["restocked"] = _restock_intent_rows(units)
         result["applied"] = False
         return result
+
+    # F9: resolve the PHYSICAL store these units go back on. No-op (and no extra
+    # work) for the ordinary counter return; only an online-order return is
+    # redirected.
+    routing = _resolve_restock_store(
+        store_id, order_id, processing_store_id=processing_store_id, order=order
+    )
+    target_store = routing["store_id"]
+    result["restock_store_id"] = target_store
+    result["restock_store_redirected_from"] = routing["redirected_from"]
+    result["restock_store_reason"] = routing["reason"]
+
+    # Keyed on the REASON, not on `target_store is None`: a legacy order with no
+    # store stamp at all is not an online store and must keep its existing
+    # store-agnostic behaviour, not be newly blocked by this guard.
+    if routing["reason"] == _RESTOCK_ROUTE_UNRESOLVED:
+        # FAIL LOUD. Minting on the online store would publish stock no shop can
+        # pick; silently dropping the unit would lose real goods. Record intent,
+        # leave applied=False (the /retry-restock surface + the return doc keep
+        # it visible) and shout so Sentry / the operator sees it.
+        logger.error(
+            "[RETURNS] restock BLOCKED for %s: order %s bills to ONLINE store %s "
+            "and no physical fulfilment/processing store could be resolved. "
+            "%d unit(s) NOT restocked (nothing minted on the online store). "
+            "Set ONLINE_FULFILLMENT_STORE_ID or restock manually.",
+            return_id,
+            order_id,
+            store_id,
+            len(units),
+        )
+        # A log line is not a listener: file a deduped P1 task so the goods
+        # surface as work in the app, not only in Railway.
+        _raise_restock_blocked_task(
+            return_id, order_id, store_id, units, processing_store_id
+        )
+        result["restocked"] = _restock_intent_rows(units)
+        result["applied"] = False
+        return result
+
+    # F9 refinement -- ONLY on the redirected (online-order) path: an online
+    # order can be fulfilled from SEVERAL shops (_claim_units_multistore), so
+    # each UNIT goes back to the shop it actually left from. Two layers:
+    #   * a per-UNIT queue expanded from fulfillment_breakdown's qty (so ONE
+    #     line split 1+1 across two shops sends one unit to each), and
+    #   * a per-PRODUCT default for anything the breakdown does not cover.
+    # The physical-store path never runs this block at all.
+    # exact_order_only must be keyed on "is the store I am searching the store
+    # the sale was booked against?", not merely on "did I redirect?". A legacy
+    # ONLINE order carrying NO store_id key at all resolves to the caller's own
+    # shop, is judged physical, and would otherwise reach the order-agnostic
+    # fallback and grab an unrelated walk-in's SOLD unit. Channel/source is the
+    # cheap, precise tell for that population.
+    is_redirected = bool(routing["redirected_from"])
+    is_online_order = (
+        is_redirected
+        or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
+        or bool((order or {}).get("shopify_order_id"))
+    )
+    per_product_queue: Dict[str, List[str]] = {}
+    per_product_default: Dict[str, str] = {}
+    if is_redirected:
+        redirect_order = (
+            order if order is not None else _load_order_for_restock(order_id)
+        )
+        db_handle = _get_db()
+        distinct_pids: List[str] = []
+        for u in units:
+            pid = u.get("product_id")
+            if pid and pid not in distinct_pids:
+                distinct_pids.append(pid)
+        for pid in distinct_pids:
+            per_product_queue[pid] = _fulfilment_unit_queue(
+                db_handle, redirect_order, pid
+            )
+            hit = _resolve_restock_store(
+                store_id,
+                order_id,
+                processing_store_id=processing_store_id,
+                order=redirect_order,
+                product_id=pid,
+            )
+            if hit["store_id"]:
+                per_product_default[pid] = hit["store_id"]
 
     # We have a stock repo - actually re-add each unit.
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
+    landed_stores: List[str] = []
     all_ok = True
     for u in units:
         pid = u.get("product_id")
+        # Never the online store: every source here is filtered through
+        # _first_physical_store / _fulfilment_unit_queue, and target_store is
+        # physical too (an UNRESOLVED route returned early above).
+        queue = per_product_queue.get(pid) or []
+        if queue:
+            unit_store = _take_fulfilment_slot(
+                stock_repo, queue, pid, order_id, used_ids
+            )
+        else:
+            unit_store = per_product_default.get(pid) or target_store
+        if unit_store and unit_store not in landed_stores:
+            landed_stores.append(unit_store)
         row = per_line_applied.setdefault(
             pid,
             {
@@ -977,9 +2034,27 @@ def _restock_good_items(
                 "reactivated": 0,
                 "minted": 0,
                 "applied": True,
+                # WHICH physical store(s) this product's units landed on.
+                "store_id": unit_store,
+                "store_ids": [],
             },
         )
-        sid = _reactivate_original_unit(stock_repo, pid, store_id, order_id, used_ids)
+        if unit_store and unit_store not in row["store_ids"]:
+            row["store_ids"].append(unit_store)
+        sid = _reactivate_original_unit(
+            stock_repo,
+            pid,
+            unit_store,
+            order_id,
+            used_ids,
+            # MUST-FIX 1: on the redirected path the sale was booked against the
+            # ONLINE store, so the order-scoped lookup legitimately misses (every
+            # historical import). Without this flag the order-AGNOSTIC fallback
+            # would grab an unrelated walk-in customer's SOLD unit at this shop
+            # -- flipping a frame that is on somebody's face to AVAILABLE and
+            # erasing their sale. Mint instead; that is the honest record.
+            exact_order_only=is_online_order,
+        )
         if sid:
             row["reactivated"] += 1
             row["quantity"] += 1
@@ -989,7 +2064,7 @@ def _restock_good_items(
                 prior_status="SOLD",
                 new_status="AVAILABLE",
                 return_id=return_id,
-                store_id=store_id,
+                store_id=unit_store,
                 user_id=user_id,
             )
             continue
@@ -1002,13 +2077,20 @@ def _restock_good_items(
         try:
             created = stock_repo.create(
                 {
-                    "store_id": store_id,
+                    # F9: unit_store is guaranteed PHYSICAL here -- an online
+                    # billing store was redirected above, and an unresolvable
+                    # one returned early without minting anything.
+                    "store_id": unit_store,
                     "product_id": pid,
                     "quantity": 1,
                     "status": "AVAILABLE",
                     "source_type": "RETURN",
                     "source_id": return_id,
                     "returned_from_order_id": order_id,
+                    # Auditable redirect stamp: this unit was booked here
+                    # because the order billed to a stockless online store.
+                    "restocked_from_store_id": routing["redirected_from"],
+                    "restock_route_reason": routing["reason"],
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -1025,14 +2107,30 @@ def _restock_good_items(
                     prior_status=None,
                     new_status="AVAILABLE",
                     return_id=return_id,
-                    store_id=store_id,
+                    store_id=unit_store,
                     user_id=user_id,
                 )
         else:
             all_ok = False
             row["applied"] = False
 
+    # A per-line row's store_id was set once from its FIRST unit and never
+    # revised, so a 2-at-BOK + 1-at-PUN line read {quantity: 3, store_id: BOK}
+    # -- the exact lie the top-level field is deliberately nulled to avoid.
+    for row in per_line_applied.values():
+        ids = row.get("store_ids") or []
+        row["store_id"] = ids[0] if len(ids) == 1 else None
+
     result["restocked"] = list(per_line_applied.values())
+    # Where the units ACTUALLY landed. When a split sent them to more than one
+    # shop the single-valued field is set to None rather than naming one of
+    # them -- a reconciliation consumer reading it must not be told the wrong
+    # shop for the other half. `restock_store_ids` always carries the full set.
+    result["restock_store_ids"] = list(landed_stores)
+    if len(landed_stores) == 1:
+        result["restock_store_id"] = landed_stores[0]
+    elif len(landed_stores) > 1:
+        result["restock_store_id"] = None
     # Applied only if every unit landed somewhere; otherwise leave False so a
     # later retry can finish the job (the stock_ids already added are recorded).
     result["applied"] = all_ok
@@ -1362,6 +2460,154 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
 # ============================================================================
 
 
+@router.post("/quote")
+async def quote_return(
+    body: ReturnCreate = Body(...),
+    current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
+):
+    """AUTHORITATIVE money preview for a return -- no side effects, nothing
+    reserved, nothing written.
+
+    The till MUST prefill its refund-tender picker from THIS ``net_refund``
+    rather than computing an amount client-side. A client-side gross-up drifted
+    from the server on every GST-inclusive sale (the server resolves the billed
+    gross from the ORIGINAL order line as (taxable_value + tax_amount)/qty,
+    while the till was re-applying GST to an already-inclusive price), so a
+    Rs 5,900 refund prefilled as Rs 6,962 and the tender split then 400'd with
+    no way for the cashier to recover. Deriving the figure from one server-side
+    source makes that class of drift impossible.
+
+    Also echoes the source order's CAPTURED tender breakdown (what each tender
+    actually collected, net of prior per-tender refunds) so the till can show
+    the cashier what is legitimately refundable per tender instead of guessing
+    -- the same figures ``_gate_refund_tenders_against_order`` enforces on POST.
+    """
+    order = _resolve_order(body)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Original order not found")
+    validate_store_access(order.get("store_id"), current_user)
+
+    active_lines = [ln for ln in body.items if (ln.return_qty or 0) > 0]
+    if not active_lines:
+        raise HTTPException(status_code=400, detail="No returnable lines supplied")
+
+    resolved_order_id = body.order_id or order.get("order_id")
+    priced_lines = _priced_return_lines(active_lines, order)
+    try:
+        gross_refund = engine.returned_value(priced_lines)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    restocking_fee = round(float(body.restocking_fee or 0.0), 2)
+    if body.return_type == "EXCHANGE":
+        restocking_fee = 0.0
+    try:
+        net_amount = engine.net_refund(gross_refund, restocking_fee)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    settlement = None
+    replacement_priced: List[Dict[str, Any]] = []
+    if body.return_type == "EXCHANGE":
+        # Server-resolved replacement prices (never the client's) -- the same
+        # rule as the refund side, because a COLLECT feeds the cash drawer.
+        replacement_priced = _resolve_replacement_prices(
+            [r.model_dump() for r in body.replacement_items]
+        )
+        try:
+            settlement = engine.exchange_settlement(gross_refund, replacement_priced)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
+
+    captured = _order_captured_tenders(order)
+    non_refundable = _order_non_refundable_tenders(order)
+    prior = _prior_refund_tenders(resolved_order_id)
+    refundable = {
+        t: round(max(captured.get(t, 0.0) - prior.get(t, 0.0), 0.0), 2)
+        for t in captured
+    }
+    # STORE_CREDIT is the substitute for the whole non-refundable pool (gift
+    # voucher / loyalty / EMI / credit). Offering it is what makes a part-voucher
+    # sale refundable at all -- without it every payload a cashier can build is
+    # rejected and the refund is un-completable.
+    store_credit_allowance = round(
+        max(sum(non_refundable.values()) - prior.get("STORE_CREDIT", 0.0), 0.0), 2
+    )
+    # Store credit needs a CUSTOMER to hold it. A walk-in sale has none, so
+    # offering the tender here produced a dead end: the till built the only
+    # split the quote allowed and the POST then failed, naming a remedy that was
+    # itself rejected. Withhold the offer instead, and let the un-netted escape
+    # path (no refund_tenders) carry the refund.
+    _order_customer_id = (order or {}).get("customer_id")
+    if store_credit_allowance > 0 and _order_customer_id:
+        refundable["STORE_CREDIT"] = store_credit_allowance
+    cash_in_refundable_total = round(
+        sum(v for k, v in refundable.items() if k in _REFUND_CASH_IN), 2
+    )
+    # TRUE when a split made only of cash-in tenders CANNOT reach the net refund
+    # (a part-voucher sale), so the till must surface WHY and offer the
+    # STORE_CREDIT leg / the un-netted escape instead of dead-ending the cashier.
+    # The pool must ACTUALLY EXIST. Without this guard a Shopify-paid order
+    # (no captured tenders at all) reported cash_in_shortfall True with an EMPTY
+    # non_refundable pool, so the till printed an impossible "refund that portion
+    # as STORE_CREDIT" instruction AND suppressed the one correct advisory
+    # ("record it as cash paid out") on exactly the orders it was written for.
+    # A cash-in-only split cannot reach the net refund. This is the ROOT
+    # condition; the REASON decides which advisory the till shows.
+    _cash_in_cannot_cover = (
+        body.return_type == "RETURN"
+        and net_amount > 0
+        and cash_in_refundable_total + 0.01 < net_amount
+    )
+    # cash_in_shortfall drives the "refund that portion as STORE_CREDIT" offer,
+    # so it requires a pool that ACTUALLY EXISTS and a customer to hold it.
+    cash_in_shortfall = (
+        _cash_in_cannot_cover
+        and round(sum(non_refundable.values()), 2) > 0
+        and bool(_order_customer_id)
+    )
+    return {
+        "order_id": resolved_order_id,
+        "return_type": body.return_type,
+        "gross_refund": gross_refund,
+        "restocking_fee": restocking_fee,
+        # THE authoritative figure the refund-tender split must sum to.
+        "net_refund": net_amount,
+        "gst_breakup": engine.gst_breakup(
+            gross_refund, engine.dominant_gst_rate(priced_lines)
+        ),
+        "settlement": settlement,
+        # Server-resolved replacement lines + the total they sum to, so the till
+        # shows (and the cashier confirms) the SAME figures the settlement used.
+        # No client number reaches collect_amount unverified.
+        "replacement_items_priced": replacement_priced,
+        "replacement_total": round(
+            sum(
+                float(r.get("quantity") or 0) * float(r.get("unit_price") or 0)
+                for r in replacement_priced
+            ),
+            2,
+        ),
+        # Per-tender truth for the picker (and what the POST gate enforces).
+        "captured_tenders": captured,
+        # What the sale took on instruments that cannot come back as cash.
+        "non_refundable_tenders": non_refundable,
+        "prior_refunds_by_tender": prior,
+        "refundable_by_tender": refundable,
+        "cash_in_shortfall": cash_in_shortfall,
+        # TRUE whenever the server cannot certify a COMPLETE refundable split:
+        # no captured payments at all (legacy / imported), a voucher pool the
+        # cash tenders cannot cover, OR any other reason the cash-in tenders
+        # fall short -- notably gateway + counter-cash (a real supported shape),
+        # where BOTH advisories used to stay silent while every payload the till
+        # could build was rejected. The till shows the escape banner and the
+        # un-netted path rather than disabling the button with no explanation.
+        "tenders_unverifiable": (not captured and not non_refundable)
+        or _cash_in_cannot_cover,
+    }
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_return(
@@ -1596,6 +2842,47 @@ async def create_return(
             ),
         )
 
+    # ------------------------------------------------------------------
+    # TENDER CAPTURE + SETTLEMENT VALIDATION (pre-claim).
+    # These MUST run here, in the validation phase, NOT during recording: a 400
+    # raised after the atomic returnable-qty claim below permanently burns the
+    # customer's returnable quantity and claws back their loyalty points with no
+    # return doc written, so the retry then fails with "returnable quantity 0".
+    # Keeping them here preserves the invariant this file documents at the claim:
+    # the claim is the LAST thing that can fail before side effects.
+    # ------------------------------------------------------------------
+    replacement_dump = [r.model_dump() for r in body.replacement_items]
+    settlement: Optional[Dict[str, Any]] = None
+    if body.return_type == "EXCHANGE":
+        # AUTHORITATIVE replacement pricing from the catalog. The client's
+        # unit_price is NOT trusted: the settlement difference drives a real
+        # cash collection, so a typed number would be a drawer input.
+        replacement_dump = _resolve_replacement_prices(replacement_dump)
+        try:
+            settlement = engine.exchange_settlement(gross_refund, replacement_dump)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        _gate_exchange_settlement(settlement, replacement_dump, gross_refund)
+
+    refund_tenders: Optional[List[Dict[str, Any]]] = None
+    collect_method: Optional[str] = None
+    drawer_auto_netted = False
+    if body.return_type == "RETURN":
+        refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
+            body.refund_tenders, net_amount
+        )
+        # AUTHORITATIVE cross-check: a tender may only be refunded up to what it
+        # actually collected on this order (a UI rule is not a control).
+        refund_tenders, drawer_auto_netted = _gate_refund_tenders_against_order(
+            refund_tenders, order=order, order_id=resolved_order_id
+        )
+    elif body.return_type == "EXCHANGE" and settlement is not None:
+        if settlement["direction"] == engine.COLLECT:
+            # The difference is a NEW cash-in; record the tender it was taken in
+            # (drawer-truth), not the original sale's tender. Absent -> UNKNOWN.
+            collect_method = _normalize_collect_method(body.collect_method)
+            drawer_auto_netted = collect_method is not None
+
     # F27 ORIGINAL-TENDER HARD-LOCK. Runs before recording (and before the matrix
     # gate) so a tender mismatch rejects with nothing reserved. PERMISSIVE: no-op
     # unless the cashier supplied a refund_method that differs from the order's
@@ -1643,22 +2930,13 @@ async def create_return(
 
     return_id = generate_return_id()
 
-    # 2. Type-specific recording.
+    # 2. Type-specific recording. (`settlement`, `refund_tenders`,
+    #    `collect_method` and `drawer_auto_netted` were computed + validated in
+    #    the pre-claim validation phase above -- never recomputed here.)
     refund_amount: Optional[float] = None
     credit_amount: Optional[float] = None
-    settlement: Optional[Dict[str, Any]] = None
     collect_amount: Optional[float] = None
     credit_entry: Optional[Dict[str, Any]] = None
-    replacement_dump = [r.model_dump() for r in body.replacement_items]
-
-    # For an EXCHANGE, compute (and validate) the settlement up front so its 400
-    # fires BEFORE we reserve any returnable qty -- a validation error must never
-    # leave a phantom reservation on the order line.
-    if body.return_type == "EXCHANGE":
-        try:
-            settlement = engine.exchange_settlement(ret_value, replacement_dump)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
 
     # 2b. ATOMIC QUANTITY CLAIM (the concurrency belt-and-suspenders, mirroring
     #     the voucher redeem guard). All 400/422 input validation has now passed,
@@ -1694,9 +2972,139 @@ async def create_return(
             )
         claimed.append(rl)
 
-    # BUG-099: reverse loyalty for this return -- claw back points earned on the
-    # original order + restore points redeemed on it. Fail-soft (never blocks the
-    # return); a genuine failure flags the return doc for reconciliation. Walk-in /
+    def _issue_credit_or_fail(
+        amount: float,
+        *,
+        reason: str,
+        gross: Optional[float] = None,
+        fee: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Issue store credit and FAIL LOUD if no ledger row lands.
+
+        EVERY credit-issuing branch goes through here. Previously only the
+        RETURN branch checked the result, so a walk-in (no customer record --
+        routine counter behaviour, and _issue_store_credit returns None on a
+        falsy customer_id) got a 201 saying "Store credit added to customer
+        account" with ZERO ledger rows AND a permanently burned returnable
+        quantity. A 201 must never claim credit that does not exist.
+
+        GST: the reversal is backed out of the CREDITED amount itself, not
+        pro-rated off the gross. Pro-rating mixed two bases (gst_view is built
+        on `gross_refund`, the share on `net_amount = gross - fee`), which made
+        the stamped tax VANISH at fee 900 and go NEGATIVE at fee 1500 -- and
+        reports.py SUBTRACTS the CDNR from hsn_by_rate, so a negative tax ADDS
+        to the bucket."""
+        rate = float(gst_view.get("gst_rate") or 0)
+        taxable = round(amount / (1 + rate / 100.0), 2) if rate else round(amount, 2)
+        tax = round(amount - taxable, 2)
+        entry = _issue_store_credit(
+            customer_id,
+            amount,
+            reason=reason,
+            ref=return_id,
+            current_user=current_user,
+            gross=gross if gross is not None else round(amount, 2),
+            restocking_fee=fee,
+            taxable=taxable,
+            tax=tax,
+            gst_rate=rate or None,
+            interstate=(
+                order.get("interstate")
+                if isinstance(order.get("interstate"), bool)
+                else None
+            ),
+        )
+        if entry is None:
+            # Release the qty claim so the return stays retryable, then say so.
+            for done in claimed:
+                _release_returnable_qty(
+                    resolved_order_id,
+                    done["orig_line"],
+                    float(done["ret_line"].return_qty),
+                )
+            _why = (
+                "this sale has no customer record, so store credit cannot be "
+                "issued - take the customer's details and retry, or refund to a "
+                "payment tender"
+                if not customer_id
+                else "the credit ledger could not be written - retry shortly"
+            )
+            raise HTTPException(
+                status_code=503 if customer_id else 400,
+                detail=(
+                    f"Could not issue the Rs {amount:.2f} store-credit portion of "
+                    f"this return, so NOTHING was recorded: {_why}."
+                ),
+            )
+        return entry
+
+    if body.return_type == "RETURN":
+        # Net of any restocking fee = the cash actually given back. The explicit
+        # refund-tender breakdown was validated + cross-checked pre-claim.
+        refund_amount = net_amount
+        refund_method = body.refund_method or _order_payment_method(order)
+
+        # ISSUE the NON-DRAWER portion. A STORE_CREDIT (or reissued voucher) leg
+        # is a PROMISE OF MONEY: without this the customer surrendered the goods,
+        # took only the cash legs in notes, and the balance existed NOWHERE in
+        # IMS -- and because refund_amount counts the full net against the
+        # cumulative cap, the corrective refund was blocked forever. The drawer
+        # stayed correct, so nothing flagged it.
+        _non_drawer_total = round(
+            sum(
+                float(t.get("amount") or 0)
+                for t in (refund_tenders or [])
+                if str(t.get("method") or "") in _REFUND_NON_DRAWER
+            ),
+            2,
+        )
+        if _non_drawer_total > 0:
+            credit_entry = _issue_credit_or_fail(
+                _non_drawer_total,
+                reason=f"Refund {return_id} - non-drawer tender portion",
+            )
+            credit_amount = _non_drawer_total
+
+    elif body.return_type == "CREDIT_NOTE":
+        credit_amount = net_amount
+        refund_method = "STORE_CREDIT"
+        # SAME GUARD AS THE RETURN BRANCH ABOVE. A restocking fee equal to the
+        # gross is legitimate ("take the goods back, issue nothing") and the FE
+        # permits it -- its max IS the gross. Calling the issuer with 0 made
+        # _issue_store_credit return None (it refuses amount <= 0), which the
+        # fail-loud path then reported as a ledger outage, sending the cashier
+        # into an infinite retry against a perfectly healthy ledger.
+        if net_amount > 0:
+            credit_entry = _issue_credit_or_fail(
+                net_amount,
+                reason=f"Credit note for return {return_id}",
+                gross=gross_refund,
+                fee=restocking_fee,
+            )
+
+    else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
+        refund_method = body.refund_method or _order_payment_method(order)
+        if settlement["direction"] == engine.COLLECT:
+            collect_amount = settlement["difference"]
+        elif settlement["direction"] == engine.REFUND:
+            # Refund the difference as store credit (recorded, not executed).
+            credit_amount = settlement["difference"]
+            credit_entry = _issue_credit_or_fail(
+                settlement["difference"],
+                reason=f"Exchange refund for return {return_id}",
+            )
+
+    # BUG-099 loyalty reversal. ORDER MATTERS: this runs AFTER the credit
+    # issuance above, which is the only step here that can HARD-FAIL. The
+    # reversal is fail-soft and is NEVER undone, and its idempotency is keyed on
+    # return_id -- and every retry mints a fresh return_id. So when it ran first,
+    # a credit failure released the qty claim but left an ORPHANED reversal, and
+    # each retry clawed back real points again with no return doc to reconcile
+    # against. General rule: when one step can hard-fail and another cannot be
+    # undone, do the hard-failing one FIRST.
+    #
+    # Claw back points earned on the original order + restore points redeemed on
+    # it. A genuine failure flags the return doc for reconciliation. Walk-in /
     # no customer -> skip (walk-ins never earn loyalty).
     loyalty_reversal_failed = False
     _cust = customer_id
@@ -1725,56 +3133,6 @@ async def create_return(
                 "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
             )
 
-    if body.return_type == "RETURN":
-        # Net of any restocking fee = the cash actually given back.
-        refund_amount = net_amount
-        refund_method = body.refund_method or _order_payment_method(order)
-
-    elif body.return_type == "CREDIT_NOTE":
-        credit_amount = net_amount
-        refund_method = "STORE_CREDIT"
-        credit_entry = _issue_store_credit(
-            customer_id,
-            net_amount,
-            reason=f"Credit note for return {return_id}",
-            ref=return_id,
-            current_user=current_user,
-            gross=gross_refund,
-            restocking_fee=restocking_fee,
-            # Stamp the real GST split so the GSTR-1 CDNR reports the true
-            # output-tax reversal (not 0, the fee-less gross==net derivation).
-            taxable=gst_view.get("taxable"),
-            tax=gst_view.get("tax"),
-            gst_rate=gst_view.get("gst_rate"),
-            # CDNR head follows the PARENT order's persisted interstate flag
-            # (online orders); absent -> state-compare fallback unchanged.
-            interstate=(
-                order.get("interstate")
-                if isinstance(order.get("interstate"), bool)
-                else None
-            ),
-        )
-
-    else:  # EXCHANGE (settlement already computed + validated above)
-        refund_method = body.refund_method or _order_payment_method(order)
-        if settlement["direction"] == engine.COLLECT:
-            collect_amount = settlement["difference"]
-        elif settlement["direction"] == engine.REFUND:
-            # Refund the difference as store credit (recorded, not executed).
-            credit_amount = settlement["difference"]
-            credit_entry = _issue_store_credit(
-                customer_id,
-                settlement["difference"],
-                reason=f"Exchange refund for return {return_id}",
-                ref=return_id,
-                current_user=current_user,
-                # Same CDNR head consistency as the CREDIT_NOTE branch.
-                interstate=(
-                    order.get("interstate")
-                    if isinstance(order.get("interstate"), bool)
-                    else None
-                ),
-            )
 
     # 3. Restock resellable (GOOD) units back into serialized stock (fail-soft).
     #    (resolved_order_id already computed during the quantity-integrity guard.)
@@ -1783,6 +3141,12 @@ async def create_return(
         "restock_stock_ids": [],
         "applied": False,
         "skipped": [],
+        # F9 routing stamp; None until the restock actually resolves a store, so
+        # a failed / blocked restock never claims the units landed anywhere.
+        "restock_store_id": None,
+        "restock_store_ids": [],
+        "restock_store_redirected_from": None,
+        "restock_store_reason": None,
     }
     try:
         restock_result = _restock_good_items(
@@ -1791,6 +3155,11 @@ async def create_return(
             return_id,
             order_id=resolved_order_id,
             user_id=current_user.get("user_id"),
+            # F9: the counter the goods were handed back at -- the fallback
+            # physical store when the online order carries no fulfilment stamp.
+            processing_store_id=current_user.get("active_store_id"),
+            # Already resolved above; saves the online branch a second fetch.
+            order=order,
         )
     except Exception as exc:  # noqa: BLE001
         # A stock-write failure must never break the return record - leave
@@ -1799,6 +3168,13 @@ async def create_return(
     restocked = restock_result.get("restocked", [])
     restock_applied = bool(restock_result.get("applied"))
     restock_stock_ids = restock_result.get("restock_stock_ids", [])
+    # F9: the PHYSICAL store the units actually landed on (== store_id for an
+    # ordinary counter return; the redirected shop for an online-order return;
+    # None when the restock was blocked / failed and nothing landed anywhere).
+    restock_store_id = restock_result.get("restock_store_id")
+    # Full set when a multi-shop split sent units to more than one shop (the
+    # single-valued field is then None so nobody is told the wrong shop).
+    restock_store_ids = restock_result.get("restock_store_ids", [])
 
     # Online oversell guard (council B11): a GOOD-condition return puts stock
     # back on the shelf, so the online AVAILABLE count goes UP -- re-push it to
@@ -1811,7 +3187,14 @@ async def create_return(
             restocked_skus = [
                 r.get("sku") for r in restocked if isinstance(r, dict) and r.get("sku")
             ]
-            writeback_after_restock(None, restocked_skus, store_id)
+            # F9: hand the write-back the PHYSICAL store the units landed on.
+            # (Quantities are pooled all-store either way, but the summary /
+            # sync_runs context must never name the stockless online store.)
+            writeback_after_restock(
+                None,
+                restocked_skus,
+                restock_store_id or (restock_store_ids[0] if restock_store_ids else None),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] online write-back skipped: %s", exc)
 
@@ -1839,12 +3222,31 @@ async def create_return(
         "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
+        # DRAWER-TRUTH: the explicit refund-tender breakdown the Day-End readers
+        # net off (RETURN) and the tender an exchange difference was collected in
+        # (EXCHANGE COLLECT). None when the cashier gave no breakdown -> the
+        # refund is UNKNOWN to the drawer and netted nowhere (manual workaround).
+        "refund_tenders": refund_tenders,
+        "collect_method": collect_method,
+        # True when this return carries an explicit breakdown, so it WILL be
+        # auto-deducted in Day-End -- the FE warns staff not to also key it as a
+        # manual "cash paid out" (double-count guard).
+        "drawer_auto_netted": drawer_auto_netted,
         "credit_amount": credit_amount,
         "collect_amount": collect_amount,
         "settlement": settlement,
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
+        # F9 audit stamp: WHICH store the returned units were put back on, and
+        # -- when the order billed to a stockless ONLINE store -- what it was
+        # redirected from and why.
+        "restock_store_id": restock_store_id,
+        "restock_store_ids": restock_store_ids,
+        "restock_store_redirected_from": restock_result.get(
+            "restock_store_redirected_from"
+        ),
+        "restock_store_reason": restock_result.get("restock_store_reason"),
         "credit_entry": credit_entry,
         "status": "COMPLETED",
         # BUG-099: True when the loyalty reversal could not be applied (a real
@@ -1934,12 +3336,27 @@ async def create_return(
         "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
+        "refund_tenders": refund_tenders,
+        "collect_method": collect_method,
+        "drawer_auto_netted": drawer_auto_netted,
         "credit_amount": credit_amount,
+        # The ledger row backing any store-credit portion, so the till can show
+        # the customer what was issued (and a caller can verify it exists).
+        "credit_entry": credit_entry,
         "collect_amount": collect_amount,
         "settlement": settlement,
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
+        "restock_store_id": restock_store_id,
+        "restock_store_ids": restock_store_ids,
+        "restock_store_redirected_from": restock_result.get(
+            "restock_store_redirected_from"
+        ),
+        # Without the reason a caller sees redirected_from=<online store> and
+        # cannot tell "routed by the fulfilment breakdown" from "fell back to
+        # the counter". The persisted doc and the retry response both carry it.
+        "restock_store_reason": restock_result.get("restock_store_reason"),
         "message": message,
     }
 
@@ -2085,14 +3502,88 @@ async def retry_restock(
     existing_ids = list(claim.get("restock_stock_ids") or [])
     lines = [ReturnLine(**it) for it in (claim.get("items") or [])]
 
+    # F9: the order is the ONLY record of which physical shop shipped each unit.
+    # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
+    # routing evidence exactly like the Shopify confirm door does.
+    claim_store = claim.get("store_id")
+    claim_order_id = claim.get("order_id")
+    retry_order = _load_order_for_restock(claim_order_id)
+
+    # THIS DOOR IS THE RECOVERY PATH. _raise_restock_blocked_task and the refund
+    # -review banner both send the operator here, so it must hold the SAME rule
+    # as the confirm door: when the return bills to a stockless ONLINE store and
+    # the order cannot be read, we do NOT know which shop shipped which unit --
+    # and the caller's active store is a guess, not an answer. Guessing here
+    # strands one shop's real unit SOLD forever and mints a phantom on another
+    # shop's LIVE shelf (POS-sellable, and it feeds the pooled Shopify on-hand),
+    # while reporting "Restock applied". Refuse, and keep it retryable.
+    if retry_order is None and is_online_store(_get_db(), claim_store):
+        logger.error(
+            "[RETURNS] restock retry BLOCKED for %s: order %s could not be read "
+            "and the return bills to ONLINE store %s, so the fulfilling shop for "
+            "each unit is unknown. Nothing restocked (a guess would strand one "
+            "shop's unit and mint a phantom on another).",
+            return_id,
+            claim_order_id,
+            claim_store,
+        )
+        blocked_units = [
+            {
+                "product_id": ln.product_id,
+                "sku": getattr(ln, "sku", "") or "",
+                "product_name": getattr(ln, "product_name", "") or "",
+            }
+            for ln in lines
+        ]
+        _raise_restock_blocked_task(
+            return_id,
+            claim_order_id,
+            claim_store,
+            blocked_units,
+            current_user.get("active_store_id"),
+        )
+        blocked_update = {
+            "restocked": _restock_intent_rows(blocked_units),
+            "restock_applied": False,
+            "restock_stock_ids": existing_ids,
+            "restock_in_progress": False,
+            "restock_store_id": None,
+            "restock_store_ids": [],
+            "restock_store_redirected_from": claim_store,
+            "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
+        try:
+            coll.update_one({"return_id": return_id}, {"$set": blocked_update})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
+        return {
+            "return_id": return_id,
+            "restock_applied": False,
+            "restock_stock_ids": existing_ids,
+            "restock_store_id": None,
+            "restock_store_ids": [],
+            "message": (
+                "Could not restock: the original order could not be read, so "
+                "there is no way to tell which shop each returned item came "
+                "from. Nothing was added to any shop's stock. A task has been "
+                "raised -- retry once the order loads, or add the items at the "
+                "receiving shop."
+            ),
+        }
+
     try:
         restock_result = _restock_good_items(
             lines,
-            claim.get("store_id"),
+            claim_store,
             return_id,
-            order_id=claim.get("order_id"),
+            order_id=claim_order_id,
             already_applied=False,
             user_id=current_user.get("user_id"),
+            # F9: same online-store redirect as the create path -- a retry must
+            # never be the door that mints a phantom unit on BV/WO-ONLINE-01.
+            processing_store_id=current_user.get("active_store_id"),
+            # VERIFIED evidence (non-None was checked above).
+            order=retry_order,
         )
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
@@ -2123,16 +3614,43 @@ async def retry_restock(
         "restock_stock_ids": merged_ids,
         "restock_in_progress": False,
         "restock_completed_at": datetime.now().isoformat(),
+        # F9 audit stamp (mirrors the create path).
+        "restock_store_id": restock_result.get("restock_store_id"),
+        "restock_store_ids": restock_result.get("restock_store_ids", []),
+        "restock_store_redirected_from": restock_result.get(
+            "restock_store_redirected_from"
+        ),
+        "restock_store_reason": restock_result.get("restock_store_reason"),
     }
     try:
         coll.update_one({"return_id": return_id}, {"$set": update})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
 
+    # A successful retry raised the shelf count exactly like the create path
+    # did, so Shopify has to hear about it too. Without this the online path --
+    # which now routinely DEFERS recovery to this endpoint -- leaves the
+    # recovered frame sellable in-shop but invisible online. Fail-soft.
+    restocked_rows = update["restocked"]
+    if update["restock_applied"] and restocked_rows:
+        try:
+            from ..services.online_stock_writeback import writeback_after_restock
+
+            retry_skus = [
+                r.get("sku")
+                for r in restocked_rows
+                if isinstance(r, dict) and r.get("sku")
+            ]
+            writeback_after_restock(None, retry_skus, update["restock_store_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[RETURNS] retry write-back skipped: %s", exc)
+
     return {
         "return_id": return_id,
         "restock_applied": update["restock_applied"],
         "restock_stock_ids": update["restock_stock_ids"],
+        "restock_store_id": update["restock_store_id"],
+        "restock_store_ids": update["restock_store_ids"],
         "message": (
             "Restock applied"
             if update["restock_applied"]

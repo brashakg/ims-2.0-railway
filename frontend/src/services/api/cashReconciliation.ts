@@ -44,6 +44,16 @@ export interface ReconRow {
   variance_status: ReconStatus;
   tolerance: number;
   by_mode: Record<string, ReconByModeRow>;
+  // Which definition the by_mode figures use. Both close systems now report
+  // NET_OF_RECORDED_REFUNDS; sessions closed before that change are labelled
+  // PAYMENTS_ONLY_LEGACY so one grid never mixes two definitions unannounced.
+  by_mode_basis?: 'NET_OF_RECORDED_REFUNDS' | 'PAYMENTS_ONLY_LEGACY';
+  // Present when a recorded cash refund may also have been keyed as a manual
+  // cash payout/expense (possible double entry). Advisory only.
+  refund_double_entry_advisory?: { message?: string; matched_amount?: number; reason?: string } | null;
+  // True when the expected drawer computed NEGATIVE (a cash-in is missing) —
+  // the over/short verdict is withheld rather than crediting a phantom overage.
+  negative_expected_advisory?: boolean;
   closed_by?: string | null;
   closed_by_name?: string | null;
   closed_at?: string | null;

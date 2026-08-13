@@ -425,9 +425,20 @@ def _fetch_local_bytes(url: str) -> Optional[bytes]:
         store = get_file_store()
         if store is None:
             return None
+        # P0 (security panel, reproduced at runtime): the unscoped RETRY that
+        # used to sit here -- "older images may lack the kind tag" -- pulled
+        # ANY blob in the shared bucket into a customer-facing catalogue PDF
+        # once the kind-scoped read returned None. An employee Aadhaar scan
+        # referenced by a crafted image URL was embedded in the PDF. A fallback
+        # that deliberately drops the kind check is the same defect as omitting
+        # require_kind in the first place, so it is gone.
+        #
+        # The legacy justification is also empty in fact: production holds no
+        # blob without a metadata.kind (168 files, all product_image or
+        # grn_document), so nothing legitimate depended on the retry. A
+        # genuinely untagged legacy image now renders as a missing image rather
+        # than as somebody's ID document.
         rec = store.get(fid, require_kind="product_image")
-        if rec is None:
-            rec = store.get(fid)  # older images may lack the kind tag
         return rec[0] if rec else None
     except Exception:  # noqa: BLE001
         return None

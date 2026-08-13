@@ -97,6 +97,10 @@ export default function RefundReviewsPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('OPEN');
   const [actingId, setActingId] = useState<string | null>(null);
+  // Refunds confirmed in THIS session whose credit note posted but whose stock
+  // did NOT go back. A toast disappears; real goods on the counter with no
+  // stock row must stay on screen until the accountant has dealt with them.
+  const [restockGaps, setRestockGaps] = useState<{ ref: string; order: string }[]>([]);
   // OS-013 / PR #947 follow-up 5: which reach the backend actually applied
   // ('all-stores' | 'store-scoped' | null before the first load) -- drives the
   // scope hint below instead of a static sentence that could go stale.
@@ -146,8 +150,57 @@ export default function RefundReviewsPage() {
       setActingId(review.review_id);
       try {
         if (action === 'confirm') {
-          await refundReviewsApi.confirm(review.review_id);
-          toast.success('Credit note posted and stock restocked.');
+          const res = await refundReviewsApi.confirm(review.review_id);
+          // HONEST OUTCOME: the credit note posting and the stock restock are
+          // two different things and either can fail on its own. This used to
+          // toast "…and stock restocked" unconditionally, so an accountant
+          // closed the row believing the frame was back on a shelf when the
+          // backend had restocked NOTHING (an online order with no fulfilment
+          // stamp resolves to no physical store and mints nothing on purpose).
+          const result = (res?.result ?? {}) as {
+            status?: string;
+            restock_applied?: boolean;
+            restock_store_id?: string | null;
+            restock_store_ids?: string[] | null;
+            return_id?: string | null;
+          };
+          // An idempotent re-confirm returns {status:'duplicate'} with NO
+          // restock_applied key. Reading that as `false` would pin the red
+          // "stock not put back" banner on a refund whose units were restocked
+          // fine on the first pass.
+          if (result.status === 'duplicate') {
+            toast.success('Already posted — this refund was confirmed earlier.');
+            await load();
+            return;
+          }
+          const landed =
+            result.restock_store_ids && result.restock_store_ids.length > 0
+              ? result.restock_store_ids.join(', ')
+              : result.restock_store_id || '';
+          if (result.restock_applied) {
+            toast.success(
+              landed
+                ? `Credit note posted. Stock put back at ${landed}.`
+                : 'Credit note posted and stock restocked.',
+            );
+          } else {
+            const ref = result.return_id || review.review_id;
+            toast.warning(
+              `Credit note posted, but the returned items were NOT put back into stock (${ref}). ` +
+                'A task has been raised — add them at the receiving shop.',
+            );
+            setRestockGaps((prev) =>
+              prev.some((g) => g.ref === ref)
+                ? prev
+                : [
+                    ...prev,
+                    {
+                      ref,
+                      order: review.order_number || review.shopify_order_id || ref,
+                    },
+                  ],
+            );
+          }
         } else {
           await refundReviewsApi.reject(review.review_id);
           toast.success('Refund review rejected.');
@@ -206,6 +259,31 @@ export default function RefundReviewsPage() {
             ? 'This queue is limited to your active store — an empty list may mean another store has refunds waiting.'
             : 'This queue spans all stores — online refunds bill under the online store, so nothing here is hidden by your active store.'}
         </p>
+      )}
+
+      {/* Stock that did NOT come back. The credit note posted (money is settled)
+          but the units were not restocked anywhere, so the goods are physically
+          held with no stock row. A deduped task is raised backend-side; this
+          keeps it in front of the accountant who just confirmed it too. */}
+      {restockGaps.length > 0 && (
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <p className="inline-flex items-center gap-1.5 text-sm font-semibold text-red-800">
+            <AlertTriangle className="w-4 h-4" /> Stock not put back on{' '}
+            {restockGaps.length} refund{restockGaps.length !== 1 ? 's' : ''}
+          </p>
+          <p className="text-sm text-red-900 mt-1">
+            The credit note posted and the customer is refunded, but the returned items could
+            not be booked into any shop&apos;s stock — so they are physically with whoever
+            received them and IMS has no record of them. Add them at the receiving shop.
+          </p>
+          <ul className="mt-1.5 text-xs text-red-800 list-disc pl-5">
+            {restockGaps.map((g) => (
+              <li key={g.ref}>
+                {g.order} · {g.ref}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {openCount > 0 && (
@@ -330,8 +408,15 @@ export default function RefundReviewsPage() {
                       <>
                         <span className="text-gray-300">·</span>
                         <Store className="w-3 h-3 shrink-0" />
-                        <span className="truncate" title={`Restock into ${r.restock_store_id}`}>
-                          restock {restockLabel}
+                        {/* PROPOSED, not decided: the shop each unit actually
+                            goes back to is resolved per unit at confirm time
+                            from how the order was fulfilled. Saying "restock
+                            <shop>" here read as a settled fact. */}
+                        <span
+                          className="truncate"
+                          title={`Expected to restock into ${r.restock_store_id} (confirmed per unit when you post)`}
+                        >
+                          likely restock {restockLabel}
                         </span>
                       </>
                     )}

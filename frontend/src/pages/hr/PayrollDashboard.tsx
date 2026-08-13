@@ -21,6 +21,8 @@ import { useAuth } from '../../context/AuthContext';
 import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
 import { neutralizeFormula } from '../../utils/exportUtils';
+import { PayrollAccessNotice } from '../../components/hr/PayrollAccessNotice';
+import { isForbiddenError, forbiddenDetail } from '../../utils/errorHandler';
 
 // Types
 interface SalaryBreakdown {
@@ -129,6 +131,9 @@ export function PayrollDashboard() {
   // UI
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Owner ruling 2026-08-09: salary data is ADMIN-only. A 403 must show an
+  // explicit access notice -- an empty table would read as "nobody was paid".
+  const [noAccess, setNoAccess] = useState<string | null>(null);
   const [showAdvanceForm, setShowAdvanceForm] = useState(false);
   const [advanceForm, setAdvanceForm] = useState({ amount: '', reason: '' });
 
@@ -140,6 +145,7 @@ export function PayrollDashboard() {
   const loadSalarySheet = async () => {
     setIsLoading(true);
     setError(null);
+    setNoAccess(null);
     try {
       const data = await payrollApi.getSalarySheet(
         selectedMonth,
@@ -148,7 +154,12 @@ export function PayrollDashboard() {
       );
       setSalarySheet(data?.salaries || []);
     } catch (err) {
-      setError('Failed to load salary sheet');
+      setSalarySheet([]);
+      if (isForbiddenError(err)) {
+        setNoAccess(forbiddenDetail(err, 'The salary sheet is restricted to administrators.'));
+      } else {
+        setError('Failed to load salary sheet');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -157,11 +168,19 @@ export function PayrollDashboard() {
   const loadAdvances = async (employeeId: string) => {
     setIsLoading(true);
     setError(null);
+    setNoAccess(null);
     try {
       const data = await payrollApi.getAdvances(employeeId);
       setAdvances(data?.advances || []);
     } catch (err) {
-      setError('Failed to load advances');
+      setAdvances([]);
+      if (isForbiddenError(err)) {
+        setNoAccess(
+          forbiddenDetail(err, "Another employee's salary advances are restricted to administrators.")
+        );
+      } else {
+        setError('Failed to load advances');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -170,11 +189,19 @@ export function PayrollDashboard() {
   const loadPayslip = async (employeeId: string) => {
     setIsLoading(true);
     setError(null);
+    setNoAccess(null);
     try {
       const data = await payrollApi.getPayslip(employeeId, selectedMonth, selectedYear);
       setPayslip(data?.payslip || null);
     } catch (err) {
-      setError('Failed to load payslip');
+      setPayslip(null);
+      if (isForbiddenError(err)) {
+        setNoAccess(
+          forbiddenDetail(err, "Another employee's payslip is restricted to administrators.")
+        );
+      } else {
+        setError('Failed to load payslip');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -321,6 +348,8 @@ export function PayrollDashboard() {
             <div className="flex justify-center items-center py-8">
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
             </div>
+          ) : noAccess ? (
+            <PayrollAccessNotice message={noAccess} what="the salary sheet" />
           ) : salarySheet.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               No salary data for {MONTHS[selectedMonth - 1]} {selectedYear}
@@ -459,6 +488,8 @@ export function PayrollDashboard() {
               <div className="flex justify-center py-8">
                 <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
               </div>
+            ) : noAccess ? (
+              <PayrollAccessNotice message={noAccess} what="salary advances" />
             ) : advances.length === 0 ? (
               <div className="text-center py-8 text-gray-500">No advances recorded</div>
             ) : (
@@ -637,6 +668,8 @@ export function PayrollDashboard() {
                   </div>
                 </div>
               </div>
+            ) : noAccess ? (
+              <PayrollAccessNotice message={noAccess} what="this payslip" />
             ) : (
               <div className="text-center py-8 text-gray-500">
                 No payslip found for selected month

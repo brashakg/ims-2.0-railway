@@ -306,11 +306,11 @@ class TestF11ToricRequiresAxis:
         assert rx_repo.created[0]["right_eye"]["axis"] is None
 
     def test_lens_power_combo_rejects_toric_without_axis(self, monkeypatch):
-        # NOTE: this endpoint's role gate is malformed upstream
-        # (require_roles(_CLINICAL_ROLES) passes the tuple as ONE role), so only
-        # SUPERADMIN's hardcoded bypass gets through today. Left alone on
-        # purpose -- an RBAC change does not belong in a clinical-safety fix.
-        client = _clinical_client(monkeypatch, roles=("SUPERADMIN",))
+        # Driven as a NORMAL clinical role (the endpoint's role gate is now a
+        # correctly splatted require_roles(*_CLINICAL_ROLES)), so this asserts
+        # the axis rule on the path a real optometrist actually takes -- not on
+        # SUPERADMIN's bypass.
+        client = _clinical_client(monkeypatch, roles=("OPTOMETRIST",))
         resp = client.post(
             "/clinical/lens-power-combos",
             json={
@@ -719,20 +719,40 @@ class TestF19ValidateUsesCanonicalLimits:
         assert body["valid"] is False
         assert any("0.25" in i for i in body["issues"])
 
-    def test_no_literal_limits_left_in_the_endpoint_code(self):
-        """The stale duplicates are gone: the validate handler's CODE must not
-        restate any range - it delegates to rx_validation. (Comments and the
-        docstring may still narrate the history; only code lines are checked.)"""
-        import inspect
+    def test_endpoint_follows_the_canonical_limit_table(self, monkeypatch):
+        """BEHAVIOURAL proof of delegation: move the CANONICAL limit and the
+        endpoint's verdict must move with it.
 
-        src = inspect.getsource(prescriptions.validate_prescription)
-        # Drop the docstring + comment lines; what remains is executable code.
-        body = src.split('"""')[2]
-        code = "\n".join(
-            line for line in body.splitlines() if not line.strip().startswith("#")
+        The bug being guarded is a second, drifting copy of the ranges inside
+        the handler. If such a copy existed, tightening
+        ``rx_validation._RX_LIMITS`` would leave the endpoint's answer
+        unchanged. Replaces a check that grepped the handler's source for stale
+        numeric literals ("-20.0", "3.50", ...) -- which a reformat, a renamed
+        constant or a helper extraction would defeat, and which asserted
+        against whatever body inspect.getsource happened to return.
+        """
+        from api.services import rx_validation
+
+        rx = _doc_with_eyes(
+            {"sph": "-8.00", "cyl": "0", "axis": None, "add": "0"},
+            {"sph": "0", "cyl": "0", "axis": None, "add": "0"},
         )
-        for stale in ("-20.0", "20.0)", "3.50", "0.75 <=", "-6.0 <="):
-            assert stale not in code, f"stale limit {stale} still hardcoded"
+
+        # Baseline: -8.00 D is comfortably inside the canonical +/-25 range.
+        client = _rx_client(monkeypatch, _FakeSingleRxRepo(rx))
+        body = client.get("/prescriptions/rx-1/validate").json()
+        assert body["valid"] is True, body
+
+        # Tighten the ONE canonical table; the same Rx must now be reported
+        # out of range. A handler carrying its own copy would still say valid.
+        monkeypatch.setitem(rx_validation._RX_LIMITS, "sph", (-5.0, 5.0))
+        client = _rx_client(monkeypatch, _FakeSingleRxRepo(rx))
+        body = client.get("/prescriptions/rx-1/validate").json()
+        assert body["valid"] is False, (
+            "the validate endpoint is not reading rx_validation._RX_LIMITS -- "
+            "a stale duplicate of the ranges has been reintroduced"
+        )
+        assert any("sph" in i.lower() for i in body["issues"]), body["issues"]
 
 
 # ============================================================================

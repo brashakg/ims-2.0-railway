@@ -11,7 +11,12 @@ import api from './client';
 
 export type DenomKind = 'note' | 'coin';
 export type TillStatus = 'OPEN' | 'BLIND_SUBMITTED' | 'LOCKED';
-export type VarianceStatus = 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | null;
+// NEGATIVE_EXPECTED: the arithmetic says the drawer should hold less than
+// nothing (more cash refunded than it took in) -- a cash-in is missing, so the
+// server withholds the over/short VERDICT rather than crediting a phantom
+// overage. The figures themselves are still shown.
+export type VarianceStatus =
+  | 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | 'NEGATIVE_EXPECTED' | null;
 
 export interface DenominationLine {
   face: number;
@@ -36,7 +41,14 @@ export interface TillSession {
   cash_payouts_paisa?: number | null;
   // Revealed only to managers/finance (redacted for cashiers pre-lock).
   expected_cash_paisa?: number | null;
+  // GROSS cash collected; recorded customer cash refunds are a SEPARATE line
+  // (never merged into the manual "cash paid out" figure).
   cash_sales_paisa?: number | null;
+  cash_refunds_paisa?: number | null;
+  // True when a recorded cash refund and a manual cash payout coincide -- they
+  // may be the same money entered twice (the pre-fix workaround).
+  refund_double_entry_advisory?: boolean | null;
+  negative_expected_advisory?: boolean | null;
   variance_paisa?: number | null;
   variance_status?: VarianceStatus;
   tolerance_paisa?: number | null;
@@ -63,8 +75,15 @@ export interface ZRead {
   opening_denominations: DenominationLine[];
   blind_denominations: DenominationLine[];
   by_mode: Record<string, { collected: number; refunded: number; net: number; count: number; ledger?: string }>;
+  // Z-Read identity: opening + cash_sales - cash_refunds - cash_payouts.
+  // cash_sales_paisa is GROSS collected; cash_refunds_paisa is the recorded
+  // customer cash refunds already auto-deducted from the expected drawer.
   cash_sales_paisa: number;
+  cash_refunds_paisa?: number | null;
   cash_payouts_paisa: number;
+  refund_double_entry_advisory?: boolean | null;
+  negative_expected_advisory?: boolean | null;
+  negative_expected_message?: string | null;
   expected_cash_paisa?: number | null;
   counted_cash_paisa?: number | null;
   variance_paisa?: number | null;

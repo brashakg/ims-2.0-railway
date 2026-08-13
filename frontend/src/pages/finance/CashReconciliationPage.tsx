@@ -517,6 +517,18 @@ function RowGroup({
                   {row.tolerance > 0 && (
                     <p className="text-xs text-gray-400 pt-1">Tolerance ±{inr(row.tolerance)}</p>
                   )}
+                  {row.negative_expected_advisory && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-1">
+                      More cash was refunded than this drawer took in — a cash-in is missing
+                      (e.g. a refund funded from the safe). The over/short verdict is withheld.
+                    </p>
+                  )}
+                  {row.refund_double_entry_advisory && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-1">
+                      {row.refund_double_entry_advisory.message ||
+                        'A manual cash payout may duplicate a recorded customer cash refund.'}
+                    </p>
+                  )}
                 </dl>
               </div>
 
@@ -524,6 +536,13 @@ function RowGroup({
               <div className="bg-white border border-gray-200 rounded-lg p-3">
                 <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
                   By tender
+                  {/* Label the BASIS so one grid never silently mixes a
+                      payments-only figure with a returns-netted one. */}
+                  <span className="ml-1 normal-case font-normal text-gray-400">
+                    {row.by_mode_basis === 'PAYMENTS_ONLY_LEGACY'
+                      ? '(payments only — legacy close)'
+                      : '(net of recorded refunds)'}
+                  </span>
                 </h3>
                 {modes.length === 0 ? (
                   <p className="text-sm text-gray-400">No per-tender breakdown recorded.</p>
