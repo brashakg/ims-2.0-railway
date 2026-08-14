@@ -1044,6 +1044,54 @@ def test_the_budget_reader_is_told_a_head_was_withheld(budget_db, role):
     assert body["categories_partially_restricted"] is True
 
 
+class _NoBudgetDB(_FakeDB):
+    """No budget document for the period -- so /finance/budget falls through to
+    the hard-coded skeleton at finance.py:2374, whose `salaries` head is
+    {"budget": 0, "actual": 0}. This is the LIVE state of the business today:
+    payroll has never been run and no expense has been booked."""
+
+    def get_collection(self, name):
+        if name == "budgets":
+            return _Col([])
+        return _Col([])
+
+
+@pytest.fixture
+def no_budget_db(monkeypatch):
+    monkeypatch.setattr(finance, "_get_db", lambda: _NoBudgetDB())
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])
+def test_no_restriction_notice_when_the_withheld_head_carried_nothing(
+    no_budget_db, role
+):
+    """THE OTHER DIRECTION, and the reason this test exists.
+
+    The strip pops the pay head unconditionally, which is right -- but CLAIMING
+    something was withheld when the head was 0/0 lit the amber "this is not the
+    full operating cost" notice permanently, on the live no-budget-set state,
+    for every store and area manager. A warning that is always on is exactly as
+    useless as one that never appears: staff tune it out, and then it is not
+    believed on the day a real wage bill IS withheld.
+
+    Paired with test_the_budget_reader_is_told_a_head_was_withheld above, which
+    covers the true case -- delete the flag entirely and THAT one dies, flag
+    unconditionally and THIS one dies. Neither alone discriminates.
+    """
+    body = _budget(role).json()
+
+    # THE REQUIREMENT, asserted first.
+    assert "categories_partially_restricted" not in body, (
+        f"{role} was told a head was withheld when the pay head was 0/0"
+    )
+    # ...and the head is still gone, because popping it is unconditional and
+    # correct. A test that let the head survive here would pass for the wrong
+    # reason.
+    assert "salaries" not in body["categories"]
+    # Non-pay heads still present, so this is not simply an empty response.
+    assert "rent" in body["categories"]
+
+
 def test_the_budget_policy_row_still_admits_the_manager_tier():
     """The FIGURE is gated, not the route -- a store manager still plans rent,
     utilities and marketing. Recorded so a later tidy-up does not close the

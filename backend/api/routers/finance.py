@@ -2449,12 +2449,27 @@ async def get_budget(
     # BOTH numbers go, not just the actual: `budget` is the PLANNED wage bill for
     # the month, which in a 1-5 person store is an individual's pay to within a
     # rounding, and `actual` is the same expense figure /pnl now withholds.
+    #
+    # THE FLAG IS GATED ON MONEY, NOT ON THE POP. Dropping the head always
+    # happens; CLAIMING something was withheld only happens when the head
+    # actually carried a figure. The no-budget skeleton above (:2374) hard-codes
+    # `"salaries": {"budget": 0, "actual": 0}`, and no-budget-set is the live
+    # state today -- so flagging on the pop alone lit the amber "this is not the
+    # full operating cost" notice permanently for every store and area manager,
+    # while nothing of value had been withheld. A warning that is always on is
+    # exactly as useless as one that never appears: it gets tuned out, and then
+    # it is not believed on the day a real wage bill IS withheld.
     if not is_salary_admin(current_user):
         _cats = budget.get("categories") or {}
         _dropped = [c for c in list(_cats) if _is_payroll_shaped_expense(c)]
+        _withheld_money = any(
+            float((_cats.get(_c) or {}).get("budget") or 0) != 0
+            or float((_cats.get(_c) or {}).get("actual") or 0) != 0
+            for _c in _dropped
+        )
         for _c in _dropped:
             _cats.pop(_c, None)
-        if _dropped:
+        if _withheld_money:
             budget["categories_partially_restricted"] = True
     return budget
 
