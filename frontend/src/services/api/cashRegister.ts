@@ -59,6 +59,13 @@ export interface ExpectedPreview {
     reason: 'AMOUNT_MATCH' | 'REFUND_CATEGORY';
     message: string;
   } | null;
+  // True when an expense booked in this window is NOT paid out of the shop
+  // till (salaries, staff advances, PF/ESI — owner ruling 2026-08-14) and has
+  // therefore been left OUT of `cash_expenses` and out of `expected`. Never
+  // carries the amount: a figure a human counts money against must say that it
+  // leaves something out, without saying what or how much.
+  off_till_expense_advisory?: boolean;
+  off_till_expense_message?: string | null;
   // True when the expected drawer computes NEGATIVE (a cash-in is missing).
   negative_expected_advisory?: boolean;
   negative_expected_message?: string | null;

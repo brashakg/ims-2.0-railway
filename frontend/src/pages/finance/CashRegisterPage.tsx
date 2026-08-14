@@ -32,6 +32,7 @@ import {
   type ExpectedPreview,
   type SessionsResponse,
 } from '../../services/api/cashRegister';
+import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -479,6 +480,24 @@ function ReconcileView({
             <div className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>{preview.negative_expected_message}</span>
+            </div>
+          )}
+          {/* Something booked at this store this period is NOT paid from the
+              till (salaries / advances / PF-ESI never are), so it is not in
+              "Expected in drawer" above. Never adjust a figure a person counts
+              money against without telling them.
+
+              The backend supplies the wording and is authoritative; the local
+              constant is a FALLBACK so a flagged-but-textless response renders
+              a sentence rather than an empty amber box, which would read as a
+              warning with nothing in it. */}
+          {preview?.off_till_expense_advisory && (
+            <div
+              data-testid="off-till-expense-advisory"
+              className="mt-3 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2"
+            >
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{preview.off_till_expense_message || OFF_TILL_EXPENSE_NOTICE}</span>
             </div>
           )}
 

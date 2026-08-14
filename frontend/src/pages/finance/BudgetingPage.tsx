@@ -15,6 +15,7 @@ import { storeApi } from '../../services/api/stores';
 import { budgetsApi } from '../../services/api/budgets';
 import type { BudgetLine, BudgetVariance } from '../../services/api/budgets';
 import { formatCurrency } from './financeUtils';
+import RestrictedTotalsNotice from './RestrictedTotalsNotice';
 
 const REVENUE_HEAD = 'REVENUE';
 
@@ -235,6 +236,21 @@ export default function BudgetingPage() {
         </div>
       ) : (
         <>
+          {/* Some heads are administrator-only (owner ruling). Say so in plain
+              English rather than letting a short table read as the truth --
+              both the rows and the totals below are short by the same amount.
+
+              THIS USED TO NAME THE HEAD ("Salary and payroll heads are not
+              shown"). It no longer does, and the shared component is the reason
+              why: the Finance dashboard deliberately says only that something
+              is missing, and a screen one click away that spells out WHICH head
+              teaches the reader how to decode the discreet one. Discretion that
+              is applied on one screen and not its twin is not discretion. */}
+          <RestrictedTotalsNotice
+            show={variance?.heads_partially_restricted}
+            scope="budget rows and totals"
+          />
+
           {/* Summary cards */}
           <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
             <SummaryCard

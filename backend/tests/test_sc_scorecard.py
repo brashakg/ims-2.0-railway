@@ -494,10 +494,27 @@ def test_sc_t7_kicker_idempotency_and_rollup(client, patched):
     assert out["product_incentive_amount"] == 800.0
     assert out["sale_count"] == 2
 
-    # GET rollup endpoint
+    # GET rollup endpoint. OWNER RULING 2026-08-13 (self-only): the manager who
+    # LOGGED these two kickers for S1 may no longer READ them back -- an
+    # incentive is an earning line on S1's payslip. They get their own (empty)
+    # rollup instead, and the store total goes with the rows.
     g = client.get("/api/v1/incentive/kicker/2026-06", headers=hdr)
     assert g.status_code == 200
-    assert g.json()["total"] == 800.0
+    assert g.json()["items"] == []
+    assert g.json()["total"] == 0.0
+    assert g.json()["scope"] == "self"
+
+    admin_token = create_access_token({
+        "user_id": "adm", "username": "adm", "roles": ["ADMIN"],
+        "store_ids": [STORE], "active_store_id": STORE,
+    })
+    ga = client.get(
+        "/api/v1/incentive/kicker/2026-06",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert ga.status_code == 200
+    assert ga.json()["total"] == 800.0
+    assert ga.json()["scope"] == "store"
 
 
 # ===========================================================================

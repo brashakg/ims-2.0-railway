@@ -43,10 +43,16 @@ export interface BudgetVariance {
   period: string;
   lines: BudgetVarianceLine[];
   totals: BudgetVarianceTotals;
+  // Present (true) only when pay-shaped heads were withheld from this reader.
+  // The lines AND the totals are both short by the same amount, so the table
+  // still adds up -- it is simply a smaller, pay-free table. Show the note.
+  heads_partially_restricted?: boolean;
 }
 
 export const budgetsApi = {
-  list: async (params: { store_id?: string; period?: string }): Promise<{ budgets: BudgetLine[]; total: number }> => {
+  list: async (
+    params: { store_id?: string; period?: string },
+  ): Promise<{ budgets: BudgetLine[]; total: number; heads_partially_restricted?: boolean }> => {
     const response = await api.get('/budgets', { params });
     return response.data;
   },

@@ -165,6 +165,7 @@ import OutstandingPanel from './OutstandingPanel';
 import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
 import BudgetPanel from './BudgetPanel';
+import RestrictedTotalsNotice from './RestrictedTotalsNotice';
 import VendorPayments from './VendorPayments';
 import JournalEntriesPanel from './JournalEntriesPanel';
 
@@ -205,6 +206,21 @@ export default function FinanceDashboard() {
   const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
   const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
   const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
+  // The backend tells us when it has withheld an expense head from this reader.
+  // THREE separate flags on three separate responses -- /pnl, /budget and
+  // /cash-flow -- and they are kept as three pieces of state on purpose: two of
+  // them share the key name `expenses_partially_restricted`, so a single shared
+  // flag would look correct in any test that varies only one at a time and would
+  // put a notice on a tab whose total is whole. Carrying them into state is what
+  // stops a shortened total rendering as the truth -- see RestrictedTotalsNotice.
+  const [expensesRestricted, setExpensesRestricted] = useState(false);
+  const [budgetRestricted, setBudgetRestricted] = useState(false);
+  // THE THIRD ONE, and the easiest to miss. /finance/cash-flow strips the same
+  // pay heads below ADMIN and sets the SAME flag name as /pnl (finance.py:1500)
+  // -- but mapCashFlow() below keeps only the four numbers and drops the rest
+  // of the body, so the flag was arriving and being thrown away. "Total
+  // outflows" then rendered short, with nothing on screen saying so.
+  const [cashFlowRestricted, setCashFlowRestricted] = useState(false);
 
   // UI states
   const [isLoading, setIsLoading] = useState(true);
@@ -243,6 +259,18 @@ export default function FinanceDashboard() {
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
+      // A failed/absent call must NOT leave a stale "incomplete" banner up, and
+      // must not invent one either — default false on anything but an explicit
+      // true from the backend.
+      setExpensesRestricted(
+        pnl.status === 'fulfilled' && !!(pnl.value as any)?.expenses_partially_restricted,
+      );
+      setBudgetRestricted(
+        bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
+      );
+      setCashFlowRestricted(
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
+      );
 
       // Reflect the real period-lock state for the selected month.
       try {
@@ -415,6 +443,14 @@ export default function FinanceDashboard() {
         <div className="animate-fadeIn">
           {activeTab === 'revenue-pl' && (
             <>
+              {/* The operating-expense figure below is short by whatever the
+                  backend withheld from this role. Say so BEFORE the number,
+                  not after it. */}
+              <RestrictedTotalsNotice
+                show={expensesRestricted}
+                scope="profit and expense figures"
+                className="mb-4"
+              />
               <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
               {!canSeeStorePayroll && (
                 <div className="card mt-4 p-4">
@@ -547,7 +583,18 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && (
             <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
           )}
-          {activeTab === 'cash-flow' && <CashFlowPanel cashFlow={cashFlow} />}
+          {activeTab === 'cash-flow' && (
+            <>
+              {/* "Total outflows" below is short by whatever was withheld from
+                  this role. Say so above the number, not after it. */}
+              <RestrictedTotalsNotice
+                show={cashFlowRestricted}
+                scope="cash outflow figures"
+                className="mb-4"
+              />
+              <CashFlowPanel cashFlow={cashFlow} />
+            </>
+          )}
           {activeTab === 'period' && (
             <PeriodManagement
               periodLocked={periodLocked}
@@ -558,7 +605,15 @@ export default function FinanceDashboard() {
             />
           )}
           {activeTab === 'budgets' && (
-            <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
+            <>
+              {/* Rows AND the totals underneath are short by the same amount. */}
+              <RestrictedTotalsNotice
+                show={budgetRestricted}
+                scope="budget rows and totals"
+                className="mb-4"
+              />
+              <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
+            </>
           )}
           {activeTab === 'vendor-payments' && (
             <VendorPayments vendorPayments={vendorPayments} />
