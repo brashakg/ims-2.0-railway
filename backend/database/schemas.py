@@ -1063,7 +1063,27 @@ ADVANCE_SCHEMA = {
         "employee_id": {"bsonType": "string"},
         "employee_name": {"bsonType": "string"},
         "store_id": {"bsonType": "string"},
-        "advance_type": {"enum": ["SALARY_ADVANCE", "TRAVEL_ADVANCE", "SPECIAL_ADVANCE"]},
+        # OWNER RULING 2026-08-14: an advance is for a business reason, never
+        # for pay -- a salary advance goes through Payroll. This enum used to
+        # lead with SALARY_ADVANCE. The AUTHORITY is ADVANCE_TYPES in
+        # api/routers/expenses.py; test_advances_scope.py pins the two together
+        # so a value added there can never be rejected by this validator.
+        # NOTE: the rest of this schema is STALE against that router (it still
+        # requires advance_number, and its status enum says REQUESTED /
+        # FULLY_SETTLED where the router writes PENDING / SETTLED). The advances
+        # collection does not exist in production, so no validator is live yet;
+        # reconciling the rest needs a product decision on the workflow states.
+        "advance_type": {
+            "enum": [
+                "TRAVEL",
+                "LOCAL_CONVEYANCE",
+                "VENDOR_PAYMENT",
+                "WORKSHOP_SUPPLIES",
+                "STORE_MAINTENANCE",
+                "MARKETING_EVENT",
+                "STATUTORY_FEE",
+            ]
+        },
         "amount": {"bsonType": "decimal"},
         "purpose": {"bsonType": "string"},
         "requested_date": {"bsonType": "date"},
