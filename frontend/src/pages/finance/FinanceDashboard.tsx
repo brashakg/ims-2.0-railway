@@ -206,10 +206,13 @@ export default function FinanceDashboard() {
   const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
   const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
   const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
-  // The backend tells us when it has withheld an expense head from this reader
-  // (finance.py sets these on /pnl and /budget). Carrying the flags into state
-  // is what stops a shortened total rendering as the truth — see
-  // RestrictedTotalsNotice.
+  // The backend tells us when it has withheld an expense head from this reader.
+  // THREE separate flags on three separate responses -- /pnl, /budget and
+  // /cash-flow -- and they are kept as three pieces of state on purpose: two of
+  // them share the key name `expenses_partially_restricted`, so a single shared
+  // flag would look correct in any test that varies only one at a time and would
+  // put a notice on a tab whose total is whole. Carrying them into state is what
+  // stops a shortened total rendering as the truth -- see RestrictedTotalsNotice.
   const [expensesRestricted, setExpensesRestricted] = useState(false);
   const [budgetRestricted, setBudgetRestricted] = useState(false);
   // THE THIRD ONE, and the easiest to miss. /finance/cash-flow strips the same
