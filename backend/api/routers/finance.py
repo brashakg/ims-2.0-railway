@@ -1647,6 +1647,28 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         },
         _REVENUE_EXPR,
     )
+    # PAYROLL-INCLUSIVE, DELIBERATELY -- INSIDE THE 2026-08-14 EXCEPTION.
+    #
+    # This sum has no category filter, so it carries any pay booked as an
+    # ordinary expense, and it is surfaced raw as `this_month.expenses` and
+    # folded into `this_month.net_cash_flow`. It is NOT stripped, and the reason
+    # is the ROLE SET, not the shape of the figure:
+    #
+    #   the gate is _require_finance_admin = SUPERADMIN / ADMIN / ACCOUNTANT,
+    #   and the rbac_policy row is the same three. Take the salary admins out
+    #   and exactly ONE role remains: ACCOUNTANT -- the role the owner ruled on
+    #   2026-08-14 may read the pay heads BY NAME AND BY AMOUNT on
+    #   /finance/survival-cashflow. STORE_MANAGER and AREA_MANAGER, the roles
+    #   the /pnl and /cash-flow strips genuinely protect, cannot reach this
+    #   route at all, at either layer.
+    #
+    # So stripping here would withhold from the accountant, blended, a figure
+    # the owner has just decided they may read unblended one screen over. That
+    # is theatre, and it would cost the owner an accurate month-to-date cash
+    # position on his own dashboard.
+    #
+    # IF THIS GATE EVER WIDENS BELOW ACCOUNTANT this comment is void and the
+    # strip must be added the same day -- see get_cash_flow for the shape.
     expenses = _agg_sum(
         db,
         "expenses",

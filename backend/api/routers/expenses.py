@@ -1395,6 +1395,25 @@ async def get_reimbursement_aging(
 
     Buckets each waiting expense by days-pending (0-7 / 8-15 / 15+). Admin /
     accountant gated. Fail-soft: empty buckets when no DB.
+
+    PAYROLL-INCLUSIVE, DELIBERATELY -- INSIDE THE 2026-08-14 EXCEPTION.
+
+    The rows carry `category` and `amount` verbatim, so if a person books the
+    wage bill as an ordinary expense it appears here by head and by amount.
+    That is NOT stripped, and the reason is the ROLE SET rather than the figure:
+    the gate is require_roles(*_ACCOUNTANT_ROLES) == ADMIN / ACCOUNTANT (plus
+    SUPERADMIN's automatic pass) and the rbac_policy row is ["ACCOUNTANT",
+    "ADMIN"]. Take the salary admins out and exactly ONE role remains:
+    ACCOUNTANT -- the role the owner ruled on 2026-08-14 may read the pay heads
+    BY NAME on /finance/survival-cashflow. STORE_MANAGER and AREA_MANAGER, the
+    roles the /finance/pnl and /finance/cash-flow payroll strips genuinely
+    protect, cannot reach this route at either layer.
+
+    Stripping here would therefore buy no secrecy from anybody while breaking
+    the accountant's own chase-list -- an unpaid reimbursement they cannot see
+    is one they cannot pay. See services/salary_visibility.py for the rule and
+    routers/finance.py::get_cash_flow for the strip's shape if this gate ever
+    widens below ACCOUNTANT.
     """
     expense_repo = get_expense_repository()
     empty = {

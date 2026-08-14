@@ -1738,3 +1738,451 @@ def test_every_router_reads_the_same_payroll_head_matcher():
         budgets_router.is_payroll_shaped_expense
         is salary_visibility.is_payroll_shaped_expense
     )
+
+
+# ===========================================================================
+# 15. THE CROSS-ROUTER SEARCH -- ONE CALLER, EVERY EXPENSE-TOTALLING SCREEN,
+#     ONE POOL OF NUMBERS.
+#
+#     *** THIS IS THE TEST THE LAST TWO ROUNDS DID NOT HAVE. ***
+#
+#     Sections 10 and 13 are each per-ROUTER: section 10 pools the finance
+#     routes, section 13 pools the budgets routes, and neither can see a
+#     subtraction that crosses from one router to the other. That is the exact
+#     shape of both misses this PR has now had:
+#
+#       round 1 stripped /finance/pnl and left /finance/cash-flow inclusive
+#               -> one subtraction, two responses, SAME router.
+#       round 2 stripped /finance/* and left /budgets/variance naming the head
+#               -> no subtraction needed at all, DIFFERENT router.
+#
+#     A per-route test passes in both worlds. So this section mounts the
+#     finance router and the budgets router on ONE app, points them at ONE
+#     store and ONE month, drives every expense-totalling screen as ONE caller,
+#     and pools every numeric leaf and every string from all of it. The
+#     question it asks is the attacker's question and not the reviewer's:
+#     given everything this person can see today, can they arrive at the
+#     wage bill -- by reading it, or by any signed sum of up to three figures?
+#
+#     THE ADMIN CONTROL IS LOAD-BEARING. An ADMIN is served the pay head in
+#     full, so the searcher MUST find it immediately for that role. If it does
+#     not, the searcher is broken and every "sealed" verdict below is worthless
+#     -- which is precisely the failure mode catalogued in
+#     memory/feedback_hollow_tests.md as "assertions true by construction".
+# ===========================================================================
+
+UNI_PAY_HEAD = "Staff Salaries"     # normalises to "staff salaries" -> denied
+UNI_PAY_ACTUAL = 63910.65           # the BOOKED wage bill
+UNI_PAY_PLANNED = 58317.35          # the PLANNED wage bill (also restricted)
+UNI_RENT = 21000.00
+UNI_POWER = 3450.00
+UNI_RENT_PLANNED = 20000.00
+UNI_CLEAN = round(UNI_RENT + UNI_POWER, 2)          # 24450.00
+UNI_DIRTY = round(UNI_CLEAN + UNI_PAY_ACTUAL, 2)    # 88360.65
+
+
+def _uni_period():
+    """The month all five screens describe.
+
+    /finance/cash-flow takes no date parameters -- it is hardcoded to the 1st
+    of the current IST month. So the CURRENT month is the only window in which
+    all five screens genuinely describe the same scope, which is the whole
+    premise of a cross-route subtraction. A frozen month would make the pnl and
+    budgets figures describe a different period from the cash-flow one and the
+    test would prove nothing.
+    """
+    from api.utils.ist import ist_today
+
+    today = ist_today()
+    return today.replace(day=1).isoformat(), today.isoformat(), today.strftime("%Y-%m")
+
+
+class _UnifiedDB(_FakeDB):
+    """One store, one month, three expense heads -- one of them somebody's pay.
+
+    `payroll` is EMPTY on purpose: nobody has run a payroll month, which is
+    production's state today (0 payroll docs). The wage bill is here purely
+    because a person typed it into the free-text expense category box.
+    """
+
+    def __init__(self):
+        first, today, _period = _uni_period()
+        self._MAP = {
+            "orders": [
+                {
+                    "order_id": "ZZ-UO1",
+                    "store_id": SOLO_STORE,
+                    "created_at": datetime.now(),
+                    "status": "COMPLETED",
+                    "payment_status": "PAID",
+                    "grand_total": SOLO_REVENUE,
+                    "tax_amount": 0.0,
+                    "amount_paid": SOLO_REVENUE,
+                    "items": [
+                        {"product_id": "ZZ-P1", "quantity": 1, "total": SOLO_REVENUE}
+                    ],
+                }
+            ],
+            "expenses": [
+                _cross_expense(UNI_PAY_HEAD, UNI_PAY_ACTUAL, "ZZ-UE1", today),
+                _cross_expense("Rent", UNI_RENT, "ZZ-UE2", first),
+                _cross_expense("Electricity", UNI_POWER, "ZZ-UE3", today),
+            ],
+            "payroll": [],
+        }
+
+    def get_collection(self, name):
+        return _Col(self._MAP.get(name, []))
+
+
+class _UnifiedBudgetsColl:
+    """The `budgets` collection for the same store and the same month."""
+
+    def find(self, query=None, *a, **k):
+        _first, _today, period = _uni_period()
+        return [
+            {
+                "budget_id": "ZZ-UB1",
+                "store_id": SOLO_STORE,
+                "period": period,
+                "head": UNI_PAY_HEAD,
+                "planned_amount": UNI_PAY_PLANNED,
+            },
+            {
+                "budget_id": "ZZ-UB2",
+                "store_id": SOLO_STORE,
+                "period": period,
+                "head": "Rent",
+                "planned_amount": UNI_RENT_PLANNED,
+            },
+        ]
+
+
+@pytest.fixture
+def unified_db(monkeypatch):
+    """Point BOTH routers at the SAME store, the SAME month, the SAME expenses.
+
+    This is what makes the pool an honest attack surface rather than five
+    unrelated fixtures: every figure below describes one real month in one real
+    store, so any difference between two of them is information about that
+    month and nothing else.
+    """
+    from api.routers import budgets as budgets_router
+
+    monkeypatch.setattr(finance, "_get_db", lambda: _UnifiedDB())
+    monkeypatch.setattr(finance, "_cost_by_product", lambda _db: {"ZZ-P1": SOLO_COGS})
+    monkeypatch.setattr(finance, "_store_maps", lambda db: ({SOLO_STORE: "ENT1"}, {}))
+    monkeypatch.setattr(
+        finance, "_store_name_map", lambda db: {SOLO_STORE: "Solo Store"}
+    )
+
+    monkeypatch.setattr(
+        budgets_router, "_budgets_collection", lambda: _UnifiedBudgetsColl()
+    )
+    monkeypatch.setattr(budgets_router, "_revenue_actual", lambda s, p: SOLO_REVENUE)
+    monkeypatch.setattr(
+        budgets_router,
+        "_expense_actuals_by_category",
+        lambda s, p: {
+            UNI_PAY_HEAD: UNI_PAY_ACTUAL,
+            "Rent": UNI_RENT,
+            "Electricity": UNI_POWER,
+        },
+    )
+    return budgets_router
+
+
+def _unified_client(*roles):
+    """ONE app, BOTH routers, ONE session. The point of the whole section."""
+    from api.routers import budgets as budgets_router
+
+    app = FastAPI()
+    app.include_router(finance.router, prefix="/api/v1/finance")
+    app.include_router(budgets_router.router, prefix="/api/v1/budgets")
+
+    async def _u():
+        return _session(*roles)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+def _harvest_strings(node, out=None):
+    """Every string anywhere in a response, at any depth, KEYS INCLUDED.
+
+    Head names are data here, not schema: /budgets/variance puts the expense
+    head in a `head` VALUE while other shapes put it in a dict KEY. Harvesting
+    both means a future refactor that moves the head from one to the other
+    cannot quietly slip past this test.
+    """
+    if out is None:
+        out = []
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            _harvest_strings(key, out)
+            _harvest_strings(value, out)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            _harvest_strings(value, out)
+    return out
+
+
+def _unified_paths():
+    first, today, period = _uni_period()
+    return (
+        f"/api/v1/finance/pnl?store_id={SOLO_STORE}"
+        f"&from_date={first}&to_date={today}",
+        f"/api/v1/finance/cash-flow?store_id={SOLO_STORE}",
+        "/api/v1/finance/cash-flow-forecast?days=90",
+        f"/api/v1/budgets?store_id={SOLO_STORE}&period={period}",
+        f"/api/v1/budgets/variance?store_id={SOLO_STORE}&period={period}",
+    )
+
+
+def _unified_pool(role):
+    """Drive all five screens as one caller; return (bodies, numbers, strings).
+
+    A 403 contributes nothing to the pool, which is the correct treatment: a
+    screen the caller cannot open is not part of their attack surface. It is
+    also why the manager tier's pool is genuinely their whole surface -- see
+    test_the_owner_cash_views_are_out_of_reach... in section 11.
+    """
+    client = _unified_client(role)
+    bodies = {}
+    for path in _unified_paths():
+        resp = client.get(path)
+        bodies[path.split("?")[0]] = (
+            resp.status_code,
+            resp.json() if resp.status_code == 200 else {},
+        )
+    numbers, strings = [], []
+    for _status, body in bodies.values():
+        _harvest(body, numbers)
+        _harvest_strings(body, strings)
+    return bodies, numbers, strings
+
+
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"])
+def test_the_pay_head_is_not_named_on_any_screen_this_caller_can_open(
+    unified_db, role
+):
+    """HALF ONE: it must not be READABLE. No subtraction, no cleverness --
+    round 2 found /budgets/variance simply printing head="Staff Salaries" with
+    its amount, which is why this half exists separately from the arithmetic
+    half below and fails with its own message."""
+    bodies, _numbers, strings = _unified_pool(role)
+    assert bodies["/api/v1/finance/pnl"][0] == 200
+    assert bodies["/api/v1/budgets/variance"][0] == 200
+
+    named = [s for s in strings if "salar" in s.lower() or "payroll" in s.lower()]
+    assert not named, (
+        f"{role} is shown a pay head by name across the finance/budgets "
+        f"screens: {named}"
+    )
+
+
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+def test_the_pay_head_is_not_recoverable_across_finance_and_budgets(
+    unified_db, role
+):
+    """HALF TWO: it must not be DERIVABLE. Both the booked wage bill and the
+    planned one, against every number on every screen this caller can open, by
+    any signed sum of up to three terms.
+
+    THE MANAGER TIER ONLY, and that is the honest scope rather than a
+    convenient one. These two roles are 403'd from the forecast, the owner
+    dashboard and the survival view, so the five screens below really are their
+    entire expense-totalling surface and "not recoverable" here really does
+    mean sealed. The ACCOUNTANT is a different question with a different answer
+    -- see the two tests immediately below, which state it rather than quietly
+    excluding the role.
+    """
+    bodies, numbers, _strings = _unified_pool(role)
+    assert bodies["/api/v1/finance/cash-flow-forecast"][0] == 403, (
+        f"{role} can now open the payroll-INCLUSIVE forecast; the strip in "
+        "get_cash_flow has to be extended to it the same day"
+    )
+    for target, label in (
+        (UNI_PAY_ACTUAL, "the BOOKED wage bill"),
+        (UNI_PAY_PLANNED, "the PLANNED wage bill"),
+    ):
+        hit = _recoverable(target, numbers, max_terms=3)
+        assert hit is None, (
+            f"{role} recovers {label} ({target}) by arithmetic across the "
+            f"finance and budgets screens: {hit}\n"
+            f"  pnl.total_expenses        = "
+            f"{bodies['/api/v1/finance/pnl'][1].get('total_expenses')}\n"
+            f"  cash-flow.expense_outflow = "
+            f"{bodies['/api/v1/finance/cash-flow'][1].get('expense_outflow')}\n"
+            f"  variance.totals           = "
+            f"{bodies['/api/v1/budgets/variance'][1].get('totals')}"
+        )
+
+
+def test_the_accountant_is_sealed_on_the_routes_this_pr_actually_closes(
+    unified_db,
+):
+    """THE ACCOUNTANT, part one: the four screens this PR closes really are
+    closed for them too. /finance/pnl, /finance/cash-flow, /budgets and
+    /budgets/variance give up neither wage bill, by name or by arithmetic."""
+    client = _unified_client("ACCOUNTANT")
+    first, today, period = _uni_period()
+    closed = (
+        f"/api/v1/finance/pnl?store_id={SOLO_STORE}"
+        f"&from_date={first}&to_date={today}",
+        f"/api/v1/finance/cash-flow?store_id={SOLO_STORE}",
+        f"/api/v1/budgets?store_id={SOLO_STORE}&period={period}",
+        f"/api/v1/budgets/variance?store_id={SOLO_STORE}&period={period}",
+    )
+    numbers, strings = [], []
+    for path in closed:
+        resp = client.get(path)
+        assert resp.status_code == 200, resp.text
+        _harvest(resp.json(), numbers)
+        _harvest_strings(resp.json(), strings)
+
+    assert not [s for s in strings if "salar" in s.lower()]
+    for target in (UNI_PAY_ACTUAL, UNI_PAY_PLANNED):
+        assert _recoverable(target, numbers, max_terms=3) is None
+
+
+def test_the_accountants_seal_is_deliberately_incomplete_and_here_is_where(
+    unified_db,
+):
+    """THE ACCOUNTANT, part two -- *** THIS TEST PINS A GAP ON PURPOSE. ***
+
+    Add /finance/cash-flow-forecast, which the ACCOUNTANT may open and the
+    manager tier may not, and the wage bill comes straight back:
+
+        forecast's payroll-INCLUSIVE 90-day expense total
+          MINUS /finance/pnl's payroll-EXCLUSIVE total
+          = the wage bill
+
+    That is NOT an oversight and it is NOT a fresh finding to go and fix. The
+    owner ruled on 2026-08-14 that the ACCOUNTANT may read the aggregate wage
+    bill BY NAME on /finance/survival-cashflow, which sits behind the identical
+    gate. Closing the forecast against that role would protect nothing they can
+    not already read one screen over, while handing them a cash runway with the
+    largest outgoing of the month missing from it.
+
+    So the honest statement of what PR #985 achieves is:
+
+        STORE_MANAGER / AREA_MANAGER -- SEALED.
+        ACCOUNTANT                   -- closed on the four screens above,
+                                        still open by the owner's exception.
+
+    This test asserts that gap EXISTS so nobody can claim the accountant is
+    sealed when they are not, and so that anybody who does close the forecast
+    has to come here, read the ruling, and decide deliberately. If the owner
+    ever narrows the survival-screen exception, this is the test to delete and
+    the strip in get_cash_flow is the shape to copy.
+    """
+    _bodies, numbers, _strings = _unified_pool("ACCOUNTANT")
+    hit = _recoverable(UNI_PAY_ACTUAL, numbers, max_terms=3)
+    assert hit is not None, (
+        "the ACCOUNTANT can no longer recover the wage bill across the finance "
+        "screens. If that was deliberate -- i.e. the owner narrowed his "
+        "2026-08-14 survival-cashflow exception -- then delete this test and "
+        "say so in the PR. If it was accidental, the accountant has just lost "
+        "an accurate cash runway and nobody decided that."
+    )
+
+
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+def test_the_cross_router_search_finds_it_instantly_for_an_admin(unified_db, role):
+    """THE POSITIVE CONTROL, and the only reason the two tests above mean
+    anything. An ADMIN is served the wage bill in full and on purpose, so the
+    searcher must find it BY NAME and BY ARITHMETIC. A suite that can only ever
+    say "not found" is a suite that proves nothing."""
+    _bodies, numbers, strings = _unified_pool(role)
+
+    assert UNI_PAY_HEAD in strings, (
+        "an ADMIN is no longer shown the pay head by name -- either the strip "
+        "is over-reaching or the string harvester is broken; either way the "
+        "'not named' verdicts above are worthless"
+    )
+    for target in (UNI_PAY_ACTUAL, UNI_PAY_PLANNED):
+        assert _recoverable(target, numbers, max_terms=3) is not None, (
+            f"the searcher could not find {target} even for an {role}, who is "
+            "served it outright -- the search is vacuous"
+        )
+
+
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"])
+def test_the_ordinary_heads_survive_on_every_screen(unified_db, role):
+    """GUARD AGAINST OVER-STRIPPING, cross-router too. A store manager still
+    runs a store: rent and electricity must still be there, on both routers,
+    or this PR has broken the operating-cost screens it was meant to protect.
+    """
+    bodies, _numbers, strings = _unified_pool(role)
+    assert "Rent" in strings and "Electricity" in strings
+
+    variance = bodies["/api/v1/budgets/variance"][1]
+    heads = {ln["head"]: ln for ln in variance["lines"]}
+    assert heads["Rent"]["planned"] == UNI_RENT_PLANNED
+    assert heads["Rent"]["actual"] == UNI_RENT
+    assert heads["Electricity"]["actual"] == UNI_POWER
+    assert heads["REVENUE"]["actual"] == SOLO_REVENUE
+
+    # And the two routers still agree on the pay-free month, which is what
+    # makes the subtraction return zero instead of the wage bill.
+    assert variance["totals"]["expense_actual"] == UNI_CLEAN
+    assert bodies["/api/v1/finance/cash-flow"][1]["expense_outflow"] == UNI_CLEAN
+    assert bodies["/api/v1/finance/pnl"][1]["total_expenses"] == UNI_CLEAN
+
+
+def test_salary_advance_recovery_is_not_swept_up_as_a_pay_head(unified_db):
+    """THE FALSE-POSITIVE GUARD, named in the brief because getting this wrong
+    is the expensive half. "Salary advance recovery" is money coming BACK from
+    a customer or an employee; it is an ordinary operating line and a store
+    manager must keep it. The matcher is exact-match on the normalised head
+    precisely so it cannot swallow this one."""
+    from api.services.salary_visibility import is_payroll_shaped_expense as _m
+
+    assert _m("Salary advance recovery") is False
+    assert _m("Commission to broker") is False
+    assert _m("Rent") is False
+    # ...while still catching the heads a person actually reaches for.
+    assert _m("Staff Salaries") is True
+    assert _m("  SALARIES & WAGES ") is True
+
+
+# ===========================================================================
+# 16. THE THREE ROUTES LEFT PAYROLL-INCLUSIVE ON PURPOSE, PINNED AS A GATE.
+#
+#     /finance/owner-dashboard, /finance/cash-flow-forecast and
+#     /expenses/aging all total or name expenses without a payroll filter.
+#     They are NOT stripped, and the justification is entirely the ROLE SET:
+#     every one of them is ACCOUNTANT / ADMIN / SUPERADMIN, and the ACCOUNTANT
+#     is the role the owner ruled on 2026-08-14 may read the pay heads BY NAME
+#     on /finance/survival-cashflow. Closing them against that role would be
+#     theatre; it protects nothing they cannot already read one screen over.
+#
+#     THAT JUSTIFICATION IS ONLY TRUE WHILE THE GATES STAY WHERE THEY ARE.
+#     This test is the tripwire: widen any of them to STORE_MANAGER or
+#     AREA_MANAGER and it fails, because those roles have no authorisation to
+#     see other people's pay in any form and the strip would have to follow
+#     the same day.
+# ===========================================================================
+
+
+def test_the_payroll_inclusive_routes_are_still_accountant_and_admin_only():
+    """The tripwire under the 2026-08-14 exception. If this fails, read the
+    comments at finance.py::owner_dashboard, finance.py::cash_flow_forecast and
+    expenses.py::get_reimbursement_aging BEFORE relaxing the assertion -- the
+    correct response is to add the payroll strip, not to widen this list."""
+    manager_tier = {"STORE_MANAGER", "AREA_MANAGER"}
+    for path in (
+        "/api/v1/finance/owner-dashboard",
+        "/api/v1/finance/cash-flow-forecast",
+        "/api/v1/expenses/aging",
+    ):
+        allowed = set(_allowed("GET", path))
+        assert not (allowed & manager_tier), (
+            f"{path} is payroll-INCLUSIVE and has been opened to "
+            f"{sorted(allowed & manager_tier)}, who may not see other people's "
+            "pay in any form -- it now needs the strip from get_cash_flow"
+        )
+        assert allowed <= {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}, sorted(allowed)
