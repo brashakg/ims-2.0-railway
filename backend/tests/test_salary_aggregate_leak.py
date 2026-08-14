@@ -1782,11 +1782,11 @@ UNI_DIRTY = round(UNI_CLEAN + UNI_PAY_ACTUAL, 2)    # 88360.65
 
 
 def _uni_period():
-    """The month all five screens describe.
+    """The month all seven screens describe.
 
     /finance/cash-flow takes no date parameters -- it is hardcoded to the 1st
     of the current IST month. So the CURRENT month is the only window in which
-    all five screens genuinely describe the same scope, which is the whole
+    all seven screens genuinely describe the same scope, which is the whole
     premise of a cross-route subtraction. A frozen month would make the pnl and
     budgets figures describe a different period from the cash-flow one and the
     test would prove nothing.
@@ -1797,12 +1797,51 @@ def _uni_period():
     return today.replace(day=1).isoformat(), today.isoformat(), today.strftime("%Y-%m")
 
 
+class _SessionCursor(list):
+    """`find(...).sort(...).limit(...)` -- the chain the sessions route uses.
+
+    Without this, ``list_cash_register_sessions`` raises inside its own
+    try/except and returns an EMPTY session list, so the till screens would
+    contribute nothing to the pool and every "sealed" verdict below would be
+    sealed only because the fixture was broken. That is exactly the
+    "assertions true by construction" failure in feedback_hollow_tests.md, so
+    ``test_the_till_screens_really_are_in_the_pool`` asserts the fixture is
+    live before any of the search tests are believed.
+    """
+
+    def sort(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+
+class _SessionCol(_Col):
+    def find(self, query=None, projection=None, *a, **k):
+        return _SessionCursor(super().find(query, projection))
+
+
+# The open till, in the SAME store and the SAME month as everything else, so
+# a figure on the close screen is a figure about the month the /pnl and
+# /budgets screens describe. Numbers chosen not to collide with any other.
+UNI_OPENING_FLOAT = 5000.00
+UNI_CASH_SALES = 137500.00
+UNI_TILL_OPEN_AT = None  # filled per-run from _uni_period()
+
+
 class _UnifiedDB(_FakeDB):
     """One store, one month, three expense heads -- one of them somebody's pay.
 
     `payroll` is EMPTY on purpose: nobody has run a payroll month, which is
     production's state today (0 payroll docs). The wage bill is here purely
     because a person typed it into the free-text expense category box.
+
+    It also carries an OPEN cash-register session for that store, because the
+    till family (/finance/cash-register/sessions, and the reconciliation
+    console it feeds) totals THE SAME expenses over THE SAME store for THE
+    SAME four roles as /finance/pnl. Round 1 made /pnl payroll-exclusive and
+    left this family inclusive; three rounds of per-route tests never saw it,
+    and only a pooled search across BOTH families does.
     """
 
     def __init__(self):
@@ -1829,10 +1868,22 @@ class _UnifiedDB(_FakeDB):
                 _cross_expense("Electricity", UNI_POWER, "ZZ-UE3", today),
             ],
             "payroll": [],
+            "cash_register_sessions": [
+                {
+                    "session_id": "ZZ-UCR1",
+                    "store_id": SOLO_STORE,
+                    "status": "OPEN",
+                    "opened_at": f"{first}T09:00:00+05:30",
+                    "opening_float": UNI_OPENING_FLOAT,
+                }
+            ],
         }
 
     def get_collection(self, name):
-        return _Col(self._MAP.get(name, []))
+        docs = self._MAP.get(name, [])
+        if name == "cash_register_sessions":
+            return _SessionCol(docs)
+        return _Col(docs)
 
 
 class _UnifiedBudgetsColl:
@@ -1875,6 +1926,13 @@ def unified_db(monkeypatch):
     monkeypatch.setattr(
         finance, "_store_name_map", lambda db: {SOLO_STORE: "Solo Store"}
     )
+    # The till's cash-IN side. Stubbed because this section is about the
+    # EXPENSE side: a hand-built orders fixture for the drawer would only add
+    # a way for the pool to be wrong for reasons unrelated to the wage bill.
+    monkeypatch.setattr(
+        finance, "_cash_sales_for_window", lambda *a, **k: (UNI_CASH_SALES, 0.0)
+    )
+    monkeypatch.setattr(finance, "_refund_double_entry_advisory", lambda *a, **k: None)
 
     monkeypatch.setattr(
         budgets_router, "_budgets_collection", lambda: _UnifiedBudgetsColl()
@@ -1938,11 +1996,19 @@ def _unified_paths():
         "/api/v1/finance/cash-flow-forecast?days=90",
         f"/api/v1/budgets?store_id={SOLO_STORE}&period={period}",
         f"/api/v1/budgets/variance?store_id={SOLO_STORE}&period={period}",
+        # ADDED ROUND 4. The till family totals the same `expenses` collection
+        # over the same store for the same four roles as /finance/pnl, and
+        # three rounds of per-route tests never noticed. It is in the POOL now,
+        # not in a test of its own, because the pool is the only thing that has
+        # reliably caught this class.
+        f"/api/v1/finance/cash-register/sessions?store_id={SOLO_STORE}",
+        f"/api/v1/finance/cash-reconciliation-summary?from={first}&to={today}"
+        f"&store_id={SOLO_STORE}",
     )
 
 
 def _unified_pool(role):
-    """Drive all five screens as one caller; return (bodies, numbers, strings).
+    """Drive all seven screens as one caller; return (bodies, numbers, strings).
 
     A 403 contributes nothing to the pool, which is the correct treatment: a
     screen the caller cannot open is not part of their attack surface. It is
@@ -1983,6 +2049,60 @@ def test_the_pay_head_is_not_named_on_any_screen_this_caller_can_open(
     )
 
 
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"])
+def test_the_till_screens_really_are_in_the_pool(unified_db, role):
+    """*** BELIEVE NOTHING BELOW UNTIL THIS PASSES. ***
+
+    The two till paths were added to `_unified_paths` in round 4. Both handlers
+    wrap their reads in try/except and fall back to an empty body, so a fixture
+    that does not satisfy them returns 200 with nothing in it -- and every
+    "not recoverable" verdict in this section would then be true only because
+    the till contributed no numbers. That is the hollow-test failure this repo
+    has documented 25+ times.
+
+    So: assert the till screens are LIVE and carrying real figures, before any
+    search result from them is trusted.
+    """
+    bodies, numbers, _strings = _unified_pool(role)
+
+    sessions = bodies["/api/v1/finance/cash-register/sessions"]
+    assert sessions[0] == 200, sessions
+    preview = sessions[1].get("expected_preview")
+    assert preview is not None, (
+        "the open till session did not reach the handler -- the fixture is "
+        "dead and this whole section proves nothing"
+    )
+    assert preview["cash_sales"] == UNI_CASH_SALES
+    assert preview["opening_float"] == UNI_OPENING_FLOAT
+    assert UNI_CASH_SALES in numbers, "the till's figures are not in the pool"
+
+    recon = bodies["/api/v1/finance/cash-reconciliation-summary"]
+    assert recon[0] == 200, recon
+    assert "totals" in recon[1]
+
+
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"])
+def test_the_till_drawer_is_payroll_free_on_the_shared_screen(unified_db, role):
+    """The round-3 finding, stated as the figure rather than as a difference.
+
+    The verifier reproduced expected_preview.cash_expenses = payroll-INCLUSIVE
+    while /finance/pnl.total_expenses was payroll-EXCLUSIVE over the same store
+    and month. Both are now the pay-free operating total, so the subtraction
+    that recovered the wage bill returns zero.
+    """
+    bodies, _numbers, _strings = _unified_pool(role)
+    preview = bodies["/api/v1/finance/cash-register/sessions"][1]["expected_preview"]
+    assert preview["cash_expenses"] == UNI_CLEAN, (
+        f"{role} sees a till total of {preview['cash_expenses']}; the pay-free "
+        f"operating total for this month is {UNI_CLEAN}"
+    )
+    assert bodies["/api/v1/finance/pnl"][1]["total_expenses"] == UNI_CLEAN
+    assert (
+        round(preview["cash_expenses"]
+              - bodies["/api/v1/finance/pnl"][1]["total_expenses"], 2) == 0.0
+    )
+
+
 @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
 def test_the_pay_head_is_not_recoverable_across_finance_and_budgets(
     unified_db, role
@@ -1993,7 +2113,7 @@ def test_the_pay_head_is_not_recoverable_across_finance_and_budgets(
 
     THE MANAGER TIER ONLY, and that is the honest scope rather than a
     convenient one. These two roles are 403'd from the forecast, the owner
-    dashboard and the survival view, so the five screens below really are their
+    dashboard and the survival view, so the seven screens below really are their
     entire expense-totalling surface and "not recoverable" here really does
     mean sealed. The ACCOUNTANT is a different question with a different answer
     -- see the two tests immediately below, which state it rather than quietly

@@ -15,7 +15,7 @@ from ..utils.ist import (
 )
 from ..utils.dates import to_date_str
 from ..utils.online_gst import order_interstate_flag
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Body
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -4035,27 +4035,112 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     return round(cash_sales, 2), round(cash_refunds, 2)
 
 
+# ===========================================================================
+# OFF-TILL EXPENSE HEADS -- an EXPENSE-CLASSIFICATION correction, not a
+# redaction. Read this before changing the drawer maths below.
+# ===========================================================================
+# OWNER RULING 2026-08-14, asked directly: are salaries, staff advances or
+# PF/ESI ever paid out of a shop cash till?
+#
+#     "NEVER - always bank, cheque or from the office."
+#
+# Today the code disagrees with him, and the disagreement costs money at
+# day-end rather than merely leaking one. ExpenseCreate.payment_mode is
+# Optional (routers/expenses.py), and the loop below treats a BLANK mode as
+# cash. So a wage bill typed into the free-text expense box with the payment-
+# mode dropdown left alone is subtracted from the drawer:
+#
+#     expected_cash = opening + cash_sales - cash_refunds - cash_expenses
+#
+# Subtracting money that never left the till makes `expected` too LOW, so the
+# physical count reads as a large phantom OVERAGE. That fires in every affected
+# store the first month somebody books pay as an expense, and an "overage" the
+# size of a month's wages is exactly the kind of alarm a manager learns to
+# ignore. This is a money-correctness bug first.
+#
+# IT ALSO CLOSES A LEAK THIS BRANCH OPENED. Round 1 (47bd52c) made
+# GET /finance/pnl payroll-EXCLUSIVE for the manager tier while these till
+# routes stayed payroll-INCLUSIVE over the SAME store -- the four roles on
+# rbac_policy rows for /finance/pnl and /finance/cash-register/sessions are the
+# same four roles. Two requests, one subtraction, wage bill recovered. See
+# services/salary_visibility.py "THE SECOND COROLLARY".
+#
+# THEREFORE THIS EXCLUSION IS IDENTICAL FOR EVERY ROLE, ADMIN AND SUPERADMIN
+# INCLUDED. There is deliberately no role check in this function or its
+# callers. A role-conditional drawer would just be a THIRD asymmetry to
+# subtract across; removing the differential entirely leaves nothing to
+# subtract. It also means the number a human counts money against is the same
+# number for everyone who looks at it, which is the only defensible property
+# for a cash-drawer figure.
+#
+# THE DELIBERATE CHOICE, AND ITS FAILURE MODE
+# -------------------------------------------
+# What if somebody books a payroll-shaped head with payment_mode EXPLICITLY set
+# to CASH? That contradicts the owner. Two options:
+#
+#   (a) honour the explicit mode -- drawer stays arithmetically right in the
+#       case where it really did happen, but the wage bill is back in a figure
+#       the manager tier can read, and the cross-route subtraction reopens.
+#   (b) exclude it ALWAYS, whatever the mode.
+#
+# WE TAKE (b). The ruling is unconditional, so an explicit CASH mode on a pay
+# head is a mis-booking, and (a) would make the leak controllable by whoever
+# books the expense -- an attacker-chosen field. Failure mode of (b), stated
+# plainly because the owner has to live with it at day-end: IF cash genuinely
+# went out of a till for a pay head, that drawer reads SHORT by that amount.
+# A shortage gets investigated; it is not silent. AND IT IS NOT SILENT HERE
+# EITHER -- `excluded_count` below drives a visible note on the close screen
+# and the running preview (no amount, no head name), because a number a human
+# counts money against must never be adjusted behind their back.
+#
+# RESIDUAL, DISCLOSED: on a store where cash really did leave the till for a
+# pay head, the resulting variance IS that amount. Deriving it requires the
+# owner's "never" to have been broken, and in that world the manager watched
+# the cash leave. Not closable without reintroducing (a).
+
+
+class _CashExpenseWindow(NamedTuple):
+    """Drawer-relevant cash expenses, plus what was left out of them.
+
+    ``excluded_count`` is a COUNT and never an amount: it exists so the screen
+    can say "something here is not paid from the till" without handing the
+    manager tier the pay figure the rest of this PR withholds.
+    """
+
+    total: float
+    excluded_count: int
+
+
 def _cash_expenses_for_window(
     db, store_id: str, start_iso: str, end_iso: Optional[str]
-):
+) -> _CashExpenseWindow:
     """Cash payouts from the drawer for a store in the window.
 
     Expenses use `expense_date` (ISO date) and `payment_mode`. Only CASH-mode
     expenses come out of the physical drawer; UPI/CARD/BANK don't. Counts
     APPROVED / PAID / SENT_TO_ACCOUNTANT spends (anything that represents money
-    actually disbursed). Fail-soft to 0."""
+    actually disbursed). Payroll-shaped heads are excluded outright -- see the
+    block above. Fail-soft to (0.0, 0)."""
     if db is None:
-        return 0.0
+        return _CashExpenseWindow(0.0, 0)
     start_day = start_iso[:10]
     end_day = (end_iso or now_ist().isoformat())[:10]
     total = 0.0
+    excluded = 0
     try:
         cursor = db.get_collection("expenses").find(
             {
                 "store_id": store_id,
                 "expense_date": {"$gte": start_day, "$lte": end_day},
             },
-            {"_id": 0, "amount": 1, "payment_mode": 1, "status": 1, "expense_date": 1},
+            {
+                "_id": 0,
+                "amount": 1,
+                "payment_mode": 1,
+                "status": 1,
+                "expense_date": 1,
+                "category": 1,
+            },
         )
         for e in cursor:
             mode = str(e.get("payment_mode") or "").upper()
@@ -4064,13 +4149,30 @@ def _cash_expenses_for_window(
             status = str(e.get("status") or "").upper()
             if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
                 continue
+            # Salaries, advances and PF/ESI never come out of a shop till
+            # (owner, 2026-08-14). Same matcher as /pnl and /budgets, imported
+            # from services/salary_visibility -- never a local copy.
+            if is_payroll_shaped_expense(e.get("category")):
+                excluded += 1
+                continue
             try:
                 total += float(e.get("amount", 0) or 0)
             except (TypeError, ValueError):
                 pass
     except Exception:
-        return 0.0
-    return round(total, 2)
+        return _CashExpenseWindow(0.0, 0)
+    return _CashExpenseWindow(round(total, 2), excluded)
+
+
+# Shown verbatim to whoever is counting the drawer. No amount, no head name:
+# it tells them the expected figure deliberately leaves something out and who
+# to ask, which is all they need to stop themselves "correcting" a real count.
+OFF_TILL_EXPENSE_MESSAGE = (
+    "One or more expenses booked here in this period are not paid out of the "
+    "shop till, so they are left out of the expected-cash figure. If your "
+    "count does not tally, check with an administrator before adjusting "
+    "anything."
+)
 
 
 # A CASH expense whose amount matches a recorded CASH refund to within a paisa
@@ -4315,7 +4417,8 @@ async def close_cash_register(
     end_iso = _iso_now()
 
     cash_sales, cash_refunds = _cash_sales_for_window(db, store_id, start_iso, end_iso)
-    cash_expenses = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
+    _cash_exp = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
+    cash_expenses = _cash_exp.total
     opening_float = float(session.get("opening_float", 0) or 0)
 
     denoms = cash_register.normalize_denominations(
@@ -4386,6 +4489,15 @@ async def close_cash_register(
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
         "refund_double_entry_advisory": refund_double_entry,
+        # Salaries / advances / PF-ESI are never paid from a till (owner
+        # 2026-08-14), so they are OUT of `cash_expenses` above. Say so on the
+        # record: an expected-cash figure that quietly leaves something out is
+        # exactly the "screen stating something the system knows is not true"
+        # that PR #960 was written to kill. Count only -- never the amount.
+        "off_till_expense_advisory": bool(_cash_exp.excluded_count),
+        "off_till_expense_message": (
+            OFF_TILL_EXPENSE_MESSAGE if _cash_exp.excluded_count else None
+        ),
         "negative_expected_advisory": summary.get("negative_expected_advisory", False),
         "negative_expected_message": summary.get("negative_expected_message"),
         # by_mode_breakdown is NET OF RECORDED REFUNDS (same basis as the
@@ -4467,7 +4579,8 @@ async def list_cash_register_sessions(
         os_store = open_session.get("store_id")
         start_iso = open_session.get("opened_at") or _iso_now()
         cash_sales, cash_refunds = _cash_sales_for_window(db, os_store, start_iso, None)
-        cash_expenses = _cash_expenses_for_window(db, os_store, start_iso, None)
+        _cash_exp = _cash_expenses_for_window(db, os_store, start_iso, None)
+        cash_expenses = _cash_exp.total
         opening_float = float(open_session.get("opening_float", 0) or 0)
         expected = cash_register.compute_expected_cash(
             opening_float, cash_sales, cash_refunds, cash_expenses, 0.0
@@ -4483,6 +4596,13 @@ async def list_cash_register_sessions(
             # matches a recorded cash refund is probably the same money twice.
             "refund_double_entry_advisory": _refund_double_entry_advisory(
                 db, os_store, start_iso, None, cash_refunds
+            ),
+            # Something booked this period is not paid from the till, so it is
+            # not in `cash_expenses` and not in `expected`. Count only, never
+            # the amount -- see OFF_TILL_EXPENSE_MESSAGE.
+            "off_till_expense_advisory": bool(_cash_exp.excluded_count),
+            "off_till_expense_message": (
+                OFF_TILL_EXPENSE_MESSAGE if _cash_exp.excluded_count else None
             ),
             # A negative expectation means a cash-in is missing -- never present
             # the resulting "overage" as a verdict.
@@ -4709,6 +4829,15 @@ async def cash_reconciliation_summary(
                 # closed before the change carry a payments-only breakdown.
                 "by_mode_basis": s.get("by_mode_basis") or "PAYMENTS_ONLY_LEGACY",
                 "refund_double_entry_advisory": s.get("refund_double_entry_advisory"),
+                # Carried from the close record, not recomputed. The row's own
+                # arithmetic (opening + sales - refunds - expenses = expected)
+                # must keep tying out, and `expected` here is the figure the
+                # closer actually counted money against on the day -- restating
+                # a signed-off drawer from today's rules would be worse than
+                # the thing it fixes. New closes are already payroll-free at
+                # source; sessions closed before this change keep their number
+                # and now say so.
+                "off_till_expense_advisory": bool(s.get("off_till_expense_advisory")),
                 "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": closed_by,
                 "closed_by_name": s.get("closed_by_name"),
@@ -4776,6 +4905,12 @@ async def cash_reconciliation_summary(
                     if s.get("refund_double_entry_advisory")
                     else None
                 ),
+                # Always False for a blind EOD: `cash_payouts_paisa` is a figure
+                # the cashier hand-keys on the till screen (routers/till.py),
+                # not one derived from the `expenses` collection, so there is
+                # no expense head here to classify. Emitted anyway so every row
+                # in this one grid carries the same keys.
+                "off_till_expense_advisory": False,
                 "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": locked_by,
                 "closed_by_name": s.get("locked_by_name"),
