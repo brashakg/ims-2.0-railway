@@ -32,11 +32,28 @@ subtraction, whatever the route's role gate says. When you hide a salary figure,
 hide every figure it can be recovered from -- see ``PAYROLL_DERIVED_PNL_FIELDS``
 in routers/finance.py for the worked example.
 
+THE SECOND COROLLARY (added 2026-08-14, learned the expensive way)
+-------------------------------------------------------------------
+The subtraction does not have to happen INSIDE one response. Round 1 of PR #985
+made GET /finance/pnl payroll-EXCLUSIVE for a store manager and left GET
+/finance/cash-flow payroll-INCLUSIVE over the SAME store and the SAME month. Two
+requests, one subtraction, and the wage bill was back:
+
+    cash-flow.expense_outflow 88360.65 - pnl.total_expenses 24450.00 = 63910.65
+
+The sibling sweep had looked at /finance/cash-flow and cleared it because its
+body carries "a grand total, no head names". THE HEAD NAME WAS NEVER THE LEAK.
+Two figures over the same scope that differ only by payroll ARE the payroll,
+whatever they are called. So when you make one route payroll-exclusive, the
+question is not "does this other route name a salary" -- it is "does this other
+route total the same expenses over a scope the same caller can ask for".
+
 No emoji (Windows cp1252).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Iterable, Tuple
 
 # The ONLY roles that may see another person's pay, in any shape: a payslip, a
@@ -76,3 +93,99 @@ def is_salary_admin(user: dict) -> bool:
     so a caller we cannot identify never receives salary data.
     """
     return any(r in SALARY_ADMIN_ROLES for r in _roles_of(user))
+
+
+# ===========================================================================
+# "Is this free-text expense head somebody's pay?"
+#
+# LIVED HERE SINCE 2026-08-14, and it lives here for the same reason the role
+# tuple does. It was born private inside routers/finance.py; within one round
+# routers/budgets.py was found emitting the identical head, by name, to the
+# identical roles. A matcher that lives in one router's private namespace is a
+# matcher the next router will fork or forget. Import it, never re-type it.
+# ===========================================================================
+
+# The `expenses` collection's `category` is FREE TEXT typed by whoever books the
+# spend. The automated payroll run genuinely never writes there -- it writes the
+# `payroll` collection -- but a PERSON can, and if anybody books "Salary" or
+# "Staff wages" as an ordinary expense it reaches a store manager verbatim, by
+# head and by amount. services/survival_cashflow.py already lists
+# "salary"/"payroll" among its expense heads, so this shape is anticipated in
+# this codebase, not hypothetical.
+#
+# WHAT THIS COVERS, EXACTLY: a category whose NORMALISED form (lower-cased,
+# punctuation folded to spaces, runs of whitespace collapsed -- see
+# ``normalise_expense_category``) is one of the strings below. So "Salary",
+# " SALARY ", "Salaries & Wages" and "staff-wages" are all caught.
+#
+# WHAT IT DOES NOT COVER, and cannot: free text is free. "Sal Mar-26", "Ramesh
+# payment", "Staff", a misspelling, a Hindi or transliterated head, or whatever
+# head somebody invents next month all sail through. An exact-match list is still
+# worth having because it catches the heads a person actually reaches for, and
+# because the alternative -- substring or fuzzy matching -- would silently
+# swallow innocent heads ("commission to broker", "salary advance recovery" from
+# a customer) and quietly corrupt the manager's operating-cost panel, which is a
+# worse failure than the one it prevents. The durable fix is a controlled
+# expense-category list; this is the cheap guard until that exists.
+PAYROLL_SHAPED_EXPENSE_CATEGORIES = frozenset(
+    {
+        "salary",
+        "salaries",
+        "salary wages",
+        "salaries wages",
+        "salary and wages",
+        "salaries and wages",
+        "wage",
+        "wages",
+        "staff salary",
+        "staff salaries",
+        "staff wage",
+        "staff wages",
+        "staff cost",
+        "staff costs",
+        "staff pay",
+        "employee salary",
+        "employee salaries",
+        "employee cost",
+        "employee costs",
+        "payroll",
+        "payroll cost",
+        "payroll costs",
+        "payroll expense",
+        "payroll expenses",
+        "remuneration",
+        "staff remuneration",
+        "staff incentive",
+        "staff incentives",
+        "staff bonus",
+        "employee bonus",
+        "staff commission",
+        "gratuity",
+        "pf",
+        "epf",
+        "pf contribution",
+        "epf contribution",
+        "employer pf",
+        "esi",
+        "esic",
+        "esi contribution",
+        "esic contribution",
+    }
+)
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def normalise_expense_category(category) -> str:
+    """Lower-case, fold punctuation to spaces, collapse whitespace.
+
+    "Salaries & Wages" -> "salaries wages"; "  STAFF-SALARY " -> "staff salary".
+    A non-string (None, a number) normalises to "" and therefore never matches.
+    """
+    text = _NON_ALNUM.sub(" ", str(category or "").lower())
+    return " ".join(text.split())
+
+
+def is_payroll_shaped_expense(category) -> bool:
+    """Whether this free-text expense head means 'this is somebody's pay'."""
+    return normalise_expense_category(category) in PAYROLL_SHAPED_EXPENSE_CATEGORIES

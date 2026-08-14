@@ -43,6 +43,10 @@ from ..dependencies import (
     get_expense_repository,
     validate_store_access,
 )
+from ..services.salary_visibility import (
+    is_payroll_shaped_expense,
+    is_salary_admin,
+)
 
 # Reuse the proven order-revenue aggregation from reports.py verbatim so the
 # budget variance can never drift from what the Reports module shows.
@@ -306,8 +310,20 @@ async def list_budgets(
         return {"budgets": [], "total": 0}
 
     budgets = [_clean_budget_doc(r) for r in rows]
+    # A planned "Salaries" head is the PLANNED wage bill, which in a 1-5 person
+    # store is an individual's pay to within a rounding. Same rule and same
+    # reasoning as GET /finance/budget -- see the block on budget_variance below
+    # for why this router needed the rule at all.
+    restricted = False
+    if not is_salary_admin(current_user):
+        kept = [b for b in budgets if not is_payroll_shaped_expense(b.get("head"))]
+        restricted = len(kept) != len(budgets)
+        budgets = kept
     budgets.sort(key=lambda b: ((b.get("head") != REVENUE_HEAD), b.get("head") or ""))
-    return {"budgets": budgets, "total": len(budgets)}
+    out: Dict[str, Any] = {"budgets": budgets, "total": len(budgets)}
+    if restricted:
+        out["heads_partially_restricted"] = True
+    return out
 
 
 @router.delete("/{budget_id}")
@@ -352,6 +368,11 @@ async def budget_variance(
     Returns one row per head with planned / actual / variance (actual-planned)
     / variance_pct, plus a totals block. Heads that have ACTUALS but no plan
     are included with planned=0 so nothing is hidden.
+
+    ONE EXCEPTION, and it is a security rule, not a data rule: payroll-shaped
+    heads are withheld below salary-admin (owner ruling 2026-08-09) and the
+    totals shrink with them. The response then carries
+    `heads_partially_restricted: true`. See the strip below.
     """
     store_id = validate_store_access(store_id, current_user)
     period = _validate_period(period)
@@ -379,6 +400,34 @@ async def budget_variance(
     actual_by_head[REVENUE_HEAD] = round(_revenue_actual(store_id, period), 2)
     for cat, amt in _expense_actuals_by_category(store_id, period).items():
         actual_by_head[cat] = round(amt, 2)
+
+    # ---- the payroll strip, applied BEFORE anything is derived ----------
+    #
+    # THE SIBLING THE ROUND-1 SWEEP MISSED. PR #985 round 1 closed the pay heads
+    # on GET /finance/budget because the Budgets tab renders beside the P&L tab.
+    # It never asked who ELSE serves a budget: THIS route does, to the SAME four
+    # roles (_BUDGET_ROLES == ACCOUNTANT / ADMIN / AREA_MANAGER / STORE_MANAGER),
+    # store-scoped and month-scoped, and it returns the head BY NAME with its
+    # `actual` -- the same expense figure /finance/pnl now withholds. A rule
+    # applied to one of two twins is not applied.
+    #
+    # STRIPPED AT THE SOURCE MAPS, not from the finished rows, so that every
+    # figure built out of them moves together: `lines`, `expense_planned`,
+    # `expense_actual`, both variances, both percentages and `net_planned` /
+    # `net_actual`. Filtering only `lines` would leave the wage bill recoverable
+    # as expense_actual - sum(line.actual), which is exactly the subtraction this
+    # whole PR exists to close.
+    #
+    # BOTH SIDES GO. `planned` is the PLANNED wage bill (an individual's pay to
+    # within a rounding, in a 1-5 person store) and `actual` is the booked one.
+    heads_partially_restricted = False
+    if not is_salary_admin(current_user):
+        _dropped = [h for h in planned_by_head if is_payroll_shaped_expense(h)]
+        _dropped += [h for h in actual_by_head if is_payroll_shaped_expense(h)]
+        for _h in _dropped:
+            planned_by_head.pop(_h, None)
+            actual_by_head.pop(_h, None)
+        heads_partially_restricted = bool(_dropped)
 
     # ---- merge: every head that has a plan OR an actual -----------------
     all_heads = set(planned_by_head) | set(actual_by_head)
@@ -425,9 +474,15 @@ async def budget_variance(
         "net_actual": round(revenue_actual - expense_actual, 2),
     }
 
-    return {
+    out: Dict[str, Any] = {
         "store_id": store_id,
         "period": period,
         "lines": lines,
         "totals": totals,
     }
+    if heads_partially_restricted:
+        # Tell the reader the table is short rather than letting a reduced
+        # total read as the truth. A flag, never a figure -- same contract as
+        # /finance/pnl's `expenses_partially_restricted`.
+        out["heads_partially_restricted"] = True
+    return out

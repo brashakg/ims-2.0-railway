@@ -4,7 +4,6 @@ import calendar
 import csv
 import io
 import logging
-import re
 import uuid
 from datetime import datetime, timedelta, date
 from ..utils.ist import (
@@ -28,7 +27,9 @@ from ..services import survival_cashflow
 from ..services.cost_mask import can_see_cost
 from ..services.salary_visibility import (
     SALARY_RESTRICTED_MESSAGE,
+    is_payroll_shaped_expense,
     is_salary_admin,
+    normalise_expense_category,
 )
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
@@ -757,89 +758,16 @@ PAYROLL_DERIVED_PNL_FIELDS = (
 )
 
 # 3. The one hole in "the `expenses` dict is payroll-EXCLUSIVE" above: `category`
-#    is FREE TEXT typed by whoever books the expense. The automated payroll run
-#    genuinely never writes here -- but a person can, and if anybody books
-#    "Salary" or "Staff wages" as an ordinary expense it reaches a store manager
-#    verbatim, by head and by amount. services/survival_cashflow.py already lists
-#    "salary"/"payroll" among its expense heads, so this shape is anticipated in
-#    this codebase, not hypothetical.
-#
-#    WHAT THIS COVERS, EXACTLY: a category whose NORMALISED form (lower-cased,
-#    punctuation folded to spaces, runs of whitespace collapsed -- see
-#    _normalise_expense_category) is one of the strings below. So "Salary",
-#    " SALARY ", "Salaries & Wages" and "staff-wages" are all caught.
-#
-#    WHAT IT DOES NOT COVER, and cannot: free text is free. "Sal Mar-26",
-#    "Ramesh payment", "Staff", a misspelling, a Hindi or transliterated head, or
-#    whatever head somebody invents next month all sail through. An exact-match
-#    list is still worth having because it catches the heads a person actually
-#    reaches for, and because the alternative -- substring or fuzzy matching --
-#    would silently swallow innocent heads ("commission to broker", "salary
-#    advance recovery" from a customer) and quietly corrupt the manager's
-#    operating-cost panel, which is a worse failure than the one it prevents.
-#    The durable fix is a controlled expense-category list; this is the cheap
-#    guard until that exists.
-PAYROLL_SHAPED_EXPENSE_CATEGORIES = frozenset(
-    {
-        "salary",
-        "salaries",
-        "salary wages",
-        "salaries wages",
-        "salary and wages",
-        "salaries and wages",
-        "wage",
-        "wages",
-        "staff salary",
-        "staff salaries",
-        "staff wage",
-        "staff wages",
-        "staff cost",
-        "staff costs",
-        "staff pay",
-        "employee salary",
-        "employee salaries",
-        "employee cost",
-        "employee costs",
-        "payroll",
-        "payroll cost",
-        "payroll costs",
-        "payroll expense",
-        "payroll expenses",
-        "remuneration",
-        "staff remuneration",
-        "staff incentive",
-        "staff incentives",
-        "staff bonus",
-        "employee bonus",
-        "staff commission",
-        "gratuity",
-        "pf",
-        "epf",
-        "pf contribution",
-        "epf contribution",
-        "employer pf",
-        "esi",
-        "esic",
-        "esi contribution",
-        "esic contribution",
-    }
-)
-
-
-def _normalise_expense_category(category) -> str:
-    """Lower-case, fold punctuation to spaces, collapse whitespace.
-
-    "Salaries & Wages" -> "salaries wages"; "  STAFF-SALARY " -> "staff salary".
-    A non-string (None, a number) normalises to "" and therefore never matches.
-    """
-    text = str(category or "").lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
-
-
-def _is_payroll_shaped_expense(category) -> bool:
-    """Whether this free-text expense head means 'this is somebody's pay'."""
-    return _normalise_expense_category(category) in PAYROLL_SHAPED_EXPENSE_CATEGORIES
+#    is FREE TEXT typed by whoever books the expense, so somebody can book the
+#    wage bill as an ordinary expense and hand it to a store manager by name.
+#    The deny-set that catches the heads a person actually reaches for, what it
+#    covers and what it cannot, now lives in services/salary_visibility.py
+#    beside the role tuple -- it was found forked-by-omission onto
+#    routers/budgets.py within a round of being written here. Imported above as
+#    ``is_payroll_shaped_expense``; the two private aliases below keep this
+#    module's existing call sites (and their tests) reading naturally.
+_normalise_expense_category = normalise_expense_category
+_is_payroll_shaped_expense = is_payroll_shaped_expense
 
 
 @router.get("/pnl")
@@ -1457,11 +1385,14 @@ async def get_cash_flow(
     }
     if active_store:
         exp_match["store_id"] = active_store
+    # Grouped BY HEAD, not into a single grand total, purely so the payroll
+    # strip below can subtract the pay heads out. Nothing downstream sees the
+    # heads -- this response has never carried them and still does not.
     exp_out = list(
         db.get_collection("expenses").aggregate(
             [
                 {"$match": exp_match},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+                {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
             ]
         )
     )
@@ -1510,19 +1441,64 @@ async def get_cash_flow(
         except Exception:
             vendor_payment_outflow = 0.0
 
-    expense_outflow = exp_out[0]["total"] if exp_out else 0
+    expense_outflow = round(sum(float(r.get("total") or 0.0) for r in exp_out), 2)
     purchase_outflow = po_out[0]["total"] if po_out else 0
-    total_outflow = expense_outflow + purchase_outflow + vendor_payment_outflow
 
-    return {
+    # THE CROSS-ROUTE SUBTRACTION, and the reason this strip exists at all.
+    #
+    # /pnl is payroll-EXCLUSIVE below salary-admin. This route totals THE SAME
+    # expenses collection over THE SAME store (validate_store_access above) for
+    # THE SAME window (1st of the current month) -- a window /pnl will happily
+    # be asked for. So a store manager who holds both responses does:
+    #
+    #     cash-flow.expense_outflow - pnl.total_expenses = the wage bill
+    #
+    # measured live at 88360.65 - 24450.00 = 63910.65 before this change. The
+    # earlier sibling sweep cleared this route because its body carries no head
+    # names. The head name was never the leak: two figures over the same scope
+    # that differ only by payroll ARE the payroll. See the second corollary in
+    # services/salary_visibility.py.
+    #
+    # ALL THREE FIGURES MOVE TOGETHER. `outflows` and `net_cash_flow` are built
+    # FROM expense_outflow, so reducing expense_outflow alone would hand the pay
+    # straight back as
+    #     outflows - expense_outflow - purchase_outflow - vendor_payment_outflow
+    # Reducing the variable at source, BEFORE total_outflow is summed, is what
+    # keeps the whole body internally consistent: the four numbers still add up,
+    # they simply add up to a smaller, pay-free month. `inflows` is order
+    # revenue and shares no term with any of them.
+    expenses_partially_restricted = False
+    if not is_salary_admin(current_user):
+        _restricted = round(
+            sum(
+                float(r.get("total") or 0.0)
+                for r in exp_out
+                if is_payroll_shaped_expense(r.get("_id"))
+            ),
+            2,
+        )
+        if _restricted:
+            expense_outflow = round(expense_outflow - _restricted, 2)
+            expenses_partially_restricted = True
+
+    total_outflow = round(
+        expense_outflow + purchase_outflow + vendor_payment_outflow, 2
+    )
+
+    body = {
         "period": period,
         "inflows": total_inflow,
         "outflows": total_outflow,
-        "net_cash_flow": total_inflow - total_outflow,
+        "net_cash_flow": round(total_inflow - total_outflow, 2),
         "expense_outflow": expense_outflow,
         "purchase_outflow": purchase_outflow,
         "vendor_payment_outflow": vendor_payment_outflow,
     }
+    if expenses_partially_restricted:
+        # Same flag /pnl sets, and for the same reason: a short total must not
+        # read as the truth. A flag, never a figure.
+        body["expenses_partially_restricted"] = True
+    return body
 
 
 # === Owner cash-flow dashboard + forecast (ADMIN / ACCOUNTANT) ===
@@ -1801,6 +1777,37 @@ async def cash_flow_forecast(
         {"date": it.get("due_date"), "amount": it["outstanding"]} for it in ap["items"]
     ]
 
+    # PAYROLL-INCLUSIVE, DELIBERATELY, AND HERE IS WHY (reviewed 2026-08-14).
+    #
+    # `monthly_expense_est` is an all-heads expense total and it is surfaced in
+    # `assumptions.monthly_expense_estimate`, so it carries any pay booked as an
+    # expense. It is NOT stripped, and the reason is the ROLE SET, not the
+    # blending:
+    #
+    #   this route's gate is _require_finance_admin = SUPERADMIN / ADMIN /
+    #   ACCOUNTANT, and the rbac_policy row is the same three. Take the salary
+    #   admins out and exactly ONE role remains: ACCOUNTANT -- the role the owner
+    #   ruled on 2026-08-14 may read the pay heads BY NAME AND BY AMOUNT on
+    #   /finance/survival-cashflow, which sits behind this identical gate.
+    #
+    # So stripping here would withhold from the accountant, in blended form, a
+    # figure the owner has just decided they may read unblended one endpoint
+    # over. It buys no secrecy from anybody and costs the accountant an accurate
+    # runway. STORE_MANAGER and AREA_MANAGER -- the roles the /pnl and
+    # /cash-flow strips genuinely protect against -- cannot reach this route at
+    # all, at either layer.
+    #
+    # WHAT AN ATTACKER WOULD HAVE TO KNOW TO UNBLEND IT, stated properly rather
+    # than hiding behind "it is blended": the figure is sum(all approved/paid
+    # expenses, ALL stores, trailing 90 days) / 3. To pull one month's wage bill
+    # out of it they would need the 90-day non-pay expense total across every
+    # store (this response does not carry it, and /pnl is per-store and
+    # caller-scoped) AND the other two months' pay. An accountant closing the
+    # books has both from the ledger anyway, which is the point above.
+    #
+    # IF THIS GATE EVER WIDENS BELOW ACCOUNTANT, this comment is void and the
+    # strip must be added the same day -- see get_cash_flow for the shape.
+    #
     # Recurring monthly outflow estimate. Expenses are dated on `expense_date`
     # (date-only 'YYYY-MM-DD' string), NOT `date` -- the old field name matched
     # nothing, so the recurring estimate was always 0 and the forecast
@@ -2012,6 +2019,32 @@ async def get_survival_cashflow(
 
     Read-only analytics; integer paise. ADMIN / ACCOUNTANT only -- mirrors
     /owner-dashboard's gate exactly.
+
+    *** OWNER RULING 2026-08-14: THIS ROUTE STAYS OPEN TO THE ACCOUNTANT, AND
+        THAT IS A DELIBERATE EXCEPTION TO HIS OWN 2026-08-09 SALARY RULING.
+        DO NOT "TIDY IT UP". ***
+
+    services/survival_cashflow.ESSENTIAL_DEFAULT_HEADS literally lists salary,
+    salaries, payroll, pf and esi, and `survival.essential_detail` returns those
+    heads BY NAME with their amounts. The route is store-narrowable via
+    ?store_id=, and the business runs stores of 1-5 people, so for an ACCOUNTANT
+    -- who is NOT a salary admin -- this is a named, per-store wage bill.
+
+    The owner was shown that exact consequence and left it open anyway. His
+    reasoning, recorded because it is sound: knowing what pay is due IS the
+    point of a survival-cash view. An accountant who cannot see the largest
+    committed outgoing of the month cannot answer "can we make payroll this
+    month", which is the only question this screen exists to answer.
+
+    THE COST, stated plainly so nobody has to rediscover it: after PR #985 the
+    ACCOUNTANT cannot see the wage bill on /finance/pnl or /finance/cash-flow,
+    but CAN read it by name here. Closing /finance/cash-flow for the ACCOUNTANT
+    is therefore belt-and-braces rather than a seal; the roles those strips
+    genuinely protect against are STORE_MANAGER and AREA_MANAGER, who cannot
+    reach this route at all. That inconsistency is the owner's to resolve, not a
+    fresh audit finding -- test_salary_aggregate_leak.py PINS this behaviour so
+    the next well-meaning security pass cannot silently delete the accountant's
+    cash-survival tool.
     """
     _require_finance_admin(current_user)
     db = _get_db()

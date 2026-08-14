@@ -235,6 +235,17 @@ export default function BudgetingPage() {
         </div>
       ) : (
         <>
+          {/* Pay heads are administrator-only (owner ruling). Say so in plain
+              English rather than letting a short table read as the truth --
+              both the rows and the totals below are short by the same amount. */}
+          {variance?.heads_partially_restricted && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Salary and payroll heads are not shown on this screen, and the
+              totals below leave them out too. Ask an administrator for the full
+              picture.
+            </div>
+          )}
+
           {/* Summary cards */}
           <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
             <SummaryCard

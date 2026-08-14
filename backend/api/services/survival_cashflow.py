@@ -58,6 +58,25 @@ DUE_SOON_DAYS = 7
 # Seed list -- owner-editable via E2 policy key
 # `finance.survival_essential_heads` (policy_registry.py carries the same
 # default by importing THIS constant, so they cannot drift).
+#
+# *** THE PAY HEADS BELOW ("salary", "salaries", "payroll", "pf", "esi") ARE
+#     HERE ON PURPOSE. OWNER RULING 2026-08-14. DO NOT REMOVE THEM AS A
+#     SALARY-VISIBILITY FIX. ***
+#
+# They put the wage bill, by name and by amount, into `essential_detail`, which
+# GET /finance/survival-cashflow serves to an ACCOUNTANT -- a role the owner's
+# 2026-08-09 ruling otherwise bars from other people's pay. He was shown that
+# consequence and chose to leave this route open: knowing salaries are due is
+# the entire point of a survival-cash view, and an accountant who cannot see the
+# largest committed outgoing cannot answer "can we make payroll this month".
+#
+# Deleting these heads would not close the gap either -- it would silently
+# reclassify the wage bill as DEFERRABLE and tell the owner he can skip paying
+# his staff. If a future ruling really does close this, the fix is the ROUTE
+# GATE in routers/finance.py, never this list.
+#
+# backend/tests/test_salary_aggregate_leak.py pins both halves: an ACCOUNTANT
+# still receives these heads by name, and an ADMIN still gets the full detail.
 ESSENTIAL_DEFAULT_HEADS: List[str] = [
     "rent",
     "salary",
