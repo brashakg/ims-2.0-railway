@@ -431,6 +431,78 @@ def compute_aging(expenses: list, now: datetime) -> dict:
 # ============================================================================
 
 
+# ---------------------------------------------------------------------------
+# EXPENSE CATEGORIES -- a fixed list of SHOP spending heads, with no pay head.
+# ---------------------------------------------------------------------------
+# OWNER RULING 2026-08-14: the expense category is a fixed list, enforced by the
+# server. ExpenseCreate.category was a free-text str, so the API accepted
+# anything -- including "Staff Salaries". The finance and budget screens strip
+# payroll-shaped heads, but only once an expense is APPROVED, so a wage bill
+# booked as an expense was visible by name and amount to every approver while it
+# sat PENDING and then vanished on approval. Closing the list REMOVES that
+# problem instead of managing it: pay cannot be recorded as a shop expense at
+# all, so nothing downstream has to hide it.
+#
+# THESE VALUES ARE THE ONES THE UI ALREADY SUBMITS, verbatim, from CATEGORIES in
+# frontend/src/pages/finance/ExpenseTracker.tsx. The eight everyday heads are
+# lowercase and PETTY_CASH is uppercase -- that inconsistency is pre-existing and
+# is deliberately PRESERVED rather than tidied, because _PETTY_CASH_CATEGORY,
+# every stored document, every spend cap keyed by category and the finance
+# reports all already agree on these exact strings. Renaming them here to look
+# neat would silently orphan all of that.
+#
+# There is no "OTHER": `miscellaneous` already is the catch-all, and the owner
+# ruled on 2026-08-14 that Miscellaneous stays EXACTLY as it is -- no cap, no
+# warning, no nudge. He was offered a capped variant and removal and chose to
+# keep it unchanged. Do not add a guard to it.
+#
+# frontend/.../ExpenseTracker.tsx is the list the user sees; THIS tuple is what
+# the server enforces. test_expense_category_fixed_list.py reads that .tsx file
+# and fails if the two ever differ.
+EXPENSE_CATEGORIES = (
+    "utilities",
+    "rent",
+    "maintenance",
+    "supplies",
+    "travel",
+    "food",
+    "marketing",
+    "miscellaneous",
+    # F17: an APPROVED claim in this category debits the store petty-cash float.
+    # Uppercase because that is what _PETTY_CASH_CATEGORY matches on.
+    "PETTY_CASH",
+)
+
+# Case-insensitive lookup -> the ONE canonical spelling we store. The codebase
+# is already inconsistent about case (the form submits "rent" but the approval
+# screen compares category.toUpperCase() == "PETTY_CASH"), so we accept either
+# case at the door and write exactly one spelling behind it. Without this, a
+# caller sending "RENT" would be rejected outright, and a caller sending
+# "petty_cash" would file a claim that never debits the float.
+_EXPENSE_CATEGORY_BY_LOWER = {c.lower(): c for c in EXPENSE_CATEGORIES}
+
+# Plain English, shown to whoever submitted the claim. It names every allowed
+# head and says where pay actually belongs.
+EXPENSE_CATEGORY_ERROR = (
+    "Choose one of the listed expense categories: "
+    + ", ".join(EXPENSE_CATEGORIES)
+    + ". Pay is not one of them -- salaries and wages are recorded in Payroll, "
+    "never as a shop expense."
+)
+
+
+def canonical_expense_category(value) -> Optional[str]:
+    """The stored spelling of `value`, or None when it is not a real category.
+
+    Trims surrounding whitespace and matches without regard to case; nothing
+    else is coerced, so "Staff Salaries" fails loudly rather than being guessed
+    at. Total: any non-string input returns None.
+    """
+    if not isinstance(value, str):
+        return None
+    return _EXPENSE_CATEGORY_BY_LOWER.get(value.strip().lower())
+
+
 class ExpenseCreate(BaseModel):
     category: str
     # An expense claim must be for a positive rupee amount. A zero / negative
@@ -443,6 +515,22 @@ class ExpenseCreate(BaseModel):
     advance_id: Optional[str] = None
     payment_mode: Optional[str] = None  # CASH / UPI / CARD / BANK_TRANSFER / CHEQUE
     store_id: Optional[str] = None
+
+    @field_validator("category")
+    @classmethod
+    def _category_must_be_on_the_list(cls, value: str) -> str:
+        """Reject anything not on EXPENSE_CATEGORIES with a 422, and normalise case.
+
+        Strict on purpose: production holds ZERO expense documents, so there is
+        no legacy head to grandfather and no reason for a compatibility escape
+        hatch. The form has only ever offered these nine, so the only caller
+        this can turn away is one talking to the API directly -- which is
+        exactly the door "Staff Salaries" came through.
+        """
+        canonical = canonical_expense_category(value)
+        if canonical is None:
+            raise ValueError(EXPENSE_CATEGORY_ERROR)
+        return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +622,23 @@ class CapEntry(BaseModel):
     daily: Optional[float] = None
     monthly: Optional[float] = None
 
+    @field_validator("category")
+    @classmethod
+    def _cap_category_must_be_on_the_list(cls, value: str) -> str:
+        """The same list, on the OTHER side of the cap lookup.
+
+        resolve_cap matches (role, category) by exact string, so a cap saved
+        under a category the expense form can no longer submit is a cap that can
+        never bind -- a limit an admin believes is protecting them and is not.
+        Running the cap category through the same canonicaliser keeps the two
+        sides of that comparison spelt identically, and refuses a cap on a head
+        that does not exist rather than storing dead config.
+        """
+        canonical = canonical_expense_category(value)
+        if canonical is None:
+            raise ValueError(EXPENSE_CATEGORY_ERROR)
+        return canonical
+
 
 class GlobalCap(BaseModel):
     daily: Optional[float] = None
@@ -584,9 +689,33 @@ def _load_caps() -> dict:
     if not isinstance(doc, dict):
         return {"caps": [], "global": {}}
     return {
-        "caps": doc.get("caps") or [],
+        "caps": _canonicalise_cap_categories(doc.get("caps") or []),
         "global": doc.get("global") or {},
     }
+
+
+def _canonicalise_cap_categories(entries):
+    """Respell each cap's category to the one canonical form, on READ.
+
+    Belt and braces for the cap that was configured BEFORE the category list was
+    closed. CapEntry now canonicalises on write, but a doc already sitting in
+    Mongo with "Rent" or "petty_cash" would otherwise never match the "rent" /
+    "PETTY_CASH" that an expense is now stored under, and the admin's limit
+    would quietly stop binding. An entry whose category is not a real head is
+    left EXACTLY as it is: it never bound before either, and silently rewriting
+    it would be inventing a cap nobody configured.
+    """
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        canonical = canonical_expense_category(entry.get("category"))
+        if canonical is not None and canonical != entry.get("category"):
+            entry = {**entry, "category": canonical}
+        out.append(entry)
+    return out
 
 
 def _spent_for_category(employee_id: str, category: str, on_date: date):

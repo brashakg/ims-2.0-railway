@@ -45,19 +45,22 @@ def read_object_list_values(path: str, const_name: str) -> List[str]:
     with open(path, "r", encoding="utf-8") as handle:
         source = handle.read()
 
-    # Everything between "export const NAME = [" and the matching "]".
-    opener = f"export const {const_name} = ["
-    start = source.find(opener)
-    if start < 0:
+    # "const NAME = [" / "export const NAME = [", with an optional TypeScript
+    # type annotation in between ("const CATEGORIES: {...}[] = [").
+    opener = re.search(
+        r"(?:export\s+)?const\s+" + re.escape(const_name) + r"\b[^=\n]*=\s*\[",
+        source,
+    )
+    if opener is None:
         raise AssertionError(
-            f"could not find `{opener}` in {path} -- the constant was renamed "
-            "or moved; update this parity test with it"
+            f"could not find `const {const_name} = [` in {path} -- the constant "
+            "was renamed or moved; update this parity test with it"
         )
-    end = source.find("\n]", start)
+    end = source.find("\n]", opener.end())
     if end < 0:
         raise AssertionError(f"could not find the end of {const_name} in {path}")
 
-    block = source[start + len(opener) : end]
+    block = source[opener.end() : end]
     values = re.findall(r"value:\s*'([^']+)'", block)
     if not values:
         raise AssertionError(

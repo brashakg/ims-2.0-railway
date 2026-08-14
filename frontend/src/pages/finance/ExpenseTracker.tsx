@@ -41,6 +41,21 @@ interface ApiError {
 
 // Expense categories carry NO status meaning, so they all share one neutral
 // chip (was a decorative rainbow — off the muted house theme).
+//
+// OWNER RULING 2026-08-14: this is a CLOSED list, and since 2026-08-15 the
+// server enforces it too — POST /expenses rejects any other category with a 422
+// naming these, so pay can no longer be recorded as a shop expense. Keep this
+// array identical to EXPENSE_CATEGORIES in backend/api/routers/expenses.py; a
+// backend test (test_expense_category_fixed_list.py) reads THIS file and fails
+// if they drift, because the symptom of drift is a form that 422s after the
+// user has typed everything.
+//
+// The mixed casing (eight lowercase, PETTY_CASH uppercase) is pre-existing and
+// deliberate: stored expenses, the petty-cash float rule and the spend caps all
+// already key off these exact strings. Do not tidy it.
+//
+// "Miscellaneous" stays EXACTLY as it is by the owner's explicit decision — no
+// cap, no warning, no nudge.
 const CATEGORIES: { value: string; label: string; color: string }[] = [
   { value: 'utilities', label: 'Utilities', color: 'bg-gray-100 text-gray-700' },
   { value: 'rent', label: 'Rent / Lease', color: 'bg-gray-100 text-gray-700' },
@@ -220,11 +235,17 @@ export default function ExpenseTracker() {
       await load();
     } catch (err) {
       // Surface governance rejections (cap exceeded / unsettled advance) which
-      // the backend returns as a 400 with a clear detail message.
+      // the backend returns as a 400 with a clear detail message, AND schema
+      // rejections (422), which arrive as a LIST of field errors rather than a
+      // string -- e.g. a category the server no longer accepts. The dropdown
+      // only offers accepted categories, so a 422 here means something is out
+      // of step; say what the server said instead of a useless generic.
       const e = err as ApiError;
       const detail = e?.response?.data?.detail;
       if (e?.response?.status === 400 && typeof detail === 'string') {
         toast.error(detail);
+      } else if (Array.isArray(detail) && detail[0]?.msg) {
+        toast.error(detail[0].msg);
       } else {
         toast.error('Failed to submit expense');
       }
