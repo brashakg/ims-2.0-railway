@@ -86,12 +86,30 @@ const BUDGET_WHOLE = {
   categories: { Rent: { budget: 20000, actual: 21000 } },
 };
 
-function primeApi(pnl: unknown, budget: unknown) {
+// The cash-flow body, which strips the SAME heads under the SAME flag name as
+// /pnl (finance.py:1500). mapCashFlow() keeps only the numbers, so the flag has
+// to be read off the raw response or it is silently discarded.
+const CASHFLOW_SHORT = {
+  period: 'This month',
+  inflows: 300000,
+  outflows: 24450,
+  net_cash_flow: 275550,
+  expenses_partially_restricted: true,
+};
+
+const CASHFLOW_WHOLE = {
+  period: 'This month',
+  inflows: 300000,
+  outflows: 24450,
+  net_cash_flow: 275550,
+};
+
+function primeApi(pnl: unknown, budget: unknown, cashFlow: unknown = CASHFLOW_WHOLE) {
   api.getRevenue.mockResolvedValue({ total_revenue: 300000 });
   api.getPnl.mockResolvedValue(pnl);
   api.getGstSummary.mockResolvedValue({});
   api.getOutstanding.mockResolvedValue([]);
-  api.getCashFlow.mockResolvedValue({ inflows: 0, outflows: 0 });
+  api.getCashFlow.mockResolvedValue(cashFlow);
   api.getBudget.mockResolvedValue(budget);
   api.getVendorPayments.mockResolvedValue([]);
   api.getPeriodStatus.mockResolvedValue({ locked: false });
@@ -200,6 +218,55 @@ describe('FinanceDashboard budgets tab - the short budget declares itself', () =
     // something out when it does not, and the notice stops meaning anything.
     primeApi(PNL_SHORT, BUDGET_WHOLE);
     await openBudgetsTab();
+    await waitFor(() =>
+      expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
+    );
+  });
+});
+
+// ===========================================================================
+// THE CASH FLOW TAB - the third flag, and the one that was being thrown away.
+// ===========================================================================
+// GET /finance/cash-flow strips the same pay heads below ADMIN and sets the
+// SAME key name as /pnl (`expenses_partially_restricted`, finance.py:1500).
+// The dashboard's mapCashFlow() keeps four numbers and discards the rest of
+// the body, so the flag arrived and was dropped on the floor: "Total outflows"
+// rendered short by the wage bill with nothing on screen saying so.
+//
+// It is a separate flag on a separate response, so it gets its own pair plus a
+// cross-wiring guard -- wiring this tab to the P&L flag would look correct in
+// every single-flag test.
+
+describe('FinanceDashboard cash flow tab - the short outflow declares itself', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  async function openCashFlowTab() {
+    const user = userEvent.setup();
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(api.getCashFlow).toHaveBeenCalled());
+    await user.click(screen.getByRole('button', { name: /cash flow/i }));
+  }
+
+  it('shows the banner when outflows were stripped', async () => {
+    primeApi(PNL_WHOLE, BUDGET_WHOLE, CASHFLOW_SHORT);
+    await openCashFlowTab();
+    const notice = await screen.findByTestId(NOTICE);
+    expect(notice.textContent).toMatch(/not the full operating cost/i);
+    expect(notice.textContent).toMatch(/cash outflow figures/i);
+  });
+
+  it('shows NOTHING when the outflow total is whole', async () => {
+    primeApi(PNL_WHOLE, BUDGET_WHOLE, CASHFLOW_WHOLE);
+    await openCashFlowTab();
+    // POSITIVE CONTROL: the panel really rendered, so "no banner" is a verdict
+    // and not just an unrendered tab.
+    expect(await screen.findAllByText(/outflow/i)).not.toHaveLength(0);
+    expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('the cash flow banner follows the CASH FLOW flag, not the P&L flag', async () => {
+    primeApi(PNL_SHORT, BUDGET_WHOLE, CASHFLOW_WHOLE);
+    await openCashFlowTab();
     await waitFor(() =>
       expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
     );

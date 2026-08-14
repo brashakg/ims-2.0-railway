@@ -212,6 +212,12 @@ export default function FinanceDashboard() {
   // RestrictedTotalsNotice.
   const [expensesRestricted, setExpensesRestricted] = useState(false);
   const [budgetRestricted, setBudgetRestricted] = useState(false);
+  // THE THIRD ONE, and the easiest to miss. /finance/cash-flow strips the same
+  // pay heads below ADMIN and sets the SAME flag name as /pnl (finance.py:1500)
+  // -- but mapCashFlow() below keeps only the four numbers and drops the rest
+  // of the body, so the flag was arriving and being thrown away. "Total
+  // outflows" then rendered short, with nothing on screen saying so.
+  const [cashFlowRestricted, setCashFlowRestricted] = useState(false);
 
   // UI states
   const [isLoading, setIsLoading] = useState(true);
@@ -258,6 +264,9 @@ export default function FinanceDashboard() {
       );
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
+      );
+      setCashFlowRestricted(
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -571,7 +580,18 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && (
             <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
           )}
-          {activeTab === 'cash-flow' && <CashFlowPanel cashFlow={cashFlow} />}
+          {activeTab === 'cash-flow' && (
+            <>
+              {/* "Total outflows" below is short by whatever was withheld from
+                  this role. Say so above the number, not after it. */}
+              <RestrictedTotalsNotice
+                show={cashFlowRestricted}
+                scope="cash outflow figures"
+                className="mb-4"
+              />
+              <CashFlowPanel cashFlow={cashFlow} />
+            </>
+          )}
           {activeTab === 'period' && (
             <PeriodManagement
               periodLocked={periodLocked}
