@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import ts_constants  # noqa: E402
 from strict_fakes import matches  # noqa: E402
 
 from api.routers import expenses  # noqa: E402
@@ -458,3 +459,48 @@ class TestAdvanceTypeIsAFixedList:
         repo = FakeAdvanceRepo([])
         resp = self._post(monkeypatch, repo, "Salary advance")
         assert expenses.ADVANCE_TYPE_ERROR in resp.text
+
+
+class TestAdvanceTypesMatchTheDropdown:
+    """The dropdown a requester sees and the list the server accepts are ONE list.
+
+    The frontend offers ADVANCE_TYPES from services/api/expenses.ts; the backend
+    rejects anything outside ADVANCE_TYPES in routers/expenses.py. Two
+    hand-maintained copies drift, and the drift shows up as a form that 422s
+    AFTER the requester has typed everything -- worse than the hole it closes.
+    The BACKEND tuple is the runtime authority; this test reads the real .ts file
+    and fails if the pair differ, so the copy can never rot unnoticed.
+    """
+
+    ADVANCE_TYPES_TS = ts_constants.frontend_path("services", "api", "expenses.ts")
+
+    def test_the_dropdown_offers_exactly_what_the_server_accepts(self):
+        offered = ts_constants.read_object_list_values(
+            self.ADVANCE_TYPES_TS, "ADVANCE_TYPES"
+        )
+        assert list(offered) == list(expenses.ADVANCE_TYPES), (
+            "the advance-reason dropdown and the server's allowed list have "
+            "drifted; every value the form offers must be accepted (or the "
+            "requester gets a 422 after filling the form in) and every value "
+            "the server accepts should be reachable from the form"
+        )
+
+    def test_every_offered_reason_is_actually_accepted_over_http(self, monkeypatch):
+        """Membership is not enough -- drive each dropdown value through the API.
+
+        A validator that agreed with the list but rejected on some other rule
+        (whitespace, casing, a stray Optional) would pass the comparison above
+        and still break live advance requests.
+        """
+        offered = ts_constants.read_object_list_values(
+            self.ADVANCE_TYPES_TS, "ADVANCE_TYPES"
+        )
+        for value in offered:
+            repo = FakeAdvanceRepo([])
+            client = _client(monkeypatch, ["SALES_STAFF"], repo)
+            resp = client.post(
+                "/expenses/advances",
+                json={"advance_type": value, "amount": 500.0, "purpose": "for work"},
+            )
+            assert resp.status_code == 201, f"the form offers {value} but: {resp.text}"
+            assert repo.created[0]["advance_type"] == value

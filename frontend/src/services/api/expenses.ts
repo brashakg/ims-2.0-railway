@@ -43,6 +43,51 @@ export interface UploadBillResult {
   duplicate_of?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// ADVANCES
+// ---------------------------------------------------------------------------
+// OWNER RULING 2026-08-14: an advance is for a BUSINESS reason and never for
+// pay. A salary advance goes through Payroll, which is ADMIN-only. This list
+// must stay identical to ADVANCE_TYPES in backend/api/routers/expenses.py --
+// the backend rejects anything else with a 422, and a backend test
+// (test_advances_scope.py) reads THIS file and fails if the two drift apart.
+// There is deliberately no "Other": a catch-all becomes the default choice and
+// re-opens the free-text hole. The free-text "purpose" field carries the
+// specifics of an unusual request.
+export const ADVANCE_TYPES = [
+  { value: 'TRAVEL', label: 'Travel — tickets, fuel, lodging for a work trip' },
+  { value: 'LOCAL_CONVEYANCE', label: 'Local conveyance — auto or taxi to the lab, bank or a delivery' },
+  { value: 'VENDOR_PAYMENT', label: 'Vendor payment — lens lab, supplier or courier paid on delivery' },
+  { value: 'WORKSHOP_SUPPLIES', label: 'Workshop supplies — lab consumables, solutions, small tools' },
+  { value: 'STORE_MAINTENANCE', label: 'Store maintenance — electrician, plumber, AC, signage' },
+  { value: 'MARKETING_EVENT', label: 'Marketing event — camp, school screening, local promotion' },
+  { value: 'STATUTORY_FEE', label: 'Government fee — trade licence, registration renewal' },
+] as const;
+
+export type AdvanceType = (typeof ADVANCE_TYPES)[number]['value'];
+
+export const advanceTypeLabel = (v?: string) =>
+  ADVANCE_TYPES.find((t) => t.value === v)?.label || v || '—';
+
+export interface AdvanceRecord {
+  advance_id: string;
+  employee_id?: string;
+  employee_name?: string;
+  store_id?: string;
+  advance_type?: string;
+  amount: number;
+  purpose?: string;
+  expected_settlement_date?: string | null;
+  // PENDING | APPROVED | DISBURSED | PARTIALLY_SETTLED | SETTLED
+  status: string;
+  created_at?: string;
+  approved_by?: string;
+  approved_at?: string;
+  disbursed_at?: string;
+  disbursement_reference?: string;
+  settled_at?: string;
+}
+
 export interface ExpenseCapEntry {
   role: string;
   category: string;
@@ -217,6 +262,43 @@ export const expensesApi = {
   // (approver / finance gated).
   getDuplicateBills: async (storeId?: string) => {
     const response = await api.get('/expenses/duplicate-bills', { params: { store_id: storeId } });
+    return response.data;
+  },
+
+  // Advances. The backend scopes this list: the approver tier
+  // (ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT / SUPERADMIN) gets every
+  // advance for the store; everyone else gets only their own, whatever is
+  // passed here.
+  getAdvances: async (params?: { store_id?: string; status?: string; employee_id?: string }) => {
+    const response = await api.get('/expenses/advances', { params });
+    return response.data as { advances: AdvanceRecord[]; total: number };
+  },
+
+  // advance_type must be one of ADVANCE_TYPES; anything else is a 422.
+  createAdvance: async (data: {
+    advance_type: AdvanceType;
+    amount: number;
+    purpose: string;
+    expected_settlement_date?: string;
+  }) => {
+    const response = await api.post('/expenses/advances', data);
+    return response.data;
+  },
+
+  approveAdvance: async (advanceId: string) => {
+    const response = await api.post(`/expenses/advances/${advanceId}/approve`);
+    return response.data;
+  },
+
+  disburseAdvance: async (advanceId: string, reference: string) => {
+    const response = await api.post(`/expenses/advances/${advanceId}/disburse`, null, {
+      params: { reference },
+    });
+    return response.data;
+  },
+
+  settleAdvance: async (advanceId: string) => {
+    const response = await api.post(`/expenses/advances/${advanceId}/settle`);
     return response.data;
   },
 
