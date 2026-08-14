@@ -54,6 +54,11 @@ export interface ReconRow {
   // True when the expected drawer computed NEGATIVE (a cash-in is missing) —
   // the over/short verdict is withheld rather than crediting a phantom overage.
   negative_expected_advisory?: boolean;
+  // True when an expense in this session's window is NOT paid from the till
+  // (salaries / advances / PF-ESI) and was therefore left out of
+  // `cash_expenses` and `expected_cash`. Carried from the close record, never
+  // recomputed, and never carrying the amount.
+  off_till_expense_advisory?: boolean;
   closed_by?: string | null;
   closed_by_name?: string | null;
   closed_at?: string | null;

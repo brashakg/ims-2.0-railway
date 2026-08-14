@@ -39,6 +39,7 @@ import {
   type ReconRow,
   type ReconStatus,
 } from '../../services/api/cashReconciliation';
+import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -527,6 +528,19 @@ function RowGroup({
                     <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-1">
                       {row.refund_double_entry_advisory.message ||
                         'A manual cash payout may duplicate a recorded customer cash refund.'}
+                    </p>
+                  )}
+                  {/* An expense in this window is not paid from the till, so it
+                      is not in the expected figure above. No amount, no head.
+                      This row's API carries only the boolean, so the wording
+                      comes from the frontend's single copy of the sentence --
+                      one screen must not say this two different ways. */}
+                  {row.off_till_expense_advisory && (
+                    <p
+                      data-testid="off-till-expense-advisory"
+                      className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-1"
+                    >
+                      {OFF_TILL_EXPENSE_NOTICE}
                     </p>
                   )}
                 </dl>
