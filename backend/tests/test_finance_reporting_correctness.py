@@ -462,7 +462,7 @@ def test_request_advance_raises_on_write_failure(monkeypatch):
     client = _expenses_client(monkeypatch, advance_repo=_NoneCreateRepo())
     resp = client.post(
         "/expenses/advances",
-        json={"advance_type": "CASH", "amount": 5000.0, "purpose": "travel"},
+        json={"advance_type": "TRAVEL", "amount": 5000.0, "purpose": "bus to Ranchi"},
     )
     assert resp.status_code == 503
     assert "persist" in resp.json()["detail"].lower()
@@ -497,7 +497,7 @@ def test_request_advance_blocked_when_outstanding(monkeypatch):
     client = TestClient(app)
     resp = client.post(
         "/expenses/advances",
-        json={"advance_type": "CASH", "amount": 5000.0, "purpose": "travel"},
+        json={"advance_type": "TRAVEL", "amount": 5000.0, "purpose": "bus to Ranchi"},
     )
     assert resp.status_code == 400
     assert "outstanding" in resp.json()["detail"].lower()
@@ -511,7 +511,7 @@ def test_request_advance_allowed_when_none_outstanding(monkeypatch):
     )
     resp = client.post(
         "/expenses/advances",
-        json={"advance_type": "CASH", "amount": 5000.0, "purpose": "travel"},
+        json={"advance_type": "TRAVEL", "amount": 5000.0, "purpose": "bus to Ranchi"},
     )
     assert resp.status_code == 201
     assert resp.json()["advance_id"]

@@ -8,7 +8,7 @@ import hashlib
 import io
 from fastapi import APIRouter, Depends, Header, Query, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import date, datetime
 import uuid
@@ -71,6 +71,38 @@ _SPEND_STATUSES = ("PENDING", "APPROVED", "SENT_TO_ACCOUNTANT", "ENTERED", "PAID
 # AdvanceRepository.find_outstanding; DISBURSED is the state the existing
 # disburse endpoint sets, PARTIALLY_SETTLED is reserved for partial settlement.
 _UNSETTLED_ADVANCE_STATUSES = ("DISBURSED", "PARTIALLY_SETTLED")
+
+
+# ---------------------------------------------------------------------------
+# THE ADVANCE APPROVER TIER -- ONE definition, used by the workflow gates AND
+# by the read scope on GET /advances.
+# ---------------------------------------------------------------------------
+# OWNER RULING 2026-08-14: "the approver tier sees ALL advances for their store;
+# everyone else sees ONLY their own." His reasoning is operational: the person
+# who approves the request is the person who hands over the cash, so they cannot
+# approve what they cannot see.
+#
+# This tier is NOT _is_admin and it is NOT the salary tier. The authority for
+# "who is an approver" is the workflow gate itself -- the roles that may
+# approve / disburse / settle an advance -- so this predicate is DERIVED from
+# _APPROVAL_ROLES rather than repeating it. Add a role to _APPROVAL_ROLES and
+# the read scope widens with it; that is deliberate, and
+# test_advances_scope.py::test_advance_approver_tier_matches_the_workflow_gates
+# pins both to the rbac_policy rows so the pair can never drift apart silently.
+#
+# SUPERADMIN is included because require_roles() auto-passes it (auth.py:584),
+# so it is genuinely an approver at the workflow gates.
+ADVANCE_APPROVER_ROLES = ("SUPERADMIN",) + _APPROVAL_ROLES
+
+
+def is_advance_approver(current_user: dict) -> bool:
+    """True when this caller may see OTHER people's advances for their store.
+
+    Fails CLOSED: None, {}, a role-less session and an unknown role all return
+    False, so a caller we cannot identify only ever sees their own rows.
+    """
+    roles = (current_user or {}).get("roles") or []
+    return any(r in ADVANCE_APPROVER_ROLES for r in roles)
 
 
 def _is_admin(current_user: dict) -> bool:
@@ -399,6 +431,78 @@ def compute_aging(expenses: list, now: datetime) -> dict:
 # ============================================================================
 
 
+# ---------------------------------------------------------------------------
+# EXPENSE CATEGORIES -- a fixed list of SHOP spending heads, with no pay head.
+# ---------------------------------------------------------------------------
+# OWNER RULING 2026-08-14: the expense category is a fixed list, enforced by the
+# server. ExpenseCreate.category was a free-text str, so the API accepted
+# anything -- including "Staff Salaries". The finance and budget screens strip
+# payroll-shaped heads, but only once an expense is APPROVED, so a wage bill
+# booked as an expense was visible by name and amount to every approver while it
+# sat PENDING and then vanished on approval. Closing the list REMOVES that
+# problem instead of managing it: pay cannot be recorded as a shop expense at
+# all, so nothing downstream has to hide it.
+#
+# THESE VALUES ARE THE ONES THE UI ALREADY SUBMITS, verbatim, from CATEGORIES in
+# frontend/src/pages/finance/ExpenseTracker.tsx. The eight everyday heads are
+# lowercase and PETTY_CASH is uppercase -- that inconsistency is pre-existing and
+# is deliberately PRESERVED rather than tidied, because _PETTY_CASH_CATEGORY,
+# every stored document, every spend cap keyed by category and the finance
+# reports all already agree on these exact strings. Renaming them here to look
+# neat would silently orphan all of that.
+#
+# There is no "OTHER": `miscellaneous` already is the catch-all, and the owner
+# ruled on 2026-08-14 that Miscellaneous stays EXACTLY as it is -- no cap, no
+# warning, no nudge. He was offered a capped variant and removal and chose to
+# keep it unchanged. Do not add a guard to it.
+#
+# frontend/.../ExpenseTracker.tsx is the list the user sees; THIS tuple is what
+# the server enforces. test_expense_category_fixed_list.py reads that .tsx file
+# and fails if the two ever differ.
+EXPENSE_CATEGORIES = (
+    "utilities",
+    "rent",
+    "maintenance",
+    "supplies",
+    "travel",
+    "food",
+    "marketing",
+    "miscellaneous",
+    # F17: an APPROVED claim in this category debits the store petty-cash float.
+    # Uppercase because that is what _PETTY_CASH_CATEGORY matches on.
+    "PETTY_CASH",
+)
+
+# Case-insensitive lookup -> the ONE canonical spelling we store. The codebase
+# is already inconsistent about case (the form submits "rent" but the approval
+# screen compares category.toUpperCase() == "PETTY_CASH"), so we accept either
+# case at the door and write exactly one spelling behind it. Without this, a
+# caller sending "RENT" would be rejected outright, and a caller sending
+# "petty_cash" would file a claim that never debits the float.
+_EXPENSE_CATEGORY_BY_LOWER = {c.lower(): c for c in EXPENSE_CATEGORIES}
+
+# Plain English, shown to whoever submitted the claim. It names every allowed
+# head and says where pay actually belongs.
+EXPENSE_CATEGORY_ERROR = (
+    "Choose one of the listed expense categories: "
+    + ", ".join(EXPENSE_CATEGORIES)
+    + ". Pay is not one of them -- salaries and wages are recorded in Payroll, "
+    "never as a shop expense."
+)
+
+
+def canonical_expense_category(value) -> Optional[str]:
+    """The stored spelling of `value`, or None when it is not a real category.
+
+    Trims surrounding whitespace and matches without regard to case; nothing
+    else is coerced, so "Staff Salaries" fails loudly rather than being guessed
+    at. Total: any non-string input returns None.
+    """
+    if not isinstance(value, str):
+        return None
+    return _EXPENSE_CATEGORY_BY_LOWER.get(value.strip().lower())
+
+
 class ExpenseCreate(BaseModel):
     category: str
     # An expense claim must be for a positive rupee amount. A zero / negative
@@ -412,6 +516,81 @@ class ExpenseCreate(BaseModel):
     payment_mode: Optional[str] = None  # CASH / UPI / CARD / BANK_TRANSFER / CHEQUE
     store_id: Optional[str] = None
 
+    @field_validator("category")
+    @classmethod
+    def _category_must_be_on_the_list(cls, value: str) -> str:
+        """Reject anything not on EXPENSE_CATEGORIES with a 422, and normalise case.
+
+        Strict on purpose: production holds ZERO expense documents, so there is
+        no legacy head to grandfather and no reason for a compatibility escape
+        hatch. The form has only ever offered these nine, so the only caller
+        this can turn away is one talking to the API directly -- which is
+        exactly the door "Staff Salaries" came through.
+        """
+        canonical = canonical_expense_category(value)
+        if canonical is None:
+            raise ValueError(EXPENSE_CATEGORY_ERROR)
+        return canonical
+
+
+# ---------------------------------------------------------------------------
+# ADVANCE TYPES -- a fixed list of BUSINESS reasons, with no pay option.
+# ---------------------------------------------------------------------------
+# OWNER RULING 2026-08-14: advance_type was free text, so anyone could type
+# "Salary advance" and record pay information on this route -- routing round the
+# Payroll module, which the owner locked to ADMIN / SUPERADMIN on 2026-08-09.
+# The free text is replaced by this closed list. A genuine salary advance now
+# has nowhere to go here and must be raised in Payroll, where the admin-only
+# rule already applies.
+#
+# Each value is a reason an optical chain actually hands an employee cash:
+#   TRAVEL            - inter-city / inter-store work travel: bus or train
+#                       tickets, fuel, lodging, paid BEFORE the trip.
+#   LOCAL_CONVEYANCE  - same-day local running: auto or taxi to the fitting lab,
+#                       the bank, or a customer's home for a delivery.
+#   VENDOR_PAYMENT    - cash to settle a lens lab, frame supplier or courier who
+#                       takes payment on delivery.
+#   WORKSHOP_SUPPLIES - lens-edging consumables, cleaning solution and small
+#                       tools bought locally for the fitting lab.
+#   STORE_MAINTENANCE - on-the-spot repairs: electrician, plumber, AC service,
+#                       signage, glasswork.
+#   MARKETING_EVENT   - eye-check-up camps, school screenings and local
+#                       promotions where costs are paid in cash on site.
+#   STATUTORY_FEE     - government / municipal counters that take cash or a DD:
+#                       trade licence, shop registration renewal.
+#
+# DELIBERATELY ABSENT, and why:
+#   * Anything pay-shaped (salary / advance against salary / PF / bonus). That
+#     is the whole point of the ruling; Payroll owns pay.
+#   * A petty-cash float top-up. Petty cash is its own money path in this router
+#     (POST /petty-cash/open and /topup) with its own guarded ledger; an advance
+#     for the same purpose would double-count the same rupees.
+#   * "OTHER". It is convenient and it re-opens the hole the owner just closed:
+#     once staff learn the catch-all is always accepted it becomes the default
+#     choice, the field stops meaning anything for reporting, and it is the
+#     obvious landing spot for a salary advance in disguise. The specifics of an
+#     unusual request already have a home -- the free-text `purpose` field, which
+#     the approver reads before releasing cash. If a genuinely new reason
+#     appears, adding a value here is a one-line change the owner can ask for;
+#     that week of friction is the price of every row meaning something.
+ADVANCE_TYPES = (
+    "TRAVEL",
+    "LOCAL_CONVEYANCE",
+    "VENDOR_PAYMENT",
+    "WORKSHOP_SUPPLIES",
+    "STORE_MAINTENANCE",
+    "MARKETING_EVENT",
+    "STATUTORY_FEE",
+)
+
+# Plain English, shown to the requester verbatim. It names every allowed value
+# and says where a salary advance actually belongs.
+ADVANCE_TYPE_ERROR = (
+    "Choose one of the listed reasons for this advance: "
+    + ", ".join(ADVANCE_TYPES)
+    + ". Pay is not one of them -- a salary advance is requested in Payroll."
+)
+
 
 class AdvanceCreate(BaseModel):
     advance_type: str
@@ -420,12 +599,45 @@ class AdvanceCreate(BaseModel):
     purpose: str
     expected_settlement_date: Optional[date] = None
 
+    @field_validator("advance_type")
+    @classmethod
+    def _reason_must_be_on_the_list(cls, value: str) -> str:
+        """Reject anything not on ADVANCE_TYPES with a 422.
+
+        Strict on purpose: production holds ZERO advances (the collection does
+        not exist), so there is no legacy value to accommodate and no reason for
+        a compatibility escape hatch. Whitespace is trimmed; nothing else is
+        coerced, so "Salary advance" and "travel" both fail loudly rather than
+        being guessed at.
+        """
+        cleaned = (value or "").strip()
+        if cleaned not in ADVANCE_TYPES:
+            raise ValueError(ADVANCE_TYPE_ERROR)
+        return cleaned
+
 
 class CapEntry(BaseModel):
     role: str
     category: str
     daily: Optional[float] = None
     monthly: Optional[float] = None
+
+    @field_validator("category")
+    @classmethod
+    def _cap_category_must_be_on_the_list(cls, value: str) -> str:
+        """The same list, on the OTHER side of the cap lookup.
+
+        resolve_cap matches (role, category) by exact string, so a cap saved
+        under a category the expense form can no longer submit is a cap that can
+        never bind -- a limit an admin believes is protecting them and is not.
+        Running the cap category through the same canonicaliser keeps the two
+        sides of that comparison spelt identically, and refuses a cap on a head
+        that does not exist rather than storing dead config.
+        """
+        canonical = canonical_expense_category(value)
+        if canonical is None:
+            raise ValueError(EXPENSE_CATEGORY_ERROR)
+        return canonical
 
 
 class GlobalCap(BaseModel):
@@ -477,9 +689,33 @@ def _load_caps() -> dict:
     if not isinstance(doc, dict):
         return {"caps": [], "global": {}}
     return {
-        "caps": doc.get("caps") or [],
+        "caps": _canonicalise_cap_categories(doc.get("caps") or []),
         "global": doc.get("global") or {},
     }
+
+
+def _canonicalise_cap_categories(entries):
+    """Respell each cap's category to the one canonical form, on READ.
+
+    Belt and braces for the cap that was configured BEFORE the category list was
+    closed. CapEntry now canonicalises on write, but a doc already sitting in
+    Mongo with "Rent" or "petty_cash" would otherwise never match the "rent" /
+    "PETTY_CASH" that an expense is now stored under, and the admin's limit
+    would quietly stop binding. An entry whose category is not a real head is
+    left EXACTLY as it is: it never bound before either, and silently rewriting
+    it would be inventing a cap nobody configured.
+    """
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        canonical = canonical_expense_category(entry.get("category"))
+        if canonical is not None and canonical != entry.get("category"):
+            entry = {**entry, "category": canonical}
+        out.append(entry)
+    return out
 
 
 def _spent_for_category(employee_id: str, category: str, on_date: date):
@@ -1663,7 +1899,22 @@ async def list_advances(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """List advances with optional filters"""
+    """List advances with optional filters.
+
+    Ownership scope (OWNER RULING 2026-08-14), mirroring list_expenses above:
+    the APPROVER TIER -- the roles that approve / disburse / settle an advance,
+    see is_advance_approver -- sees every advance for the store in view, because
+    they hand over the cash and cannot approve what they cannot see. EVERYONE
+    ELSE sees ONLY their own, whatever the query parameters say.
+
+    Before this scope existed, any authenticated user at a store (a salesperson,
+    an optometrist) could list every colleague's advance for that store --
+    employee_id, amount, purpose and type.
+
+    The route stays open to all authenticated users (rbac_policy: AUTHENTICATED)
+    so a salesperson can still read their OWN advances; the narrowing is here,
+    not at the door.
+    """
     advance_repo = get_advance_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
@@ -1673,8 +1924,14 @@ async def list_advances(
     filter_dict = {}
     if active_store:
         filter_dict["store_id"] = active_store
-    if employee_id:
-        filter_dict["employee_id"] = employee_id
+    if is_advance_approver(current_user):
+        if employee_id:
+            filter_dict["employee_id"] = employee_id
+    else:
+        # Own rows only. The employee_id query parameter is deliberately
+        # OVERRIDDEN rather than honoured -- honouring it is exactly the leak
+        # this scope closes, so it can only ever narrow to the caller.
+        filter_dict["employee_id"] = current_user.get("user_id")
     if status:
         filter_dict["status"] = status
 
