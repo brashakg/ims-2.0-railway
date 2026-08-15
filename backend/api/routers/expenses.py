@@ -123,25 +123,37 @@ def _is_admin(current_user: dict) -> bool:
     return any(r in current_user.get("roles", []) for r in _ADMIN_ROLES)
 
 
-def _assert_expense_object_access(existing: dict, current_user: dict) -> None:
+def _assert_expense_object_access(
+    existing: dict,
+    current_user: dict,
+    *,
+    allow_approver: bool = True,
+    action: str = "access your own expense bill",
+) -> None:
     """BUG-091: object-level authz for a single expense (bill download/upload).
 
     Two dimensions, mirroring the LIST endpoint (own-only for non-approvers) and
     the mutation endpoints (validate_store_access). Without this, ANY authenticated
     role could stream/replace ANY expense's bill -- a private financial document
     (receipt with amount / GSTIN / PII) -- across stores and employees by id.
+
+    ``allow_approver=False`` drops the approver escape hatch and makes the call
+    strictly own-only. That is right for an act that speaks FOR the claimant
+    rather than about the claim -- see submit_expense. It is a PARAMETER rather
+    than a second helper on purpose: two copies of an authz rule drift, and this
+    file has already been bitten by exactly that.
     """
     # Store dimension: 403 for a store-level role asking outside its reach.
     validate_store_access(existing.get("store_id"), current_user)
     # Ownership dimension: approvers/finance/admins may review in-store bills;
     # everyone else only their own.
     roles = current_user.get("roles") or []
-    if any(r in roles for r in _APPROVAL_ROLES) or "SUPERADMIN" in roles:
+    if allow_approver and (
+        any(r in roles for r in _APPROVAL_ROLES) or "SUPERADMIN" in roles
+    ):
         return
     if existing.get("employee_id") != current_user.get("user_id"):
-        raise HTTPException(
-            status_code=403, detail="You can only access your own expense bill"
-        )
+        raise HTTPException(status_code=403, detail=f"You can only {action}")
 
 
 # ============================================================================
@@ -1173,6 +1185,31 @@ async def submit_expense(
         existing = expense_repo.find_by_id(expense_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
+
+        # OBJECT-LEVEL AUTHZ, and it was missing entirely: this was the only
+        # single-expense mutation in this file with no ownership or store check,
+        # so any authenticated user at any store could push another employee's
+        # DRAFT into the approval queue by guessing its id.
+        #
+        # STRICTLY OWN-ONLY -- allow_approver=False, unlike the bill routes.
+        # Submitting is not reviewing: it is the claimant declaring their own
+        # claim finished. A DRAFT is unfinished working state by definition --
+        # the amount may be wrong, the receipt not yet attached. An approver who
+        # could submit someone else's draft could push a claim its author never
+        # said was ready and then approve it, because the separation-of-duties
+        # guard on /approve only stops the REQUESTER from approving, and the
+        # requester stays the original employee_id. Own-only closes that without
+        # touching the approval rule.
+        #
+        # If a real need appears (an employee leaves with a draft outstanding),
+        # the answer is an explicit submit-on-behalf action that RECORDS who did
+        # it -- not quietly widening this one back.
+        _assert_expense_object_access(
+            existing,
+            current_user,
+            allow_approver=False,
+            action="submit your own expense",
+        )
 
         if existing.get("status") != "DRAFT":
             raise HTTPException(
