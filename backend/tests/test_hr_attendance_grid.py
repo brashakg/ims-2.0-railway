@@ -51,10 +51,19 @@ def test_parse_month_valid():
 
 
 def test_parse_month_falls_back_to_current():
-    today = datetime.today()
+    # Read the SAME clock the code under test reads. _parse_month falls back to
+    # now_ist() -- a fixed UTC+05:30 clock (BUG-104), deliberately independent of
+    # the server timezone. Asserting against datetime.today() compared two
+    # different clocks: identical on a box in India, 5h30m apart on the UTC CI
+    # runner. For 5.5 hours at the end of every month (18:30-23:59 UTC on the
+    # last day) IST had already rolled into the next month, so the assertion
+    # compared Sep against Aug and this test went red on a calendar nobody ran
+    # it on. Accept either reading, so an IST month rollover landing between the
+    # two calls can't fail it either.
+    before = hr.now_ist()
     for bad in [None, "", "garbage", "2026-13", "2026-00", "not-a-month", "2026"]:
         y, m = hr._parse_month(bad)
-        assert (y, m) == (today.year, today.month)
+        assert (y, m) in {(d.year, d.month) for d in (before, hr.now_ist())}
 
 
 def test_status_to_code_mapping():
