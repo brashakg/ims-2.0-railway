@@ -35,6 +35,7 @@ RESPONSE BODY. Hermetic fakes, no Mongo. No emoji (Windows cp1252).
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import sys
 
@@ -59,6 +60,21 @@ from api.services import rbac_policy, salary_visibility  # noqa: E402
 STORE = "ZZ-TILL"
 DAY = "2026-08-14"
 OPENED_AT = f"{DAY}T09:00:00+05:30"
+
+# CALENDAR ROT GUARD. `DAY` is a fixed date, which is right for rows this file
+# SEEDS with an explicit closed_at. It is wrong for the one test that closes a
+# session through the REAL endpoint: that stamps closed_at from the server
+# clock, and cash-reconciliation-summary buckets a session by str(closed_at)[:10]
+# (finance.py:4801-4802). A hard-coded single-day window therefore passed on the
+# day this file was written and failed every day after -- it broke main the next
+# morning.
+#
+# The window below spans the seeded day through TOMORROW, so it holds whatever
+# the date is and whichever side of midnight the server's timezone falls on.
+# Widening it costs nothing here: this test's subject is the CONTENT of the
+# closed row, and date filtering is covered separately by the seeded-row test
+# further down, which still pins the exact day.
+_TOMORROW = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
 
 OPENING_FLOAT = 5000.00
 CASH_SALES = 41000.00
@@ -430,7 +446,7 @@ def test_the_reconciliation_console_carries_the_note_on_the_closed_row(till_db):
     and confirm the row is payroll-free AND says something was left out."""
     assert _close("STORE_MANAGER").status_code == 200
     resp = _client("STORE_MANAGER").get(
-        f"/api/v1/finance/cash-reconciliation-summary?from={DAY}&to={DAY}"
+        f"/api/v1/finance/cash-reconciliation-summary?from={DAY}&to={_TOMORROW}"
         f"&store_id={STORE}"
     )
     assert resp.status_code == 200, resp.text
