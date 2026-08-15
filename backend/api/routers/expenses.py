@@ -38,6 +38,20 @@ _ACCOUNTANT_ROLES = ("ADMIN", "ACCOUNTANT")
 # approvers/finance). Mirrors _APPROVAL_ROLES; SUPERADMIN auto-passes.
 _REVIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
+# The subset of _REVIEW_ROLES whose remit is the whole group rather than one
+# shop. Spotting the SAME bill claimed at two DIFFERENT shops is the point of
+# the duplicate watch-list for these three, so scoping them to a store would
+# remove the finding the screen exists to surface. AREA_MANAGER is deliberately
+# NOT here: they cover several shops, not the group, and reach their others by
+# passing ?store_id= explicitly.
+_ORG_WIDE_REVIEW_ROLES = ("SUPERADMIN", "ADMIN", "ACCOUNTANT")
+
+
+def _is_org_wide_reviewer(current_user: dict) -> bool:
+    return any(
+        r in _ORG_WIDE_REVIEW_ROLES for r in (current_user.get("roles") or [])
+    )
+
 # Roles allowed to edit the spend-cap configuration. SUPERADMIN auto-passes
 # inside require_roles, so it is intentionally omitted here.
 _CAP_EDIT_ROLES = ("ADMIN",)
@@ -1694,8 +1708,49 @@ async def list_duplicate_bills(
         return {"expenses": [], "total": 0}
 
     filter_dict = {"duplicate_bill": True}
-    if store_id:
-        filter_dict["store_id"] = store_id
+
+    # STORE SCOPE. `store_id` was optional and unvalidated, so a STORE_MANAGER
+    # who simply omitted it received duplicate-flagged rows -- employee name,
+    # amount, description, category -- from every store in the group. This was
+    # the only route in this file where a store-level role could read across
+    # stores by leaving a parameter off. Duplicates are detected WITHIN a store
+    # (same SHA-256 as a prior expense in the same store), so a cross-store row
+    # was never useful to them either; it was purely a leak.
+    #
+    # A single validate_store_access() call -- the pattern the sibling routes
+    # use -- is the WRONG shape here, and copying it would have traded a leak
+    # for a silent outage. _REVIEW_ROLES deliberately mixes two kinds of
+    # reviewer:
+    #   * ORG-WIDE (SUPERADMIN / ADMIN / ACCOUNTANT). For them the whole point
+    #     of this screen is spotting the same bill claimed at two DIFFERENT
+    #     shops. validate_store_access() returns `active_store_id` when no
+    #     store_id is passed, which would have quietly narrowed an admin's
+    #     watch-list to one shop -- and it treats ACCOUNTANT as store-level, so
+    #     an explicit store_id would 403 an accountant out of a store they are
+    #     entitled to review.
+    #   * STORE-LEVEL (AREA_MANAGER / STORE_MANAGER), who get their own store.
+    if _is_org_wide_reviewer(current_user):
+        if store_id:
+            filter_dict["store_id"] = store_id
+    else:
+        # Omitting store_id must not mean "every store". An explicit foreign
+        # store_id raises 403 inside validate_store_access.
+        scope = validate_store_access(store_id, current_user) or current_user.get(
+            "active_store_id"
+        )
+        if not scope:
+            # FAIL CLOSED. A store-level session we cannot pin to a store gets
+            # an error, never the unfiltered list -- that fallback is exactly
+            # the bug being fixed.
+            raise HTTPException(
+                status_code=400,
+                detail="No active store for this session. Pick a store, then reopen this list.",
+            )
+        filter_dict["store_id"] = scope
+        # An AREA_MANAGER covering several shops sees their active store here
+        # and passes ?store_id= for each of the others; validate_store_access
+        # admits any store in their store_ids. That matches how the sibling
+        # approval and petty-cash routes already behave in this file.
 
     try:
         expenses = expense_repo.find_many(filter_dict, limit=10000) or []
