@@ -40,3 +40,22 @@ def test_comparison_safe_for_mixed_shapes():
     assert to_date_str(datetime(2026, 5, 15)) >= cutoff
     assert to_date_str("2026-04-15") < cutoff
     assert (to_date_str(None) >= cutoff) is False  # empty string sorts low
+
+
+def test_to_date_str_is_deliberately_NOT_ist_aware():
+    """TRIPWIRE. `to_date_str` normalises SHAPE (datetime|str|date -> 'YYYY-MM-DD').
+    It must NOT shift the clock.
+
+    Its IST-aware sibling `ist.ist_date_str` sits next to it and looks almost
+    identical, so a future tidy-up is likely to try to merge them. That would
+    silently move ALL ten callers a day forward for small-hours rows -- Mongo
+    range bounds, sort keys, dedupe keys and analytics comparisons included,
+    none of which want a calendar shift.
+
+    A reviewer made exactly that change and it killed ZERO tests across every
+    date-consuming suite. This assertion closes that: 22:30 UTC is 04:00 IST the
+    NEXT day, so an IST-aware `to_date_str` returns the 21st and this fails.
+    """
+    assert to_date_str(datetime(2026, 8, 20, 22, 30)) == "2026-08-20"
+    # ...and the mirror, so the pin cannot be satisfied by hard-coding a date.
+    assert to_date_str(datetime(2026, 8, 20, 9, 0)) == "2026-08-20"

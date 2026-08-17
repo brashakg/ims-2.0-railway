@@ -349,3 +349,84 @@ def test_reports_dashboard_day_bucketing_still_ist():
     assert reports_helper(IN_WINDOW) == IN_WINDOW_IST_DAY
     assert reports_helper(AFTERNOON) == AFTERNOON_DAY
     assert reports_helper("2026-08-20T22:30:00") == "2026-08-20"
+
+
+# ===========================================================================
+# 7. /reports/finance/gst -- the SAME requirement as the reconciliation row,
+#    and it lived in the very file this change consolidated. `/dashboard` two
+#    screens above already went through the helper; this row did not, so the
+#    same file answered the same question two different ways.
+# ===========================================================================
+
+class _GstOrderRepo:
+    def __init__(self, orders):
+        self._orders = orders
+
+    def find_many(self, _filter=None, limit=0, **_kw):
+        # Deliberately ignores the created_at bounds: the subject here is the
+        # DATE ON THE ROW, not the range filter. Returning the planted orders
+        # unconditionally keeps a bound-vs-row mismatch from masking the very
+        # thing under test.
+        return list(self._orders)
+
+
+def _gst_rows(created_at):
+    """Drive the REAL gst_report and return its rows."""
+    import asyncio
+
+    from api.routers import reports as _reports
+
+    order = {
+        "order_id": "ZZ-GST-1",
+        "order_number": "INV/ZZ/0001",
+        "store_id": "ZZ-STORE",
+        "customer_id": "ZZ-CUST",
+        "created_at": created_at,
+        "status": "COMPLETED",
+        "grand_total": 1180.0,
+        "tax_amount": 180.0,
+    }
+
+    real_repo = _reports.get_order_repository
+    real_raw = _reports._get_raw_db
+    _reports.get_order_repository = lambda: _GstOrderRepo([order])
+    _reports._get_raw_db = lambda: None  # no store/customer state -> intra-state
+    try:
+        body = asyncio.run(
+            _reports.gst_report(
+                from_date=date(2020, 1, 1),
+                to_date=date(2030, 1, 1),
+                store_id=None,
+                current_user={
+                    "user_id": "u1",
+                    "roles": ["ADMIN"],
+                    "active_store_id": "ZZ-STORE",
+                    "store_ids": ["ZZ-STORE"],
+                },
+            )
+        )
+    finally:
+        _reports.get_order_repository = real_repo
+        _reports._get_raw_db = real_raw
+    return body["data"]
+
+
+def test_gst_row_date_is_the_ist_day_for_a_small_hours_invoice():
+    assert _gst_rows(IN_WINDOW)[0]["date"] == IN_WINDOW_IST_DAY
+
+
+def test_gst_row_date_unchanged_for_an_afternoon_invoice_positive_control():
+    assert _gst_rows(AFTERNOON)[0]["date"] == AFTERNOON_DAY
+
+
+def test_gst_row_1_april_does_not_report_into_the_prior_fy():
+    """The worst outcome on this surface: an invoice the accountant reads as
+    belonging to the previous financial year. Production holds one order in
+    exactly this shape."""
+    assert _gst_rows(FY_EVE)[0]["date"] == FY_EVE_IST_DAY
+
+
+def test_gst_row_boundary_pair_either_side_of_ist_midnight():
+    a = _gst_rows(datetime(2026, 8, 20, 18, 29, 59))[0]["date"]
+    b = _gst_rows(datetime(2026, 8, 20, 18, 30, 0))[0]["date"]
+    assert (a, b) == ("2026-08-20", "2026-08-21")

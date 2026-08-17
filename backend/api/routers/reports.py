@@ -1292,9 +1292,15 @@ async def gst_report(
         rows.append(
             {
                 "order_number": o.get("order_number") or o.get("order_id"),
-                # created_at is a BSON datetime; str(...)[:10] -> 'YYYY-MM-DD'
-                # and is also safe for legacy ISO-string rows.
-                "date": str(o.get("created_at", ""))[:10],
+                # THE IST CALENDAR DAY, not the stored UTC one. This is the date
+                # an accountant reads off a GST row, so it is the same
+                # requirement as finance.py's reconciliation row -- and it sat
+                # in THIS file, two screens away from /dashboard which already
+                # went through the helper. `str(...)[:10]` returned the raw
+                # stored day, so an order placed 00:00-05:30 IST showed the
+                # PREVIOUS day; production holds 76 such orders (8%), one of
+                # them across the 1-April financial-year boundary.
+                "date": ist_date_str(o.get("created_at")),
                 "taxable_amount": taxable,
                 "cgst": cgst,
                 "sgst": sgst,
