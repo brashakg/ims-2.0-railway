@@ -397,6 +397,21 @@ async def auto_generate_follow_ups(
                     # orders switched from ISO strings to datetimes); to_date_str
                     # normalizes datetime|str|date -> 'YYYY-MM-DD' so
                     # datetime.fromisoformat never TypeErrors on a datetime input.
+                    #
+                    # BUG-104 RULING -- deliberately NOT ist_date_str. The day
+                    # derived here is not displayed; it only feeds
+                    # `reminder_date`, which is (a) compared against
+                    # `date.today()` -- itself the UTC box day, so converting
+                    # one side alone just moves the boundary -- and (b) used as
+                    # the DEDUPE KEY `scheduled_date`, already persisted on
+                    # 2,384 live follow_ups rows. Shifting it would miss those
+                    # keys and generate a SECOND reminder for every order in the
+                    # 00:00-05:30 IST window (~8% of orders), i.e. a customer
+                    # gets called twice -- to buy a reminder landing one day
+                    # earlier on a 730-day horizon, which nobody can perceive.
+                    # If exactness is ever wanted it needs a migration that
+                    # re-keys the existing scheduled_date values, not a code
+                    # change on its own.
                     day = to_date_str(order["created_at"])
                     if not day:
                         continue

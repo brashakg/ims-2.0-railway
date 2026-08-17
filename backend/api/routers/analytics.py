@@ -329,7 +329,21 @@ class KPIData:
 
 
 def get_date_range(period: str) -> tuple[datetime, datetime]:
-    """Get start and end date for a given period"""
+    """Get start and end date for a given period.
+
+    BUG-104 RULING -- deliberately still the NAIVE BOX CLOCK (UTC on Railway),
+    the same frame `created_at` is stored in. Do NOT "fix" the new-vs-returning
+    customer split below by wrapping the STORED side in ``ist_date_str``: the
+    bound it is compared against (``start_date.date()``) is derived from THIS
+    function, so converting only one side does not remove the boundary error,
+    it just moves it. The same `start_date`/`end_date` pair is ALSO handed to
+    `_fetch_orders_in_window` / `calculate_metrics_for_period` as Mongo range
+    bounds on naive-UTC `created_at` -- and those must move the OPPOSITE way
+    (`ist_day_start_utc`, keeping the stored side raw). Making this IST-aware
+    is therefore a scoped change across the whole analytics window, not a
+    one-line swap, and half-doing it would anchor the revenue figures and the
+    customer split on the same screen to two different midnights.
+    """
     end_date = datetime.now()
 
     if period == "today":

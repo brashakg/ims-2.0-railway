@@ -35,7 +35,7 @@ from api.services.tender_routing import (
     assert_voucher_balanced,
     build_tender_jv_legs,
 )
-from api.utils.dates import to_date_str
+from api.utils.ist import ist_date_str
 
 
 def _ledger_entry(name: str, xml_amount: float) -> str:
@@ -108,7 +108,11 @@ def tally_build_tender_receipt_xml(
         assert_voucher_balanced(signed)
 
         order_id = escape(str(o.get("order_id", "")))
-        order_date = to_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
+        # BUG-104: the <DATE> on a dated accounting document. Shift the stored
+        # naive-UTC created_at onto the IST day BEFORE stripping the dashes --
+        # a 02:00-IST tender otherwise posts a receipt against yesterday, and on
+        # 1 April against the prior financial year.
+        order_date = ist_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
         party = escape(str(o.get("customer_name") or "Walk-in Customer"))
 
         narration_block = (

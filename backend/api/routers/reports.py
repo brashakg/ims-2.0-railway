@@ -11,11 +11,17 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
-from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist, ist_day_start_utc, ist_today
+from ..utils.ist import (
+    now_ist,
+    now_ist_naive,
+    fy_start_year_ist,
+    ist_date_str,
+    ist_day_start_utc,
+    ist_today,
+)
 from ..utils.online_gst import order_interstate_flag
 from calendar import monthrange
 from .auth import get_current_user, require_roles
-from ..utils.dates import to_date_str
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -448,20 +454,6 @@ async def get_reports_root():
     }
 
 
-# `created_at` is stored as a NAIVE-UTC instant; the dashboard's "today" is the
-# IST business day. Shift by the fixed IST offset (India has no DST) before
-# taking the calendar day, otherwise 00:00-05:30-IST orders bucket into
-# "yesterday". Legacy string created_at passes through to_date_str unchanged.
-_IST_OFFSET = timedelta(hours=5, minutes=30)
-
-
-def _ist_date_str(value: Any) -> str:
-    """IST calendar-day string ('YYYY-MM-DD') for a stored naive-UTC value."""
-    if isinstance(value, datetime):
-        return to_date_str(value + _IST_OFFSET)
-    return to_date_str(value)
-
-
 @router.get("/dashboard")
 async def dashboard_stats(
     store_id: Optional[str] = Query(None),
@@ -501,7 +493,7 @@ async def dashboard_stats(
         # Calculate totals
         for order in all_orders:
             status = order.get("status", "")
-            order_date = _ist_date_str(order.get("created_at"))
+            order_date = ist_date_str(order.get("created_at"))
 
             # Today's orders
             if order_date == today_str:
@@ -535,7 +527,7 @@ async def dashboard_stats(
         # Count customers created today
         all_customers = customer_repo.find_many({"store_id": active_store}, limit=0)
         for customer in all_customers:
-            created_date = _ist_date_str(customer.get("created_at"))
+            created_date = ist_date_str(customer.get("created_at"))
             if created_date == today_str:
                 today_new_customers += 1
 
@@ -1300,9 +1292,15 @@ async def gst_report(
         rows.append(
             {
                 "order_number": o.get("order_number") or o.get("order_id"),
-                # created_at is a BSON datetime; str(...)[:10] -> 'YYYY-MM-DD'
-                # and is also safe for legacy ISO-string rows.
-                "date": str(o.get("created_at", ""))[:10],
+                # THE IST CALENDAR DAY, not the stored UTC one. This is the date
+                # an accountant reads off a GST row, so it is the same
+                # requirement as finance.py's reconciliation row -- and it sat
+                # in THIS file, two screens away from /dashboard which already
+                # went through the helper. `str(...)[:10]` returned the raw
+                # stored day, so an order placed 00:00-05:30 IST showed the
+                # PREVIOUS day; production holds 76 such orders (8%), one of
+                # them across the 1-April financial-year boundary.
+                "date": ist_date_str(o.get("created_at")),
                 "taxable_amount": taxable,
                 "cgst": cgst,
                 "sgst": sgst,
