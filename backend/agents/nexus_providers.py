@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape
 import httpx
 
 from .providers import dispatch_mode  # reuse DISPATCH_MODE gate
-from api.utils.dates import to_date_str
+from api.utils.ist import ist_date_str
 
 logger = logging.getLogger(__name__)
 
@@ -597,7 +597,12 @@ def tally_build_day_voucher_xml(
         # an imported order carries `order_number`, never `order_id`, and an
         # empty <VOUCHERNUMBER> is unusable to the accountant.
         order_id = escape(_order_identity(o))
-        order_date = to_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
+        # BUG-104: this is the <DATE> on a DATED ACCOUNTING DOCUMENT carrying
+        # CGST/SGST/IGST. created_at is a naive UTC wall clock, so a sale at
+        # 02:00 IST books a day early -- and on 1 April that lands the voucher
+        # in the PRIOR FINANCIAL YEAR. Convert to the IST day FIRST, then strip
+        # the dashes; stripping first would make the shift impossible.
+        order_date = ist_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
         party = escape(o.get("customer_name") or "Walk-in Customer")
         subtotal = float(o.get("subtotal", 0) or 0)
         cgst = float(o.get("cgst_amount", 0) or 0)

@@ -9,11 +9,11 @@ from datetime import datetime, timedelta, date
 from ..utils.ist import (
     now_ist,
     now_ist_naive,
+    ist_date_str,
     ist_today,
     ist_day_start_utc,
     fy_start_year_ist,
 )
-from ..utils.dates import to_date_str
 from ..utils.online_gst import order_interstate_flag
 from typing import Optional, List, Dict, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Body
@@ -3173,7 +3173,9 @@ def _b2b_invoice_row(o: dict, cust: dict, split: dict, now: datetime) -> dict:
         "order_id": o.get("order_id"),
         "invoice_number": invoice_number,
         "has_invoice_number": bool(o.get("invoice_number")),
-        "date": to_date_str(o.get("created_at")),
+        # BUG-104: the invoice date an accountant reads off the GST / Tally
+        # reconciliation screen. IST business day, not the UTC box clock.
+        "date": ist_date_str(o.get("created_at")),
         "store_id": o.get("store_id"),
         "customer_id": o.get("customer_id"),
         "customer_name": o.get("customer_name") or cust.get("name") or "",

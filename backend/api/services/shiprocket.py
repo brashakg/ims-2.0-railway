@@ -43,7 +43,7 @@ import os
 
 import httpx
 
-from ..utils.dates import to_date_str
+from ..utils.ist import ist_date_str, ist_today
 
 try:
     # Reuse the single DISPATCH_MODE gate the rest of the app uses.
@@ -264,7 +264,11 @@ def build_shipment_payload(
     # created_at is a BSON datetime on POS orders and (post-#935) online orders;
     # legacy docs may carry an ISO string. Slicing a datetime raised TypeError and
     # 500'd live booking (this call sits OUTSIDE create_shipment's try).
-    order_date = to_date_str(order.get("created_at")) or datetime.now().date().isoformat()
+    #
+    # BUG-104: the courier reads this as the business date the order was placed,
+    # so it must be the IST calendar day. created_at is stored as a naive UTC
+    # wall clock, so a 00:00-05:30-IST order otherwise ships dated YESTERDAY.
+    order_date = ist_date_str(order.get("created_at")) or ist_today().isoformat()
     sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
 
     return {
