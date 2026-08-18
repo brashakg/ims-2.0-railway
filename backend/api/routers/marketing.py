@@ -45,6 +45,7 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
 from ..dependencies import get_db as _dep_get_db
 from ..dependencies import validate_store_access
 from ..services.notification_service import send_notification, populate_template
+from ..utils.ist import ist_date_str
 
 router = APIRouter()
 
@@ -443,9 +444,18 @@ async def get_rx_expiry_alerts(
             "customer_id": rx.get("customer_id", ""),
             "customer_name": customer.get("name", rx.get("patient_name", "Unknown")),
             "customer_phone": customer.get("mobile", ""),
-            "expiry_date": expiry.strftime("%Y-%m-%d"),
+            # BUG-104, VALUE rule (move the derived day FORWARD +5:30). BOTH
+            # of these dates are read by a PATIENT: they go out on the Rx
+            # expiry alert as "your prescription dated X expires on Y". The
+            # stored `created_at` is a naive datetime.now() == the UTC wall
+            # clock (Railway runs UTC), so an eye test recorded between 00:00
+            # and 05:30 IST was quoted back to the customer with YESTERDAY's
+            # date -- and the expiry, being that instant plus 730 days, was a
+            # day early too. `days_until_expiry` is deliberately NOT touched:
+            # it is elapsed time between two values in the same frame.
+            "expiry_date": ist_date_str(expiry),
             "days_until_expiry": days_until,
-            "prescription_date": created.strftime("%Y-%m-%d"),
+            "prescription_date": ist_date_str(created),
         }
 
         if days_until <= 30:
