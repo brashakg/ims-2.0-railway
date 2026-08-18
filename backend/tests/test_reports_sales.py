@@ -906,3 +906,75 @@ class TestGSTR3B:
         assert body["outwardTaxableSupplies"]["centralTax"] == 0.0
         assert body["outwardTaxableSupplies"]["stateTax"] == 0.0
         assert body["outwardTaxableSupplies"]["integratedTax"] == 0.0
+
+
+# ============================================================================
+# BUG-104: the trend's BUCKET LABEL and the WINDOW that selects its rows must
+# share one frame.
+# ============================================================================
+# _daily_trend labels each bucket with the IST day. While the window bounds
+# were still naive-local, a 22:30-UTC order was admitted by the window and then
+# labelled with TOMORROW -- so asking for June returned a bar dated 1 July, and
+# an order placed 01:30 IST on 1 June was missing from June altogether.
+# Bound and label are corrected in OPPOSITE directions (bound backward, label
+# forward), which is exactly why they have to be checked together.
+
+def test_trend_has_no_bucket_outside_the_requested_window(
+    client, auth_headers, patched_reports
+):
+    """THE REQUIREMENT: ask for June, get only June."""
+    fake_db = patched_reports["db"]
+    # 2026-06-30T20:00 UTC == 1 July 01:30 IST -> belongs to JULY, so it must
+    # not appear at all in a June request.
+    _seed_order(fake_db, order_id="JUL", grand_total=3000.0,
+                created_at=datetime(2026, 6, 30, 20, 0))
+    _seed_order(fake_db, order_id="MID", grand_total=500.0,
+                created_at=datetime(2026, 6, 15, 9, 0))
+
+    body = client.get(
+        "/api/v1/reports/sales/summary?from_date=2026-06-01&to_date=2026-06-30",
+        headers=auth_headers,
+    ).json()
+    days = [b["date"] for b in body["dailyTrend"]]
+
+    assert all("2026-06-01" <= d <= "2026-06-30" for d in days), (
+        f"a bucket fell outside the requested June window: {days}"
+    )
+
+
+def test_trend_includes_a_small_hours_order_on_the_first_of_the_month(
+    client, auth_headers, patched_reports
+):
+    """The other half. 2026-05-31T20:00 UTC == 1 June 01:30 IST, so it is a
+    JUNE order and must be in a June request -- it used to be missing."""
+    fake_db = patched_reports["db"]
+    _seed_order(fake_db, order_id="JUN1", grand_total=777.0,
+                created_at=datetime(2026, 5, 31, 20, 0))
+
+    body = client.get(
+        "/api/v1/reports/sales/summary?from_date=2026-06-01&to_date=2026-06-30",
+        headers=auth_headers,
+    ).json()
+    buckets = {b["date"]: b["sales"] for b in body["dailyTrend"]}
+
+    assert buckets.get("2026-06-01") == 777.0, (
+        f"the 1-June IST order is missing from June: {buckets}"
+    )
+
+
+def test_trend_afternoon_order_keeps_its_own_day_positive_control(
+    client, auth_headers, patched_reports
+):
+    """Without this, shifting every order a day forward would pass both of the
+    assertions above."""
+    fake_db = patched_reports["db"]
+    _seed_order(fake_db, order_id="AFT", grand_total=250.0,
+                created_at=datetime(2026, 6, 15, 9, 0))
+
+    body = client.get(
+        "/api/v1/reports/sales/summary?from_date=2026-06-01&to_date=2026-06-30",
+        headers=auth_headers,
+    ).json()
+    buckets = {b["date"]: b["sales"] for b in body["dailyTrend"]}
+
+    assert buckets.get("2026-06-15") == 250.0, buckets

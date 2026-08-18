@@ -162,6 +162,34 @@ def ist_date_str(value: Any) -> str:
     return to_date_str(value)
 
 
+def ist_month_window_utc(year: int, month: int):
+    """NAIVE-UTC (start, end_inclusive) bounds for the IST calendar month.
+
+    THE BOUND MOVES BACKWARD, the stored value is never touched. IST midnight
+    on the 1st IS 18:30 UTC on the last day of the previous month, so a naive
+    ``datetime(year, month, 1)`` bound silently excludes every order placed
+    00:00-05:30 IST on the 1st -- they fall into the PREVIOUS month. In
+    production 4 real orders sit in exactly that shape (2021-09, 2022-01,
+    2024-06, 2025-04), and on the payout screen that is staff incentive money
+    counted into the wrong month.
+
+    Consecutive windows TILE: this month's end is one microsecond before next
+    month's start, so no row is counted twice and none is dropped. The previous
+    hand-written copies subtracted a whole SECOND, leaving a one-second hole an
+    order could fall into.
+
+    ONE definition on purpose. Three separate copies of this window existed --
+    payout, reports /sales/growth and budgets -- and fixing one of them made two
+    screens report different revenue for the same month.
+    """
+    start = ist_day_start_utc(_date(year, month, 1))
+    if month == 12:
+        nxt = ist_day_start_utc(_date(year + 1, 1, 1))
+    else:
+        nxt = ist_day_start_utc(_date(year, month + 1, 1))
+    return start, nxt - timedelta(microseconds=1)
+
+
 def fy_start_year_ist(dt: Optional[datetime] = None) -> int:
     """Indian financial-year START year for an instant (FY starts 1 April, IST).
 

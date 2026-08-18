@@ -17,6 +17,7 @@ from ..utils.ist import (
     fy_start_year_ist,
     ist_date_str,
     ist_day_start_utc,
+    ist_month_window_utc,
     ist_today,
 )
 from ..utils.online_gst import order_interstate_flag
@@ -696,8 +697,13 @@ async def sales_summary(
     if order_repo is None:
         return empty
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104: the BOUNDS must be IST days too. _daily_trend now labels each
+    # bucket with the IST day, so a naive-local window let a 22:30-UTC order in
+    # and then labelled it with TOMORROW -- ask for June, get a bar dated 1
+    # July. Bound and label have to share one frame or the chart contradicts
+    # the range the reader asked for.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(microseconds=1)
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -722,8 +728,13 @@ async def daily_sales(
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
-    end_dt = now_ist_naive()
-    start_dt = end_dt - timedelta(days=days)
+    # BUG-104: `now_ist_naive()` is the IST wall clock as a naive value, but
+    # `created_at` is naive-UTC -- comparing them mixes frames and pushed the
+    # window 5h30m into the future, so the last bar could be dated tomorrow.
+    # `datetime.now()` is "now" in the SAME frame as the stored instant; the
+    # start is pinned to an IST midnight so the bars are whole IST days.
+    end_dt = datetime.now()
+    start_dt = ist_day_start_utc(ist_today() - timedelta(days=days))
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -1500,26 +1511,16 @@ async def sales_growth(
         return {"current_month": {}, "mom_growth": {}, "yoy_growth": {}}
 
     # Current month
-    current_start = datetime(year, month, 1)
-    if month == 12:
-        current_end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
-    else:
-        current_end = datetime(year, month + 1, 1) - timedelta(seconds=1)
-
+    # BUG-104: IST month BOUNDS against naive-UTC `created_at` -- the same
+    # window payout and budgets use, from the one shared definition, so a
+    # growth figure and a payout figure for the same month cannot disagree.
+    current_start, current_end = ist_month_window_utc(year, month)
     # Previous month (MoM)
-    if month == 1:
-        mom_start = datetime(year - 1, 12, 1)
-        mom_end = datetime(year, 1, 1) - timedelta(seconds=1)
-    else:
-        mom_start = datetime(year, month - 1, 1)
-        mom_end = datetime(year, month, 1) - timedelta(seconds=1)
-
+    mom_start, mom_end = ist_month_window_utc(
+        year - 1 if month == 1 else year, 12 if month == 1 else month - 1
+    )
     # Previous year (YoY)
-    yoy_start = datetime(year - 1, month, 1)
-    if month == 12:
-        yoy_end = datetime(year, 1, 1) - timedelta(seconds=1)
-    else:
-        yoy_end = datetime(year - 1, month + 1, 1) - timedelta(seconds=1)
+    yoy_start, yoy_end = ist_month_window_utc(year - 1, month)
 
     current_orders = _orders_in_window(
         order_repo,
