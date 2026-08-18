@@ -2818,7 +2818,18 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
                 bill_number = _gstr1_bill_number(order, validation_issues)
                 created_raw = order.get("created_at", "")
-                invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
+                # BUG-104, VALUE rule (move the derived day FORWARD). This is
+                # the invoiceDate on a FILED GSTR-1 row. The month window above
+                # is already IST (ist_day_start_utc, correctly a BOUND moving
+                # BACKWARD), so an order minted 01-Jun 02:00 IST is selected
+                # into JUNE -- but str(created_at)[:10] printed 31-May on it, a
+                # date OUTSIDE the tax period it is filed in. On 1 April it
+                # printed a PRIOR-FINANCIAL-YEAR date against an IST-minted
+                # Rule 46(b) serial. Same class as the creditNoteDate fixed in
+                # _credit_note_date_ist; ist_date_str leaves a legacy ISO
+                # STRING created_at untouched by design (unknown frame), which
+                # is exactly the old behaviour for the migrated orders.
+                invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
                 place_of_supply = customer_state or store_state or "Unknown"
 
                 # HSN: pull from the first line item if available; fallback
@@ -4262,11 +4273,34 @@ from collections import defaultdict
 
 
 def _fy_of(dt: datetime) -> str:
-    """Indian financial year: Apr 1 - Mar 31. Returns 'FY24-25' style."""
-    yr = dt.year
-    if dt.month >= 4:
-        return f"FY{yr % 100:02d}-{(yr + 1) % 100:02d}"
-    return f"FY{(yr - 1) % 100:02d}-{yr % 100:02d}"
+    """Indian financial-year LABEL ('FY24-25') for a STORED instant.
+
+    BUG-104, VALUE rule -- the day this tags an order with is read off a
+    report, so it moves FORWARD (+5:30) before the April test is applied.
+
+    This used to carry its own ``dt.month >= 4`` test on the RAW stored
+    instant. ``created_at`` is a naive ``datetime.now()`` == the UTC wall
+    clock (Railway runs UTC), so an order placed 1-Apr 01:30 IST carries a
+    31-Mar timestamp and was tagged with the PRIOR financial year -- while its
+    GST invoice serial, minted off the IST clock, says the new one (Rule
+    46(b)). Production holds exactly one order in that shape.
+
+    The duplicate April rule is now DELETED rather than repaired: ``ist.py``
+    already owns the only definition of the financial year
+    (``fy_start_year_ist``) and of the IST day of a stored instant
+    (``ist_date_str``). What is left here is the reports-local LABEL format,
+    which ``fy_start_year_ist`` (an int) deliberately does not produce. Two
+    copies of the April rule is how the boundary drifts.
+    """
+    try:
+        anchor = datetime.fromisoformat(ist_date_str(dt))
+    except (TypeError, ValueError):
+        # Unparseable / frameless input: fall back to the raw instant rather
+        # than raise. Never reached for a datetime, which is all _order_created_at
+        # ever yields.
+        anchor = dt
+    yr = fy_start_year_ist(anchor)
+    return f"FY{yr % 100:02d}-{(yr + 1) % 100:02d}"
 
 
 _PRICE_BANDS: list[tuple[str, float, float]] = [
@@ -4346,6 +4380,16 @@ async def footfall_audit(
     start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
     for _ in range(months_back - 1):
         start = (start - timedelta(days=1)).replace(day=1)
+    # BUG-104, BOUND rule (move the bound BACKWARD). `start` above is an IST
+    # wall-clock value -- correct for the `date_str` walkin/walkout filters
+    # (those columns ARE IST business-day strings) and for the _month_iter
+    # labels, but WRONG as a Mongo bound on `created_at`, which is naive-UTC.
+    # IST-midnight on the 1st IS 18:30 UTC on the last day of the previous
+    # month, so a bare `start` dropped every order placed 00:00-05:30 IST on
+    # the 1st out of the orders leg while the walkout leg kept it -- the two
+    # halves of the same row of this table were counted in different months.
+    orders_from = ist_day_start_utc(start.date())
+    orders_to = ist_day_start_utc(ist_today() + timedelta(days=1))
 
     # Fetch all the inputs in three queries.
     walkin_counters = []
@@ -4380,8 +4424,8 @@ async def footfall_audit(
         _orders_in_window(
             order_repo,
             store_id=active_store,
-            start_dt=start,
-            end_dt=now,
+            start_dt=orders_from,
+            end_dt=orders_to,
         )
         if order_repo is not None
         else []
@@ -4409,7 +4453,13 @@ async def footfall_audit(
         ca = _order_created_at(o)
         if ca is None:
             continue
-        orders_by_month[ca.strftime("%Y-%m")] += 1
+        # BUG-104, VALUE rule (move the derived month FORWARD). The other side
+        # of this comparison is `ds[:7]` off walk_in_counters/walkouts
+        # `date_str`, which is an IST business-day string. Bucketing orders by
+        # the raw UTC month put an order placed 1-Jul 01:30 IST into JUNE while
+        # its walkout sat in JULY -- the same row of the table then showed more
+        # orders than walk-ins and invented "hidden sales".
+        orders_by_month[ist_date_str(ca)[:7]] += 1
 
     months = []
     rolling = {
@@ -4497,13 +4547,20 @@ async def sales_price_bands(
     # Start of FY (fy_count - 1) years before the current FY.
     current_fy_start_year = fy_start_year_ist()
     start_year = current_fy_start_year - (fy_count - 1)
-    start = datetime(start_year, 4, 1)
+    # BUG-104, BOUND rule (move the bound BACKWARD). A bare
+    # `datetime(start_year, 4, 1)` is IST-midnight expressed in the WRONG
+    # frame: `created_at` is naive-UTC, and 1-Apr 00:00 IST IS 31-Mar 18:30
+    # UTC. The old bound therefore excluded every 1-April sale made between
+    # 00:00 and 05:30 IST from the oldest FY in the window -- the same instants
+    # that _fy_of below now tags INTO that FY. Bound and value move in opposite
+    # directions, or the FY totals disagree with the FY labels.
+    start = ist_day_start_utc(date(start_year, 4, 1))
     orders = (
         _orders_in_window(
             order_repo,
             store_id=active_store,
             start_dt=start,
-            end_dt=now,
+            end_dt=ist_day_start_utc(ist_today() + timedelta(days=1)),
         )
         if order_repo is not None
         else []
@@ -4518,8 +4575,11 @@ async def sales_price_bands(
         net = _order_net(o)
         enriched.append(
             {
+                # BUG-104, VALUE rule for BOTH: these are read off the
+                # premiumization chart, so the stored instant moves FORWARD
+                # (+5:30) before its FY / month is taken.
                 "fy": _fy_of(ca),
-                "month": ca.strftime("%Y-%m"),
+                "month": ist_date_str(ca)[:7],
                 "net": net,
                 "band": _price_band_of(net),
                 "customer_id": o.get("customer_id"),
@@ -4807,14 +4867,18 @@ async def sales_seasonality(
     """
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
-    now = now_ist_naive()
-    start = now - timedelta(days=365 * years_back)
+    # BUG-104, BOUND rule (backward) for the window, VALUE rule (forward) for
+    # the day-of-week / month-of-year buckets below. Both halves live in this
+    # one endpoint so they had to move together: a Monday sale at 02:00 IST
+    # carries a SUNDAY UTC timestamp, and which day the shop is busy is the
+    # entire point of this report.
+    start = ist_day_start_utc(ist_today() - timedelta(days=365 * years_back))
     orders = (
         _orders_in_window(
             order_repo,
             store_id=active_store,
             start_dt=start,
-            end_dt=now,
+            end_dt=ist_day_start_utc(ist_today() + timedelta(days=1)),
         )
         if order_repo is not None
         else []
@@ -4842,11 +4906,19 @@ async def sales_seasonality(
         ca = _order_created_at(o)
         if ca is None:
             continue
+        # VALUE rule: take the IST calendar day FIRST, then its weekday /
+        # month. Reading .weekday() off the raw stored instant filed every
+        # 00:00-05:30 IST sale under the PREVIOUS day -- Monday-morning trade
+        # showed up as Sunday revenue, and 1-April trade as March.
+        try:
+            ist_day = date.fromisoformat(ist_date_str(ca))
+        except (TypeError, ValueError):
+            continue
         rev = _order_revenue(o)
-        dow_agg[dow_names[ca.weekday()]]["invoices"] += 1
-        dow_agg[dow_names[ca.weekday()]]["revenue"] += rev
-        moy_agg[moy_names[ca.month - 1]]["invoices"] += 1
-        moy_agg[moy_names[ca.month - 1]]["revenue"] += rev
+        dow_agg[dow_names[ist_day.weekday()]]["invoices"] += 1
+        dow_agg[dow_names[ist_day.weekday()]]["revenue"] += rev
+        moy_agg[moy_names[ist_day.month - 1]]["invoices"] += 1
+        moy_agg[moy_names[ist_day.month - 1]]["revenue"] += rev
 
     def _materialize_row(name: str, slot: dict, key: str) -> dict:
         n = slot["invoices"]
