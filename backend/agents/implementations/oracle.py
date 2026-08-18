@@ -903,11 +903,20 @@ class OracleAgent(JarvisAgent):
                 # bounds never matched a BSON Date (Mongo type bracketing) --
                 # post-backfill every order is datetime-typed, so the string
                 # query silently returned ZERO revenue for all 7 days.
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                # BUG-104. BOTH sides move, in OPPOSITE directions: the day
+                # LABEL is an IST business day (this series is read back to the
+                # owner as "yesterday's revenue"), while the Mongo bounds must
+                # be that IST day expressed in the naive-UTC frame created_at
+                # is stored in. On the old UTC days, every sale made between
+                # 00:00 and 05:30 IST was reported against the previous day.
+                from api.utils.ist import ist_day_start_utc, ist_today
+
+                today_ist = ist_today()
                 by_day: Dict[str, float] = {}
                 for d in range(7):
-                    day_start = (now - timedelta(days=d)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    day_end = day_start + timedelta(days=1)
+                    day_ist = today_ist - timedelta(days=d)
+                    day_start = ist_day_start_utc(day_ist)
+                    day_end = ist_day_start_utc(day_ist + timedelta(days=1))
                     day_total = sum(
                         o.get("grand_total", 0) or 0
                         for o in orders_coll.find(
@@ -915,7 +924,7 @@ class OracleAgent(JarvisAgent):
                             {"grand_total": 1},
                         )
                     )
-                    by_day[day_start.date().isoformat()] = round(float(day_total), 2)
+                    by_day[day_ist.isoformat()] = round(float(day_total), 2)
                 context["revenue_last_7d"] = by_day
             except Exception:
                 context["revenue_last_7d"] = {}

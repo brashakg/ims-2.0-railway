@@ -26,7 +26,7 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
-from ..utils.ist import ist_today, now_ist
+from ..utils.ist import ist_date_str, ist_today, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -761,7 +761,11 @@ class JarvisAnalyticsEngine:
                             "vendor": p.get("vendor_name") or "",
                             "status": p.get("status") or "",
                             "total": float(p.get("total") or 0),
-                            "created_at": str(p.get("created_at") or "")[:10],
+                            # BUG-104, VALUE rule (+5:30). purchase_orders.created_at
+                            # is a BSON datetime (BaseRepository._add_timestamps) in
+                            # the naive-UTC frame, and this day is quoted back to the
+                            # owner in a Jarvis briefing.
+                            "created_at": ist_date_str(p.get("created_at")),
                         }
                         for p in open_pos
                     ],

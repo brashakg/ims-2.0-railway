@@ -29,6 +29,7 @@ from ..dependencies import (
     resolve_store_scope,
 )
 from ..services import ap_engine
+from ..utils.ist import fy_start_year_ist, ist_date_str, now_ist
 from ..services import product_master as _pm
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ..services.file_store import (
@@ -4869,7 +4870,12 @@ def _vendor_mtd_spend(db, vendor_id: str) -> float:
     (an honest zero, never a fabricated number per SYSTEM_INTENT)."""
     if db is None:
         return 0.0
-    month_prefix = datetime.now().strftime("%Y-%m")  # "2026-06"
+    # BUG-104. The VALUE side (`bill_date`) is already an IST business-date
+    # string, so the month PREFIX it is matched against must be the IST month
+    # too. On the UTC clock, between 00:00 and 05:30 IST on the 1st this asked
+    # for LAST month and the vendor's month-to-date spend read as the previous
+    # month's total for five and a half hours every month.
+    month_prefix = now_ist().strftime("%Y-%m")  # "2026-06"
     total = 0.0
     try:
         bills = db.get_collection("vendor_bills").find(
@@ -5006,6 +5012,14 @@ async def vendor_performance(
     try:
         from datetime import timedelta
 
+        # BUG-104 sweep finding, NOT an IST bug -- a FRAME-TYPE bug of the same
+        # family as buy_desk.py:110. `grns.created_at` is written by
+        # BaseRepository._add_timestamps as a BSON **datetime** (it overwrites
+        # whatever the caller passed), and Mongo type-brackets: a STRING $gte
+        # never matches a Date, so this query returned ZERO rows and the vendor
+        # GRN scorecard has been permanently, silently empty. Pass the datetime.
+        # `cutoff` itself is pure elapsed time (now minus N days) in the same
+        # naive-UTC frame the instants are stored in, so it needs no IST shift.
         cutoff = datetime.now() - timedelta(days=months * 30)
 
         grn_coll = db.get_collection("grns")
@@ -5014,7 +5028,7 @@ async def vendor_performance(
                 {
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
-                    "created_at": {"$gte": cutoff.isoformat()},
+                    "created_at": {"$gte": cutoff},
                 },
                 {
                     "_id": 0,
@@ -5164,6 +5178,10 @@ async def vendor_purchase_history(
     try:
         from datetime import timedelta
 
+        # Same frame-type bug as the scorecard above: purchase_orders /
+        # grns.created_at are BSON datetimes (BaseRepository._add_timestamps),
+        # so the old ISO-STRING $gte matched nothing and this whole vendor
+        # spend chart rendered empty. Compare Date to Date.
         cutoff = datetime.now() - timedelta(days=months * 30)
 
         po_coll = db.get_collection("purchase_orders")
@@ -5174,7 +5192,7 @@ async def vendor_purchase_history(
                 {
                     "vendor_id": vendor_id,
                     "status": {"$nin": ["CANCELLED", "DRAFT"]},
-                    "created_at": {"$gte": cutoff.isoformat()},
+                    "created_at": {"$gte": cutoff},
                 },
                 {
                     "_id": 0,
@@ -5195,7 +5213,7 @@ async def vendor_purchase_history(
                 {
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
-                    "created_at": {"$gte": cutoff.isoformat()},
+                    "created_at": {"$gte": cutoff},
                 },
                 {
                     "_id": 0,
@@ -5212,7 +5230,10 @@ async def vendor_purchase_history(
         product_spend: dict = {}
 
         for po in pos:
-            month = str(po.get("created_at") or "")[:7]
+            # BUG-104, VALUE rule (+5:30): the month this spend is charted
+            # under is a business month. A PO raised 1-Jun 02:00 IST used to
+            # land in MAY's bar.
+            month = ist_date_str(po.get("created_at"))[:7]
             if not month:
                 continue
             bucket = monthly.setdefault(
@@ -5245,7 +5266,8 @@ async def vendor_purchase_history(
                     product_spend[pid]["units"] += int(item.get("quantity") or 0)
 
         for grn in grns:
-            month = str(grn.get("created_at") or "")[:7]
+            # Same chart, same frame as the PO leg above (VALUE rule).
+            month = ist_date_str(grn.get("created_at"))[:7]
             if not month:
                 continue
             bucket = monthly.setdefault(
@@ -5309,24 +5331,33 @@ async def get_tds_threshold_status(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    # Determine current FY start
-    now = datetime.utcnow()
+    # Determine current FY start.
+    # BUG-104: this carried its OWN `now.month >= 4` financial-year rule off
+    # `datetime.utcnow()`. Railway runs UTC, so between 00:00 and 05:30 IST on
+    # 1 April that rule still returns the PREVIOUS financial year -- and this
+    # figure decides whether the s.194Q / 206C TDS threshold has been crossed,
+    # so a whole extra year of payments got counted into the cumulative and TDS
+    # was deducted (or the threshold declared crossed) on the wrong basis.
+    # ist.fy_start_year_ist is the single definition of the April rule.
+    fy_default = datetime(fy_start_year_ist(), 4, 1)
     if fy_start:
         from ..services.ap_engine import parse_date as _pd
 
-        fy_start_dt = _pd(fy_start) or datetime(
-            now.year if now.month >= 4 else now.year - 1, 4, 1
-        )
+        fy_start_dt = _pd(fy_start) or fy_default
     else:
-        fy_start_dt = datetime(now.year if now.month >= 4 else now.year - 1, 4, 1)
+        fy_start_dt = fy_default
 
-    # Sum all payments to this vendor in the current FY
+    # Sum all payments to this vendor in the current FY.
+    # `payment_date` is a DATE-ONLY ISO string ('2026-04-01'), so the bound has
+    # to be date-only too: the old `fy_start_dt.isoformat()` produced
+    # '2026-04-01T00:00:00', which sorts AFTER '2026-04-01' and silently
+    # excluded every payment made on 1 April from the FY cumulative.
     try:
         past_payments = list(
             db.get_collection("vendor_payments").find(
                 {
                     "vendor_id": vendor_id,
-                    "payment_date": {"$gte": fy_start_dt.isoformat()},
+                    "payment_date": {"$gte": fy_start_dt.date().isoformat()},
                 },
                 {"amount": 1, "tds_amount": 1, "_id": 0},
             )
@@ -5384,8 +5415,13 @@ async def export_26q(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    now = datetime.utcnow()
-    target_fy = fy if fy else (now.year if now.month >= 4 else now.year - 1)
+    # BUG-104: same private `now.month >= 4` FY rule off the UTC box clock as
+    # the threshold endpoint above. On 1 April 00:00-05:30 IST the accountant
+    # opening the 26Q export got the PRIOR year's return. Use the one
+    # definition. The bounds are date-only because `payment_date` is a
+    # date-only ISO string -- '2026-04-01T00:00:00' sorts after '2026-04-01',
+    # which dropped every 1-April payment out of Q1 of the return.
+    target_fy = fy if fy else fy_start_year_ist()
     fy_start = datetime(target_fy, 4, 1)
     fy_end = datetime(target_fy + 1, 3, 31, 23, 59, 59)
 
@@ -5394,8 +5430,8 @@ async def export_26q(
             db.get_collection("vendor_payments").find(
                 {
                     "payment_date": {
-                        "$gte": fy_start.isoformat(),
-                        "$lte": fy_end.isoformat(),
+                        "$gte": fy_start.date().isoformat(),
+                        "$lte": fy_end.date().isoformat(),
                     },
                     "tds_amount": {"$gt": 0},
                 },
