@@ -24,6 +24,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+from ..utils.ist import ist_date_str
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -336,10 +338,14 @@ async def handle_reorder(
         last_order = _get_last_cl_order(customer)
         if last_order:
             order_num = last_order.get("order_number") or last_order.get("order_id", "")
+            # BUG-104: this date is read by the CUSTOMER on WhatsApp, so it is
+            # an outbound VALUE -> the IST calendar day (+5:30), not the stored
+            # UTC one. No bound and no persisted key on this path, so nothing
+            # else has to move with it.
             notes = (
                 f"Inbound WhatsApp: reorder request. "
                 f"Last CL order: {order_num} on "
-                f"{str(last_order.get('created_at', ''))[:10]}."
+                f"{ist_date_str(last_order.get('created_at'))}."
             )
         _create_follow_up(customer, "general", notes, store_id)
     return _REPLY_TEMPLATES["REORDER"].format(name=name)

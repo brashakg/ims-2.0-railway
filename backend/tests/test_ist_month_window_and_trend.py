@@ -413,3 +413,50 @@ def test_gstr1_cdnr_row_carries_the_ist_credit_note_date():
     assert by_ref["RET-ZZ-0001"]["creditNoteDate"] != "2026-04-30"
     # POSITIVE CONTROL: the afternoon note must not move.
     assert by_ref["RET-ZZ-0002"]["creditNoteDate"] == "2026-05-02"
+
+
+# ===========================================================================
+# 4. SWEEP -- the one site that was trivially safe and clearly a VALUE
+# ===========================================================================
+
+
+def _reorder_notes(last_order):
+    """Drive the REAL handle_reorder and return the follow-up note text that
+    goes out with the WhatsApp reply."""
+    import asyncio
+
+    from api.services import whatsapp_intents as wi
+
+    captured = {}
+    real_last = wi._get_last_cl_order
+    real_fu = wi._create_follow_up
+    wi._get_last_cl_order = lambda _c: last_order
+    wi._create_follow_up = lambda _c, _t, notes, _s: captured.update(notes=notes)
+    try:
+        asyncio.run(
+            wi.handle_reorder("919876543210", {"name": "ZZ Customer"}, "ZZ-IST-STORE")
+        )
+    finally:
+        wi._get_last_cl_order = real_last
+        wi._create_follow_up = real_fu
+    return captured["notes"]
+
+
+def test_whatsapp_reorder_note_quotes_the_customers_own_ist_day():
+    """The date goes out on WhatsApp to the CUSTOMER, so it is an outbound
+    VALUE. No bound and no persisted key on this path."""
+    notes = _reorder_notes({
+        "order_id": "ZZ-CL-1",
+        "order_number": "BV/26-27/0042",
+        "created_at": SMALL_HOURS_1ST,
+    })
+    assert "2026-05-01" in notes
+    assert "2026-04-30" not in notes
+
+
+def test_whatsapp_reorder_note_afternoon_order_unchanged_positive_control():
+    notes = _reorder_notes({
+        "order_number": "BV/26-27/0043",
+        "created_at": AFTERNOON_30TH,
+    })
+    assert "2026-04-30" in notes

@@ -454,6 +454,19 @@ async def auto_generate_follow_ups(
             tests = list(tests_collection.find({"store_id": store_id}))
             for test in tests:
                 if test.get("created_at"):
+                    # BUG-104 RULING -- deliberately NOT ist_date_str, for the
+                    # SAME reason as the frame-replacement sibling ~55 lines
+                    # above (read that note). This day is not displayed; it
+                    # only feeds `reminder_date`, which is (a) compared against
+                    # `date.today()` -- itself the UTC box day, so shifting one
+                    # side alone just moves the boundary -- and (b) used as the
+                    # DEDUPE KEY `scheduled_date`, already persisted on live
+                    # rows. Shifting it would miss those keys and raise a
+                    # SECOND reminder for every test in the 00:00-05:30 IST
+                    # window, i.e. a customer gets called twice, to buy a
+                    # reminder landing one day earlier on a 365-day horizon.
+                    # Exactness here needs a migration that re-keys the stored
+                    # scheduled_date values, not a code change on its own.
                     test_date = datetime.fromisoformat(test["created_at"]).date()
                     reminder_date = test_date + timedelta(days=365)  # 1 year
 
