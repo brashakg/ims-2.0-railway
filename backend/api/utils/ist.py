@@ -128,12 +128,66 @@ def ist_date_str(value: Any) -> str:
         carries no reliable frame, so guessing would corrupt it; this matches
         the pass-through the reports dashboard has always used.
       - ``None`` / other     -> '' (comparisons fail safe, never crash)
+
+    KNOWN LIMITATION -- COLLECTIONS THAT STORE ``created_at`` AS A STRING
+    --------------------------------------------------------------------
+    Because strings pass through unshifted, this helper CANNOT correct a
+    collection whose ``created_at`` is written as an ISO string rather than a
+    datetime: it will hand back the stored (UTC) day and look like it worked.
+    That is not a bug to fix here -- the pass-through is what stops it
+    corrupting a string that was already IST-local -- but the caller must
+    handle it.
+
+    HOW TO TELL, for any collection: find its WRITER and read what it puts in
+    ``created_at``.
+      - ``datetime.now().isoformat()``  -> NAIVE-UTC string (Railway runs UTC).
+        The 00:00-05:30 IST day-shift DOES apply. Parse to a datetime first,
+        then pass THAT here.
+      - an offset-bearing string ('...+05:30' / '...Z') -> pass the parsed
+        aware datetime here; the conversion is exact.
+      - a genuinely IST-local wall-clock string -> already correct. Shifting it
+        would CREATE the bug. Leave it.
+
+    Known instance: ``credit_note_ledger.created_at`` is a naive-UTC string
+    (``services/store_credit_ledger.py::make_entry`` and
+    ``services/shopify_ingest.py::_refund_credit_note_date_iso``). The
+    parse-then-shift wrapper for it is
+    ``api/routers/reports.py::_credit_note_date_ist`` -- copy that shape rather
+    than teaching this helper to guess.
     """
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             return value.astimezone(IST).date().isoformat()
         return (value + _IST_OFFSET).date().isoformat()
     return to_date_str(value)
+
+
+def ist_month_window_utc(year: int, month: int):
+    """NAIVE-UTC (start, end_inclusive) bounds for the IST calendar month.
+
+    THE BOUND MOVES BACKWARD, the stored value is never touched. IST midnight
+    on the 1st IS 18:30 UTC on the last day of the previous month, so a naive
+    ``datetime(year, month, 1)`` bound silently excludes every order placed
+    00:00-05:30 IST on the 1st -- they fall into the PREVIOUS month. In
+    production 4 real orders sit in exactly that shape (2021-09, 2022-01,
+    2024-06, 2025-04), and on the payout screen that is staff incentive money
+    counted into the wrong month.
+
+    Consecutive windows TILE: this month's end is one microsecond before next
+    month's start, so no row is counted twice and none is dropped. The previous
+    hand-written copies subtracted a whole SECOND, leaving a one-second hole an
+    order could fall into.
+
+    ONE definition on purpose. Three separate copies of this window existed --
+    payout, reports /sales/growth and budgets -- and fixing one of them made two
+    screens report different revenue for the same month.
+    """
+    start = ist_day_start_utc(_date(year, month, 1))
+    if month == 12:
+        nxt = ist_day_start_utc(_date(year + 1, 1, 1))
+    else:
+        nxt = ist_day_start_utc(_date(year, month + 1, 1))
+    return start, nxt - timedelta(microseconds=1)
 
 
 def fy_start_year_ist(dt: Optional[datetime] = None) -> int:

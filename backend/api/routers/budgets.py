@@ -50,6 +50,7 @@ from ..services.salary_visibility import (
 
 # Reuse the proven order-revenue aggregation from reports.py verbatim so the
 # budget variance can never drift from what the Reports module shows.
+from ..utils.ist import ist_month_window_utc
 from . import reports as _reports
 
 logger = logging.getLogger(__name__)
@@ -131,12 +132,14 @@ def _month_window(period: str):
     """
     year = int(period[:4])
     month = int(period[5:7])
-    start_dt = datetime(year, month, 1)
-    if month == 12:
-        end_dt = datetime(year + 1, 1, 1) - timedelta(seconds=1)
-    else:
-        end_dt = datetime(year, month + 1, 1) - timedelta(seconds=1)
-    return start_dt, end_dt
+    # BUG-104. These are BOUNDS against naive-UTC `created_at`, so the IST month
+    # begins 5h30m EARLIER in that frame. The plain `datetime(year, month, 1)`
+    # that used to sit here excluded every order placed 00:00-05:30 IST on the
+    # 1st -- and once payout's window was corrected and this one was not, the
+    # incentive screen and the budget-vs-actual screen reported DIFFERENT
+    # revenue for the same month. One shared definition, so they cannot drift
+    # again. It also closes the one-second `$lte` hole the old `seconds=1` left.
+    return ist_month_window_utc(year, month)
 
 
 def _revenue_actual(store_id: Optional[str], period: str) -> float:

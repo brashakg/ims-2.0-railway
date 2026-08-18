@@ -53,7 +53,7 @@ from database.repositories.product_incentive_log_repository import (
 from api.services.points_calculator import aggregate_mtd
 from api.services import scorecard_engine
 from api.services.csv_safe import safe_writer, BOM
-from api.utils.ist import ist_today
+from api.utils.ist import ist_day_start_utc, ist_today
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -175,18 +175,43 @@ def _points_repo() -> Optional[PointsLogRepository]:
 
 
 def _month_window(year: int, month: int) -> tuple:
-    """Returns (start_dt, next_month_dt, df_str, dt_str). The datetime
-    pair drives Mongo `created_at` range matches; the str pair is for
-    legacy `date_str` fallbacks if any caller wants them."""
+    """Returns (start_dt, next_month_dt, df_str, dt_str) for an IST month.
+
+    BUG-104. The two pairs are DIFFERENT KINDS OF THING and are corrected in
+    OPPOSITE directions -- do not "unify" them:
+
+    * ``start_dt`` / ``next_first`` are BOUNDS. They are compared against
+      ``orders.created_at``, which is stored as a naive ``datetime.now()`` ==
+      the UTC wall clock (Railway runs UTC). An IST month therefore begins
+      5h30m EARLIER in that frame -- IST midnight on the 1st IS 18:30 UTC on
+      the last day of the previous month -- so the bound moves BACKWARD, via
+      ``ist_day_start_utc``. It is the BOUND that moves, never the stored
+      instant: shifting ``created_at`` forward instead would move the error to
+      the other side of the boundary, not remove it.
+      Both ends move together, so consecutive months still TILE exactly:
+      ``_month_window(y, m)[1] == _month_window(y, m + 1)[0]``.
+      Before this, an order placed 00:00-05:30 IST on the 1st carried a UTC
+      timestamp on the last day of the PREVIOUS month, fell outside this
+      window, and paid staff incentive into the wrong month (4 live orders:
+      2021-09, 2022-01, 2024-06, 2025-04).
+
+    * ``df`` / ``dt`` are CALENDAR LABELS, deliberately left as the plain
+      first/last IST day of the month. Their real consumer is
+      ``points_log.date_str`` (``_build_mtd_data`` -> ``list_for_mtd``), which
+      is the IST business day a human typed on the daily points sheet -- not an
+      instant, so there is nothing to shift and shifting them would silently
+      drop the 1st (or the last) of every month from MTD scoring.
+    """
     from datetime import timedelta
 
-    start_dt = datetime(year, month, 1)
-    if month == 12:
-        next_first = datetime(year + 1, 1, 1)
-    else:
-        next_first = datetime(year, month + 1, 1)
-    df = start_dt.date().isoformat()
-    dt = (next_first.date() - timedelta(days=1)).isoformat()
+    first = date_type(year, month, 1)
+    next_y, next_m = (year + 1, 1) if month == 12 else (year, month + 1)
+    next_first_date = date_type(next_y, next_m, 1)
+
+    start_dt = ist_day_start_utc(first)
+    next_first = ist_day_start_utc(next_first_date)
+    df = first.isoformat()
+    dt = (next_first_date - timedelta(days=1)).isoformat()
     return start_dt, next_first, df, dt
 
 
@@ -244,6 +269,16 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
                     if not (start_dt <= created_at < next_first):
                         continue
                 elif isinstance(created_at, str):
+                    # TABLED, not fixed (BUG-104). df/dt are IST calendar
+                    # LABELS, so comparing them against the UTC day sliced out
+                    # of a legacy ISO string leaves a residual 5h30m mismatch
+                    # here. Left alone on purpose: this branch only runs when
+                    # the $aggregate above RAISED, and 0 of 934 production
+                    # orders store created_at as a string, so it selects
+                    # nothing today. Fixing it properly means parsing the
+                    # string to its naive-UTC instant and comparing against
+                    # start_dt/next_first -- do that, not a shift of df/dt,
+                    # which would break points_log MTD (see _month_window).
                     if not (df <= created_at[:10] <= dt):
                         continue
                 else:

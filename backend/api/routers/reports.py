@@ -17,6 +17,7 @@ from ..utils.ist import (
     fy_start_year_ist,
     ist_date_str,
     ist_day_start_utc,
+    ist_month_window_utc,
     ist_today,
 )
 from ..utils.online_gst import order_interstate_flag
@@ -221,6 +222,49 @@ def _cdnr_note_number(entry: dict) -> str:
     return ref[:16]
 
 
+def _credit_note_date_ist(raw) -> str:
+    """IST calendar day ('YYYY-MM-DD') of a ``credit_note_ledger.created_at``.
+
+    BUG-104, and the one place ``ist_date_str`` alone CANNOT do the job.
+
+    That column is stored as an ISO **STRING**, not a datetime -- all 11
+    production rows are string-typed -- and both writers put a NAIVE-UTC
+    instant in it:
+
+      * ``services/store_credit_ledger.py::make_entry`` ->
+        ``datetime.now().isoformat()``, and Railway runs UTC, so that is the
+        UTC wall clock with no offset written;
+      * ``services/shopify_ingest.py::_refund_credit_note_date_iso`` ->
+        ``_to_naive_utc(...).isoformat()``, documented as naive-UTC so it
+        compares apples-to-apples with the finance/GST datetime windows.
+
+    ``ist_date_str`` passes strings through UNSHIFTED by documented design (a
+    bare string carries no reliable frame, so guessing would corrupt it). Here
+    the frame IS known from the writers, so parse to the naive-UTC instant
+    FIRST and then take the IST day. The date is a VALUE that leaves the system
+    -- it is the ``creditNoteDate`` on the GSTN portal export -- so it moves
+    FORWARD (+5:30). Without this a credit note issued 00:00-05:30 IST prints
+    the previous day, and on 1-Apr prints a PRIOR-financial-year date, even
+    though the GSTR-1 month window (``ist_day_start_utc``, correctly a BOUND
+    moving backward) already selected the row into the right return.
+
+    Fail-soft: an unparseable string falls back to its own first 10 characters
+    (the pre-BUG-104 behaviour), never raises, and '' for a missing value so
+    the caller's ``or month + "-01"`` default still fires.
+    """
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, datetime):
+        return ist_date_str(raw)
+    text = str(raw).strip()
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return text[:10]
+    return ist_date_str(parsed)
+
+
 def _order_tax(order: dict) -> float:
     for k in ("tax_amount", "total_tax", "tax"):
         v = order.get(k)
@@ -267,17 +311,29 @@ def _summarise_orders(orders: list) -> dict:
 
 
 def _daily_trend(orders: list) -> list:
-    """Group orders by date_str (or created_at[:10] fallback). Returns
-    sorted-asc list of {date, sales, orders}."""
+    """Group orders by the IST calendar day. Returns sorted-asc list of
+    {date, sales, orders}.
+
+    BUG-104. The day here is a VALUE the owner reads off a chart, derived from
+    a stored instant -- so it is corrected by moving the VALUE FORWARD (+5:30)
+    through ``ist_date_str``, the same rule ``/dashboard`` in this file already
+    uses. (Contrast a Mongo range BOUND, which moves BACKWARD via
+    ``ist_day_start_utc``.) ``created_at`` is a naive ``datetime.now()`` == the
+    UTC wall clock, so before this every order placed 00:00-05:30 IST -- 76 of
+    934 live orders, 8.1% -- was plotted on the PREVIOUS day.
+
+    The ``date_str`` preference is KEPT but is dead today: 0 of 934 production
+    orders carry that field, so the ``created_at`` path is the ONLY live path.
+    It stays because it is correct if a caller ever does supply one (like
+    points_log.date_str, an IST business-day label a human typed), and removing
+    it would change behaviour for any such caller; it is documented here so
+    nobody reads it as a live safeguard.
+    """
     by_day: dict = {}
     for o in orders:
         ds = o.get("date_str")
         if not ds:
-            ca = o.get("created_at")
-            if isinstance(ca, datetime):
-                ds = ca.date().isoformat()
-            elif isinstance(ca, str) and len(ca) >= 10:
-                ds = ca[:10]
+            ds = ist_date_str(o.get("created_at"))
         if not ds:
             continue
         slot = by_day.setdefault(ds, {"date": ds, "sales": 0.0, "orders": 0})
@@ -641,8 +697,13 @@ async def sales_summary(
     if order_repo is None:
         return empty
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104: the BOUNDS must be IST days too. _daily_trend now labels each
+    # bucket with the IST day, so a naive-local window let a 22:30-UTC order in
+    # and then labelled it with TOMORROW -- ask for June, get a bar dated 1
+    # July. Bound and label have to share one frame or the chart contradicts
+    # the range the reader asked for.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(microseconds=1)
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -667,8 +728,13 @@ async def daily_sales(
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
-    end_dt = now_ist_naive()
-    start_dt = end_dt - timedelta(days=days)
+    # BUG-104: `now_ist_naive()` is the IST wall clock as a naive value, but
+    # `created_at` is naive-UTC -- comparing them mixes frames and pushed the
+    # window 5h30m into the future, so the last bar could be dated tomorrow.
+    # `datetime.now()` is "now" in the SAME frame as the stored instant; the
+    # start is pinned to an IST midnight so the bars are whole IST days.
+    end_dt = datetime.now()
+    start_dt = ist_day_start_utc(ist_today() - timedelta(days=days))
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -1445,26 +1511,16 @@ async def sales_growth(
         return {"current_month": {}, "mom_growth": {}, "yoy_growth": {}}
 
     # Current month
-    current_start = datetime(year, month, 1)
-    if month == 12:
-        current_end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
-    else:
-        current_end = datetime(year, month + 1, 1) - timedelta(seconds=1)
-
+    # BUG-104: IST month BOUNDS against naive-UTC `created_at` -- the same
+    # window payout and budgets use, from the one shared definition, so a
+    # growth figure and a payout figure for the same month cannot disagree.
+    current_start, current_end = ist_month_window_utc(year, month)
     # Previous month (MoM)
-    if month == 1:
-        mom_start = datetime(year - 1, 12, 1)
-        mom_end = datetime(year, 1, 1) - timedelta(seconds=1)
-    else:
-        mom_start = datetime(year, month - 1, 1)
-        mom_end = datetime(year, month, 1) - timedelta(seconds=1)
-
+    mom_start, mom_end = ist_month_window_utc(
+        year - 1 if month == 1 else year, 12 if month == 1 else month - 1
+    )
     # Previous year (YoY)
-    yoy_start = datetime(year - 1, month, 1)
-    if month == 12:
-        yoy_end = datetime(year, 1, 1) - timedelta(seconds=1)
-    else:
-        yoy_end = datetime(year - 1, month + 1, 1) - timedelta(seconds=1)
+    yoy_start, yoy_end = ist_month_window_utc(year - 1, month)
 
     current_orders = _orders_in_window(
         order_repo,
@@ -2988,7 +3044,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         # dedicated note_number stamped on synthesized
                         # historical CNs, else the internal ref capped at 16.
                         ref = _cdnr_note_number(entry)
-                        cn_date = str(entry.get("created_at", ""))[:10] if entry.get("created_at") else month + "-01"
+                        cn_date = _credit_note_date_ist(
+                            entry.get("created_at")
+                        ) or (month + "-01")
 
                         # Credit notes carry the items' HSN/rate. Prefer the rate
                         # stamped on the ledger row (Shopify refund + in-store

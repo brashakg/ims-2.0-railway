@@ -24,7 +24,7 @@ import os
 import sys
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -52,13 +52,26 @@ def test_period_validation_accepts_valid_and_rejects_garbage():
 
 
 def test_month_window_spans_whole_month_and_wraps_december():
+    """BUG-104: these are IST month bounds, expressed in the naive-UTC frame
+    `created_at` is stored in.
+
+    This test previously asserted `start == datetime(2026, 2, 1)` -- i.e. it
+    encoded the defect. A bound at UTC midnight on the 1st excludes every order
+    placed 00:00-05:30 IST that day, so those orders fell into the PREVIOUS
+    month. IST midnight on 1 Feb IS 31 Jan 18:30 UTC, so the bound sits there.
+    Concrete instants below rather than a call to the helper, so this cannot
+    pass by agreeing with a broken helper.
+    """
     start, end = budgets._month_window("2026-02")
-    assert start == datetime(2026, 2, 1)
-    assert start <= end and end < datetime(2026, 3, 1)
-    # December wraps into the next year.
+    assert start == datetime(2026, 1, 31, 18, 30)
+    assert start <= end and end < datetime(2026, 2, 28, 18, 30)
+    # An order at 01:30 IST on 1 Feb (= 31 Jan 20:00 UTC) is a FEBRUARY order.
+    assert start <= datetime(2026, 1, 31, 20, 0) <= end
+    # December wraps into the next year, and the two windows still tile.
     _, dec_end = budgets._month_window("2026-12")
-    assert dec_end < datetime(2027, 1, 1)
-    assert dec_end >= datetime(2026, 12, 31)
+    jan_start, _ = budgets._month_window("2027-01")
+    assert dec_end < jan_start
+    assert dec_end + timedelta(microseconds=1) == jan_start
 
 
 def test_variance_and_pct_math():
