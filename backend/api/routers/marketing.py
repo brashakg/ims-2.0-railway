@@ -548,7 +548,18 @@ async def send_rx_reminder(
                 except Exception:
                     created = None
             if created:
-                expiry_date_str = (created + timedelta(days=730)).strftime("%d %b %Y")
+                # BUG-104, VALUE rule (+5:30). This is the expiry date the
+                # PATIENT receives on WhatsApp. The stored created_at is a
+                # naive datetime.now() == the UTC wall clock (Railway runs
+                # UTC), so formatting the raw instant quoted an Rx recorded
+                # 00:00-05:30 IST with a day-early expiry -- and DISAGREED
+                # with the (already-fixed) staff alert screen above, which
+                # shows ist_date_str(expiry) for the same prescription. Both
+                # channels now derive the same IST calendar day.
+                expiry = created + timedelta(days=730)
+                expiry_date_str = datetime.strptime(
+                    ist_date_str(expiry), "%Y-%m-%d"
+                ).strftime("%d %b %Y")
 
     result = await send_notification(
         store_id=store_id,

@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # IST (TZ-P3): segment "today" defaults must be the IST business day -- the
 # server clock is UTC, which between 00:00-05:30 IST is still on yesterday.
-from api.utils.ist import now_ist_naive
+from api.utils.ist import ist_date_str, now_ist_naive
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,18 @@ def _resolve_rx_expiry(
         cid = rx.get("customer_id", "")
         if not cid:
             continue
-        exp_str = expiry.strftime("%d %b %Y")
+        # BUG-104, VALUE rule (+5:30). This is the `expiry_date` TEMPLATE
+        # TOKEN the rx_expiry campaign sends to the CUSTOMER -- the same
+        # defect, same customer, different channel as marketing.py's
+        # /rx-reminder. `created_at` here IS a stored instant (prescriptions
+        # rows are BaseRepository-stamped BSON datetimes == naive UTC wall
+        # clock), so the raw strftime quoted a day-early expiry for any Rx
+        # recorded 00:00-05:30 IST. Both channels must quote ONE date: this
+        # takes the IST calendar day of the expiry instant, exactly like the
+        # /rx-reminder fix.
+        exp_str = datetime.strptime(ist_date_str(expiry), "%Y-%m-%d").strftime(
+            "%d %b %Y"
+        )
         # keep the SOONEST expiry per customer
         if cid not in soonest:
             soonest[cid] = exp_str
@@ -635,7 +646,13 @@ def _resolve_lapsed_patient(
                 cust,
                 {
                     "months_lapsed": months,
-                    "last_touch_date": touch.date().isoformat() if touch else None,
+                    # BUG-104, VALUE rule (+5:30): the last-touch day shown on
+                    # the lapsed-patient audience row. `touch` is (usually) a
+                    # stored naive-UTC instant; .date() off it read the UTC
+                    # day, one day early for 00:00-05:30 IST touches.
+                    # ist_date_str shifts datetimes and leaves frame-less
+                    # values (already 'YYYY-MM-DD') unchanged.
+                    "last_touch_date": ist_date_str(touch) if touch else None,
                 },
             )
         )
