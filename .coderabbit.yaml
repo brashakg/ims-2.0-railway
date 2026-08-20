@@ -1,0 +1,34 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/getting-started/configure-coderabbit
+# Reviews every PR automatically once the CodeRabbit GitHub App is installed on this repo.
+language: "en-US"
+reviews:
+  profile: "chill"
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/dist/**"
+    - "!docs/reference/**"
+  path_instructions:
+    - path: "backend/api/**"
+      instructions: |
+        Prioritize flagging over-engineering: new abstractions used only once, duplicated
+        logic that could reuse an existing service, and dead or unreachable code.
+        Money paths (GST, pricing, discounts, refunds, credit notes, payroll, tender
+        reconciliation) deserve extra scrutiny: rounding and paisa-exactness, CGST/SGST
+        vs IGST splits, period-lock enforcement (423 when locked), idempotency of
+        financial writes, and atomicity of read-modify-write stock/loyalty updates.
+        Python source must not contain emoji (Windows cp1252 logging crashes on them).
+    - path: "frontend/src/**"
+      instructions: |
+        Flag unused exports and components, duplicated UI logic that could reuse an
+        existing shared component, and boolean-prop proliferation. The app theme is
+        light-only: flag dark-theme utility classes (bg-gray-800/900, text-gray-300 on
+        dark backgrounds) as regressions. API services must be imported directly from
+        their module, not the services/api barrel.
+chat:
+  auto_reply: true
