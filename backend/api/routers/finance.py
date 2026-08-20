@@ -4800,8 +4800,22 @@ async def cash_reconciliation_summary(
     for s in cr_sessions:
         # The "business day" is the close date (these sessions have no
         # session_date field). Fall back to opened_at.
+        # BUG-104, VALUE rule via parse-then-shift (the _credit_note_date_ist
+        # shape): closed_at/opened_at are written by _iso_now() ==
+        # datetime.utcnow().isoformat() -- a NAIVE-UTC ISO STRING, whose
+        # frame is known from the writer, so parse it to the instant FIRST
+        # and then take the IST day. Slicing [:10] read the UTC day: a till
+        # closed after midnight IST (00:00-05:30) filed under YESTERDAY's
+        # business day AND was range-filtered against the operator's IST
+        # start/end days in the wrong frame. Unparseable junk falls back to
+        # the old first-10-chars behaviour.
         closed_at = s.get("closed_at") or s.get("opened_at")
-        sess_day = str(closed_at or "")[:10]
+        _parsed_close = _to_dt(closed_at)
+        sess_day = (
+            ist_date_str(_parsed_close)
+            if _parsed_close is not None
+            else str(closed_at or "")[:10]
+        )
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)

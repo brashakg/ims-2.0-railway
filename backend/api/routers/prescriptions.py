@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 from typing_extensions import Literal
 from datetime import date, datetime, timedelta
+
+from ..utils.ist import now_ist_naive
 import uuid
 
 from .auth import get_current_user
@@ -1043,13 +1045,12 @@ def _rx_validity(rx: dict):
     snake/camel fields. prescription_date is checked first so that back-dated
     prescriptions created via POST /prescriptions (which stores prescription_date)
     compute the correct expiry rather than falling back to created_at."""
-    td = _parse_dt(
-        rx.get("prescription_date")
-        or rx.get("test_date")
-        or rx.get("testDate")
-        or rx.get("created_at")
-        or rx.get("createdAt")
-    )
+    raw = rx.get("prescription_date") or rx.get("test_date") or rx.get("testDate")
+    from_stored_instant = False
+    if not raw:
+        raw = rx.get("created_at") or rx.get("createdAt")
+        from_stored_instant = True
+    td = _parse_dt(raw)
     months = rx.get("validity_months") or rx.get("validityMonths") or 12
     try:
         months = int(months)
@@ -1057,8 +1058,21 @@ def _rx_validity(rx: dict):
         months = 12
     if td is None:
         return None, None
+    # BUG-104, VALUE rule, on the LEGACY FALLBACK LEG only. prescription_date
+    # / test_date are IST business dates (frame-less calendar values -- leave
+    # them). created_at is a stored instant on the UTC wall clock (a BSON
+    # datetime via BaseRepository, or a naive-UTC ISO string on the oldest
+    # rows -- _parse_dt also strips a trailing Z back to the naive-UTC
+    # instant), so for an eye test recorded 00:00-05:30 IST the displayed
+    # expiry_date was a day early. Shift that leg (+5:30, India has no DST)
+    # onto the IST wall clock so both legs share the IST frame, and compare
+    # validity against the IST clock -- not the UTC box clock, which between
+    # 00:00 and 05:30 IST called an Rx valid/expired 5h30m off its IST
+    # expiry moment.
+    if from_stored_instant and td.tzinfo is None:
+        td = td + timedelta(hours=5, minutes=30)
     expiry = _add_months(td, months)
-    return expiry, datetime.now() < expiry
+    return expiry, now_ist_naive() < expiry
 
 
 @router.get("/family/{customer_id}")
@@ -1585,20 +1599,20 @@ async def validate_prescription(
     _check("Right eye", rx.get("right_eye") or rx.get("rightEye"))
     _check("Left eye", rx.get("left_eye") or rx.get("leftEye"))
 
-    # Expiry — 12 months from test/created date unless validity set
+    # Expiry — 12 months from test/created date unless validity set.
+    # BUG-104 closing sweep (self-found): this block was a private fork of
+    # _rx_validity with THREE divergences -- it compared against utcnow()
+    # (the UTC box clock, not the IST clock), it skipped the created_at
+    # IST shift, and its hand-rolled month math raised ValueError on
+    # month-end dates (31-Jan + 1 month), silently reporting expired=False
+    # via the except. One validity computation now (day-clamped months, IST
+    # frame, prescription_date preferred) so this advisory can never
+    # disagree with the family-view expiry.
     expired = False
     try:
-        from datetime import datetime as _dt
-
-        test_date = rx.get("test_date") or rx.get("testDate") or rx.get("created_at")
-        months = int(rx.get("validity_months") or rx.get("validityMonths") or 12)
-        if test_date:
-            td = _dt.fromisoformat(str(test_date).replace("Z", "").split(".")[0])
-            expiry = td.replace(
-                year=td.year + (td.month - 1 + months) // 12,
-                month=(td.month - 1 + months) % 12 + 1,
-            )
-            expired = _dt.utcnow() > expiry
+        _expiry, _valid = _rx_validity(rx)
+        if _expiry is not None:
+            expired = not _valid
     except Exception:
         pass
 

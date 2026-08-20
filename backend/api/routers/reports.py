@@ -2328,8 +2328,15 @@ async def customer_acquisition(
             "retention_percent": 0,
         }
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule (the bound moves BACKWARD). from_date/to_date are
+    # IST calendar days the caller typed; created_at is a stored naive-UTC
+    # instant. Naive-midnight bounds dropped every customer/order created
+    # 00:00-05:30 IST on the first requested day (they fell before the
+    # window) and mis-claimed the same IST window of the day after to_date.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     # Get all customers (small enough N to walk in-process)
     all_customers = customer_repo.find_many({"store_id": active_store}, limit=0) or []
@@ -2340,7 +2347,10 @@ async def customer_acquisition(
         if isinstance(ca, datetime):
             return from_dt <= ca <= to_dt
         if isinstance(ca, str) and len(ca) >= 10:
-            return from_dt.date().isoformat() <= ca[:10] <= to_dt.date().isoformat()
+            # Legacy string rows carry no reliable frame: compare their raw
+            # day against the REQUESTED calendar days, exactly as before
+            # (deliberately NOT the shifted bounds above).
+            return from_date.isoformat() <= ca[:10] <= to_date.isoformat()
         return False
 
     new_customers = len([c for c in all_customers if _in_window(c.get("created_at"))])
@@ -4002,12 +4012,30 @@ async def promotions_report(
     flt: dict = {}
     if active_store:
         flt["store_id"] = active_store
-    # applied_at is an ISO string; string range compare is correct for ISO dates.
+    # applied_at IS an ISO string (promotions.py writes _now_iso() ==
+    # datetime.now().isoformat(), a NAIVE-UTC string on the UTC box), so a
+    # STRING bound is the right shape -- the frame was the bug, not the type.
+    # BUG-104, BOUND rule: start/end are IST calendar days the caller typed;
+    # 'T00:00:00' bounds compared the stored naive-UTC strings at UTC
+    # midnight, dropping every promo fired 00:00-05:30 IST on the first day
+    # and claiming the same window after the last. The IST day boundary
+    # expressed in the stored naive-UTC frame is ist_day_start_utc, emitted
+    # as an isoformat string so it stays lexically comparable.
     if start_date:
-        flt["applied_at"] = {"$gte": f"{start_date}T00:00:00"}
+        try:
+            _sd = date.fromisoformat(str(start_date)[:10])
+            flt["applied_at"] = {"$gte": ist_day_start_utc(_sd).isoformat()}
+        except ValueError:
+            flt["applied_at"] = {"$gte": f"{start_date}T00:00:00"}
     if end_date:
         flt.setdefault("applied_at", {})
-        flt["applied_at"]["$lte"] = f"{end_date}T23:59:59"
+        try:
+            _ed = date.fromisoformat(str(end_date)[:10])
+            flt["applied_at"]["$lt"] = ist_day_start_utc(
+                _ed + timedelta(days=1)
+            ).isoformat()
+        except ValueError:
+            flt["applied_at"]["$lte"] = f"{end_date}T23:59:59"
 
     try:
         apps = list(db.get_collection("promo_applications").find(flt))
