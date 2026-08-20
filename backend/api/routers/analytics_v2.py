@@ -26,7 +26,7 @@ from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ..utils.ist import ist_date_str, ist_today
+from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 
 router = APIRouter()
 
@@ -1034,15 +1034,20 @@ async def staff_leaderboard(
     if db is None:
         return {"leaderboard": [], "period": period}
 
-    now = datetime.now()
+    # BUG-104, BOUND rule -- and this leaderboard has a TWIN: payroll.py's
+    # /sales-leaderboard already computes today/week/month from the IST
+    # clock (now_ist + ist_day_start_utc). Off the box clock these two
+    # screens DISAGREED between 00:00 and 05:30 IST -- same staff, same
+    # orders, different ranks. Identical window math to the payroll twin so
+    # they can never diverge again.
+    now = now_ist()
+    today = now.date()
     if period == "today":
-        from_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        from_date = ist_day_start_utc(today)
     elif period == "week":
-        from_date = (now - timedelta(days=now.weekday())).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        from_date = ist_day_start_utc(today - timedelta(days=now.weekday()))
     else:
-        from_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from_date = ist_day_start_utc(today.replace(day=1))
 
     orders = list(
         db.get_collection("orders")
@@ -1245,9 +1250,30 @@ async def anomaly_detection(
     if db is None:
         return {"anomalies": [], "summary": {"total_anomalies": 0, "critical_count": 0}}
 
+    # BUG-104, BOUND rule (the bound moves BACKWARD; the stored value is
+    # never touched). date_from/date_to are IST calendar days the SUPERADMIN
+    # typed; created_at is a naive-UTC instant. A naive-midnight bound
+    # excluded every 00:00-05:30-IST void on the FIRST day of the range from
+    # the scan (round 1 fixed only the PRINTED dates at the grouping below),
+    # and the old $lte-to-midnight upper bound excluded the whole LAST
+    # requested day. ist_day_start_utc(from) .. one microsecond before
+    # ist_day_start_utc(to + 1 day) covers exactly the requested IST days.
+    # The no-dates default stays a rolling 30-day window (pure elapsed time
+    # in the stored frame -- no calendar boundary, nothing to shift).
     now = datetime.now()
-    dt_from = _parse_date(date_from) or (now - timedelta(days=30))
-    dt_to = _parse_date(date_to) or now
+    parsed_from = _parse_date(date_from)
+    parsed_to = _parse_date(date_to)
+    dt_from = (
+        ist_day_start_utc(parsed_from.date())
+        if parsed_from is not None
+        else (now - timedelta(days=30))
+    )
+    dt_to = (
+        ist_day_start_utc(parsed_to.date() + timedelta(days=1))
+        - timedelta(microseconds=1)
+        if parsed_to is not None
+        else now
+    )
 
     orders = list(
         db.get_collection("orders")
