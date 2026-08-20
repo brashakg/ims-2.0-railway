@@ -44,12 +44,11 @@ jobs:
         continue-on-error: true
 
       - name: Run unit tests
-        run: npm run test:unit -- --coverage --maxWorkers=2 || true
-        continue-on-error: true
-
-      - name: Run integration tests
-        run: npm run test:integration -- --maxWorkers=2 || true
-        continue-on-error: true
+        # These steps used to call `npm run test:unit` / `test:integration`,
+        # scripts that were never defined -- `|| true` + continue-on-error
+        # masked the missing-script error, so frontend tests silently never
+        # ran in CI. This is the real vitest suite, and it gates the merge.
+        run: npm run test:coverage -- --maxWorkers=2
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
