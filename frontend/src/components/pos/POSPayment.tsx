@@ -33,7 +33,7 @@ function fc(amount: number | undefined | null): string {
 // ============================================================================
 // Cash Change Calculator
 // ============================================================================
-function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: number }) {
+function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
   const [cashTendered, setCashTendered] = useState('');
   const tendered = parseFloat(cashTendered) || 0;
   const change = tendered - grandTotal;
@@ -280,7 +280,7 @@ export function StepPayment() {
 
       {/* Cash change calculator — only if cash payment was added */}
       {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
-        <CashChangeCalculator grandTotal={total} totalPaid={paid} />
+        <CashChangeCalculator grandTotal={total} />
       )}
 
       {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}

@@ -66,7 +66,6 @@ export interface CartLineItem {
   // Optical linkage
   is_optical: boolean;
   linked_prescription_id?: string;
-  linked_frame_id?: string;      // For lenses linked to a frame
   lens_details?: {
     type: string;                // Single Vision / Bifocal / Progressive
     material: string;            // CR-39 / Polycarbonate / Hi-Index
@@ -152,14 +151,11 @@ export interface POSState {
   order_id: string | null;
   order_number: string | null;
 
-  // Customer loyalty & history
+  // Customer loyalty
   customerLoyaltyPoints: number;
-  customerLastOrder?: { productName: string; monthsAgo: number };
-  customerLastRx?: any[];
 
   // Voucher & rewards
   appliedVoucher?: { code: string; discountAmount: number };
-  loyaltyPointsRedeemed: number;
   // POS-3: deferred loyalty redemption intent. Points are NOT debited until
   // the order is confirmed. The intent is stored here so the payment panel
   // can show the LOYALTY line; actual /loyalty/redeem call happens in
@@ -173,8 +169,6 @@ export interface POSState {
 
   // Navigation
   setStep: (step: POSStep) => void;
-  nextStep: () => void;
-  prevStep: () => void;
 
   // Sale type
   setSaleType: (type: SaleType) => void;
@@ -196,7 +190,6 @@ export interface POSState {
   applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
   updateItemNote: (lineId: string, note: string) => void;
   setCartNote: (note: string) => void;
-  linkLensToFrame: (lensLineId: string, frameLineId: string) => void;
 
   // Payment
   addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => void;
@@ -216,10 +209,8 @@ export interface POSState {
 
   // --- Loyalty & Vouchers ---
   setCustomerLoyaltyPoints: (points: number) => void;
-  setCustomerHistory: (lastOrder?: any, lastRx?: any) => void;
   applyVoucher: (code: string, discountAmount: number) => void;
   removeVoucher: () => void;
-  redeemLoyaltyPoints: (pointsToRedeem: number) => void;
   // POS-3: store a deferred redemption intent without debiting points yet.
   setPendingLoyaltyRedeem: (intent: { points: number; rupeeValue: number; orderValue: number } | null) => void;
   clearPendingLoyaltyRedeem: () => void;
@@ -248,14 +239,6 @@ export interface POSState {
   getTotalPaid: () => number;
   getBalance: () => number;
 }
-
-// ============================================================================
-// Step Order (for next/prev)
-// ============================================================================
-
-const STEP_ORDER: POSStep[] = ['customer', 'prescription', 'products', 'review', 'payment', 'complete'];
-
-const QUICK_SALE_STEPS: POSStep[] = ['customer', 'products', 'review', 'payment', 'complete'];
 
 // ============================================================================
 // Helpers
@@ -324,10 +307,7 @@ const initialState = {
   order_number: null,
   is_processing: false,
   customerLoyaltyPoints: 0,
-  customerLastOrder: undefined,
-  customerLastRx: undefined,
   appliedVoucher: undefined,
-  loyaltyPointsRedeemed: 0,
   pendingLoyaltyRedeem: null,
 };
 
@@ -342,22 +322,6 @@ export const usePOSStore = create<POSState>()(
 
       // --- Navigation ---
       setStep: (step: POSStep) => set({ current_step: step }),
-
-      nextStep: () => {
-        const steps = get().sale_type === 'quick_sale' ? QUICK_SALE_STEPS : STEP_ORDER;
-        const idx = steps.indexOf(get().current_step);
-        if (idx < steps.length - 1) {
-          set({ current_step: steps[idx + 1] });
-        }
-      },
-
-      prevStep: () => {
-        const steps = get().sale_type === 'quick_sale' ? QUICK_SALE_STEPS : STEP_ORDER;
-        const idx = steps.indexOf(get().current_step);
-        if (idx > 0) {
-          set({ current_step: steps[idx - 1] });
-        }
-      },
 
       // --- Sale Type ---
       setSaleType: (type) => set({ sale_type: type }),
@@ -455,16 +419,6 @@ export const usePOSStore = create<POSState>()(
 
       setCartNote: (note: string) => set({ cart_note: note }),
 
-      linkLensToFrame: (lensLineId: string, frameLineId: string) => {
-        set((state: POSState) => ({
-          cart: (state.cart || []).map((item: CartLineItem) =>
-            item.id === lensLineId
-              ? { ...item, linked_frame_id: frameLineId }
-              : item
-          ),
-        }));
-      },
-
       // --- Payment ---
       addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => {
         set((state: POSState) => ({
@@ -519,20 +473,11 @@ export const usePOSStore = create<POSState>()(
       // --- Loyalty & Vouchers ---
       setCustomerLoyaltyPoints: (points: number) => set({ customerLoyaltyPoints: points }),
 
-      setCustomerHistory: (lastOrder?: any, lastRx?: any) => set({
-        customerLastOrder: lastOrder,
-        customerLastRx: lastRx
-      }),
-
       applyVoucher: (code: string, discountAmount: number) => set({
         appliedVoucher: { code, discountAmount }
       }),
 
       removeVoucher: () => set({ appliedVoucher: undefined }),
-
-      redeemLoyaltyPoints: (pointsToRedeem: number) => set({
-        loyaltyPointsRedeemed: pointsToRedeem
-      }),
 
       // POS-3: deferred loyalty redemption (points debited AFTER order create)
       setPendingLoyaltyRedeem: (intent) => set({ pendingLoyaltyRedeem: intent }),
@@ -752,10 +697,7 @@ export const usePOSStore = create<POSState>()(
         patient: null,
         prescription: null,
         customerLoyaltyPoints: 0,
-        customerLastOrder: undefined,
-        customerLastRx: undefined,
         appliedVoucher: undefined,
-        loyaltyPointsRedeemed: 0,
         pendingLoyaltyRedeem: null,
         // Reset transient state
         is_processing: false,

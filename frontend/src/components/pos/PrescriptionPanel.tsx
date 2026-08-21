@@ -8,7 +8,7 @@ import { Eye, Edit3, Check, X, Link2 } from 'lucide-react';
 import type { Prescription, EyePower } from '../../types';
 // PATIENT SAFETY: a recorded 0 power is a finding, not a blank -- never
 // `value={x || ''}` and never `{x && <row/>}` on a power. See rxPowerValue.
-import { hasRecordedPower, powerInputValue } from '../../utils/rxPowerValue';
+import { formatPowerOrDash, hasRecordedPower, powerInputValue } from '../../utils/rxPowerValue';
 
 interface PrescriptionPanelProps {
   prescription: Prescription;
@@ -30,10 +30,7 @@ export function PrescriptionPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [editedPrescription, setEditedPrescription] = useState<Prescription>(prescription);
 
-  const formatPower = (value: number | null | undefined) => {
-    if (value === null || value === undefined) return '-';
-    return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
-  };
+  const formatPower = formatPowerOrDash;
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-IN', {

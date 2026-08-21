@@ -7,11 +7,7 @@ import { usePOSStore } from '../../stores/posStore';
 import { vouchersApi } from '../../services/api/vouchers';
 import { Gift, X, Loader2, AlertCircle } from 'lucide-react';
 
-interface VoucherRedemptionProps {
-  onVoucherApplied?: (discountAmount: number) => void;
-}
-
-export function VoucherRedemption({ onVoucherApplied }: VoucherRedemptionProps) {
+export function VoucherRedemption() {
   const store = usePOSStore();
   const [voucherCode, setVoucherCode] = useState('');
   const [isValidating, setIsValidating] = useState(false);
@@ -55,7 +51,6 @@ export function VoucherRedemption({ onVoucherApplied }: VoucherRedemptionProps) 
       });
 
       setVoucherCode('');
-      onVoucherApplied?.(discountAmount);
       setIsValidating(false);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to validate voucher. Please try again.';

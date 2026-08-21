@@ -45,8 +45,6 @@
 
 import { isBlankValue } from './rxAxisEntry';
 
-export { isBlankValue };
-
 /**
  * A power for the WIRE, where the backend field is a string
  * (`EyeData.sph/cyl/add: Optional[str] = None`).
