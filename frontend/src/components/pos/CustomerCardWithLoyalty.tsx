@@ -13,7 +13,7 @@
 // on the Payment step will see the same fallback state.
 
 import { useEffect, useState } from 'react';
-import { Award, Eye, ShoppingBag, Clock } from 'lucide-react';
+import { Award, Clock } from 'lucide-react';
 import clsx from 'clsx';
 
 import { usePOSStore } from '../../stores/posStore';
@@ -100,39 +100,6 @@ export function CustomerCardWithLoyalty() {
               )}
             </div>
           </div>
-
-          {/* Last Prescription Summary */}
-          {store.customerLastRx && store.customerLastRx.length > 0 && (
-            <div className="bg-white rounded-lg p-3 border border-blue-100">
-              <div className="flex items-center gap-2 mb-2">
-                <Eye className="w-5 h-5 text-blue-600" />
-                <span className="font-medium text-gray-900 text-sm">Last Prescription</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-xs text-gray-500">
-                {store.customerLastRx.map((rx: any, idx: number) => (
-                  <div key={idx} className="bg-gray-100 rounded p-2">
-                    <p className="font-semibold text-gray-700">{rx.eyeSide}</p>
-                    <p>SPH: {rx.sph || '-'}</p>
-                    {rx.cyl && <p>CYL: {rx.cyl}</p>}
-                    {rx.add && <p>ADD: {rx.add}</p>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Last Order */}
-          {store.customerLastOrder && (
-            <div className="bg-white rounded-lg p-3 border border-green-100">
-              <div className="flex items-center gap-2">
-                <ShoppingBag className="w-5 h-5 text-green-600" />
-                <div className="text-sm">
-                  <p className="font-medium text-gray-900">Last bought: {store.customerLastOrder.productName}</p>
-                  <p className="text-xs text-gray-500">{store.customerLastOrder.monthsAgo} months ago</p>
-                </div>
-              </div>
-            </div>
-          )}
         </>
       )}
 
