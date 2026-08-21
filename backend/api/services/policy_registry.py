@@ -791,6 +791,27 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "within 7 days (overdue bills are MUST_PAY regardless). "
         "Empty = only the per-bill vendor_critical flag applies.",
     ),
+    # --- POS EMI financing ---
+    # SINGLE source of truth for the EMI annual interest rate. The order
+    # add-payment endpoint (routers/orders.py) builds the EMI schedule from
+    # this policy, and the POS payment screen reads the SAME key via
+    # GET /settings/policies/{key}?scope=store:<id> so the on-screen quote
+    # always matches what the backend charges. The POSPayment.tsx fallback
+    # constant mirrors this default -- change both together.
+    _spec(
+        key="pos.emi_annual_rate_percent",
+        type="percent",
+        default=12.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Finance",
+        label="EMI annual interest rate %",
+        help="Annual interest rate used for in-store EMI schedules. The POS "
+        "payment screen quotes and the order records the same rate. "
+        "0 = no-cost EMI.",
+        minimum=0,
+        maximum=60,
+    ),
     # --- HR: half-day attendance rule (owner-requested, settings-system) ---
     # DARK by default: with hr.half_day_auto = False the attendance flow behaves
     # exactly as today (status is whatever the admin marks). Turning it ON makes
@@ -840,6 +861,28 @@ REGISTRY = {s.key: s for s in _REGISTRY_LIST}
 # Union of all write roles across the registry -- the coarse RBAC-table gate for
 # the PUT/DELETE endpoints (the per-key write_roles is the fine-grained gate).
 ALL_WRITE_ROLES = sorted({r for s in _REGISTRY_LIST for r in s.write_roles})
+
+
+def resolve_emi_annual_rate(store_id) -> float:
+    """Effective EMI annual rate (%) for a store: policy
+    `pos.emi_annual_rate_percent` resolved store > entity > global > registry
+    default (12.0). Fail-soft to the registry default so a policy-engine hiccup
+    never blocks a payment or a store read.
+
+    THE ONE DEFINITION. Both consumers -- the order/payment engine
+    (orders.py) and the store-detail read the POS screen quotes from
+    (stores.py) -- import THIS function, so the rate a cashier shows a
+    customer and the rate the order charges cannot drift apart. That
+    screen-vs-charge divergence is the exact defect PR #997 exists to close;
+    do not re-inline this in a router.
+    """
+    try:
+        from . import policy_engine
+
+        scope = {"store_id": store_id} if store_id else None
+        return float(policy_engine.get_policy("pos.emi_annual_rate_percent", scope))
+    except Exception:  # noqa: BLE001
+        return 12.0  # mirrors the registry default for pos.emi_annual_rate_percent
 
 
 def spec_to_public(s: PolicySpec) -> dict:

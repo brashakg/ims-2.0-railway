@@ -82,12 +82,12 @@ export interface CartLineItem {
   // Calculated
   line_total: number;            // (unit_price * quantity) - discount_amount
 
-  // Item-level notes (PD, fitting, tint, etc.)
-  notes?: string;
-
-  // Second note field used by POSLayout's optical-detail panel (distinct
-  // from `notes`, which is written by POSCart). Kept as a separate field
-  // because the two UIs show/write them independently.
+  // Item-level note (PD, fitting, tint, etc.). ONE field, edited from both
+  // the cart panel and the Review step, and ALWAYS sent to the backend as
+  // `item_note` (OrderItemCreate.item_note). A legacy twin field `notes`
+  // existed until 2026-08-21 — cart-panel notes went there and were silently
+  // dropped from the order payload; restoreHeldSale/rehydrate still fold an
+  // old snapshot's `notes` into this field so parked bills keep their notes.
   item_note?: string;
 }
 
@@ -190,7 +190,6 @@ export interface POSState {
   applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
   updateItemNote: (lineId: string, note: string) => void;
   setCartNote: (note: string) => void;
-  setItemNote: (lineId: string, note: string) => void;
 
   // Payment
   addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => void;
@@ -263,6 +262,16 @@ function recalcCartDiscountAmount(cart: CartLineItem[], percent: number): number
     0,
   );
   return Math.round(subtotalAfterItem * (percent / 100) * 100) / 100;
+}
+
+// Held bills / persisted drafts parked BEFORE the notes/item_note merge
+// (2026-08-21) may carry the legacy `notes` field. Fold it into `item_note`
+// so recalling a parked bill never loses a staff note. When BOTH exist the
+// Review-step field (`item_note`) wins — it was the one the order sent.
+function migrateLegacyItemNote(item: any): CartLineItem {
+  const { notes, ...rest } = item || {};
+  if (notes && !rest.item_note) rest.item_note = notes;
+  return rest as CartLineItem;
 }
 
 function generateLineId(): string {
@@ -403,17 +412,12 @@ export const usePOSStore = create<POSState>()(
       updateItemNote: (lineId: string, note: string) => {
         set((state: POSState) => ({
           cart: (state.cart || []).map((item: CartLineItem) =>
-            item.id === lineId ? { ...item, notes: note } : item
+            item.id === lineId ? { ...item, item_note: note } : item
           ),
         }));
       },
 
       setCartNote: (note: string) => set({ cart_note: note }),
-      setItemNote: (lineId: string, note: string) => set((state: POSState) => ({
-        cart: (state.cart || []).map((item: CartLineItem) =>
-          item.id === lineId ? { ...item, item_note: note } : item
-        ),
-      })),
 
       // --- Payment ---
       addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => {
@@ -554,7 +558,7 @@ export const usePOSStore = create<POSState>()(
       restoreHeldSale: (snapshot: any) => {
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
-        const cart: CartLineItem[] = Array.isArray(snap.cart) ? snap.cart : [];
+        const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
         const percent = snap.cart_discount_percent || 0;
         set({
           ...initialState,
@@ -705,6 +709,9 @@ export const usePOSStore = create<POSState>()(
       onRehydrateStorage: () => (state: POSState | undefined) => {
         if (state) {
           if (!Array.isArray(state.cart)) state.cart = [];
+          // Fold the pre-2026-08-21 legacy `notes` field into `item_note` so a
+          // draft persisted before the merge keeps its notes on the order.
+          state.cart = state.cart.map(migrateLegacyItemNote);
           if (!Array.isArray(state.payments)) state.payments = [];
           state.current_step = 'customer'; // Always start fresh on page load
           state.is_processing = false;
