@@ -8,15 +8,21 @@
 // (bg-white/900, text-gray-700/400, *-900/30 alpha overlays) with the
 // app's light-theme tokens. Pure visual change, no logic touched.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   IndianRupee, Phone, CreditCard, FileText,
   CheckCircle, X,
 } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
+import { policiesApi } from '../../services/api/settings';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
 import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
+
+// Fallback while the policy fetch is in flight / failed. MIRRORS the backend
+// registry default for `pos.emi_annual_rate_percent` (backend
+// api/services/policy_registry.py) -- change both together.
+const EMI_ANNUAL_RATE_PERCENT_FALLBACK = 12;
 
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
@@ -76,6 +82,22 @@ export function StepPayment() {
   const [emiProvider, setEmiProvider] = useState('HDFC');
   const [emiTenure, setEmiTenure] = useState(12);
   const [emiDownPayment, setEmiDownPayment] = useState('');
+  // The rate the BACKEND will apply: policy `pos.emi_annual_rate_percent`
+  // resolved for this store (same resolution the order add-payment endpoint
+  // uses to build the schedule). Until it loads, mirror the backend default.
+  const [emiAnnualRatePct, setEmiAnnualRatePct] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    policiesApi
+      .getOne('pos.emi_annual_rate_percent', store.store_id ? `store:${store.store_id}` : undefined)
+      .then((p) => {
+        const v = Number(p?.value);
+        if (alive && Number.isFinite(v)) setEmiAnnualRatePct(v);
+      })
+      .catch(() => { /* keep fallback */ });
+    return () => { alive = false; };
+  }, [store.store_id]);
+  const annualRatePct = emiAnnualRatePct ?? EMI_ANNUAL_RATE_PERCENT_FALLBACK;
 
   const emiProviders = ['HDFC', 'ICICI', 'AXIS', 'ADITYA BIRLA', 'BAJAJ', 'INDIABULLS'];
   const emiTenures = [3, 6, 9, 12, 18, 24];
@@ -95,9 +117,7 @@ export function StepPayment() {
     // (which reduces balance_due); emiBalance is forwarded to the backend
     // as emi_principal so the schedule is computed on the correct base.
     const emiBalance = balance - downPayment;
-    // EMI rate fetched from store settings; falls back to 12% annual
-    const annualRate = (store as any).emiAnnualRate ?? 0.12;
-    const monthlyRate = annualRate / 12;
+    const monthlyRate = annualRatePct / 100 / 12;
     const monthlyEMI = calculateEMI(emiBalance, monthlyRate, emiTenure);
     const processingFee = (emiBalance * 0.02);
     store.addPayment({
@@ -215,8 +235,9 @@ export function StepPayment() {
             {emiDownPayment && (
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
                 <div className="flex justify-between"><span className="text-gray-700">Loan Amount:</span><span className="font-semibold text-gray-900">{'₹'}{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Interest Rate:</span><span className="font-semibold text-gray-900">{annualRatePct}% p.a.</span></div>
                 <div className="flex justify-between"><span className="text-gray-700">Processing Fee (2%):</span><span className="font-semibold text-gray-900">{'₹'}{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700" data-testid="emi-monthly-quote">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), annualRatePct / 100 / 12, emiTenure) * 100) / 100}</span></div>
               </div>
             )}
             <div className="flex gap-2">

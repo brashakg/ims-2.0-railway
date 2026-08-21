@@ -791,6 +791,27 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "within 7 days (overdue bills are MUST_PAY regardless). "
         "Empty = only the per-bill vendor_critical flag applies.",
     ),
+    # --- POS EMI financing ---
+    # SINGLE source of truth for the EMI annual interest rate. The order
+    # add-payment endpoint (routers/orders.py) builds the EMI schedule from
+    # this policy, and the POS payment screen reads the SAME key via
+    # GET /settings/policies/{key}?scope=store:<id> so the on-screen quote
+    # always matches what the backend charges. The POSPayment.tsx fallback
+    # constant mirrors this default -- change both together.
+    _spec(
+        key="pos.emi_annual_rate_percent",
+        type="percent",
+        default=12.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Finance",
+        label="EMI annual interest rate %",
+        help="Annual interest rate used for in-store EMI schedules. The POS "
+        "payment screen quotes and the order records the same rate. "
+        "0 = no-cost EMI.",
+        minimum=0,
+        maximum=60,
+    ),
     # --- HR: half-day attendance rule (owner-requested, settings-system) ---
     # DARK by default: with hr.half_day_auto = False the attendance flow behaves
     # exactly as today (status is whatever the admin marks). Turning it ON makes

@@ -635,6 +635,11 @@ export const policiesApi = {
     const r = await api.get('/settings/policies', { params: scope ? { scope } : {} });
     return r.data;
   },
+  /** Effective value of ONE key at a scope ("store:<id>" | "entity:<id>" | undefined=global). */
+  getOne: async (key: string, scope?: string): Promise<PolicyEffective> => {
+    const r = await api.get(`/settings/policies/${encodeURIComponent(key)}`, { params: scope ? { scope } : {} });
+    return r.data;
+  },
   set: async (key: string, value: any, scope?: Record<string, string> | null): Promise<PolicyEffective> => {
     const r = await api.put(`/settings/policies/${encodeURIComponent(key)}`, { value, scope: scope || null });
     return r.data;
