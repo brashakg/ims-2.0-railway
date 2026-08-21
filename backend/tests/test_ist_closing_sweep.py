@@ -497,6 +497,134 @@ def test_owner_brief_top_skus_is_no_longer_permanently_empty():
     assert skus[0]["qty_sold"] == 2  # the 5-day-old order only, not the 40-day
 
 
+# ---------------------------------------------------------------------------
+# 4b. SELF-FOUND in the closing sweep (declared in the PR table): five more
+# dead or mis-framed counters in the same owner brief, fixed alongside the
+# four named sites. Each proven the same way.
+# ---------------------------------------------------------------------------
+
+
+def _jarvis_ctx(now=EARLY, **colls):
+    from api.utils.ist import ist_day_start_utc as _real_start
+
+    frozen_today = (now + timedelta(hours=5, minutes=30)).date()
+    db = _DB(**colls)
+
+    def _coll(name):
+        return db.get_collection(name) if name in colls else None
+
+    with _PatchAttrs(
+        jarvis_mod,
+        datetime=_frozen(now),
+        get_db_collection=_coll,
+        ist_today=lambda: frozen_today,
+        now_ist=lambda: _ist_now_of(now),
+        ist_day_start_utc=lambda d=None: _real_start(d if d is not None else frozen_today),
+    ):
+        return jarvis_mod.JarvisAnalyticsEngine.get_extended_context()
+
+
+def test_owner_brief_grn_count_is_no_longer_permanently_zero():
+    """Self-found DEAD QUERY: grns.created_at is a BSON datetime; the old
+    '%Y-%m-%d' string bound matched nothing and the brief always said 0 GRNs."""
+    grns = [
+        {"grn_id": "ZZ-G1", "created_at": EARLY - timedelta(days=5)},
+        {"grn_id": "ZZ-G2", "created_at": EARLY - timedelta(days=40)},
+    ]
+    ctx = _jarvis_ctx(grns=grns)
+    assert ctx["grns_last_30d"] == 1  # elapsed 30d: the 40-day-old row stays out
+
+
+def test_owner_brief_alert_count_reads_the_field_sentinel_writes():
+    """Self-found field-name miss: SENTINEL stamps `timestamp` (BSON datetime),
+    never `created_at` -- the 7-day alert count was permanently 0 twice over."""
+    alerts = [{"alert_id": "ZZ-A1", "timestamp": EARLY - timedelta(days=1)}]
+    ctx = _jarvis_ctx(alert_history=alerts)
+    assert ctx["alerts_last_7d"] == 1
+
+
+def test_owner_brief_webhook_inbox_count_is_no_longer_permanently_zero():
+    """Self-found DEAD QUERY: webhook_inbox.received_at is a BSON datetime."""
+    inbox = [{"webhook_id": "ZZ-W1", "received_at": EARLY - timedelta(hours=2)}]
+    ctx = _jarvis_ctx(webhook_inbox=inbox)
+    assert ctx["webhook_inbox_recent"] == 1
+
+
+def test_owner_brief_tally_exports_reads_the_field_nexus_writes():
+    """Self-found field-name miss: NEXUS stamps `generated_at` (aware-UTC ISO
+    string), never `exported_at` -- the count was permanently 0."""
+    exports = [
+        {
+            "export_id": "ZZ-T1",
+            "generated_at": (EARLY - timedelta(days=1)).isoformat() + "+00:00",
+        }
+    ]
+    ctx = _jarvis_ctx(tally_exports=exports)
+    assert ctx["tally_exports_recent"] == 1
+
+
+def test_owner_brief_marketing_sent_today_starts_at_ist_midnight():
+    """Self-found BOUND on a string column in the string's own frame: a send at
+    01:00 IST on 1 July ('2026-06-30T19:30:00') is TODAY at 01:30 IST; a
+    16:30-IST 30-June send is yesterday (positive control)."""
+    logs = [
+        {"sent_at": "2026-06-30T19:30:00"},
+        {"sent_at": "2026-06-30T12:00:00"},
+    ]
+    ctx = _jarvis_ctx(notification_logs=logs)
+    assert ctx["marketing"]["sent_today"] == 1
+    assert ctx["marketing"]["sent_this_week"] == 2
+
+
+def test_owner_brief_expense_month_is_the_ist_month():
+    """Self-found month label: expenses.date is an operator-typed IST
+    business-date string; 'this month' must be the IST month, which at 01:30
+    IST on 1 July is JULY while the UTC box still says June."""
+    expenses = [
+        {"date": "2026-07-01", "amount": 500.0, "category": "TEA"},
+        {"date": "2026-06-28", "amount": 999.0, "category": "TEA"},
+    ]
+    ctx = _jarvis_ctx(expenses=expenses)
+    assert ctx["expenses_mtd"]["total_this_month"] == 500.0
+
+
+def test_owner_brief_payroll_and_targets_use_the_ist_month_key():
+    """Self-found month labels: salary_records.month and targets.period are
+    'YYYY-MM' IST payroll/business periods."""
+    ctx = _jarvis_ctx(
+        salary_records=[{"month": "2026-07", "net_pay": 15000.0}],
+        targets=[{"store_id": STORE, "period": "2026-07", "target_amount": 1.0}],
+    )
+    assert ctx["payroll_mtd"]["records_this_month"] == 1
+    assert len(ctx["targets"]) == 1
+
+
+def test_reengagement_nudge_no_longer_calls_every_customer_lapsed():
+    """Self-found DEAD QUERY in get_recommendations: the string 180-day bound
+    matched no BSON-datetime orders, so recent_buyer_ids was always empty and
+    the re-engagement nudge fired on the ENTIRE customer base."""
+    customers = [{"customer_id": "ZZ-C%d" % i} for i in range(20)]
+    orders = [
+        {"customer_id": "ZZ-C%d" % i, "created_at": EARLY - timedelta(days=10)}
+        for i in range(16)
+    ]
+    db = _DB(customers=customers, orders=orders)
+
+    def _coll(name):
+        return db.get_collection(name) if name in ("customers", "orders") else None
+
+    with _PatchAttrs(
+        jarvis_mod,
+        datetime=_frozen(EARLY),
+        get_db_collection=_coll,
+        ist_today=lambda: date(2026, 7, 1),
+        now_ist=lambda: _ist_now_of(EARLY),
+    ):
+        recs = jarvis_mod.JarvisAnalyticsEngine.get_recommendations()
+    # 16 of 20 bought recently -> only 4 lapsed, below the >= 5 nudge floor.
+    assert not any("re-engage" in str(r).lower() or "lapsed" in str(r).lower() for r in recs), recs
+
+
 # ===========================================================================
 # 5. MIS-TABLED: the rx_expiry campaign token (must AGREE with item 1)
 # ===========================================================================
