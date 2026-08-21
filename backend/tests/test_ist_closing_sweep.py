@@ -592,7 +592,10 @@ def test_owner_brief_payroll_and_targets_use_the_ist_month_key():
     """Self-found month labels: salary_records.month and targets.period are
     'YYYY-MM' IST payroll/business periods."""
     ctx = _jarvis_ctx(
-        salary_records=[{"month": "2026-07", "net_pay": 15000.0}],
+        salary_records=[
+            {"month": "2026-07", "net_pay": 15000.0},
+            {"month": "2026-06", "net_pay": 14000.0},  # last month: must stay out
+        ],
         targets=[{"store_id": STORE, "period": "2026-07", "target_amount": 1.0}],
     )
     assert ctx["payroll_mtd"]["records_this_month"] == 1
@@ -757,14 +760,15 @@ def test_customer_acquisition_window_covers_the_requested_ist_days():
     1 July does not; the 16:30-IST 30-June one does (positive control); and a
     legacy string row keeps the old calendar-day comparison."""
     customers = [
-        {"customer_id": "ZZ-A", "created_at": datetime(2026, 5, 31, 19, 0)},
+        {"customer_id": "ZZ-A1", "created_at": datetime(2026, 5, 31, 19, 0)},
+        {"customer_id": "ZZ-A2", "created_at": datetime(2026, 5, 31, 19, 30)},
         {"customer_id": "ZZ-B", "created_at": datetime(2026, 6, 30, 19, 0)},
         {"customer_id": "ZZ-C", "created_at": AFTERNOON},
         {"customer_id": "ZZ-D", "created_at": "2026-06-15T12:00:00"},
     ]
     out = _acquisition(customers, date(2026, 6, 1), date(2026, 6, 30))
-    assert out["new_customers"] == 3  # ZZ-A + ZZ-C + ZZ-D, not ZZ-B
-    assert out["total_customers"] == 4
+    assert out["new_customers"] == 4  # ZZ-A1 + ZZ-A2 + ZZ-C + ZZ-D, not ZZ-B
+    assert out["total_customers"] == 5
 
 
 def test_customer_acquisition_first_day_alone_still_catches_the_early_signup():
