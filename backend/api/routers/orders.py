@@ -1048,18 +1048,10 @@ def generate_order_number(store_id: str) -> str:
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
-def _emi_annual_rate(store_id) -> float:
-    """Effective EMI annual rate (%) for a store: policy
-    `pos.emi_annual_rate_percent` resolved store > entity > global >
-    registry default (12.0). Fail-soft to the registry default so a policy-
-    engine hiccup never blocks a payment."""
-    try:
-        from ..services import policy_engine
-
-        scope = {"store_id": store_id} if store_id else None
-        return float(policy_engine.get_policy("pos.emi_annual_rate_percent", scope))
-    except Exception:  # noqa: BLE001
-        return 12.0  # mirrors the registry default for pos.emi_annual_rate_percent
+# The EMI rate has ONE definition -- services/policy_registry.resolve_emi_annual_rate
+# -- shared with the store-detail read the POS screen quotes from. An alias,
+# not a copy: re-inlining it here is how the screen and the charge drift apart.
+from ..services.policy_registry import resolve_emi_annual_rate as _emi_annual_rate
 
 
 def build_emi_schedule(principal: float, annual_rate: float, months: int) -> dict:

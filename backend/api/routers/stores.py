@@ -14,6 +14,7 @@ from .auth import get_current_user, require_roles
 # this router's roster reuses it rather than maintaining a second field list
 # (see the P0 note at get_store_users).
 from .users import picker_user
+from ..services.policy_registry import resolve_emi_annual_rate
 from ..dependencies import (
     get_store_repository,
     get_user_repository,
@@ -582,6 +583,15 @@ async def get_store(store_id: str, current_user: dict = Depends(get_current_user
     if repo is not None:
         store = repo.find_by_id(store_id)
         if store is not None:
+            # RESOLVED EMI RATE, on the one store read every POS role already
+            # has (this route is AUTHENTICATED + store-scoped). The policies
+            # endpoint is deliberately NOT open to SALES_CASHIER/SALES_STAFF,
+            # and widening it would hand cashiers every policy value in the
+            # system just to fetch one number. Delivering the single resolved
+            # figure here keeps least-privilege AND closes the quote-vs-charge
+            # gap: the same shared resolver computes what the order will
+            # actually charge (orders.py imports it too).
+            store["emi_annual_rate_percent"] = resolve_emi_annual_rate(store_id)
             return store
         raise HTTPException(status_code=404, detail="Store not found")
 

@@ -65,6 +65,10 @@ vi.mock('../../../services/api', () => {
     adminStoreApi: { listStores: noop, getStoreUsers: () => Promise.resolve([]), getStaff: () => Promise.resolve([]) },
     inventoryApi: { searchByBarcode: noop },
     loyaltyApi: { redeem: noop, getBalance: noop },
+    // POSPayment reads the EMI rate off the store detail; an unmocked read
+    // here would reject and the screen falls back to 12% -- fine for these
+    // tests, but mock it resolved so no unhandled-rejection noise.
+    storeApi: { getStore: () => Promise.resolve({ store_id: 'BV-BOK-01' }) },
   };
 });
 

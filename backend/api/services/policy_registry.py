@@ -863,6 +863,28 @@ REGISTRY = {s.key: s for s in _REGISTRY_LIST}
 ALL_WRITE_ROLES = sorted({r for s in _REGISTRY_LIST for r in s.write_roles})
 
 
+def resolve_emi_annual_rate(store_id) -> float:
+    """Effective EMI annual rate (%) for a store: policy
+    `pos.emi_annual_rate_percent` resolved store > entity > global > registry
+    default (12.0). Fail-soft to the registry default so a policy-engine hiccup
+    never blocks a payment or a store read.
+
+    THE ONE DEFINITION. Both consumers -- the order/payment engine
+    (orders.py) and the store-detail read the POS screen quotes from
+    (stores.py) -- import THIS function, so the rate a cashier shows a
+    customer and the rate the order charges cannot drift apart. That
+    screen-vs-charge divergence is the exact defect PR #997 exists to close;
+    do not re-inline this in a router.
+    """
+    try:
+        from . import policy_engine
+
+        scope = {"store_id": store_id} if store_id else None
+        return float(policy_engine.get_policy("pos.emi_annual_rate_percent", scope))
+    except Exception:  # noqa: BLE001
+        return 12.0  # mirrors the registry default for pos.emi_annual_rate_percent
+
+
 def spec_to_public(s: PolicySpec) -> dict:
     """Schema row the FE renders. Secrets never expose their value here (the value
     lives in the per-scope GET responses, masked)."""

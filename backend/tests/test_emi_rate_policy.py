@@ -90,3 +90,74 @@ class TestFrontendGoldenAnchor:
     def test_golden_default_control(self):
         s = orders_module.build_emi_schedule(25000.0, 12.0, 12)
         assert s["monthly_emi"] == 2221.22
+
+
+# ===========================================================================
+# THE CHANNEL THE POS SCREEN READS, and who may read it.
+# ===========================================================================
+# Round 1 of PR #997 fetched the rate via GET /settings/policies/{key} -- a
+# route closed to SALES_CASHIER and SALES_STAFF. Their 403 died in the
+# screen's silent catch, so every cashier quoted the 12% fallback while the
+# order charged the configured rate: the exact quote-vs-charge defect the PR
+# exists to close, surviving for the roles that do most of the billing. The
+# rate now rides on GET /stores/{store_id}, which is AUTHENTICATED and
+# store-scoped. These tests pin (a) that access, by role name, and (b) that
+# the store read and the order engine share ONE resolver, so they cannot
+# drift.
+
+from api.routers import stores as stores_module  # noqa: E402
+from api.services.rbac_policy import check_access  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "role", ["SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER", "ADMIN"]
+)
+def test_every_billing_role_may_read_the_store_detail_rate_channel(role):
+    """THE REQUIREMENT. If this route ever narrows, the POS screen silently
+    falls back to 12% for the excluded role while the order charges the
+    configured rate -- and no frontend test can see it, because they mock the
+    API below the RBAC layer. This is the backend half of that proof."""
+    assert check_access("GET", "/api/v1/stores/S1", [role]) is True, (
+        f"{role} lost the store-detail read -- their POS EMI quote is now the "
+        "fallback while the order charges the configured rate"
+    )
+
+
+def test_the_policies_route_stays_closed_to_cashiers_the_other_side():
+    """The deliberate least-privilege choice, pinned from the other side: we
+    did NOT widen the policy table to cashiers to deliver one number."""
+    assert check_access(
+        "GET", "/api/v1/settings/policies/pos.emi_annual_rate_percent", ["SALES_CASHIER"]
+    ) is False
+
+
+def test_store_detail_and_order_engine_share_one_resolver_by_identity():
+    """The twin tripwire. Two copies of 'what is the EMI rate' is how the
+    screen and the charge drift apart -- the nine-times-bitten defect shape.
+    Function IDENTITY, not behavioural equality: a re-inlined copy with the
+    same behaviour today still drifts tomorrow."""
+    assert orders_module._emi_annual_rate is policy_registry.resolve_emi_annual_rate
+    assert stores_module.resolve_emi_annual_rate is policy_registry.resolve_emi_annual_rate
+
+
+def test_store_detail_carries_the_resolved_rate(monkeypatch):
+    """Drive the real get_store handler: the response must carry the resolved
+    planted rate -- that field IS the screen's data source."""
+    import asyncio
+
+    class _Repo:
+        def find_by_id(self, sid):
+            return {"store_id": sid, "name": "Bokaro"}
+
+    monkeypatch.setattr(stores_module, "get_store_repository", lambda: _Repo())
+    monkeypatch.setattr(
+        stores_module, "resolve_emi_annual_rate", lambda sid: 14.5
+    )
+    body = asyncio.run(
+        stores_module.get_store(
+            "S1",
+            current_user={"user_id": "u1", "roles": ["SALES_CASHIER"],
+                          "active_store_id": "S1", "store_ids": ["S1"]},
+        )
+    )
+    assert body["emi_annual_rate_percent"] == 14.5

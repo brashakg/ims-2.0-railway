@@ -13,8 +13,8 @@ import {
   IndianRupee, Phone, CreditCard, FileText,
   CheckCircle, X,
 } from 'lucide-react';
+import { storeApi } from '../../services/api';
 import { usePOSStore } from '../../stores/posStore';
-import { policiesApi } from '../../services/api/settings';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
 import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
@@ -82,19 +82,26 @@ export function StepPayment() {
   const [emiProvider, setEmiProvider] = useState('HDFC');
   const [emiTenure, setEmiTenure] = useState(12);
   const [emiDownPayment, setEmiDownPayment] = useState('');
-  // The rate the BACKEND will apply: policy `pos.emi_annual_rate_percent`
-  // resolved for this store (same resolution the order add-payment endpoint
-  // uses to build the schedule). Until it loads, mirror the backend default.
+  // The rate the BACKEND will apply, read off the STORE DETAIL -- the one
+  // endpoint every POS role already has (GET /stores/{id} is AUTHENTICATED +
+  // store-scoped, and the server stamps `emi_annual_rate_percent` on it via
+  // the SAME shared resolver the order add-payment engine uses, so quote and
+  // charge cannot drift). The policies endpoint is deliberately NOT used
+  // here: it is closed to SALES_CASHIER/SALES_STAFF, and the first cut of
+  // this fix fetched it anyway -- the 403 died in a silent catch and every
+  // cashier quoted the fallback while the order charged the configured rate,
+  // which is the exact defect this change exists to close.
   const [emiAnnualRatePct, setEmiAnnualRatePct] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
-    policiesApi
-      .getOne('pos.emi_annual_rate_percent', store.store_id ? `store:${store.store_id}` : undefined)
-      .then((p) => {
-        const v = Number(p?.value);
+    if (!store.store_id) return () => { alive = false; };
+    storeApi
+      .getStore(store.store_id)
+      .then((detail: { emi_annual_rate_percent?: number }) => {
+        const v = Number(detail?.emi_annual_rate_percent);
         if (alive && Number.isFinite(v)) setEmiAnnualRatePct(v);
       })
-      .catch(() => { /* keep fallback */ });
+      .catch(() => { /* keep fallback -- it mirrors the registry default */ });
     return () => { alive = false; };
   }, [store.store_id]);
   const annualRatePct = emiAnnualRatePct ?? EMI_ANNUAL_RATE_PERCENT_FALLBACK;

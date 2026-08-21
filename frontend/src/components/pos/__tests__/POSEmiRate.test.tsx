@@ -44,10 +44,15 @@ vi.mock('../../../constants/gstRuntime', () => ({
   loadPricingMode: vi.fn(),
 }));
 
-// The policy read the screen performs — the ONLY rate source it may use.
-const getOneMock = vi.fn();
-vi.mock('../../../services/api/settings', () => ({
-  policiesApi: { getOne: (...a: unknown[]) => getOneMock(...a) },
+// The STORE-DETAIL read the screen performs — the ONLY rate source it may
+// use. The first cut fetched the policies endpoint instead, which is closed
+// to SALES_CASHIER/SALES_STAFF: the 403 died in a silent catch and cashiers
+// quoted the 12% fallback while the order charged the configured rate. The
+// store detail is AUTHENTICATED + store-scoped, so every billing role can
+// read it — and the backend RBAC test pins that access by role name.
+const getStoreMock = vi.fn();
+vi.mock('../../../services/api', () => ({
+  storeApi: { getStore: (...a: unknown[]) => getStoreMock(...a) },
 }));
 
 import { StepPayment } from '../POSPayment';
@@ -74,21 +79,20 @@ function openEmiWithDownPayment() {
 
 beforeEach(() => {
   localStorage.clear();
-  getOneMock.mockReset();
+  getStoreMock.mockReset();
 });
 
 describe('POS EMI quote uses the store policy rate (pos.emi_annual_rate_percent)', () => {
   it('REQUIREMENT: a planted non-default 14.5% rate is shown on screen and the quote equals the backend schedule (2250.56, not the 12% default 2221.22)', async () => {
-    getOneMock.mockResolvedValue({
-      key: 'pos.emi_annual_rate_percent', value: 14.5, source: 'store',
-      scope: 'store:BV-BOK-01', type: 'percent',
+    getStoreMock.mockResolvedValue({
+      store_id: 'BV-BOK-01', name: 'Bokaro', emi_annual_rate_percent: 14.5,
     });
     seedCart(30000);
     render(<StepPayment />);
 
     // The screen fetched the rate for THIS store's scope.
     expect(await screen.findByText(/Total Due/)).toBeInTheDocument();
-    expect(getOneMock).toHaveBeenCalledWith('pos.emi_annual_rate_percent', 'store:BV-BOK-01');
+    expect(getStoreMock).toHaveBeenCalledWith('BV-BOK-01');
 
     openEmiWithDownPayment();
 
@@ -108,7 +112,7 @@ describe('POS EMI quote uses the store policy rate (pos.emi_annual_rate_percent)
   });
 
   it('positive control: when the policy fetch fails, the screen falls back to the backend default 12% (2221.22)', async () => {
-    getOneMock.mockRejectedValue(new Error('network down'));
+    getStoreMock.mockRejectedValue(new Error('network down'));
     seedCart(30000);
     render(<StepPayment />);
     openEmiWithDownPayment();
