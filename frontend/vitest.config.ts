@@ -18,5 +18,10 @@ export default defineConfig({
     css: false,
     restoreMocks: true,
     clearMocks: true,
+    coverage: {
+      // lcov is what the CI codecov upload reads (coverage/lcov.info);
+      // without it the default reporters produce no lcov file at all.
+      reporter: ['text', 'lcov'],
+    },
   },
 })
