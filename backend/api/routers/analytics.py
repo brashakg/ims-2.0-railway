@@ -4,13 +4,14 @@ Provides comprehensive analytics and business intelligence endpoints
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
+from ..utils.ist import ist_date_str
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -653,6 +654,21 @@ async def get_revenue_trends(
             if _is_billable(o)
         ]
 
+        # BUG-104. This endpoint is a JOIN: the bucket keys below are built
+        # from STORED instants, and the timeline labels further down are built
+        # by walking `current_date`. They MUST end up in the same frame or
+        # buckets fall outside the timeline and their revenue vanishes off the
+        # chart. So BOTH sides move FORWARD to the IST calendar day (VALUE
+        # rule) -- the query window itself is left in the stored naive-UTC
+        # frame, because it is pure elapsed time (now minus N days) with no
+        # calendar-day boundary in it.
+        def _ist_day(value):
+            """IST calendar date of a stored instant, or None."""
+            try:
+                return date.fromisoformat(ist_date_str(value))
+            except (TypeError, ValueError):
+                return None
+
         # Group by period
         def group_by_period(orders: List[Dict[str, Any]], period_type: str):
             grouped = {}
@@ -660,13 +676,17 @@ async def get_revenue_trends(
                 created_at = _safe_parse_date(order.get("created_at"))
                 if not created_at:
                     continue
+                # VALUE rule: the IST day of the sale, not the UTC day. A sale
+                # at 02:00 IST used to be charted on the previous day's bar.
+                ist_day = _ist_day(created_at)
+                if ist_day is None:
+                    continue
                 if period_type == "daily":
-                    key = created_at.date().isoformat()
+                    key = ist_day.isoformat()
                 elif period_type == "weekly":
-                    week_start = created_at - timedelta(days=created_at.weekday())
-                    key = week_start.date().isoformat()
+                    key = (ist_day - timedelta(days=ist_day.weekday())).isoformat()
                 else:  # monthly
-                    key = created_at.strftime("%Y-%m")
+                    key = ist_day.strftime("%Y-%m")
 
                 if key not in grouped:
                     grouped[key] = 0
@@ -677,17 +697,21 @@ async def get_revenue_trends(
         current_grouped = group_by_period(current_period, period)
         previous_grouped = group_by_period(previous_period, period)
 
-        # Build timeline
+        # Build timeline. The labels are the OTHER side of the join above, so
+        # they walk IST days too (BUG-104). Leaving them on the UTC day while
+        # the buckets moved to IST is exactly the round-2 defect: the last
+        # bucket of the window would have no label to land on and its revenue
+        # would silently disappear from the chart.
         timeline_data = []
-        current_date = start_date
+        current_date = _ist_day(start_date)
+        end_label_date = _ist_day(end_date)
 
-        while current_date <= end_date:
+        while current_date is not None and end_label_date is not None and current_date <= end_label_date:
             if period == "daily":
-                key = current_date.date().isoformat()
+                key = current_date.isoformat()
                 next_date = current_date + timedelta(days=1)
             elif period == "weekly":
-                week_start = current_date - timedelta(days=current_date.weekday())
-                key = week_start.date().isoformat()
+                key = (current_date - timedelta(days=current_date.weekday())).isoformat()
                 next_date = current_date + timedelta(days=7)
             else:  # monthly
                 key = current_date.strftime("%Y-%m")

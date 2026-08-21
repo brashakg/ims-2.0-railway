@@ -9,6 +9,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, date, timezone
+
+from ..utils.ist import ist_date_str
 from html import escape as _html_escape
 import uuid
 from .auth import get_current_user, require_roles
@@ -1703,18 +1705,33 @@ def _eye_block(rx: dict, key: str) -> dict:
 
 
 def _rx_date(rx: dict) -> str:
-    """Best-effort human date for the Rx (prescription_date / test_date / created_at)."""
+    """Best-effort human date for the Rx (prescription_date / test_date / created_at).
+
+    BUG-104, VALUE rule, on the legacy created_at fallback leg: this date is
+    PRINTED on the patient's Rx card. prescription_date / test_date are IST
+    business-date strings (frame-less -- their parse lands on midnight, which
+    the +5:30 shift leaves on the same day). created_at is a stored instant
+    on the UTC wall clock (BSON datetime, or an aware 'Z' string on imported
+    rows), so formatting it raw printed YESTERDAY's date on a card for an eye
+    test recorded 00:00-05:30 IST. ist_date_str shifts datetimes to the IST
+    calendar day; a NAIVE ISO string still passes through unshifted by
+    documented design (no reliable frame), matching the old behaviour.
+    """
     raw = rx.get("prescription_date") or rx.get("test_date") or rx.get("created_at")
     if raw is None:
         return ""
     if isinstance(raw, datetime):
-        return raw.strftime("%d %b %Y")
+        return datetime.strptime(ist_date_str(raw), "%Y-%m-%d").strftime("%d %b %Y")
     if isinstance(raw, str):
         # ISO strings -> dd Mon YYYY; fall back to the raw string on parse fail.
         try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00")).strftime(
-                "%d %b %Y"
-            )
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                # An offset-bearing string has an exact frame: use it.
+                return datetime.strptime(
+                    ist_date_str(parsed), "%Y-%m-%d"
+                ).strftime("%d %b %Y")
+            return parsed.strftime("%d %b %Y")
         except ValueError:
             return raw[:10]
     return str(raw)

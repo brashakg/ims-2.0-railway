@@ -183,16 +183,21 @@ def state_code_of(*candidates: Any) -> str:
 
 def financial_year_label(dt: Optional[datetime] = None) -> str:
     """Indian FY label (e.g. ``2026-27``) for an instant (FY starts 1 April IST).
-    Reuses ``utils.ist.fy_start_year_ist`` with a safe inline fallback. P1-2: when
-    no instant is given, default to an IST instant (NOT UTC) so the FY boundary is
-    correct in the 00:00-05:30 IST window near 1-Apr."""
-    dt = dt or _now_ist()
-    try:
-        from api.utils.ist import fy_start_year_ist
+    Reuses ``utils.ist.fy_start_year_ist``. P1-2: when no instant is given,
+    default to an IST instant (NOT UTC) so the FY boundary is correct in the
+    00:00-05:30 IST window near 1-Apr.
 
-        start = fy_start_year_ist(dt)
-    except Exception:  # noqa: BLE001
-        start = dt.year if dt.month >= 4 else dt.year - 1
+    BUG-104 closing sweep: the previous try/except carried an inline fallback
+    that was a byte-for-byte duplicate of ``fy_start_year_ist``'s own body,
+    reachable only if ``api.utils.ist`` failed to import -- and that module is
+    a hard dependency of the whole app (it has no fragile imports of its own;
+    its zoneinfo lookup already self-falls-back to a fixed +05:30). The
+    duplicate could never produce a different label, only rot independently,
+    so it is DELETED rather than tabled."""
+    from api.utils.ist import fy_start_year_ist
+
+    dt = dt or _now_ist()
+    start = fy_start_year_ist(dt)
     return f"{start}-{str(start + 1)[-2:]}"
 
 

@@ -20,6 +20,7 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from
 # the POS / PO / GRN / till guards -- do NOT add a second detector here.
 from ..services.stores_util import is_online_store
+from ..utils.ist import ist_date_str
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -460,7 +461,14 @@ def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
         db = _get_db()
         if db is None:
             return {}
-        cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+        # BUG-104 sweep finding, NOT an IST bug -- the same frame-TYPE bug as
+        # buy_desk.py:110 and the vendor spend chart. `grns.created_at` is a
+        # BSON datetime (BaseRepository._add_timestamps overwrites whatever the
+        # caller passed), and Mongo type-brackets: an ISO-STRING $gte never
+        # matches a Date, so this join returned NOTHING and the "+N via GRN-xxx"
+        # source chip never appeared on the stock ledger. `cutoff` is pure
+        # elapsed time in the stored naive-UTC frame, so it needs no IST shift.
+        cutoff = datetime.now() - timedelta(days=30)
         cur = (
             db.get_collection("grns")
             .find(
@@ -495,7 +503,12 @@ def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
                 out[pid] = {
                     "grn_number": grn.get("grn_number") or "",
                     "qty": qty,
-                    "date": str(when)[:10],
+                    # BUG-104, VALUE rule (+5:30). accepted_at / created_at are
+                    # naive-UTC instants; this is the "last received on" date a
+                    # store user reads next to the stock line, so it is the IST
+                    # business day. Goods booked in before 05:30 IST used to show
+                    # the previous day.
+                    "date": ist_date_str(when),
                 }
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INVENTORY] last-GRN join failed: %s", exc)

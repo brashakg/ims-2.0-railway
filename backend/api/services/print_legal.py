@@ -37,6 +37,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from api.utils.ist import ist_date_str
+
 # ---------------------------------------------------------------------------
 # Public template-key catalog -- single source of truth for which template
 # keys are addressable by the editor system. Routers and tests import this.
@@ -433,9 +435,31 @@ def declarations(doc_type: str) -> str:
 
 
 def format_date(value: Any) -> str:
-    """Render any date-ish value as DD-Mon-YYYY (e.g. "19-Apr-2026").
+    """Render any date-ish value as DD-Mon-YYYY (e.g. "19-Apr-2026"), on the
+    IST calendar.
 
     Accepts: datetime, ISO string, "YYYY-MM-DD", None. Junk -> empty string.
+
+    BUG-104, VALUE rule (+5:30). Every date this sink formats is printed on
+    paper an OUTSIDE party reads -- the estimate date a customer holds, the
+    Rule-55 delivery-challan date a transporter shows at a checkpoint. The
+    inputs reaching it are, established from their writers:
+
+      * naive datetime        -- orders.created_at, a BSON datetime stamped
+                                 from datetime.now() == the UTC wall clock;
+      * aware '+00:00' string -- estimates.created_at
+                                 (datetime.now(timezone.utc).isoformat());
+      * naive ISO string      -- stock_transfers.created_at
+                                 (datetime.now().isoformat(), UTC box);
+      * date-only 'YYYY-MM-DD'-- valid_until / invoice_date business dates.
+
+    The first three are UTC instants whose IST day is one ahead between 00:00
+    and 05:30 IST (a challan printed then carried YESTERDAY's date, and
+    prior-FY paper on 1 April). The fourth parses to midnight, which +5:30
+    leaves on the same day -- so one shift is correct for every input. No
+    caller passes an IST-local wall-clock timestamp (they do not exist in
+    these collections); if one ever does, it must be converted BEFORE this
+    sink.
     """
     if value is None:
         return ""
@@ -457,7 +481,9 @@ def format_date(value: Any) -> str:
                 dt = datetime.strptime(s[:10], "%Y-%m-%d")
             except ValueError:
                 return ""
-    return dt.strftime("%d-%b-%Y")
+    # ist_date_str: aware -> IST exactly; naive -> +5:30 (naive frames here
+    # are UTC instants or date-only midnights, where the day is unchanged).
+    return datetime.strptime(ist_date_str(dt), "%Y-%m-%d").strftime("%d-%b-%Y")
 
 
 def format_datetime_ist(value: Any) -> str:

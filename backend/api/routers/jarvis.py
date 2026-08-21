@@ -26,7 +26,7 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
-from ..utils.ist import ist_today, now_ist
+from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -329,9 +329,15 @@ class JarvisAnalyticsEngine:
         if orders_col is None:
             return None
         try:
-            from datetime import datetime as _dt
-
-            month_start = _dt.now().strftime("%Y-%m-01")
+            # BUG-104 DEAD QUERY: orders.created_at is a BSON datetime
+            # (BaseRepository stamps it), and Mongo type-brackets -- the old
+            # ISO-STRING "%Y-%m-01" $gte matched NOTHING, so the owner brief
+            # reported zero month-sales and an empty category/product
+            # breakdown, permanently, as an honest-looking empty state. The
+            # bound is a real datetime now, and it is the IST month start
+            # moved BACKWARD into the stored naive-UTC frame (BOUND rule), so
+            # a sale at 00:30 IST on the 1st lands in the right month.
+            month_start = ist_day_start_utc(ist_today().replace(day=1))
             counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
             cat_sales: Dict[str, float] = {}
             cat_units: Dict[str, int] = {}
@@ -520,9 +526,11 @@ class JarvisAnalyticsEngine:
                 "upcoming_eye_tests": [],
             }
         try:
-            from datetime import datetime as _dt
-
-            month_start = _dt.now().strftime("%Y-%m-01")
+            # BUG-104 DEAD QUERY: customers.created_at is a BSON datetime, so
+            # the old ISO-STRING "%Y-%m-01" $gte matched NOTHING and the
+            # "New this month" segment was permanently 0. Real datetime bound,
+            # IST month start moved backward into the stored frame (BOUND).
+            month_start = ist_day_start_utc(ist_today().replace(day=1))
             total = col.count_documents({})
             new_this_month = col.count_documents({"created_at": {"$gte": month_start}})
             b2b = col.count_documents({"customer_type": "B2B"})
@@ -761,7 +769,11 @@ class JarvisAnalyticsEngine:
                             "vendor": p.get("vendor_name") or "",
                             "status": p.get("status") or "",
                             "total": float(p.get("total") or 0),
-                            "created_at": str(p.get("created_at") or "")[:10],
+                            # BUG-104, VALUE rule (+5:30). purchase_orders.created_at
+                            # is a BSON datetime (BaseRepository._add_timestamps) in
+                            # the naive-UTC frame, and this day is quoted back to the
+                            # owner in a Jarvis briefing.
+                            "created_at": ist_date_str(p.get("created_at")),
                         }
                         for p in open_pos
                     ],
@@ -773,13 +785,15 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("grns")
             if col is not None:
+                # BUG-104 DEAD QUERY (self-found in the closing sweep):
+                # grns.created_at is a BSON datetime (BaseRepository stamps
+                # it -- established in inventory.py's stock-ledger fix), so
+                # the old "%Y-%m-%d" STRING bound matched NOTHING and the
+                # briefing always said 0 GRNs. Pure elapsed time in the
+                # stored naive-UTC frame: no calendar boundary, no IST shift.
                 ctx["grns_last_30d"] = col.count_documents(
                     {
-                        "created_at": {
-                            "$gte": (datetime.now() - timedelta(days=30)).strftime(
-                                "%Y-%m-%d"
-                            )
-                        },
+                        "created_at": {"$gte": datetime.now() - timedelta(days=30)},
                     }
                 )
         except Exception:
@@ -898,7 +912,12 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("prescriptions")
             if col is not None:
-                month_start = datetime.now().strftime("%Y-%m-01")
+                # BUG-104 DEAD QUERY: prescriptions.created_at is a BSON
+                # datetime, so the old "%Y-%m-01" STRING bound matched
+                # NOTHING -- "prescriptions this month" was permanently 0 in
+                # the owner brief. Real datetime bound, IST month start
+                # moved backward into the stored frame (BOUND rule).
+                month_start = ist_day_start_utc(ist_today().replace(day=1))
                 ctx["prescriptions"] = {
                     "total": col.count_documents({}),
                     "this_month": col.count_documents(
@@ -946,9 +965,15 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("notification_logs")
             if col is not None:
-                today_start = datetime.now().replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
+                # BUG-104, BOUND rule (self-found in the closing sweep):
+                # notification_logs.sent_at is a naive-UTC ISO STRING
+                # (reminder_rail._now_iso), so a string bound is the right
+                # SHAPE -- but "today" must start at IST midnight expressed
+                # in that stored naive-UTC frame, not at UTC midnight, or
+                # sends between 00:00 and 05:30 IST are counted into
+                # yesterday. The 7-day count below is pure elapsed time in
+                # one frame and needs no shift.
+                today_start = ist_day_start_utc()
                 ctx["marketing"] = {
                     "sent_today": col.count_documents(
                         {"sent_at": {"$gte": today_start.isoformat()}}
@@ -996,7 +1021,12 @@ class JarvisAnalyticsEngine:
         try:
             orders_col = get_db_collection("orders")
             if orders_col is not None:
-                cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                # BUG-104 DEAD QUERY: orders.created_at is a BSON datetime,
+                # and this string cutoff sat inside an aggregate $match --
+                # type-bracketed to zero rows, so top-SKUs was permanently
+                # empty. A rolling 30-day cutoff is pure elapsed time in the
+                # stored naive-UTC frame: plain datetime, no IST shift.
+                cutoff = datetime.now() - timedelta(days=30)
                 pipeline = [
                     {
                         "$match": {
@@ -1306,7 +1336,12 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("expenses")
             if col is not None:
-                month_start = datetime.now().strftime("%Y-%m-01")
+                # BUG-104 (self-found): expenses.date is an operator-typed
+                # IST business-date STRING, so the string bound is the right
+                # shape -- but "this month" must be the IST month, not the
+                # UTC box month, which is still LAST month between 00:00 and
+                # 05:30 IST on the 1st.
+                month_start = now_ist().strftime("%Y-%m-01")
                 total_month = 0.0
                 category_breakdown: Dict[str, float] = {}
                 for e in col.find(
@@ -1352,7 +1387,10 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("salary_records")
             if col is not None:
-                month_start = datetime.now().strftime("%Y-%m-01")
+                # BUG-104 (self-found): salary_records.month is a "YYYY-MM"
+                # payroll-period label, an IST business concept -- the month
+                # key must come from the IST clock, not the UTC box clock.
+                month_start = now_ist().strftime("%Y-%m-01")
                 ctx["payroll_mtd"] = {
                     "records_this_month": col.count_documents(
                         {"month": {"$gte": month_start[:7]}}
@@ -1478,7 +1516,10 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("targets")
             if col is not None:
-                month_key = datetime.now().strftime("%Y-%m")
+                # BUG-104 (self-found): targets.period is a "YYYY-MM" IST
+                # business-month label; key off the IST clock, not the UTC
+                # box clock (still last month 00:00-05:30 IST on the 1st).
+                month_key = now_ist().strftime("%Y-%m")
                 ctx["targets"] = [
                     {
                         "store_id": t.get("store_id") or "",
@@ -1527,11 +1568,15 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("alert_history")
             if col is not None:
+                # DEAD QUERY (self-found in the BUG-104 closing sweep; a
+                # field-name miss, not an IST frame miss): SENTINEL is the
+                # only writer of alert_history and it stamps `timestamp` (a
+                # BSON datetime), never `created_at` -- so this count was
+                # permanently 0 twice over (missing field AND a string bound
+                # against a Date). Elapsed 7 days, plain datetime, no shift.
                 ctx["alerts_last_7d"] = col.count_documents(
                     {
-                        "created_at": {
-                            "$gte": (datetime.now() - timedelta(days=7)).isoformat()
-                        },
+                        "timestamp": {"$gte": datetime.now() - timedelta(days=7)},
                     }
                 )
         except Exception:
@@ -1620,11 +1665,13 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("webhook_inbox")
             if col is not None:
+                # BUG-104 DEAD QUERY (self-found): webhook_inbox.received_at
+                # is a BSON datetime (webhooks.py writes
+                # datetime.now(timezone.utc)), so the old ISO-STRING bound
+                # matched NOTHING. Elapsed 24h, plain datetime, no shift.
                 ctx["webhook_inbox_recent"] = col.count_documents(
                     {
-                        "received_at": {
-                            "$gte": (datetime.now() - timedelta(days=1)).isoformat()
-                        },
+                        "received_at": {"$gte": datetime.now() - timedelta(days=1)},
                     }
                 )
         except Exception:
@@ -1634,9 +1681,16 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("tally_exports")
             if col is not None:
+                # DEAD QUERY (self-found in the BUG-104 closing sweep; a
+                # field-name miss): NEXUS is the only writer of tally_exports
+                # and it stamps `generated_at` (an aware-UTC ISO string),
+                # never `exported_at` -- the count was permanently 0. The
+                # naive-UTC bound string compares lexically with the stored
+                # '...+00:00' strings over a 7-day horizon (same YYYY-MM-DDTHH
+                # prefix, one UTC frame), and elapsed time needs no IST shift.
                 ctx["tally_exports_recent"] = col.count_documents(
                     {
-                        "exported_at": {
+                        "generated_at": {
                             "$gte": (datetime.now() - timedelta(days=7)).isoformat()
                         },
                     }
@@ -1830,7 +1884,12 @@ class JarvisAnalyticsEngine:
             cust_col = get_db_collection("customers")
             orders_col = get_db_collection("orders")
             if cust_col is not None and orders_col is not None:
-                six_months_ago = (datetime.now() - timedelta(days=180)).isoformat()
+                # BUG-104 DEAD QUERY (self-found): orders.created_at is a
+                # BSON datetime; the old ISO-STRING bound matched NOTHING, so
+                # recent_buyer_ids was always empty and EVERY customer looked
+                # lapsed (the re-engagement nudge fired on the whole base).
+                # Elapsed 180 days, plain datetime, no shift.
+                six_months_ago = datetime.now() - timedelta(days=180)
                 # Customers who haven't ordered in 6 months (cap query small)
                 recent_buyer_ids = set()
                 for o in orders_col.find(
