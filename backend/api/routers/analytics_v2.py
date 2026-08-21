@@ -1275,6 +1275,20 @@ async def anomaly_detection(
         else now
     )
 
+    # The anomaly rows carry the scanned RANGE as calendar days. Those must
+    # echo the IST days the SUPERADMIN asked for (or the IST days of the
+    # rolling default), NOT the shifted bound instants above -- printing
+    # dt_from's UTC day would label a June scan "2026-05-31 to ...".
+    from_day_label = (
+        parsed_from.date().isoformat()
+        if parsed_from is not None
+        else ist_date_str(dt_from)
+    )
+    to_day_label = (
+        parsed_to.date().isoformat() if parsed_to is not None else ist_date_str(dt_to)
+    )
+    range_label = f"{from_day_label} to {to_day_label}"
+
     orders = list(
         db.get_collection("orders")
         .find(
@@ -1354,9 +1368,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{data['count']} voided/cancelled orders",
                     "order_ids": data["order_ids"][:10],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 
@@ -1370,9 +1382,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{data['count']} refunds totaling Rs.{round(data['total'], 2)}",
                     "order_ids": data["order_ids"][:10],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 
@@ -1386,9 +1396,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{len(data['orders'])} orders with >20% discount",
                     "order_ids": [o["order_id"] for o in data["orders"][:10]],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 
