@@ -20,6 +20,10 @@ pylint==3.0.3
 mypy==1.8.0
 types-python-dateutil==2.9.0.20260518
 
+# Dead code + complexity (advisory CI jobs — never block merges)
+vulture==2.14
+radon==6.0.1
+
 # Security
 bandit==1.7.6
 # safety 3.0.1 pinned pydantic <2, which downgraded our pydantic 2.9 install

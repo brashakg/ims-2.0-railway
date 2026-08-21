@@ -90,6 +90,45 @@ jobs:
           name: backend-coverage
           fail_ci_if_error: false
 
+  dead-code-complexity:
+    # Advisory only — vulture (dead code, confidence >= 90) + radon (complexity
+    # rank D or worse) report to the job summary; never blocks a merge and is
+    # not a required check.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analyzers
+        run: pip install vulture==2.14 radon==6.0.1
+
+      - name: Dead code report (vulture)
+        run: |
+          {
+            echo '## Backend dead code (vulture, confidence >= 90 — advisory)'
+            echo '```'
+            vulture api/ --min-confidence 90 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          vulture api/ --min-confidence 90 || true
+        continue-on-error: true
+
+      - name: Complexity report (radon, rank D+)
+        run: |
+          {
+            echo '## Backend complexity hotspots (radon, rank D or worse — advisory)'
+            echo '```'
+            radon cc api/ -s -n D --total-average || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          radon cc api/ -s -n D --total-average || true
+        continue-on-error: true
+
   security:
     runs-on: ubuntu-latest
 

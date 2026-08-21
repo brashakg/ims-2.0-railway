@@ -49,6 +49,7 @@
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
     "jsdom": "^29.1.1",
+    "knip": "^6.32.2",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",
     "terser": "^5.48.0",

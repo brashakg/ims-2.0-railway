@@ -78,6 +78,30 @@ jobs:
           path: frontend/dist/
           retention-days: 30
 
+  dead-code:
+    # Advisory only — knip reports unused files/exports/dependencies to the job
+    # summary; it never blocks a merge and is not a required check.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dead code report (knip)
+        run: |
+          npx knip --no-progress --reporter markdown >> "$GITHUB_STEP_SUMMARY" || true
+          npx knip --no-progress || true
+        continue-on-error: true
+
   security-scan:
     runs-on: ubuntu-latest
 

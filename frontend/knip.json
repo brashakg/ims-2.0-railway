@@ -1,0 +1,8 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "ignore": [
+    "public/boot-flags.js",
+    "k6-load-test.js"
+  ],
+  "ignoreExportsUsedInFile": true
+}
