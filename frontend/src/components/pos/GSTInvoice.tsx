@@ -23,7 +23,6 @@ import {
   amountInWords,
   declarations,
   inr,
-  formatDate,
   tblHead,
   tblCell,
   tblNum,
@@ -423,5 +422,3 @@ export function GSTInvoice({
 }
 
 export default GSTInvoice;
-// Re-export the format helper for callers that need the same date formatting.
-export { formatDate as formatInvoiceDate };

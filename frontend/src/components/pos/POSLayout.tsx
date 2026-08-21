@@ -31,30 +31,6 @@ import type { Prescription } from '../../types';
 const POS_AUTO_ATTACH_SINGLE_RX =
   import.meta.env.VITE_POS_AUTO_ATTACH_SINGLE_RX === 'true';
 
-// Backwards-compatible type exports (used by BillingEngine, CartPanel)
-export interface CartItem {
-  product_id: string;
-  name: string;
-  sku: string;
-  brand?: string;
-  unit_price: number;
-  quantity: number;
-  image_url?: string;
-  category: string;
-  stock?: number;
-  is_optical?: boolean;
-  discount_percent?: number;
-}
-
-export interface Customer {
-  id: string;
-  name: string;
-  phone: string;
-  email?: string;
-  address?: string;
-  loyalty_points?: number;
-}
-
 // Import orphaned components
 import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
@@ -64,7 +40,6 @@ import { LensFittingFormModal } from './LensFittingFormModal';
 import type { LensFittingFormValue } from './LensFittingFormModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
-import { DayEndReport } from './DayEndReport';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
@@ -234,7 +209,6 @@ export function POSLayout() {
   const [showReceipt, setShowReceipt] = useState(false);
   const [holdConfirm, setHoldConfirm] = useState(false);
   const [showRecallPanel, setShowRecallPanel] = useState(false);
-  const [showDayEnd, setShowDayEnd] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
   const [showWalkoutModal, setShowWalkoutModal] = useState(false);
   const [walkinBusy, setWalkinBusy] = useState(false);
@@ -358,7 +332,6 @@ export function POSLayout() {
     setShowReceipt(false);
     setHoldConfirm(false);
     setShowRecallPanel(false);
-    setShowDayEnd(false);
     setErrorMsg(null);
     // C-5: a brand-new order must not reuse the previous attempt's key.
     idempotencyKeyRef.current = null;
@@ -460,8 +433,8 @@ export function POSLayout() {
   const isFinalInputGroup = !!currentGroup && currentGroup.members.includes('payment');
 
   // Flow-aware navigation. We drive the canonical store step directly to each
-  // group's anchor rather than store.nextStep/prevStep (whose linear 6-step
-  // walk doesn't know about condensed grouping).
+  // group's anchor (a linear next/prev walk wouldn't know about condensed
+  // grouping).
   const goToGroup = useCallback((idx: number) => {
     const g = flowGroups[idx];
     if (g) startTransition(() => store.setStep(g.anchor));
@@ -1515,9 +1488,6 @@ export function POSLayout() {
           </div>
         </div>
       )}
-      {showDayEnd && (
-        <DayEndReport storeId={store.store_id} onClose={() => setShowDayEnd(false)} />
-      )}
     </div>
   );
 }
@@ -1525,7 +1495,7 @@ export function POSLayout() {
 // ============================================================================
 // Customer Purchase History (compact, in StepCustomer)
 // ============================================================================
-function RxAvailableBadge({ customerId }: { customerId: string; customerName?: string }) {
+function RxAvailableBadge({ customerId }: { customerId: string }) {
   const store = usePOSStore();
   const [rxCount, setRxCount] = useState(0);
   const [latestRx, setLatestRx] = useState<any>(null);
@@ -1986,7 +1956,7 @@ function StepCustomer() {
           </div>
           {!isWalkin && <MemberSelect />}
           {!isWalkin && <CustomerCardWithLoyalty />}
-          {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
+          {!isWalkin && <RxAvailableBadge customerId={store.customer.id} />}
           {!isWalkin && <CustomerHistory customerId={store.customer.id} />}
           </>
         ) : (
