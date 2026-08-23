@@ -758,8 +758,19 @@ async def sales_by_salesperson(
     if order_repo is None:
         return {"data": []}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule (the bound moves BACKWARD). from_date/to_date are
+    # IST calendar days the operator typed; created_at is a stored naive-UTC
+    # instant, so an IST day starts 5h30m EARLIER in that frame. The old
+    # naive-midnight window dropped every 00:00-05:30-IST sale on the FIRST
+    # requested day and claimed the same band from the day AFTER to_date --
+    # so this staff-sales report disagreed with the payout month window
+    # (payout.py _month_window) and both leaderboard twins, which already
+    # shift: two screens, two rosters, same month. Same shape as
+    # /customers/acquisition below and /sales/summary above.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
     # so a string filter never matched and this report came back empty.
@@ -804,8 +815,13 @@ async def sales_by_category(
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: same typed-IST-range defect as /sales/by-salesperson
+    # above -- the naive-midnight window started 5h30m late in the stored
+    # naive-UTC frame.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -1294,8 +1310,18 @@ async def gst_report(
             },
         }
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule. This is a GST report a finance user reads, and it
+    # must AGREE with /finance/gst-summary (finance.py), which already shifts
+    # its month bounds through ist_day_start_utc: a GST tax period is an IST
+    # calendar month, but created_at is a stored naive-UTC instant, so the
+    # bound moves BACKWARD 5h30m. The old naive-midnight window filed an
+    # invoice raised 00:00-05:30 IST on the 1st into the PREVIOUS month here
+    # while the summary filed it correctly -- two GST screens, two totals,
+    # same period.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     orders = order_repo.find_many(
         {
@@ -1444,16 +1470,26 @@ async def sales_comparison(
     if order_repo is None:
         return {"current_period": {}, "previous_period": {}, "comparison": {}}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule -- BOTH windows together. The typed range is IST
+    # calendar days; created_at is a stored naive-UTC instant, so each bound
+    # moves BACKWARD 5h30m. The derived previous window must move the SAME
+    # way or the seam leaks: prev_to_date + 1 day == from_date, so
+    # prev_to_dt == from_dt - 1 microsecond by construction -- no order can
+    # fall between (or into both of) adjacent periods.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     # Calculate period difference
     period_days = (to_date - from_date).days
     prev_from_date = from_date - timedelta(days=period_days + 1)
     prev_to_date = from_date - timedelta(days=1)
 
-    prev_from_dt = datetime.combine(prev_from_date, datetime.min.time())
-    prev_to_dt = datetime.combine(prev_to_date, datetime.max.time())
+    prev_from_dt = ist_day_start_utc(prev_from_date)
+    prev_to_dt = ist_day_start_utc(prev_to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     current_orders = _orders_in_window(
         order_repo,
@@ -1583,8 +1619,12 @@ async def profit_by_category(
     if order_repo is None:
         return {"data": [], "total_profit": 0}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
+    # typed-IST-range defect as /sales/by-salesperson (see the comment there).
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
     # so a string filter never matched and this report came back empty.
@@ -1644,8 +1684,12 @@ async def profit_by_store(
     if order_repo is None:
         return {"data": [], "total_profit": 0}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
+    # typed-IST-range defect as /sales/by-salesperson (see the comment there).
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
 
     # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
     # so a string filter never matched and this report came back empty.
@@ -1712,8 +1756,12 @@ async def discount_analysis(
     if order_repo is None:
         return {"by_category": [], "by_store": [], "summary": {}}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
+    # typed-IST-range defect as /sales/by-salesperson (see the comment there).
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -1795,8 +1843,14 @@ async def staff_ranking(
     if order_repo is None:
         return {"data": []}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep. This is the
+    # SECOND staff roster (besides /sales/by-salesperson): the two must rank
+    # the same orders for the same typed range or a manager sees two
+    # different rosters for one month.
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -2276,8 +2330,12 @@ async def expense_vs_revenue(
     if order_repo is None:
         return {"revenue": 0, "cost": 0, "profit": 0, "margin_percent": 0}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
+    # typed-IST-range defect as /sales/by-salesperson (see the comment there).
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
@@ -2404,8 +2462,12 @@ async def brand_sellthrough(
     if order_repo is None:
         return {"data": [], "summary": {}}
 
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
+    # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
+    # typed-IST-range defect as /sales/by-salesperson (see the comment there).
+    from_dt = ist_day_start_utc(from_date)
+    to_dt = ist_day_start_utc(to_date + timedelta(days=1)) - timedelta(
+        microseconds=1
+    )
     orders = _orders_in_window(
         order_repo,
         store_id=active_store,
