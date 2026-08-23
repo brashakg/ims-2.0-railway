@@ -30,7 +30,7 @@ from calendar import monthrange
 import logging
 
 from .auth import get_current_user
-from ..utils.ist import ist_date_str
+from ..utils.ist import ist_date_str, ist_month_window_utc
 
 logger = logging.getLogger(__name__)
 
@@ -348,9 +348,10 @@ async def my_commission(
         return empty
 
     try:
-        days_in_month = monthrange(yr, mon)[1]
-        from_dt = datetime(yr, mon, 1)
-        to_dt = datetime(yr, mon, days_in_month, 23, 59, 59)
+        # The IST month as naive-UTC bounds (BUG-104) -- computed "exactly
+        # like /payroll/commission/summary", which is the point: the staff
+        # member's own view and the manager ledger must see the same month.
+        from_dt, to_dt = ist_month_window_utc(yr, mon)
         store_id = current_user.get("active_store_id")
 
         order_query = {

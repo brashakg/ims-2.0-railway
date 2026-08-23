@@ -55,6 +55,7 @@ import api.dependencies as deps_mod  # noqa: E402
 from agents.implementations import megaphone as megaphone_mod  # noqa: E402
 from api.routers import analytics_v2 as analytics_v2_mod  # noqa: E402
 from api.routers import finance as finance_mod  # noqa: E402
+from api.routers import hr_self_service as hrss_mod  # noqa: E402
 from api.routers import payout as payout_mod  # noqa: E402
 from api.routers import payroll as payroll_mod  # noqa: E402
 from api.routers import reports as reports_mod  # noqa: E402
@@ -110,6 +111,20 @@ def _dig(doc, dotted):
             return None
         cur = cur.get(part)
     return cur
+
+
+def _sum_val(doc, arg):
+    """Evaluate a $sum argument: field path, numeric constant, or an $ifNull
+    chain (finance's _REVENUE_EXPR shape) -- just enough Mongo to stay strict."""
+    if isinstance(arg, str):
+        return _dig(doc, arg.lstrip("$")) or 0
+    if isinstance(arg, dict) and "$ifNull" in arg:
+        primary, fallback = arg["$ifNull"]
+        val = _dig(doc, primary.lstrip("$")) if isinstance(primary, str) else primary
+        return val if val is not None else _sum_val(doc, fallback)
+    if isinstance(arg, (int, float)):
+        return arg
+    raise AssertionError("fake $sum does not implement %r" % (arg,))
 
 
 class _Cursor:
@@ -194,13 +209,9 @@ class _TypeBracketColl:
                     for out_key, expr in spec.items():
                         if out_key == "_id":
                             continue
-                        arg = expr["$sum"]
-                        val = (
-                            _dig(r, arg.lstrip("$")) or 0
-                            if isinstance(arg, str)
-                            else arg
+                        slot[out_key] = slot.get(out_key, 0) + _sum_val(
+                            r, expr["$sum"]
                         )
-                        slot[out_key] = slot.get(out_key, 0) + val
                 rows = list(groups.values())
             elif op == "$sort":
                 for fld, direction in reversed(list(spec.items())):
@@ -670,3 +681,143 @@ def test_megaphone_sent_today_starts_at_ist_midnight():
     assert out.success is True
     assert out.data["sent_today"] == 1, out.data
     assert out.data["pending_now"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the commission LEDGER (money), the staff member's own view of it,
+# and the revenue MoM denominator -- the three sites round 3 tabled/found.
+# ---------------------------------------------------------------------------
+
+_COMMISSION_CFG = [
+    {"employee_id": "ZZ-S-JUL", "commission_rate_percent": 10.0},
+    {"employee_id": "ZZ-S-JUN", "commission_rate_percent": 10.0},
+]
+
+
+def test_commission_summary_sits_on_the_ist_month_roster():
+    """/payroll/commission/summary is the ledger that PAYS the roster the five
+    fixed screens show. July must contain the 00:30-IST 1-July sale (ZZ-S-JUL,
+    9000) and nothing else; June must contain only the 16:30-IST 30-June
+    afternoon control (ZZ-S-JUN, 7000). Before the fix the month-literal
+    window put the small-hours sale in JUNE's ledger and left a one-second
+    hole before midnight."""
+    db = _DB(orders=ROSTER_CAST, salary_config=_COMMISSION_CFG)
+    with _PatchAttrs(payroll_mod, _get_db=lambda: db):
+        july = asyncio.run(
+            payroll_mod.get_commission_summary(
+                month=7, year=2026, store_id=STORE, employee_id=None,
+                current_user=dict(ADMIN),
+            )
+        )
+    db2 = _DB(orders=ROSTER_CAST, salary_config=_COMMISSION_CFG)
+    with _PatchAttrs(payroll_mod, _get_db=lambda: db2):
+        june = asyncio.run(
+            payroll_mod.get_commission_summary(
+                month=6, year=2026, store_id=STORE, employee_id=None,
+                current_user=dict(ADMIN),
+            )
+        )
+
+    assert {i["employee_id"] for i in july["items"]} == {"ZZ-S-JUL"}, july["items"]
+    assert {i["employee_id"] for i in june["items"]} == {"ZZ-S-JUN"}, june["items"]
+
+    (jrow,) = july["items"]
+    assert jrow["revenue"] == 9000.0
+    assert jrow["commission_amount"] == 900.0  # 9000 * 10%
+    assert july["total_commission"] == 900.0
+    # The drilldown day is the IST day: 1 July, not the raw slice's 30 June.
+    assert [o["date"] for o in jrow["recent_orders"]] == ["2026-07-01"]
+
+    (junrow,) = june["items"]  # afternoon positive control unmoved
+    assert junrow["revenue"] == 7000.0
+    assert june["total_commission"] == 700.0
+
+
+def test_my_commission_sees_the_same_ist_month_as_the_manager_ledger():
+    """/hr/self/commission is the STAFF MEMBER'S view of the same money. The
+    seller of the 00:30-IST 1-July sale must see it in their July (revenue
+    9000, commission 900) and NOT in their June -- and the June afternoon
+    seller's month is untouched (positive control)."""
+    jul_user = {
+        "user_id": "ZZ-S-JUL", "roles": ["SALES_STAFF"], "active_store_id": STORE,
+    }
+    jun_user = {
+        "user_id": "ZZ-S-JUN", "roles": ["SALES_STAFF"], "active_store_id": STORE,
+    }
+
+    db = _DB(orders=ROSTER_CAST, salary_config=_COMMISSION_CFG)
+    with _PatchAttrs(hrss_mod, _get_db=lambda: db):
+        jul_own = asyncio.run(
+            hrss_mod.my_commission(month=7, year=2026, current_user=dict(jul_user))
+        )
+        jun_leak = asyncio.run(
+            hrss_mod.my_commission(month=6, year=2026, current_user=dict(jul_user))
+        )
+        jun_own = asyncio.run(
+            hrss_mod.my_commission(month=6, year=2026, current_user=dict(jun_user))
+        )
+
+    assert jul_own["sales_count"] == 1 and jul_own["revenue"] == 9000.0, jul_own
+    assert jul_own["commission_amount"] == 900.0
+    # The small-hours sale must NOT also (or instead) appear in June.
+    assert jun_leak["sales_count"] == 0 and jun_leak["revenue"] == 0.0, jun_leak
+    # Afternoon control: the June seller's own June is exactly the 7000 sale.
+    assert jun_own["revenue"] == 7000.0 and jun_own["commission_amount"] == 700.0
+
+
+_MOM_CAST = [
+    # Current month (July): one afternoon sale.
+    _order(datetime(2026, 7, 10, 10, 0), total=2000.0, oid="ZZ-M-CUR"),
+    # 00:30 IST 1 June -- the FIRST IST day of the previous month. The old
+    # shifted-frame arithmetic ((start - 1d).replace(day=1)) started the prev
+    # window at 18:30 UTC on the 1st, dropping exactly this order from the
+    # MoM denominator every month.
+    _order(datetime(2026, 5, 31, 19, 0), total=3000.0, oid="ZZ-M-PREV-FIRST"),
+    # Mid-June afternoon control.
+    _order(datetime(2026, 6, 15, 10, 0), total=1000.0, oid="ZZ-M-PREV-MID"),
+    # A May sale that must stay OUT of the previous window.
+    _order(datetime(2026, 5, 15, 10, 0), total=50000.0, oid="ZZ-M-MAY-OUT"),
+]
+
+
+def test_revenue_mom_previous_window_tiles_with_the_current_month():
+    """get_revenue(period=month): the previous-month denominator must start at
+    the previous month's first IST day (as a naive-UTC bound) and END exactly
+    where the current window begins -- no hole, no overlap. Pinned twice: on
+    the emitted $match bounds and on the resulting mom_growth number."""
+    db = _DB(orders=_MOM_CAST)
+    coll = db.get_collection("orders")
+    pipelines = []
+    orig_aggregate = coll.aggregate
+
+    def spy(pipeline, *a, **k):
+        pipelines.append(pipeline)
+        return orig_aggregate(pipeline, *a, **k)
+
+    coll.aggregate = spy
+
+    with _PatchAttrs(
+        finance_mod, _get_db=lambda: db, ist_today=lambda: date(2026, 7, 15)
+    ):
+        out = asyncio.run(
+            finance_mod.get_revenue(
+                period="month", store_id=None, current_user=dict(ADMIN)
+            )
+        )
+
+    # Bound pins, as concrete instants (NOT recomputed via the helper under
+    # test -- a broken helper must not be able to agree with itself).
+    cur_start = datetime(2026, 6, 30, 18, 30)   # 1 July IST as naive-UTC
+    prev_start = datetime(2026, 5, 31, 18, 30)  # 1 June IST as naive-UTC
+    assert len(pipelines) == 2, pipelines
+    cur_match = pipelines[0][0]["$match"]["created_at"]
+    prev_match = pipelines[1][0]["$match"]["created_at"]
+    assert cur_match["$gte"] == cur_start, cur_match
+    assert prev_match["$gte"] == prev_start, prev_match
+    # THE SEAM: previous window's $lt is exactly the current window's start.
+    assert prev_match["$lt"] == cur_start, prev_match
+
+    # Behavioural pin: prev revenue = 3000 (small-hours 1-June) + 1000 (mid
+    # June) = 4000; May's 50000 stays out. mom = (2000-4000)/4000 = -50.0%.
+    assert out["total_revenue"] == 2000.0, out
+    assert out["mom_growth"] == -50.0, out

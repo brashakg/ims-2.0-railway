@@ -166,16 +166,6 @@ ALLOWED = {
         "shifting df/dt, which would break points_log MTD."
     ),
     (
-        "api/routers/payroll.py",
-        '"date": str(o.get("created_at", ""))[:10],',
-    ): (
-        "Sales-commission drilldown. The value AND the surrounding month "
-        "window (datetime(year, month, 1) .. 23:59:59) carry the identical "
-        "defect PLUS a one-second hole, and this is staff commission money: "
-        "bound and value must move together in a money-reviewed PR of its own, "
-        "not as a drive-by inside a reporting change."
-    ),
-    (
         "api/routers/vendors.py",
         'when = str(b.get("bill_date") or b.get("created_at") or "")[:7]',
     ): (
