@@ -30,6 +30,7 @@ import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..providers import send_whatsapp, send_sms, dispatch_mode, provider_ready
+from api.utils.ist import ist_day_start_utc, ist_today
 
 # Quiet-hours / IST clock is now shared so EVERY outbound path (MEGAPHONE,
 # task-escalation WhatsApp, and the manual marketing send API) agree on the
@@ -1084,9 +1085,26 @@ class MegaphoneAgent(JarvisAgent):
                 message="notification_logs unavailable",
             )
         try:
+            # BUG-104 round-3 VERDICT: ALIGN to the IST business day.
+            # These "today" counters were internally one frame (this class
+            # stamps queued_at/sent_at/dispatched_at as aware-UTC ISO strings
+            # and compared them against a UTC-midnight string), so nothing
+            # here was ever DROPPED -- but round 2 moved the jarvis owner
+            # brief's sent_today to IST midnight, so between 00:00 and 05:30
+            # IST the two owner-facing readouts disagreed on how many
+            # messages went out "today". A wrong count here costs a confusing
+            # SUPERADMIN status line (dispatch is gated by the consent /
+            # quiet-hours / frequency-cap stack, never by these counters), so
+            # the cheap align wins over a tabling. The boundary is the IST
+            # day start expressed as the same aware-UTC ISO shape the rows
+            # store, so the string comparison stays type-valid.
+            # KNOWN, SEPARATE: no writer anywhere stamps `queued_at` (the
+            # queue door stamps created_at -- notification_service.py), so
+            # queued_today reads 0 regardless of frame; that is a field-name
+            # defect outside BUG-104, left for its own change.
             today_start = (
-                datetime.now(timezone.utc)
-                .replace(hour=0, minute=0, second=0, microsecond=0)
+                ist_day_start_utc(ist_today())
+                .replace(tzinfo=timezone.utc)
                 .isoformat()
             )
             counts = {
