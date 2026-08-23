@@ -674,7 +674,14 @@ async def get_revenue(
 
     # Previous period for MoM/YoY
     if period == "month":
-        prev_start = (start - timedelta(days=1)).replace(day=1)
+        # BUG-104: derive the previous month in the CALENDAR frame, then
+        # convert. `start` is a SHIFTED naive-UTC instant (18:30 on the last
+        # day of the prior month), so calendar arithmetic on it -- the old
+        # `(start - 1 day).replace(day=1)` -- landed on the 1st AT 18:30 UTC,
+        # i.e. IST midnight of the 2nd: the whole first IST day of the
+        # previous month fell out of the MoM denominator, every month.
+        prev_first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        prev_start = ist_day_start_utc(prev_first)
         prev_match = {
             "created_at": {"$gte": prev_start, "$lt": start},
             "status": _REAL_ORDER_STATUS_FILTER,
