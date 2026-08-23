@@ -23,7 +23,7 @@ from ..dependencies import (
     resolve_store_scope,
     can_access_store_scoped,
 )
-from ..utils.ist import now_ist, ist_day_start_utc
+from ..utils.ist import now_ist, ist_day_start_utc, ist_date_str, ist_month_window_utc
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
@@ -2181,10 +2181,14 @@ async def get_commission_summary(
         return {"items": [], "month": month, "year": year, "total_commission": 0}
 
     try:
-        # Date range for the requested month.
-        days_in_month = monthrange(year, month)[1]
-        from_dt = datetime(year, month, 1)
-        to_dt = datetime(year, month, days_in_month, 23, 59, 59)
+        # THE IST MONTH, as naive-UTC BOUNDS (BUG-104). The naive month-literal
+        # window that used to sit here excluded every sale placed 00:00-05:30
+        # IST on the 1st (it landed in the PREVIOUS month's ledger) and left a
+        # one-second hole before midnight -- so this commission ledger
+        # disagreed with the fixed leaderboards/payout roster every month.
+        # Round 1 tabled this site for "a money-reviewed PR of its own"; this
+        # is that PR.
+        from_dt, to_dt = ist_month_window_utc(year, month)
 
         # Build order query.
         order_query: dict = {
@@ -2223,7 +2227,9 @@ async def get_commission_summary(
             staff_map[sid]["orders"].append(
                 {
                     "order_id": o.get("order_id") or o.get("_id", ""),
-                    "date": str(o.get("created_at", ""))[:10],
+                    # The IST day, matching the window above -- a raw slice
+                    # here re-badged the small-hours sale with yesterday.
+                    "date": ist_date_str(o.get("created_at")),
                     "amount": amount,
                 }
             )

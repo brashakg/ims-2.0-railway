@@ -42,6 +42,8 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+
+from api.utils.ist import ist_date_str, now_ist
 from typing import Any, Dict, Optional
 
 import httpx
@@ -157,8 +159,16 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
     inv_no = _s(
         order.get("invoice_number") or order.get("order_number") or order.get("id")
     )
+    # BUG-104, VALUE rule (+5:30). DocDtls.Dt is the STATUTORY document date
+    # registered on the IRP, and GSTN cross-populates GSTR-1 from the IRN. The
+    # created_at fallback is a stored naive datetime.now() == the UTC wall
+    # clock (Railway runs UTC), so slicing its UTC day would register a
+    # 1-Apr-00:00-05:30-IST invoice dated 31-March PRIOR-FY while the (fixed)
+    # GSTR-1 files it 1-April -- one invoice, two statutory dates.
+    # ist_date_str shifts datetimes to the IST calendar day and passes
+    # date-only strings (invoice_date) through unchanged.
     inv_date_raw = order.get("invoice_date") or order.get("created_at") or ""
-    inv_date = _fmt_date_ddmmyyyy(inv_date_raw)
+    inv_date = _fmt_date_ddmmyyyy(ist_date_str(inv_date_raw) or inv_date_raw)
 
     # Seller GSTIN -- from the store/entity on the order
     seller_gstin = _s(order.get("store_gstin") or order.get("billing_gstin"))
@@ -352,9 +362,10 @@ def _fmt_date_ddmmyyyy(val: Any) -> str:
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         y, m, d = s[:4], s[5:7], s[8:10]
         return f"{d}/{m}/{y}"
-    # Fallback: today
-    today = datetime.now(timezone.utc)
-    return today.strftime("%d/%m/%Y")
+    # Fallback: today. BUG-104: this is the same statutory DocDtls date, so
+    # "today" must be the IST calendar day, not the UTC box day (which is
+    # yesterday between 00:00 and 05:30 IST -- and prior-FY on 1 April).
+    return now_ist().strftime("%d/%m/%Y")
 
 
 # ---------------------------------------------------------------------------

@@ -189,7 +189,13 @@ def _cr_session(session_id, store_id, day, *, opening, sales, expected, counted,
         "by_mode_breakdown": {"CASH": {"net": sales, "count": 4}},
         "closed_by": "cashier-7",
         "closed_by_name": "Ramesh",
-        "closed_at": f"{day}T18:30:00",
+        # 12:00 UTC == 17:30 IST: unambiguously the SAME IST calendar day, so
+        # these fixtures pin window filtering, not the frame shift. (The old
+        # 18:30:00 was EXACTLY IST midnight -- the BUG-104 boundary itself --
+        # and under the parse-then-shift fix it correctly rolls to `day`+1.
+        # The midnight-close case has its own dedicated tests in
+        # test_ist_closing_sweep.py.)
+        "closed_at": f"{day}T12:00:00",
         "opened_at": f"{day}T09:00:00",
     }
 

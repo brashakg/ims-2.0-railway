@@ -5,7 +5,7 @@ import csv
 import io
 import logging
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from ..utils.ist import (
     now_ist,
     now_ist_naive,
@@ -674,7 +674,14 @@ async def get_revenue(
 
     # Previous period for MoM/YoY
     if period == "month":
-        prev_start = (start - timedelta(days=1)).replace(day=1)
+        # BUG-104: derive the previous month in the CALENDAR frame, then
+        # convert. `start` is a SHIFTED naive-UTC instant (18:30 on the last
+        # day of the prior month), so calendar arithmetic on it -- the old
+        # `(start - 1 day).replace(day=1)` -- landed on the 1st AT 18:30 UTC,
+        # i.e. IST midnight of the 2nd: the whole first IST day of the
+        # previous month fell out of the MoM denominator, every month.
+        prev_first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        prev_start = ist_day_start_utc(prev_first)
         prev_match = {
             "created_at": {"$gte": prev_start, "$lt": start},
             "status": _REAL_ORDER_STATUS_FILTER,
@@ -3873,16 +3880,33 @@ def _iso_now() -> str:
 
 
 def _to_dt(s):
-    """Parse an ISO date/datetime string to a datetime (None on failure)."""
+    """Parse an ISO date/datetime string to a NAIVE-UTC datetime (None on
+    failure).
+
+    Stored instants here are naive-UTC (``_iso_now()``); every caller compares
+    the result against that frame. An offset-suffixed string -- never written
+    by our stamps, but present in fixtures and possible in hand-edited rows --
+    is CONVERTED to that frame. The old ``[:19]`` slice silently DROPPED the
+    offset and re-badged the wall time as UTC: '...T21:00:00+05:30' (21:00
+    IST) was read as 21:00 UTC, 5h30m late, which filed a legacy till close
+    under the next IST business day (BUG-104's mirror image)."""
     if not s:
         return None
+    raw = str(s)
+    dt = None
     try:
-        return datetime.fromisoformat(str(s)[:19])
+        dt = datetime.fromisoformat(raw)
     except (ValueError, TypeError):
         try:
-            return datetime.fromisoformat(str(s)[:10])
+            dt = datetime.fromisoformat(raw[:19])
         except (ValueError, TypeError):
-            return None
+            try:
+                dt = datetime.fromisoformat(raw[:10])
+            except (ValueError, TypeError):
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
@@ -4800,8 +4824,22 @@ async def cash_reconciliation_summary(
     for s in cr_sessions:
         # The "business day" is the close date (these sessions have no
         # session_date field). Fall back to opened_at.
+        # BUG-104, VALUE rule via parse-then-shift (the _credit_note_date_ist
+        # shape): closed_at/opened_at are written by _iso_now() ==
+        # datetime.utcnow().isoformat() -- a NAIVE-UTC ISO STRING, whose
+        # frame is known from the writer, so parse it to the instant FIRST
+        # and then take the IST day. Slicing [:10] read the UTC day: a till
+        # closed after midnight IST (00:00-05:30) filed under YESTERDAY's
+        # business day AND was range-filtered against the operator's IST
+        # start/end days in the wrong frame. Unparseable junk falls back to
+        # the old first-10-chars behaviour.
         closed_at = s.get("closed_at") or s.get("opened_at")
-        sess_day = str(closed_at or "")[:10]
+        _parsed_close = _to_dt(closed_at)
+        sess_day = (
+            ist_date_str(_parsed_close)
+            if _parsed_close is not None
+            else str(closed_at or "")[:10]
+        )
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)

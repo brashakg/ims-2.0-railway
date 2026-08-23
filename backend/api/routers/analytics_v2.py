@@ -18,7 +18,7 @@ Advanced analytics and feature endpoints:
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
@@ -26,6 +26,7 @@ from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
+from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 
 router = APIRouter()
 
@@ -79,9 +80,25 @@ def _created_range(
 
 
 def _day_key(value) -> str:
-    """Coerce a `created_at` value (BSON datetime OR legacy ISO string OR
-    None) to 'YYYY-MM-DD'. Never raises -- replaces the unsafe `[:10]` slice
-    that TypeError'd on datetime objects."""
+    """RAW-FRAME day key: the UTC calendar day of a stored `created_at`.
+
+    Coerces a BSON datetime OR a legacy ISO string OR None to 'YYYY-MM-DD',
+    never raising -- it replaced the unsafe `[:10]` slice that TypeError'd on
+    datetime objects.
+
+    BUG-104 -- DELIBERATELY NOT IST, and deliberately still here. `created_at`
+    is a naive datetime.now() == the UTC wall clock, so this returns the UTC
+    day; for any instant between 00:00 and 05:30 IST that is the PREVIOUS
+    business day. Three of the four call sites this helper used to have were
+    business days a person reads, and they now use `ist_date_str` instead.
+
+    The ONE remaining caller is the demand-forecast trend split, where the key
+    is compared against `(now - 45 days).strftime(...)` off the same naive box
+    clock and never leaves the function. Both sides of that comparison are in
+    THIS frame; converting one alone would move the boundary error rather than
+    remove it. Do not "finish the job" by making this IST-aware -- that would
+    silently re-break the one place the raw frame is correct.
+    """
     if isinstance(value, datetime):
         return value.date().isoformat()
     if isinstance(value, str):
@@ -421,7 +438,14 @@ async def dead_stock(
                 # Normalize to a 'YYYY-MM-DD' day-key so the > comparison and
                 # the later parse both work whether created_at is a BSON
                 # datetime or a legacy ISO string.
-                order_date = _day_key(o.get("created_at"))
+                #
+                # BUG-104, VALUE rule (+5:30). This value is emitted as
+                # `last_sold_date` on the dead-stock screen -- the date a buyer
+                # reads before deciding return-to-vendor vs clearance -- so it
+                # is the IST business day, not the UTC one. The `>` max
+                # comparison below stays correct because ist_date_str is
+                # monotonic in the instant and BOTH sides of it come from here.
+                order_date = ist_date_str(o.get("created_at"))
                 if order_date and (
                     pid not in last_sold_map or order_date > last_sold_map[pid]
                 ):
@@ -451,7 +475,10 @@ async def dead_stock(
                 for item in items:
                     pid = item.get("product_id", "")
                     if pid and pid not in last_sold_map:
-                        last_sold_map[pid] = _day_key(o.get("created_at"))
+                        # Same map, so the SAME frame as the branch above --
+                        # converting one and not the other would make two
+                        # products' "last sold" dates incomparable.
+                        last_sold_map[pid] = ist_date_str(o.get("created_at"))
 
     dead_items = []
     total_value = 0.0
@@ -472,8 +499,13 @@ async def dead_stock(
         last_sold = last_sold_map.get(pid)
         if last_sold:
             try:
-                last_dt = datetime.fromisoformat(last_sold)
-                days_since = (now - last_dt).days
+                # `last_sold` is now an IST calendar day, so the "today" it is
+                # subtracted from must be the IST one too -- `now` here is the
+                # naive-UTC box clock and is still correct for the Mongo bound
+                # above, which is why this reads a separate clock instead of
+                # moving that one.
+                last_day = date.fromisoformat(last_sold)
+                days_since = (ist_today() - last_day).days
             except Exception:
                 days_since = days_threshold + 1
         else:
@@ -1002,15 +1034,20 @@ async def staff_leaderboard(
     if db is None:
         return {"leaderboard": [], "period": period}
 
-    now = datetime.now()
+    # BUG-104, BOUND rule -- and this leaderboard has a TWIN: payroll.py's
+    # /sales-leaderboard already computes today/week/month from the IST
+    # clock (now_ist + ist_day_start_utc). Off the box clock these two
+    # screens DISAGREED between 00:00 and 05:30 IST -- same staff, same
+    # orders, different ranks. Identical window math to the payroll twin so
+    # they can never diverge again.
+    now = now_ist()
+    today = now.date()
     if period == "today":
-        from_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        from_date = ist_day_start_utc(today)
     elif period == "week":
-        from_date = (now - timedelta(days=now.weekday())).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        from_date = ist_day_start_utc(today - timedelta(days=now.weekday()))
     else:
-        from_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from_date = ist_day_start_utc(today.replace(day=1))
 
     orders = list(
         db.get_collection("orders")
@@ -1213,9 +1250,44 @@ async def anomaly_detection(
     if db is None:
         return {"anomalies": [], "summary": {"total_anomalies": 0, "critical_count": 0}}
 
+    # BUG-104, BOUND rule (the bound moves BACKWARD; the stored value is
+    # never touched). date_from/date_to are IST calendar days the SUPERADMIN
+    # typed; created_at is a naive-UTC instant. A naive-midnight bound
+    # excluded every 00:00-05:30-IST void on the FIRST day of the range from
+    # the scan (round 1 fixed only the PRINTED dates at the grouping below),
+    # and the old $lte-to-midnight upper bound excluded the whole LAST
+    # requested day. ist_day_start_utc(from) .. one microsecond before
+    # ist_day_start_utc(to + 1 day) covers exactly the requested IST days.
+    # The no-dates default stays a rolling 30-day window (pure elapsed time
+    # in the stored frame -- no calendar boundary, nothing to shift).
     now = datetime.now()
-    dt_from = _parse_date(date_from) or (now - timedelta(days=30))
-    dt_to = _parse_date(date_to) or now
+    parsed_from = _parse_date(date_from)
+    parsed_to = _parse_date(date_to)
+    dt_from = (
+        ist_day_start_utc(parsed_from.date())
+        if parsed_from is not None
+        else (now - timedelta(days=30))
+    )
+    dt_to = (
+        ist_day_start_utc(parsed_to.date() + timedelta(days=1))
+        - timedelta(microseconds=1)
+        if parsed_to is not None
+        else now
+    )
+
+    # The anomaly rows carry the scanned RANGE as calendar days. Those must
+    # echo the IST days the SUPERADMIN asked for (or the IST days of the
+    # rolling default), NOT the shifted bound instants above -- printing
+    # dt_from's UTC day would label a June scan "2026-05-31 to ...".
+    from_day_label = (
+        parsed_from.date().isoformat()
+        if parsed_from is not None
+        else ist_date_str(dt_from)
+    )
+    to_day_label = (
+        parsed_to.date().isoformat() if parsed_to is not None else ist_date_str(dt_to)
+    )
+    range_label = f"{from_day_label} to {to_day_label}"
 
     orders = list(
         db.get_collection("orders")
@@ -1242,7 +1314,15 @@ async def anomaly_detection(
         sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
         status = (o.get("status", "") or "").lower()
         oid = o.get("order_id", str(o.get("_id", "")))
-        order_date = _day_key(o.get("created_at"))
+        # BUG-104, VALUE rule (+5:30). This is BOTH the "same day" grouping key
+        # for the void-and-recreate detector AND the date printed in the
+        # anomaly shown against a named staff member. "Same day" has to mean
+        # the same BUSINESS day; on the UTC day the shop's evening and the next
+        # morning's 00:00-05:30 IST trade were split across two buckets (a real
+        # void-and-recreate pair could slip the >= 3 threshold) and the accusing
+        # date could name the wrong day. Both sides of the grouping come from
+        # this one value, so they move together.
+        order_date = ist_date_str(o.get("created_at"))
 
         # 1. Excessive voids / cancellations
         if status in ("void", "voided", "cancelled", "canceled"):
@@ -1288,9 +1368,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{data['count']} voided/cancelled orders",
                     "order_ids": data["order_ids"][:10],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 
@@ -1304,9 +1382,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{data['count']} refunds totaling Rs.{round(data['total'], 2)}",
                     "order_ids": data["order_ids"][:10],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 
@@ -1320,9 +1396,7 @@ async def anomaly_detection(
                     "staff_name": data["name"],
                     "description": f"{len(data['orders'])} orders with >20% discount",
                     "order_ids": [o["order_id"] for o in data["orders"][:10]],
-                    "date": dt_from.strftime("%Y-%m-%d")
-                    + " to "
-                    + dt_to.strftime("%Y-%m-%d"),
+                    "date": range_label,
                 }
             )
 

@@ -14,13 +14,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import os
 import re
 import time
 import logging
 from .auth import get_current_user, hash_password, verify_password, require_roles
 from ..dependencies import get_audit_repository, get_store_repository
+from ..utils.ist import ist_day_start_utc, ist_today
 # BUG-155: the canonical at-rest credential crypto now lives in a shared leaf
 # module so every read/write path (settings, admin, nexus, einvoice, ondc, ...)
 # encrypts/decrypts with the same key. The _encrypt_config/_decrypt_config/
@@ -2088,21 +2089,32 @@ async def update_system_settings(
 def _audit_time_filter(start_date: Optional[str], end_date: Optional[str]) -> dict:
     """Build a Mongo `timestamp` range clause from inclusive YYYY-MM-DD bounds.
 
+    BUG-104, BOUND rule (round-3 closing sweep): the typed bounds are IST
+    calendar days, but audit `timestamp` is a stored naive-UTC instant
+    (audit_activity middleware stamps datetime.utcnow()), so each IST day
+    starts 5h30m EARLIER in that frame -- the bound moves BACKWARD via
+    ist_day_start_utc. The old naive-midnight bounds hid every 00:00-05:30-IST
+    action on the first requested day of the SUPERADMIN Activity Log and
+    showed the same band from the day after the last.
+
     Returns {} when neither bound parses, so a malformed date silently widens
-    the query rather than 500ing it. `end_date` is taken to the END of that day
-    (23:59:59.999999) so a single-day from==to range returns that whole day.
+    the query rather than 500ing it. `end_date` is taken to the end of that
+    IST day (next IST day start minus 1 microsecond) so a single-day
+    from==to range returns that whole IST day.
     """
     clause: dict = {}
     if start_date:
         try:
-            clause["$gte"] = datetime.strptime(start_date, "%Y-%m-%d")
+            clause["$gte"] = ist_day_start_utc(
+                datetime.strptime(start_date, "%Y-%m-%d").date()
+            )
         except (ValueError, TypeError):
             pass
     if end_date:
         try:
-            clause["$lte"] = datetime.strptime(end_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, microsecond=999999
-            )
+            clause["$lte"] = ist_day_start_utc(
+                datetime.strptime(end_date, "%Y-%m-%d").date() + timedelta(days=1)
+            ) - timedelta(microseconds=1)
         except (ValueError, TypeError):
             pass
     return {"timestamp": clause} if clause else {}
@@ -2306,7 +2318,13 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    today = date.today()
+    # BUG-104 (round-3 closing sweep): "today" is the IST business day, not
+    # the UTC box day -- between 00:00 and 05:30 IST date.today() still says
+    # YESTERDAY, so the header date, the audit window (via the IST-shifted
+    # _audit_time_filter above) and the orders window below would all label
+    # and count the wrong day. Same today-counter class round 2 fixed in the
+    # jarvis owner brief; the numbers on the two screens must agree.
+    today = ist_today()
     total_actions = 0
     logins = 0
     orders_created = 0
@@ -2323,8 +2341,12 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
 
         order_repo = get_order_repository()
         if order_repo is not None:
-            start = datetime.combine(today, datetime.min.time())
-            end = datetime.combine(today, datetime.max.time())
+            # BOUND rule: created_at is a stored naive-UTC instant; the IST
+            # day starts 5h30m earlier in that frame.
+            start = ist_day_start_utc(today)
+            end = ist_day_start_utc(today + timedelta(days=1)) - timedelta(
+                microseconds=1
+            )
             orders_created = order_repo.count(
                 {"created_at": {"$gte": start, "$lte": end}}
             )

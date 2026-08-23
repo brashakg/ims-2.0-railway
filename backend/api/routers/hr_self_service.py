@@ -30,10 +30,30 @@ from calendar import monthrange
 import logging
 
 from .auth import get_current_user
+from ..utils.ist import ist_date_str, ist_month_window_utc
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _applied_day(raw) -> str:
+    """IST calendar day of a leave application's `applied_at`.
+
+    BUG-104, VALUE rule via parse-then-shift: hr.py writes applied_at as
+    datetime.now().isoformat() == a NAIVE-UTC ISO string (Railway runs UTC),
+    so slicing [:10] showed an employee who applied 00:00-05:30 IST
+    YESTERDAY's date. The frame is known from the writer, so parse to the
+    instant first, then take the IST day. Junk falls back to the old
+    first-10-chars behaviour; missing -> ''.
+    """
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(raw)[:19])
+    except (ValueError, TypeError):
+        return str(raw)[:10]
+    return ist_date_str(parsed)
 
 
 def _get_db():
@@ -218,7 +238,7 @@ async def my_leaves(
                     "days": days,
                     "status": status,
                     "reason": d.get("reason", ""),
-                    "applied_at": str(d.get("applied_at", ""))[:10],
+                    "applied_at": _applied_day(d.get("applied_at")),
                 }
             )
 
@@ -328,9 +348,10 @@ async def my_commission(
         return empty
 
     try:
-        days_in_month = monthrange(yr, mon)[1]
-        from_dt = datetime(yr, mon, 1)
-        to_dt = datetime(yr, mon, days_in_month, 23, 59, 59)
+        # The IST month as naive-UTC bounds (BUG-104) -- computed "exactly
+        # like /payroll/commission/summary", which is the point: the staff
+        # member's own view and the manager ledger must see the same month.
+        from_dt, to_dt = ist_month_window_utc(yr, mon)
         store_id = current_user.get("active_store_id")
 
         order_query = {

@@ -627,7 +627,25 @@ class TaskmasterAgent(JarvisAgent):
                 sku = item.get("sku")
                 if sku in disabled_skus:
                     continue
-                # Skip if a draft PO already exists for this SKU today
+                # Skip if a draft PO already exists for this SKU today.
+                #
+                # BUG-104 round-3 VERDICT: TABLED, deliberately kept on the
+                # UTC day. This is a DEDUPE KEY, not a displayed date: both
+                # sides are aware-UTC ISO strings this same function writes
+                # (created_at below), so the comparison is one self-written
+                # frame and nothing is dropped -- the only effect of the UTC
+                # day is WHICH 24h window suppresses a second draft. Two runs
+                # inside one IST day CAN straddle a UTC midnight (e.g. 04:00
+                # IST then 10:00 IST) and double-draft one PO, but every
+                # auto-draft is Tier-2 requires_approval=True, so a human
+                # sees both and approves one; the cost is a duplicate DRAFT
+                # row, never a duplicate order or money. Aligning to IST
+                # would (a) leave this dedupe-key class inconsistent with
+                # follow_ups/kicker, which round 1 tabled for the same
+                # reason, and (b) itself open a one-off window at the
+                # switchover where the key changes and a duplicate drafts
+                # anyway. Same ruling as the follow_ups scheduled_date entry
+                # in test_no_raw_calendar_derivations.ALLOWED.
                 today_start = (
                     datetime.now(timezone.utc)
                     .replace(hour=0, minute=0, second=0, microsecond=0)
