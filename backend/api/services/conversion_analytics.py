@@ -25,6 +25,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
+from api.utils.ist import ist_day_start_utc
+
 # Orders in these states never count as a conversion (F24 packet + reports.py
 # _orders_in_window mirror the same exclusion). HISTORICAL = a pre-IMS order
 # imported for customer-360 history only -- it can never convert an eye test.
@@ -146,8 +148,20 @@ def get_conversion_dashboard(
     #    exclude CANCELLED / DRAFT at the source.
     orders_by_customer: Dict[str, List[dict]] = {}
     if customer_ids:
-        start_dt = datetime.combine(from_date, datetime.min.time())
-        end_dt = datetime.combine(to_date, datetime.max.time()) + window
+        # BUG-104, BOUND rule (round-3 closing sweep): from_date/to_date are
+        # IST calendar days the caller typed, but orders.created_at is a
+        # stored naive-UTC instant -- an IST day starts 5h30m EARLIER in that
+        # frame, so the bound moves BACKWARD via ist_day_start_utc. The old
+        # naive-midnight window dropped every 00:00-05:30-IST order on the
+        # first day (a conversion the optometrist never got credit for) and
+        # widened past the intended end. test_date above is a BUSINESS-DATE
+        # string and correctly keeps its calendar-day bounds.
+        start_dt = ist_day_start_utc(from_date)
+        end_dt = (
+            ist_day_start_utc(to_date + timedelta(days=1))
+            - timedelta(microseconds=1)
+            + window
+        )
         order_filter: Dict = {
             "customer_id": {"$in": customer_ids},
             "created_at": {"$gte": start_dt, "$lte": end_dt},
