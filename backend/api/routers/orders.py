@@ -1048,6 +1048,12 @@ def generate_order_number(store_id: str) -> str:
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
+# The EMI rate has ONE definition -- services/policy_registry.resolve_emi_annual_rate
+# -- shared with the store-detail read the POS screen quotes from. An alias,
+# not a copy: re-inlining it here is how the screen and the charge drift apart.
+from ..services.policy_registry import resolve_emi_annual_rate as _emi_annual_rate
+
+
 def build_emi_schedule(principal: float, annual_rate: float, months: int) -> dict:
     """Reconcile an EMI plan so the installments sum EXACTLY to total_payable.
 
@@ -4320,25 +4326,12 @@ async def add_payment(
                     status_code=400,
                     detail="EMI tenure (emi_months) is required for EMI payments",
                 )
-            # Fetch configurable EMI rate from store settings (default 12% annual)
-            emi_annual_rate = 12.0  # fallback
-            try:
-                from ..dependencies import get_seeded_db
-
-                db = get_seeded_db()
-                if db:
-                    store_settings = db.get_collection("settings").find_one(
-                        {
-                            "store_id": current_user.get("active_store_id"),
-                            "key": "emi_config",
-                        }
-                    )
-                    if store_settings and store_settings.get("value", {}).get(
-                        "annual_rate"
-                    ):
-                        emi_annual_rate = float(store_settings["value"]["annual_rate"])
-            except Exception:
-                pass  # use default
+            # Configurable EMI rate from the policy matrix (store > entity >
+            # global > registry default 12.0). Replaces the old read of a
+            # `settings` collection `emi_config` row that NOTHING ever wrote:
+            # the policy key is owner-editable in Settings and is the SAME
+            # key the POS payment screen quotes from, so screen == charge.
+            emi_annual_rate = _emi_annual_rate(current_user.get("active_store_id"))
 
             # POS-2 + P3-C: use emi_principal (financed balance) when the
             # caller provides it; fall back to payment.amount for backward

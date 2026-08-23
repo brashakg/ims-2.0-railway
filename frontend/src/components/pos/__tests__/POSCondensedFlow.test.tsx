@@ -79,6 +79,7 @@ vi.mock('../../../services/api', () => {
     adminStoreApi: { listStores: noop, getStoreUsers: () => Promise.resolve([]), getStaff: () => Promise.resolve([]) },
     inventoryApi: { searchByBarcode: noop },
     loyaltyApi: { redeem: noop, getBalance: noop },
+    storeApi: { getStore: () => Promise.resolve({ store_id: 'BV-BOK-01' }) },
   };
 });
 

@@ -632,7 +632,7 @@ export function POSLayout() {
           discount_percent: item.discount_percent,
           prescription_id: item.linked_prescription_id,
           lens_details: item.lens_details,
-          item_note: (item as any).item_note || undefined,
+          item_note: item.item_note || undefined,
         })),
         notes: store.cart_note || undefined,
         // Phase 6.7 — pass delivery + cart-discount fields through to backend
@@ -729,8 +729,8 @@ export function POSLayout() {
               },
               prescription_id: store.prescription.id || '',
               fitting_instructions: cartItems
-                .filter(i => i.notes)
-                .map(i => `${i.name}: ${i.notes}`)
+                .filter(i => i.item_note)
+                .map(i => `${i.name}: ${i.item_note}`)
                 .join('; ') || undefined,
               special_notes: store.cart_note || undefined,
               expected_date: expectedDate.toISOString().split('T')[0],
@@ -2682,8 +2682,8 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                   {item.lens_details && <p className="text-xs text-purple-500 mt-0.5">{item.lens_details.type} {'\u00B7'} {item.lens_details.coatings.join(', ')}</p>}
                   <input
                     placeholder="Item notes (PD, fitting, tint, coating...)"
-                    defaultValue={(item as any).item_note || ''}
-                    onBlur={(e) => store.setItemNote?.(item.id, e.target.value)}
+                    defaultValue={item.item_note || ''}
+                    onBlur={(e) => store.updateItemNote(item.id, e.target.value)}
                     className="mt-1 w-full text-[11px] px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 placeholder:text-gray-400 focus:border-bv-red-300 focus:bg-white"
                   />
                 </td>

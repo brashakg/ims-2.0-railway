@@ -201,7 +201,7 @@ export function CartSidebar() {
             {item.is_optical && (
               <input
                 placeholder="PD / Fitting / Tint notes…"
-                value={item.notes || ''}
+                value={item.item_note || ''}
                 onChange={(e) => store.updateItemNote(item.id, e.target.value)}
                 style={{
                   marginTop: 6,
