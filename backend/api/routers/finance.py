@@ -5,7 +5,7 @@ import csv
 import io
 import logging
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from ..utils.ist import (
     now_ist,
     now_ist_naive,
@@ -3880,16 +3880,33 @@ def _iso_now() -> str:
 
 
 def _to_dt(s):
-    """Parse an ISO date/datetime string to a datetime (None on failure)."""
+    """Parse an ISO date/datetime string to a NAIVE-UTC datetime (None on
+    failure).
+
+    Stored instants here are naive-UTC (``_iso_now()``); every caller compares
+    the result against that frame. An offset-suffixed string -- never written
+    by our stamps, but present in fixtures and possible in hand-edited rows --
+    is CONVERTED to that frame. The old ``[:19]`` slice silently DROPPED the
+    offset and re-badged the wall time as UTC: '...T21:00:00+05:30' (21:00
+    IST) was read as 21:00 UTC, 5h30m late, which filed a legacy till close
+    under the next IST business day (BUG-104's mirror image)."""
     if not s:
         return None
+    raw = str(s)
+    dt = None
     try:
-        return datetime.fromisoformat(str(s)[:19])
+        dt = datetime.fromisoformat(raw)
     except (ValueError, TypeError):
         try:
-            return datetime.fromisoformat(str(s)[:10])
+            dt = datetime.fromisoformat(raw[:19])
         except (ValueError, TypeError):
-            return None
+            try:
+                dt = datetime.fromisoformat(raw[:10])
+            except (ValueError, TypeError):
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
