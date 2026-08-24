@@ -453,39 +453,66 @@ class _SpyCol(_Col):
         return super().find(query, projection, *a, **k)
 
 
-def test_every_drawer_reader_asks_for_the_same_expense_window(monkeypatch):
-    """THE AGREEMENT REQUIREMENT. `_cash_expenses_for_window` decides what the
-    drawer is charged; `_refund_double_entry_advisory` decides what the
-    manager is TOLD to delete. Both read `expenses.expense_date` for one
-    session. If they disagree the advisory names a payout the drawer never
-    subtracted -- a manager who acts on it turns a correct count into a
-    shortage the size of that payout.
+# The two window SHAPES a drawer session can have. The preview leaves the
+# session open (end_iso=None); the close supplies the closing instant. Round 2
+# of this PR tested only the preview -- where BOTH readers fall through to
+# ist_today() and therefore agree by construction -- so a verifier reverted
+# the advisory's UPPER bound alone and every test stayed green while the close
+# path silently disagreed. Both shapes, and both ends, from here on.
+_WINDOW_SHAPES = [
+    # (label, end_iso, expected $gte, expected $lte)
+    ("preview, still open", None, IST_DAY, IST_DAY),
+    ("close after IST midnight", CLOSED_AFTER_MIDNIGHT, IST_DAY, IST_DAY),
+]
 
-    Asserted on the emitted FILTERS, not on the outputs: two helpers can
-    agree by accident on one fixture and disagree on the next."""
+
+@pytest.mark.parametrize(
+    "label,end_iso,want_gte,want_lte",
+    _WINDOW_SHAPES,
+    ids=[w[0] for w in _WINDOW_SHAPES],
+)
+def test_every_drawer_reader_asks_for_the_same_expense_window(
+    monkeypatch, label, end_iso, want_gte, want_lte
+):
+    """THE AGREEMENT REQUIREMENT. `_cash_expenses_for_window` decides what the
+    drawer is CHARGED; `_refund_double_entry_advisory` decides what the manager
+    is TOLD TO DELETE. Both read `expenses.expense_date` for one session. If
+    they disagree the advisory names a payout the drawer never subtracted -- a
+    manager who acts on it turns a correct count into a shortage that size.
+
+    Asserted on the emitted FILTERS, not the outputs: two helpers can agree by
+    accident on one fixture and diverge on the next. BOTH ENDS are asserted
+    against hand-written days -- an equality check alone passes when both
+    readers are wrong in the same way."""
     db = _DB(cash_register_sessions=[_session(OPENED_SMALL_HOURS)])
     spy = _SpyCol(_EXPENSES)
     db.cols["expenses"] = spy
     # A real refund leg, so the advisory gets past its early return and
-    # actually queries expenses -- an early return would make the comparison
-    # below vacuous.
+    # actually queries expenses -- an early return would make this vacuous.
     db.cols["returns"] = _Col([_refund_row(410.00)])
     _freeze(monkeypatch, db, stub_advisory=False)
 
-    finance._cash_expenses_for_window(db, STORE, OPENED_SMALL_HOURS, None)
-    finance._refund_double_entry_advisory(db, STORE, OPENED_SMALL_HOURS, None, 500.0)
+    finance._cash_expenses_for_window(db, STORE, OPENED_SMALL_HOURS, end_iso)
+    finance._refund_double_entry_advisory(
+        db, STORE, OPENED_SMALL_HOURS, end_iso, 500.0
+    )
 
     windows = [f["expense_date"] for f in spy.filters if "expense_date" in f]
     assert len(windows) == 2, (
-        "expected the drawer window and the advisory window; got %d" % len(windows)
+        "expected the drawer window AND the advisory window on the %s path; "
+        "got %d -- if a reader was added that reaches expenses another way, "
+        "this test cannot see it and must be extended" % (label, len(windows))
     )
-    assert windows[0] == windows[1], (
-        "the drawer charges the window %r while the advisory reads %r -- the "
-        "advisory can name a payout the drawer never subtracted"
-        % (windows[0], windows[1])
+    charged, advised = windows
+    assert charged == advised, (
+        "on the %s path the drawer charges %r while the advisory reads %r -- "
+        "the advisory can name a payout the drawer never subtracted"
+        % (label, charged, advised)
     )
-    # ...and that shared window is the IST day, not the UTC face.
-    assert windows[0]["$gte"] == IST_DAY, windows[0]
+    # Both ends, as hand-written IST days: agreement on a WRONG window is not
+    # the requirement.
+    assert charged["$gte"] == want_gte, charged
+    assert charged["$lte"] == want_lte, charged
 
 
 def test_the_advisory_does_not_name_a_payout_from_outside_the_drawer_window(
@@ -614,3 +641,50 @@ def test_the_tender_bound_helpers_leave_naive_values_alone():
     assert tr._to_dt(None) is None and tr._iso(None) is None
     # Junk keeps its old raw face rather than vanishing.
     assert tr._iso("wobble") == "wobble"
+
+def test_a_date_typed_refund_is_seen_by_the_total_AND_the_legs(monkeypatch):
+    """SAME WINDOW means same bound values AND the same CLAUSE SHAPE.
+
+    `returns.created_at` is written as a string today, but the collection has
+    carried Date-typed rows, and Mongo type-brackets the two apart: a query
+    must ask BOTH ways or one type is silently dropped. The refund TOTAL asks
+    both ways; the leg list used to ask only the string way. A Date-typed
+    refund was therefore netted off the drawer by the total and invisible to
+    the legs -- and the advisory gives up on an empty leg list, so the money
+    left the drawer while the warning about it switched itself off.
+
+    Aligning the bound VALUES was not enough; this pins the SHAPE."""
+    date_typed = _refund_row(275.50)
+    date_typed["created_at"] = datetime(2026, 8, 14, 19, 5, 0)  # Date-typed
+    db = _DB(orders=[], returns=[date_typed])
+    _freeze(monkeypatch, db, stub_sales=False)
+
+    _sales, cash_refunds = finance._cash_sales_for_window(
+        db, STORE, OPENED_SMALL_HOURS, CLOSED_AFTER_MIDNIGHT
+    )
+    legs = finance._cash_refund_legs_for_window(
+        db, STORE, OPENED_SMALL_HOURS, CLOSED_AFTER_MIDNIGHT
+    )
+
+    assert cash_refunds == 275.50, cash_refunds
+    assert legs == [275.50], (
+        "the total netted Rs %.2f off the drawer but the legs saw %r -- the "
+        "leg query asks for one BSON type and the total asks for both, so the "
+        "double-entry advisory silently switches off"
+        % (cash_refunds, legs)
+    )
+
+
+def test_a_string_typed_refund_is_still_seen_by_both(monkeypatch):
+    """POSITIVE CONTROL for the shape fix: the ordinary string-typed refund
+    (what every writer produces today) must be unaffected."""
+    db = _DB(orders=[], returns=[_refund_row(88.10)])
+    _freeze(monkeypatch, db, stub_sales=False)
+
+    _sales, cash_refunds = finance._cash_sales_for_window(
+        db, STORE, OPENED_SMALL_HOURS, CLOSED_AFTER_MIDNIGHT
+    )
+    legs = finance._cash_refund_legs_for_window(
+        db, STORE, OPENED_SMALL_HOURS, CLOSED_AFTER_MIDNIGHT
+    )
+    assert cash_refunds == 88.10 and legs == [88.10], (cash_refunds, legs)
