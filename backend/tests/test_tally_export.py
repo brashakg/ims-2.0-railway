@@ -755,6 +755,13 @@ def _seed_ist_day_corners(orders, store_id="BV-GK1"):
         orders.insert_one(order)
 
 
+def _voucher_ids(xml):
+    """The order identities actually shipped in a file, as a set. A COUNT is
+    not discriminating here: the UTC box day yields the same three vouchers,
+    just the wrong three."""
+    return set(re.findall(r"<VOUCHERNUMBER>([^<]+)</VOUCHERNUMBER>", xml))
+
+
 @pytest.mark.asyncio
 async def test_the_export_window_is_the_whole_ist_day_not_the_utc_box_day(
     patched_nexus,
@@ -789,7 +796,7 @@ async def test_the_export_window_is_the_whole_ist_day_not_the_utc_box_day(
         "00:30 IST on the 9th belongs to the 9th; the UTC box day reaches "
         "forward and steals it"
     )
-    assert row["voucher_count"] == 3
+    assert _voucher_ids(row["xml"]) == {"O-EARLY", "O-NOON", "O-LATE"}
 
 
 @pytest.mark.asyncio
@@ -817,7 +824,9 @@ async def test_the_nightly_default_covers_yesterdays_complete_ist_day(
     assert row["export_date"] == datetime(2026, 5, 8, tzinfo=timezone.utc).isoformat(), (
         "the nightly run must file YESTERDAY's IST day, not today's partial one"
     )
-    assert row["voucher_count"] == 3
+    assert _voucher_ids(row["xml"]) == {"O-EARLY", "O-NOON", "O-LATE"}, (
+        "the nightly file shipped %r" % sorted(_voucher_ids(row["xml"]))
+    )
     assert "O-LATE" in row["xml"], "the 23:30-IST sale reached no nightly file"
     assert "O-TOMORROW" not in row["xml"], "today's partial IST day is not final"
 
@@ -838,3 +847,89 @@ async def test_every_voucher_date_matches_the_file_it_ships_in(patched_nexus):
     dates = re.findall(r"<DATE>(\d{8})</DATE>", row["xml"])
     assert dates, "no voucher dates in the export"
     assert set(dates) == {"20260508"}, dates
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_chain_wide_fallback_uses_the_same_ist_day(
+    monkeypatch, fake_db_with_stores
+):
+    """The FALLBACK path must not drift back to the UTC day.
+
+    When StoreRepository is unavailable the orchestrator falls back to one
+    chain-wide row rather than silently skipping the export. That path used to
+    compute its OWN day bounds; it now receives the caller's resolved IST-day
+    bounds and row key. Nothing asserted that until this test -- the
+    anti-drift guarantee lived only in a docstring, which is precisely the
+    one-place-not-its-twin shape this change exists to prevent.
+
+    Same four IST-day corners as the per-store tests, so a drift back to the
+    UTC box day shows up as membership, not just as a key."""
+    from agents.implementations import nexus as nexus_module
+    from api import dependencies as deps_module
+
+    nexus = nexus_module.NexusAgent(db=fake_db_with_stores)
+    nexus.get_collection = lambda name: fake_db_with_stores.get_collection(name)
+    monkeypatch.setattr(
+        nexus_module, "ist_today", lambda: EXPORT_DAY + timedelta(days=1)
+    )
+
+    def _no_repo():
+        raise RuntimeError("StoreRepository unavailable")
+
+    monkeypatch.setattr(deps_module, "get_store_repository", _no_repo)
+
+    _seed_ist_day_corners(fake_db_with_stores.get_collection("orders"))
+    result = await nexus._build_tally_export()
+
+    assert result.ok is True
+    rows = fake_db_with_stores.get_collection("tally_exports").docs
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row.get("store_id") is None, "the fallback writes ONE chain-wide row"
+    assert row["export_date"] == datetime(2026, 5, 8, tzinfo=timezone.utc).isoformat(), (
+        "the legacy path filed under a different day from the per-store path"
+    )
+    assert _voucher_ids(row["xml"]) == {"O-EARLY", "O-NOON", "O-LATE"}, (
+        "the legacy chain-wide path shipped %r -- it has drifted back to the "
+        "UTC box day, which starts 5h30m late (losing the 00:30-IST sale) and "
+        "reaches into the next IST day"
+        % sorted(_voucher_ids(row["xml"]))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_string_dated_order_is_stamped_with_its_ist_day(
+    patched_nexus,
+):
+    """One file, one voucher date -- whatever SHAPE created_at was stored in.
+
+    Legacy online orders wrote created_at as an ISO STRING, and ist_date_str
+    passes strings through unshifted by design. Now that the window is one IST
+    day it spans two UTC dates, so a string-dated 00:15-IST sale is correctly
+    selected into this file and would have been stamped with the PREVIOUS
+    day: one file carrying two voucher dates, i.e. a wrong date on a dated
+    accounting document. The datetime-stored twin is the control."""
+    nexus, db = patched_nexus
+    orders = db.get_collection("orders")
+
+    # 00:15 IST on 8 May, stored as a legacy STRING (naive-UTC face 7 May).
+    string_dated = _make_order(
+        order_id="O-LEGACY-STR", store_id="BV-GK1", created_iso="2026-05-07T18:45:00"
+    )
+    orders.insert_one(string_dated)
+    # The same instant class, stored as a datetime -- the control.
+    dt_dated = _make_order(order_id="O-DT", store_id="BV-GK1", created_iso="x")
+    dt_dated["created_at"] = datetime(2026, 5, 7, 19, 30)  # 01:00 IST, 8 May
+    orders.insert_one(dt_dated)
+
+    await nexus._build_tally_export()
+
+    row = next(r for r in db.get_collection("tally_exports").docs
+               if r.get("store_id") == "BV-GK1")
+    assert row["voucher_count"] == 2, "both shapes must be in the 8-May file"
+    dates = re.findall(r"<DATE>(\d{8})</DATE>", row["xml"])
+    assert set(dates) == {"20260508"}, (
+        "a file keyed 8 May shipped voucher dates %r -- a string-stored sale "
+        "was stamped with the UTC day while its datetime twin got the IST "
+        "day, so the SHAPE of the row decided the accounting date" % (dates,)
+    )

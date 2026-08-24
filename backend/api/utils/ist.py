@@ -162,6 +162,40 @@ def ist_date_str(value: Any) -> str:
     return to_date_str(value)
 
 
+def ist_date_str_from_stored(value: Any) -> str:
+    """IST calendar day of a stored instant, WHICHEVER SHAPE it was stored in.
+
+    ``ist_date_str`` above passes strings through unshifted by deliberate
+    design -- a bare string carries no reliable frame, and guessing would
+    corrupt one that is already IST-local. Use THIS helper instead wherever
+    the frame IS known from the writer: a column that holds naive-UTC
+    instants, written by ``datetime.now().isoformat()`` on a UTC box, which
+    some rows carry as datetimes and older rows as ISO strings. Parse to the
+    instant first, then take the IST day -- the shape a row happens to be
+    stored in must never change the business day it is reported under.
+
+    Aware strings ('...+05:30' / '...Z') convert exactly. An unparseable
+    string falls back to its own first ten characters (the pre-BUG-104
+    behaviour), never raises.
+
+    Existing private copies of this shape, to fold onto this definition rather
+    than growing a fourth: ``api/routers/reports.py::_credit_note_date_ist``
+    (credit_note_ledger.created_at) and ``api/routers/finance.py::
+    _ist_day_face`` (cash-register session stamps).
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        return ist_date_str(value)
+    text = str(value).strip()
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return text[:10]
+    return ist_date_str(parsed)
+
+
 def ist_month_window_utc(year: int, month: int):
     """NAIVE-UTC (start, end_inclusive) bounds for the IST calendar month.
 
