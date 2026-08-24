@@ -106,30 +106,43 @@ def test_spectacle_card_treats_every_junk_token_as_absent(junk):
 # --------------------------------------------------------------------------
 # THE CRITICAL DISTINCTION: 0 is real clinical data, not absence
 # --------------------------------------------------------------------------
+# A dioptric POWER of zero now renders through the shared renderer, which spells
+# it "Plano" -- the same word the clinic's own A5 Rx card has always used. The
+# REQUIREMENT these tests exist to protect is unchanged and still asserted
+# directly: a recorded zero is real clinical data and must never come out as a
+# blank or a dash. AXIS and PD keep rendering numerically, because an axis is a
+# meridian and a PD is a millimetre measurement -- neither is a power.
+PLANO = "Plano"
+
+
 def test_spectacle_card_keeps_a_genuine_numeric_zero():
     """A cylinder of 0 / axis of 0 / add of 0 is REAL. Never blank it."""
     html = _spectacle(right={"sph": 0, "cyl": 0, "axis": 0, "add": 0, "pd": 0})
     cells = _row_cells(html, "RE")
-    assert cells == ["0", "0", "0", "0", "0"], cells
+    assert cells == [PLANO, PLANO, "0", PLANO, "0"], cells
+    # THE REQUIREMENT: a recorded zero is never rendered as absence.
     assert "-" not in cells
+    assert "" not in cells
 
 
 def test_spectacle_card_keeps_a_genuine_string_zero():
     """Stored Rx values are a mix of numbers and strings; "0" is still real."""
     html = _spectacle(right={"sph": "0", "cyl": "0", "axis": "0", "add": "0", "pd": "0"})
     cells = _row_cells(html, "RE")
-    assert cells == ["0", "0", "0", "0", "0"], cells
+    assert cells == [PLANO, PLANO, "0", PLANO, "0"], cells
+    assert "-" not in cells
 
 
 def test_spectacle_card_keeps_zero_point_zero_and_float_zero():
     """0.0 and "0.00" must survive too -- they are prescribable powers."""
     html = _spectacle(right={"sph": 0.0, "cyl": "0.00", "axis": 0, "add": "0.0", "pd": 0})
     cells = _row_cells(html, "RE")
-    assert cells[SPH] == "0.0"
-    assert cells[CYL] == "0.00"
+    assert cells[SPH] == PLANO
+    assert cells[CYL] == PLANO
     assert cells[AXIS] == "0"
-    assert cells[ADD] == "0.0"
+    assert cells[ADD] == PLANO
     assert cells[PD] == "0"
+    assert "-" not in cells
 
 
 def test_a_missing_field_is_still_a_dash():
@@ -285,5 +298,6 @@ def test_contact_lens_card_renders_dash_for_junk_and_keeps_zero():
     )
     cells = _row_cells(html, "RE")
     # POWER CYL AXIS ADD BC DIA
-    assert cells == ["-", "0", "-", "0", "-", "14.2"], cells
+    # Junk -> "-" (absent); a recorded zero POWER -> "Plano" (present).
+    assert cells == ["-", PLANO, "-", PLANO, "-", "14.2"], cells
     assert ">None<" not in html

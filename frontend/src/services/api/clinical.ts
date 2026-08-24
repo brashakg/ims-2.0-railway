@@ -247,14 +247,20 @@ export const clinicalApi = {
   },
 
   completeTest: async (testId: string, data: {
+    // SIGNED STRINGS, not numbers. This contract used to be `number | null`,
+    // and that type was where the plus sign died: the form holds "+4.00",
+    // parseFloat made it 4, the server stored str(4.0) = "4.0", and the lab
+    // job-card, the customer's Rx portal and the Customer-360 block all printed
+    // a positive power with no sign. The backend field is Optional[str] and
+    // float("+4.00") == 4.0, so the signed string round-trips untouched.
     rightEye: {
-      sphere: number | null; cylinder: number | null; axis: number | null;
-      add?: number | null; pd?: number | null;
+      sphere: string | null; cylinder: string | null; axis: string | null;
+      add?: string | null; pd?: string | null;
       prism?: string | null; base?: string | null; va?: string | null;
     };
     leftEye: {
-      sphere: number | null; cylinder: number | null; axis: number | null;
-      add?: number | null; pd?: number | null;
+      sphere: string | null; cylinder: string | null; axis: string | null;
+      add?: string | null; pd?: string | null;
       prism?: string | null; base?: string | null; va?: string | null;
     };
     pd?: number;

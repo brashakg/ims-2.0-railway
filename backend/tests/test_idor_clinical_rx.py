@@ -83,9 +83,12 @@ class _FakeEyeTestRepo:
     def get_customer_tests(self, customer_id):
         return [dict(d) for d in self._docs if d.get("customer_id") == customer_id]
 
+    # Mirrors the real repository signature (see clinical_repository), so the
+    # store-scope tests keep exercising the production call exactly.
     def complete_test(self, test_id, right_eye, left_eye, pd=None, notes=None,
                       lens_recommendation=None, coating_recommendation=None,
-                      clinical_findings=None, soap_note=None):
+                      clinical_findings=None, soap_note=None,
+                      exam_blocks=None, exam_header=None):
         for d in self._docs:
             if d.get("test_id") == test_id:
                 d["status"] = "COMPLETED"

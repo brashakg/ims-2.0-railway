@@ -25,6 +25,7 @@ import type {
 import type {
   AutoRefData,
   AutoRefEye,
+  FinalRxData,
   LensometerData,
   PowerReading,
   SlitLampData,
@@ -130,6 +131,86 @@ export interface ExamTabsPayload {
   autoRef?: AutoRefPayload;
   subjectiveRx?: ExamRefractionPayload;
   slitLamp?: SlitLampPayload;
+}
+
+// ---------------------------------------------------------------------------
+// The FINAL Rx -- the block that becomes a billable, dispensable prescription.
+// ---------------------------------------------------------------------------
+// THE PLUS SIGN IS LOST HERE, and this is why the owner sees "4.00" where he
+// typed "+4.00". The form holds "+4.00"; this mapping used to run every power
+// through parseFloat, so the number 4 went on the wire, the server stored
+// str(4.0) = "4.0", and every surface that echoes the stored string raw --
+// the lab job-card the lens grinder reads, the customer's Rx portal, the
+// Customer-360 block, the clinical handover card -- printed a power with no
+// sign. `String(4)` cannot put the plus back, because by then nothing knows
+// there was one.
+//
+// The backend has always been ready for the signed string: EyeData.sph is
+// Optional[str], float("+4.00") == 4.0, and _validate_rx_value passes a signed
+// value through byte-for-byte. Only the frontend was throwing it away.
+
+export interface FinalRxEyeWire {
+  sphere: string | null;
+  cylinder: string | null;
+  axis: string | null;
+  add: string | null;
+  pd: string | null;
+  prism: string | null;
+  base: string | null;
+  va: string | null;
+}
+
+export interface FinalRxWire {
+  rightEye: FinalRxEyeWire;
+  leftEye: FinalRxEyeWire;
+  /** Binocular PD as a NUMBER -- the backend field is Optional[float]. */
+  pd?: number;
+  ipd?: string;
+  lensRecommendation?: string;
+  nextCheckup?: string;
+}
+
+/** null (not undefined) for "not recorded": JSON.stringify drops undefined,
+ *  and the backend reads a dropped key as "not sent" rather than "blank". */
+function wire(v: string | undefined | null): string | null {
+  return txt(v) ?? null;
+}
+
+function finalEyeWire(
+  eye: FinalRxData['rightEye'] | undefined,
+  flatAdd: string | undefined,
+): FinalRxEyeWire {
+  return {
+    sphere: wire(eye?.sphere),
+    cylinder: wire(eye?.cylinder),
+    axis: wire(eye?.axis),
+    // The near ADD lives on the FLAT rightAdd/leftAdd field; the per-eye `add`
+    // is the fallback (it is what "Copy from Subjective" fills in).
+    add: wire(flatAdd) ?? wire(eye?.add),
+    pd: wire(eye?.pd),
+    prism: wire(eye?.prism),
+    base: wire(eye?.base),
+    va: wire(eye?.va),
+  };
+}
+
+/** The Final Rx, ready to spread into a complete/update request body. */
+export function finalRxPayload(fr: FinalRxData | undefined): FinalRxWire {
+  const right = finalEyeWire(fr?.rightEye, fr?.rightAdd);
+  const left = finalEyeWire(fr?.leftEye, fr?.leftAdd);
+  const binocular = txt(fr?.rightEye?.pd) ?? txt(fr?.leftEye?.pd);
+  const binocularNum = binocular === undefined ? undefined : Number(binocular);
+  return {
+    rightEye: right,
+    leftEye: left,
+    pd:
+      binocularNum !== undefined && Number.isFinite(binocularNum)
+        ? binocularNum
+        : undefined,
+    ipd: txt(fr?.ipd),
+    lensRecommendation: txt(fr?.lensType),
+    nextCheckup: txt(fr?.nextCheckup),
+  };
 }
 
 /** The exam tabs, ready to spread into a complete/update request body. */

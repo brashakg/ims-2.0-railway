@@ -14,7 +14,13 @@ from ..utils.ist import now_ist_naive
 import uuid
 
 from .auth import get_current_user
-from ..services.rx_print_values import is_absent_rx_value, rx_text_or
+from ..services.rx_print_values import (
+    format_rx_value,
+    is_absent_rx_value,
+    rx_axis_or,
+    rx_power_or,
+    rx_text_or,
+)
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -492,13 +498,15 @@ def generate_rx_number() -> str:
 
 
 def _fmt_power(value) -> str:
-    """Render a dioptric power for an error message: -1.25 / +2.00 / raw text."""
-    try:
-        num = float(str(value).strip())
-    except (TypeError, ValueError):
-        return str(value)
-    sign = "+" if num > 0 else "-"
-    return f"{sign}{abs(num):.2f}"
+    """Render a dioptric power for an error message: -1.25 / +2.00 / raw text.
+
+    Delegates to the ONE renderer. The local copy this replaces produced
+    "-0.00" for a zero (`sign = "+" if num > 0 else "-"` -- a zero is neither),
+    which is not a power anyone can read. Unreachable today because the only
+    caller is behind `_cyl_is_toric`, but a second copy of a sign rule is
+    exactly how the first one drifted."""
+    rendered = format_rx_value(value)
+    return rendered if rendered != "" else str(value)
 
 
 def _cyl_is_toric(cyl) -> bool:
@@ -1649,6 +1657,21 @@ def _cell(value) -> str:
     return rx_text_or(value, "-")
 
 
+def _power_cell(value) -> str:
+    """Render a DIOPTRIC power cell on a printed card.
+
+    `_cell` prints the stored string verbatim, which is how a power saved as
+    "4" reached a patient's card as "4" instead of "+4.00". A power has to be
+    RENDERED, not echoed. Same renderer the clinic's own A5 card uses, so the
+    two cards this app can print for the same prescription finally agree."""
+    return rx_power_or(value, "-")
+
+
+def _axis_cell(value) -> str:
+    """Render an AXIS cell -- a meridian, never signed."""
+    return rx_axis_or(value, "-")
+
+
 def _text(value, fallback: str = "-") -> str:
     """Render a free-text Rx field (lens/coating recommendation, remarks...)."""
     return rx_text_or(value, fallback)
@@ -1680,18 +1703,18 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
-                    <td>{_cell(right.get('sph'))}</td>
-                    <td>{_cell(right.get('cyl'))}</td>
-                    <td>{_cell(right.get('axis'))}</td>
-                    <td>{_cell(right.get('add'))}</td>
+                    <td>{_power_cell(right.get('sph'))}</td>
+                    <td>{_power_cell(right.get('cyl'))}</td>
+                    <td>{_axis_cell(right.get('axis'))}</td>
+                    <td>{_power_cell(right.get('add'))}</td>
                     <td>{_cell(right.get('pd'))}</td>
                 </tr>
                 <tr>
                     <td><strong>LE</strong></td>
-                    <td>{_cell(left.get('sph'))}</td>
-                    <td>{_cell(left.get('cyl'))}</td>
-                    <td>{_cell(left.get('axis'))}</td>
-                    <td>{_cell(left.get('add'))}</td>
+                    <td>{_power_cell(left.get('sph'))}</td>
+                    <td>{_power_cell(left.get('cyl'))}</td>
+                    <td>{_axis_cell(left.get('axis'))}</td>
+                    <td>{_power_cell(left.get('add'))}</td>
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
@@ -1744,19 +1767,19 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
-                    <td>{_cell(right.get('cl_power'))}</td>
-                    <td>{_cell(right.get('cl_cyl'))}</td>
-                    <td>{_cell(right.get('cl_axis'))}</td>
-                    <td>{_cell(right.get('cl_add'))}</td>
+                    <td>{_power_cell(right.get('cl_power'))}</td>
+                    <td>{_power_cell(right.get('cl_cyl'))}</td>
+                    <td>{_axis_cell(right.get('cl_axis'))}</td>
+                    <td>{_power_cell(right.get('cl_add'))}</td>
                     <td>{_cell(right.get('base_curve'))}</td>
                     <td>{_cell(right.get('diameter'))}</td>
                 </tr>
                 <tr>
                     <td><strong>LE</strong></td>
-                    <td>{_cell(left.get('cl_power'))}</td>
-                    <td>{_cell(left.get('cl_cyl'))}</td>
-                    <td>{_cell(left.get('cl_axis'))}</td>
-                    <td>{_cell(left.get('cl_add'))}</td>
+                    <td>{_power_cell(left.get('cl_power'))}</td>
+                    <td>{_power_cell(left.get('cl_cyl'))}</td>
+                    <td>{_axis_cell(left.get('cl_axis'))}</td>
+                    <td>{_power_cell(left.get('cl_add'))}</td>
                     <td>{_cell(left.get('base_curve'))}</td>
                     <td>{_cell(left.get('diameter'))}</td>
                 </tr>

@@ -27,7 +27,7 @@ import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
-import { examTabsPayload } from '../../components/clinical/eyeTestPayload';
+import { examTabsPayload, finalRxPayload } from '../../components/clinical/eyeTestPayload';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
 import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
@@ -265,15 +265,13 @@ export function ClinicalPage() {
       // Final-Rx field set (VA / prism / base per eye + IPD + lens type + next
       // checkup) so the auto-created prescription carries the SAME data a
       // POS-created Rx does (field + DB parity).
-      const fr = data.finalRx;
-      const re = fr?.rightEye;
-      const le = fr?.leftEye;
-
-      // Convert string values to numbers, handling empty strings
-      const parseValue = (val: string): number | null => {
-        const num = parseFloat(val);
-        return isNaN(num) ? null : num;
-      };
+      //
+      // The mapping lives in eyeTestPayload.finalRxPayload rather than inline
+      // here. It used to run every power through parseFloat, which is exactly
+      // where a typed "+4.00" became the number 4 and the explicit plus was
+      // destroyed for good.
+      const re = data.finalRx?.rightEye;
+      const le = data.finalRx?.leftEye;
 
       await clinicalApi.completeTest(currentTestId, {
         // The four exam tabs. They used to stop here: this handler read only
@@ -285,31 +283,8 @@ export function ClinicalPage() {
         optometristName: data.optometristName || undefined,
         chiefComplaint: data.chiefComplaint || undefined,
         vduUsage: data.vduUsage || undefined,
-        rightEye: {
-          sphere: parseValue(re?.sphere || ''),
-          cylinder: parseValue(re?.cylinder || ''),
-          axis: parseValue(re?.axis || ''),
-          // Near-vision ADD is captured in finalRx.rightAdd, not rightEye.add.
-          add: parseValue(fr?.rightAdd || re?.add || ''),
-          pd: parseValue(re?.pd || ''),
-          prism: re?.prism || null,
-          base: re?.base || null,
-          va: re?.va || null,
-        },
-        leftEye: {
-          sphere: parseValue(le?.sphere || ''),
-          cylinder: parseValue(le?.cylinder || ''),
-          axis: parseValue(le?.axis || ''),
-          add: parseValue(fr?.leftAdd || le?.add || ''),
-          pd: parseValue(le?.pd || ''),
-          prism: le?.prism || null,
-          base: le?.base || null,
-          va: le?.va || null,
-        },
-        pd: parseValue(re?.pd || le?.pd || '') ?? undefined,
-        ipd: fr?.ipd || undefined,
-        lensRecommendation: fr?.lensType || undefined,
-        nextCheckup: fr?.nextCheckup || undefined,
+        // Final Rx: signed strings, sign intact end-to-end.
+        ...finalRxPayload(data.finalRx),
         notes: data.chiefComplaint || '',
         // C6-B: also persist the structured exam findings the form already
         // collects (chief complaint + per-eye aided VA from the Final Rx) into

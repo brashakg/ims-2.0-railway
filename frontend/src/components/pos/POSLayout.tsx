@@ -2529,7 +2529,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
           <Eye className="w-4 h-4 text-purple-600 flex-shrink-0" />
           <span className="text-purple-700 font-medium">Rx:</span>
-          <span className="text-purple-500">OD {store.prescription.rightEye?.sphere}/{store.prescription.rightEye?.cylinder} {'\u00B7'} OS {store.prescription.leftEye?.sphere}/{store.prescription.leftEye?.cylinder}</span>
+          {/* Through the ONE formatter, like every other Rx readout: this chip
+              interpolated the raw stored value, so a positive power showed with
+              no "+" and a recorded plano showed as a bare 0. */}
+          <span className="text-purple-500">OD {formatPowerOrDash(store.prescription.rightEye?.sphere)}/{formatPowerOrDash(store.prescription.rightEye?.cylinder)} {'\u00B7'} OS {formatPowerOrDash(store.prescription.leftEye?.sphere)}/{formatPowerOrDash(store.prescription.leftEye?.cylinder)}</span>
         </div>
       )}
 

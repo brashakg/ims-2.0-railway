@@ -506,57 +506,20 @@ class SendToFloorInput(BaseModel):
 # ============================================================================
 
 
-def format_rx_value(v) -> str:
-    """Render an Rx power for display/print.
-
-    Rules (Rx business rules, IMS 2.0):
-      - None / missing / empty -> "" (blank cell)
-      - exactly 0 (any numeric form) -> "Plano"
-      - otherwise -> explicit sign + 2 decimals, e.g. "-1.25", "+0.50"
-
-    PURE function (no I/O) so it can be unit-tested in isolation. Accepts ints,
-    floats, or numeric strings (the prescriptions collection stores eye powers
-    as strings, e.g. {"sph": "-1.25"}). Non-numeric junk -> "" rather than a
-    crash, keeping the print endpoint fail-soft.
-    """
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        s = v.strip()
-        if s == "":
-            return ""
-        try:
-            num = float(s)
-        except ValueError:
-            return ""
-    else:
-        try:
-            num = float(v)
-        except (TypeError, ValueError):
-            return ""
-    # Normalise -0.0 and tiny float noise to a clean zero -> "Plano".
-    if abs(num) < 0.005:
-        return "Plano"
-    sign = "+" if num > 0 else "-"
-    return f"{sign}{abs(num):.2f}"
-
-
-def format_axis_value(v) -> str:
-    """Render an AXIS (1-180 whole degrees). Blank for None/missing, else int."""
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        s = v.strip()
-        if s == "":
-            return ""
-        try:
-            return str(int(round(float(s))))
-        except ValueError:
-            return ""
-    try:
-        return str(int(round(float(v))))
-    except (TypeError, ValueError):
-        return ""
+# ---------------------------------------------------------------------------
+# Rx display renderers.
+# ---------------------------------------------------------------------------
+# These now live in api/services/rx_print_values.py, beside the absence rule
+# they share a contract with, and are re-exported here so every existing import
+# (and the tests pinning them) keeps working unchanged. They MOVED rather than
+# being copied because the surfaces that most needed them -- the workshop lab
+# job-card and the prescriptions print card -- were interpolating the stored
+# string raw and printing a positive power with no "+", and a router is not
+# somewhere another router can import from.
+from ..services.rx_print_values import (  # noqa: E402,F401
+    format_axis_value,
+    format_rx_value,
+)
 
 
 def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:

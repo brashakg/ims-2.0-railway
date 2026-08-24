@@ -30,17 +30,25 @@ interface CLEyeData {
 interface PrescriptionData {
   // Discriminator -- SPECTACLE (default) keeps the existing spectacle fields.
   rx_kind?: RxKind;
-  // ---- Spectacle fields (unchanged) ----
-  sph_od?: number;
-  cyl_od?: number;
-  axis_od?: number;
-  add_od?: number;
-  pd_od?: number;
-  sph_os?: number;
-  cyl_os?: number;
-  axis_os?: number;
-  add_os?: number;
-  pd_os?: number;
+  // ---- Spectacle powers ----
+  // STRING (a signed, normalised "+4.00" / "-0.75"), not number. The form used
+  // to parseFloat every keystroke into a number, so the explicit plus a
+  // positive power must carry was destroyed before the value ever reached the
+  // wire -- `String(4)` is "4" and nothing downstream can know a plus belonged
+  // there. `Number("+4.00") === 5`-style parses still work everywhere (the
+  // validator, the backend's float(), _rxAxis), so keeping the text costs
+  // nothing and keeps the sign. A number is still accepted on the way IN, for
+  // callers hydrating from a stored numeric Rx.
+  sph_od?: number | string;
+  cyl_od?: number | string;
+  axis_od?: number | string;
+  add_od?: number | string;
+  pd_od?: number | string;
+  sph_os?: number | string;
+  cyl_os?: number | string;
+  axis_os?: number | string;
+  add_os?: number | string;
+  pd_os?: number | string;
   // ---- Spectacle parity fields (match the clinical Final Rx) ----
   va_od?: string;
   prism_od?: string;
@@ -109,12 +117,16 @@ export function PrescriptionForm({
     return v === undefined || v === null ? '' : String(v);
   };
 
-  // RxPowerInput emits a normalized STRING (e.g. "+5.00", "-0.75", "0.00"); the
-  // signed string parses cleanly (Number("+5.00") === 5) so the sign survives.
+  // RxPowerInput emits a normalized STRING (e.g. "+5.00", "-0.75", "0.00").
+  // KEEP IT AS TEXT. `parseFloat("+4.00")` is the number 4 and `String(4)` is
+  // "4": that one coercion is where the owner's missing plus was lost, and no
+  // formatter downstream can restore it because by then the plus is not
+  // absent, it never existed. Everything that consumes these fields parses
+  // with Number()/float(), both of which accept a leading "+".
   const handleRxChange = (field: keyof PrescriptionData, value: string) => {
     setPrescription(prev => ({
       ...prev,
-      [field]: value.trim() === '' ? undefined : parseFloat(value),
+      [field]: value.trim() === '' ? undefined : value.trim(),
     }));
   };
 

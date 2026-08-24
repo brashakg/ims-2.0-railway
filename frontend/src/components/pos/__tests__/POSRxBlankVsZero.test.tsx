@@ -174,10 +174,12 @@ describe('a BLANK power is never persisted as a claim of zero', () => {
     }
 
     // ...and the power that WAS recorded still travels, so a payload that
-    // nulled everything would not pass. PrescriptionForm holds Rx fields as
-    // NUMBERS (`parseFloat` on change, `undefined` for empty), so the wire
-    // carries the number's own string form, not the input's display text.
-    expect(body.right_eye.sph).toBe('-2');
+    // nulled everything would not pass. PrescriptionForm now holds Rx fields as
+    // the input's own NORMALISED SIGNED TEXT ("-2.00"), not `parseFloat`'d
+    // numbers -- that coercion was what destroyed the plus on a positive power
+    // (`String(4)` is "4"). The wire therefore carries "-2.00" rather than
+    // "-2"; numerically identical, and the sign now survives for a plus too.
+    expect(body.right_eye.sph).toBe('-2.00');
   }, SLOW);
 
   it('nulls the RIGHT eye too when only the LEFT eye was examined', async () => {
@@ -191,7 +193,7 @@ describe('a BLANK power is never persisted as a claim of zero', () => {
     expect(body.right_eye.sph).toBeNull();
     expect(body.right_eye.cyl).toBeNull();
     expect(body.right_eye.add).toBeNull();
-    expect(body.left_eye.sph).toBe('-1');
+    expect(body.left_eye.sph).toBe('-1.00');
   }, SLOW);
 
   it('echoes a blank power into the POS store as null, not as a fabricated 0', async () => {
@@ -242,8 +244,8 @@ describe('a RECORDED 0 survives the counter intact', () => {
       }
     }
     // The value the counter actually persists for a plano.
-    expect(body.right_eye.sph).toBe('0');
-    expect(body.left_eye.cyl).toBe('0');
+    expect(body.right_eye.sph).toBe('0.00');
+    expect(body.left_eye.cyl).toBe('0.00');
 
     // BOTH STATES IN ONE EYE, which is the whole point of the ticket: the
     // measured zeros above are kept, and the ADD nobody recorded stays absent.

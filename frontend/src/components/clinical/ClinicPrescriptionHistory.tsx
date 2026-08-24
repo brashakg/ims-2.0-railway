@@ -22,6 +22,9 @@ import { prescriptionApi, clinicalApi, customerApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionForm } from '../pos/PrescriptionForm';
+import { formatRxPower, type RxPowerKind } from './RxPowerInput';
+// PATIENT SAFETY: one display formatter, one blank-vs-zero rule.
+import { formatPowerOrDash } from '../../utils/rxPowerValue';
 
 interface FamilyMember {
   patient_id: string | null;
@@ -56,18 +59,26 @@ interface ClinicPrescriptionHistoryProps {
 function rxToFormInitial(rx: any): Record<string, any> {
   const re = rx?.right_eye || rx?.rightEye || {};
   const le = rx?.left_eye || rx?.leftEye || {};
-  const num = (v: any) => {
+  // Hydrate powers as NORMALISED SIGNED STRINGS ("+4.00"), through the one
+  // formatter the Rx inputs already use. This used to hydrate numbers, and a
+  // field the clinician never touched then went back out as `String(4)` = "4",
+  // so re-saving an untouched prescription QUIETLY STRIPPED the plus from every
+  // positive power on it.
+  const pow = (v: any, kind: RxPowerKind) => {
     if (v === undefined || v === null || v === '') return undefined;
     const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
+    if (!Number.isFinite(n)) return undefined;
+    return formatRxPower(String(v), kind);
   };
   const str = (v: any) => (v === undefined || v === null || v === '' ? undefined : String(v));
   return {
-    sph_od: num(re.sph ?? re.sphere), cyl_od: num(re.cyl ?? re.cylinder), axis_od: num(re.axis),
-    add_od: num(re.add ?? re.addition), pd_od: num(re.pd),
+    sph_od: pow(re.sph ?? re.sphere, 'SPH'), cyl_od: pow(re.cyl ?? re.cylinder, 'CYL'),
+    axis_od: pow(re.axis, 'AXIS'),
+    add_od: pow(re.add ?? re.addition, 'ADD'), pd_od: pow(re.pd, 'PD'),
     va_od: str(re.acuity ?? re.va), prism_od: str(re.prism), base_od: str(re.base),
-    sph_os: num(le.sph ?? le.sphere), cyl_os: num(le.cyl ?? le.cylinder), axis_os: num(le.axis),
-    add_os: num(le.add ?? le.addition), pd_os: num(le.pd),
+    sph_os: pow(le.sph ?? le.sphere, 'SPH'), cyl_os: pow(le.cyl ?? le.cylinder, 'CYL'),
+    axis_os: pow(le.axis, 'AXIS'),
+    add_os: pow(le.add ?? le.addition, 'ADD'), pd_os: pow(le.pd, 'PD'),
     va_os: str(le.acuity ?? le.va), prism_os: str(le.prism), base_os: str(le.base),
     ipd: str(rx?.ipd),
     lens_type: str(rx?.lens_recommendation),
@@ -95,12 +106,9 @@ function fmtDate(d: any): string {
   return isNaN(dt.getTime()) ? '—' : dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-function fmtPower(v: any): string {
-  if (v === undefined || v === null || v === '') return '-';
-  const n = Number(v);
-  if (!Number.isFinite(n)) return String(v);
-  return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
-}
+// One display formatter for the whole prescription surface (utils/rxPowerValue).
+// This was a private fourth copy of the same six lines.
+const fmtPower = formatPowerOrDash;
 
 // Optometrist display NAME for an Rx card (backlog #2). The backend stores
 // optometrist_name on new Rx and backfills it from the users collection on

@@ -85,11 +85,25 @@ def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
     """Validate that an Rx STRING value falls within acceptable clinical range.
 
     Raises ValueError on a bad value (out of range / off the 0.25 grid /
-    non-numeric). Blank / None / "0" pass through unchanged (plano). A leading
-    '+' is accepted (float('+5.00') == 5.0) so a signed string never trips."""
-    if value is None or value.strip() == "" or value.strip() == "0":
+    non-numeric). Blank / None / any spelling of ZERO passes through unchanged
+    (plano). A leading '+' is accepted (float('+5.00') == 5.0) so a signed
+    string never trips."""
+    if value is None or value.strip() == "":
         return value
     num = _coerce_float(value, field_name)
+    # PLANO. Zero is a NUMERIC fact, so test it numerically. This used to read
+    # `value.strip() == "0"`, which recognised only one of the several ways the
+    # app spells zero -- "0.00", "+0.00", "-0.00" and " 0 " all mean exactly the
+    # same clinical thing and all missed the shortcut.
+    #
+    # That mattered for ADD, whose valid range is 0.75-4.00 because those are
+    # the limits of a PRESCRIBED reading addition. A patient who needs no
+    # reading addition has an ADD of zero, which is not "outside the range", it
+    # is the absence of an addition. Spelled "0" it was accepted; spelled
+    # "0.00" it fell through to the range check and the ENTIRE prescription was
+    # refused. Now every spelling of zero takes the same door.
+    if num == 0:
+        return value
     lo, hi = _limits_for(field_name)
     if num < lo or num > hi:
         raise ValueError(
