@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional
 
 from pymongo.errors import DuplicateKeyError
 
+from . import cash_denominations as _denom
+
 _SESSIONS_COLLECTION = "till_sessions"
 
 # Status lifecycle (the blind state machine):
@@ -63,12 +65,11 @@ NEGATIVE_EXPECTED_MESSAGE = (
     "this variance."
 )
 
-# Indian denomination ladder (paisa-exact). face is RUPEES; the count grid sums
-# face*pieces in RUPEES then we convert to paisa once at the boundary so float
-# noise never accumulates. Rs 2000 is withdrawn (kept out of the default grid,
-# same as the existing cash_register module).
-NOTE_FACES = (500, 200, 100, 50, 20, 10)
-COIN_FACES = (10, 5, 2, 1)
+# Indian denomination ladder (paisa-exact) -- defined ONCE in
+# services/cash_denominations.py and re-exported here so the till module has no
+# second copy of the face values to drift from.
+NOTE_FACES = _denom.NOTE_FACES
+COIN_FACES = _denom.COIN_FACES
 
 # E2 policy keys (registered in policy_registry.py). Defaults here mirror the
 # registry so a direct service call (no policy doc) still behaves.
@@ -122,62 +123,23 @@ def _session_day_window(session: Dict[str, Any]):
     return start, start + timedelta(days=1)
 
 
-def _coerce_pieces(value: Any) -> int:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return n if n > 0 else 0
-
-
-def _coerce_face(value: Any) -> Optional[int]:
-    try:
-        f = int(value)
-    except (TypeError, ValueError):
-        return None
-    return f if f > 0 else None
-
-
 def normalize_denominations(rows: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Clean a list of {face, kind, pieces} dicts: drop bad faces, clamp pieces
     to non-negative ints, default kind to 'note', and attach the computed line
     total in PAISA (face*100*pieces). Order is preserved as supplied so the
-    stored doc mirrors what the cashier entered."""
-    out: List[Dict[str, Any]] = []
-    for r in rows or []:
-        if not isinstance(r, dict):
-            continue
-        face = _coerce_face(r.get("face"))
-        if face is None:
-            continue
-        pieces = _coerce_pieces(r.get("pieces"))
-        kind = str(r.get("kind") or "note").lower()
-        if kind not in ("note", "coin"):
-            kind = "note"
-        out.append(
-            {
-                "face": face,
-                "kind": kind,
-                "pieces": pieces,
-                "line_total_paisa": face * 100 * pieces,
-            }
-        )
-    return out
+    stored doc mirrors what the cashier entered. Delegates to the shared
+    normaliser -- there is only one."""
+    return _denom.normalize_rows(rows)
 
 
 def total_paisa_from_denominations(rows: Optional[List[Dict[str, Any]]]) -> int:
     """Sum of face*100*pieces across denomination rows, in PAISA. Pure."""
-    return sum(r["line_total_paisa"] for r in normalize_denominations(rows))
+    return _denom.total_paisa(rows)
 
 
 def denomination_ladder() -> List[Dict[str, Any]]:
     """The blank denomination grid the UI starts from (pieces all zero)."""
-    rows: List[Dict[str, Any]] = []
-    for face in NOTE_FACES:
-        rows.append({"face": face, "kind": "note", "pieces": 0})
-    for face in COIN_FACES:
-        rows.append({"face": face, "kind": "coin", "pieces": 0})
-    return rows
+    return _denom.denomination_ladder()
 
 
 # ---------------------------------------------------------------------------

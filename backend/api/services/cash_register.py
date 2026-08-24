@@ -29,72 +29,42 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-# Canonical denomination ladder, highest first. (face, kind).
-# Notes Rs 500..10, then coins Rs 10..1. The UI renders rows in this order.
-NOTE_FACES = (500, 200, 100, 50, 20, 10)
-COIN_FACES = (10, 5, 2, 1)
+from . import cash_denominations as denom
+
+# The ladder, the row shape and the arithmetic all live in ONE module
+# (services/cash_denominations.py). What remains here is a thin RUPEE-facing
+# adapter: historical `cash_register_sessions` documents (and the manager
+# console that reads them) carry a rupee `line_total` key, so this door keeps
+# emitting exactly that shape. No second ladder, no second normaliser.
+NOTE_FACES = denom.NOTE_FACES
+COIN_FACES = denom.COIN_FACES
 
 
 def denomination_ladder() -> list[dict]:
     """The blank denomination grid the UI starts from (pieces all zero)."""
-    rows: list[dict] = []
-    for face in NOTE_FACES:
-        rows.append({"face": face, "kind": "note", "pieces": 0})
-    for face in COIN_FACES:
-        rows.append({"face": face, "kind": "coin", "pieces": 0})
-    return rows
-
-
-def _coerce_pieces(value) -> int:
-    """A denomination piece count: a non-negative integer. Junk -> 0."""
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return n if n > 0 else 0
-
-
-def _coerce_face(value) -> Optional[int]:
-    try:
-        f = int(value)
-    except (TypeError, ValueError):
-        return None
-    return f if f > 0 else None
+    return denom.denomination_ladder()
 
 
 def normalize_denominations(rows: Optional[Iterable[dict]]) -> list[dict]:
     """Clean a list of {face, kind, pieces} dicts: drop bad faces, clamp
     pieces to non-negative ints, default kind to 'note', and attach the
-    computed line total (face * pieces). Order is preserved as supplied so
-    the stored doc mirrors what the cashier entered."""
-    out: list[dict] = []
-    for r in rows or []:
-        if not isinstance(r, dict):
-            continue
-        face = _coerce_face(r.get("face"))
-        if face is None:
-            continue
-        pieces = _coerce_pieces(r.get("pieces"))
-        kind = str(r.get("kind") or "note").lower()
-        if kind not in ("note", "coin"):
-            kind = "note"
-        out.append(
-            {
-                "face": face,
-                "kind": kind,
-                "pieces": pieces,
-                "line_total": face * pieces,
-            }
-        )
-    return out
+    computed line total (face * pieces, in RUPEES -- the legacy stored shape).
+    Order is preserved as supplied so the stored doc mirrors what the cashier
+    entered."""
+    return [
+        {
+            "face": r["face"],
+            "kind": r["kind"],
+            "pieces": r["pieces"],
+            "line_total": r["line_total_paisa"] // 100,
+        }
+        for r in denom.normalize_rows(rows)
+    ]
 
 
 def total_from_denominations(rows: Optional[Iterable[dict]]) -> float:
-    """Sum of face * pieces across denomination rows. Pure."""
-    total = 0
-    for r in normalize_denominations(rows):
-        total += r["line_total"]
-    return float(total)
+    """Sum of face * pieces across denomination rows, in RUPEES. Pure."""
+    return float(denom.total_paisa(rows) // 100)
 
 
 def compute_expected_cash(

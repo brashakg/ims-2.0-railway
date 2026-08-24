@@ -69,7 +69,10 @@ class TestDenominationMath:
         faces_notes = [r["face"] for r in rows if r["kind"] == "note"]
         faces_coins = [r["face"] for r in rows if r["kind"] == "coin"]
         assert faces_notes == [500, 200, 100, 50, 20, 10]
-        assert faces_coins == [10, 5, 2, 1]
+        # The Rs 20 coin is in circulation and BOTH count sheets in the app
+        # already offer it; the backend's blank grid used to omit it, so a
+        # drawer holding Rs 20 coins had no row to enter them on.
+        assert faces_coins == [20, 10, 5, 2, 1]
         assert 2000 not in faces_notes  # RBI withdrew it
         assert all(r["pieces"] == 0 for r in rows)
 
