@@ -13,7 +13,9 @@ Owner-approved "wider extremes" realistic limits (2026-06):
   CYL (Cylinder):  -6.00 to  +6.00 diopters, 0.25 steps
   AXIS:            1 to 180 degrees (WHOLE number); MANDATORY when cyl != 0
   ADD (Addition): +0.75 to  +4.00 diopters, 0.25 steps (PLUS-ONLY)
-  PD (Pupillary Distance): 40 to 80 mm (a measurement, not Rx -> no 0.25 grid)
+  PD (Pupillary Distance): 40 to 80 mm binocular / 20 to 45 mm per-eye monocular
+                           (a measurement, not Rx -> no 0.25 grid)
+  K  (Keratometry):       30.0 to 60.0 D (corneal curvature; unsigned, no grid)
   CL Base Curve (base_curve): 8.0 to 9.5 mm
   CL Diameter (diameter):    13.0 to 15.0 mm
 
@@ -42,6 +44,11 @@ _RX_LIMITS = {
     # a monocular per-eye value must NOT be rejected for being < 40.
     "pd": (40.0, 80.0),          # binocular / total PD (IPD)
     "pd_mono": (20.0, 45.0),     # per-eye monocular PD
+    # KERATOMETRY (corneal curvature), dioptres, from the auto-refractometer's
+    # K readings. Dioptric but NEVER signed and NOT on the 0.25 grid (devices
+    # report 0.05/0.125 steps). 30-60 D spans a very flat cornea to advanced
+    # keratoconus; anything outside is a mis-keyed or mis-parsed reading.
+    "k": (30.0, 60.0),
     # Contact-lens millimetre measurements (fit params). Not dioptric -> no
     # 0.25 grid; a plain range check only. cl_power/cl_cyl/cl_add reuse the
     # sph/cyl/add dioptric limits below (see _CL_ALIASES).

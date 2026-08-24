@@ -48,6 +48,7 @@ import {
   createEmptySoapNote,
 } from './eyeTestTypes';
 
+import { validateEyeTest } from './eyeTestValidation';
 import { LensometerTab } from './LensometerTab';
 import { SlitLampTab } from './SlitLampTab';
 import { AutoRefTab } from './AutoRefTab';
@@ -77,6 +78,10 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   const [activeTab, setActiveTab] = useState<TabId>('lensometer');
   const [isSaving, setIsSaving] = useState(false);
   const [showPrint, setShowPrint] = useState(false);
+  // The first out-of-range / un-grindable value found on ANY tab. Rendered as a
+  // persistent banner rather than a toast: the clinician has to walk back to
+  // another tab to fix it, and a toast is gone by the time they get there.
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Header data
   const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
@@ -174,6 +179,25 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   });
 
   const handleSave = async () => {
+    // PATIENT SAFETY: range-check EVERY power the exam captured before it can
+    // leave this form. Until this call existed the seven tabs consumed none of
+    // the canonical limits and a lensometer SPH of -9999 saved cleanly. The
+    // backend re-checks the same bounds (the API is reachable without this UI);
+    // this is the fast, specific message, not the gate.
+    const problem = validateEyeTest({
+      lensometer: lensometerData,
+      slitLamp: slitLampData,
+      autoRef: autoRefData,
+      subjectiveRx: subjectiveRxData,
+      finalRx: finalRxData,
+      clinicalFindings,
+    });
+    if (problem) {
+      setValidationError(problem);
+      return;
+    }
+    setValidationError(null);
+
     setIsSaving(true);
     try {
       const data: EyeTestData = {
@@ -394,6 +418,17 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
             <UploadsTab uploads={uploads} onUpload={handleFileUpload} onRemove={removeUpload} />
           )}
         </div>
+
+        {/* Validation banner — the tab + eye + field that blocks the save. */}
+        {validationError && (
+          <div
+            role="alert"
+            className="mx-4 mb-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2"
+          >
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>{validationError}</span>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50">

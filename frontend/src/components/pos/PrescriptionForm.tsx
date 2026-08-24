@@ -165,12 +165,17 @@ export function PrescriptionForm({
 
   const validateBeforeSubmit = (): string | null => {
     if (rxKind === 'SPECTACLE') {
+      // pd_od / pd_os are the PER-EYE (monocular) boxes -- placeholder "32.5".
+      // They were validated against the BINOCULAR 40-80 range, so every correct
+      // monocular PD was rejected and the Rx could not be saved at all. The
+      // backend distinguishes the two (EyeData.validate_pd -> "pd_mono") and is
+      // the source of truth; the binocular limit belongs to the IPD box.
       const odEye = { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
-        add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od };
+        add: prescription.add_od, pd_mono: prescription.pd_od, va: prescription.va_od };
       const od = validateEyeDetailed(odEye, 'Right eye (OD)');
       if (od && !(deferAxisPrompt && axisIsTheOnlyProblem(od))) return od.message;
       const osEye = { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
-        add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os };
+        add: prescription.add_os, pd_mono: prescription.pd_os, va: prescription.va_os };
       const os = validateEyeDetailed(osEye, 'Left eye (OS)');
       if (os && !(deferAxisPrompt && axisIsTheOnlyProblem(os))) return os.message;
     } else {

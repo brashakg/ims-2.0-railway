@@ -19,6 +19,7 @@ import {
 } from '../../services/api/sales';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { validateEyePair, validateRxField } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
 import clsx from 'clsx';
 
@@ -149,6 +150,31 @@ export function PrescriptionVersionsEditor({
 
   const handleSaveCurrent = async () => {
     if (locked) return;
+    const v0 = versions[activeTab];
+    // Range-check through the canonical table (the backend re-checks; this is
+    // the fast, specific message). Each version slot is a real clinical Rx --
+    // "before testing" and "manual" end up on the same prescription document as
+    // "final" -- and none of the four slots checked anything at all.
+    const slotErr =
+      validateEyePair(
+        {
+          sph: v0.right_eye?.sphere, cyl: v0.right_eye?.cylinder,
+          axis: v0.right_eye?.axis, add: v0.right_eye?.addition,
+        },
+        'Right eye (OD)',
+      ) ||
+      validateEyePair(
+        {
+          sph: v0.left_eye?.sphere, cyl: v0.left_eye?.cylinder,
+          axis: v0.left_eye?.axis, add: v0.left_eye?.addition,
+        },
+        'Left eye (OS)',
+      ) ||
+      validateRxField('pd', v0.pd, '');
+    if (slotErr) {
+      toast.error(slotErr);
+      return;
+    }
     setSaving(true);
     try {
       const v = versions[activeTab];

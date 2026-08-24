@@ -17,6 +17,8 @@ interface PowerInputProps {
   width?: string;
   /** Which Rx kind this field is (drives sign/format rules). VA is free text. */
   kind?: RxPowerKind;
+  /** Accessible name, when it must differ from the short visible label. */
+  ariaLabel?: string;
 }
 
 export function PowerInput({
@@ -26,6 +28,7 @@ export function PowerInput({
   placeholder = '',
   width = 'w-20',
   kind = 'SPH',
+  ariaLabel,
 }: PowerInputProps) {
   return (
     <div className="flex flex-col">
@@ -37,7 +40,7 @@ export function PowerInput({
         placeholder={placeholder}
         className="input-field text-center text-sm"
         width={width}
-        aria-label={label}
+        aria-label={ariaLabel ?? label}
       />
     </div>
   );
@@ -56,6 +59,10 @@ export function EyePowerRow({
   onChange,
   showVA = true,
 }: EyePowerRowProps) {
+  // Both eyes render in the SAME tab, so a bare "SPH" label appears twice and a
+  // screen reader (or a test) cannot tell which eye it is on. Prefix the eye.
+  const side = eye === 'R' ? 'Right' : 'Left';
+  const L = (field: string) => `${side} ${field}`;
   return (
     <div className="overflow-x-auto">
       <div className="flex items-center gap-2 py-2 min-w-max">
@@ -68,13 +75,13 @@ export function EyePowerRow({
         >
           {eye}
         </div>
-        <PowerInput kind="SPH" label="SPH" value={data.sphere} onChange={(v) => onChange('sphere', v)} placeholder="+0.00" />
-        <PowerInput kind="CYL" label="CYL" value={data.cylinder} onChange={(v) => onChange('cylinder', v)} placeholder="-0.00" />
-        <PowerInput kind="AXIS" label="AXIS" value={data.axis} onChange={(v) => onChange('axis', v)} placeholder="1-180" width="w-16" />
-        <PowerInput kind="ADD" label="ADD" value={data.add} onChange={(v) => onChange('add', v)} placeholder="+0.00" width="w-16" />
-        <PowerInput kind="PD" label="PD" value={data.pd} onChange={(v) => onChange('pd', v)} placeholder="mm" width="w-16" />
+        <PowerInput kind="SPH" label="SPH" ariaLabel={L('SPH')} value={data.sphere} onChange={(v) => onChange('sphere', v)} placeholder="+0.00" />
+        <PowerInput kind="CYL" label="CYL" ariaLabel={L('CYL')} value={data.cylinder} onChange={(v) => onChange('cylinder', v)} placeholder="-0.00" />
+        <PowerInput kind="AXIS" label="AXIS" ariaLabel={L('AXIS')} value={data.axis} onChange={(v) => onChange('axis', v)} placeholder="1-180" width="w-16" />
+        <PowerInput kind="ADD" label="ADD" ariaLabel={L('ADD')} value={data.add} onChange={(v) => onChange('add', v)} placeholder="+0.00" width="w-16" />
+        <PowerInput kind="PD" label="PD" ariaLabel={L('PD')} value={data.pd} onChange={(v) => onChange('pd', v)} placeholder="mm" width="w-16" />
         {showVA && (
-          <PowerInput kind="VA" label="VA" value={data.va} onChange={(v) => onChange('va', v)} placeholder="6/6" width="w-16" />
+          <PowerInput kind="VA" label="VA" ariaLabel={L('VA')} value={data.va} onChange={(v) => onChange('va', v)} placeholder="6/6" width="w-16" />
         )}
       </div>
     </div>

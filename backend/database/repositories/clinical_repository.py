@@ -159,6 +159,8 @@ class EyeTestRepository(BaseRepository):
         coating_recommendation: Optional[str] = None,
         clinical_findings: Optional[Dict] = None,
         soap_note: Optional[Dict] = None,
+        exam_blocks: Optional[Dict] = None,
+        exam_header: Optional[Dict] = None,
     ) -> bool:
         """Complete eye test with prescription data.
 
@@ -188,6 +190,14 @@ class EyeTestRepository(BaseRepository):
             update_data["clinical_findings"] = clinical_findings
         if soap_note:
             update_data["soap_note"] = soap_note
+        # The four exam tabs (lensometer / slit_lamp / auto_ref / subjective_rx)
+        # and the exam header. Each key is written only when the caller supplied
+        # it, so a refraction-only test stores exactly the document it always
+        # did, and an amendment that omits a tab never blanks the stored one.
+        for key, value in (exam_blocks or {}).items():
+            update_data[key] = value
+        for key, value in (exam_header or {}).items():
+            update_data[key] = value
         return self.update(test_id, update_data)
 
     def save_soap_note(self, test_id: str, soap_note: Dict) -> bool:

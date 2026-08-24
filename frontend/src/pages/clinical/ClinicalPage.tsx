@@ -27,6 +27,7 @@ import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
+import { examTabsPayload } from '../../components/clinical/eyeTestPayload';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
 import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
@@ -275,6 +276,15 @@ export function ClinicalPage() {
       };
 
       await clinicalApi.completeTest(currentTestId, {
+        // The four exam tabs. They used to stop here: this handler read only
+        // finalRx / chiefComplaint / clinicalFindings / soapNote, and the API
+        // client had no field for the rest, so a lensometer or slit-lamp
+        // reading never left the browser.
+        ...examTabsPayload(data),
+        examDate: data.examDate || undefined,
+        optometristName: data.optometristName || undefined,
+        chiefComplaint: data.chiefComplaint || undefined,
+        vduUsage: data.vduUsage || undefined,
         rightEye: {
           sphere: parseValue(re?.sphere || ''),
           cylinder: parseValue(re?.cylinder || ''),

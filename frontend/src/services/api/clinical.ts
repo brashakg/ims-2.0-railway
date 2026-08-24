@@ -71,6 +71,65 @@ export interface ClinicalFindings {
   additionalNotes?: string;
 }
 
+// ---------------------------------------------------------------------------
+// The four exam tabs (lensometer / auto-ref / subjective refraction / slit
+// lamp). Mirrors the backend ExamRefraction / AutoRefExam / SlitLampExam models
+// in routers/clinical.py.
+//
+// Every power is a SIGNED STRING, never a number. `parseFloat("+4.00")` is the
+// number 4, and `String(4)` is "4" -- the explicit plus a positive power must
+// carry is destroyed the moment a value is coerced to a number, and no
+// downstream formatter can put it back with certainty. Strings also let a
+// deliberate blank stay blank instead of becoming 0.
+// ---------------------------------------------------------------------------
+export interface ExamEyeReadingPayload {
+  sphere?: string | null;
+  cylinder?: string | null;
+  axis?: string | null;
+  add?: string | null;
+  /** PER-EYE (monocular) PD in mm. */
+  pd?: string | null;
+  va?: string | null;
+}
+
+export interface AutoRefEyeReadingPayload extends ExamEyeReadingPayload {
+  k1?: string | null;
+  k1Axis?: string | null;
+  k2?: string | null;
+  k2Axis?: string | null;
+}
+
+export interface ExamRefractionPayload {
+  rightEye?: ExamEyeReadingPayload;
+  leftEye?: ExamEyeReadingPayload;
+  remarks?: string | null;
+}
+
+export interface AutoRefPayload {
+  rightEye?: AutoRefEyeReadingPayload;
+  leftEye?: AutoRefEyeReadingPayload;
+  remarks?: string | null;
+}
+
+export interface SlitLampEyePayload {
+  lids?: string | null;
+  conjunctiva?: string | null;
+  cornea?: string | null;
+  ac?: string | null;
+  iris?: string | null;
+  pupil?: string | null;
+  lens?: string | null;
+  fundus?: string | null;
+  /** Intra-ocular pressure, mmHg (0-80). */
+  iop?: number | null;
+}
+
+export interface SlitLampPayload {
+  rightEye?: SlitLampEyePayload;
+  leftEye?: SlitLampEyePayload;
+  remarks?: string | null;
+}
+
 // Shape returned by GET /clinical/abuse-detection. Mirrors the backend
 // _build_abuse_alerts() output and the AbuseDetection component's renderer.
 export interface AbuseAlert {
@@ -213,6 +272,20 @@ export const clinicalApi = {
     // entirely for a refraction-only test. Can also be saved/updated after
     // completion via saveSoapNote().
     soapNote?: SoapNotePayload;
+    // The four exam tabs. Until 2026-08-24 these had NO field here at all --
+    // they were not "dropped", they were unrepresentable, so a lensometer or
+    // auto-ref reading could never leave the browser and no validator on any
+    // layer ever saw one. Powers travel as SIGNED STRINGS ("+4.00") so the
+    // explicit plus survives to the printed card and the lab job-card.
+    lensometer?: ExamRefractionPayload;
+    autoRef?: AutoRefPayload;
+    subjectiveRx?: ExamRefractionPayload;
+    slitLamp?: SlitLampPayload;
+    // Exam header, also previously dropped.
+    examDate?: string;
+    optometristName?: string;
+    chiefComplaint?: string;
+    vduUsage?: string;
   }) => {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);
     return response.data;

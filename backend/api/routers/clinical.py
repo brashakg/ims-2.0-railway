@@ -333,6 +333,99 @@ class SoapNote(BaseModel):
         populate_by_name = True
 
 
+class ExamEyeReading(BaseModel):
+    """One eye's readings on a NON-final exam tab.
+
+    CLINICAL-CRITICAL, and NEW as of 2026-08-24. The lensometer, auto-
+    refractometer and subjective-refraction tabs collected these values in the
+    browser and then DROPPED them: no field existed on this model, no column
+    existed on the document, and consequently NO VALIDATOR EVER SAW THEM. An
+    optometrist could record a lensometer sphere of -9999 and the API would
+    neither reject it nor keep it.
+
+    Powers stay STRINGS so a signed value ("+4.00") survives byte-for-byte --
+    float() would coerce away the explicit plus the printed card and the lab
+    job-card have to show. The RANGE checks are not declared here as field
+    validators but run through `_validate_eye_test_rx` in the endpoint, so an
+    exam reading is judged by EXACTLY the same code, with exactly the same
+    message, as the final prescription. One gate, not a lookalike.
+    """
+
+    sphere: Optional[str] = None
+    cylinder: Optional[str] = None
+    axis: Optional[str] = None
+    add: Optional[str] = None
+    # PER-EYE PD is MONOCULAR (~20-45mm); validated as "pd_mono".
+    pd: Optional[str] = None
+    va: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AutoRefEyeReading(ExamEyeReading):
+    """An auto-refractometer eye: a refraction PLUS the keratometry pair."""
+
+    k1: Optional[str] = None
+    k1_axis: Optional[str] = Field(None, alias="k1Axis")
+    k2: Optional[str] = None
+    k2_axis: Optional[str] = Field(None, alias="k2Axis")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExamRefraction(BaseModel):
+    """A lensometer / subjective-refraction tab: both eyes + free-text remarks."""
+
+    right_eye: ExamEyeReading = Field(default_factory=ExamEyeReading, alias="rightEye")
+    left_eye: ExamEyeReading = Field(default_factory=ExamEyeReading, alias="leftEye")
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AutoRefExam(BaseModel):
+    """The auto-refractometer tab: both eyes (with K readings) + remarks."""
+
+    right_eye: AutoRefEyeReading = Field(
+        default_factory=AutoRefEyeReading, alias="rightEye"
+    )
+    left_eye: AutoRefEyeReading = Field(
+        default_factory=AutoRefEyeReading, alias="leftEye"
+    )
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SlitLampEyeExam(BaseModel):
+    """One eye's slit-lamp findings. Free text on purpose (the tab offers
+    pick-lists but an optometrist must be able to describe what they saw);
+    only the intra-ocular pressure is a number, bounded to the same 0-80 mmHg
+    clinical window ClinicalFindings and SoapNote already use."""
+
+    lids: Optional[str] = None
+    conjunctiva: Optional[str] = None
+    cornea: Optional[str] = None
+    ac: Optional[str] = None
+    iris: Optional[str] = None
+    pupil: Optional[str] = None
+    lens: Optional[str] = None
+    fundus: Optional[str] = None
+    iop: Optional[float] = Field(None, ge=0, le=80)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SlitLampExam(BaseModel):
+    right_eye: SlitLampEyeExam = Field(
+        default_factory=SlitLampEyeExam, alias="rightEye"
+    )
+    left_eye: SlitLampEyeExam = Field(default_factory=SlitLampEyeExam, alias="leftEye")
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
@@ -353,6 +446,23 @@ class EyeTestData(BaseModel):
     # CLI-11: optional structured SOAP exam note.  Absent -> refraction-only test
     # exactly as before; present -> stored under ``soap_note`` on the test doc.
     soap_note: Optional[SoapNote] = Field(None, alias="soapNote")
+
+    # ---- The four exam tabs that used to be thrown away (2026-08-24) --------
+    # Each is OPTIONAL: a quick refraction-only test sends none of them and the
+    # stored document is byte-for-byte what it was before. Present -> validated
+    # against the SAME clinical ranges as the final Rx and persisted, so the
+    # exam can be re-opened and edited instead of "edit" silently blanking a
+    # patient's readings.
+    lensometer: Optional[ExamRefraction] = None
+    auto_ref: Optional[AutoRefExam] = Field(None, alias="autoRef")
+    subjective_rx: Optional[ExamRefraction] = Field(None, alias="subjectiveRx")
+    slit_lamp: Optional[SlitLampExam] = Field(None, alias="slitLamp")
+
+    # Exam header fields the form collects and also used to drop.
+    exam_date: Optional[str] = Field(None, alias="examDate")
+    optometrist_name: Optional[str] = Field(None, alias="optometristName")
+    chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
+    vdu_usage: Optional[str] = Field(None, alias="vduUsage")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -476,7 +586,7 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
     a power past the checks by leaving its twin key present-but-null.
     """
     from .prescriptions import _eye_value, _validate_eye_axis
-    from ..services.rx_validation import _validate_rx_value
+    from ..services.rx_validation import _validate_measurement, _validate_rx_value
 
     if not isinstance(eye, dict):
         return
@@ -500,7 +610,114 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
 
+    # PER-EYE PD. This eye-test path writes the Rx as a RAW DICT straight to
+    # rx_repo.create(), so EyeData's own field validators never run on it and a
+    # PD of 9999 reached a billable, dispensable prescription: a garbage
+    # monocular PD decentres the lens and induces prism. The per-eye box is
+    # MONOCULAR, so "pd_mono" (20-45mm) is the right bound, not the binocular
+    # 40-80 one. Same rule as EyeData.validate_pd.
+    try:
+        _validate_measurement(_as_str(_eye_value(eye, "pd")), "pd_mono")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
+    # PRISM travels as free text through a bare <input> on the Final Rx tab and
+    # is persisted verbatim. Mirrors EyeData.validate_prism (0-10 dioptres).
+    prism = _eye_value(eye, "prism")
+    if prism is not None and str(prism).strip() != "":
+        try:
+            mag = float(str(prism).strip())
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} prism must be a number in prism dioptres (0-10)",
+            )
+        if not (0.0 <= mag <= 10.0):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} prism must be between 0 and 10 prism dioptres",
+            )
+
     _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=422)
+
+
+def _validate_keratometry(eye_label: str, eye: dict) -> None:
+    """Validate an auto-refractometer eye's K readings (corneal curvature).
+
+    K1/K2 are dioptric but unsigned and off the 0.25 grid, so they use the
+    canonical "k" range in rx_validation rather than the sphere range; their
+    axes are ordinary 1-180 meridians. These were bare text boxes that accepted
+    any string at all, and nothing on the server had ever seen them."""
+    from ..services.rx_validation import _validate_axis, _validate_measurement
+
+    if not isinstance(eye, dict):
+        return
+    for key, label in (("k1", "K1"), ("k2", "K2")):
+        value = eye.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            _validate_measurement(str(value), "k")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {label} {exc}")
+    for key, label in (("k1_axis", "K1 axis"), ("k2_axis", "K2 axis")):
+        value = eye.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            _validate_axis(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {label}: {exc}")
+
+
+def _validate_exam_block(label: str, block) -> None:
+    """Range-check one exam tab (lensometer / auto-ref / subjective refraction)
+    through the SAME validator the final prescription goes through."""
+    if block is None:
+        return
+    for side, eye in (("Right eye", block.right_eye), ("Left eye", block.left_eye)):
+        eye_dict = eye.model_dump(exclude_none=True)
+        _validate_eye_test_rx(f"{label} {side}", eye_dict)
+        if isinstance(eye, AutoRefEyeReading):
+            _validate_keratometry(f"{label} {side}", eye_dict)
+
+
+def _exam_blocks_for_storage(data: "EyeTestData") -> dict:
+    """The exam tabs to PERSIST on the test document, snake_case, omitting the
+    tabs the optometrist left untouched.
+
+    An ABSENT tab stores nothing at all, so a quick refraction-only test writes
+    exactly the document it wrote before this block existed. A tab that is
+    PRESENT but whose fields are all blank still stores its (empty) shape --
+    "the optometrist opened this tab and recorded nothing" is a different fact
+    from "this exam predates the tab".
+    """
+    blocks = {}
+    for key, value in (
+        ("lensometer", data.lensometer),
+        ("auto_ref", data.auto_ref),
+        ("subjective_rx", data.subjective_rx),
+        ("slit_lamp", data.slit_lamp),
+    ):
+        if value is not None:
+            blocks[key] = value.model_dump(exclude_none=True)
+    return blocks
+
+
+def _exam_header_for_storage(data: "EyeTestData") -> dict:
+    """The exam header fields (date / optometrist / complaint / VDU hours) the
+    form collects. Only the ones actually supplied, so an absent field never
+    overwrites a stored one with a blank on a later amendment."""
+    header = {}
+    for key, value in (
+        ("exam_date", data.exam_date),
+        ("optometrist_name", data.optometrist_name),
+        ("chief_complaint", data.chief_complaint),
+        ("vdu_usage", data.vdu_usage),
+    ):
+        if value is not None and str(value).strip() != "":
+            header[key] = value
+    return header
 
 
 def _axis_for_storage(eye: dict):
@@ -939,6 +1156,13 @@ async def complete_test(
     # write-path gap. Raises 422 on a violation.
     _validate_eye_test_rx("Right eye", data.right_eye)
     _validate_eye_test_rx("Left eye", data.left_eye)
+    # ...and the same gate over the three exam tabs that now reach the server.
+    # These used to be dropped in the browser, so no layer -- not the form, not
+    # the transport, not a Pydantic model, not a validator -- had ever looked at
+    # a lensometer or auto-ref power. -9999 went in and nothing objected.
+    _validate_exam_block("Lensometer", data.lensometer)
+    _validate_exam_block("Auto-Ref", data.auto_ref)
+    _validate_exam_block("Subjective Rx", data.subjective_rx)
 
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
@@ -999,6 +1223,11 @@ async def complete_test(
                 else None
             ),
             soap_note=soap_note_dict,
+            # The lensometer / slit-lamp / auto-ref / subjective-refraction
+            # tabs. Empty dict for a refraction-only test -> nothing extra is
+            # written and the stored document is unchanged.
+            exam_blocks=_exam_blocks_for_storage(data),
+            exam_header=_exam_header_for_storage(data),
         )
 
         if success:

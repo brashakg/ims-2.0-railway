@@ -50,6 +50,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from ..services.rx_validation import _STEP_FIELDS, _limits_for
 from .auth import get_current_user, require_roles
 
 logger = logging.getLogger(__name__)
@@ -63,18 +64,14 @@ router = APIRouter()
 _DEVICE_IMPORT_ROLES = ("ADMIN", "STORE_MANAGER", "OPTOMETRIST")
 
 # ---------------------------------------------------------------------------
-# Rx validation ranges (source of truth: CLAUDE.md + docs/SYSTEM_INTENT.md)
-# SPH: -20.00 to +20.00  (0.25 steps)
-# CYL: -6.00  to +6.00   (0.25 steps)
-# AXIS: 1 to 180          (whole degrees)
-# ADD: +0.75 to +3.50    (0.25 steps)
+# Rx validation ranges. THIS FILE USED TO DECLARE ITS OWN COPY -- and the copy
+# had gone stale: sph -20..+20 and add +0.75..+3.50, the pre-2026-06 bounds. The
+# canonical owner-approved limits are sph -25..+25 and add +0.75..+4.00, so a
+# genuine -22.00 lensmeter reading was rejected by an endpoint whose own error
+# message called its numbers "the valid IMS range". A second copy of a clinical
+# range is a defect, not a convenience: the one table in
+# api/services/rx_validation.py is now the only one, via _limits_for().
 # ---------------------------------------------------------------------------
-_RX_LIMITS = {
-    "sph": (-20.0, 20.0),
-    "cyl": (-6.0, 6.0),
-    "add": (0.75, 3.50),
-}
-_STEP_FIELDS = {"sph", "cyl", "add"}
 
 
 def _parse_rx_float(raw: str, field: str) -> Optional[float]:
@@ -97,7 +94,7 @@ def _parse_rx_float(raw: str, field: str) -> Optional[float]:
             "Check the device CSV export settings."
         )
 
-    lo, hi = _RX_LIMITS.get(field, (-999.0, 999.0))
+    lo, hi = _limits_for(field)
     if value < lo or value > hi:
         raise ValueError(
             f"{field.upper()} value {value} is outside the valid IMS range "
@@ -361,8 +358,9 @@ def parse_device_csv(content: bytes) -> DeviceImportResult:
         "Accepts a CSV file exported from a clinical ophthalmic device "
         "(autorefractor, lensmeter) and maps it to the validated IMS Rx shape. "
         "Supports Topcon/Nidek column-per-eye format and Huvitz/Zeiss per-eye-row "
-        "format. The returned Rx has been range-validated (SPH -20..+20, "
-        "CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50, 0.25-diopter steps) but is "
+        "format. The returned Rx has been range-validated against the canonical "
+        "IMS limits in api/services/rx_validation.py (SPH -25..+25, CYL -6..+6, "
+        "AXIS 1-180, ADD +0.75..+4.00, 0.25-diopter steps) but is "
         "NOT saved to the database -- the optometrist must review and confirm "
         "before posting to POST /api/v1/prescriptions. "
         "Requires OPTOMETRIST, STORE_MANAGER, or ADMIN role. "

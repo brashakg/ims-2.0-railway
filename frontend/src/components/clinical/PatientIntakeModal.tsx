@@ -66,8 +66,9 @@ interface PatientIntakeModalProps {
 
 // --- Rx range validation (single source: constants/rxLimits.ts) -------------
 // SPH -25..+25 (0.25) - CYL -6..+6 (0.25) - AXIS 1-180 whole - ADD +0.75..+4.00
-// (0.25) - PD 40..80 (0.5). CYL<->AXIS paired. The backend rx_validation.py is
-// the ultimate gate; this gives a fast client message on an obvious typo.
+// (0.25) - per-eye PD 20..45 (0.5). CYL<->AXIS paired. The backend
+// rx_validation.py is the ultimate gate; this gives a fast client message on an
+// obvious typo.
 function validateEye(eye: EyeRx, label: string): string | null {
   return validateEyePair(
     {
@@ -75,7 +76,11 @@ function validateEye(eye: EyeRx, label: string): string | null {
       cyl: eye.cyl,
       axis: eye.axis,
       add: eye.add,
-      pd: eye.pd,
+      // This is the PER-EYE box, so the MONOCULAR range applies (~half the
+      // binocular PD). It was checked against the binocular 40-80 limit, which
+      // refused every correct monocular entry; the backend has always used
+      // pd_mono here (EyeData.validate_pd) and is the source of truth.
+      pd_mono: eye.pd,
       va: eye.va,
     },
     label,

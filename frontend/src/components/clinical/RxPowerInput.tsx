@@ -29,7 +29,10 @@
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 
-export type RxPowerKind = 'SPH' | 'CYL' | 'ADD' | 'AXIS' | 'PD' | 'VA' | 'BC' | 'DIA';
+// 'K' is a keratometry (corneal curvature) reading in dioptres. It is dioptric
+// but NEVER signed -- a cornea has no minus power -- so it is formatted like a
+// measurement (2 dp, no sign) rather than like SPH/CYL.
+export type RxPowerKind = 'SPH' | 'CYL' | 'ADD' | 'AXIS' | 'PD' | 'VA' | 'BC' | 'DIA' | 'K';
 
 // Kinds that carry a sign the user may type. ADD is plus-only (normalized to
 // +abs on blur); SPH/CYL are signed both ways. AXIS/PD/VA/BC/DIA carry no sign.
@@ -77,6 +80,11 @@ export function formatRxPower(value: string, kind: RxPowerKind): string {
   if (MM_1DP_KINDS.includes(kind)) {
     // PD / BC / DIA are millimetre measurements: one decimal, unsigned.
     return Math.abs(num).toFixed(1);
+  }
+
+  if (kind === 'K') {
+    // Keratometry: dioptres, two decimals, never signed.
+    return Math.abs(num).toFixed(2);
   }
 
   if (kind === 'ADD') {

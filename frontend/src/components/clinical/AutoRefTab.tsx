@@ -4,6 +4,7 @@
 
 import { Camera } from 'lucide-react';
 import { EyePowerRow } from './EyeTestInput';
+import { RxPowerInput } from './RxPowerInput';
 import type { AutoRefData, PowerReading } from './eyeTestTypes';
 
 interface AutoRefTabProps {
@@ -40,45 +41,53 @@ function KeratometryEye({
         <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs ${badgeColor}`}>{badge}</div>
         <span className="text-sm font-medium">{label}</span>
       </div>
+      {/* K readings go through the shared sign-aware input like every other
+          clinical number, so they are sanitized + normalized on blur and can be
+          range-checked by the one validator. They were bare text boxes that
+          accepted anything at all. */}
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="text-xs text-gray-500 mb-1 block">K1 (D)</label>
-          <input
-            type="text"
+          <RxPowerInput
+            kind="K"
             value={k1}
-            onChange={(e) => onFieldChange(eye, 'k1', e.target.value)}
+            onChange={(v) => onFieldChange(eye, 'k1', v)}
             placeholder="e.g., 42.50"
-            className="input-field text-sm"
+            className="input-field text-sm w-full"
+            aria-label={`${label} K1`}
           />
         </div>
         <div>
           <label className="text-xs text-gray-500 mb-1 block">K1 Axis</label>
-          <input
-            type="text"
+          <RxPowerInput
+            kind="AXIS"
             value={k1Axis}
-            onChange={(e) => onFieldChange(eye, 'k1Axis', e.target.value)}
-            placeholder="0-180"
-            className="input-field text-sm"
+            onChange={(v) => onFieldChange(eye, 'k1Axis', v)}
+            placeholder="1-180"
+            className="input-field text-sm w-full"
+            aria-label={`${label} K1 axis`}
           />
         </div>
         <div>
           <label className="text-xs text-gray-500 mb-1 block">K2 (D)</label>
-          <input
-            type="text"
+          <RxPowerInput
+            kind="K"
             value={k2}
-            onChange={(e) => onFieldChange(eye, 'k2', e.target.value)}
+            onChange={(v) => onFieldChange(eye, 'k2', v)}
             placeholder="e.g., 43.00"
-            className="input-field text-sm"
+            className="input-field text-sm w-full"
+            aria-label={`${label} K2`}
           />
         </div>
         <div>
           <label className="text-xs text-gray-500 mb-1 block">K2 Axis</label>
-          <input
-            type="text"
+          <RxPowerInput
+            kind="AXIS"
             value={k2Axis}
-            onChange={(e) => onFieldChange(eye, 'k2Axis', e.target.value)}
-            placeholder="0-180"
-            className="input-field text-sm"
+            onChange={(v) => onFieldChange(eye, 'k2Axis', v)}
+            placeholder="1-180"
+            className="input-field text-sm w-full"
+            aria-label={`${label} K2 axis`}
           />
         </div>
       </div>
