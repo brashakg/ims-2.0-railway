@@ -178,16 +178,32 @@ def ist_date_str_from_stored(value: Any) -> str:
     string falls back to its own first ten characters (the pre-BUG-104
     behaviour), never raises.
 
-    Existing private copies of this shape, to fold onto this definition rather
-    than growing a fourth: ``api/routers/reports.py::_credit_note_date_ist``
-    (credit_note_ledger.created_at) and ``api/routers/finance.py::
-    _ist_day_face`` (cash-register session stamps).
+    Existing copies of this shape, to fold onto this definition rather than
+    growing a fourth: ``api/routers/reports.py::_credit_note_date_ist``
+    (credit_note_ledger.created_at) and the inline ``_to_dt(closed_at)`` +
+    ``ist_date_str(...)`` pair in ``api/routers/finance.py``'s
+    cash-reconciliation summary (session stamps).
+
+    NOT the same rule as the GSTR-1 ``invoice_date`` in
+    ``reports.py::get_gstr1_data``, which deliberately keeps a stored STRING
+    unshifted -- see the comment at that site. For a string-stored order in
+    the 00:00-05:30 IST band the two GST-facing documents would name
+    different days (and on 1 April, different financial years). Production
+    holds zero string-typed ``orders.created_at`` rows (the #935 backfill),
+    so the two cannot disagree today; converging them is a money-reviewed
+    change of its own, not a drive-by here.
     """
     if value is None or value == "":
         return ""
     if isinstance(value, datetime):
         return ist_date_str(value)
-    text = str(value).strip()
+    if not isinstance(value, str):
+        # A non-string, non-datetime (an int epoch, a stray list) has no ISO
+        # face to parse. Defer to ist_date_str, which returns '' -- an empty
+        # <DATE> fails a Tally import loudly, where a coerced '1746646200'
+        # would look like data.
+        return ist_date_str(value)
+    text = value.strip()
     candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
         parsed = datetime.fromisoformat(candidate)

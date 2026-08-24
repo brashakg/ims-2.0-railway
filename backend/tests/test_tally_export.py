@@ -756,10 +756,17 @@ def _seed_ist_day_corners(orders, store_id="BV-GK1"):
 
 
 def _voucher_ids(xml):
-    """The order identities actually shipped in a file, as a set. A COUNT is
-    not discriminating here: the UTC box day yields the same three vouchers,
-    just the wrong three."""
+    """The order identities actually shipped in a file, as a set. A COUNT
+    alone is not discriminating -- the UTC box day yields the same three
+    vouchers, just the wrong three -- but a SET alone cannot see a DOUBLE
+    EMIT, which is GST double-booking. Assert both: the set says WHICH, the
+    count says HOW MANY."""
     return set(re.findall(r"<VOUCHERNUMBER>([^<]+)</VOUCHERNUMBER>", xml))
+
+
+def _voucher_count(xml):
+    """How many vouchers the file actually carries, duplicates included."""
+    return len(re.findall(r"<VOUCHERNUMBER>[^<]+</VOUCHERNUMBER>", xml))
 
 
 @pytest.mark.asyncio
@@ -797,6 +804,10 @@ async def test_the_export_window_is_the_whole_ist_day_not_the_utc_box_day(
         "forward and steals it"
     )
     assert _voucher_ids(row["xml"]) == {"O-EARLY", "O-NOON", "O-LATE"}
+    assert _voucher_count(row["xml"]) == 3 == row["voucher_count"], (
+        "the set names the right vouchers but the file carries %d of them -- "
+        "a duplicate emit is GST booked twice" % _voucher_count(row["xml"])
+    )
 
 
 @pytest.mark.asyncio
@@ -826,6 +837,10 @@ async def test_the_nightly_default_covers_yesterdays_complete_ist_day(
     )
     assert _voucher_ids(row["xml"]) == {"O-EARLY", "O-NOON", "O-LATE"}, (
         "the nightly file shipped %r" % sorted(_voucher_ids(row["xml"]))
+    )
+    assert _voucher_count(row["xml"]) == 3 == row["voucher_count"], (
+        "duplicate vouchers in the nightly file: %d"
+        % _voucher_count(row["xml"])
     )
     assert "O-LATE" in row["xml"], "the 23:30-IST sale reached no nightly file"
     assert "O-TOMORROW" not in row["xml"], "today's partial IST day is not final"
@@ -894,6 +909,12 @@ async def test_the_legacy_chain_wide_fallback_uses_the_same_ist_day(
         "UTC box day, which starts 5h30m late (losing the 00:30-IST sale) and "
         "reaches into the next IST day"
         % sorted(_voucher_ids(row["xml"]))
+    )
+    # The fallback is the ONLY path with a single test, so its duplicate
+    # detector has to live here too.
+    assert _voucher_count(row["xml"]) == 3 == row["voucher_count"], (
+        "the chain-wide file carries %d vouchers for 3 orders"
+        % _voucher_count(row["xml"])
     )
 
 
