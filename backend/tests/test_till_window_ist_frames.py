@@ -213,18 +213,22 @@ def _client():
     return TestClient(app)
 
 
-def _freeze(monkeypatch, db, *, iso_now=None, stub_sales=True):
+def _freeze(monkeypatch, db, *, iso_now=None, stub_sales=True, stub_advisory=True):
     """One store, one session, two expenses -- and every clock nailed down.
 
-    `stub_sales` replaces the sales side with a constant so the EXPENSE
-    assertions cannot fail for an unrelated reason. The two residue-2 tests
-    pass stub_sales=False -- they are about the real sales helper."""
+    The stubs exist so an assertion about ONE helper cannot fail because of
+    another. Any test whose subject IS the stubbed helper must switch its own
+    stub off -- a stubbed subject is a test that proves nothing, and this file
+    has already been bitten by it twice."""
     monkeypatch.setattr(finance, "_get_db", lambda: db)
     if stub_sales:
         monkeypatch.setattr(
             finance, "_cash_sales_for_window", lambda *a, **k: (CASH_SALES, 0.0)
         )
-    monkeypatch.setattr(finance, "_refund_double_entry_advisory", lambda *a, **k: None)
+    if stub_advisory:
+        monkeypatch.setattr(
+            finance, "_refund_double_entry_advisory", lambda *a, **k: None
+        )
     monkeypatch.setattr(finance, "_store_name_map", lambda db_: {STORE: "Till Store"})
     # 01:00 IST on 15 Aug: inside the small-hours window, so a UTC-faced bound
     # and an IST-faced one disagree by exactly one day.
@@ -409,3 +413,204 @@ def test_naive_bounds_and_naive_legacy_rows_are_unchanged(monkeypatch):
         db, STORE, "2026-08-14T15:30:00", "2026-08-14T23:00:00"
     )
     assert cash_sales == 1200.0
+
+
+# ===========================================================================
+# THE COMPLETENESS CLAIM, MADE EXECUTABLE
+#
+# Round 1 of this PR claimed the idiom "existed inline three times". It
+# existed FOUR times, and the fourth -- the double-entry advisory, ninety
+# lines below the one that was fixed -- reads the same column on the same
+# screen from the same two endpoints. A prose claim about how many copies
+# there are has now been wrong twice in this campaign, so the claim below is
+# a TEST: the drawer's readers must agree on the window, whatever anyone
+# believes about how many of them there are.
+# ===========================================================================
+
+
+def _refund_row(amount, created_at="2026-08-14T19:05:00"):
+    """A COMPLETED cash refund inside the small-hours session's window."""
+    return {
+        "return_id": "ZZ-R1",
+        "store_id": STORE,
+        "status": "COMPLETED",
+        "return_type": "RETURN",
+        "created_at": created_at,
+        "refund_tenders": [{"method": "CASH", "amount": amount}],
+    }
+
+
+class _SpyCol(_Col):
+    """Records every filter it is asked for, so a test can compare the
+    windows two helpers actually emitted rather than their results."""
+
+    def __init__(self, docs):
+        super().__init__(docs)
+        self.filters = []
+
+    def find(self, query=None, projection=None, *a, **k):
+        self.filters.append(query)
+        return super().find(query, projection, *a, **k)
+
+
+def test_every_drawer_reader_asks_for_the_same_expense_window(monkeypatch):
+    """THE AGREEMENT REQUIREMENT. `_cash_expenses_for_window` decides what the
+    drawer is charged; `_refund_double_entry_advisory` decides what the
+    manager is TOLD to delete. Both read `expenses.expense_date` for one
+    session. If they disagree the advisory names a payout the drawer never
+    subtracted -- a manager who acts on it turns a correct count into a
+    shortage the size of that payout.
+
+    Asserted on the emitted FILTERS, not on the outputs: two helpers can
+    agree by accident on one fixture and disagree on the next."""
+    db = _DB(cash_register_sessions=[_session(OPENED_SMALL_HOURS)])
+    spy = _SpyCol(_EXPENSES)
+    db.cols["expenses"] = spy
+    # A real refund leg, so the advisory gets past its early return and
+    # actually queries expenses -- an early return would make the comparison
+    # below vacuous.
+    db.cols["returns"] = _Col([_refund_row(410.00)])
+    _freeze(monkeypatch, db, stub_advisory=False)
+
+    finance._cash_expenses_for_window(db, STORE, OPENED_SMALL_HOURS, None)
+    finance._refund_double_entry_advisory(db, STORE, OPENED_SMALL_HOURS, None, 500.0)
+
+    windows = [f["expense_date"] for f in spy.filters if "expense_date" in f]
+    assert len(windows) == 2, (
+        "expected the drawer window and the advisory window; got %d" % len(windows)
+    )
+    assert windows[0] == windows[1], (
+        "the drawer charges the window %r while the advisory reads %r -- the "
+        "advisory can name a payout the drawer never subtracted"
+        % (windows[0], windows[1])
+    )
+    # ...and that shared window is the IST day, not the UTC face.
+    assert windows[0]["$gte"] == IST_DAY, windows[0]
+
+
+def test_the_advisory_does_not_name_a_payout_from_outside_the_drawer_window(
+    monkeypatch,
+):
+    """The money consequence, end to end. A till opened 00:30 IST is not
+    charged the PREVIOUS IST day's payout, so it must not be told to delete
+    it either. Before the fix the advisory reached back a day and did exactly
+    that -- on a legitimate entry the previous day's close had already
+    subtracted."""
+    # The previous day's payout is amount-matched to a cash refund leg, which
+    # is what makes the advisory fire at all.
+    db = _DB(
+        expenses=[_expense("ZZ-XP", PREV_IST_DAY, 1499.00)],
+        cash_register_sessions=[_session(OPENED_SMALL_HOURS)],
+        returns=[_refund_row(1499.00)],
+    )
+    _freeze(monkeypatch, db, stub_sales=False, stub_advisory=False)
+
+    advisory = finance._refund_double_entry_advisory(
+        db, STORE, OPENED_SMALL_HOURS, None, 1499.00
+    )
+    assert advisory is None, (
+        "the advisory named Rs 1499 from the PREVIOUS IST day, which this "
+        "drawer was never charged: %r" % (advisory,)
+    )
+
+
+def test_the_advisory_still_fires_inside_its_own_window(monkeypatch):
+    """POSITIVE CONTROL, and it is not optional: the fix above must narrow the
+    window, not switch the warning off. A genuine same-day double entry must
+    still be caught."""
+    db = _DB(
+        expenses=[_expense("ZZ-XT", IST_DAY, 1499.00)],
+        cash_register_sessions=[_session(OPENED_SMALL_HOURS)],
+        returns=[_refund_row(1499.00)],
+    )
+    _freeze(monkeypatch, db, stub_sales=False, stub_advisory=False)
+
+    advisory = finance._refund_double_entry_advisory(
+        db, STORE, OPENED_SMALL_HOURS, None, 1499.00
+    )
+    assert advisory is not None, "a same-day double entry is no longer warned about"
+    assert advisory["matched_amount"] == 1499.00
+    assert advisory["reason"] == "AMOUNT_MATCH"
+
+
+def test_the_refund_total_and_its_legs_read_the_same_window(monkeypatch):
+    """The refund TOTAL (`_cash_sales_for_window`) and the per-leg list behind
+    the advisory (`_cash_refund_legs_for_window`) select the same `returns`
+    rows. Normalising one bound and not the other would let the total net a
+    refund the legs cannot see -- and the advisory, which returns early on an
+    empty leg list, would quietly switch itself off."""
+    bound_aware = "2026-08-14T21:00:00+05:30"  # == 15:30:00 naive UTC
+    refund_row = {
+        "return_id": "ZZ-R1",
+        "store_id": STORE,
+        "status": "COMPLETED",
+        "return_type": "RETURN",
+        "created_at": "2026-08-14T16:00:00",  # inside the window
+        "refund_tenders": [{"method": "CASH", "amount": 410.00}],
+    }
+    db = _DB(orders=[], returns=[refund_row])
+    _freeze(monkeypatch, db, stub_sales=False)
+
+    _sales, cash_refunds = finance._cash_sales_for_window(
+        db, STORE, bound_aware, "2026-08-14T23:00:00"
+    )
+    legs = finance._cash_refund_legs_for_window(
+        db, STORE, bound_aware, "2026-08-14T23:00:00"
+    )
+
+    assert cash_refunds == 410.00, cash_refunds
+    assert legs == [410.00], (
+        "the total netted Rs %.2f of refund while the legs saw %r -- the two "
+        "read different windows, so the advisory silently switches off"
+        % (cash_refunds, legs)
+    )
+
+
+# ===========================================================================
+# The same drift class, one file out: tender_reconciliation's own bound
+# helpers, called straight from the close (finance.py:_close path) and
+# persisted as `by_mode_breakdown` on the close record.
+# ===========================================================================
+
+
+def test_the_tender_windows_two_clauses_describe_one_window():
+    """`_window_match` emits a DATETIME clause and a STRING clause for the
+    same window, because Mongo type-brackets the two apart. They must
+    therefore name the same instant.
+
+    Its `_to_dt` was the pre-#993 `[:19]` slice, which drops an offset and
+    re-badges the wall time as UTC, while `_iso` passed the raw value
+    through: for '...T01:30:00+05:30' the two clauses ended up 5h30m apart,
+    silently describing different windows on the close that writes
+    by_mode_breakdown."""
+    from api.services import tender_reconciliation as tr
+
+    aware = "2026-08-14T21:00:00+05:30"  # == 15:30:00 naive UTC
+    match = tr._window_match(STORE, aware, "2026-08-14T23:00:00")
+    clauses = match["$or"]
+    date_clause = next(c["created_at"] for c in clauses
+                       if isinstance(c["created_at"]["$gte"], datetime))
+    str_clause = next(c["created_at"] for c in clauses
+                      if isinstance(c["created_at"]["$gte"], str))
+
+    assert date_clause["$gte"] == datetime(2026, 8, 14, 15, 30), date_clause
+    assert str_clause["$gte"] == "2026-08-14T15:30:00", (
+        "the string clause says %r while the datetime clause says %s -- one "
+        "window, two different instants"
+        % (str_clause["$gte"], date_clause["$gte"])
+    )
+    # The two clauses must name the SAME instant, whichever type a row uses.
+    assert str_clause["$gte"] == date_clause["$gte"].isoformat()
+
+
+def test_the_tender_bound_helpers_leave_naive_values_alone():
+    """POSITIVE CONTROL: production stamps are naive-UTC, and those must pass
+    through untouched -- the fix normalises aware values, it does not shift
+    every bound."""
+    from api.services import tender_reconciliation as tr
+
+    assert tr._to_dt("2026-08-14T15:30:00") == datetime(2026, 8, 14, 15, 30)
+    assert tr._iso("2026-08-14T15:30:00") == "2026-08-14T15:30:00"
+    assert tr._to_dt(None) is None and tr._iso(None) is None
+    # Junk keeps its old raw face rather than vanishing.
+    assert tr._iso("wobble") == "wobble"

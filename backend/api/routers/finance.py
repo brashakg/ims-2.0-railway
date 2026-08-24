@@ -3922,6 +3922,31 @@ def _ist_day_face(value) -> str:
     return ist_date_str(dt) if dt is not None else str(value or "")[:10]
 
 
+def _naive_utc_iso_bound(v) -> Optional[str]:
+    """The NAIVE-UTC ISO face of a bound, for a LEGACY STRING clause.
+
+    BUG-104. String-typed ``created_at`` columns (`returns`, legacy online
+    orders) hold naive-UTC isoformats, so a bound compared against them
+    LEXICALLY must be in that frame too. Passing the raw value through meant
+    an offset-suffixed bound ('...T21:00:00+05:30') was compared face-value
+    against '...T15:30:00' -- sorting 5h30m late and silently dropping rows.
+    ``_to_dt`` already normalises an aware value to naive-UTC (#993);
+    unparseable junk keeps the old raw face.
+
+    ONE definition: the drawer's refund TOTAL and the per-leg list behind its
+    advisory read the same returns rows, so a second copy here would let the
+    total say one thing while the legs said another and the advisory quietly
+    switched itself off."""
+    if v is None:
+        return None
+    dt = v if isinstance(v, datetime) else _to_dt(v)
+    if dt is None:
+        return str(v)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
+
+
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
     """Net POS CASH collected for a store between start and end (ISO strings).
 
@@ -3961,27 +3986,8 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     # elsewhere hand out naive-UTC datetimes) -- returns.created_at is string-only
     # and would type-bracket to no match against a datetime bound, silently
     # resurrecting the whole false-shortage bug. Coerce so it never can.
-    def _as_iso(v) -> Optional[str]:
-        """The NAIVE-UTC ISO face of a bound, for the legacy string clause.
-
-        Legacy string-typed ``created_at`` values are naive-UTC isoformats, so
-        the bound compared against them LEXICALLY must be in that frame too.
-        Passing the raw string through meant an offset-suffixed bound
-        ('...T21:00:00+05:30') was compared face-value against
-        '...T15:30:00' -- sorting 5h30m late and silently dropping legacy rows
-        from the drawer's cash sales. ``_to_dt`` already normalises an aware
-        value to naive-UTC (#993); unparseable junk keeps the old raw face."""
-        if v is None:
-            return None
-        dt = v if isinstance(v, datetime) else _to_dt(v)
-        if dt is None:
-            return str(v)
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt.isoformat()
-
-    start_str = _as_iso(start_iso)
-    end_str = _as_iso(end_iso)
+    start_str = _naive_utc_iso_bound(start_iso)
+    end_str = _naive_utc_iso_bound(end_iso)
     start_dt = _to_dt(start_iso)
     date_win: Dict = {"$gte": start_dt} if start_dt else {}
     str_win: Dict = {"$gte": start_str} if start_str else {}
@@ -4272,10 +4278,13 @@ def _cash_refund_legs_for_window(
     try:
         from ..services.tender_routing import canonicalize_tender
 
-        start_str = start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
-        win: Dict = {"$gte": start_str}
+        # The SAME bound normalisation the refund TOTAL uses
+        # (_cash_sales_for_window) -- returns.created_at is string-only, so a
+        # raw offset-suffixed bound here would read a different window from
+        # the total and silently empty the advisory (`if not legs: return`).
+        win: Dict = {"$gte": _naive_utc_iso_bound(start_iso)}
         if end_iso:
-            win["$lte"] = end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso)
+            win["$lte"] = _naive_utc_iso_bound(end_iso)
         cursor = db.get_collection("returns").find(
             {
                 "store_id": store_id,
@@ -4318,14 +4327,14 @@ def _refund_double_entry_advisory(
     if not legs:
         return None
     try:
-        start_day = (
-            start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
-        )[:10]
-        end_day = (
-            (end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso))
-            if end_iso
-            else now_ist().isoformat()
-        )[:10]
+        # THE SAME WINDOW the drawer itself uses (BUG-104). This advisory
+        # names a specific payout and tells a manager to delete it, so reading
+        # a different window from _cash_expenses_for_window is worse than
+        # reading none: on a till opened 00:00-05:30 IST it reached back a day
+        # and told them to remove a legitimate entry the PREVIOUS day's close
+        # had already subtracted -- turning a correct count into a shortage.
+        start_day = _ist_day_face(start_iso)
+        end_day = _ist_day_face(end_iso) if end_iso else ist_today().isoformat()
         cursor = db.get_collection("expenses").find(
             {
                 "store_id": store_id,
