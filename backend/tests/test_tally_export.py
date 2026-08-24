@@ -18,10 +18,19 @@ it.
 from __future__ import annotations
 
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
+
+# The IST business day the nightly export covers, frozen (BUG-104: the
+# export window is the PREVIOUS complete IST day, so a real-clock test
+# would plant orders in a window that drifts at every midnight).
+# IN_WINDOW is 10:00 IST expressed as the naive-UTC instant orders store.
+EXPORT_DAY = date(2026, 5, 8)
+IN_WINDOW = datetime(2026, 5, 8, 4, 30)
+IN_WINDOW_ISO = IN_WINDOW.isoformat()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -373,6 +382,12 @@ def patched_nexus(monkeypatch, fake_db_with_stores):
     store_repo = StoreRepository(fake_db_with_stores.get_collection("stores"))
     monkeypatch.setattr(deps_module, "get_store_repository", lambda: store_repo)
 
+    # Freeze the clock at the 23:00-IST tick of the day AFTER EXPORT_DAY, so
+    # the default (no target_date) window is EXPORT_DAY -- deterministically.
+    monkeypatch.setattr(
+        nexus_module, "ist_today", lambda: EXPORT_DAY + timedelta(days=1)
+    )
+
     return nexus, fake_db_with_stores
 
 
@@ -381,7 +396,7 @@ async def test_orchestrator_splits_per_store(patched_nexus):
     """Two stores with 2 + 1 orders → two rows in tally_exports."""
     nexus, db = patched_nexus
     orders = db.get_collection("orders")
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today = IN_WINDOW_ISO
     # Two for GK1, one for LAJ (same day, all completed)
     orders.insert_one(_make_order(order_id="O1", store_id="BV-GK1", created_iso=today))
     orders.insert_one(_make_order(order_id="O2", store_id="BV-GK1", created_iso=today))
@@ -405,7 +420,7 @@ async def test_orchestrator_skips_stores_with_no_orders(patched_nexus):
     """A store with zero qualifying orders gets no row written."""
     nexus, db = patched_nexus
     orders = db.get_collection("orders")
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today = IN_WINDOW_ISO
     orders.insert_one(_make_order(order_id="O1", store_id="BV-GK1", created_iso=today))
     # No orders for BV-LAJ
 
@@ -427,7 +442,7 @@ async def test_orchestrator_writes_unbalanced_row(patched_nexus):
     """
     nexus, db = patched_nexus
     orders = db.get_collection("orders")
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today = IN_WINDOW_ISO
     # Header says Rs 121.00; the lines only account for Rs 100 + Rs 18 = 118.
     orders.insert_one(
         _make_order(
@@ -458,14 +473,10 @@ async def test_orchestrator_includes_bson_datetime_dated_orders(patched_nexus):
     orders = db.get_collection("orders")
     # A datetime-dated order (the branch previously untested)...
     dt_order = _make_order(order_id="ODT", store_id="BV-GK1", created_iso="replaced")
-    dt_order["created_at"] = datetime.now(timezone.utc).replace(
-        hour=10, minute=0, second=0, microsecond=0, tzinfo=None
-    )
+    dt_order["created_at"] = IN_WINDOW
     orders.insert_one(dt_order)
     # ...alongside a legacy string-dated order the same day.
-    today_iso = datetime.now(timezone.utc).replace(
-        hour=11, minute=0, second=0, microsecond=0
-    ).isoformat()
+    today_iso = (IN_WINDOW + timedelta(hours=1)).isoformat()
     orders.insert_one(
         _make_order(order_id="OSTR", store_id="BV-GK1", created_iso=today_iso)
     )
@@ -486,7 +497,9 @@ async def test_orchestrator_regenerate_overwrites_prior_row(patched_nexus):
     upsert (overwrite) — the natural key is (export_date, store_id)."""
     nexus, db = patched_nexus
     orders = db.get_collection("orders")
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # An explicit target_date names a CALENDAR day; the orchestrator reads
+    # its .date() as the IST business day to export.
+    today = datetime(EXPORT_DAY.year, EXPORT_DAY.month, EXPORT_DAY.day, tzinfo=timezone.utc)
     orders.insert_one(
         _make_order(order_id="O1", store_id="BV-GK1", created_iso=today.isoformat())
     )
@@ -714,3 +727,114 @@ def test_regenerate_poisons_the_row_the_reader_actually_serves(
     assert "_UNBALANCED" in dl.headers["content-disposition"]
     assert dl.headers["X-Tally-Balanced"] == "0"
     assert dl.text == "", "the superseded green voucher XML must not be served"
+
+
+# ============================================================================
+# BUG-104 — the export window is ONE COMPLETE IST BUSINESS DAY
+# ============================================================================
+
+# The four corners of the 8-May-2026 IST business day, as the naive-UTC
+# instants orders actually store. The IST day runs 7 May 18:30 UTC (inclusive)
+# to 8 May 18:30 UTC (exclusive).
+IST_DAY_FIRST_MINUTES = datetime(2026, 5, 7, 19, 0)   # 00:30 IST, 8 May
+IST_DAY_AFTERNOON = IN_WINDOW                          # 10:00 IST, 8 May
+IST_DAY_LAST_MINUTES = datetime(2026, 5, 8, 18, 0)    # 23:30 IST, 8 May
+NEXT_IST_DAY = datetime(2026, 5, 8, 19, 0)            # 00:30 IST, 9 May
+
+
+def _seed_ist_day_corners(orders, store_id="BV-GK1"):
+    """One sale at each corner of the IST day, plus one just after it."""
+    for oid, stamp in (
+        ("O-EARLY", IST_DAY_FIRST_MINUTES),
+        ("O-NOON", IST_DAY_AFTERNOON),
+        ("O-LATE", IST_DAY_LAST_MINUTES),
+        ("O-TOMORROW", NEXT_IST_DAY),
+    ):
+        order = _make_order(order_id=oid, store_id=store_id, created_iso="unused")
+        order["created_at"] = stamp
+        orders.insert_one(order)
+
+
+@pytest.mark.asyncio
+async def test_the_export_window_is_the_whole_ist_day_not_the_utc_box_day(
+    patched_nexus,
+):
+    """THE REQUIREMENT, on the explicit-date path so the assertion is about
+    WINDOW MEMBERSHIP alone.
+
+    The UTC box day (00:00-24:00 UTC) is the IST day shifted 5h30m late: it
+    drops the first 5.5 hours of the IST day (00:00-05:30 IST) and reaches
+    forward into the NEXT one. Asking for 8 May must return 8 May's business
+    -- its first minutes, its afternoon and its last minutes -- and nothing
+    belonging to 9 May."""
+    nexus, db = patched_nexus
+    _seed_ist_day_corners(db.get_collection("orders"))
+
+    anchor = datetime(EXPORT_DAY.year, EXPORT_DAY.month, EXPORT_DAY.day,
+                      tzinfo=timezone.utc)
+    result = await nexus._build_tally_export(target_date=anchor, store_id="BV-GK1")
+
+    assert result.ok is True
+    row = next(r for r in db.get_collection("tally_exports").docs
+               if r.get("store_id") == "BV-GK1")
+    assert "O-EARLY" in row["xml"], (
+        "a sale at 00:30 IST is the first business of the IST day; the UTC "
+        "box day starts 5h30m late and loses it"
+    )
+    assert "O-NOON" in row["xml"], "afternoon positive control"
+    assert "O-LATE" in row["xml"], (
+        "a sale at 23:30 IST is the last business of the IST day"
+    )
+    assert "O-TOMORROW" not in row["xml"], (
+        "00:30 IST on the 9th belongs to the 9th; the UTC box day reaches "
+        "forward and steals it"
+    )
+    assert row["voucher_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_nightly_default_covers_yesterdays_complete_ist_day(
+    patched_nexus,
+):
+    """THE COVERAGE REQUIREMENT (the reason the window moved).
+
+    The tick fires at 23:00 IST. Under the old default -- the CURRENT UTC day,
+    which does not end until 05:30 IST tomorrow -- a sale rung up at 23:30 IST
+    fell into a window whose export had already run that evening and was never
+    covered by a later one: it reached NO automatic nightly file, recoverable
+    only by a manual regenerate. Defaulting to YESTERDAY's complete IST day
+    covers every minute exactly once."""
+    nexus, db = patched_nexus
+    _seed_ist_day_corners(db.get_collection("orders"))
+
+    # ist_today() is frozen to 9 May by the fixture: the 23:00-IST tick of the
+    # night AFTER the business day being exported.
+    result = await nexus._build_tally_export()
+
+    assert result.ok is True
+    row = next(r for r in db.get_collection("tally_exports").docs
+               if r.get("store_id") == "BV-GK1")
+    assert row["export_date"] == datetime(2026, 5, 8, tzinfo=timezone.utc).isoformat(), (
+        "the nightly run must file YESTERDAY's IST day, not today's partial one"
+    )
+    assert row["voucher_count"] == 3
+    assert "O-LATE" in row["xml"], "the 23:30-IST sale reached no nightly file"
+    assert "O-TOMORROW" not in row["xml"], "today's partial IST day is not final"
+
+
+@pytest.mark.asyncio
+async def test_every_voucher_date_matches_the_file_it_ships_in(patched_nexus):
+    """Window and voucher <DATE> must agree. nexus_providers stamps each
+    <DATE> via ist_date_str (an IST day); if the window were the UTC box day
+    the file would mix two IST dates -- an accountant importing '8 May' would
+    book 9 May vouchers into it."""
+    nexus, db = patched_nexus
+    _seed_ist_day_corners(db.get_collection("orders"))
+
+    await nexus._build_tally_export()
+
+    row = next(r for r in db.get_collection("tally_exports").docs
+               if r.get("store_id") == "BV-GK1")
+    dates = re.findall(r"<DATE>(\d{8})</DATE>", row["xml"])
+    assert dates, "no voucher dates in the export"
+    assert set(dates) == {"20260508"}, dates

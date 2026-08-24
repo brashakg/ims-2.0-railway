@@ -30,7 +30,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
-from api.utils.ist import now_ist
+from api.utils.ist import ist_day_start_utc, ist_today, now_ist
 from ..nexus_providers import (
     SyncResult,
     TallyExportError,
@@ -277,23 +277,51 @@ class NexusAgent(JarvisAgent):
             return SyncResult(ok=True, provider="tally", kind="export",
                               notes="required collection unavailable — heartbeat")
 
-        # Resolve the day-window for the export
-        day_anchor = target_date or datetime.now(timezone.utc)
-        day_start = day_anchor.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        export_date_iso = day_start.isoformat()
+        # Resolve the day-window for the export.
+        #
+        # BUG-104 RULING (round-4 verifier find; FIXED, not tabled). The
+        # window is one COMPLETE IST business day, bounded backward via
+        # ist_day_start_utc. The old window was the CURRENT UTC day
+        # (datetime.now(timezone.utc) at UTC midnight), which ends 05:30 IST
+        # TOMORROW -- but the nightly tick fires at 23:00 IST
+        # (INTEGRATION_SCHEDULES), so orders placed 23:00-05:30 IST landed in
+        # a window whose export had already run and reached NO automatic
+        # nightly file; manual /regenerate was the only recovery. Exporting
+        # the PREVIOUS complete IST day trades freshness for completeness: a
+        # day's file is generated the following 23:00, final and whole, and
+        # every voucher <DATE> inside (ist_date_str in nexus_providers)
+        # equals the file's own day. Tally was dark in production at the
+        # switchover (no integrations row, zero tally_exports rows --
+        # verified 2026-08-24), so no overlap with historical UTC-day files
+        # exists.
+        if target_date is not None:
+            # Manual /regenerate names a calendar day (admin.py anchors it at
+            # UTC midnight purely for the row key's shape). The day the
+            # SUPERADMIN means is the IST business day of that date.
+            export_day = target_date.date()
+        else:
+            export_day = ist_today() - timedelta(days=1)
+        ds_dt = ist_day_start_utc(export_day)
+        de_dt = ist_day_start_utc(export_day + timedelta(days=1))
+        # Row key: keep the reader-expected '<day>T00:00:00+00:00' shape
+        # (admin.py's _normalise_export_date contract); the key's date now
+        # truthfully names the IST day whose complete orders the file holds.
+        export_date_iso = datetime(
+            export_day.year, export_day.month, export_day.day, tzinfo=timezone.utc
+        ).isoformat()
 
         # created_at is stored as a naive-UTC BSON DATETIME for both POS orders
         # (BaseRepository._add_timestamps) and online orders (shopify_ingest now
         # writes datetimes too). LEGACY online orders wrote ISO STRINGS. MongoDB
-        # type-brackets a Date range away from a string field, so query BOTH shapes
-        # via $or -- otherwise one type is silently dropped from the Tally day
-        # export. (Reused for the store loop below; see _dt_or_str_created_range.)
-        ds_dt = day_start.replace(tzinfo=None) if getattr(day_start, "tzinfo", None) else day_start
-        de_dt = day_end.replace(tzinfo=None) if getattr(day_end, "tzinfo", None) else day_end
+        # type-brackets a Date range away from a string field, so query BOTH
+        # shapes via $or -- otherwise one type is silently dropped from the
+        # Tally day export. The string bounds are the naive-UTC isoformats of
+        # the SAME instants (legacy strings are naive-UTC too; an aware
+        # '+00:00'-suffixed legacy string still orders correctly against them
+        # lexically).
         created_or = [
             {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
-            {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+            {"created_at": {"$gte": ds_dt.isoformat(), "$lt": de_dt.isoformat()}},
         ]
 
         # Resolve the list of stores to process
@@ -315,7 +343,9 @@ class NexusAgent(JarvisAgent):
             if not stores:
                 # Fallback: no store directory available — single-row legacy path
                 logger.warning("[NEXUS] No active stores; falling back to chain-wide single export.")
-                return await self._build_tally_export_legacy(day_start, day_end, orders_coll, export_coll)
+                return await self._build_tally_export_legacy(
+                    ds_dt, de_dt, export_date_iso, orders_coll, export_coll
+                )
 
         rows_written = 0
         unbalanced_stores: List[str] = []
@@ -583,21 +613,25 @@ class NexusAgent(JarvisAgent):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] poison tally_exports write failed for {sid}: {e}")
 
-    async def _build_tally_export_legacy(self, day_start, day_end, orders_coll, export_coll) -> SyncResult:
+    async def _build_tally_export_legacy(
+        self, ds_dt, de_dt, export_date_iso, orders_coll, export_coll
+    ) -> SyncResult:
         """Single-row chain-wide export — used when StoreRepository
         is unavailable so we never silently skip the export. Mirrors
-        the pre-I-6 behavior."""
+        the pre-I-6 behavior.
+
+        Takes the caller's ALREADY-RESOLVED naive-UTC IST-day bounds and row
+        key (BUG-104): computing its own would let the fallback path drift
+        back to the UTC day the per-store path no longer uses."""
         # Dual-type created_at match: orders persist created_at as a naive-UTC BSON
         # datetime (POS + online), but legacy online orders wrote ISO strings -- a
         # Date range never matches a string field (Mongo type bracketing), so $or
         # both shapes to avoid silently dropping either from the export.
-        ds_dt = day_start.replace(tzinfo=None) if getattr(day_start, "tzinfo", None) else day_start
-        de_dt = day_end.replace(tzinfo=None) if getattr(day_end, "tzinfo", None) else day_end
         try:
             todays_orders = list(orders_coll.find({
                 "$or": [
                     {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
-                    {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+                    {"created_at": {"$gte": ds_dt.isoformat(), "$lt": de_dt.isoformat()}},
                 ],
                 "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             }))
@@ -607,8 +641,6 @@ class NexusAgent(JarvisAgent):
         if not todays_orders:
             return SyncResult(ok=True, provider="tally", kind="export",
                               notes="No completed orders today (legacy path)")
-
-        export_date_iso = day_start.isoformat()
         legacy_meta = {"store_id": None, "store_code": "CHAIN", "store_name": "CHAIN"}
         try:
             xml, priced, rejected = tally_build_day_voucher_xml_checked(
