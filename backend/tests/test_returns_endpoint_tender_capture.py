@@ -360,7 +360,14 @@ def test_cash_return_completes_and_nets_the_drawer(ctx):
     assert body["drawer_auto_netted"] is True
 
     doc = c["returns"].docs[0]
-    assert doc["refund_tenders"] == [{"method": "CASH", "amount": _BILLED_GROSS}]
+    # The MONEY contract, unchanged. A CASH leg now also carries the
+    # notes-and-coins record; no breakdown was sent here, so it is an honest
+    # absence (NOT a zero count) and it never touches the amount.
+    assert [
+        {"method": t["method"], "amount": t["amount"]}
+        for t in doc["refund_tenders"]
+    ] == [{"method": "CASH", "amount": _BILLED_GROSS}]
+    assert doc["refund_tenders"][0]["cash_count"]["state"] == "NOT_CAPTURED"
     assert doc["drawer_auto_netted"] is True
 
     # ... and the Day-End drawer reader SEES it (the whole point of the PR).
@@ -734,10 +741,16 @@ def test_legal_multi_leg_split_is_accepted_and_folded(ctx):
     )
     assert r.status_code in (200, 201), r.text
     doc = c["returns"].docs[0]
-    assert doc["refund_tenders"] == [
+    # The MONEY contract, unchanged: two CASH rows fold into ONE Rs 3,000 leg.
+    assert [
+        {"method": t["method"], "amount": t["amount"]}
+        for t in doc["refund_tenders"]
+    ] == [
         {"method": "CASH", "amount": 3000.00},
         {"method": "UPI", "amount": 2900.00},
     ]
+    assert doc["refund_tenders"][0]["cash_count"]["state"] == "NOT_CAPTURED"
+    assert "cash_count" not in doc["refund_tenders"][1]
     _, refunds = _cash_sales_for_window(
         c["db"], _STORE, "2000-01-01T00:00:00", "2999-01-01T00:00:00"
     )

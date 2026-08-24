@@ -52,6 +52,7 @@ from ..dependencies import (
     get_stock_repository,
     validate_store_access,
 )
+from ..services import cash_denominations as cash_denom
 from ..services import restock_engine
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
@@ -140,6 +141,11 @@ class RefundTenderLine(BaseModel):
 
     method: str = Field(..., description="CASH / UPI / CARD / BANK")
     amount: float = Field(..., ge=0)
+    # Which notes and coins physically left the drawer on THIS leg. Optional,
+    # CASH-only, and purely an attached record: the 400 gate below compares
+    # `amount` against the net refund and a denomination sum never enters that
+    # comparison. A leg with no breakdown is stored NOT_CAPTURED, never zero.
+    cash_count: Optional[cash_denom.CashCountInput] = None
 
 
 class ReturnCreate(BaseModel):
@@ -723,6 +729,11 @@ def _normalize_refund_tenders(
     # Folding here also makes the PERSISTED breakdown canonical for the readers.
     folded: Dict[str, float] = {}
     order_seen: List[str] = []
+    # The notes fold with the legs they belong to. Two CASH legs that fold into
+    # one canonical Rs 5,900 row must carry the SUM of their two count sheets,
+    # or the folded row would report half the money as notes.
+    counted_rows: Dict[str, List[Dict[str, Any]]] = {}
+    counted_state: Dict[str, str] = {}
     for t in raw:
         method = str(getattr(t, "method", "") or "").strip().upper()
         canon = canonicalize_tender(method)
@@ -744,9 +755,36 @@ def _normalize_refund_tenders(
         if canon not in folded:
             order_seen.append(canon)
         folded[canon] = round(folded.get(canon, 0.0) + amt, 2)
-    out: List[Dict[str, Any]] = [
-        {"method": m, "amount": folded[m]} for m in order_seen
-    ]
+        leg_count = getattr(t, "cash_count", None)
+        if leg_count is not None:
+            counted_rows.setdefault(canon, []).append(
+                [r.model_dump() for r in (leg_count.rows or [])]
+            )
+            # SUGGESTED is only kept when EVERY folded leg was suggested; one
+            # human-counted leg makes the folded row a counted row.
+            state = str(leg_count.state or cash_denom.STATE_COUNTED).upper()
+            prior = counted_state.get(canon)
+            counted_state[canon] = (
+                state if prior is None or prior == state else cash_denom.STATE_COUNTED
+            )
+    out: List[Dict[str, Any]] = []
+    for m in order_seen:
+        row: Dict[str, Any] = {"method": m, "amount": folded[m]}
+        # CASH-only: a UPI or store-credit refund has no notes to count. The
+        # block is attached to the row and NEVER consulted by the balance gate
+        # below -- the amount is what must equal the net refund.
+        if m == "CASH":
+            amount_paisa = cash_denom.rupees_to_paisa(folded[m])
+            if m in counted_rows:
+                merged = cash_denom.merge_rows(*counted_rows[m])
+                row["cash_count"] = cash_denom.build_block(
+                    merged,
+                    amount_paisa,
+                    state=counted_state.get(m) or cash_denom.STATE_COUNTED,
+                )
+            else:
+                row["cash_count"] = cash_denom.not_captured_block(amount_paisa)
+        out.append(row)
     total = round(sum(folded.values()), 2)
     if not out:
         return None, False

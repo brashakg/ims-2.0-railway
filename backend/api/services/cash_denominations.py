@@ -45,6 +45,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from pydantic import BaseModel, Field
+
 # ---------------------------------------------------------------------------
 # The ONE ladder. Indian currency in circulation (RBI): Rs 2000 is withdrawn.
 # A Rs 10 and a Rs 20 exist as BOTH a note and a coin, which is exactly why a
@@ -157,6 +159,45 @@ def normalize_rows(rows: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str, A
 def total_paisa(rows: Optional[Iterable[Dict[str, Any]]]) -> int:
     """Sum of face*100*pieces across count rows, in PAISA. Pure."""
     return sum(r["line_total_paisa"] for r in normalize_rows(rows))
+
+
+def merge_rows(*row_lists: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Sum several count-row lists into one, adding pieces at each (kind, face).
+
+    Used where a document folds several legs of the same tender into one
+    canonical row (returns folds two CASH legs into one) -- the notes must fold
+    with them or the folded row would carry only half the count. Output is in
+    ladder order, highest face first, with off-ladder faces appended; a face
+    that ends at zero pieces is dropped, so merging nothing yields []."""
+    merged: Dict[Tuple[str, int], int] = {}
+    seen_any = False
+    for rows in row_lists:
+        for row in normalize_rows(rows):
+            seen_any = True
+            key = face_key(row)
+            merged[key] = merged.get(key, 0) + int(row["pieces"])
+    if not seen_any:
+        return []
+    order: List[Tuple[str, int]] = [(KIND_NOTE, f) for f in NOTE_FACES] + [
+        (KIND_COIN, f) for f in COIN_FACES
+    ]
+    extras = sorted(
+        (k for k in merged if k not in order), key=lambda k: (-k[1], k[0])
+    )
+    out: List[Dict[str, Any]] = []
+    for kind, face in order + extras:
+        pieces = merged.get((kind, face), 0)
+        if pieces <= 0:
+            continue
+        out.append(
+            {
+                "face": face,
+                "kind": kind,
+                "pieces": pieces,
+                "line_total_paisa": face * 100 * pieces,
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +354,118 @@ def build_drawer_block(
         return not_captured_block(0)
     total = sum(r["line_total_paisa"] for r in norm)
     return build_block(norm, total, state=requested or STATE_COUNTED, actor=actor, now=now)
+
+
+# ---------------------------------------------------------------------------
+# The wire shape: what a screen sends, defined ONCE for every router
+# ---------------------------------------------------------------------------
+
+
+class DenominationRow(BaseModel):
+    """One line of a count sheet as a screen sends it. ``line_total_paisa`` is
+    NOT accepted from a client -- it is derived server-side, so a caller can
+    never smuggle a total past the arithmetic."""
+
+    face: int = Field(..., description="Face value in whole rupees")
+    kind: str = Field(default=KIND_NOTE, description="'note' or 'coin'")
+    pieces: int = Field(default=0, ge=0, description="How many of them")
+
+
+class CashCountInput(BaseModel):
+    """A count sheet on the wire: the rows, plus which of the three states they
+    are. OMITTING this object entirely is how a cashier under pressure skips
+    the count -- it becomes NOT_CAPTURED, never a zero and never a refusal."""
+
+    rows: List[DenominationRow] = Field(default_factory=list)
+    state: Optional[str] = Field(
+        default=None, description="COUNTED | SUGGESTED | NOT_CAPTURED"
+    )
+
+
+def block_from_input(
+    payload: Optional[CashCountInput],
+    amount_paisa: Any,
+    actor: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Turn what a screen sent into the stored Cash Count Block.
+
+    ``None`` (the field was simply not sent) -> NOT_CAPTURED against the
+    supplied amount. This is the ONLY conversion routers perform, so no router
+    holds its own idea of the shape."""
+    if payload is None:
+        return not_captured_block(amount_paisa)
+    return build_block(
+        [r.model_dump() for r in (payload.rows or [])],
+        amount_paisa,
+        state=payload.state,
+        actor=actor,
+        now=now,
+    )
+
+
+def cash_leg_identity(
+    tendered_paisa: Optional[int],
+    change_paisa: Optional[int],
+    amount_paisa: Any,
+) -> Optional[bool]:
+    """Per-leg identity: tendered - change == the CASH leg amount.
+
+    Anchored to the LEG, never to the bill: on a UPI Rs 1,000 + CASH Rs 850
+    split, the Rs 1,000 note the customer handed over is measured against the
+    Rs 850 cash leg, not the Rs 1,850 total. Returns None when either side was
+    not captured -- an unknown is not an imbalance. A False is a FLAG; nothing
+    anywhere rejects or adjusts a payment because of it."""
+    if tendered_paisa is None or change_paisa is None:
+        return None
+    try:
+        return int(tendered_paisa) - int(change_paisa) == int(amount_paisa or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def cash_leg_record(
+    *,
+    tendered: Optional[CashCountInput],
+    change: Optional[CashCountInput],
+    tendered_amount_paisa: Optional[int],
+    change_amount_paisa: Optional[int],
+    amount_paisa: Any,
+    actor: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """The block of keys a CASH payment leg carries ALONGSIDE its amount.
+
+    TWO count blocks, never one. A Rs 1,600 cash sale where the customer hands
+    4 x Rs 500 and takes Rs 400 back moves the drawer +4 x Rs 500 and
+    -2 x Rs 200; the net rupee figure carries no face information at all, so a
+    single "denominations of the Rs 1,600" object could never close a per-face
+    ledger.
+
+    Every value here is DERIVED or COPIED. Nothing in the returned dict is the
+    payment amount, and no caller is expected to write one of these back onto
+    ``amount``. A scalar that was not supplied stays None -- blank, not zero."""
+    tendered_p = None if tendered_amount_paisa is None else int(tendered_amount_paisa)
+    change_p = None if change_amount_paisa is None else int(change_amount_paisa)
+    # When the notes were counted but no scalar came with them, the count IS
+    # the scalar -- that is what the cashier physically handled.
+    t_block = block_from_input(tendered, tendered_p if tendered_p is not None else 0, actor, now)
+    if tendered_p is None and is_captured(t_block):
+        tendered_p = int(t_block["total_paisa"])
+        t_block["amount_paisa"] = tendered_p
+        t_block["matches_amount"] = True
+    c_block = block_from_input(change, change_p if change_p is not None else 0, actor, now)
+    if change_p is None and is_captured(c_block):
+        change_p = int(c_block["total_paisa"])
+        c_block["amount_paisa"] = change_p
+        c_block["matches_amount"] = True
+    return {
+        "cash_tendered_count": t_block,
+        "cash_change_count": c_block,
+        "tendered_amount_paisa": tendered_p,
+        "change_amount_paisa": change_p,
+        "cash_leg_balanced": cash_leg_identity(tendered_p, change_p, amount_paisa),
+    }
 
 
 def is_captured(block: Optional[Dict[str, Any]]) -> bool:

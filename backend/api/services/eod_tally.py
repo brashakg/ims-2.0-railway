@@ -292,6 +292,135 @@ def compute_expected(
 
 
 # ---------------------------------------------------------------------------
+# The per-face drawer ledger (denominated tally)
+# ---------------------------------------------------------------------------
+
+
+def compute_face_ledger(
+    db,
+    store_id: str,
+    window_start: Any,
+    window_end: Any,
+    *,
+    opening_count: Optional[Dict[str, Any]] = None,
+    closing_count: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Tally the drawer FACE BY FACE across the day.
+
+        opening float
+          + notes taken in on every cash sale
+          - notes handed back as change
+          - notes handed back on cash refunds
+          - notes paid out of the till
+          = what each face SHOULD be at close
+        vs the closing count = the per-face discrepancy
+
+    This is a COUNT ledger, in pieces. It never touches, derives or replaces a
+    rupee amount: the rupee expected/variance figures come from
+    ``compute_expected`` exactly as before, and a store that captures no
+    breakdowns still gets those figures unchanged.
+
+    A NOT_CAPTURED block contributes NOTHING (unknown is not zero), so
+    ``coverage`` reports how much of the day actually carries a breakdown --
+    without it a manager could read a clean per-face tally that simply means
+    nobody counted anything.
+
+    The window is built by ``tender_reconciliation.window_match`` -- the SAME
+    builder the rupee reader uses, so the two can never disagree about which
+    sales belong to the day. DB absent / read failure -> an honest empty
+    envelope, never a fabricated tally."""
+    from . import tender_reconciliation as tr
+
+    expected: Dict[Any, int] = {}
+    counted: Dict[Any, int] = {}
+    coverage = {
+        "cash_sale_legs": 0,
+        "cash_sale_legs_counted": 0,
+        "refund_legs": 0,
+        "refund_legs_counted": 0,
+        "payouts": 0,
+        "payouts_counted": 0,
+        "flagged": 0,
+    }
+    _denom.accumulate(expected, opening_count, +1)
+    _denom.accumulate(counted, closing_count, +1)
+    if _denom.is_flagged(opening_count):
+        coverage["flagged"] += 1
+    if _denom.is_flagged(closing_count):
+        coverage["flagged"] += 1
+
+    read_ok = True
+    if db is not None:
+        match = tr.window_match(store_id, window_start, window_end)
+        try:
+            for order in db.get_collection("orders").find(
+                match, {"_id": 0, "payments": 1}
+            ):
+                for pay in order.get("payments") or []:
+                    if str((pay or {}).get("method") or "").upper() != "CASH":
+                        continue
+                    coverage["cash_sale_legs"] += 1
+                    tendered = (pay or {}).get("cash_tendered_count")
+                    change = (pay or {}).get("cash_change_count")
+                    if _denom.is_captured(tendered) or _denom.is_captured(change):
+                        coverage["cash_sale_legs_counted"] += 1
+                    # Notes IN, notes OUT. Two separate movements -- a single
+                    # net figure carries no face information at all.
+                    _denom.accumulate(expected, tendered, +1)
+                    _denom.accumulate(expected, change, -1)
+                    if _denom.is_flagged(tendered) or _denom.is_flagged(change):
+                        coverage["flagged"] += 1
+                    if (pay or {}).get("cash_leg_balanced") is False:
+                        coverage["flagged"] += 1
+        except Exception:  # noqa: BLE001
+            read_ok = False
+        try:
+            ret_match = tr.window_match(store_id, window_start, window_end)
+            ret_match["status"] = "COMPLETED"
+            ret_match["historical"] = {"$ne": True}
+            for ret in db.get_collection("returns").find(
+                ret_match, {"_id": 0, "refund_tenders": 1}
+            ):
+                for leg in ret.get("refund_tenders") or []:
+                    if str((leg or {}).get("method") or "").upper() != "CASH":
+                        continue
+                    coverage["refund_legs"] += 1
+                    block = (leg or {}).get("cash_count")
+                    if _denom.is_captured(block):
+                        coverage["refund_legs_counted"] += 1
+                    if _denom.is_flagged(block):
+                        coverage["flagged"] += 1
+                    _denom.accumulate(expected, block, -1)
+        except Exception:  # noqa: BLE001
+            read_ok = False
+        try:
+            exp_match = tr.window_match(store_id, window_start, window_end)
+            exp_match["payment_mode"] = "CASH"
+            for row in db.get_collection("expenses").find(
+                exp_match, {"_id": 0, "cash_count": 1}
+            ):
+                coverage["payouts"] += 1
+                block = (row or {}).get("cash_count")
+                if _denom.is_captured(block):
+                    coverage["payouts_counted"] += 1
+                if _denom.is_flagged(block):
+                    coverage["flagged"] += 1
+                _denom.accumulate(expected, block, -1)
+        except Exception:  # noqa: BLE001
+            read_ok = False
+
+    rows = _denom.ledger_rows(expected, counted)
+    return {
+        "rows": rows,
+        "coverage": coverage,
+        "read_ok": read_ok,
+        "opening_captured": _denom.is_captured(opening_count),
+        "closing_captured": _denom.is_captured(closing_count),
+        "difference_paisa": sum(r["difference_paisa"] for r in rows),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Z-Read number (atomic per-store-per-day counter)
 # ---------------------------------------------------------------------------
 
@@ -331,6 +460,7 @@ def open_session(
     store_id: str,
     session_date: str,
     opening_denominations: Optional[List[Dict[str, Any]]] = None,
+    opening_count_state: Optional[str] = None,
     opening_float_paisa: Optional[int] = None,
     shift: Optional[str] = None,
     note: Optional[str] = None,
@@ -390,13 +520,23 @@ def open_session(
         "status": STATUS_OPEN,
         "shift": (shift or "").upper() or None,
         "opening_float_paisa": declared,
+        # LEGACY SHAPE, unchanged: every existing reader of this collection
+        # keeps working byte-for-byte.
         "opening_denominations": denoms,
+        # THE SHARED SHAPE (services/cash_denominations.py). Same rows, plus
+        # the state (so an uncounted float reads NOT_CAPTURED rather than as an
+        # empty drawer) and the flag when the declared float and the notes
+        # disagree. The declared float remains the money either way.
+        "opening_count": _denom.build_block(
+            denoms, declared, state=opening_count_state, actor=actor
+        ),
         "opened_at": now,
         "opened_by": cashier_id,
         "opening_note": note,
         # blind-submit + lock fields (hidden / null until those steps)
         "blind_count_paisa": None,
         "blind_denominations": [],
+        "closing_count": _denom.not_captured_block(0),
         "cash_payouts_paisa": 0,
         "expected_cash_paisa": None,
         "variance_paisa": None,
@@ -457,6 +597,7 @@ def blind_submit(
     session_id: str,
     *,
     blind_denominations: Optional[List[Dict[str, Any]]] = None,
+    closing_count_state: Optional[str] = None,
     blind_count_paisa: Optional[int] = None,
     cash_payouts_paisa: int = 0,
     window_start: Any = None,
@@ -550,6 +691,12 @@ def blind_submit(
                 "$set": {
                     "status": STATUS_BLIND_SUBMITTED,
                     "blind_denominations": denoms,
+                    # The shared shape alongside the legacy list. A close with
+                    # no grid entered reads NOT_CAPTURED -- an uncounted drawer
+                    # must never look like an emptied one.
+                    "closing_count": _denom.build_block(
+                        denoms, counted, state=closing_count_state, actor=actor
+                    ),
                     "blind_count_paisa": counted,
                     "cash_payouts_paisa": payouts,
                     "expected_cash_paisa": expected_cash_paisa,
@@ -885,6 +1032,20 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "opening_float_paisa": opening,
         "opening_denominations": session.get("opening_denominations") or [],
         "blind_denominations": session.get("blind_denominations") or [],
+        # The shared Cash Count Blocks + the face-by-face tally of the day.
+        # Purely additive to the rupee figures above, which are computed exactly
+        # as before and are unaffected by whether anyone counted notes.
+        "opening_count": session.get("opening_count")
+        or _denom.not_captured_block(opening),
+        "closing_count": session.get("closing_count")
+        or _denom.not_captured_block(int(counted or 0)),
+        "face_ledger": compute_face_ledger(
+            db,
+            session.get("store_id"),
+            *_session_day_window(session),
+            opening_count=session.get("opening_count"),
+            closing_count=session.get("closing_count"),
+        ),
         "by_mode": session.get("by_mode") or {},
         # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
         # expected. cash_sales is GROSS collected; cash_refunds is the recorded

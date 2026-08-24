@@ -36,6 +36,7 @@ from ..services.rx_validation import (
     _validate_axis as _validate_rx_axis,
     is_rx_required_line as _is_rx_required_line,
 )
+from ..services import cash_denominations as cash_denom
 
 
 def _get_db():
@@ -556,6 +557,22 @@ class PaymentCreate(BaseModel):
     # build_emi_schedule uses this amount so the schedule reflects the full
     # financed balance, not just the down-payment recorded in `amount`.
     emi_principal: Optional[float] = Field(None, gt=0, le=100_000_000)
+    # ---- Denominated cash accountability (CASH legs only) -------------------
+    # Which notes and coins the customer HANDED OVER, and which were HANDED
+    # BACK as change. Both are OPTIONAL and are attached records: nothing here
+    # can change `amount`, the change arithmetic, amount_paid, balance_due,
+    # payment_status or a single GST figure. Omit them entirely and the sale
+    # completes exactly as it always has, with the breakdown recorded as
+    # NOT_CAPTURED (never as a zero count).
+    #
+    # The scalars are ANCHORED TO THIS LEG, never to the bill: on a
+    # UPI Rs 1,000 + CASH Rs 850 split, tendered_amount is measured against the
+    # Rs 850 cash leg. tendered - change should equal `amount`; when it does
+    # not, the row is flagged for a human and the amount is left alone.
+    cash_tendered: Optional[cash_denom.CashCountInput] = None
+    cash_change: Optional[cash_denom.CashCountInput] = None
+    tendered_amount: Optional[float] = Field(None, ge=0, le=100_000_000)
+    change_amount: Optional[float] = Field(None, ge=0, le=100_000_000)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -4364,6 +4381,32 @@ async def add_payment(
         }
         if emi_details:
             payment_data["emi_details"] = emi_details
+
+        # Denominated cash accountability. ADDITIVE and CASH-only: these keys
+        # ride alongside `amount`, which stays the single source of truth for
+        # amount_paid, balance_due, payment_status, GST and every export.
+        # add_payment recomputes the ladder from `amount` + `method` alone, so
+        # nothing below can move it. A cashier who entered nothing produces
+        # NOT_CAPTURED blocks -- never a fabricated zero, never a blocked sale.
+        if payment.method == PaymentMethod.CASH:
+            payment_data.update(
+                cash_denom.cash_leg_record(
+                    tendered=payment.cash_tendered,
+                    change=payment.cash_change,
+                    tendered_amount_paisa=(
+                        None
+                        if payment.tendered_amount is None
+                        else cash_denom.rupees_to_paisa(payment.tendered_amount)
+                    ),
+                    change_amount_paisa=(
+                        None
+                        if payment.change_amount is None
+                        else cash_denom.rupees_to_paisa(payment.change_amount)
+                    ),
+                    amount_paisa=cash_denom.rupees_to_paisa(payment.amount),
+                    actor=current_user,
+                )
+            )
 
         if repo.add_payment(order_id, payment_data):
             # Auto-confirm DRAFT orders when first payment is received
