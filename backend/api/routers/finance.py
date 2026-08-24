@@ -3909,6 +3909,19 @@ def _to_dt(s):
     return dt
 
 
+def _ist_day_face(value) -> str:
+    """The IST calendar day ('YYYY-MM-DD') of a stored instant.
+
+    BUG-104. Timestamps on this surface (`opened_at`, `closed_at`) are written
+    by ``_iso_now()`` == ``datetime.utcnow().isoformat()``, so their first ten
+    characters are the UTC day -- which, for anything between 00:00 and 05:30
+    IST, is YESTERDAY. Parse to the instant first, then take the IST day.
+    Unparseable junk keeps the old first-ten-characters behaviour rather than
+    dropping the row. One definition, so no caller can drift from another."""
+    dt = _to_dt(value)
+    return ist_date_str(dt) if dt is not None else str(value or "")[:10]
+
+
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
     """Net POS CASH collected for a store between start and end (ISO strings).
 
@@ -3949,11 +3962,23 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     # and would type-bracket to no match against a datetime bound, silently
     # resurrecting the whole false-shortage bug. Coerce so it never can.
     def _as_iso(v) -> Optional[str]:
+        """The NAIVE-UTC ISO face of a bound, for the legacy string clause.
+
+        Legacy string-typed ``created_at`` values are naive-UTC isoformats, so
+        the bound compared against them LEXICALLY must be in that frame too.
+        Passing the raw string through meant an offset-suffixed bound
+        ('...T21:00:00+05:30') was compared face-value against
+        '...T15:30:00' -- sorting 5h30m late and silently dropping legacy rows
+        from the drawer's cash sales. ``_to_dt`` already normalises an aware
+        value to naive-UTC (#993); unparseable junk keeps the old raw face."""
         if v is None:
             return None
-        if isinstance(v, datetime):
-            return v.isoformat()
-        return str(v)
+        dt = v if isinstance(v, datetime) else _to_dt(v)
+        if dt is None:
+            return str(v)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.isoformat()
 
     start_str = _as_iso(start_iso)
     end_str = _as_iso(end_iso)
@@ -4164,8 +4189,17 @@ def _cash_expenses_for_window(
     block above. Fail-soft to (0.0, 0)."""
     if db is None:
         return _CashExpenseWindow(0.0, 0)
-    start_day = start_iso[:10]
-    end_day = (end_iso or now_ist().isoformat())[:10]
+    # BUG-104. `expense_date` is an operator-typed IST CALENDAR DATE, so BOTH
+    # bounds must be IST days. `start_iso` is the session's `opened_at`, a
+    # naive-UTC instant: its first ten characters are the UTC day, so a till
+    # opened 00:00-05:30 IST reached back into the PREVIOUS IST day and
+    # subtracted a second day of payouts from the drawer (expected too low ->
+    # an honest count reads as an overage). The upper bound was also
+    # INCONSISTENT with the lower one -- the UTC face when a close passed
+    # `end_iso`, the IST face when the live preview passed None -- so the two
+    # ends of one window sat in different calendar frames.
+    start_day = _ist_day_face(start_iso)
+    end_day = _ist_day_face(end_iso) if end_iso else ist_today().isoformat()
     total = 0.0
     excluded = 0
     try:
@@ -4834,12 +4868,7 @@ async def cash_reconciliation_summary(
         # start/end days in the wrong frame. Unparseable junk falls back to
         # the old first-10-chars behaviour.
         closed_at = s.get("closed_at") or s.get("opened_at")
-        _parsed_close = _to_dt(closed_at)
-        sess_day = (
-            ist_date_str(_parsed_close)
-            if _parsed_close is not None
-            else str(closed_at or "")[:10]
-        )
+        sess_day = _ist_day_face(closed_at)
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)
