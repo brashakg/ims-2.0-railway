@@ -68,14 +68,24 @@ class _FakeTestRepo:
             return dict(self._doc)
         return None
 
+    # Signature MIRRORS database/repositories/clinical_repository.complete_test,
+    # exam_blocks / exam_header included. A double that accepts less than the
+    # real repository does not "keep the test focused" -- it makes the test
+    # unable to observe the arguments production actually passes.
     def complete_test(self, test_id, right_eye, left_eye, pd=None, notes=None,
                       lens_recommendation=None, coating_recommendation=None,
-                      clinical_findings=None, soap_note=None):
+                      clinical_findings=None, soap_note=None,
+                      exam_blocks=None, exam_header=None,
+                      ipd=None, next_checkup=None):
         if not self._doc or self._doc.get("test_id") != test_id:
             return False
         self.complete_calls += 1
         self._doc["status"] = "COMPLETED"
         self._doc["prescription"] = {"right_eye": right_eye, "left_eye": left_eye}
+        if exam_blocks:
+            self._doc["exam"] = exam_blocks
+        if exam_header:
+            self._doc["exam_header"] = exam_header
         return True
 
 

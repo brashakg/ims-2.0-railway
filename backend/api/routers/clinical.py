@@ -333,6 +333,99 @@ class SoapNote(BaseModel):
         populate_by_name = True
 
 
+class ExamEyeReading(BaseModel):
+    """One eye's readings on a NON-final exam tab.
+
+    CLINICAL-CRITICAL, and NEW as of 2026-08-24. The lensometer, auto-
+    refractometer and subjective-refraction tabs collected these values in the
+    browser and then DROPPED them: no field existed on this model, no column
+    existed on the document, and consequently NO VALIDATOR EVER SAW THEM. An
+    optometrist could record a lensometer sphere of -9999 and the API would
+    neither reject it nor keep it.
+
+    Powers stay STRINGS so a signed value ("+4.00") survives byte-for-byte --
+    float() would coerce away the explicit plus the printed card and the lab
+    job-card have to show. The RANGE checks are not declared here as field
+    validators but run through `_validate_eye_test_rx` in the endpoint, so an
+    exam reading is judged by EXACTLY the same code, with exactly the same
+    message, as the final prescription. One gate, not a lookalike.
+    """
+
+    sphere: Optional[str] = None
+    cylinder: Optional[str] = None
+    axis: Optional[str] = None
+    add: Optional[str] = None
+    # PER-EYE PD is MONOCULAR (~20-45mm); validated as "pd_mono".
+    pd: Optional[str] = None
+    va: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AutoRefEyeReading(ExamEyeReading):
+    """An auto-refractometer eye: a refraction PLUS the keratometry pair."""
+
+    k1: Optional[str] = None
+    k1_axis: Optional[str] = Field(None, alias="k1Axis")
+    k2: Optional[str] = None
+    k2_axis: Optional[str] = Field(None, alias="k2Axis")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExamRefraction(BaseModel):
+    """A lensometer / subjective-refraction tab: both eyes + free-text remarks."""
+
+    right_eye: ExamEyeReading = Field(default_factory=ExamEyeReading, alias="rightEye")
+    left_eye: ExamEyeReading = Field(default_factory=ExamEyeReading, alias="leftEye")
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AutoRefExam(BaseModel):
+    """The auto-refractometer tab: both eyes (with K readings) + remarks."""
+
+    right_eye: AutoRefEyeReading = Field(
+        default_factory=AutoRefEyeReading, alias="rightEye"
+    )
+    left_eye: AutoRefEyeReading = Field(
+        default_factory=AutoRefEyeReading, alias="leftEye"
+    )
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SlitLampEyeExam(BaseModel):
+    """One eye's slit-lamp findings. Free text on purpose (the tab offers
+    pick-lists but an optometrist must be able to describe what they saw);
+    only the intra-ocular pressure is a number, bounded to the same 0-80 mmHg
+    clinical window ClinicalFindings and SoapNote already use."""
+
+    lids: Optional[str] = None
+    conjunctiva: Optional[str] = None
+    cornea: Optional[str] = None
+    ac: Optional[str] = None
+    iris: Optional[str] = None
+    pupil: Optional[str] = None
+    lens: Optional[str] = None
+    fundus: Optional[str] = None
+    iop: Optional[float] = Field(None, ge=0, le=80)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SlitLampExam(BaseModel):
+    right_eye: SlitLampEyeExam = Field(
+        default_factory=SlitLampEyeExam, alias="rightEye"
+    )
+    left_eye: SlitLampEyeExam = Field(default_factory=SlitLampEyeExam, alias="leftEye")
+    remarks: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
@@ -353,6 +446,23 @@ class EyeTestData(BaseModel):
     # CLI-11: optional structured SOAP exam note.  Absent -> refraction-only test
     # exactly as before; present -> stored under ``soap_note`` on the test doc.
     soap_note: Optional[SoapNote] = Field(None, alias="soapNote")
+
+    # ---- The four exam tabs that used to be thrown away (2026-08-24) --------
+    # Each is OPTIONAL: a quick refraction-only test sends none of them and the
+    # stored document is byte-for-byte what it was before. Present -> validated
+    # against the SAME clinical ranges as the final Rx and persisted, so the
+    # exam can be re-opened and edited instead of "edit" silently blanking a
+    # patient's readings.
+    lensometer: Optional[ExamRefraction] = None
+    auto_ref: Optional[AutoRefExam] = Field(None, alias="autoRef")
+    subjective_rx: Optional[ExamRefraction] = Field(None, alias="subjectiveRx")
+    slit_lamp: Optional[SlitLampExam] = Field(None, alias="slitLamp")
+
+    # Exam header fields the form collects and also used to drop.
+    exam_date: Optional[str] = Field(None, alias="examDate")
+    optometrist_name: Optional[str] = Field(None, alias="optometristName")
+    chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
+    vdu_usage: Optional[str] = Field(None, alias="vduUsage")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -396,57 +506,20 @@ class SendToFloorInput(BaseModel):
 # ============================================================================
 
 
-def format_rx_value(v) -> str:
-    """Render an Rx power for display/print.
-
-    Rules (Rx business rules, IMS 2.0):
-      - None / missing / empty -> "" (blank cell)
-      - exactly 0 (any numeric form) -> "Plano"
-      - otherwise -> explicit sign + 2 decimals, e.g. "-1.25", "+0.50"
-
-    PURE function (no I/O) so it can be unit-tested in isolation. Accepts ints,
-    floats, or numeric strings (the prescriptions collection stores eye powers
-    as strings, e.g. {"sph": "-1.25"}). Non-numeric junk -> "" rather than a
-    crash, keeping the print endpoint fail-soft.
-    """
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        s = v.strip()
-        if s == "":
-            return ""
-        try:
-            num = float(s)
-        except ValueError:
-            return ""
-    else:
-        try:
-            num = float(v)
-        except (TypeError, ValueError):
-            return ""
-    # Normalise -0.0 and tiny float noise to a clean zero -> "Plano".
-    if abs(num) < 0.005:
-        return "Plano"
-    sign = "+" if num > 0 else "-"
-    return f"{sign}{abs(num):.2f}"
-
-
-def format_axis_value(v) -> str:
-    """Render an AXIS (1-180 whole degrees). Blank for None/missing, else int."""
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        s = v.strip()
-        if s == "":
-            return ""
-        try:
-            return str(int(round(float(s))))
-        except ValueError:
-            return ""
-    try:
-        return str(int(round(float(v))))
-    except (TypeError, ValueError):
-        return ""
+# ---------------------------------------------------------------------------
+# Rx display renderers.
+# ---------------------------------------------------------------------------
+# These now live in api/services/rx_print_values.py, beside the absence rule
+# they share a contract with, and are re-exported here so every existing import
+# (and the tests pinning them) keeps working unchanged. They MOVED rather than
+# being copied because the surfaces that most needed them -- the workshop lab
+# job-card and the prescriptions print card -- were interpolating the stored
+# string raw and printing a positive power with no "+", and a router is not
+# somewhere another router can import from.
+from ..services.rx_print_values import (  # noqa: E402,F401
+    format_axis_value,
+    format_rx_value,
+)
 
 
 def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
@@ -476,7 +549,11 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
     a power past the checks by leaving its twin key present-but-null.
     """
     from .prescriptions import _eye_value, _validate_eye_axis
-    from ..services.rx_validation import _validate_rx_value
+    from ..services.rx_validation import (
+        _validate_measurement,
+        _validate_rx_value,
+        _validate_visual_acuity,
+    )
 
     if not isinstance(eye, dict):
         return
@@ -500,7 +577,159 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
 
+    # PER-EYE PD. This eye-test path writes the Rx as a RAW DICT straight to
+    # rx_repo.create(), so EyeData's own field validators never run on it and a
+    # PD of 9999 reached a billable, dispensable prescription: a garbage
+    # monocular PD decentres the lens and induces prism. The per-eye box is
+    # MONOCULAR, so "pd_mono" (20-45mm) is the right bound, not the binocular
+    # 40-80 one. Same rule as EyeData.validate_pd.
+    try:
+        _validate_measurement(_as_str(_eye_value(eye, "pd")), "pd_mono")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
+    # VISUAL ACUITY. Free text on the wire, a closed clinical set in reality:
+    # "banana" and "20/9999" both saved with a 200 into the exam block AND into
+    # the mirrored prescription, because no validator in backend/ had ever
+    # looked at this field. The exam form gates it client-side, so the exposure
+    # is the direct API, a device/CSV import and the integrations.
+    try:
+        _validate_visual_acuity(_eye_value(eye, "va", "acuity"), "VA")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
+    # PRISM travels as free text through a bare <input> on the Final Rx tab and
+    # is persisted verbatim. Mirrors EyeData.validate_prism (0-10 dioptres).
+    prism = _eye_value(eye, "prism")
+    if prism is not None and str(prism).strip() != "":
+        try:
+            mag = float(str(prism).strip())
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} prism must be a number in prism dioptres (0-10)",
+            )
+        if not (0.0 <= mag <= 10.0):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} prism must be between 0 and 10 prism dioptres",
+            )
+
     _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=422)
+
+
+def _validate_eye_test_payload(data: "EyeTestData") -> None:
+    """The WHOLE clinical range gate for one exam payload, in one place.
+
+    Both write doors -- POST /tests/{id}/complete and PUT /tests/{id}/exam --
+    must apply identical checks: an amendment is a write of a medical power and
+    gets exactly what the first write got. They used to repeat the same five
+    calls, which is how the BINOCULAR IPD ended up gated in the browser and
+    nowhere on the server. One reader now, so a rule added here lands on both.
+    """
+    from ..services.rx_validation import _validate_measurement
+
+    _validate_eye_test_rx("Right eye", data.right_eye)
+    _validate_eye_test_rx("Left eye", data.left_eye)
+    # The three exam tabs that now reach the server. They used to be dropped in
+    # the browser, so no layer -- not the form, not the transport, not a
+    # Pydantic model, not a validator -- had ever looked at a lensometer or
+    # auto-ref power. -9999 went in and nothing objected.
+    _validate_exam_block("Lensometer", data.lensometer)
+    _validate_exam_block("Auto-Ref", data.auto_ref)
+    _validate_exam_block("Subjective Rx", data.subjective_rx)
+
+    # THE BINOCULAR IPD: the single number that centres BOTH lenses in the
+    # frame. It is not the per-eye monocular PD (already gated above as
+    # "pd_mono", 20-45mm) -- it is its 40-80mm twin, and it was validated in the
+    # browser and NOWHERE on the server, so an IPD of 9999 from a device
+    # import, a CSV or a direct call reached a billable prescription and the
+    # lab. zero_is_blank=False because this field is new on the exam document:
+    # there is no legacy corpus of "0" to tolerate, and a 0mm IPD is
+    # anatomically impossible, exactly as the form has always said.
+    try:
+        _validate_measurement(data.ipd, "pd", zero_is_blank=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"IPD: {exc}")
+
+
+def _validate_keratometry(eye_label: str, eye: dict) -> None:
+    """Validate an auto-refractometer eye's K readings (corneal curvature).
+
+    K1/K2 are dioptric but unsigned and off the 0.25 grid, so they use the
+    canonical "k" range in rx_validation rather than the sphere range; their
+    axes are ordinary 1-180 meridians. These were bare text boxes that accepted
+    any string at all, and nothing on the server had ever seen them."""
+    from ..services.rx_validation import _validate_axis, _validate_measurement
+
+    if not isinstance(eye, dict):
+        return
+    for key, label in (("k1", "K1"), ("k2", "K2")):
+        value = eye.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            _validate_measurement(str(value), "k")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {label} {exc}")
+    for key, label in (("k1_axis", "K1 axis"), ("k2_axis", "K2 axis")):
+        value = eye.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            _validate_axis(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {label}: {exc}")
+
+
+def _validate_exam_block(label: str, block) -> None:
+    """Range-check one exam tab (lensometer / auto-ref / subjective refraction)
+    through the SAME validator the final prescription goes through."""
+    if block is None:
+        return
+    for side, eye in (("Right eye", block.right_eye), ("Left eye", block.left_eye)):
+        eye_dict = eye.model_dump(exclude_none=True)
+        _validate_eye_test_rx(f"{label} {side}", eye_dict)
+        if isinstance(eye, AutoRefEyeReading):
+            _validate_keratometry(f"{label} {side}", eye_dict)
+
+
+def _exam_blocks_for_storage(data: "EyeTestData") -> dict:
+    """The exam tabs to PERSIST on the test document, snake_case, omitting the
+    tabs the optometrist left untouched.
+
+    An ABSENT tab stores nothing at all, so a quick refraction-only test writes
+    exactly the document it wrote before this block existed. A tab that is
+    PRESENT but whose fields are all blank still stores its (empty) shape --
+    "the optometrist opened this tab and recorded nothing" is a different fact
+    from "this exam predates the tab".
+    """
+    blocks = {}
+    for key, value in (
+        ("lensometer", data.lensometer),
+        ("auto_ref", data.auto_ref),
+        ("subjective_rx", data.subjective_rx),
+        ("slit_lamp", data.slit_lamp),
+    ):
+        if value is not None:
+            blocks[key] = value.model_dump(exclude_none=True)
+    return blocks
+
+
+def _exam_header_for_storage(data: "EyeTestData") -> dict:
+    """The exam header fields (date / optometrist / complaint / VDU hours) the
+    form collects. Only the ones actually supplied, so an absent field never
+    overwrites a stored one with a blank on a later amendment."""
+    header = {}
+    for key, value in (
+        ("exam_date", data.exam_date),
+        ("optometrist_name", data.optometrist_name),
+        ("chief_complaint", data.chief_complaint),
+        ("vdu_usage", data.vdu_usage),
+    ):
+        if value is not None and str(value).strip() != "":
+            header[key] = value
+    return header
 
 
 def _axis_for_storage(eye: dict):
@@ -546,6 +775,33 @@ def _power_for_storage(eye: dict, *keys) -> str:
 
     value = _eye_value(eye, *keys)
     return "" if value is None else str(value)
+
+
+def _eye_for_rx_storage(eye: dict) -> dict:
+    """One eye of the FINAL Rx, in the shape the prescriptions collection stores.
+
+    An ABSENT power/axis means "not tested for this eye" -> stored blank. Never
+    fabricate a 0.00 power or a 180 axis into a billable Rx (audit P1). A
+    genuine plano "0" is preserved, because "no correction needed" is a
+    finding and not an absence.
+
+    This was written out twice per call site (once per eye) in the completion
+    handler; the amend handler would have made it four copies of a rule about
+    what reaches a dispensable prescription.
+    """
+    return {
+        "sph": _power_for_storage(eye, "sphere", "sph"),
+        "cyl": _power_for_storage(eye, "cylinder", "cyl"),
+        "axis": _axis_for_storage(eye),
+        "add": _power_for_storage(eye, "add", "addition"),
+        # str(x.get("pd", "")) stored the literal "None" when the per-eye PD box
+        # was left blank (the key is PRESENT with a null), which later blocked
+        # every edit of that eye.
+        "pd": _power_for_storage(eye, "pd"),
+        "prism": (eye.get("prism") or None),
+        "base": (eye.get("base") or None),
+        "acuity": (eye.get("acuity") or eye.get("va") or None),
+    }
 
 
 def _to_camel_case(snake_str: str) -> str:
@@ -937,8 +1193,7 @@ async def complete_test(
     # success, so an out-of-range SPH/CYL/AXIS/ADD here would otherwise be
     # saved into an Rx the prescriptions endpoint would reject -- closing that
     # write-path gap. Raises 422 on a violation.
-    _validate_eye_test_rx("Right eye", data.right_eye)
-    _validate_eye_test_rx("Left eye", data.left_eye)
+    _validate_eye_test_payload(data)
 
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
@@ -999,6 +1254,15 @@ async def complete_test(
                 else None
             ),
             soap_note=soap_note_dict,
+            # The lensometer / slit-lamp / auto-ref / subjective-refraction
+            # tabs. Empty dict for a refraction-only test -> nothing extra is
+            # written and the stored document is unchanged.
+            exam_blocks=_exam_blocks_for_storage(data),
+            exam_header=_exam_header_for_storage(data),
+            # Stored on the EXAM too, not only on the mirrored prescription --
+            # otherwise the Edit screen reopens with an empty IPD box.
+            ipd=data.ipd,
+            next_checkup=data.next_checkup,
         )
 
         if success:
@@ -1051,40 +1315,8 @@ async def complete_test(
                         "full_name", current_user.get("username", "")
                     ),
                     "eye_test_id": test_id,
-                    # An ABSENT power/axis means "not tested for this eye" -> leave
-                    # it blank, never fabricate a 0.00 power or a 180 axis into a
-                    # billable Rx (audit P1). A genuine plano "0" is preserved.
-                    "right_eye": {
-                        "sph": _power_for_storage(data.right_eye, "sphere", "sph"),
-                        "cyl": _power_for_storage(data.right_eye, "cylinder", "cyl"),
-                        "axis": _axis_for_storage(data.right_eye),
-                        "add": _power_for_storage(data.right_eye, "add", "addition"),
-                        # str(x.get("pd", "")) stored the literal "None" when the
-                        # per-eye PD box was left blank (the key is PRESENT with a
-                        # null), which later blocked every edit of that eye.
-                        "pd": _power_for_storage(data.right_eye, "pd"),
-                        "prism": (data.right_eye.get("prism") or None),
-                        "base": (data.right_eye.get("base") or None),
-                        "acuity": (
-                            data.right_eye.get("acuity")
-                            or data.right_eye.get("va")
-                            or None
-                        ),
-                    },
-                    "left_eye": {
-                        "sph": _power_for_storage(data.left_eye, "sphere", "sph"),
-                        "cyl": _power_for_storage(data.left_eye, "cylinder", "cyl"),
-                        "axis": _axis_for_storage(data.left_eye),
-                        "add": _power_for_storage(data.left_eye, "add", "addition"),
-                        "pd": _power_for_storage(data.left_eye, "pd"),
-                        "prism": (data.left_eye.get("prism") or None),
-                        "base": (data.left_eye.get("base") or None),
-                        "acuity": (
-                            data.left_eye.get("acuity")
-                            or data.left_eye.get("va")
-                            or None
-                        ),
-                    },
+                    "right_eye": _eye_for_rx_storage(data.right_eye),
+                    "left_eye": _eye_for_rx_storage(data.left_eye),
                     "lens_recommendation": data.lens_recommendation,
                     "coating_recommendation": data.coating_recommendation,
                     "ipd": data.ipd,
@@ -1129,6 +1361,140 @@ async def complete_test(
 
     # Fallback for demo
     return {"message": "Test completed", "testId": test_id}
+
+
+@router.put("/tests/{test_id}/exam")
+async def amend_eye_test(
+    test_id: str,
+    data: EyeTestData,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
+):
+    """Amend an already-completed eye test -- the clinic's Edit screen.
+
+    The Edit pencil used to open an Rx-ONLY form, so the lensometer, slit-lamp,
+    auto-ref and subjective-refraction readings could not be corrected: roughly
+    a hundred captured values with nineteen of them editable. It now reopens the
+    SAME seven-tab exam screen the reading was typed into, and this is where
+    that screen saves.
+
+    Why not reuse POST /complete: that call also flips status to COMPLETED,
+    stamps completed_at, mints the mirrored prescription document and fires the
+    sales-floor handover. It refuses outright once a test is COMPLETED, and for
+    good reason -- re-running it to save an edit would duplicate the Rx and the
+    handover. This endpoint writes only what the exam screen owns.
+
+    Same validation gate as completion, deliberately: an amendment is a write of
+    a medical power and gets exactly the checks the first write got.
+
+    The prior values are preserved on the document's append-only `amendments`
+    list, so correcting a reading never erases what it replaced.
+    """
+    _validate_eye_test_payload(data)
+
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    existing = test_repo.find_by_id(test_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+    # Cross-store IDOR guard, same as completion: 404-hide a test in another
+    # store rather than confirming it exists.
+    _store_scope_or_404(existing, current_user)
+
+    now_iso = datetime.utcnow().isoformat()
+    soap_note_dict = None
+    if data.soap_note is not None:
+        soap_note_dict = data.soap_note.model_dump(exclude_none=True)
+        # An amendment does NOT re-date the note it corrects. The exam screen
+        # sends the note back without its provenance, so re-stamping here would
+        # move recorded_at to today and re-attribute the whole note to whoever
+        # made the correction. The original recorder and time stay; who changed
+        # it, and when, is on `amended_by` / `amended_at` and the `amendments`
+        # list. Only a note that has no provenance at all gets stamped now.
+        prior_note = existing.get("soap_note") or {}
+        soap_note_dict.setdefault(
+            "recorded_by",
+            prior_note.get("recorded_by") or current_user.get("user_id", ""),
+        )
+        soap_note_dict.setdefault(
+            "recorded_at", prior_note.get("recorded_at") or now_iso
+        )
+
+    ok = test_repo.amend_test(
+        test_id=test_id,
+        right_eye=data.right_eye,
+        left_eye=data.left_eye,
+        pd=data.pd,
+        notes=data.notes,
+        lens_recommendation=data.lens_recommendation,
+        coating_recommendation=data.coating_recommendation,
+        clinical_findings=(
+            data.clinical_findings.model_dump(exclude_none=True)
+            if data.clinical_findings
+            else None
+        ),
+        soap_note=soap_note_dict,
+        exam_blocks=_exam_blocks_for_storage(data),
+        exam_header=_exam_header_for_storage(data),
+        ipd=data.ipd,
+        next_checkup=data.next_checkup,
+        amended_by=current_user.get("user_id", ""),
+        amended_at=now_iso,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to amend test")
+
+    # Keep the mirrored prescription in step with the corrected Final Rx --
+    # otherwise the amendment would fix the exam record while the document the
+    # LAB and the PATIENT actually read still carried the old power.
+    rx_repo = get_prescription_repository()
+    prescription_id = None
+    if rx_repo is not None:
+        linked = rx_repo.find_by_eye_test(test_id)
+        if linked:
+            prescription_id = linked.get("prescription_id")
+            rx_update = {
+                "right_eye": _eye_for_rx_storage(data.right_eye),
+                "left_eye": _eye_for_rx_storage(data.left_eye),
+                "updated_at": now_iso,
+            }
+            # A field the exam screen did NOT carry must never blank the stored
+            # one -- the same rule the exam tabs follow. It matters most for a
+            # legacy exam saved before the IPD was persisted on the test
+            # document: the box opens empty, and an empty box must not reach
+            # the lab as "no pupillary distance".
+            for key, value in (
+                ("ipd", data.ipd),
+                ("lens_recommendation", data.lens_recommendation),
+                ("next_checkup", data.next_checkup),
+            ):
+                if value is not None and str(value).strip() != "":
+                    rx_update[key] = value
+            rx_repo.update(prescription_id, rx_update)
+
+    # Completion is audited (EYE_TEST_RECORDED); a later correction of the same
+    # clinical record is the same class of write and is audited too. The
+    # document's own append-only `amendments` list holds WHAT changed; this is
+    # the Activity-Log entry saying WHO changed it and when.
+    _audit_clinical(
+        "EYE_TEST_AMENDED",
+        test_id,
+        current_user,
+        store_id=existing.get("store_id"),
+        detail={
+            "customer_id": existing.get("customer_id"),
+            "patient_id": existing.get("patient_id"),
+            "prescription_id": prescription_id,
+        },
+    )
+
+    return {
+        "testId": test_id,
+        "prescriptionId": prescription_id,
+        "amended": True,
+        "message": "Eye test amended",
+    }
 
 
 # ============================================================================

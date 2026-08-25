@@ -25,6 +25,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { customerApi, prescriptionApi } from '../../services/api';
 import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
+import { validateEyeDetailed } from '../../constants/rxLimits';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
 const MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] as const;
@@ -152,6 +153,25 @@ export function ContactLensFittingPage() {
     }
     if (!user?.activeStoreId) {
       toast.error('Select a store before recording a fitting');
+      return;
+    }
+    // Range-check through the canonical table before the round-trip. The CL
+    // dioptric fields reuse the spectacle limits (cl_power ~ sph, cl_cyl ~ cyl,
+    // cl_add ~ add) exactly as the backend does (rx_validation._CL_ALIASES);
+    // BC/DIA have their own millimetre bounds.
+    const clCheck = (eye: Record<string, number> | null, label: string): string | null =>
+      eye
+        ? validateEyeDetailed(
+            {
+              sph: eye.cl_power, cyl: eye.cl_cyl, axis: eye.cl_axis, add: eye.cl_add,
+              base_curve: eye.base_curve, diameter: eye.diameter,
+            },
+            label,
+          )?.message ?? null
+        : null;
+    const clErr = clCheck(clRight, 'Right eye (OD)') || clCheck(clLeft, 'Left eye (OS)');
+    if (clErr) {
+      toast.error(clErr);
       return;
     }
     setSubmitting(true);

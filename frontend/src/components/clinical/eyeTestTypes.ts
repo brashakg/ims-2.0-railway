@@ -3,6 +3,9 @@
 // ============================================================================
 
 import { Eye, Glasses, Camera, FileText, Upload, Stethoscope } from 'lucide-react';
+// TYPE-ONLY, so this is erased at compile time and the pairing with
+// eyeTestHydrate (which imports the tab types from here) is not a real cycle.
+import type { StoredEyeTest } from './eyeTestHydrate';
 
 // Types
 export interface PatientInfo {
@@ -19,6 +22,16 @@ export interface EyeTestFormProps {
   onSave: (data: EyeTestData) => void;
   patient: PatientInfo | null;
   optometristName?: string;
+  /**
+   * A stored eye test to EDIT, as returned by GET /clinical/tests/{id}.
+   *
+   * Absent -> a new exam (every tab empty), exactly as before. Present -> the
+   * same seven tabs, pre-filled, so lensometer and slit-lamp readings can be
+   * corrected instead of being invisible in an Rx-only form.
+   */
+  initialTest?: StoredEyeTest | null;
+  /** Label for the save button; an amendment is not a "Complete test". */
+  saveLabel?: string;
 }
 
 // Form Data Types

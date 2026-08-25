@@ -14,7 +14,13 @@ from ..utils.ist import now_ist_naive
 import uuid
 
 from .auth import get_current_user
-from ..services.rx_print_values import is_absent_rx_value, rx_text_or
+from ..services.rx_print_values import (
+    format_rx_value,
+    is_absent_rx_value,
+    rx_axis_or,
+    rx_power_or,
+    rx_text_or,
+)
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -155,9 +161,11 @@ def _audit_rx(
 #   CL base_curve 8.0-9.5 mm - CL diameter 13.0-15.0 mm
 from ..services.rx_validation import (  # noqa: E402
     _RX_LIMITS,
+    _validate_measurement,
     _validate_rx_value,
     _validate_rx_number,
     _validate_axis,
+    _validate_visual_acuity,
 )
 
 # ============================================================================
@@ -246,6 +254,13 @@ class EyeData(BaseModel):
         # 40-80 binocular limit. See rx_validation._RX_LIMITS.
         return _validate_rx_value(v, "pd_mono")
 
+    @field_validator("acuity")
+    @classmethod
+    def validate_acuity(cls, v: Optional[str]) -> Optional[str]:
+        # Visual acuity is a CLOSED clinical set, not free text: "banana" and
+        # "20/9999" used to save with a 200 and print on the patient's card.
+        return _validate_visual_acuity(v, "acuity")
+
     @field_validator("prism")
     @classmethod
     def validate_prism(cls, v: Optional[str]) -> Optional[str]:
@@ -301,6 +316,11 @@ class CLEyeData(BaseModel):
     diameter: Optional[float] = None  # DIA, mm
     acuity: Optional[str] = None  # visual acuity, e.g. "6/6"
 
+    @field_validator("acuity")
+    @classmethod
+    def validate_acuity(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_visual_acuity(v, "acuity")
+
 
 class PrescriptionCreate(BaseModel):
     patient_id: str
@@ -353,6 +373,15 @@ class PrescriptionCreate(BaseModel):
     ipd: Optional[str] = None
     next_checkup: Optional[str] = None
     remarks: Optional[str] = None
+
+    @field_validator("ipd")
+    @classmethod
+    def validate_ipd(cls, v: Optional[str]) -> Optional[str]:
+        # BINOCULAR PD (40-80mm) -- the number that centres BOTH lenses. Its
+        # per-eye monocular twin was already gated; this one was not, on either
+        # this door or the clinical exam's. zero_is_blank=False: a 0mm IPD is
+        # anatomically impossible and this field carries no legacy "0" corpus.
+        return _validate_measurement(v, "pd", zero_is_blank=False)
 
     @model_validator(mode="after")
     def _validate_contact_lens_block(self) -> "PrescriptionCreate":
@@ -492,13 +521,15 @@ def generate_rx_number() -> str:
 
 
 def _fmt_power(value) -> str:
-    """Render a dioptric power for an error message: -1.25 / +2.00 / raw text."""
-    try:
-        num = float(str(value).strip())
-    except (TypeError, ValueError):
-        return str(value)
-    sign = "+" if num > 0 else "-"
-    return f"{sign}{abs(num):.2f}"
+    """Render a dioptric power for an error message: -1.25 / +2.00 / raw text.
+
+    Delegates to the ONE renderer. The local copy this replaces produced
+    "-0.00" for a zero (`sign = "+" if num > 0 else "-"` -- a zero is neither),
+    which is not a power anyone can read. Unreachable today because the only
+    caller is behind `_cyl_is_toric`, but a second copy of a sign rule is
+    exactly how the first one drifted."""
+    rendered = format_rx_value(value)
+    return rendered if rendered != "" else str(value)
 
 
 def _cyl_is_toric(cyl) -> bool:
@@ -1432,6 +1463,27 @@ async def update_prescription(
     if not body:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # Fields the EDIT door writes that EyeDataEdit deliberately does not
+    # field-validate (it wants a business 400, not Pydantic's 422). Checked on
+    # what the CALLER SENT, never on the merged stored value: refusing to WRITE
+    # junk must not make an existing record with a legacy value un-editable.
+    try:
+        for eye_key in ("right_eye", "left_eye"):
+            sent = body.get(eye_key)
+            if isinstance(sent, dict):
+                _validate_visual_acuity(sent.get("acuity"), f"{eye_key} acuity")
+        if "ipd" in body:
+            # zero_is_blank left at its default HERE, unlike the create and exam
+            # doors. The clinic Edit form loads the stored IPD into the box and
+            # sends it straight back (`ipd: rxData.ipd || undefined`), so a
+            # legacy "0" on an old record arrives looking exactly like a typed
+            # one -- and refusing it would stop a clinician correcting a SPHERE
+            # on that record. 9999 and 6.25 are still refused; a stored 0 is
+            # read as "never measured", which is what it means.
+            _validate_measurement(body.get("ipd"), "pd")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     # Re-validate spectacle powers against the canonical clinical ranges. We
     # call the SAME validators the create path / EyeData validators use, but
     # surface a 400 (deliberate business rejection) instead of 422.
@@ -1649,6 +1701,21 @@ def _cell(value) -> str:
     return rx_text_or(value, "-")
 
 
+def _power_cell(value) -> str:
+    """Render a DIOPTRIC power cell on a printed card.
+
+    `_cell` prints the stored string verbatim, which is how a power saved as
+    "4" reached a patient's card as "4" instead of "+4.00". A power has to be
+    RENDERED, not echoed. Same renderer the clinic's own A5 card uses, so the
+    two cards this app can print for the same prescription finally agree."""
+    return rx_power_or(value, "-")
+
+
+def _axis_cell(value) -> str:
+    """Render an AXIS cell -- a meridian, never signed."""
+    return rx_axis_or(value, "-")
+
+
 def _text(value, fallback: str = "-") -> str:
     """Render a free-text Rx field (lens/coating recommendation, remarks...)."""
     return rx_text_or(value, fallback)
@@ -1680,18 +1747,18 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
-                    <td>{_cell(right.get('sph'))}</td>
-                    <td>{_cell(right.get('cyl'))}</td>
-                    <td>{_cell(right.get('axis'))}</td>
-                    <td>{_cell(right.get('add'))}</td>
+                    <td>{_power_cell(right.get('sph'))}</td>
+                    <td>{_power_cell(right.get('cyl'))}</td>
+                    <td>{_axis_cell(right.get('axis'))}</td>
+                    <td>{_power_cell(right.get('add'))}</td>
                     <td>{_cell(right.get('pd'))}</td>
                 </tr>
                 <tr>
                     <td><strong>LE</strong></td>
-                    <td>{_cell(left.get('sph'))}</td>
-                    <td>{_cell(left.get('cyl'))}</td>
-                    <td>{_cell(left.get('axis'))}</td>
-                    <td>{_cell(left.get('add'))}</td>
+                    <td>{_power_cell(left.get('sph'))}</td>
+                    <td>{_power_cell(left.get('cyl'))}</td>
+                    <td>{_axis_cell(left.get('axis'))}</td>
+                    <td>{_power_cell(left.get('add'))}</td>
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
@@ -1744,19 +1811,19 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
-                    <td>{_cell(right.get('cl_power'))}</td>
-                    <td>{_cell(right.get('cl_cyl'))}</td>
-                    <td>{_cell(right.get('cl_axis'))}</td>
-                    <td>{_cell(right.get('cl_add'))}</td>
+                    <td>{_power_cell(right.get('cl_power'))}</td>
+                    <td>{_power_cell(right.get('cl_cyl'))}</td>
+                    <td>{_axis_cell(right.get('cl_axis'))}</td>
+                    <td>{_power_cell(right.get('cl_add'))}</td>
                     <td>{_cell(right.get('base_curve'))}</td>
                     <td>{_cell(right.get('diameter'))}</td>
                 </tr>
                 <tr>
                     <td><strong>LE</strong></td>
-                    <td>{_cell(left.get('cl_power'))}</td>
-                    <td>{_cell(left.get('cl_cyl'))}</td>
-                    <td>{_cell(left.get('cl_axis'))}</td>
-                    <td>{_cell(left.get('cl_add'))}</td>
+                    <td>{_power_cell(left.get('cl_power'))}</td>
+                    <td>{_power_cell(left.get('cl_cyl'))}</td>
+                    <td>{_axis_cell(left.get('cl_axis'))}</td>
+                    <td>{_power_cell(left.get('cl_add'))}</td>
                     <td>{_cell(left.get('base_curve'))}</td>
                     <td>{_cell(left.get('diameter'))}</td>
                 </tr>

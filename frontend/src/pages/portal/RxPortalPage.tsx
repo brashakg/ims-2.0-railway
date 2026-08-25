@@ -20,6 +20,8 @@ import {
   type PortalPrescription,
   type PortalRxResponse,
 } from '../../services/api/portal';
+// ONE display formatter for a dioptric power (explicit "+", blank stays blank).
+import { formatPowerOrDash } from '../../utils/rxPowerValue';
 
 type Step = 'phone' | 'otp' | 'view';
 
@@ -316,11 +318,14 @@ function RxList({
 
 // Pull the canonical eye fields out of whatever shape the record stores them
 // in (right_eye/left_eye dicts). We render only what's present.
-const EYE_FIELDS: Array<{ key: string; label: string }> = [
-  { key: 'sph', label: 'SPH' },
-  { key: 'cyl', label: 'CYL' },
+// `power: true` marks a DIOPTRIC cell, which must render through the shared
+// formatter so a positive power shows its explicit "+". AXIS is a meridian, not
+// a power: it carries no sign and must never be given one.
+const EYE_FIELDS: Array<{ key: string; label: string; power?: boolean }> = [
+  { key: 'sph', label: 'SPH', power: true },
+  { key: 'cyl', label: 'CYL', power: true },
   { key: 'axis', label: 'AXIS' },
-  { key: 'add', label: 'ADD' },
+  { key: 'add', label: 'ADD', power: true },
 ];
 
 /**
@@ -333,10 +338,22 @@ function recorded(v: unknown): boolean {
   return v !== null && v !== undefined && v !== '';
 }
 
-function eyeVal(eye: Record<string, unknown> | null | undefined, key: string): string {
+function eyeVal(
+  eye: Record<string, unknown> | null | undefined,
+  key: string,
+  isPower = false,
+): string {
   if (!eye) return '—';
   const v = eye[key] ?? eye[key.toUpperCase()];
   if (v === null || v === undefined || v === '') return '—';
+  // A dioptric power goes through the ONE formatter, so the patient's own copy
+  // of their prescription reads "+4.00" and not the bare "4" / "4.0" that the
+  // stored string happens to hold. `String(v)` printed whatever was in the
+  // database, which is how a positive power lost its plus on this card.
+  if (isPower) {
+    const formatted = formatPowerOrDash(v);
+    if (formatted !== '-') return formatted;
+  }
   return String(v);
 }
 
@@ -376,13 +393,13 @@ function RxCard({ p }: { p: PortalPrescription }) {
             <tr className="border-t border-gray-100">
               <td className="py-2 pr-4 font-medium text-gray-700">Right (OD)</td>
               {EYE_FIELDS.map((f) => (
-                <td key={f.key} className="py-2 px-2 text-center text-gray-800">{eyeVal(p.right_eye, f.key)}</td>
+                <td key={f.key} className="py-2 px-2 text-center text-gray-800">{eyeVal(p.right_eye, f.key, f.power)}</td>
               ))}
             </tr>
             <tr className="border-t border-gray-100">
               <td className="py-2 pr-4 font-medium text-gray-700">Left (OS)</td>
               {EYE_FIELDS.map((f) => (
-                <td key={f.key} className="py-2 px-2 text-center text-gray-800">{eyeVal(p.left_eye, f.key)}</td>
+                <td key={f.key} className="py-2 px-2 text-center text-gray-800">{eyeVal(p.left_eye, f.key, f.power)}</td>
               ))}
             </tr>
           </tbody>

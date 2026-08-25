@@ -40,6 +40,11 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+from ..services.rx_print_values import (
+    format_axis_value,
+    format_rx_value,
+    is_absent_rx_value,
+)
 from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_db,
@@ -420,17 +425,27 @@ def _rx_summary(rx: Optional[dict]) -> dict:
         return {"right": "", "left": "", "available": False}
 
     def _eye(eye: Optional[dict]) -> str:
+        # CLINICAL-CRITICAL. This string is the LAB JOB-CARD -- the traveler the
+        # lens grinder reads to cut the lens. It used to interpolate the stored
+        # value verbatim (f"SPH {eye['sph']}"), so a power saved as "4" or "4.0"
+        # reached the grinder as "SPH 4" with no sign at all. It also used a
+        # TRUTHINESS test, which silently dropped a recorded plano: an eye that
+        # needs no sphere correction simply had no SPH line, indistinguishable
+        # from an eye whose sphere was never measured.
+        #
+        # Both are fixed by the shared renderers: is_absent_rx_value is an
+        # explicit emptiness test (a 0 is present), and format_rx_value emits
+        # "+4.00" / "-1.25" / "Plano".
         if not eye or not isinstance(eye, dict):
             return ""
         parts = []
-        if eye.get("sph"):
-            parts.append(f"SPH {eye['sph']}")
-        if eye.get("cyl"):
-            parts.append(f"CYL {eye['cyl']}")
-        if eye.get("axis") is not None and eye.get("axis") != "":
-            parts.append(f"AX {eye['axis']}")
-        if eye.get("add"):
-            parts.append(f"ADD {eye['add']}")
+        for key, label in (("sph", "SPH"), ("cyl", "CYL")):
+            if not is_absent_rx_value(eye.get(key)):
+                parts.append(f"{label} {format_rx_value(eye[key])}")
+        if not is_absent_rx_value(eye.get("axis")):
+            parts.append(f"AX {format_axis_value(eye['axis'])}")
+        if not is_absent_rx_value(eye.get("add")):
+            parts.append(f"ADD {format_rx_value(eye['add'])}")
         return " ".join(parts)
 
     return {

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
 import { RxPowerInput } from '../clinical/RxPowerInput';
-import { validateEyeDetailed } from '../../constants/rxLimits';
+import { validateEyeDetailed, VA_OPTIONS } from '../../constants/rxLimits';
 import { useToast } from '../../context/ToastContext';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
@@ -11,7 +11,6 @@ const CL_MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY',
 // Spectacle Final-Rx option lists -- kept in sync with the clinical Final-Rx
 // tab (components/clinical/FinalRxTab + eyeTestTypes) so a POS-captured Rx and
 // a clinic-captured Rx offer identical choices.
-const VA_OPTIONS = ['', '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
 const BASE_OPTIONS = ['', 'IN', 'OUT', 'UP', 'DOWN'] as const;
 const LENS_TYPES = ['Single Vision', 'Bifocal', 'Progressive', 'Office Lens', 'Anti-Fatigue'] as const;
 
@@ -30,17 +29,25 @@ interface CLEyeData {
 interface PrescriptionData {
   // Discriminator -- SPECTACLE (default) keeps the existing spectacle fields.
   rx_kind?: RxKind;
-  // ---- Spectacle fields (unchanged) ----
-  sph_od?: number;
-  cyl_od?: number;
-  axis_od?: number;
-  add_od?: number;
-  pd_od?: number;
-  sph_os?: number;
-  cyl_os?: number;
-  axis_os?: number;
-  add_os?: number;
-  pd_os?: number;
+  // ---- Spectacle powers ----
+  // STRING (a signed, normalised "+4.00" / "-0.75"), not number. The form used
+  // to parseFloat every keystroke into a number, so the explicit plus a
+  // positive power must carry was destroyed before the value ever reached the
+  // wire -- `String(4)` is "4" and nothing downstream can know a plus belonged
+  // there. `Number("+4.00") === 5`-style parses still work everywhere (the
+  // validator, the backend's float(), _rxAxis), so keeping the text costs
+  // nothing and keeps the sign. A number is still accepted on the way IN, for
+  // callers hydrating from a stored numeric Rx.
+  sph_od?: number | string;
+  cyl_od?: number | string;
+  axis_od?: number | string;
+  add_od?: number | string;
+  pd_od?: number | string;
+  sph_os?: number | string;
+  cyl_os?: number | string;
+  axis_os?: number | string;
+  add_os?: number | string;
+  pd_os?: number | string;
   // ---- Spectacle parity fields (match the clinical Final Rx) ----
   va_od?: string;
   prism_od?: string;
@@ -109,12 +116,16 @@ export function PrescriptionForm({
     return v === undefined || v === null ? '' : String(v);
   };
 
-  // RxPowerInput emits a normalized STRING (e.g. "+5.00", "-0.75", "0.00"); the
-  // signed string parses cleanly (Number("+5.00") === 5) so the sign survives.
+  // RxPowerInput emits a normalized STRING (e.g. "+5.00", "-0.75", "0.00").
+  // KEEP IT AS TEXT. `parseFloat("+4.00")` is the number 4 and `String(4)` is
+  // "4": that one coercion is where the owner's missing plus was lost, and no
+  // formatter downstream can restore it because by then the plus is not
+  // absent, it never existed. Everything that consumes these fields parses
+  // with Number()/float(), both of which accept a leading "+".
   const handleRxChange = (field: keyof PrescriptionData, value: string) => {
     setPrescription(prev => ({
       ...prev,
-      [field]: value.trim() === '' ? undefined : parseFloat(value),
+      [field]: value.trim() === '' ? undefined : value.trim(),
     }));
   };
 
@@ -165,12 +176,17 @@ export function PrescriptionForm({
 
   const validateBeforeSubmit = (): string | null => {
     if (rxKind === 'SPECTACLE') {
+      // pd_od / pd_os are the PER-EYE (monocular) boxes -- placeholder "32.5".
+      // They were validated against the BINOCULAR 40-80 range, so every correct
+      // monocular PD was rejected and the Rx could not be saved at all. The
+      // backend distinguishes the two (EyeData.validate_pd -> "pd_mono") and is
+      // the source of truth; the binocular limit belongs to the IPD box.
       const odEye = { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
-        add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od };
+        add: prescription.add_od, pd_mono: prescription.pd_od, va: prescription.va_od };
       const od = validateEyeDetailed(odEye, 'Right eye (OD)');
       if (od && !(deferAxisPrompt && axisIsTheOnlyProblem(od))) return od.message;
       const osEye = { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
-        add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os };
+        add: prescription.add_os, pd_mono: prescription.pd_os, va: prescription.va_os };
       const os = validateEyeDetailed(osEye, 'Left eye (OS)');
       if (os && !(deferAxisPrompt && axisIsTheOnlyProblem(os))) return os.message;
     } else {

@@ -13,6 +13,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNow } from '../../hooks/useNow';
 import { handoffsApi, type ClinicalHandover } from '../../services/api/handoffs';
+// PATIENT SAFETY: one power formatter, and a recorded 0 is not a blank.
+import { formatPowerOrDash, hasRecordedPower } from '../../utils/rxPowerValue';
 
 const TICK_MS = 30 * 1000;
 
@@ -34,10 +36,16 @@ function rxLine(h: ClinicalHandover): string | null {
   if (!s) return null;
   const eye = (e?: Record<string, unknown> | null): string => {
     if (!e) return '—';
-    const sph = e.sph ?? '';
-    const cyl = e.cyl ?? '';
-    const axis = e.axis ?? '';
-    const parts = [sph, cyl ? `${cyl}` : '', axis ? `x${axis}` : ''].filter(Boolean);
+    // Powers render through the ONE formatter, so a positive sphere reaches the
+    // sales floor as "+4.00" and not the bare stored "4". Two bugs in one line
+    // before: `${cyl}` printed the raw stored string with no sign, and the
+    // truthiness filter ALSO dropped a recorded plano 0 -- "no astigmatism" is
+    // a finding, not an absence.
+    const sph = hasRecordedPower(e.sph) ? formatPowerOrDash(e.sph) : '';
+    const cyl = hasRecordedPower(e.cyl) ? formatPowerOrDash(e.cyl) : '';
+    const axisRecorded = e.axis !== null && e.axis !== undefined && e.axis !== '';
+    const axis = axisRecorded ? `x${e.axis}` : '';
+    const parts = [sph, cyl, axis].filter(Boolean);
     return parts.length ? parts.join(' ') : '—';
   };
   return `R: ${eye(s.right_eye)}  L: ${eye(s.left_eye)}`;

@@ -78,3 +78,103 @@ def rx_text_or(value: Any, fallback: str = "-") -> str:
     if is_absent_rx_value(value):
         return fallback
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# THE display renderers for an Rx power / axis
+# ---------------------------------------------------------------------------
+# These moved here from routers/clinical.py (which still re-exports them, so
+# every existing import and its pinned tests keep working). They live beside
+# the absence rule because they answer the SAME question for the same cards,
+# and because the surfaces that needed them most were not importing them at
+# all: the workshop LAB JOB-CARD -- the traveler the lens grinder reads -- and
+# the customer's Rx portal both interpolated the stored string raw, so a power
+# saved as "4" or "4.0" was handed to the lab and to the patient with no sign.
+#
+# CLINICAL-CRITICAL: the sign of a power is the difference between two
+# different lenses. A plus power printed without its plus is not a cosmetic
+# defect on a job card.
+
+
+def format_rx_value(v) -> str:
+    """Render an Rx power for display/print.
+
+    Rules (Rx business rules, IMS 2.0):
+      - None / missing / empty -> "" (blank cell)
+      - exactly 0 (any numeric form) -> "Plano"
+      - otherwise -> explicit sign + 2 decimals, e.g. "-1.25", "+0.50"
+
+    PURE function (no I/O) so it can be unit-tested in isolation. Accepts ints,
+    floats, or numeric strings (the prescriptions collection stores eye powers
+    as strings, e.g. {"sph": "-1.25"}). Non-numeric junk -> "" rather than a
+    crash, keeping the print endpoint fail-soft.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return ""
+        try:
+            num = float(s)
+        except ValueError:
+            return ""
+    else:
+        try:
+            num = float(v)
+        except (TypeError, ValueError):
+            return ""
+    # Normalise -0.0 and tiny float noise to a clean zero -> "Plano".
+    if abs(num) < 0.005:
+        return "Plano"
+    sign = "+" if num > 0 else "-"
+    return f"{sign}{abs(num):.2f}"
+
+
+def format_axis_value(v) -> str:
+    """Render an AXIS (1-180 whole degrees). Blank for None/missing, else int.
+
+    An axis is a MERIDIAN, not a power: it is never signed. Keeping it in the
+    same module as format_rx_value is what stops a future edit from "helpfully"
+    giving it a plus.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return ""
+        try:
+            return str(int(round(float(s))))
+        except ValueError:
+            return ""
+    try:
+        return str(int(round(float(v))))
+    except (TypeError, ValueError):
+        return ""
+
+
+def rx_power_or(value, fallback: str = "-") -> str:
+    """A dioptric power for a printed card, or `fallback` when nothing was
+    recorded.
+
+    The difference from `rx_text_or` is the whole point of this function:
+    rx_text_or prints the STORED STRING VERBATIM, so a power stored as "4"
+    printed as "4". This one renders it, so it prints "+4.00".
+
+    A recorded zero renders as "Plano" -- a real finding, never the fallback.
+    """
+    if is_absent_rx_value(value):
+        return fallback
+    rendered = format_rx_value(value)
+    # Junk that survived the absence check (e.g. "abc") renders as "" here;
+    # fall back rather than printing an empty cell.
+    return rendered if rendered != "" else fallback
+
+
+def rx_axis_or(value, fallback: str = "-") -> str:
+    """An AXIS for a printed card, or `fallback` when nothing was recorded."""
+    if is_absent_rx_value(value):
+        return fallback
+    rendered = format_axis_value(value)
+    return rendered if rendered != "" else fallback

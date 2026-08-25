@@ -6,6 +6,7 @@ import { FileText, Stethoscope } from 'lucide-react';
 import type { FinalRxData, SubjectiveRxData, ClinicalFindingsData } from './eyeTestTypes';
 import { LENS_TYPES, COLOUR_VISION_OPTIONS } from './eyeTestTypes';
 import { RxPowerInput } from './RxPowerInput';
+import { VA_OPTIONS } from '../../constants/rxLimits';
 
 interface FinalRxTabProps {
   data: FinalRxData;
@@ -16,7 +17,6 @@ interface FinalRxTabProps {
   onFindingsChange: (data: ClinicalFindingsData) => void;
 }
 
-const VA_OPTIONS = ['6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'];
 const BASE_OPTIONS = ['IN', 'OUT', 'UP', 'DOWN'];
 
 function DistanceVisionRow({
@@ -62,7 +62,7 @@ function DistanceVisionRow({
         <select value={data.va} onChange={(e) => onFieldChange(eye, 'va', e.target.value)}
           className="input-field text-center text-sm w-full">
           {VA_OPTIONS.map(opt => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={opt} value={opt}>{opt || '-'}</option>
           ))}
         </select>
       </td>

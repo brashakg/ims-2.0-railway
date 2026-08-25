@@ -13,7 +13,9 @@ Owner-approved "wider extremes" realistic limits (2026-06):
   CYL (Cylinder):  -6.00 to  +6.00 diopters, 0.25 steps
   AXIS:            1 to 180 degrees (WHOLE number); MANDATORY when cyl != 0
   ADD (Addition): +0.75 to  +4.00 diopters, 0.25 steps (PLUS-ONLY)
-  PD (Pupillary Distance): 40 to 80 mm (a measurement, not Rx -> no 0.25 grid)
+  PD (Pupillary Distance): 40 to 80 mm binocular / 20 to 45 mm per-eye monocular
+                           (a measurement, not Rx -> no 0.25 grid)
+  K  (Keratometry):       30.0 to 60.0 D (corneal curvature; unsigned, no grid)
   CL Base Curve (base_curve): 8.0 to 9.5 mm
   CL Diameter (diameter):    13.0 to 15.0 mm
 
@@ -42,6 +44,11 @@ _RX_LIMITS = {
     # a monocular per-eye value must NOT be rejected for being < 40.
     "pd": (40.0, 80.0),          # binocular / total PD (IPD)
     "pd_mono": (20.0, 45.0),     # per-eye monocular PD
+    # KERATOMETRY (corneal curvature), dioptres, from the auto-refractometer's
+    # K readings. Dioptric but NEVER signed and NOT on the 0.25 grid (devices
+    # report 0.05/0.125 steps). 30-60 D spans a very flat cornea to advanced
+    # keratoconus; anything outside is a mis-keyed or mis-parsed reading.
+    "k": (30.0, 60.0),
     # Contact-lens millimetre measurements (fit params). Not dioptric -> no
     # 0.25 grid; a plain range check only. cl_power/cl_cyl/cl_add reuse the
     # sph/cyl/add dioptric limits below (see _CL_ALIASES).
@@ -78,11 +85,25 @@ def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
     """Validate that an Rx STRING value falls within acceptable clinical range.
 
     Raises ValueError on a bad value (out of range / off the 0.25 grid /
-    non-numeric). Blank / None / "0" pass through unchanged (plano). A leading
-    '+' is accepted (float('+5.00') == 5.0) so a signed string never trips."""
-    if value is None or value.strip() == "" or value.strip() == "0":
+    non-numeric). Blank / None / any spelling of ZERO passes through unchanged
+    (plano). A leading '+' is accepted (float('+5.00') == 5.0) so a signed
+    string never trips."""
+    if value is None or value.strip() == "":
         return value
     num = _coerce_float(value, field_name)
+    # PLANO. Zero is a NUMERIC fact, so test it numerically. This used to read
+    # `value.strip() == "0"`, which recognised only one of the several ways the
+    # app spells zero -- "0.00", "+0.00", "-0.00" and " 0 " all mean exactly the
+    # same clinical thing and all missed the shortcut.
+    #
+    # That mattered for ADD, whose valid range is 0.75-4.00 because those are
+    # the limits of a PRESCRIBED reading addition. A patient who needs no
+    # reading addition has an ADD of zero, which is not "outside the range", it
+    # is the absence of an addition. Spelled "0" it was accepted; spelled
+    # "0.00" it fell through to the range check and the ENTIRE prescription was
+    # refused. Now every spelling of zero takes the same door.
+    if num == 0:
+        return value
     lo, hi = _limits_for(field_name)
     if num < lo or num > hi:
         raise ValueError(
@@ -131,15 +152,24 @@ def _validate_rx_number(value, field_name: str):
     return value
 
 
-def _validate_measurement(value, field_name: str):
+def _validate_measurement(value, field_name: str, *, zero_is_blank: bool = True):
     """Range-only check for a linear millimetre measurement (PD / base_curve /
     diameter): no 0.25 grid, no sign rules. Blank / None passes. A leading '+'
-    is accepted. Raises ValueError when out of range."""
+    is accepted. Raises ValueError when out of range.
+
+    `zero_is_blank` (default True, the historic behaviour) reads a literal "0"
+    as "not recorded" rather than as a measurement of zero millimetres. That is
+    a tolerance for LEGACY documents -- plenty of stored eyes carry pd "0"
+    meaning nothing was measured, and an amendment must not be blocked by a
+    value the clinician never typed. Pass False on a field with no legacy
+    corpus: a recorded 0 mm is then refused like any other impossible reading,
+    which is what the frontend has always done."""
     if value is None:
         return value
-    if isinstance(value, str) and value.strip() in ("", "0"):
-        # A blank measurement is "not recorded"; unlike a dioptric power, "0"
-        # is not a meaningful PD/BC/DIA so treat it as not-entered too.
+    blanks = ("", "0") if zero_is_blank else ("",)
+    if isinstance(value, str) and value.strip() in blanks:
+        # A blank measurement is "not recorded"; see `zero_is_blank` above for
+        # why a literal "0" is usually read the same way.
         return value
     num = _coerce_float(value, field_name)
     lo, hi = _limits_for(field_name)
@@ -147,6 +177,37 @@ def _validate_measurement(value, field_name: str):
         raise ValueError(
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
             f"Please double-check the prescription."
+        )
+    return value
+
+
+# VISUAL ACUITY. A Snellen fraction at 6 metres, plus the four standard
+# low-vision notations that IMS's own SOAP-note form already offers (Counting
+# Fingers / Hand Movement / Perception of Light / No Perception of Light). This
+# is the mirror of the frontend VA_SET in constants/rxLimits.ts, widened by
+# those four so the server can never refuse a record another IMS screen can
+# legitimately produce. It is a CLOSED set either way: "banana" and "20/9999"
+# were both saving with a 200 into a patient's clinical record because nothing
+# in backend/ had ever looked at this field.
+_VA_SET = (
+    "6/6", "6/9", "6/12", "6/18", "6/24", "6/36", "6/60",
+    "CF", "HM", "PL", "NPL",
+)
+
+
+def _validate_visual_acuity(value, field_name: str = "acuity"):
+    """Validate a visual-acuity string against the closed Snellen / low-vision
+    set. Blank / None passes ("not recorded"). Case-insensitive on the letter
+    notations. Raises ValueError on anything else; returns the value unchanged
+    so it can be used inline as a Pydantic field validator."""
+    if value is None:
+        return value
+    text = str(value).strip()
+    if text == "":
+        return value
+    if text.upper() not in {v.upper() for v in _VA_SET}:
+        raise ValueError(
+            f"{field_name} must be one of {', '.join(_VA_SET)}, got '{text}'"
         )
     return value
 

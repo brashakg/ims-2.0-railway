@@ -18,7 +18,7 @@
 // per-field ones, the CYL cases below flip to AXIS_REQUIRED_FOR_CYL and fail.
 
 import { describe, it, expect } from 'vitest';
-import { validateEyeDetailed, validateEyePair } from '../rxLimits';
+import { validateEyeDetailed, validateEyePair, validateRxField } from '../rxLimits';
 
 const LABEL = 'Right eye (OD)';
 
@@ -96,5 +96,35 @@ describe('validateEyePair still returns exactly the detailed error message', () 
     expect(validateEyePair({ axis: 90 }, LABEL)).toBe(
       'Right eye (OD) CYL is required when AXIS is set',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KERATOMETRY: a range, not a grid.
+// ---------------------------------------------------------------------------
+// The server range-checks K (30-60 D) and deliberately applies no step, its
+// own comment naming the 0.05/0.125 steps real auto-refractometers report.
+// This table carried a 0.01 grid, so a stored 43.125 was un-re-savable from
+// the Edit screen: the client refused a value the server had accepted.
+describe('a K reading is checked for RANGE only', () => {
+  for (const reading of ['43.125', '44.375', '41.05', '43.13', '30', '60']) {
+    it(`accepts ${reading} D`, () => {
+      expect(validateRxField('k', reading, 'Auto-Ref - Right (OD) K1 ')).toBeNull();
+    });
+  }
+
+  // POSITIVE CONTROL: dropping the grid must not drop the range.
+  for (const impossible of ['29.9', '60.1', '0', '9999', '-43']) {
+    it(`still REFUSES ${impossible} D`, () => {
+      expect(validateRxField('k', impossible, 'Auto-Ref - Right (OD) K1 ')).toMatch(
+        /K reading must be between 30.00 and 60.00/,
+      );
+    });
+  }
+
+  // ...and must not leak onto the fields that DO have a grid.
+  it('leaves the dioptric 0.25 grid alone', () => {
+    expect(validateRxField('sph', '-2.30', 'Right eye (OD) ')).toMatch(/0.25 steps/);
+    expect(validateRxField('cyl', '-1.10', 'Right eye (OD) ')).toMatch(/0.25 steps/);
   });
 });

@@ -42,6 +42,30 @@ export function forbiddenDetail(error: unknown, fallback: string): string {
   return looksLikeMiddlewareText ? fallback : detail;
 }
 
+/**
+ * The server's OWN message for a rejected write, in the two shapes FastAPI
+ * sends it: a plain `detail` string (a deliberate business/clinical rejection,
+ * e.g. "Right eye CYL value -50 is outside the valid range (-6 to 6)"), and the
+ * 422 validation list, where the useful part is the last element of `loc` plus
+ * `msg`. Anything else falls back to the caller's plain-English wording.
+ *
+ * Shared because an eye exam is now saved from TWO screens -- the first
+ * recording and the clinic's Edit screen -- and a clinician must not be told
+ * WHICH FIELD is wrong on one of them and "failed to save" on the other.
+ */
+export function apiDetailMessage(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data
+    ?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0] as { loc?: unknown[]; msg?: string };
+    const field = Array.isArray(first?.loc) ? String(first.loc[first.loc.length - 1]) : '';
+    const msg = first?.msg || 'invalid value';
+    return field ? `${field}: ${msg}` : msg;
+  }
+  return fallback;
+}
+
 export function formatApiError(error: unknown): FormattedError {
   if (error instanceof Error) {
     // Check for specific error patterns
