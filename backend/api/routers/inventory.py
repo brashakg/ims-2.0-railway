@@ -2432,7 +2432,9 @@ async def record_count_item(
         raise
     except Exception as e:
         logger.error(f"record_count_item error: {e}")
-        raise HTTPException(status_code=500, detail="Could not record the counted quantity")
+        raise HTTPException(
+            status_code=500, detail="Could not record the counted quantity"
+        )
 
 
 @router.post("/stock-count/{count_id}/complete")
@@ -2600,7 +2602,9 @@ async def complete_stock_count(
         raise
     except Exception as e:
         logger.error(f"complete_stock_count error: {e}")
-        raise HTTPException(status_code=500, detail="Could not complete the stock count")
+        raise HTTPException(
+            status_code=500, detail="Could not complete the stock count"
+        )
 
 
 @router.get("/stock-count/{count_id}")

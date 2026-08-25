@@ -234,9 +234,7 @@ def test_an_empty_count_stays_open_after_the_refusal(admin_client, mongo_db):
 # ============================================================================
 
 
-def test_a_scan_records_the_counted_quantity_onto_the_session(
-    admin_client, mongo_db
-):
+def test_a_scan_records_the_counted_quantity_onto_the_session(admin_client, mongo_db):
     """The count sheet door. Assert the SET and the COUNT on the stored doc."""
     pid = _seed_product(mongo_db)
     barcodes = _seed_units(mongo_db, pid, 5)
@@ -330,9 +328,7 @@ def test_a_recorded_count_can_then_be_completed(admin_client, mongo_db):
 # ============================================================================
 
 
-def test_a_real_discrepancy_is_reported_in_units_and_in_rupees(
-    admin_client, mongo_db
-):
+def test_a_real_discrepancy_is_reported_in_units_and_in_rupees(admin_client, mongo_db):
     """Two frames short at Rs 2,000 cost is "2 short, Rs 4,000" -- per line
     and in total. "Variance: 0%" over an empty list was the whole defect."""
     pid = _seed_product(mongo_db, cost=2000.0)
@@ -384,9 +380,9 @@ def test_a_line_with_no_cost_price_is_flagged_not_valued_at_zero(
 
     assert body["shrinkage_units"] == 3
     assert body["shrinkage_value"] == 0.0
-    assert body["lines_without_cost"] == 1, (
-        "a rupee total built from products with no cost must say so"
-    )
+    assert (
+        body["lines_without_cost"] == 1
+    ), "a rupee total built from products with no cost must say so"
 
 
 def test_an_overage_is_reported_separately_and_valued(admin_client, mongo_db):
@@ -436,9 +432,9 @@ def test_a_store_manager_cannot_write_off_missing_stock(
 
     r = manager_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
 
-    assert r.status_code == 403, (
-        f"a store manager must not be able to destroy stock; got {r.status_code}"
-    )
+    assert (
+        r.status_code == 403
+    ), f"a store manager must not be able to destroy stock; got {r.status_code}"
     assert (
         mongo_db["stock_units"].count_documents(
             {"product_id": pid, "status": "AVAILABLE"}
@@ -448,9 +444,7 @@ def test_a_store_manager_cannot_write_off_missing_stock(
     assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
 
 
-def test_a_unit_sold_during_the_count_is_never_written_off(
-    admin_client, mongo_db
-):
+def test_a_unit_sold_during_the_count_is_never_written_off(admin_client, mongo_db):
     """The write-off may only take units that are still AVAILABLE at the
     instant of the write. A frame sold mid-count used to be overwritten from
     SOLD to VOID -- the sale destroyed and the shortfall still "corrected"."""
@@ -469,13 +463,12 @@ def test_a_unit_sold_during_the_count_is_never_written_off(
     body = r.json()
 
     sold = list(mongo_db["stock_units"].find({"barcode": {"$in": barcodes[:2]}}))
-    assert [u["status"] for u in sold] == ["SOLD", "SOLD"], (
-        "a sold unit must never be voided from under the sale"
-    )
+    assert [u["status"] for u in sold] == [
+        "SOLD",
+        "SOLD",
+    ], "a sold unit must never be voided from under the sale"
     assert (
-        mongo_db["stock_units"].count_documents(
-            {"product_id": pid, "status": "VOID"}
-        )
+        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
         == 2
     )
     assert body["units_voided"] == 2
@@ -520,9 +513,7 @@ def test_the_same_count_cannot_be_written_off_twice(admin_client, mongo_db):
     assert second.status_code in (400, 409), second.text
 
     assert (
-        mongo_db["stock_units"].count_documents(
-            {"product_id": pid, "status": "VOID"}
-        )
+        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
         == 2
     ), "a second click must never double the write-off"
     assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 1
@@ -626,9 +617,9 @@ def test_a_sale_landing_mid_write_off_survives_the_write_off(
 
     assert racing.sale_landed, "the harness must actually have landed the sale"
     sold = mongo_db["stock_units"].find_one({"barcode": barcodes[0]})
-    assert sold["status"] == "SOLD", (
-        "the frame the customer just bought was written off from under the sale"
-    )
+    assert (
+        sold["status"] == "SOLD"
+    ), "the frame the customer just bought was written off from under the sale"
     assert "voided_at" not in sold
 
     assert body["units_voided"] == 1, "only the unit still on the shelf may go"
@@ -690,9 +681,9 @@ def test_a_second_write_off_landing_mid_flight_takes_no_stock(
     r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
 
     assert racing.fired, "the harness must actually have raced this caller"
-    assert r.status_code == 409, (
-        f"a write-off already in flight must be stood down; got {r.status_code}"
-    )
+    assert (
+        r.status_code == 409
+    ), f"a write-off already in flight must be stood down; got {r.status_code}"
     assert (
         mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
         == 0
