@@ -5876,9 +5876,9 @@ async def create_day_end_close(
         db,
         store_id=sid,
         session_date=body.date,
-        closing_rows=[r.model_dump() for r in (body.closing_count.rows or [])]
-        if body.closing_count is not None
-        else None,
+        closing_rows=(
+            body.closing_count.rows if body.closing_count is not None else None
+        ),
         closing_count_state=(
             body.closing_count.state if body.closing_count is not None else None
         ),

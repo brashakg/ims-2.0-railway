@@ -757,9 +757,10 @@ def _normalize_refund_tenders(
         folded[canon] = round(folded.get(canon, 0.0) + amt, 2)
         leg_count = getattr(t, "cash_count", None)
         if leg_count is not None:
-            counted_rows.setdefault(canon, []).append(
-                [r.model_dump() for r in (leg_count.rows or [])]
-            )
+            # Raw off the wire -- merge_rows runs them through the ONE
+            # normaliser, which is also the only thing that copes with a
+            # sheet a caller sent as junk.
+            counted_rows.setdefault(canon, []).append(leg_count.rows)
             # SUGGESTED is only kept when EVERY folded leg was suggested; one
             # human-counted leg makes the folded row a counted row.
             state = str(leg_count.state or cash_denom.STATE_COUNTED).upper()

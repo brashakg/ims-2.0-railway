@@ -45,7 +45,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # The ONE ladder. Indian currency in circulation (RBI): Rs 2000 is withdrawn.
@@ -63,6 +63,17 @@ STATE_SUGGESTED = "SUGGESTED"
 STATE_NOT_CAPTURED = "NOT_CAPTURED"
 
 _VALID_STATES = (STATE_COUNTED, STATE_SUGGESTED, STATE_NOT_CAPTURED)
+
+# Ceilings, not gates. Every figure in a count block ends up in a Mongo
+# document, and BSON integers are 8 bytes (max 9.22e18) -- an absurd
+# ``pieces``/``face``/scalar would raise OverflowError on the write, i.e. a 500
+# on a sale. These caps keep the arithmetic representable
+# (MAX_FACE * 100 * MAX_PIECES = 1e15, and a whole sheet of such rows still
+# fits) while a garbage entry stays RECORDED and FLAGGED instead of rejected.
+# All three are far beyond anything a real drawer can hold.
+MAX_PIECES = 10**7
+MAX_FACE = 10**6
+MAX_PAISA = 10**15
 
 
 def denomination_ladder() -> List[Dict[str, Any]]:
@@ -94,21 +105,34 @@ def face_key(row: Optional[Dict[str, Any]]) -> Tuple[str, int]:
 
 
 def _coerce_pieces(value: Any) -> int:
-    """A piece count: a non-negative integer. Junk or negative -> 0."""
+    """A piece count: a non-negative integer. Junk or negative -> 0, absurd ->
+    MAX_PIECES.
+
+    CLAMPED, NEVER REJECTED. ``face * 100 * pieces`` is stored, and MongoDB
+    stores 8-byte ints: a piece count of 10**15 makes ``bson.encode`` raise
+    OverflowError, which is a 500 on a door whose whole rule is that a count
+    sheet never blocks the money. A bound (``le=``) would be a rejection, so
+    the number is capped instead and the block flags itself through
+    ``matches_amount``."""
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
-    return n if n > 0 else 0
+    if n <= 0:
+        return 0
+    return n if n <= MAX_PIECES else MAX_PIECES
 
 
 def _coerce_face(value: Any) -> Optional[int]:
-    """A face value: a positive integer number of rupees. Junk -> None."""
+    """A face value: a positive integer number of rupees. Junk -> None, absurd
+    -> MAX_FACE (clamped for the same 8-byte reason as ``_coerce_pieces``)."""
     try:
         f = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return f if f > 0 else None
+    if f <= 0:
+        return None
+    return f if f <= MAX_FACE else MAX_FACE
 
 
 def rupees_to_paisa(rupees: Any) -> int:
@@ -116,7 +140,7 @@ def rupees_to_paisa(rupees: Any) -> int:
     Junk -> 0. round-then-int so float noise never accumulates."""
     try:
         return int(round(float(rupees or 0) * 100))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -133,9 +157,22 @@ def normalize_rows(rows: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str, A
 
     Drops non-dicts and bad faces, clamps pieces to a non-negative int, defaults
     an unknown ``kind`` to 'note', and attaches ``line_total_paisa``. Input ORDER
-    is preserved so the stored document mirrors what the cashier entered."""
+    is preserved so the stored document mirrors what the cashier entered.
+
+    ``rows`` ITSELF may be junk -- a string, a number, a dict -- because the
+    wire models deliberately accept anything rather than 4xx a sale over a
+    count sheet. Anything that is not a list of rows is an empty sheet, which
+    the callers then record as NOT_CAPTURED."""
+    if rows is None or isinstance(rows, (str, bytes, dict)):
+        return []
+    try:
+        items = list(rows)
+    except TypeError:
+        return []
     out: List[Dict[str, Any]] = []
-    for r in rows or []:
+    for r in items:
+        if hasattr(r, "model_dump"):
+            r = r.model_dump()
         if not isinstance(r, dict):
             continue
         face = _coerce_face(r.get("face"))
@@ -361,23 +398,45 @@ def build_drawer_block(
 # ---------------------------------------------------------------------------
 
 
-class DenominationRow(BaseModel):
+class _LenientModel(BaseModel):
+    """Base for the count-sheet wire shapes: NOTHING here ever 4xx's.
+
+    A count sheet is a RECORD that rides alongside money -- never a gate on it.
+    Typing these fields strictly put the rejection BEFORE ``normalize_rows``,
+    so Pydantic 422'd the whole request (the sale, the refund, the payout) over
+    a bad piece count and the module's own coercion never ran. On POS that 4xx
+    is swallowed by a bare ``catch`` and the ORDER SAVES WITH NO PAYMENT ROW:
+    wrong payment status, wrong drawer, wrong receivables. So the wire accepts
+    anything, the ONE normaliser coerces it, and a nonsense sheet is stored and
+    FLAGGED (``matches_amount: False``) instead of refused."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _anything_is_acceptable(cls, data: Any) -> Any:
+        # A whole block sent as a string/number/list is an unusable sheet, not
+        # a bad request: it becomes an empty one -> NOT_CAPTURED.
+        return data if isinstance(data, dict) else {}
+
+
+class DenominationRow(_LenientModel):
     """One line of a count sheet as a screen sends it. ``line_total_paisa`` is
     NOT accepted from a client -- it is derived server-side, so a caller can
-    never smuggle a total past the arithmetic."""
+    never smuggle a total past the arithmetic. Values are accepted loosely and
+    coerced by ``normalize_rows`` (junk face -> the row is dropped, junk or
+    negative pieces -> 0, absurd -> clamped)."""
 
-    face: int = Field(..., description="Face value in whole rupees")
-    kind: str = Field(default=KIND_NOTE, description="'note' or 'coin'")
-    pieces: int = Field(default=0, ge=0, description="How many of them")
+    face: Any = Field(default=None, description="Face value in whole rupees")
+    kind: Any = Field(default=KIND_NOTE, description="'note' or 'coin'")
+    pieces: Any = Field(default=0, description="How many of them")
 
 
-class CashCountInput(BaseModel):
+class CashCountInput(_LenientModel):
     """A count sheet on the wire: the rows, plus which of the three states they
     are. OMITTING this object entirely is how a cashier under pressure skips
     the count -- it becomes NOT_CAPTURED, never a zero and never a refusal."""
 
-    rows: List[DenominationRow] = Field(default_factory=list)
-    state: Optional[str] = Field(
+    rows: Any = Field(default=None, description="[{face, kind, pieces}, ...]")
+    state: Any = Field(
         default=None, description="COUNTED | SUGGESTED | NOT_CAPTURED"
     )
 
@@ -396,12 +455,31 @@ def block_from_input(
     if payload is None:
         return not_captured_block(amount_paisa)
     return build_block(
-        [r.model_dump() for r in (payload.rows or [])],
+        payload.rows,
         amount_paisa,
         state=payload.state,
         actor=actor,
         now=now,
     )
+
+
+def _clamp_paisa(value: Any) -> Optional[int]:
+    """A RECORD scalar (what the customer handed over, what went back) in
+    paisa: None stays None -- blank is not zero -- junk becomes 0, and the
+    magnitude is capped at MAX_PAISA so an absurd figure is stored and flagged
+    rather than raising OverflowError on the Mongo write. This is never the
+    payment amount; the money is `amount`, which this module never touches."""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if n > MAX_PAISA:
+        return MAX_PAISA
+    if n < -MAX_PAISA:
+        return -MAX_PAISA
+    return n
 
 
 def cash_leg_identity(
@@ -445,8 +523,8 @@ def cash_leg_record(
     Every value here is DERIVED or COPIED. Nothing in the returned dict is the
     payment amount, and no caller is expected to write one of these back onto
     ``amount``. A scalar that was not supplied stays None -- blank, not zero."""
-    tendered_p = None if tendered_amount_paisa is None else int(tendered_amount_paisa)
-    change_p = None if change_amount_paisa is None else int(change_amount_paisa)
+    tendered_p = _clamp_paisa(tendered_amount_paisa)
+    change_p = _clamp_paisa(change_amount_paisa)
     # When the notes were counted but no scalar came with them, the count IS
     # the scalar -- that is what the cashier physically handled.
     t_block = block_from_input(tendered, tendered_p if tendered_p is not None else 0, actor, now)

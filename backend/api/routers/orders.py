@@ -571,8 +571,14 @@ class PaymentCreate(BaseModel):
     # not, the row is flagged for a human and the amount is left alone.
     cash_tendered: Optional[cash_denom.CashCountInput] = None
     cash_change: Optional[cash_denom.CashCountInput] = None
-    tendered_amount: Optional[float] = Field(None, ge=0, le=100_000_000)
-    change_amount: Optional[float] = Field(None, ge=0, le=100_000_000)
+    #
+    # ACCEPTED LOOSELY ON PURPOSE. These two ride alongside `amount` as part of
+    # the attached record, so a junk, negative or absurd figure is COERCED and
+    # FLAGGED (cash_leg_balanced False), never a 422. A rejected payment POST is
+    # swallowed by POSLayout's bare catch and leaves the ORDER SAVED WITH NO
+    # PAYMENT ROW -- a count sheet must never be able to do that to a sale.
+    tendered_amount: Any = None
+    change_amount: Any = None
 
     model_config = ConfigDict(populate_by_name=True)
 
