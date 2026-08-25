@@ -178,6 +178,11 @@ class PushResult:
     # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
     # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
     membership: Optional[Any] = None
+    # Product pushes only: the photograph side channel ({attached: n} or
+    # {attached: 0, error}). Set when THIS press attached the product's photos
+    # to Shopify (productCreateMedia); None when the Shopify product already
+    # carried media, or the push never got that far.
+    photos: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -518,6 +523,7 @@ mutation imsProductCreate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
+      media(first: 1) { nodes { id } }
     }
     userErrors { field message }
   }
@@ -537,6 +543,7 @@ mutation imsProductUpdate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
+      media(first: 1) { nodes { id } }
     }
     userErrors { field message }
   }
@@ -1723,6 +1730,79 @@ def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def product_photo_urls(product: Dict[str, Any]) -> List[str]:
+    """Every usable PHOTOGRAPH URL on a catalog product doc, in display order.
+    Pure; deduped; never raises.
+
+    This is the single answer to "does this product have a photograph?" -- the
+    owner's publish rule ("no photo, no publish") and the media actually sent to
+    Shopify are both driven from THIS list, so the check and the payload can
+    never disagree.
+
+    Field precedence mirrors the rest of the app (catalogue_pdf._image_url_of,
+    products.list_products' image_url alias): the singular `image_url`, then the
+    `images[]` array (strings or {url|src} dicts), then a bare `image`.
+
+    ONLY absolute http(s) URLs count. Shopify pulls the bytes over the internet
+    from the URL we hand it; a private /uploads/... path is unfetchable, so
+    counting one as a photograph would publish exactly the empty grey box the
+    rule exists to prevent (the same rule online_sync_health.uploads_image_audit
+    already flags rows on).
+
+    NOTE: this deliberately does NOT read the `product_images` design queue.
+    Those rows push on their own, LATER press (push_image), and a photo that
+    arrives after the product is already visible does not protect the
+    storefront. A product whose only photo lives in the design queue is refused
+    rather than published bare -- conservative, and the operator fixes it by
+    putting the photo on the product."""
+    out: List[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, dict):
+            value = value.get("url") or value.get("src")
+        if not isinstance(value, str):
+            return
+        url = value.strip()
+        if url.lower().startswith(("http://", "https://")) and url not in out:
+            out.append(url)
+
+    _add(product.get("image_url"))
+    imgs = product.get("images")
+    if isinstance(imgs, (list, tuple)):
+        for item in imgs:
+            _add(item)
+    _add(product.get("image"))
+    return out
+
+
+async def _attach_product_photos(
+    db, product_gid: str, urls: List[str]
+) -> Dict[str, Any]:
+    """LIVE-only: attach the product's photographs to the Shopify product in the
+    SAME press that wrote the product (productCreateMedia). Fail-SOFT side
+    channel -- reported on the result, never flips the push's ok -- but the
+    caller WITHHOLDS the publish when nothing attached, so a media failure
+    leaves an invisible product rather than a visible grey box.
+
+    Only ever called when the Shopify product carries no media yet, so a
+    re-press can never pile a duplicate copy of the same photo onto a live
+    listing."""
+    media = build_media_inputs([{"url": u} for u in urls])
+    if not media:
+        return {"attached": 0, "error": "no usable photograph"}
+    try:
+        body = await _graphql(
+            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+        return {"attached": 0, "error": str(e)}
+    err = _user_errors_media(body)
+    if err:
+        return {"attached": 0, "error": err}
+    nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
+    return {"attached": len([n for n in nodes if (n or {}).get("id")])}
+
+
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build Shopify CreateMediaInput[] from APPROVED product_images. Prefer the
     designer's edited asset; fall back to the source url."""
@@ -1957,6 +2037,29 @@ async def push_product(
         )
     variants = variants or []
     ecom = product.get("ecom") or {}
+
+    # THE PHOTO RULE (owner ruling 2026-08-25): "Refuse -- no photo, no
+    # publish." A listing with a name, a price and an empty grey box is worse
+    # for the brand than absence. Since a press now PUBLISHES (see
+    # build_product_input), a push with no photograph is refused outright,
+    # BEFORE the dark/live branch -- so there is no path, dry-run or live, on
+    # which a photo-less product reaches Shopify at all. The row is NOT
+    # de-queued (nothing here writes back), so adding a photo and pressing
+    # again ships it.
+    photos = product_photo_urls(product)
+    if not photos:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            shopify_id=ecom.get("shopify_product_id"),
+            error="refused: no photograph -- a product with no photograph is "
+            "never published to the storefront",
+            reason="no_photo",
+        )
+
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
     # Attribute -> metafield side channel (owner 2026-07-05): planned in the
@@ -2072,6 +2175,24 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
+        # THE PHOTOGRAPH, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
+        # photo on Shopify" are different questions, and only the second one
+        # protects the storefront -- photographs used to push on a SEPARATE,
+        # LATER press (push_image over the design queue), so a product could go
+        # visible before its photo arrived. The refusal above proved IMS has a
+        # photograph; this puts it on Shopify before anything is published.
+        #
+        # Only when the Shopify product carries NO media yet (read straight off
+        # the create/update response's media selection -- no extra call): that
+        # covers the create, repairs a product an OLDER press put up bare, and
+        # can never pile a duplicate copy onto an already-photographed listing.
+        photo_summary = None
+        existing_media = ((prod.get("media") or {}).get("nodes")) or []
+        if new_gid and not existing_media:
+            photo_summary = await _attach_product_photos(db, new_gid, photos)
+        photo_on_shopify = bool(existing_media) or bool(
+            (photo_summary or {}).get("attached")
+        )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
         # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
@@ -2103,13 +2224,21 @@ async def push_product(
                 priced_ok = False
             else:
                 priced_ok = _has_publishable_price(product, variants)
-            if priced_ok:
+            if priced_ok and photo_on_shopify:
                 pub_summary = await _publish_to_online_store(db, new_gid)
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
                     # `status`): the DRAFT/PUBLISHED cards and every
                     # storefront-visibility helper read ecom.status.
                     _writeback_product(db, pid, new_gid, status="PUBLISHED")
+            elif not photo_on_shopify:
+                # The attach is fail-soft, so a media error must not leave the
+                # product VISIBLE without its photograph -- that is exactly the
+                # grey box the rule exists to prevent.
+                pub_summary = {
+                    "published": False,
+                    "error": "publish withheld: the photograph did not reach Shopify",
+                }
             else:
                 pub_summary = {
                     "published": False,
@@ -2150,6 +2279,7 @@ async def push_product(
             variant_prices=vp_summary,
             variants_seeded=seed_summary,
             publication=pub_summary,
+            photos=photo_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(

@@ -89,7 +89,13 @@ class _RouterSpy:
 
     async def __call__(self, db, query, variables):
         self.calls.append({"query": query, "variables": variables})
-        for marker, body in self._responses.items():
+        # LONGEST marker first: "productCreate" is a SUBSTRING of
+        # "productCreateMedia", so first-match-wins would answer the
+        # photograph mutation with the productCreate body and the engine
+        # would read zero attached media (and correctly withhold publish).
+        for marker, body in sorted(
+            self._responses.items(), key=lambda kv: -len(kv[0])
+        ):
             if marker in query:
                 return body
         return {"data": {}}
@@ -116,6 +122,22 @@ def _force_live(monkeypatch, responses):
             "shop_url": "test.myshopify.com",
             "access_token": "shpat_test",
             "source": "vault",
+        },
+    )
+    # THE PHOTOGRAPH rides the same press as the product (owner ruling
+    # 2026-08-25), and the publish is withheld unless it lands. Every LIVE
+    # fixture therefore needs the media mutation answered; a test that wants
+    # to prove a media FAILURE overrides this key explicitly.
+    responses = dict(responses)
+    responses.setdefault(
+        "productCreateMedia",
+        {
+            "data": {
+                "productCreateMedia": {
+                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "mediaUserErrors": [],
+                }
+            }
         },
     )
     spy = _RouterSpy(responses)
@@ -179,6 +201,11 @@ def _product(**over):
         "barcode": "2000000000017",
         "mrp": 12990,
         "offer_price": 10990,
+        # THE PHOTO RULE (owner ruling 2026-08-25): push_product refuses a
+        # product with no photograph outright, so every fixture that expects
+        # to REACH Shopify must carry one. The refusal itself is covered in
+        # test_online_push_publishes.py.
+        "images": ["https://cdn.example.com/rb-aviator.jpg"],
         "ecom": {"status": "PUBLISHED"},
     }
     doc.update(over)
@@ -802,13 +829,19 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
         monkeypatch, {"productCreate": _create_response([_DEFAULT_VARIANT_NODE])}
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one({"id": "P2", "title": "X", "ecom": {}})
+    db["catalog_products"].insert_one(
+        {"id": "P2", "title": "X", "images": ["https://cdn.example.com/x.jpg"], "ecom": {}}
+    )
     product = db["catalog_products"].find_one({"id": "P2"})
     res = _run(shopify_push.push_product(db, product, []))
     assert res.ok is True
     assert res.variants_seeded is None
     assert spy.count_for("productVariantsBulkUpdate") == 0
-    assert len(spy.calls) == 1
+    # productCreate + the photograph. Nothing else: no seeding call, and
+    # no publish (the product is unpriced -- publish stays withheld).
+    assert spy.count_for("productCreateMedia") == 1
+    assert spy.count_for("publishablePublish") == 0
+    assert len(spy.calls) == 2
 
 
 # ===========================================================================
@@ -1107,7 +1140,13 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     }
     # Shape 1: SKU-only (seeding ran, but zero priced rows).
     db["catalog_products"].insert_one(
-        {"id": "P7", "title": "X", "sku": "BV-NOPRICE", "ecom": {"status": "PUBLISHED"}}
+        {
+            "id": "P7",
+            "title": "X",
+            "sku": "BV-NOPRICE",
+            "images": ["https://cdn.example.com/x.jpg"],
+            "ecom": {"status": "PUBLISHED"},
+        }
     )
     res = _run(
         shopify_push.push_product(
@@ -1118,7 +1157,7 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     assert res.publication == withheld
     # Shape 2: no price AND no SKU (nothing to seed at all).
     db["catalog_products"].insert_one(
-        {"id": "P8", "title": "Y", "ecom": {"status": "PUBLISHED"}}
+        {"id": "P8", "title": "Y", "images": ["https://cdn.example.com/x.jpg"], "ecom": {"status": "PUBLISHED"}}
     )
     res2 = _run(
         shopify_push.push_product(
@@ -1450,6 +1489,7 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
             "sku": "BV-RB-0002",
             "mrp": 9990,
             "offer_price": 7990,
+            "images": ["https://cdn.example.com/wayfarer.jpg"],
             "ecom": {"status": "PUBLISHED"},
         }
     )

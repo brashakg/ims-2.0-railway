@@ -333,9 +333,10 @@ def test_a_product_with_no_photograph_is_refused(db, shopify):
     assert shopify.calls == [], "a photo-less product reached the Shopify API"
 
 
-def test_the_refusal_is_visible_and_never_counted_as_pushed(db, shopify):
+def test_the_refusal_is_visible_and_never_counted_as_pushed(db, shopify, monkeypatch):
     """Not silently skipped, not tallied under `pushed`. The sweep must report
     the refusal on its own line so the operator sees WHY nothing went live."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
     _seed(db, _product(pid="P-ok"))
     _seed(db, _product(pid="P-nophoto", photos=False))
 

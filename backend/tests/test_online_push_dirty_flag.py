@@ -178,6 +178,17 @@ def _force_live(monkeypatch, graphql_response):
     return calls
 
 
+def _product_writes(calls):
+    """The productUpdate/productCreate calls only. One press now makes several
+    GraphQL calls (the product, its photograph, the sales-channel publish), so
+    "how many pushes happened" has to count the PRODUCT write, not the traffic."""
+    return [
+        c
+        for c in calls
+        if "imsProductUpdate" in c["query"] or "imsProductCreate(" in c["query"]
+    ]
+
+
 @pytest.fixture(autouse=True)
 def _mirror_off(monkeypatch):
     """The flag-gated internal mirror stays OFF: _stage_catalog_draft (which
@@ -259,6 +270,9 @@ def _seed_pushed(db, product_id="P1"):
             "sku": "SKU-1",
             "title": "Ray-Ban RB2140",
             "description": "old copy",
+            # A product already live on Shopify necessarily has a photograph --
+            # the publish rule ("no photo, no publish") refuses one without.
+            "images": ["https://cdn.example.com/rb2140.jpg"],
             "inventory": {"locations": {"BV-01": 3}, "total_quantity": 3},
             "ecom": {
                 "status": "PUBLISHED",
@@ -342,7 +356,7 @@ def test_successful_push_clears_the_flag_and_pending_returns_to_zero(db, monkeyp
 
     res = _run(shopify_push.push_product(db, _load(db, "P1"), []))
     assert res.ok is True and res.mode == "LIVE"
-    assert len(calls) == 1
+    assert len(_product_writes(calls)) == 1
 
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["locally_modified"] is False
@@ -378,7 +392,7 @@ def test_shopify_writeback_never_requeues_the_row(db, monkeypatch):
         assert _pending(db) == 0
 
     # Exactly ONE push happened: the second sweep found nothing to send.
-    assert len(calls) == 1
+    assert len(_product_writes(calls)) == 1
 
 
 def test_retired_shopify_sync_stamp_does_not_queue(db, monkeypatch, admin):

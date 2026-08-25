@@ -511,7 +511,15 @@ async def push_all_pending(
     def _tally(entity: str, data: Dict[str, Any]) -> None:
         bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "noop": 0})
         bucket.setdefault("noop", 0)
-        if data.get("ok") and data.get("action") == "noop":
+        if data.get("reason") == "no_photo":
+            # THE PHOTO RULE (owner ruling 2026-08-25, "no photo, no publish").
+            # A refusal is neither a success nor a breakage: it gets its OWN
+            # line so the operator sees WHY a product did not go live and can
+            # fix it (add a photograph, press again). Filing it under `failed`
+            # would read as a Shopify error; folding it into `pushed` would be
+            # the silent lie this whole change exists to end.
+            bucket["refused_no_photo"] = bucket.get("refused_no_photo", 0) + 1
+        elif data.get("ok") and data.get("action") == "noop":
             # A clean no-op (nothing mapped/priced to send) is NOT a success
             # push -- tallied separately so the UI renders it honestly (OS-017:
             # "N processed" must never imply an MRP revision reached Shopify
