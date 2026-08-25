@@ -2129,7 +2129,23 @@ async def generate_product_description(
             paragraph[: body.max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
         )
 
-    html = build_shopify_description_html(category_name, filled, paragraph)
+    # SMART GLASSES are assembled differently, because the live store says so:
+    # the 36 Ray-Ban Meta pages are a headline + a paragraph + a <ul> of spec
+    # bullets, not the eyewear spec tables. TECH_SPEC_ROWS/GENERAL_INFO_ROWS
+    # have no row for a single electronics field (camera, audio, assistant,
+    # battery, connectivity, storage, prescription-ready), so the generic
+    # builder silently DROPPED every spec the cataloguer had just typed -- and
+    # since ProductCreate now models `description`, that is the storefront
+    # body. Same AI paragraph either way; only the assembly differs. Falls
+    # back to the generic format if there is not enough filled in to build a
+    # smart-glass listing at all.
+    html = ""
+    if _pm.resolve_category(body.category) == "SMARTGLASSES":
+        from ..services.smartglass_listing import build_description_html
+
+        html = build_description_html(filled, paragraph)
+    if not html:
+        html = build_shopify_description_html(category_name, filled, paragraph)
     return {
         "description": html,
         "paragraph": paragraph,

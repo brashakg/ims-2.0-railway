@@ -440,3 +440,79 @@ def test_a_sunglass_pim_doc_is_untouched_by_the_smartglass_generator():
     assert doc["description"] is None
     assert doc["ecom"]["seo"]["tags"] == []
     assert "Better Vision" not in (doc["ecom"]["seo"]["title"] or "")
+
+
+# ---------------------------------------------------------------------------
+# 5. The "Auto-fill with AI" button -- the path everybody actually takes
+# ---------------------------------------------------------------------------
+
+
+async def _ai_description(category, attrs, monkeypatch, paragraph):
+    """Drive the REAL /products/generate-description handler. Only the network
+    call to the model is faked (it is the INPUT, not the subject): everything
+    that assembles the HTML is the shipped code."""
+    from agents import claude_client as cc
+    from api.routers import products as pr
+
+    async def _fake_call(system, user, **kw):
+        return paragraph
+
+    monkeypatch.setattr(cc, "is_claude_available", lambda: True)
+    monkeypatch.setattr(cc, "call_claude", _fake_call)
+    return await pr.generate_product_description(
+        pr.DescriptionGenerateRequest(category=category, attributes=dict(attrs)),
+        current_user={"user_id": "u1", "username": "tester"},
+    )
+
+
+_PARAGRAPH = "Reflect your style with the Ray-Ban Meta Wayfarer in Black."
+
+
+async def test_the_ai_button_keeps_every_smart_glass_spec(monkeypatch):
+    """QuickAddPage's Auto-fill button OVERWRITES the description box with what
+    this endpoint returns, and (since ProductCreate models `description`) that
+    text IS the storefront body. Before this fix it came back as the generic
+    eyewear table -- no camera, no audio, no battery, no assistant, no
+    prescription -- so the most obvious path through the form produced a listing
+    nothing like the 36 live ones."""
+    res = await _ai_description("SMTFR", FULL_ATTRS, monkeypatch, _PARAGRAPH)
+    assert res["status"] == "GENERATED"
+    html = res["description"]
+    # The SET and the COUNT of spec bullets, in the live listing order.
+    assert re.findall(r"<li>(.*?)</li>", html) == EXPECTED_BULLETS
+    # ...and the AI prose it was pressed for is still there.
+    assert _PARAGRAPH in html
+
+
+async def test_the_ai_written_smart_glass_body_survives_onto_the_pushed_doc(
+    monkeypatch,
+):
+    """End to end: press the button, save, and the bullets are what Shopify's
+    `descriptionHtml` gets. `_build_pim_doc` must not blank or replace them."""
+    res = await _ai_description("SMTFR", FULL_ATTRS, monkeypatch, _PARAGRAPH)
+    doc = pm._build_pim_doc(
+        {
+            "category": "SMARTGLASSES",
+            "brand": "Ray-Ban",
+            "attributes": dict(FULL_ATTRS),
+            "description": res["description"],
+            "sku": "SMTFRRAYMETA1",
+            "pim_product_id": "pim-ai",
+        }
+    )
+    assert re.findall(r"<li>(.*?)</li>", doc["description"]) == EXPECTED_BULLETS
+
+
+async def test_the_ai_button_is_unchanged_for_every_other_category(monkeypatch):
+    """Only smart glasses get the bullet shape. A sunglass still gets the
+    store's deliberate Product Details / spec-table format."""
+    res = await _ai_description(
+        "SG",
+        {"brand_name": "Ray-Ban", "model_no": "RB2140", "frame_material": "Acetate"},
+        monkeypatch,
+        _PARAGRAPH,
+    )
+    html = res["description"]
+    assert "<h4>Product Details</h4>" in html
+    assert "<h4>Technical Specifications</h4>" in html
+    assert "<li>" not in html
