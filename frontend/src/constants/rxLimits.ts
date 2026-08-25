@@ -82,11 +82,14 @@ export const RX_LIMITS: Record<RxLimitField, RxLimit> = {
  * post-op eye. A gate that offers only Snellen does not make the finding go
  * away -- it makes the optometrist pick the nearest fraction, and a CF eye
  * lands in the record as 6/60. So this set is the SERVER's set, exactly:
- * backend/api/services/rx_validation.py `_VA_SET`, pinned by
- * backend/tests/test_va_set_parity.py so the two can never drift again.
+ * backend/api/services/rx_validation.py `_VA_SET`, pinned set-and-count by
+ * backend/tests/test_clinical_exam_rx_validation.py
+ * ::test_the_frontend_and_backend_visual_acuity_sets_are_identical, which
+ * reads this literal out of this file. The two can never drift again.
  *
- * Every VA dropdown in the app reads VA_OPTIONS below. Do not start a sixth
- * copy of this list.
+ * There were SIX copies of this list and two of them drifted. There are now
+ * two -- this one and the server's -- and every VA dropdown in the app reads
+ * VA_OPTIONS below. Do not start a third.
  */
 export const VA_SET = [
   '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60',
