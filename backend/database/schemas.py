@@ -2,6 +2,28 @@
 IMS 2.0 - MongoDB Schemas & Indexes
 ====================================
 Collection schemas, validators, and index definitions
+
+READ THIS BEFORE EDITING A *_SCHEMA DICT -- IT IS A LOADED GUN
+--------------------------------------------------------------
+None of the ``$jsonSchema`` validators below are applied to the live database
+today. Startup calls ``database/connection.py::ensure_indexes()``, which builds
+INDEXES only and never issues a ``collMod``. But ``database/migrations.py``
+WOULD apply them: ``run_migrations()`` walks ``COLLECTIONS`` and hands every
+schema here to ``collMod`` with ``validationLevel: "moderate"``, which validates
+EVERY insert (and every update to an already-conforming document) from that
+moment on. So the instant anyone runs ``migrations.py`` against production, any
+schema that disagrees with the code that actually writes the collection starts
+REJECTING real writes with MongoDB document-validation error 121 -- the module
+whose schema is wrong simply stops accepting new records, in a live store, mid
+trading day. A schema here is therefore never "just documentation": keep it TRUE
+to its writers, or the next person to run the migration takes the app down.
+
+Common ways a schema silently drifts out of true (all seen in this file):
+``bsonType: "date"`` on a field the router stores as an ISO **string**;
+``bsonType: "decimal"`` on a Python **float** (that is a BSON double, and
+"decimal" means Decimal128 only); ``bsonType: "double"`` on a Python **int**;
+``bsonType: "string"`` on a field a writer sets to **None**; a ``required`` field
+no writer ever writes; and an ``enum`` missing a value the code really persists.
 """
 from typing import Dict, List, Any
 
@@ -505,40 +527,99 @@ TASK_SCHEMA = {
     }
 }
 
+# EXPENSE_SCHEMA -- CORRECTED 2026-08-24 to match what api/routers/expenses.py
+# actually persists. The previous version described a system that was never
+# built; had anyone run migrations.py, expenses would have stopped accepting
+# claims entirely (see the module docstring). What was wrong, and why:
+#
+#   * `expense_number` was REQUIRED but no writer anywhere mints one -- every
+#     insert would have been rejected. Removed from `required`; kept as an
+#     optional property because the field is a genuine PRODUCT gap (a claim has
+#     no human-readable number) that needs its own change, not a schema edit.
+#     Note INDEXES["expenses"] still declares a NON-sparse UNIQUE index on it;
+#     over a corpus where every document lacks the key that index cannot build.
+#   * `category` listed TRAVEL/FOOD/COURIER/REPAIRS/OFFICE_SUPPLIES/
+#     CLIENT_RELATED/OTHER -- none of which the router can produce. The door
+#     (`ExpenseCreate._category_must_be_on_the_list` -> `canonical_expense_
+#     category`) writes exactly one of `expenses.EXPENSE_CATEGORIES`. Only
+#     PETTY_CASH overlapped, so every non-petty-cash claim would have been
+#     rejected on category alone. test_expense_schema_parity pins the two lists
+#     together (same pattern as PRODUCT_SCHEMA <-> canonical_categories()).
+#   * `status` listed SUBMITTED/PENDING_APPROVAL/PAID/CANCELLED, none of which
+#     are ever written, and omitted PENDING (every create), SENT_TO_ACCOUNTANT
+#     and ENTERED (the accountant hand-off). Corrected to the five persisted
+#     values. DRAFT is kept: nothing writes it, but /submit still branches on
+#     it, and a permissive enum entry can never cause a rejection.
+#   * `amount` was "decimal" (Decimal128). `ExpenseCreate.amount` is a Python
+#     float -> BSON double. No Decimal128 is constructed anywhere in backend/.
+#   * `expense_date` / `approved_at` were "date". The router stores ISO STRINGS
+#     (`expense.expense_date.isoformat()`, `datetime.now().isoformat()`).
+#     `created_at` / `updated_at` genuinely ARE dates -- BaseRepository.
+#     _add_timestamps overwrites the router's ISO string with a real datetime.
+#   * Several string fields are written as None on ordinary requests and so are
+#     typed ["string", "null"]. Flagged for follow-up, NOT fixed here (a
+#     write-path change needs its own review): `employee_name` is ALWAYS None,
+#     because it reads current_user["full_name"] and the JWT payload built at
+#     auth.py:910-922 carries no `full_name` claim.
+#   * `bill_uploads` / `has_bill` / `bill_waived` / `paid_at` /
+#     `payment_reference` describe an uploads model that was never built (the
+#     real one is the flat bill_* fields below). Dropped.
 EXPENSE_SCHEMA = {
     "bsonType": "object",
-    "required": ["expense_id", "expense_number", "employee_id", "category", "amount", "status"],
+    # Only what create_expense() writes on EVERY insert (expenses.py:998-1017),
+    # plus created_at, which BaseRepository.create always stamps.
+    "required": ["expense_id", "employee_id", "category", "amount", "status", "created_at"],
     "properties": {
         "expense_id": {"bsonType": "string"},
+        # Never written by any writer -- see the block comment above.
         "expense_number": {"bsonType": "string"},
         "employee_id": {"bsonType": "string"},
-        "employee_name": {"bsonType": "string"},
-        "store_id": {"bsonType": "string"},
-        "category": {"enum": ["TRAVEL", "FOOD", "COURIER", "REPAIRS", "OFFICE_SUPPLIES", "CLIENT_RELATED", "PETTY_CASH", "OTHER"]},
-        "amount": {"bsonType": "decimal"},
-        "description": {"bsonType": "string"},
-        "expense_date": {"bsonType": "date"},
-        "bill_uploads": {
-            "bsonType": "array",
-            "items": {
-                "bsonType": "object",
-                "properties": {
-                    "file_name": {"bsonType": "string"},
-                    "file_path": {"bsonType": "string"},
-                    "file_hash": {"bsonType": "string"}
-                }
-            }
+        # Always None today (no `full_name` claim on the JWT). Reported, not fixed.
+        "employee_name": {"bsonType": ["string", "null"]},
+        # expense.store_id or current_user["active_store_id"] -- either may be absent.
+        "store_id": {"bsonType": ["string", "null"]},
+        # MIRRORS api.routers.expenses.EXPENSE_CATEGORIES (pinned by a test).
+        "category": {
+            "enum": ["utilities", "rent", "maintenance", "supplies", "travel",
+                     "food", "marketing", "miscellaneous", "PETTY_CASH"]
         },
-        "has_bill": {"bsonType": "bool"},
-        "bill_waived": {"bsonType": "bool"},
-        "status": {"enum": ["DRAFT", "SUBMITTED", "PENDING_APPROVAL", "APPROVED", "REJECTED", "PAID", "CANCELLED"]},
+        # Python float -> BSON double. NOT Decimal128.
+        "amount": {"bsonType": "double"},
+        "description": {"bsonType": "string"},
+        # ISO date string ("YYYY-MM-DD"), not a BSON date.
+        "expense_date": {"bsonType": "string"},
+        "payment_mode": {"bsonType": ["string", "null"]},
+        "advance_id": {"bsonType": ["string", "null"]},
+        "idempotency_key": {"bsonType": ["string", "null"]},
+        # DRAFT is read-only (the /submit gate); the other five are persisted.
+        "status": {
+            "enum": ["DRAFT", "PENDING", "APPROVED", "REJECTED",
+                     "SENT_TO_ACCOUNTANT", "ENTERED"]
+        },
+        # --- bill upload (expenses.py:1089, :1114) -- ISO strings ---
+        "bill_file_id": {"bsonType": "string"},
+        "bill_filename": {"bsonType": "string"},
+        "bill_mime": {"bsonType": "string"},
+        "bill_uploaded_at": {"bsonType": "string"},
+        "bill_sha256": {"bsonType": "string"},
+        "duplicate_bill": {"bsonType": "bool"},
+        "duplicate_of": {"bsonType": ["string", "null"]},
+        # --- lifecycle stamps (all ISO strings, all set via repo.update) ---
+        "submitted_at": {"bsonType": "string"},
         "approved_by": {"bsonType": "string"},
-        "approved_at": {"bsonType": "date"},
+        "approved_at": {"bsonType": "string"},
+        "petty_cash_txn_id": {"bsonType": ["string", "null"]},
+        "rejected_by": {"bsonType": "string"},
+        "rejected_at": {"bsonType": "string"},
         "rejection_reason": {"bsonType": "string"},
-        "paid_at": {"bsonType": "date"},
-        "payment_reference": {"bsonType": "string"},
-        "advance_id": {"bsonType": "string"},
-        "created_at": {"bsonType": "date"}
+        "sent_to_accountant_by": {"bsonType": "string"},
+        "sent_to_accountant_at": {"bsonType": "string"},
+        "entered_by": {"bsonType": "string"},
+        "entered_at": {"bsonType": "string"},
+        "ledger_reference": {"bsonType": ["string", "null"]},
+        # --- repository-stamped, real BSON datetimes ---
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"}
     }
 }
 

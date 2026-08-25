@@ -3917,6 +3917,97 @@ def _to_dt(s):
     return dt
 
 
+def _ist_day_face(value) -> str:
+    """The IST calendar day ('YYYY-MM-DD') of a stored instant.
+
+    BUG-104. Timestamps on this surface (`opened_at`, `closed_at`) are written
+    by ``_iso_now()`` == ``datetime.utcnow().isoformat()``, so their first ten
+    characters are the UTC day -- which, for anything between 00:00 and 05:30
+    IST, is YESTERDAY. Parse to the instant first, then take the IST day.
+    Unparseable junk keeps the old first-ten-characters behaviour rather than
+    dropping the row. One definition, so no caller can drift from another."""
+    dt = _to_dt(value)
+    return ist_date_str(dt) if dt is not None else str(value or "")[:10]
+
+
+def _created_at_or_clauses(start_iso, end_iso) -> list:
+    """The dual-type `created_at` window: a DATETIME clause OR a STRING clause.
+
+    Mongo type-brackets a Date range away from a string field, so a column
+    holding both shapes must be asked for both ways or one type is silently
+    dropped (BUG-031). Bounds are normalised to the naive-UTC frame the stored
+    values use (BUG-104).
+
+    ONE definition because the refund TOTAL and the per-leg list behind the
+    drawer's double-entry advisory read the SAME `returns` rows: aligning
+    their bound VALUES but not their clause SHAPES left a Date-typed refund
+    visible to the total and invisible to the legs -- and the advisory returns
+    early on an empty leg list, so it would switch itself off while the drawer
+    still deducted the money."""
+    start_str = _naive_utc_iso_bound(start_iso)
+    end_str = _naive_utc_iso_bound(end_iso)
+    start_dt = _to_dt(start_iso)
+    date_win: Dict = {"$gte": start_dt} if start_dt else {}
+    str_win: Dict = {"$gte": start_str} if start_str else {}
+    if end_iso:
+        if end_str:
+            str_win["$lte"] = end_str
+        end_dt = _to_dt(end_iso)
+        if end_dt:
+            date_win["$lte"] = end_dt
+    clauses = []
+    if date_win:
+        clauses.append({"created_at": date_win})
+    if str_win:
+        clauses.append({"created_at": str_win})
+    return clauses
+
+
+def _ist_day_window(start_iso, end_iso) -> tuple:
+    """The (start_day, end_day) IST calendar-day pair for a till session.
+
+    BUG-104. Both bounds are IST days because they filter `expense_date`, an
+    operator-typed IST CALENDAR DATE. `start_iso` / `end_iso` are the
+    session's naive-UTC stamps (`_iso_now`), so their first ten characters are
+    the UTC day -- yesterday for anything in the 00:00-05:30 IST band. An
+    ABSENT `end_iso` means "still open, up to now", which is TODAY in the same
+    IST frame.
+
+    ONE definition on purpose. This exact two-line pair was copied inline
+    FOUR times across four review rounds -- the drawer charge and the
+    double-entry advisory being the pair that mattered, because a drift
+    between them makes the advisory name a payout the drawer never
+    subtracted. Both callers now route through here so they cannot drift."""
+    start_day = _ist_day_face(start_iso)
+    end_day = _ist_day_face(end_iso) if end_iso else ist_today().isoformat()
+    return start_day, end_day
+
+
+def _naive_utc_iso_bound(v) -> Optional[str]:
+    """The NAIVE-UTC ISO face of a bound, for a LEGACY STRING clause.
+
+    BUG-104. String-typed ``created_at`` columns (`returns`, legacy online
+    orders) hold naive-UTC isoformats, so a bound compared against them
+    LEXICALLY must be in that frame too. Passing the raw value through meant
+    an offset-suffixed bound ('...T21:00:00+05:30') was compared face-value
+    against '...T15:30:00' -- sorting 5h30m late and silently dropping rows.
+    ``_to_dt`` already normalises an aware value to naive-UTC (#993);
+    unparseable junk keeps the old raw face.
+
+    ONE definition: the drawer's refund TOTAL and the per-leg list behind its
+    advisory read the same returns rows, so a second copy here would let the
+    total say one thing while the legs said another and the advisory quietly
+    switched itself off."""
+    if v is None:
+        return None
+    dt = v if isinstance(v, datetime) else _to_dt(v)
+    if dt is None:
+        return str(v)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
+
+
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
     """Net POS CASH collected for a store between start and end (ISO strings).
 
@@ -3956,29 +4047,7 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     # elsewhere hand out naive-UTC datetimes) -- returns.created_at is string-only
     # and would type-bracket to no match against a datetime bound, silently
     # resurrecting the whole false-shortage bug. Coerce so it never can.
-    def _as_iso(v) -> Optional[str]:
-        if v is None:
-            return None
-        if isinstance(v, datetime):
-            return v.isoformat()
-        return str(v)
-
-    start_str = _as_iso(start_iso)
-    end_str = _as_iso(end_iso)
-    start_dt = _to_dt(start_iso)
-    date_win: Dict = {"$gte": start_dt} if start_dt else {}
-    str_win: Dict = {"$gte": start_str} if start_str else {}
-    if end_iso:
-        if end_str:
-            str_win["$lte"] = end_str
-        end_dt = _to_dt(end_iso)
-        if end_dt:
-            date_win["$lte"] = end_dt
-    or_clauses = []
-    if date_win:
-        or_clauses.append({"created_at": date_win})
-    if str_win:
-        or_clauses.append({"created_at": str_win})
+    or_clauses = _created_at_or_clauses(start_iso, end_iso)
     match: Dict = {"store_id": store_id}
     if or_clauses:
         match["$or"] = or_clauses
@@ -4172,8 +4241,16 @@ def _cash_expenses_for_window(
     block above. Fail-soft to (0.0, 0)."""
     if db is None:
         return _CashExpenseWindow(0.0, 0)
-    start_day = start_iso[:10]
-    end_day = (end_iso or now_ist().isoformat())[:10]
+    # BUG-104. `expense_date` is an operator-typed IST CALENDAR DATE, so BOTH
+    # bounds must be IST days. `start_iso` is the session's `opened_at`, a
+    # naive-UTC instant: its first ten characters are the UTC day, so a till
+    # opened 00:00-05:30 IST reached back into the PREVIOUS IST day and
+    # subtracted a second day of payouts from the drawer (expected too low ->
+    # an honest count reads as an overage). The upper bound was also
+    # INCONSISTENT with the lower one -- the UTC face when a close passed
+    # `end_iso`, the IST face when the live preview passed None -- so the two
+    # ends of one window sat in different calendar frames.
+    start_day, end_day = _ist_day_window(start_iso, end_iso)
     total = 0.0
     excluded = 0
     try:
@@ -4246,17 +4323,22 @@ def _cash_refund_legs_for_window(
     try:
         from ..services.tender_routing import canonicalize_tender
 
-        start_str = start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
-        win: Dict = {"$gte": start_str}
-        if end_iso:
-            win["$lte"] = end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso)
+        # The SAME WINDOW as the refund TOTAL -- same bound values AND the
+        # same dual-type clause shape (_created_at_or_clauses). Emitting only
+        # the string arm here left a Date-typed refund visible to the total
+        # and invisible to these legs, and the advisory gives up on an empty
+        # leg list: the drawer would deduct the money while the warning about
+        # it silently switched off.
+        leg_match: Dict = {
+            "store_id": store_id,
+            "status": "COMPLETED",
+            "historical": {"$ne": True},
+        }
+        leg_or = _created_at_or_clauses(start_iso, end_iso)
+        if leg_or:
+            leg_match["$or"] = leg_or
         cursor = db.get_collection("returns").find(
-            {
-                "store_id": store_id,
-                "status": "COMPLETED",
-                "historical": {"$ne": True},
-                "created_at": win,
-            },
+            leg_match,
             {"_id": 0, "return_type": 1, "refund_tenders": 1},
         )
         for r in cursor:
@@ -4292,14 +4374,13 @@ def _refund_double_entry_advisory(
     if not legs:
         return None
     try:
-        start_day = (
-            start_iso.isoformat() if isinstance(start_iso, datetime) else str(start_iso)
-        )[:10]
-        end_day = (
-            (end_iso.isoformat() if isinstance(end_iso, datetime) else str(end_iso))
-            if end_iso
-            else now_ist().isoformat()
-        )[:10]
+        # THE SAME WINDOW the drawer itself uses (BUG-104). This advisory
+        # names a specific payout and tells a manager to delete it, so reading
+        # a different window from _cash_expenses_for_window is worse than
+        # reading none: on a till opened 00:00-05:30 IST it reached back a day
+        # and told them to remove a legitimate entry the PREVIOUS day's close
+        # had already subtracted -- turning a correct count into a shortage.
+        start_day, end_day = _ist_day_window(start_iso, end_iso)
         cursor = db.get_collection("expenses").find(
             {
                 "store_id": store_id,
@@ -4902,12 +4983,7 @@ async def cash_reconciliation_summary(
         # start/end days in the wrong frame. Unparseable junk falls back to
         # the old first-10-chars behaviour.
         closed_at = s.get("closed_at") or s.get("opened_at")
-        _parsed_close = _to_dt(closed_at)
-        sess_day = (
-            ist_date_str(_parsed_close)
-            if _parsed_close is not None
-            else str(closed_at or "")[:10]
-        )
+        sess_day = _ist_day_face(closed_at)
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)

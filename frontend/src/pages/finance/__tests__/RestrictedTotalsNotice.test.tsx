@@ -189,7 +189,13 @@ describe('FinanceDashboard budgets tab - the short budget declares itself', () =
     const user = userEvent.setup();
     render(<FinanceDashboard />);
     await waitFor(() => expect(api.getBudget).toHaveBeenCalled());
-    await user.click(screen.getByRole('button', { name: /budgets/i }));
+    // findByRole, not getByRole: the waitFor above only proves the FETCH was
+    // CALLED, not that the resolved data has rendered. The tab button appears
+    // in a later paint, so a synchronous query raced it and failed roughly one
+    // CI run in two under parallel load -- while passing every time in
+    // isolation. A flaky gate teaches people to ignore red, and frontend tests
+    // gate merges here since #995.
+    await user.click(await screen.findByRole('button', { name: /budgets/i }));
   }
 
   it('shows the banner on the budgets tab when categories were withheld', async () => {
@@ -244,7 +250,8 @@ describe('FinanceDashboard cash flow tab - the short outflow declares itself', (
     const user = userEvent.setup();
     render(<FinanceDashboard />);
     await waitFor(() => expect(api.getCashFlow).toHaveBeenCalled());
-    await user.click(screen.getByRole('button', { name: /cash flow/i }));
+    // Same race as the budgets tab above -- see the note there.
+    await user.click(await screen.findByRole('button', { name: /cash flow/i }));
   }
 
   it('shows the banner when outflows were stripped', async () => {

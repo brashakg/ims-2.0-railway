@@ -21,7 +21,7 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from api.services.tender_routing import (
@@ -699,22 +699,45 @@ def _audit(
 
 
 def _to_dt(v: Any) -> Optional[datetime]:
+    """Parse a bound to a NAIVE-UTC datetime (None on failure).
+
+    BUG-104. Stored instants on this surface are naive-UTC (`_iso_now()`), and
+    _window_match below emits BOTH a datetime clause and a string clause for
+    the same window -- so both must speak that one frame. The old ``[:19]``
+    slice silently DROPPED an offset and re-badged the wall time as UTC
+    ('...T21:00:00+05:30' read as 21:00 UTC, 5h30m late), which put the two
+    clauses 5h30m apart and made them describe different windows. Mirrors
+    ``finance._to_dt``; keep the two in step."""
     if v is None:
         return None
     if isinstance(v, datetime):
-        return v
+        return v.astimezone(timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+    raw = str(v)
+    dt = None
     try:
-        return datetime.fromisoformat(str(v)[:19])
+        dt = datetime.fromisoformat(raw)
     except (ValueError, TypeError):
         try:
-            return datetime.fromisoformat(str(v)[:10])
+            dt = datetime.fromisoformat(raw[:19])
         except (ValueError, TypeError):
-            return None
+            try:
+                dt = datetime.fromisoformat(raw[:10])
+            except (ValueError, TypeError):
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _iso(v: Any) -> Optional[str]:
+    """The NAIVE-UTC ISO face of a bound, for the legacy STRING clause.
+
+    BUG-104, the same rule as ``finance._naive_utc_iso_bound``: a string
+    column holds naive-UTC isoformats, so a bound compared against it
+    lexically must be in that frame. The raw pass-through let an
+    offset-suffixed bound sort 5h30m late against the very rows the
+    datetime clause beside it selects correctly."""
     if v is None:
         return None
-    if isinstance(v, datetime):
-        return v.isoformat()
-    return str(v)
+    dt = _to_dt(v)
+    return dt.isoformat() if dt is not None else str(v)
