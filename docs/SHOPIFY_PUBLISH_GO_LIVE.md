@@ -55,11 +55,12 @@ it — but if it is ever removed, publishing has nowhere to go.)
 
 1. Open IMS → **Online Store → Shopify sync**.
 2. Look at the fourth tile, **"Online Store channel"**.
-   - **Green, "publication looked_up"** → done. Skip step 3 entirely.
+   - **Green, "publication looked_up"** (or "publication pinned") → done. Skip step 3 entirely.
    - **Red, "NOT resolved — presses will publish nothing"** → do step 3.
 
-(IMS looks the channel up by itself once it has `read_publications`. Step 3 exists for the case
-where the lookup cannot see it.)
+The screen asks Shopify for the channel every time it loads on a server that has not looked it up
+yet, so the tile is answering about your shop right now — a red tile is a real problem, not a
+leftover from a restart. If it is red, step 3 fixes it for good.
 
 ## Step 3 — only if the tile is still red: pin the channel by hand
 
@@ -115,7 +116,11 @@ do. After a bulk press the panel and the toast tell you exactly what happened:
   price IMS could not prove. They stay in the queue; fix the cause and press again.
 - **"N skipped (taken down)"** — you pulled these off the website by hand. A bulk press never
   puts one back.
-- **"Stopped at the safety cap of 25 products"** — press again to continue.
+- **"N archived (not listed)"** — retired products. The update reached Shopify, but an archived
+  product is not on the storefront, so it is never counted as live.
+- **"Stopped at the safety cap of 25 products — run again to continue"** — press again for the
+  next 25. If instead it says **"NOTHING was published this press"**, pressing again will not
+  help: every product it tried was refused or held back, and the lines above say why.
 
 If step 1 or step 3 is wrong on the day, you will see **"NOT made visible"** on everything and a
 red tile on the sync screen. That is the system telling you the truth: nothing went live. It is

@@ -266,6 +266,33 @@ def push_mode_status(db) -> Dict[str, Any]:
     }
 
 
+async def push_mode_status_resolved(db) -> Dict[str, Any]:
+    """push_mode_status PLUS the one `publications` lookup the pre-press tile
+    needs in order to be TRUE.
+
+    push_mode_status is a pure read, so the best it can report is the pinned id
+    or whatever THIS process happened to cache -- and the backend runs four
+    uvicorn workers (backend/Dockerfile). After every deploy all four caches are
+    empty, so the tile said "NOT resolved -- presses will publish nothing" about
+    a shop whose very next press publishes fine, and then flapped green/red
+    depending on which worker answered. A red tile the owner learns to ignore is
+    worse than no tile at all: it is the only warning before the door this whole
+    change opens.
+
+    So when the gates are LIVE and nothing is known yet, ASK Shopify -- once per
+    process, because the answer lands in the same cache the push path reads.
+    Fail-soft: an unreachable lookup leaves the honest `unresolved` (and DARK
+    never calls out at all -- there are no credentials to call with).
+    """
+    status = push_mode_status(db)
+    if status["is_live"] and status["online_store_publication_source"] == "unresolved":
+        gid = await _resolve_online_store_publication_id(db)
+        if gid:
+            status["online_store_publication_id"] = gid
+            status["online_store_publication_source"] = "looked_up"
+    return status
+
+
 def _has_shopify_creds(db, storefront_id: str = "BV") -> bool:
     """True iff usable Shopify Admin API credentials resolve (shop_url +
     access_token), via OAuth client-credentials OR the vault/env fallback --
@@ -2350,6 +2377,13 @@ async def push_product(
         published_ok = pub_summary is None or bool(pub_summary.get("published"))
         if not published_ok and pid:
             _requeue_unpublished(db, pid)
+        # AN ARCHIVED ROW IS NOT A LISTING. The Shopify write succeeded and the
+        # retirement is deliberate, so this is neither a failure nor a
+        # withholding -- but no shopper can find the product, and "N processed"
+        # is rendered to the owner as "these are live on bettervision.in now".
+        # This is the last path where `pushed` would not mean `visible`, so it
+        # gets its own reason and its own line, exactly like a refusal.
+        archived_not_listed = published_ok and payload.get("status") == "ARCHIVED"
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.
@@ -2386,7 +2420,11 @@ async def push_product(
                 if published_ok
                 else ((pub_summary or {}).get("error") or "publish withheld")
             ),
-            reason=None if published_ok else "publish_withheld",
+            reason=(
+                ("archived_not_listed" if archived_not_listed else None)
+                if published_ok
+                else "publish_withheld"
+            ),
             metafields=mf_summary,
             variant_prices=vp_summary,
             variants_seeded=seed_summary,

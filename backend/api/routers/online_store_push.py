@@ -76,6 +76,29 @@ _PUSH_ROLES = ("ADMIN",)
 PRODUCT_BATCH_CAP = 25
 
 
+def _queue_order(doc: Dict) -> tuple:
+    """Where one dirty product sits in the press queue: NEVER-PUSHED rows first,
+    then the longest-waiting.
+
+    The cap above is a hard 25 and a withheld publish BURNS a slot (it really
+    did reach Shopify) *and* is re-queued -- so in natural collection order 25
+    permanently-stuck rows (a broken image host, an unpriced tranche) sit at the
+    front of EVERY press forever and the photographed, priced products behind
+    them never go live, however often the owner presses. That is the "run again
+    to continue" lie one layer down: the sentence promises progress a repeat
+    press cannot make.
+
+    `ecom.last_pushed_at` is stamped by _writeback_product on every row that
+    reached Shopify, and the re-queue preserves it (read-merge-write of the
+    whole sub-doc), so ordering by it drifts a stuck row to the BACK after its
+    first attempt -- the cap keeps meaning 25 real write attempts and the queue
+    drains. Stringified so a legacy ISO-string stamp and a datetime can never
+    raise on comparison.
+    """
+    stamp = (doc.get("ecom") or {}).get("last_pushed_at")
+    return (0, "") if not stamp else (1, str(stamp))
+
+
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_collections.py)
 # ---------------------------------------------------------------------------
@@ -296,7 +319,10 @@ async def push_status(
     with no Shopify id yet). Fail-soft: no DB -> zeros + db_connected False, never
     a 500."""
     db = _get_db()
-    mode = shopify_push.push_mode_status(db)
+    # RESOLVED, not merely remembered: this endpoint feeds the "Online Store
+    # channel" tile, and a per-process cache makes that tile red on a healthy
+    # shop after every deploy (see push_mode_status_resolved).
+    mode = await shopify_push.push_mode_status_resolved(db)
     if db is None:
         return {"mode": mode, "db_connected": False, "counts": _empty_counts()}
 
@@ -581,6 +607,11 @@ async def push_all_pending(
             # filing it under `failed` would read as a Shopify breakage the
             # operator cannot act on. Its own line, with its own count.
             bucket["publish_withheld"] = bucket.get("publish_withheld", 0) + 1
+        elif data.get("reason") == "archived_not_listed":
+            # The write landed, but an ARCHIVED product is not on the
+            # storefront. Same treatment, same reason: `pushed` must mean a
+            # shopper can find it.
+            bucket["archived_not_listed"] = bucket.get("archived_not_listed", 0) + 1
         elif data.get("ok") and data.get("action") == "noop":
             # A clean no-op (nothing mapped/priced to send) is NOT a success
             # push -- tallied separately so the UI renders it honestly (OS-017:
@@ -625,6 +656,10 @@ async def push_all_pending(
                 taken_down_skipped += 1
                 continue
             dirty_products.append(doc)
+        # THE QUEUE MUST DRAIN. See _queue_order: without this the same first 25
+        # stuck rows are retried on every press and nothing behind them ever
+        # reaches bettervision.in.
+        dirty_products.sort(key=_queue_order)
         dirty_skus = [d.get("sku") for d in dirty_products if d.get("sku")]
         blocked_set, block_verifiable = online_block.classify_blocked_skus(
             db, dirty_skus
@@ -725,12 +760,15 @@ async def push_all_pending(
             _tally("images", data)
 
     # "N processed" must mean N objects the press actually did the work on.
-    # A photo-less REFUSAL never reached Shopify and a WITHHELD publish left the
-    # product invisible -- folding either into the processed number turns the
-    # screen into the same lie as "pending: 0" over an empty queue. They are
-    # counted, and shown, on their own lines in `summary`.
+    # A photo-less REFUSAL never reached Shopify, a WITHHELD publish left the
+    # product invisible, and an ARCHIVED row was retired on purpose -- folding
+    # any of them into the processed number turns the screen into the same lie
+    # as "pending: 0" over an empty queue. They are counted, and shown, on their
+    # own lines in `summary`.
     not_done = sum(
-        (b.get("refused_no_photo") or 0) + (b.get("publish_withheld") or 0)
+        (b.get("refused_no_photo") or 0)
+        + (b.get("publish_withheld") or 0)
+        + (b.get("archived_not_listed") or 0)
         for b in summary.values()
     )
     return {

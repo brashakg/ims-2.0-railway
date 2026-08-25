@@ -885,3 +885,145 @@ def test_a_photograph_shopify_could_not_fetch_is_not_a_photograph(db, shopify):
     assert res.ok is False and res.reason == "publish_withheld"
     assert shopify.calls_of("imsPublishablePublish") == []
     assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["locally_modified"] is True
+
+
+# ===========================================================================
+# ROUND 3. THE QUEUE MUST DRAIN, THE TILE MUST BE TRUE, AND "PUSHED" MUST
+# STILL MEAN "A SHOPPER CAN FIND IT".
+# ===========================================================================
+
+
+def _unpriced(pid):
+    """A row that can NEVER publish: it reaches Shopify (so it is stamped and
+    burns a cap slot) but has no provable price, so the publish is withheld and
+    the row is re-queued -- forever."""
+    doc = _product(pid=pid)
+    doc.pop("mrp", None)
+    doc.pop("offer_price", None)
+    return doc
+
+
+def test_the_queue_drains_even_when_the_stuck_rows_are_at_the_front(
+    db, shopify, monkeypatch
+):
+    """MUST-FIX 1. 25 permanently-withheld rows ahead of 15 photographed, priced
+    ones. The cap is 25 and a withheld publish BOTH burns a slot and is
+    re-queued, so in natural order the same first 25 are retried on every press
+    and the 15 good products NEVER reach bettervision.in -- while the screen
+    says 'run again to continue'. Repeated presses must publish all 15."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    for i in range(25):
+        _seed(db, _unpriced("STUCK%02d" % i))
+    good = ["GOOD%02d" % i for i in range(15)]
+    for pid in good:
+        _seed(db, _product(pid=pid))
+
+    for _ in range(5):
+        _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    live = {
+        d["id"]
+        for d in push_router._all_docs(db, "catalog_products")
+        if (d.get("ecom") or {}).get("status") == "PUBLISHED"
+    }
+    assert live == set(good), "the products behind the stuck rows never went live"
+    assert len(shopify.calls_of("imsPublishablePublish")) == 15
+
+
+def test_a_press_that_published_nothing_never_promises_progress(db, shopify, monkeypatch):
+    """The other half of must-fix 1: when every row in the cap was withheld the
+    press made NO progress, so pushed_count must be 0 -- the cue the screen
+    keys its 'run again to continue' sentence off."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    for i in range(30):
+        _seed(db, _unpriced("STUCK%02d" % i))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert out["pushed_count"] == 0
+    assert out["limit_reached"] is True
+    assert out["summary"]["products"].get("publish_withheld") == 25
+
+
+def _publications_answered(monkeypatch, name="Online Store"):
+    """A shop whose Online Store publication IS resolvable -- the lookup the
+    per-process cache is supposed to save, not replace."""
+    calls = []
+
+    async def _fake(dbx, query, variables):
+        calls.append(query)
+        return {
+            "data": {
+                "publications": {
+                    "nodes": [{"id": "gid://shopify/Publication/77", "name": name}]
+                }
+            }
+        }
+
+    monkeypatch.setattr(shopify_push, "_graphql", _fake)
+    return calls
+
+
+def test_a_fresh_worker_never_calls_a_healthy_shop_unresolved(db, shopify, monkeypatch):
+    """MUST-FIX 2. The resolved publication lives in a MODULE-level dict and the
+    backend runs four uvicorn workers, so after every deploy the tile read 'NOT
+    resolved -- presses will publish nothing' on a shop whose very next press
+    publishes fine, then flapped. A fresh process on a resolvable shop must not
+    report unresolved."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    monkeypatch.delenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", raising=False)
+    shopify_push._publication_id_cache.clear()  # a worker that has never pressed
+    _publications_answered(monkeypatch)
+
+    out = _run(push_router.push_status(current_user=_admin()))
+
+    mode = out["mode"]
+    assert mode["online_store_publication_source"] == "looked_up", (
+        "a correctly configured shop still reads RED on the pre-press tile"
+    )
+    assert mode["online_store_publication_id"] == "gid://shopify/Publication/77"
+
+
+def test_the_tile_still_says_unresolved_when_the_shop_really_has_no_channel(
+    db, shopify, monkeypatch
+):
+    """The control. Looking it up must not turn the warning into a rubber stamp:
+    a shop with no Online Store publication (or no read_publications scope) is
+    still reported honestly."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    monkeypatch.delenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", raising=False)
+    shopify_push._publication_id_cache.clear()
+    _publications_answered(monkeypatch, name="Point of Sale")
+
+    out = _run(push_router.push_status(current_user=_admin()))
+
+    assert out["mode"]["online_store_publication_source"] == "unresolved"
+    assert out["mode"]["online_store_publication_id"] is None
+
+
+def test_the_media_selection_still_asks_shopify_whether_the_photo_landed():
+    """SHOULD-FIX 3. The FAILED-photo guard reads `status` and `mediaErrors` off
+    the productCreateMedia response. Narrow the selection back to `{ id }` and
+    every node looks fine, the guard silently stops guarding, and the owner's
+    'no photo, no publish' ruling lapses with a green suite. Pin the ask."""
+    q = shopify_push._PRODUCT_CREATE_MEDIA
+    assert "status" in q and "mediaErrors" in q, (
+        "the media selection no longer asks whether Shopify fetched the bytes"
+    )
+
+
+def test_an_archived_row_is_never_counted_as_pushed(db, shopify, monkeypatch):
+    """SHOULD-FIX 4. ARCHIVED is a deliberate retirement: the write reaches
+    Shopify, no publish is attempted, and nobody can find the product. Counting
+    it under 'N processed -- these are live on bettervision.in now' is the last
+    path where `pushed` does not mean `visible`."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _seed(db, _product(pid="RETIRED", status="ARCHIVED"))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    bucket = out["summary"]["products"]
+    assert bucket["pushed"] == 0 and bucket["failed"] == 0
+    assert bucket.get("archived_not_listed") == 1
+    assert out["pushed_count"] == 0, "an invisible retired product counted as live"
+    assert shopify.calls_of("imsPublishablePublish") == []
