@@ -74,7 +74,11 @@ channel, because an ACTIVE product published to no channel is invisible on the
 storefront. Publish is still WITHHELD unless the price is provably right and the
 product has a photograph ON SHOPIFY. The publication id can be pinned with
 SHOPIFY_ONLINE_STORE_PUBLICATION_ID (else it is looked up once via `publications`,
-which needs the read_publications scope).
+which needs the read_publications scope); publishablePublish itself needs
+write_publications, which is granted in the Shopify app, not in this repo. When
+it cannot be resolved the publish is WITHHELD and the press reports
+reason="publish_withheld" -- it never claims success. Owner-facing setup steps:
+docs/SHOPIFY_PUBLISH_GO_LIVE.md.
 
 FAIL-SOFT: every function returns a structured PushResult and NEVER raises. A
 Shopify/GraphQL error becomes {ok: False, error: ...}; a missing doc becomes a
