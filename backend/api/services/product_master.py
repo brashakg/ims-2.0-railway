@@ -2314,6 +2314,30 @@ def update_product(
                 if k in clean
             }
             if pim_patch:
+                # QUEUE THE TWIN. mrp / offer_price are the variant price
+                # fallbacks the Shopify push sends, so a price changed HERE has
+                # to reach the storefront -- and the push selects rows by exactly
+                # one flag. Without this the mirror moved the price in IMS and
+                # the website kept the old one, silently, forever. Same rule as
+                # the products.py door: only fields the storefront actually shows
+                # queue a push (hsn_code / gst_rate are in no pushed payload).
+                # Queuing is not publishing: a human still presses the button.
+                if any(k in pim_patch for k in ("mrp", "offer_price")):
+                    pim_patch["ecom.locally_modified"] = True
+                    # ...and a queued row must belong to a status bucket, or the
+                    # Online Store screen counts it as pending while both status
+                    # cards ignore it. Defaulted only when ABSENT, so this can
+                    # never demote a live product back to DRAFT.
+                    twin = None
+                    if db is not None:
+                        try:
+                            twin = db.get_collection("catalog_products").find_one(
+                                {"id": updated["pim_product_id"]}
+                            )
+                        except Exception:  # noqa: BLE001 -- best-effort read
+                            twin = None
+                    if not ((twin or {}).get("ecom") or {}).get("status"):
+                        pim_patch["ecom.status"] = "DRAFT"
                 if catalog_repo is not None:
                     catalog_repo.upsert({"id": updated["pim_product_id"], **pim_patch})
                 elif db is not None:

@@ -102,6 +102,14 @@ function sweep(summary: Record<string, any>, pushed_count: number) {
   };
 }
 
+async function pressEntity(index: number) {
+  render(<OnlineShopifySyncPage />);
+  await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
+  const buttons = await screen.findAllByRole('button', { name: /^Push$/ });
+  await userEvent.click(buttons[index]);
+  await waitFor(() => expect(pushApi.pushAllPending).toHaveBeenCalled());
+}
+
 async function pressProducts() {
   render(<OnlineShopifySyncPage />);
   await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
@@ -179,5 +187,33 @@ describe('the third door is visible before the press', () => {
     render(<OnlineShopifySyncPage />);
     await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
     expect(screen.queryByText(/presses will publish nothing/i)).toBeNull();
+  });
+});
+
+
+describe('the safety-cap number belongs to products only', () => {
+  it('names the product cap when the products sweep stops early', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
+      limit_reached: true,
+    });
+
+    await pressEntity(0); // Products
+
+    const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
+    expect(info).toMatch(/safety cap of 25 products/i);
+  });
+
+  it('does NOT quote the 25-product cap for collections (they stop at 100)', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 100, failed: 0, noop: 0 }, 100),
+      limit_reached: true,
+    });
+
+    await pressEntity(1); // Collections
+
+    const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
+    expect(info).not.toMatch(/25/);
+    expect(info).toMatch(/run again to continue/i);
   });
 });

@@ -3434,6 +3434,18 @@ async def update_product(
                     if _conn is not None and getattr(_conn, "is_connected", False):
                         _cat = _conn.get_collection("catalog_products")
                         if _cat is not None:
+                            # A QUEUED ROW MUST BELONG TO A STATUS BUCKET. This
+                            # door sets the flag by dot-notation, so on a twin
+                            # with no `ecom` sub-doc Mongo creates
+                            # {ecom: {locally_modified: true}} -- pending on the
+                            # Online Store screen while the DRAFT and PUBLISHED
+                            # cards both count it as neither (the 6eede9b bug,
+                            # one door over). Defaulted only when ABSENT, so an
+                            # edit can never demote a live product back to DRAFT.
+                            if _cat_patch.get("ecom.locally_modified"):
+                                _twin = _cat.find_one({"id": product_id}) or {}
+                                if not (_twin.get("ecom") or {}).get("status"):
+                                    _cat_patch["ecom.status"] = "DRAFT"
                             _cat.update_one({"id": product_id}, {"$set": _cat_patch})
             except Exception:  # noqa: BLE001
                 logger.warning(

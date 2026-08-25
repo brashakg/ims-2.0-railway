@@ -581,3 +581,108 @@ def test_internal_cost_edit_on_the_billing_spine_does_not_queue(db, monkeypatch)
     assert saved["pricing"]["cost_price"] == 2500.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is False
     assert _pending(db) == 0
+
+
+def test_the_spine_edit_leaves_a_queued_row_in_a_status_bucket(db, monkeypatch):
+    """The 6eede9b bug, one door over. This door sets the flag by DOT-NOTATION
+    with no status default, so on a twin with no `ecom` sub-doc Mongo creates
+    {ecom: {locally_modified: true}} -- a row the Online Store screen counts as
+    pending while BOTH status cards (DRAFT and PUBLISHED) count it as neither."""
+    db["catalog_products"].insert_one(
+        {
+            "id": "P1",
+            "sku": "SKU-1",
+            "title": "Ray-Ban RB2140",
+            "images": ["https://cdn.example.com/rb2140.jpg"],
+            "mrp": 5000.0,
+        }
+    )
+
+    _edit_spine(db, monkeypatch, mrp=6000.0)
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["locally_modified"] is True
+    assert saved["ecom"]["status"] == "DRAFT", "a queued row in no status bucket"
+    assert _pending(db) == 1
+
+
+def test_the_spine_edit_never_demotes_a_live_products_status(db, monkeypatch):
+    """The other direction: the default is a DEFAULT. An edit to a product that
+    IS on the storefront must not tell the screen it went back to draft."""
+    _seed_pushed(db)
+
+    _edit_spine(db, monkeypatch, mrp=6000.0)
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["status"] == "PUBLISHED"
+    assert saved["ecom"]["locally_modified"] is True
+
+
+# ===========================================================================
+# 6. The product-master edit door (PUT /product-master/master/{id})
+# ===========================================================================
+
+
+def _pm_spine_repo():
+    coll = MockCollection("products")
+    coll.insert_one(
+        {
+            "_id": "PM1",
+            "product_id": "PM1",
+            "id": "PM1",
+            "sku": "FR-RB-0002",
+            "brand": "Ray-Ban",
+            "model": "RB1002",
+            "category": "FRAME",
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "is_active": True,
+            "pim_product_id": "P1",
+            "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1002"},
+        }
+    )
+    return ProductRepository(coll)
+
+
+def test_a_price_change_on_the_product_master_door_queues_the_twin(db, monkeypatch):
+    """The THIRD price door. It mirrors mrp / offer_price onto the catalog twin
+    -- the very fields the push sends as the variant price -- but never set the
+    one flag the push selects on, so an MRP changed here moved in IMS and never
+    reached the storefront."""
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
+    _seed_pushed(db)
+
+    pm.update_product(
+        product_id="PM1",
+        patch={"mrp": 6000.0},
+        actor="u1",
+        product_repo=_pm_spine_repo(),
+        audit_repo=AuditRepository(MockCollection("audit_logs")),
+        db=db,
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["mrp"] == 6000.0, "the mirror write must still land"
+    assert saved["ecom"]["locally_modified"] is True
+    assert _pending(db) == 1
+
+
+def test_an_internal_field_on_the_product_master_door_does_not_queue(db, monkeypatch):
+    """gst_rate is in NO pushed payload -- queuing on it would send a push that
+    changes nothing on the storefront."""
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
+    _seed_pushed(db)
+
+    pm.update_product(
+        product_id="PM1",
+        patch={"gst_rate": 12.0},
+        actor="u1",
+        product_repo=_pm_spine_repo(),
+        audit_repo=AuditRepository(MockCollection("audit_logs")),
+        db=db,
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["gst_rate"] == 12.0, "the mirror write must still land"
+    assert saved["ecom"]["locally_modified"] is False
+    assert _pending(db) == 0
