@@ -11,7 +11,7 @@ mismatch"):
     BVI category   (SPECTACLES / SUNGLASSES / SOLUTIONS / READING_GLASSES /
                     WATCHES ...)
         <->
-    Shopify productType  (the storefront-facing string, e.g. "Eyeglasses")
+    Shopify productType  (the storefront-facing string, e.g. "Spectacles")
 
 This is the single source of truth for the enum reconciliation; it feeds the
 auto-collection lineage in later phases. Pure functions over a small static
