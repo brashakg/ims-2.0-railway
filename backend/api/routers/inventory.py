@@ -2859,7 +2859,10 @@ async def reconcile_stock_count(
 
         # Persist shrinkage audit rows. NOT swallowed -- a lost audit trail for
         # stock we have just destroyed is exactly the failure worth shouting
-        # about, and it used to be a log line under a 200.
+        # about, and it used to be a log line under a 200. If this does fail,
+        # the count stays visibly "reconciling" and every voided unit still
+        # carries void_reason="cycle-count-reconcile:{count_id}", so what was
+        # destroyed is recoverable from stock_units itself.
         if shrinkage_records:
             shrinkage_coll.insert_many(shrinkage_records)
 
