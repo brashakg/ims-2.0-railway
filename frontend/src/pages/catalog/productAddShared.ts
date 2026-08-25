@@ -237,7 +237,8 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
   // (backend services/smartglass_listing.py); leaving one blank just omits its
   // bullet. Keep this field-for-field with the backend SMARTGLASSES registry
   // (product_master._EYEWEAR_SUN_TAIL + _SMARTGLASS_TECH) -- the pin test
-  // productAddShared.registry.test.ts fails if the two drift.
+  // backend/tests/test_smartglass_listing.py, which parses THIS file, fails if
+  // the two drift (test_frontend_list_and_backend_registry_agree_field_for_field).
   SMTFR: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Meta', 'Amazon', 'Google', 'Bose'] },
     { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false, placeholder: 'e.g. Meta' },
@@ -1410,7 +1411,11 @@ const CATEGORY_CODE_SYNONYMS: Record<string, string> = {
   // Accessories
   ACCESSORY: 'ACC', ACCESSORIES: 'ACC', ACC: 'ACC',
   // Smart eyewear / watches
-  SMARTSUNGLASS: 'SMTSG', SMARTSUNGLASSES: 'SMTSG', SMTSG: 'SMTSG',
+  // ONE tile: the retired "Smartglasses (Sunglass)" spellings resolve to SMTFR
+  // like every other one. Resolving them to SMTSG left the picker with nothing
+  // to highlight and categoryName('SMTSG') === '', so the review row showed a
+  // dash. SMTSG survives only as a FIELD-LIST alias (CATEGORY_FIELDS.SMTSG).
+  SMARTSUNGLASS: 'SMTFR', SMARTSUNGLASSES: 'SMTFR', SMTSG: 'SMTFR',
   SMARTGLASSES: 'SMTFR', SMARTGLASS: 'SMTFR', SMTFR: 'SMTFR',
   SMARTWATCH: 'SMTWT', SMARTWATCHES: 'SMTWT', SMTWT: 'SMTWT',
 };
@@ -1432,7 +1437,7 @@ export function inferCategoryCode(raw: unknown): string {
 // space-normalised lower-case string.
 const TITLE_KEYWORD_RULES: Array<[string, string]> = [
   // Smart eyewear / watches (before their non-smart bases).
-  ['smart sunglass', 'SMTSG'],
+  ['smart sunglass', 'SMTFR'],
   ['smart glass', 'SMTFR'], ['smartglass', 'SMTFR'],
   ['smart watch', 'SMTWT'], ['smartwatch', 'SMTWT'],
   // Reading glasses (before generic "glasses" -> frame).
