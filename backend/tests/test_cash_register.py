@@ -451,14 +451,24 @@ class TestCashRegisterEndpoints:
                 "drawer_auto_netted": True,
             }
         )
+        # `counted_override: 0` is a human saying "I counted it, it was
+        # empty". A drawer NOBODY counted has no variance to have a verdict
+        # about at all (that is NOT_COUNTED), so the negative-expected verdict
+        # can only be tested through a drawer that WAS counted.
         r = c.post(
             "/finance/cash-register/close",
-            json={"session_id": sid, "denominations": [], "tolerance": 0},
+            json={
+                "session_id": sid,
+                "denominations": [],
+                "counted_override": 0,
+                "tolerance": 0,
+            },
         )
         assert r.status_code == 200, r.text
         closed = r.json()
         assert closed["cash_refunds"] == 3900.0
         assert closed["expected"] == -3900.0          # the real number is shown
+        assert closed["counted"] == 0.0
         assert closed["variance"] == 3900.0
         # THE REGRESSION: the verdict must stay withheld, not become 'OVER'.
         assert closed["variance_status"] == "NEGATIVE_EXPECTED"

@@ -210,9 +210,9 @@ class TestNothingCountedIsNotAnEmptyDrawer:
         assert res["close"]["till_link_ok"] is True
 
     def test_the_finance_door_with_a_blank_grid_submits_no_count_either(self, db):
-        """``counted`` on the cash-register close is the sum of the grid, so a
-        blank grid makes it 0.0. Forwarding that would put the same fabricated
-        zero on the shared record through the other door."""
+        """A blank grid on the cash-register close sums to 0.0. Forwarding that
+        would put the same fabricated zero on the shared record through the
+        other door."""
         res = till.record_screen_close(
             db,
             store_id=STORE,
@@ -327,10 +327,10 @@ def _seed_linked_pair(db, till_session_id="TILL-1"):
     )
 
 
-def _summary(db):
+def _summary(db, day=DATE):
     return asyncio.run(
         finance_router.cash_reconciliation_summary(
-            from_date=DATE, to_date=DATE, store_id=STORE, current_user=USER
+            from_date=day, to_date=day, store_id=STORE, current_user=USER
         )
     )
 
@@ -391,14 +391,14 @@ class TestOneCountedDrawerIsOneRow:
 # ===========================================================================
 
 
-def _open_cr_session(db, session_id="CR-OPEN"):
+def _open_cr_session(db, session_id="CR-OPEN", opening_float=0.0):
     db.get_collection("cash_register_sessions").insert_one(
         {
             "_id": session_id,
             "session_id": session_id,
             "store_id": STORE,
             "status": "OPEN",
-            "opening_float": 0.0,
+            "opening_float": opening_float,
             "opening_denominations": [],
             "opened_at": "2026-08-24T04:00:00",
         }
@@ -406,18 +406,25 @@ def _open_cr_session(db, session_id="CR-OPEN"):
     return session_id
 
 
-def _cr_close(db, **body_kw):
-    body = finance_router.CashRegisterClose(session_id=_open_cr_session(db), **body_kw)
+def _cr_close(db, opening_float=0.0, **body_kw):
+    body = finance_router.CashRegisterClose(
+        session_id=_open_cr_session(db, opening_float=opening_float), **body_kw
+    )
     return asyncio.run(
         finance_router.close_cash_register(body=body, current_user=USER)
     )
 
 
+def _cr_stored(db, session_id="CR-OPEN"):
+    return db.get_collection("cash_register_sessions").find_one(
+        {"session_id": session_id}
+    )
+
+
 class TestTheFinanceDoorNeverFabricatesACount:
     def test_a_blank_grid_closes_the_till_without_counting_the_drawer(self, db):
-        """``counted`` here is the SUM OF THE GRID, so a blank grid makes it
-        0.0. That figure is the till's own arithmetic -- but forwarding it as a
-        count would tell the shared record the drawer held nothing, which is
+        """A blank grid sums to 0.00 -- the sum of nothing. Forwarding that as
+        a count would tell the shared record the drawer held nothing, which is
         the same lie POS Day-End used to tell."""
         _cr_close(db, denominations=[], bank_deposit=0.0)
 
@@ -425,6 +432,64 @@ class TestTheFinanceDoorNeverFabricatesACount:
         assert session["status"] == till.STATUS_OPEN
         assert session["blind_count_paisa"] is None  # never a fabricated zero
         assert session["closing_count"]["state"] == "NOT_CAPTURED"
+
+    def test_a_blank_finance_close_records_not_counted_never_a_zero_drawer(
+        self, db
+    ):
+        """THE OWNER'S OWN BUG, on the second door. Open with 4 x Rs 500, close
+        with an UNTOUCHED grid: the screen used to persist counted 0.00 against
+        an expected Rs 2,000 -- variance -Rs 2,000, verdict SHORT -- while the
+        very same document's count block said NOT_CAPTURED. One record, two
+        answers, and the honest one lost. A blank grid means NOT COUNTED."""
+        out = _cr_close(db, opening_float=2000.0, denominations=[], bank_deposit=0.0)
+
+        for doc in (out, _cr_stored(db)):
+            # Never (0.0, -2000.0, "SHORT") -- the whole day, called missing.
+            assert (doc["counted"], doc["variance"], doc["variance_status"]) == (
+                None,
+                None,
+                "NOT_COUNTED",
+            )
+            # The expected drawer is still reported -- the figure is real, it
+            # is the VERDICT that is withheld.
+            assert doc["expected"] == 2000.0
+            assert doc["closing_count"]["state"] == "NOT_CAPTURED"
+            assert doc["closing_count"]["matches_amount"] is None
+
+    def test_an_uncounted_drawer_is_not_a_shortfall_on_the_manager_console(
+        self, db
+    ):
+        """The console is where a manager actually reads this. Re-deriving
+        `float(counted or 0)` there would rebuild the fabricated zero -- and
+        its full-day shortfall -- one screen further along."""
+        _cr_close(db, opening_float=2000.0, denominations=[], bank_deposit=0.0)
+        stored = _cr_stored(db)
+        day = finance_router._ist_day_face(stored["closed_at"])
+
+        out = _summary(db, day=day)
+        row = [r for r in out["rows"] if r["session_id"] == "CR-OPEN"][0]
+
+        assert (row["counted_cash"], row["variance"], row["variance_status"]) == (
+            None,
+            None,
+            "NOT_COUNTED",
+        )
+        # ...and it is counted as neither balanced nor short in the totals.
+        assert (out["totals"]["shortage"], out["totals"]["shortage_amount"]) == (0, 0)
+        assert out["totals"]["balanced"] == 0
+
+    def test_a_manager_who_counts_an_empty_drawer_still_gets_a_real_zero(self, db):
+        """POSITIVE CONTROL. Blank is not zero -- but zero is still possible.
+        A typed override of 0 is a human saying "I counted, it was empty", and
+        that must still produce a real count and a real shortfall."""
+        out = _cr_close(
+            db, opening_float=2000.0, denominations=[], counted_override=0.0
+        )
+
+        assert out["counted"] == 0.0
+        assert out["variance"] == -2000.0
+        assert out["variance_status"] == "SHORT"
+        assert _sessions(db)[0]["blind_count_paisa"] == 0
 
     def test_a_counted_grid_does_land_on_the_shared_record(self, db):
         """The positive control: the guard above must not swallow a real count."""

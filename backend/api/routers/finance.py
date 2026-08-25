@@ -4626,10 +4626,29 @@ async def close_cash_register(
     denoms = cash_register.normalize_denominations(
         [d.model_dump() for d in body.denominations]
     )
+    # The sheet exactly as it will be stored, built ONCE here; its amount is
+    # restated at the bottom, when the counted figure is final.
+    closing_block = cash_denom.build_block(
+        denoms, 0, state=body.closing_count_state, actor=current_user
+    )
+    # NOBODY COUNTED -> NO COUNTED FIGURE. The sum of a blank grid is 0.00 --
+    # the sum of nothing -- and persisting it said the drawer WAS counted and
+    # found empty: a full-day negative variance and a SHORT verdict against a
+    # manager who simply never counted. Blank is an absence, at this door too.
+    # `is_captured` is the same authority the shared record uses, so an
+    # explicit COUNTED ("counted, and there was none") is still a real zero,
+    # and so is a typed override of 0.
+    counted_recorded = (
+        cash_denom.is_captured(closing_block) or body.counted_override is not None
+    )
     counted = (
-        round(float(body.counted_override), 2)
-        if body.counted_override is not None
-        else cash_register.total_from_denominations(denoms)
+        (
+            round(float(body.counted_override), 2)
+            if body.counted_override is not None
+            else cash_register.total_from_denominations(denoms)
+        )
+        if counted_recorded
+        else None
     )
 
     summary = cash_register.build_close_summary(
@@ -4643,13 +4662,20 @@ async def close_cash_register(
     )
     # build_close_summary uses the denoms total for counted; honour an override.
     summary["counted"] = counted
-    summary["variance"] = cash_register.compute_variance(counted, summary["expected"])
+    summary["variance"] = (
+        None
+        if counted is None
+        else cash_register.compute_variance(counted, summary["expected"])
+    )
     # RECOMPUTE THE VERDICT -- but NEVER resurrect an over/short verdict that
-    # build_close_summary deliberately withheld. A negative expected drawer means
-    # a cash-in is missing; re-deriving the status here overwrote
-    # NEGATIVE_EXPECTED with a phantom OVERAGE and persisted it next to its own
-    # amber note saying the verdict was withheld.
-    if summary.get("negative_expected_advisory"):
+    # build_close_summary deliberately withheld. No count means no variance and
+    # so no verdict at all; a negative expected drawer means a cash-in is
+    # missing, and re-deriving the status here overwrote NEGATIVE_EXPECTED with
+    # a phantom OVERAGE and persisted it next to its own amber note saying the
+    # verdict was withheld.
+    if counted is None:
+        summary["variance_status"] = cash_register.NOT_COUNTED
+    elif summary.get("negative_expected_advisory"):
         summary["variance_status"] = cash_register.NEGATIVE_EXPECTED
     else:
         summary["variance_status"] = cash_register.variance_status(
@@ -4702,15 +4728,13 @@ async def close_cash_register(
         # count when no grid came with it; with a grid, the notes rule and this
         # is used to notice a `counted_override` that disagrees with them.
         #
-        # NOTHING COUNTED -> NOTHING FORWARDED. `counted` is 0.0 when the grid
-        # is blank and no override was typed, because it is the sum of nothing.
-        # Passing that on would submit "the drawer held Rs 0.00" to the shared
-        # record -- the exact blank-persisted-as-emptied defect this work
-        # removes, moved onto the record all three screens read.
+        # NOTHING COUNTED -> NOTHING FORWARDED. `counted` is None when nobody
+        # counted, and a None never becomes a Rs 0.00 submitted to the shared
+        # record -- that is the blank-persisted-as-emptied defect this work
+        # removes, and the record all three screens read is the worst place for
+        # it. Same test as the figure this screen stores: one answer, not two.
         counted_paisa=(
-            cash_denom.rupees_to_paisa(counted)
-            if (denoms or body.counted_override is not None)
-            else None
+            cash_denom.rupees_to_paisa(counted) if counted is not None else None
         ),
         actor=current_user,
     )
@@ -4724,9 +4748,8 @@ async def close_cash_register(
     # The grid typed here is still stored as this screen's sheet, and a sheet
     # that disagrees with the shared count flags itself (matches_amount False).
     shared_paisa = _shared_counted_paisa(till_link)
-    count_adopted = (
-        shared_paisa is not None
-        and shared_paisa != cash_denom.rupees_to_paisa(counted)
+    count_adopted = shared_paisa is not None and (
+        counted is None or shared_paisa != cash_denom.rupees_to_paisa(counted)
     )
     if count_adopted:
         counted = cash_denom.paisa_to_rupees(shared_paisa)
@@ -4734,10 +4757,13 @@ async def close_cash_register(
         summary["variance"] = cash_register.compute_variance(
             counted, summary["expected"]
         )
-        if not summary.get("negative_expected_advisory"):
-            summary["variance_status"] = cash_register.variance_status(
-                summary["variance"], body.tolerance
-            )
+        # There IS a count now, so the withheld NOT_COUNTED verdict must not
+        # survive -- only NEGATIVE_EXPECTED still outranks the arithmetic.
+        summary["variance_status"] = (
+            cash_register.NEGATIVE_EXPECTED
+            if summary.get("negative_expected_advisory")
+            else cash_register.variance_status(summary["variance"], body.tolerance)
+        )
 
     update = {
         "status": "CLOSED",
@@ -4745,10 +4771,10 @@ async def close_cash_register(
         "closed_by": current_user.get("user_id"),
         "closed_by_name": current_user.get("name"),
         "closing_denominations": denoms,
-        # The shared Cash Count Block + the session it belongs to.
-        "closing_count": cash_denom.build_block(
-            denoms, cash_denom.rupees_to_paisa(counted),
-            state=body.closing_count_state, actor=current_user,
+        # The shared Cash Count Block + the session it belongs to. The block
+        # was built above; this points it at the figure actually being stored.
+        "closing_count": cash_denom.restate_amount(
+            closing_block, cash_denom.rupees_to_paisa(counted)
         ),
         "till_session_id": till_link.get("session_id"),
         "till_link_ok": bool(till_link.get("ok")),
@@ -5078,8 +5104,13 @@ async def cash_reconciliation_summary(
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)
-        counted = round(float(s.get("counted", 0) or 0), 2)
-        variance = round(counted - expected, 2)
+        # A DRAWER NOBODY COUNTED HAS NO FIGURE HERE EITHER. `counted` is None
+        # on such a close record; `float(None or 0)` would have rebuilt the
+        # fabricated zero -- and its full-day shortfall -- one screen further
+        # along, which is where a manager actually reads it.
+        raw_counted = s.get("counted")
+        counted = None if raw_counted is None else round(float(raw_counted or 0), 2)
+        variance = None if counted is None else round(counted - expected, 2)
         tol = float(s.get("tolerance", 0) or 0)
         closed_by = s.get("closed_by")
         if closed_by and not s.get("closed_by_name"):
@@ -5108,7 +5139,9 @@ async def cash_reconciliation_summary(
                 # below bucket on; the session's own OVER/SHORT wording is not
                 # interchangeable with it.)
                 "variance_status": (
-                    cash_register.NEGATIVE_EXPECTED
+                    cash_register.NOT_COUNTED
+                    if counted is None
+                    else cash_register.NEGATIVE_EXPECTED
                     if s.get("negative_expected_advisory")
                     else _recon_status(variance, tol)
                 ),
@@ -5159,8 +5192,13 @@ async def cash_reconciliation_summary(
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = _p2r(s.get("expected_cash_paisa"))
-        counted = _p2r(s.get("blind_count_paisa"))
-        variance = round(counted - expected, 2)
+        # Same rule on the Z-Read side: `blind_count_paisa` stays None until
+        # somebody counts, so an uncounted drawer reports no figure, not zero.
+        counted = (
+            None if s.get("blind_count_paisa") is None
+            else _p2r(s.get("blind_count_paisa"))
+        )
+        variance = None if counted is None else round(counted - expected, 2)
         tol = _p2r(s.get("tolerance_paisa"))
         locked_by = s.get("locked_by")
         if locked_by and not s.get("locked_by_name"):
@@ -5188,8 +5226,11 @@ async def cash_reconciliation_summary(
                 "variance": variance,
                 # Trust the engine's stored status when present (it used the
                 # configured tolerance); else classify with the same band.
-                "variance_status": s.get("variance_status")
-                or _recon_status(variance, tol),
+                "variance_status": (
+                    cash_register.NOT_COUNTED
+                    if counted is None
+                    else s.get("variance_status") or _recon_status(variance, tol)
+                ),
                 "tolerance": tol,
                 "by_mode": _norm_by_mode(s.get("by_mode")),
                 "by_mode_basis": "NET_OF_RECORDED_REFUNDS",

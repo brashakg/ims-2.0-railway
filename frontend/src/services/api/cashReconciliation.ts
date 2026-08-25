@@ -9,7 +9,16 @@
 
 import api from './client';
 
-export type ReconStatus = 'BALANCED' | 'OVERAGE' | 'SHORTAGE';
+// NOT_COUNTED: nobody counted that drawer, so there is no variance and no
+// verdict. NEGATIVE_EXPECTED: the expected drawer computed below zero (a
+// cash-in is missing), so the over/short verdict is withheld. Both are
+// withheld verdicts, never a Rs 0.00 drawer.
+export type ReconStatus =
+  | 'BALANCED'
+  | 'OVERAGE'
+  | 'SHORTAGE'
+  | 'NEGATIVE_EXPECTED'
+  | 'NOT_COUNTED';
 export type ReconSource = 'CASH_REGISTER' | 'BLIND_EOD';
 
 export interface ReconByModeRow {
@@ -38,9 +47,11 @@ export interface ReconRow {
   cash_expenses: number;
   bank_deposit: number;
   expected_cash: number;
-  counted_cash: number;
+  // NULL means nobody counted this drawer -- there is no counted figure and no
+  // variance. Never render a null as zero.
+  counted_cash: number | null;
   blind: boolean;
-  variance: number;
+  variance: number | null;
   variance_status: ReconStatus;
   tolerance: number;
   by_mode: Record<string, ReconByModeRow>;

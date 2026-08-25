@@ -128,6 +128,17 @@ def variance_status(variance: float, tolerance: float = 0.0) -> str:
 # credit the cashier with money they never held, so the verdict is suppressed
 # and this advisory is surfaced instead. The number itself is NEVER clamped or
 # hidden -- a real figure is always shown.
+# The withheld verdict for a drawer NOBODY COUNTED. There is no variance to
+# report against a count that was never taken, and the sum of a blank grid
+# (Rs 0.00) is not a count -- reporting it as one accused a manager who skipped
+# the count of emptying the till. Absence is a state, here as everywhere else
+# in the count block.
+NOT_COUNTED = "NOT_COUNTED"
+NOT_COUNTED_MESSAGE = (
+    "This drawer was closed without a count, so it is recorded as never "
+    "counted - not as an empty drawer. There is no variance to report."
+)
+
 NEGATIVE_EXPECTED = "NEGATIVE_EXPECTED"
 NEGATIVE_EXPECTED_MESSAGE = (
     "More cash was refunded than this drawer took in - a cash-in is missing "

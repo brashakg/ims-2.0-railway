@@ -17,7 +17,7 @@
 // screen gets tuned out inside a week.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 
 vi.mock('../../../services/api/cashRegister', () => ({
   cashRegisterApi: {
@@ -80,6 +80,20 @@ const CLOSED_SHARED = {
   counted_from_shared_record: true,
 };
 
+/** THE OWNER'S BUG: closed with an untouched grid. Nobody counted, so there is
+ *  no counted figure and no variance -- not a Rs 0 drawer Rs 2,000 short. */
+const CLOSED_UNCOUNTED = {
+  ...CLOSED_SHARED,
+  session_id: 'ZZ-CR-3',
+  counted: null,
+  expected: 2000,
+  variance: null,
+  variance_status: 'NOT_COUNTED' as const,
+  till_already_counted: false,
+  till_count_differs: false,
+  counted_from_shared_record: false,
+};
+
 /** The ordinary case: this screen counted the drawer itself. */
 const CLOSED_OWN = {
   ...CLOSED_SHARED,
@@ -110,6 +124,22 @@ describe('CashRegisterPage - a count that came from the other door says so', () 
     // The figure shown IS the shared one, not the grid typed on this screen.
     expect(screen.getAllByText('₹3,000')).not.toHaveLength(0);
     expect(screen.queryByText('₹2,000')).not.toBeInTheDocument();
+  });
+
+  it('says "Not counted" for a drawer nobody counted, never Rs 0 and short', async () => {
+    primeHistory(CLOSED_UNCOUNTED);
+    render(<CashRegisterPage />);
+
+    const cell = await screen.findByText('ZZ-CR-3');
+    const row = within(cell.closest('tr') as HTMLElement);
+    // The counted cell AND the variance chip both say it.
+    expect(row.getAllByText('Not counted')).toHaveLength(2);
+    // Never a fabricated zero, and never the whole day reported missing.
+    expect(row.queryByText('₹0')).not.toBeInTheDocument();
+    expect(row.queryByText('-₹2,000')).not.toBeInTheDocument();
+    // The expected drawer is still shown on the row: the FIGURE is real, the
+    // VERDICT is what is withheld.
+    expect(row.getByText('₹2,000')).toBeInTheDocument();
   });
 
   it('shows NOTHING when this screen counted the drawer itself', async () => {

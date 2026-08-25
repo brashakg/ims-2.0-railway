@@ -35,10 +35,19 @@ export interface CashRegisterSession {
   cash_refunds?: number | null;
   cash_expenses?: number | null;
   bank_deposit?: number | null;
+  // NULL means NOBODY COUNTED. A drawer closed without a count has no counted
+  // figure and no variance, and its verdict is withheld (NOT_COUNTED) -- it is
+  // never a Rs 0.00 drawer with a full-day shortfall.
   counted?: number | null;
   expected?: number | null;
   variance?: number | null;
-  variance_status?: 'BALANCED' | 'OVER' | 'SHORT' | null;
+  variance_status?:
+    | 'BALANCED'
+    | 'OVER'
+    | 'SHORT'
+    | 'NEGATIVE_EXPECTED'
+    | 'NOT_COUNTED'
+    | null;
   tolerance?: number | null;
   closing_note?: string | null;
   // TWO DOORS, ONE RECORD. The shared till session this drawer was counted on,

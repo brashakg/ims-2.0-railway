@@ -148,7 +148,13 @@ export default function CashRegisterPage() {
         tolerance: tol,
       });
       const v = closed.variance ?? 0;
-      if (closed.counted_from_shared_record) {
+      if (closed.variance_status === 'NOT_COUNTED') {
+        // Blank is not zero. Say what was recorded, so nobody goes looking for
+        // a shortfall that was never measured.
+        toast.warning(
+          'Closed without a count — recorded as NOT COUNTED, not as an empty drawer. No variance was calculated.',
+        );
+      } else if (closed.counted_from_shared_record) {
         // The drawer was already counted at POS Day-End. That count stands --
         // say so, because the figure now on this screen is not the one that was
         // just typed into the grid, and a silently swapped number is how the
@@ -269,7 +275,13 @@ export default function CashRegisterPage() {
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.closed_at)}</td>
                       <td className="px-4 py-2 text-right">{inr(s.opening_float)}</td>
                       <td className="px-4 py-2 text-right">
-                        {s.status === 'CLOSED' ? inr(s.counted) : '—'}
+                        {s.status !== 'CLOSED' ? (
+                          '—'
+                        ) : s.counted == null ? (
+                          <span className="text-gray-500 text-xs">Not counted</span>
+                        ) : (
+                          inr(s.counted)
+                        )}
                         {s.counted_from_shared_record && (
                           <span
                             data-testid="counted-at-day-end"
@@ -582,8 +594,20 @@ function Row({
 }
 
 function VarianceChip({ session }: { session: CashRegisterSession }) {
-  const v = session.variance ?? 0;
   const status = session.variance_status;
+  // A drawer nobody counted has no variance to show. Showing "−₹2,000" here
+  // was the whole day reported missing because the grid was left untouched.
+  if (status === 'NOT_COUNTED' || session.variance == null) {
+    return (
+      <span
+        title="Closed without a count. Not counted is not an empty drawer."
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Not counted
+      </span>
+    );
+  }
+  const v = session.variance;
   const cls =
     status === 'BALANCED'
       ? 'bg-green-50 text-green-700'
