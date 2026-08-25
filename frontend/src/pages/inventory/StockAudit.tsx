@@ -273,6 +273,25 @@ export function StockAudit() {
     }
   };
 
+  // A write-off that destroyed the stock but lost its audit write leaves the
+  // count parked in "reconciling" with every other door shut. Finishing it
+  // rebuilds the audit trail from the units it actually took; it never
+  // destroys another unit.
+  const handleFinishStuck = async (audit: StockAudit) => {
+    setWritingOff(audit.count_id);
+    try {
+      const result = await inventoryApi.finishStuckWriteOff(audit.count_id);
+      toast.success(
+        `Finished ${audit.audit_number} — ${result.units_voided || 0} unit(s) had already been written off (${money(result.shrinkage_value_written_off)}). No further stock was touched.`
+      );
+      loadAudits();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Could not finish the stuck write-off');
+    } finally {
+      setWritingOff(null);
+    }
+  };
+
   const completedAudits = audits.filter((a) => a.status === 'completed');
   const reconciledAudits = audits.filter((a) => a.status === 'reconciled');
   const inProgressAudits = audits.filter((a) => a.status === 'in_progress');
@@ -558,6 +577,35 @@ export function StockAudit() {
                           ) : (
                             <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
                               An admin has to write this off — counting is yours, removing stock from the books is not.
+                            </p>
+                          )
+                        )}
+
+                        {audit.status === 'reconciling' && (
+                          canWriteOff ? (
+                            <div className="space-y-2">
+                              <p className="text-sm" style={{ color: 'var(--warn)' }}>
+                                This write-off stopped part-way. The stock it had already
+                                removed is gone; its record of what it removed was not saved.
+                                Finishing rebuilds that record from the stock itself — it
+                                never removes anything more.
+                              </p>
+                              <button
+                                className="btn"
+                                disabled={writingOff === audit.count_id}
+                                onClick={() => handleFinishStuck(audit)}
+                              >
+                                {writingOff === audit.count_id ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <CheckCircle className="w-4 h-4" />
+                                )}
+                                Finish this write-off
+                              </button>
+                            </div>
+                          ) : (
+                            <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
+                              This write-off stopped part-way — an admin has to finish it.
                             </p>
                           )
                         )}

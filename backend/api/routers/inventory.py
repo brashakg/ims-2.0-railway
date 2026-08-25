@@ -3103,6 +3103,167 @@ async def reconcile_stock_count(
         )
 
 
+@router.post("/stock-count/{count_id}/reconcile/finish")
+async def finish_stuck_stock_count_reconcile(
+    count_id: str,
+    request: Optional[ReconcileStockCountRequest] = None,
+    # Same gate as the write-off itself (owner ruling 2026-08-25 #8): every
+    # door onto a stock write-off is ADMIN / SUPERADMIN only.
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Close a write-off that destroyed the stock but lost its audit write.
+
+    The write-off voids units first and writes ``stock_shrinkage`` after. If
+    that insert fails it 500s on purpose -- but the count was then parked in
+    ``reconciling`` forever: reconcile refuses it ("only completed counts"),
+    complete refuses it ("not in progress"), and no route reset it.
+
+    Re-running the write-off is NOT the fix: the units are already gone, so a
+    retry would void a second set. This finishes the count from what the
+    write-off ACTUALLY did -- every unit it took still carries
+    ``void_reason="cycle-count-reconcile:{count_id}"`` -- and destroys nothing.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        counts_coll = db.get_collection("stock_counts")
+        shrinkage_coll = db.get_collection("stock_shrinkage")
+        stock_coll = db.get_collection("stock_units")
+
+        count_doc = counts_coll.find_one({"count_id": count_id})
+        if not count_doc:
+            raise HTTPException(status_code=404, detail="Stock count session not found")
+        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Stock count session not found")
+        if count_doc.get("status") != "reconciling":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only a write-off that stopped part-way can be finished "
+                    f"(current status: {count_doc.get('status')})"
+                ),
+            )
+
+        void_reason = f"cycle-count-reconcile:{count_id}"
+        voided_by_product: Dict[str, int] = {}
+        for unit in stock_coll.find({"void_reason": void_reason}, {"product_id": 1}):
+            pid = str(unit.get("product_id") or "")
+            if pid:
+                voided_by_product[pid] = voided_by_product.get(pid, 0) + 1
+
+        # ponytail: two admins clicking Finish in the same instant could both
+        # pass this read and write one audit row each. No stock is destroyed
+        # either way and the loser's status flip 409s; add a claim flip if
+        # this ever stops being a rare manual recovery.
+        already = {
+            r.get("product_id")
+            for r in shrinkage_coll.find({"count_id": count_id}, {"product_id": 1})
+        }
+        variances = {v.get("product_id"): v for v in (count_doc.get("variances") or [])}
+        costs = _product_costs(db, list(voided_by_product.keys()))
+        now = datetime.utcnow()
+        notes = request.notes if request else None
+
+        rows = []
+        reconciled_items = []
+        units_total = 0
+        value_total = 0.0
+        for pid, voided in voided_by_product.items():
+            v = variances.get(pid) or {}
+            unit_cost = float(costs.get(pid, 0.0) or 0.0)
+            value = round(voided * unit_cost, 2)
+            units_total += voided
+            value_total += value
+            reconciled_items.append(
+                {
+                    "product_id": pid,
+                    "product_name": v.get("product_name", ""),
+                    "sku": v.get("sku", ""),
+                    "system_quantity": int(v.get("system_quantity", 0) or 0),
+                    "physical_quantity": int(v.get("physical_quantity", 0) or 0),
+                    "accepted_quantity": int(v.get("physical_quantity", 0) or 0),
+                    "units_voided": voided,
+                    "units_not_voided": 0,
+                }
+            )
+            if pid in already:
+                continue
+            rows.append(
+                {
+                    "shrinkage_id": str(uuid.uuid4()),
+                    "count_id": count_id,
+                    "audit_number": count_doc.get("audit_number", ""),
+                    "store_id": count_doc.get("store_id", ""),
+                    "product_id": pid,
+                    "product_name": v.get("product_name", ""),
+                    "sku": v.get("sku", ""),
+                    "shrinkage_quantity": voided,
+                    "units_voided": voided,
+                    "units_not_voided": 0,
+                    "unit_cost": round(unit_cost, 2),
+                    "shrinkage_value": value,
+                    "system_quantity": int(v.get("system_quantity", 0) or 0),
+                    "accepted_quantity": int(v.get("physical_quantity", 0) or 0),
+                    "recorded_at": now.isoformat(),
+                    "recorded_by": current_user.get("user_id", ""),
+                    # Rebuilt from the units themselves after the original
+                    # audit write failed -- say so, never pass it off as the
+                    # trail written at the time.
+                    "recovered": True,
+                    "notes": notes,
+                }
+            )
+
+        if rows:
+            shrinkage_coll.insert_many(rows)
+
+        value_total = round(value_total, 2)
+        claimed = counts_coll.update_one(
+            {"count_id": count_id, "status": "reconciling"},
+            {
+                "$set": {
+                    "status": "reconciled",
+                    "reconciled_at": now.isoformat(),
+                    "reconciled_by": current_user.get("user_id", ""),
+                    "reconciled_by_name": current_user.get(
+                        "full_name", current_user.get("username", "")
+                    ),
+                    "reconciliation_notes": notes,
+                    "reconciled_items": reconciled_items,
+                    "shrinkage_count": len(voided_by_product),
+                    "overage_count": 0,
+                    "units_voided": units_total,
+                    "units_not_voided": 0,
+                    "shrinkage_value_written_off": value_total,
+                    "recovered_from_stuck_write_off": True,
+                }
+            },
+        )
+        if getattr(claimed, "modified_count", 0) != 1:
+            raise HTTPException(status_code=409, detail="This count is no longer stuck")
+
+        return {
+            "message": "Stuck write-off finished from what it actually took",
+            "count_id": count_id,
+            "audit_number": count_doc.get("audit_number", ""),
+            "units_voided": units_total,
+            "shrinkage_lines": len(voided_by_product),
+            "audit_rows_written": len(rows),
+            "shrinkage_value_written_off": value_total,
+            "reconciled_at": now.isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"finish_stuck_stock_count_reconcile error: {e}")
+        raise HTTPException(
+            status_code=500, detail="Could not finish the stuck write-off"
+        )
+
+
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
 # ============================================================================

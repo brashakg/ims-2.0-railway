@@ -294,6 +294,16 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // Close a write-off that destroyed the stock but lost its audit write, so
+  // the count is not parked in "reconciling" forever. Destroys nothing.
+  finishStuckWriteOff: async (countId: string, notes?: string) => {
+    const response = await api.post(
+      `/inventory/stock-count/${countId}/reconcile/finish`,
+      notes ? { notes } : {}
+    );
+    return response.data;
+  },
+
   getStockCount: async (countId: string) => {
     const response = await api.get(`/inventory/stock-count/${countId}`);
     return response.data;

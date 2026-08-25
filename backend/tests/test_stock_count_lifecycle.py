@@ -1046,3 +1046,233 @@ def test_a_written_off_count_still_names_who_was_responsible(admin_client, mongo
         "who was responsible for that shelf"
     )
     assert row[0]["custodian_name"] == "Ravi"
+
+
+# ============================================================================
+# 10. "reconciling" MUST NOT BE A DEAD END
+# ============================================================================
+# The write-off voids the units FIRST and writes the shrinkage audit rows
+# after. If that insert fails the endpoint 500s (correctly -- a lost audit
+# trail for stock just destroyed is worth shouting about), but the count is
+# then parked in "reconciling" forever: reconcile 400s ("only completed
+# counts"), complete 400s ("not in progress"), and no route resets it.
+#
+# Re-running the write-off is NOT the answer -- the units are already gone, so
+# a retry would void a second set. The stuck count is finished from what the
+# write-off ACTUALLY did: the voided units still carry
+# void_reason="cycle-count-reconcile:{count_id}".
+
+
+class _ShrinkageAuditIsDown:
+    """The real stock_shrinkage collection, except insert_many fails once."""
+
+    def __init__(self, coll):
+        self._c = coll
+        self.blown = False
+
+    def insert_many(self, *a, **kw):
+        if not self.blown:
+            self.blown = True
+            raise RuntimeError("audit store unavailable")
+        return self._c.insert_many(*a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def _stick_a_count(admin_client, mongo_db, monkeypatch):
+    """A count whose write-off destroyed the stock and lost the audit write."""
+    pid, count_id, barcodes = _counted_short(
+        admin_client, mongo_db, on_hand=5, counted=3
+    )
+    broken = _ShrinkageAuditIsDown(mongo_db["stock_shrinkage"])
+    real_get = _DBProxy(mongo_db).get_collection
+
+    class _Proxy:
+        is_connected = True
+
+        def get_collection(self, name):
+            return broken if name == "stock_shrinkage" else real_get(name)
+
+        def __getattr__(self, name):
+            return real_get(name)
+
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _Proxy())
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 500, f"a lost audit trail must fail loud; got {r.text}"
+    assert broken.blown
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(mongo_db))
+    return pid, count_id, barcodes
+
+
+def test_a_write_off_that_lost_its_audit_write_leaves_the_count_stuck(
+    admin_client, mongo_db, monkeypatch
+):
+    """The precondition, proved rather than assumed."""
+    pid, count_id, _bc = _stick_a_count(admin_client, mongo_db, monkeypatch)
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["status"] == "reconciling"
+    assert (
+        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
+        == 2
+    ), "the stock is already destroyed -- a retry must never void a second set"
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
+    # and every other door is shut
+    assert (
+        admin_client.post(
+            f"/inventory/stock-count/{count_id}/reconcile", json={}
+        ).status_code
+        == 400
+    )
+    assert (
+        admin_client.post(
+            f"/inventory/stock-count/{count_id}/complete", json={}
+        ).status_code
+        == 400
+    )
+
+
+def test_an_admin_can_finish_a_stuck_write_off_without_destroying_more_stock(
+    admin_client, mongo_db, monkeypatch
+):
+    pid, count_id, _bc = _stick_a_count(admin_client, mongo_db, monkeypatch)
+
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish",
+        json={"notes": "audit store came back"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["units_voided"] == 2, "what the write-off actually took"
+    assert body["shrinkage_lines"] == 1
+    assert (
+        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
+        == 2
+    ), "finishing the stuck count must never destroy a second set of units"
+    assert (
+        mongo_db["stock_units"].count_documents(
+            {"product_id": pid, "status": "AVAILABLE"}
+        )
+        == 3
+    )
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["status"] == "reconciled"
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert row["units_voided"] == 2
+    assert row["shrinkage_value"] == 4000.0, "rebuilt from what was really taken"
+    assert row["recovered"] is True
+
+
+def test_finishing_a_stuck_count_twice_writes_one_audit_trail(
+    admin_client, mongo_db, monkeypatch
+):
+    _pid, count_id, _bc = _stick_a_count(admin_client, mongo_db, monkeypatch)
+    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile/finish", json={})
+
+    again = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish", json={}
+    )
+    assert again.status_code == 400
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 1
+
+
+def test_a_store_manager_cannot_finish_a_stuck_write_off(
+    admin_client, manager_client, mongo_db, monkeypatch
+):
+    """Owner ruling 2026-08-25 (#8) covers every door onto a write-off."""
+    _pid, count_id, _bc = _stick_a_count(admin_client, mongo_db, monkeypatch)
+
+    r = manager_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish", json={}
+    )
+    assert r.status_code == 403
+    assert (
+        mongo_db["stock_counts"].find_one({"count_id": count_id})["status"]
+        == "reconciling"
+    )
+
+
+class _ShrinkageAuditDiesPartWay:
+    """insert_many is ORDERED: it can land the first row and then fail. The
+    stuck count is then part-audited, and finishing it must not write a
+    second row for the product that already has one."""
+
+    def __init__(self, coll):
+        self._c = coll
+        self.blown = False
+
+    def insert_many(self, docs, *a, **kw):
+        docs = list(docs)
+        if not self.blown:
+            self.blown = True
+            if docs:
+                self._c.insert_one(docs[0])
+            raise RuntimeError("audit store died after the first row")
+        return self._c.insert_many(docs, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def test_finishing_a_part_audited_count_does_not_double_the_audit_trail(
+    admin_client, mongo_db, monkeypatch
+):
+    """Two shrinkage lines, the first row written before the audit store
+    died. Finishing writes the missing row only."""
+    count_id, pids, barcodes, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=2, units=3
+    )
+    for pid in pids:
+        admin_client.post(
+            "/inventory/stock-count-scan",
+            json={
+                "barcode": barcodes[pid][0],
+                "physical_count": 1,
+                "count_id": count_id,
+            },
+        )
+    assert (
+        admin_client.post(
+            f"/inventory/stock-count/{count_id}/complete", json={}
+        ).status_code
+        == 200
+    )
+
+    broken = _ShrinkageAuditDiesPartWay(mongo_db["stock_shrinkage"])
+    real_get = _DBProxy(mongo_db).get_collection
+
+    class _Proxy:
+        is_connected = True
+
+        def get_collection(self, name):
+            return broken if name == "stock_shrinkage" else real_get(name)
+
+        def __getattr__(self, name):
+            return real_get(name)
+
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _Proxy())
+    assert (
+        admin_client.post(
+            f"/inventory/stock-count/{count_id}/reconcile", json={}
+        ).status_code
+        == 500
+    )
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(mongo_db))
+    assert broken.blown
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 1
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish", json={}
+    ).json()
+
+    assert body["audit_rows_written"] == 1, "only the row that was lost"
+    rows = list(mongo_db["stock_shrinkage"].find({"count_id": count_id}))
+    assert len(rows) == 2, (
+        "the product that already had an audit row was given a second one -- "
+        "the loss now reads as twice what was taken"
+    )
+    assert {r["product_id"] for r in rows} == set(pids)
+    assert sum(r["units_voided"] for r in rows) == 4
