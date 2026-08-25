@@ -352,8 +352,8 @@ export default function OnlineShopifySyncPage() {
             Number(res.pushed_count ?? 0) > 0
               ? `${ent.label}: stopped at ${capText} — run again to continue (the pending count ` +
                   'below shows the remainder).'
-              : `${ent.label}: stopped at ${capText}, but NOTHING was published this press — ` +
-                  'pressing again will not help until the reasons above are fixed.',
+              : `${ent.label}: stopped at ${capText}, but NOTHING went live this press — ` +
+                  'the lines above say why. Press again to try the products behind these.',
           );
         }
       }
@@ -396,8 +396,8 @@ export default function OnlineShopifySyncPage() {
             'stop at 500) — NOT everything was pushed. ' +
             (Number(res.pushed_count ?? 0) > 0
               ? 'Click again to continue; the pending counts below show the remainder.'
-              : 'NOTHING was published this press — clicking again will not help until the ' +
-                'reasons shown below are fixed.'),
+              : 'NOTHING went live this press — the lines below say why. Click again to try ' +
+                'the objects behind these.'),
         );
       }
       loadStatus();
@@ -691,7 +691,7 @@ export default function OnlineShopifySyncPage() {
                         <AlertTriangle className="w-3 h-3" />{' '}
                         {Number(sweep.pushed_count ?? 0) > 0
                           ? 'Stopped at the safety cap — run again to continue.'
-                          : 'Stopped at the safety cap, but NOTHING was published — pressing again will not help until the reasons above are fixed.'}
+                          : 'Stopped at the safety cap, but NOTHING went live this press — the lines above say why. Press again to try the products behind these.'}
                       </p>
                     )}
                     {Array.isArray(sweep.results) && sweep.results.length > 0 ? (

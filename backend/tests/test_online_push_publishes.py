@@ -1027,3 +1027,39 @@ def test_an_archived_row_is_never_counted_as_pushed(db, shopify, monkeypatch):
     assert bucket.get("archived_not_listed") == 1
     assert out["pushed_count"] == 0, "an invisible retired product counted as live"
     assert shopify.calls_of("imsPublishablePublish") == []
+
+
+def test_a_failed_row_is_never_counted_as_processed(db, shopify, monkeypatch):
+    """A FAILED row reached nobody -- a Shopify userError, a transport failure,
+    or a fail-closed block check that made no call at all. Counting it as
+    processed reads "3 processed" over three invisible products: the same lie
+    this whole change exists to kill, in the same place.
+
+    Asserted on the SET and the COUNT: the summary must name the failures AND
+    the processed number must exclude them."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    for i in range(3):
+        _seed(db, _product(pid="F%02d" % i))
+
+    async def _boom(db_, query, variables):
+        if _Shopify._op(query) == "imsProductCreate":
+            return {
+                "data": {
+                    "productCreate": {
+                        "product": None,
+                        "userErrors": [{"field": ["handle"], "message": "taken"}],
+                    }
+                }
+            }
+        return await shopify(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", _boom)
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    bucket = out["summary"]["products"]
+    assert bucket.get("failed") == 3, bucket
+    assert bucket.get("pushed", 0) == 0, bucket
+    assert out["pushed_count"] == 0, (
+        "'%d processed' over three products no shopper can find"
+        % out["pushed_count"]
+    )

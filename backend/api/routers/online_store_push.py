@@ -769,6 +769,11 @@ async def push_all_pending(
         (b.get("refused_no_photo") or 0)
         + (b.get("publish_withheld") or 0)
         + (b.get("archived_not_listed") or 0)
+        # A FAILED row reached nobody either -- a Shopify userError, a transport
+        # failure, or a fail-closed block check that made zero calls at all.
+        # Counting it as processed reads "3 processed" over zero visible, which
+        # is the same lie in the same place.
+        + (b.get("failed") or 0)
         for b in summary.values()
     )
     return {

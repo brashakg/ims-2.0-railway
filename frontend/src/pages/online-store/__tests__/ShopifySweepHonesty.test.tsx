@@ -286,9 +286,13 @@ describe('the sweep names the products it deliberately left alone', () => {
 });
 
 describe('the cap notice must not promise progress a repeat press cannot make', () => {
-  it('does NOT say "run again to continue" when the press published nothing', async () => {
-    // The starvation shape: the cap was spent entirely on rows that were
-    // withheld, so pressing again changes nothing until they are fixed.
+  it('neither promises progress nor forbids it when the press published nothing', async () => {
+    // The cap was spent entirely on withheld rows. TWO sentences are wrong
+    // here, and the screen has told both lies in turn:
+    //   "run again to continue"      -- promises progress this press cannot make
+    //   "pressing again will not help" -- forbids a press that DOES work, because
+    //                                   the next 25 rows may be perfectly fine
+    // The honest line states what happened and leaves the decision alone.
     (pushApi.pushAllPending as any).mockResolvedValue({
       ...sweep({ pushed: 0, failed: 0, noop: 0, publish_withheld: 25 }, 0),
       limit_reached: true,
@@ -298,8 +302,9 @@ describe('the cap notice must not promise progress a repeat press cannot make', 
 
     const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
     expect(info).not.toMatch(/run again to continue/i);
-    expect(info).toMatch(/NOTHING was published/i);
-    expect(await screen.findByText(/pressing again will not help/i)).toBeTruthy();
+    expect(info).not.toMatch(/will not help/i);
+    expect(info).toMatch(/NOTHING went live/i);
+    expect(await screen.findByText(/NOTHING went live this press/i)).toBeTruthy();
   });
 
   it('still says "run again to continue" when the press DID publish', async () => {
