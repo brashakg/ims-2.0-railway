@@ -15,9 +15,13 @@ through the same push engine, the same gates and the same refusals.
 DRY-RUN BY DEFAULT: prints the plan and writes NOTHING. Pass --apply to write.
 
 WHAT IS SKIPPED, AND WHY (every bucket is printed):
-  already_live    ecom.shopify_product_id present -- the row is ALREADY on the
+  already_live    ecom.shopify_product_id present AND ecom.status == PUBLISHED
+                  -- IMS has recorded a successful publish, so the row is on the
                   live storefront. Never touched: re-queueing a live product
-                  would re-push (and re-price) it for no reason.
+                  would re-push (and re-price) it for no reason. A mapped row
+                  that was never published (status DRAFT / absent) is NOT live:
+                  it went up as an invisible draft and IS queued, which is the
+                  main thing this backfill rescues.
   already_queued  ecom.locally_modified is already True -- nothing to do. This
                   is what makes a second run a no-op.
   no_photograph   Owner ruling 2026-08-25, "no photo, no publish". The push
@@ -77,9 +81,21 @@ def classify(doc: Dict[str, Any], blocked: Set[str]) -> str:
     storefront is never touched by a backfill, whatever else is true of it.
     After that every refusal is checked BEFORE `queue`, so no row the push would
     refuse is ever queued.
+
+    "ALREADY MAPPED" IS NOT "ALREADY LIVE". A Shopify id alone proves only that
+    SOME press reached Shopify -- and the premise of this whole change is that
+    every one of those presses sent a DRAFT, published to no sales channel and
+    invisible. Skipping on the id alone would skip exactly the rows the backfill
+    exists to rescue. Live therefore requires BOTH the id AND a recorded
+    successful publish: ecom.status == "PUBLISHED", which is only ever written
+    after publishablePublish succeeded (shopify_push._writeback_product) and is
+    cleared back to DRAFT by a take-down.
     """
     ecom = doc.get("ecom") or {}
-    if ecom.get("shopify_product_id"):
+    if (
+        ecom.get("shopify_product_id")
+        and str(ecom.get("status") or "").upper() == "PUBLISHED"
+    ):
         return "already_live"
     if ecom.get("locally_modified"):
         return "already_queued"

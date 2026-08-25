@@ -218,3 +218,36 @@ def test_already_live_beats_every_other_bucket(db):
                      "shopify_product_id": "gid://shopify/Product/900"})
 
     assert bf.classify(doc, {"SKU-P1"}) == "already_live"
+
+
+def test_a_mapped_row_that_was_never_published_is_queued(db):
+    """"Already mapped" is NOT "already live". This whole PR exists because
+    every row an earlier press put on Shopify went up as an invisible DRAFT --
+    so skipping every row that carries a Shopify id skips exactly the products
+    the backfill is being run to rescue. Only a recorded successful publish
+    (ecom.status PUBLISHED, which after this PR is only ever written by
+    shopify_push after publishablePublish succeeded) means "live"."""
+    coll = _seed(
+        db,
+        _row("P1", ecom={"status": "DRAFT",
+                         "shopify_product_id": "gid://shopify/Product/900"}),
+    )
+
+    counts, queued, _ = bf.backfill(coll, set(), apply=True)
+
+    assert counts["already_live"] == 0, "an invisible DRAFT was called live"
+    assert counts["queue"] == 1 and queued == ["SKU-P1"]
+    saved = db["catalog_products"].find_one({"id": "P1"})["ecom"]
+    assert saved["locally_modified"] is True
+    # The gid MUST survive: losing it would make the rescue press create a
+    # DUPLICATE product on the live storefront.
+    assert saved["shopify_product_id"] == "gid://shopify/Product/900"
+    assert saved["status"] == "DRAFT"
+
+
+def test_a_mapped_row_with_no_recorded_status_is_queued_too(db):
+    """The oldest rows carry a Shopify id and no ecom.status at all -- IMS
+    never recorded a publish for them, so they are exactly as invisible."""
+    doc = _row("P1", ecom={"shopify_product_id": "gid://shopify/Product/900"})
+
+    assert bf.classify(doc, set()) == "queue"
