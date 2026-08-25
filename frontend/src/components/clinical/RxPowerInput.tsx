@@ -18,8 +18,9 @@
 //     a trailing `.`, a leading `0`) so the user can build the value freely.
 //   * ON BLUR + on mount / prop-change: normalizes to canonical optical format
 //     via formatRxPower() (explicit `+` on positive SPH/CYL/ADD, 2 decimals,
-//     integer AXIS 1-180, 1-decimal PD). An invalid/non-numeric string is left
-//     UNCHANGED so the form's own range validation still flags it.
+//     plain integer AXIS, 1-decimal PD). An invalid value -- non-numeric, or an
+//     impossible AXIS -- is left UNCHANGED so the form's own range validation
+//     still flags it. Nothing is ever silently corrected into range.
 //
 // The value is always a STRING (e.g. "+5.00", "-0.75", "0.00"). Number("+5.00")
 // === 5 and Python float("+5.00") === 5.0, so the signed string round-trips
@@ -28,6 +29,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
+
+// The ONE canonical Rx limits table (mirror of backend rx_validation.py). AXIS
+// bounds are read from there rather than re-typed here -- a second copy of a
+// clinical rule is a defect waiting to drift.
+import { validateRxField } from '../../constants/rxLimits';
 
 // 'K' is a keratometry (corneal curvature) reading in dioptres. It is dioptric
 // but NEVER signed -- a cornea has no minus power -- so it is formatted like a
@@ -49,7 +55,8 @@ const MM_1DP_KINDS: RxPowerKind[] = ['PD', 'BC', 'DIA'];
  * Rules (only applied when the string parses to a finite number):
  *   SPH / CYL : >0 -> "+X.XX", <0 -> "-X.XX", ==0 -> "0.00"   (2 dp, explicit +)
  *   ADD       : always positive -> "+X.XX"  (plus-only; a negative is |abs|'d)
- *   AXIS      : whole number, clamped to 1..180, no sign, no decimals
+ *   AXIS      : a real whole degree is printed plainly ("090" -> "90");
+ *               an IMPOSSIBLE axis is returned UNCHANGED, never corrected
  *   PD        : one decimal (e.g. "32.5"), no sign
  *   VA        : returned as-is (free text like "6/6")
  *   ""        : stays ""
@@ -69,12 +76,17 @@ export function formatRxPower(value: string, kind: RxPowerKind): string {
   if (!Number.isFinite(num)) return raw;
 
   if (kind === 'AXIS') {
-    // Whole degree. Keep it a plain integer; clamp into 1..180 so a stray 200
-    // or 0 is corrected rather than silently accepted.
-    let deg = Math.round(num);
-    if (deg < 1) deg = 1;
-    if (deg > 180) deg = 180;
-    return String(deg);
+    // CLINICAL-CRITICAL: an axis is a MERIDIAN, not a magnitude. 181 is not
+    // "nearly 180" -- it is most likely a slip for 18, which is 162 degrees
+    // away: the wrong cylinder meridian, headaches, a remake. The true value is
+    // UNKNOWABLE, so an impossible axis must be REFUSED, never corrected.
+    // Clamping used to mint a different, valid, WRONG meridian, which is
+    // exactly why neither the client gate nor the server gate ever saw it.
+    // Anything the canonical table refuses is handed back untouched so
+    // validateRxField/validateEyeTest raises a banner the clinician can read.
+    if (validateRxField('axis', raw)) return raw;
+    // A real whole degree: print it plainly ("090" -> "90", "90.0" -> "90").
+    return String(num);
   }
 
   if (MM_1DP_KINDS.includes(kind)) {
@@ -110,11 +122,10 @@ export function formatRxPower(value: string, kind: RxPowerKind): string {
 function sanitizeWhileTyping(value: string, kind: RxPowerKind): string {
   if (kind === 'VA') return value; // free text
 
-  if (kind === 'AXIS') {
-    // Digits only (a whole-degree axis has no sign and no decimal point).
-    return value.replace(/[^0-9]/g, '');
-  }
-
+  // AXIS deliberately has NO branch of its own: it falls through to the
+  // unsigned path, which keeps digits and at most one decimal point. Stripping
+  // the '.' turned a typo like "90.5" into "905" -- which then got clamped to a
+  // plausible, wrong 180. A fractional axis must SURVIVE in order to be refused.
   const allowSign = SIGNED_KINDS.includes(kind);
   // Strip anything that isn't a digit, a dot, or (for signed kinds) a sign.
   let out = value.replace(allowSign ? /[^0-9.+-]/g : /[^0-9.]/g, '');

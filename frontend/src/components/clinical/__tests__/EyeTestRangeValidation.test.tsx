@@ -103,7 +103,9 @@ describe('Lensometer refuses an impossible power', () => {
     const onSave = renderForm();
     openTab(/Lensometer/);
     typeInto('Right CYL', '-1.00');
-    typeInto('Right AXIS', '0', { blur: false });
+    // Blurs for real: the box used to CLAMP 0 up to 1 on blur, so this test
+    // had to skip the blur to see the bug at all. It no longer does.
+    typeInto('Right AXIS', '0');
     save();
 
     await waitFor(() => expect(alertText()).toBeTruthy());
@@ -207,5 +209,98 @@ describe('ordinary clinical values still save', () => {
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(alertText()).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AN IMPOSSIBLE AXIS IS REFUSED, NEVER REWRITTEN.
+// ---------------------------------------------------------------------------
+// AXIS is a MERIDIAN, not a magnitude. 181 is not "nearly 180" -- it is most
+// likely a slip for 18, which is 162 degrees away: the wrong cylinder meridian,
+// a patient with headaches, and a remake. The true value is UNKNOWABLE, so the
+// only safe answer is to refuse the entry, exactly as the backend's own
+// docstring promises ("a FRACTIONAL axis (90.5) is REJECTED, not rounded").
+//
+// The box used to clamp on blur (181 -> 180, 0 -> 1, 9999 -> 180) and strip the
+// decimal point while typing (90.5 -> 905 -> clamped to 180). Because the value
+// was rewritten into something IN RANGE, neither the client gate nor the server
+// gate ever saw the mistake. These tests drive the real form: change, blur,
+// Save, and assert BOTH that the typed text survived and that saving was
+// refused with a banner the optometrist can actually read.
+// ---------------------------------------------------------------------------
+describe('an impossible AXIS is refused, not silently corrected', () => {
+  const IMPOSSIBLE = ['181', '0', '90.5', '9999'];
+
+  for (const typed of IMPOSSIBLE) {
+    it(`keeps ${typed} exactly as typed and refuses to save it`, async () => {
+      const onSave = renderForm();
+      openTab(/Lensometer/);
+      // A cylinder alongside it, so the refusal cannot be the CYL<->AXIS
+      // pairing rule standing in for the range check we are actually testing.
+      typeInto('Right CYL', '-1.00');
+      typeInto('Right AXIS', typed);
+
+      // (a) NOT REWRITTEN -- the box still shows what the clinician typed.
+      expect((screen.getByLabelText('Right AXIS') as HTMLInputElement).value).toBe(typed);
+
+      // (b) REFUSED, visibly.
+      save();
+      await waitFor(() => expect(alertText()).toBeTruthy());
+      expect(alertText()).toMatch(/AXIS/i);
+      expect(onSave).not.toHaveBeenCalled();
+    });
+  }
+
+  it('says a fractional axis is not a whole number, not "out of range"', async () => {
+    renderForm();
+    openTab(/Lensometer/);
+    typeInto('Right CYL', '-1.00');
+    typeInto('Right AXIS', '90.5');
+    save();
+
+    await waitFor(() => expect(alertText()).toBeTruthy());
+    expect(alertText()).toMatch(/whole number/i);
+  });
+
+  it('refuses an impossible axis on the FINAL Rx too (the billable one)', async () => {
+    const onSave = renderForm();
+    openTab(/Final Rx/);
+    typeInto('Right (OD) cylinder', '-1.00');
+    typeInto('Right (OD) axis', '181');
+
+    expect((screen.getByLabelText('Right (OD) axis') as HTMLInputElement).value).toBe('181');
+
+    save();
+    await waitFor(() => expect(alertText()).toBeTruthy());
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  // POSITIVE CONTROLS: refusing everything would pass every assertion above.
+  it('accepts the boundary meridians 1, 90 and 180 and normalises them', async () => {
+    const onSave = renderForm();
+    openTab(/Lensometer/);
+    typeInto('Right CYL', '-1.00');
+    typeInto('Right AXIS', '001');
+    expect((screen.getByLabelText('Right AXIS') as HTMLInputElement).value).toBe('1');
+    typeInto('Right AXIS', '90.0');
+    expect((screen.getByLabelText('Right AXIS') as HTMLInputElement).value).toBe('90');
+    typeInto('Left CYL', '-0.50');
+    typeInto('Left AXIS', '180');
+    expect((screen.getByLabelText('Left AXIS') as HTMLInputElement).value).toBe('180');
+
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(alertText()).toBeNull();
+  });
+
+  it('leaves the SIGNED kinds alone -- a plus power still formats on blur', async () => {
+    renderForm();
+    openTab(/Lensometer/);
+    typeInto('Right SPH', '4');
+    expect((screen.getByLabelText('Right SPH') as HTMLInputElement).value).toBe('+4.00');
+    typeInto('Right ADD', '2');
+    expect((screen.getByLabelText('Right ADD') as HTMLInputElement).value).toBe('+2.00');
+    typeInto('Right PD', '32');
+    expect((screen.getByLabelText('Right PD') as HTMLInputElement).value).toBe('32.0');
   });
 });
