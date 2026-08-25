@@ -30,10 +30,12 @@ import {
   tillApi,
   paisaToInr,
   type TillSession,
+  type ZRead,
   type VarianceStatus,
 } from '../../services/api/till';
 import { returnsApi } from '../../services/api/returns';
 import DenomGrid from '../../components/cash/DenominationGrid';
+import FaceTallyTable from '../../components/cash/FaceTallyTable';
 import {
   blankDenoms,
   denomTotalPaisa,
@@ -75,6 +77,9 @@ export default function BlindEodTallyPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState<TillSession[]>([]);
+  // Per-face tallies, fetched on demand per locked Z-Read. `null` means the
+  // fetch failed -- shown as such, never as a clean tally.
+  const [ledgers, setLedgers] = useState<Record<string, ZRead | null>>({});
 
   // Open-phase state
   const [openDenoms, setOpenDenoms] = useState<DenomRow[]>(blankDenoms());
@@ -274,6 +279,17 @@ export default function BlindEodTallyPage() {
   }
 
   const lockedToday = sessions.filter((s) => s.status === 'LOCKED');
+
+  const loadLedger = async (sessionId: string) => {
+    try {
+      const z = await tillApi.zread(sessionId);
+      setLedgers((m) => ({ ...m, [sessionId]: z }));
+    } catch {
+      // A failed read is reported as a failed read. A missing tally must never
+      // render as a drawer that tallied.
+      setLedgers((m) => ({ ...m, [sessionId]: null }));
+    }
+  };
   const awaitingReview = sessions.filter((s) => s.status === 'BLIND_SUBMITTED');
 
   return (
@@ -527,6 +543,37 @@ export default function BlindEodTallyPage() {
                     </span>
                   </div>
                 )}
+                {/* WHERE THE DIFFERENCE CAME FROM. A drawer can balance to
+                    the rupee and still hide two mistakes that cancelled out;
+                    this is the only view that shows them. */}
+                <div className="mt-3">
+                  {ledgers[s.session_id] === undefined ? (
+                    <button
+                      type="button"
+                      onClick={() => loadLedger(s.session_id)}
+                      className="text-sm font-medium text-bv hover:underline"
+                    >
+                      Show the note-by-note tally
+                    </button>
+                  ) : ledgers[s.session_id] === null ? (
+                    <p className="text-sm text-gray-500">
+                      Could not load the note-by-note tally.{' '}
+                      <button
+                        type="button"
+                        onClick={() => loadLedger(s.session_id)}
+                        className="font-medium text-bv hover:underline"
+                      >
+                        Try again
+                      </button>
+                    </p>
+                  ) : ledgers[s.session_id]?.face_ledger ? (
+                    <FaceTallyTable ledger={ledgers[s.session_id]!.face_ledger!} />
+                  ) : (
+                    <p className="text-sm text-gray-500">
+                      This day carries no note-by-note record.
+                    </p>
+                  )}
+                </div>
                 {canLock && (
                   <div className="flex items-center gap-2 mt-3">
                     <input

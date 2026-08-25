@@ -62,6 +62,8 @@ export interface TillSession {
   expected_hidden?: boolean;
 }
 
+import type { FaceLedger } from '../../components/cash/FaceTallyTable';
+
 export interface ZRead {
   ok: boolean;
   session_id: string;
@@ -93,6 +95,10 @@ export interface ZRead {
   locked_by_name?: string | null;
   reopen_count?: number;
   history?: Array<{ action: string; at: string; by_name?: string; reason?: string }>;
+  // The day tallied FACE BY FACE (see components/cash/FaceTallyTable). Purely
+  // additive: the rupee figures above are computed exactly as before and are
+  // unaffected by whether anyone counted notes.
+  face_ledger?: FaceLedger;
 }
 
 /** COUNTED | SUGGESTED | NOT_CAPTURED. Omitted = the grid was never touched,
