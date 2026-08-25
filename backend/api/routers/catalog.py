@@ -1199,6 +1199,13 @@ def _mark_online_dirty(product: Dict) -> None:
     if not isinstance(ecom, dict):
         ecom = {}
         product["ecom"] = ecom
+    # A doc created without an `ecom` key (the catalog door and bulk import)
+    # would otherwise be counted as staged+pending while belonging to NO status
+    # bucket -- the Online Store screen's DRAFT and PUBLISHED cards would both
+    # show 0 for a row sitting in the queue. Same default _build_pim_doc uses.
+    # "The count was the lie" is this change's whole thesis; do not reintroduce
+    # it one card over.
+    ecom.setdefault("status", "DRAFT")
     ecom["locally_modified"] = True
 
 
