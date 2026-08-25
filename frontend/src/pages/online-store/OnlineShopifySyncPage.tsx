@@ -329,8 +329,8 @@ export default function OnlineShopifySyncPage() {
         // OS-046: never let a capped sweep read as complete.
         if (res.limit_reached) {
           toast.info(
-            `${ent.label}: stopped at the 100-object safety cap — run again to continue ` +
-              '(the pending count below shows the remainder).',
+            `${ent.label}: stopped at the safety cap of ${res.batch_cap ?? 100} — run again ` +
+              'to continue (the pending count below shows the remainder).',
           );
         }
       }
@@ -364,11 +364,14 @@ export default function OnlineShopifySyncPage() {
       const res = await pushApi.pushAllPending(undefined, 500);
       const where = res.mode?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
       toast.success(`Cutover push (${where}): ${res.pushed_count ?? 0} objects processed`);
-      // OS-046: the 500-object safety cap must never read as "cutover done".
+      // OS-046: a capped run must never read as "cutover done". Products stop at
+      // the backend's hard batch cap (one press = a bounded number of listings in
+      // front of customers); everything else at the 500-object valve.
       if (res.limit_reached) {
         toast.info(
-          'Stopped at the 500-object safety cap — NOT everything was pushed. ' +
-            'Click again to continue; the pending counts below show the remainder.',
+          `Stopped at the safety cap (${res.batch_cap ?? 500} products per press) — NOT ` +
+            'everything was pushed. Click again to continue; the pending counts below ' +
+            'show the remainder.',
         );
       }
       loadStatus();

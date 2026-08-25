@@ -1465,6 +1465,10 @@ export interface PushSweepResult {
   db_connected?: boolean | null;
   pushed_count?: number | null;
   limit_reached?: boolean | null;
+  /** How many PRODUCTS one press may put live (the backend's hard batch cap).
+   *  Reported so the screen can name the real number instead of hard-coding one
+   *  that drifts when the cap changes. */
+  batch_cap?: number | null;
   /** Paging block (variant-prices resync only; null otherwise — OS-017). The
    *  eligible set never shrinks after a resync, so the backend pages it
    *  deterministically: loop with `next_offset` until it comes back null. */
@@ -1572,6 +1576,18 @@ export const pushApi = {
     return _pushResultFrom(res?.data);
   },
 
+  /** Pull ONE product back OFF the live storefront (Shopify status -> DRAFT).
+   *  NOT a delete: the Shopify product and its id are kept, so pressing "Send to
+   *  website" again puts it back on the SAME listing (never a duplicate). This
+   *  is the reversibility that makes one-press publishing survivable. Throws on
+   *  HTTP failure; a SIMULATED dry-run is a normal ok=true result. */
+  takeDownProduct: async (productId: string): Promise<PushResult> => {
+    const res = await api.post(
+      `${PUSH_BASE}/product/${encodeURIComponent(productId)}/take-down`,
+    );
+    return _pushResultFrom(res?.data);
+  },
+
   /** Push an ecom_collections doc (collectionCreate/Update + smart ruleSet). */
   pushCollection: async (collectionId: string): Promise<PushResult> => {
     const res = await api.post(`${PUSH_BASE}/collection/${encodeURIComponent(collectionId)}`);
@@ -1625,6 +1641,7 @@ export const pushApi = {
       db_connected: data.db_connected ?? null,
       pushed_count: data.pushed_count ?? 0,
       limit_reached: data.limit_reached ?? false,
+      batch_cap: data.batch_cap ?? null,
       offset: data.offset ?? null,
       next_offset: data.next_offset ?? null,
       eligible_total: data.eligible_total ?? null,

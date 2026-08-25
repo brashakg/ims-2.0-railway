@@ -452,6 +452,182 @@ def test_a_live_product_missing_its_photo_gets_one_on_the_next_press(db, shopify
 
 
 # ===========================================================================
+# D. THE BATCH CAP -- one wrong press is bounded
+# ===========================================================================
+
+
+def test_one_press_sends_at_most_the_batch_cap(db, shopify, monkeypatch):
+    """N+10 queued, one press sends exactly N. Pressing publish now puts
+    products in front of customers immediately, so a single wrong press must
+    not be able to take the whole catalogue live."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    cap = push_router.PRODUCT_BATCH_CAP
+    for i in range(cap + 10):
+        _seed(db, _product(pid="P%03d" % i))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert out["summary"]["products"]["pushed"] == cap
+    assert len(shopify.calls_of("imsProductCreate")) == cap
+    assert out["batch_cap"] == cap
+
+
+def test_the_rest_stay_queued_and_the_press_does_not_read_as_finished(db, shopify, monkeypatch):
+    """The 10 that did not go must still be waiting -- a capped press that
+    silently dropped them would be the same silent failure as before -- and the
+    result must say it stopped early so the operator presses again."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    cap = push_router.PRODUCT_BATCH_CAP
+    for i in range(cap + 10):
+        _seed(db, _product(pid="P%03d" % i))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert push_router._product_counts(db)["pending"] == 10
+    assert out["limit_reached"] is True
+
+
+def test_a_caller_cannot_raise_the_cap(db, shopify, monkeypatch):
+    """The frontend passes limit=100 explicitly, so a cap that is only a
+    DEFAULT caps nothing. It is a hard server-side clamp."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    cap = push_router.PRODUCT_BATCH_CAP
+    for i in range(cap + 10):
+        _seed(db, _product(pid="P%03d" % i))
+
+    out = _run(
+        push_router.push_all_pending(
+            entities="products", limit=5000, current_user=_admin()
+        )
+    )
+
+    assert out["summary"]["products"]["pushed"] == cap
+
+
+def test_a_photo_less_refusal_does_not_burn_a_cap_slot(db, shopify, monkeypatch):
+    """A refusal never reached Shopify and nothing went live. If refusals ate
+    the cap, a catalogue that is mostly un-photographed would publish nothing
+    at all and the owner would press forever."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    cap = push_router.PRODUCT_BATCH_CAP
+    for i in range(cap):
+        _seed(db, _product(pid="N%03d" % i, photos=False))
+    for i in range(3):
+        _seed(db, _product(pid="P%03d" % i))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    bucket = out["summary"]["products"]
+    assert bucket["refused_no_photo"] == cap
+    assert bucket["pushed"] == 3
+
+
+# ===========================================================================
+# E. TAKE-DOWN -- pulling ONE product back off the storefront
+# ===========================================================================
+
+
+def _live_product(db, pid="P1"):
+    """A product that IS on the storefront: mapped, PUBLISHED, and dirty (the
+    worst case -- a take-down has to survive the next sweep)."""
+    doc = _product(pid=pid, shopify_id="gid://shopify/Product/900", status="PUBLISHED")
+    doc["ecom"]["locally_modified"] = True
+    return _seed(db, doc)
+
+
+def test_take_down_unpublishes_the_product_on_shopify(db, shopify, monkeypatch):
+    """The engine could already delist; nothing could ask it to. The button
+    is the reversibility that makes one-press publishing survivable."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+
+    out = _run(push_router.take_down_product("P1", current_user=_admin()))
+
+    assert out["result"]["ok"] is True
+    assert out["result"]["action"] == "delist"
+    sent = _input_of(shopify, "imsProductUpdate")
+    assert sent["status"] == "DRAFT", "the product is still visible on the storefront"
+    assert sent["id"] == "gid://shopify/Product/900"
+
+
+def test_take_down_keeps_the_shopify_id(db, shopify, monkeypatch):
+    """Losing the id would make the next push CREATE A DUPLICATE product on the
+    live storefront. The Shopify product is never deleted either."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+
+    out = _run(push_router.take_down_product("P1", current_user=_admin()))
+
+    assert out["result"]["shopify_id"] == "gid://shopify/Product/900"
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_product_id"] == "gid://shopify/Product/900"
+    assert shopify.calls_of("productDelete") == []
+
+
+def test_a_taken_down_product_does_not_resurrect_on_the_next_sweep(db, shopify, monkeypatch):
+    """The row was DIRTY when it was taken down. If the take-down left it
+    queued, the very next sweep would put it back in front of customers
+    seconds later and the button would be worthless."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+
+    _run(push_router.take_down_product("P1", current_user=_admin()))
+    before = len(shopify.calls_of("imsPublishablePublish"))
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert push_router._product_counts(db)["pending"] == 0
+    assert out["pushed_count"] == 0, "the sweep re-pushed a product just taken down"
+    assert len(shopify.calls_of("imsPublishablePublish")) == before
+
+
+def test_ims_stops_claiming_a_taken_down_product_is_published(db, shopify, monkeypatch):
+    """ecom.status is read by the DRAFT/PUBLISHED cards and every
+    storefront-visibility helper. Leaving it PUBLISHED would have IMS insisting
+    a product is on a storefront it was just pulled from."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+
+    _run(push_router.take_down_product("P1", current_user=_admin()))
+
+    assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["status"] == "DRAFT"
+
+
+def test_a_taken_down_product_goes_straight_back_when_pressed_again(db, shopify, monkeypatch):
+    """Take-down must not re-shut the publish door: DRAFT is the create-time
+    default the whole change exists to get past, so pressing publish again puts
+    the product straight back on the same Shopify listing."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+    _run(push_router.take_down_product("P1", current_user=_admin()))
+    shopify.media_on_existing = 1
+
+    doc = copy.deepcopy(db["catalog_products"].find_one({"id": "P1"}))
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok is True
+    assert (res.payload or {})["status"] == "ACTIVE"
+    assert (res.publication or {}).get("published") is True
+    assert res.shopify_id == "gid://shopify/Product/900", "a DUPLICATE listing"
+
+
+def test_taking_down_something_never_on_shopify_is_a_clean_noop(db, shopify, monkeypatch):
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _seed(db, _product(pid="P2"))
+
+    out = _run(push_router.take_down_product("P2", current_user=_admin()))
+
+    assert out["result"]["ok"] is True and out["result"]["action"] == "noop"
+    assert shopify.calls == []
+
+
+def test_taking_down_an_unknown_product_is_a_404(db, shopify, monkeypatch):
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    with pytest.raises(Exception) as exc:
+        _run(push_router.take_down_product("nope", current_user=_admin()))
+    assert getattr(exc.value, "status_code", None) == 404
+
+
+# ===========================================================================
 # THE PING-PONG GUARD, re-checked against the NEW publish path
 # ===========================================================================
 

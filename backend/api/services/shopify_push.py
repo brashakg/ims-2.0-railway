@@ -2299,14 +2299,34 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
     from online" cutover to take an already-synced, now-blocked product OFF the
     storefront.
 
-    REVERSIBLE by design: the Shopify product is NEVER deleted, and this does NOT
-    touch the IMS ecom.status -- so after an unblock a normal push_product rebuilds
-    the ProductInput from the unchanged ecom.status (PUBLISHED -> ACTIVE) and the
-    product re-publishes. Unlike push_product this is NOT gated by
+    REVERSIBLE by design: the Shopify product is NEVER deleted and its gid is
+    KEPT, so putting it back is a normal push (and can never mint a duplicate
+    listing). Unlike push_product this is NOT gated by
     is_blocked_from_online (it IS the block action). Obeys the same three dark
     gates: SIMULATED plan when dark, LIVE productUpdate only behind the gates.
     Only acts when the product already carries a Shopify gid (else a clean noop --
-    nothing to delist). Never raises."""
+    nothing to delist). Never raises.
+
+    AFTER A SUCCESSFUL LIVE DELIST the IMS row is brought into line with the
+    storefront (owner ruling 2026-08-25 -- take-down is the reversibility that
+    makes one-press publishing survivable):
+      * ecom.status -> DRAFT. ecom.status is READ in six places (the Online
+        Store screen's DRAFT/PUBLISHED cards, the storefront-visibility
+        helpers); leaving it PUBLISHED would have IMS insisting a product is
+        on a storefront it was just pulled from. This does NOT re-shut the
+        publish door: build_product_input maps everything except ARCHIVED to
+        ACTIVE, so pressing publish again puts it straight back.
+      * ecom.locally_modified -> False. Without this a taken-down product
+        that happened to be dirty would be RESURRECTED by the very next
+        sweep, seconds later. Taking one down has to stick until a human
+        asks for it back.
+    Both live in HERE rather than in the caller because both callers -- the
+    block cutover and the take-down button -- need the same truth: this row
+    is off the storefront.
+
+    The gid is deliberately re-written unchanged: _writeback_product is
+    set-only for the mapping, so the take-down can never lose the Shopify id
+    (losing it would make the next push CREATE A DUPLICATE live product)."""
     pid = product.get("id") or product.get("product_id")
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -2352,6 +2372,8 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
                 payload=payload,
                 error=err,
             )
+        if pid:
+            _writeback_product(db, pid, existing_gid, status="DRAFT")
         return PushResult(
             mode=MODE_LIVE,
             entity="product",

@@ -56,6 +56,27 @@ _PUSH_ROLES = ("ADMIN",)
 
 
 # ---------------------------------------------------------------------------
+# THE BATCH CAP (owner ruling 2026-08-25 -- "one press, goes live")
+# ---------------------------------------------------------------------------
+# Pressing publish now puts products in front of customers immediately, so ONE
+# wrong press must affect a BOUNDED number of products, not the whole catalogue.
+# 25 is the sane default: small enough that a mistake is 25 listings to take
+# down one by one (the /product/{id}/take-down route below), large enough that
+# the current ~59-item catalogue clears in three presses.
+#
+# This is a HARD SERVER-SIDE cap on the PRODUCT sweep, not a default the caller
+# can raise -- the frontend passes limit=100 explicitly, so a default nobody
+# reads would cap nothing. It deliberately does NOT clamp the other entities:
+# collections / menus / images / the variant-prices resync do not put a new
+# listing in front of a customer, and the resync PAGES through the whole mapped
+# set (OS-017) -- clamping it would just make that loop run out of pages.
+#
+# A capped sweep reports limit_reached=True, so the existing "run again to
+# continue" cue fires: a press that stopped early must never read as complete.
+PRODUCT_BATCH_CAP = 25
+
+
+# ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_collections.py)
 # ---------------------------------------------------------------------------
 
@@ -157,6 +178,38 @@ async def push_product(
         )
     variants = _get_variants_for_product(db, product)
     result = await shopify_push.push_product(db, product, variants)
+    data = result.to_dict()
+    _write_audit(data, current_user)
+    return {"result": data}
+
+
+@router.post("/product/{product_id}/take-down")
+async def take_down_product(
+    product_id: str,
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Pull ONE product OFF the live storefront (Shopify status -> DRAFT).
+
+    THE REVERSIBILITY THAT MAKES ONE-PRESS PUBLISHING SURVIVABLE (owner ruling
+    2026-08-25). Pressing publish now puts products in front of customers
+    immediately, so there has to be a way to pull ONE bad listing straight back
+    -- the engine could already do it (push_product_delist, built for the
+    "block collection from online" cutover) but nothing could ask it to.
+
+    NOT a delete: the Shopify product is kept and so is its id, so putting the
+    product back is an ordinary push and can never mint a duplicate listing.
+    The engine also records the take-down in IMS (ecom.status DRAFT, dirty flag
+    cleared) so the screen agrees with the storefront and the next sweep does
+    not resurrect it seconds later.
+
+    DARK by default -> a SIMULATED plan. A product that was never on Shopify is
+    a clean no-op, not an error. Unknown product -> 404; writes the same chained
+    audit row as every other push."""
+    db = _require_db()
+    product = _get_catalog_product(db, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    result = await shopify_push.push_product_delist(db, product)
     data = result.to_dict()
     _write_audit(data, current_user)
     return {"result": data}
@@ -507,6 +560,7 @@ async def push_all_pending(
     mode = shopify_push.push_mode_status(db)
     results: List[Dict[str, Any]] = []
     summary: Dict[str, Dict[str, int]] = {}
+    cap_reached = False
 
     def _tally(entity: str, data: Dict[str, Any]) -> None:
         bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "noop": 0})
@@ -557,8 +611,14 @@ async def push_all_pending(
             db, dirty_skus
         )
         blocked_skipped = 0
+        # THE BATCH CAP: at most PRODUCT_BATCH_CAP products actually go out
+        # per press. A photo-less REFUSAL does not count against it -- it
+        # never reached Shopify and nothing went live, and spending the whole
+        # cap on refusals would publish nothing at all.
+        sent = 0
         for doc in dirty_products:
-            if len(results) >= limit:
+            if len(results) >= limit or sent >= PRODUCT_BATCH_CAP:
+                cap_reached = cap_reached or sent >= PRODUCT_BATCH_CAP
                 break
             if block_verifiable and doc.get("sku") in blocked_set:
                 blocked_skipped += 1
@@ -572,6 +632,8 @@ async def push_all_pending(
             ).to_dict()
             _write_audit(data, current_user)
             _tally("products", data)
+            if data.get("reason") != "no_photo":
+                sent += 1
         if blocked_skipped:
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "blocked_skipped"
@@ -643,7 +705,12 @@ async def push_all_pending(
         "mode": mode,
         "db_connected": True,
         "pushed_count": len(results),
-        "limit_reached": len(results) >= limit,
+        # A sweep the cap stopped early must NEVER read as complete -- the
+        # caller's "run again to continue" cue keys off this flag.
+        "limit_reached": len(results) >= limit or cap_reached,
+        # How many products one press may put live. Reported so the screen
+        # can say the real number instead of hard-coding one.
+        "batch_cap": PRODUCT_BATCH_CAP,
         # Paging block (variant-prices only; null otherwise). next_offset=null
         # means the whole eligible set was covered -- the caller may stop.
         "offset": offset,
