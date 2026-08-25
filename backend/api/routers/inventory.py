@@ -2373,6 +2373,64 @@ def _on_hand_now(db, store_id: str, product_ids: List[str]) -> Dict[str, int]:
     return live
 
 
+def _expected_lines(db, count_doc: dict) -> List[dict]:
+    """The COUNT SHEET: every product this session expects to find, with what
+    has been counted against it so far.
+
+    The only wired door used to be the barcode scanner, so a shortage was
+    findable only while at least one unit of that style survived on the shelf.
+    If the last one has walked, so has its label -- which is exactly the case
+    a count exists to find. The sheet gives every expected line a quantity box
+    whether or not a unit is left to scan.
+    """
+    system_quantities = count_doc.get("system_quantities") or {}
+    counted = {
+        i.get("product_id"): i for i in (count_doc.get("items") or []) if i.get("product_id")
+    }
+    ids = [pid for pid in list(system_quantities.keys()) + list(counted.keys()) if pid]
+    labels: Dict[str, tuple] = {}
+    if ids:
+        try:
+            for p in db.get_collection("products").find(
+                {"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
+                {"_id": 1, "product_id": 1, "sku": 1, "brand": 1, "model": 1, "name": 1},
+            ):
+                sku = p.get("sku", "") or ""
+                name = (
+                    p.get("name")
+                    or f"{p.get('brand', '')} {p.get('model', '')}".strip()
+                    or sku
+                    or "Unknown"
+                )
+                for key in (p.get("_id"), p.get("product_id")):
+                    if key:
+                        labels[str(key)] = (name, sku)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[INVENTORY] count sheet product lookup failed: %s", exc)
+
+    lines = []
+    for pid in dict.fromkeys(list(system_quantities.keys()) + list(counted.keys())):
+        name, sku = labels.get(pid, ("Unknown", ""))
+        line = counted.get(pid)
+        lines.append(
+            {
+                "product_id": pid,
+                "product_name": name,
+                "sku": sku,
+                "system_quantity": int(system_quantities.get(pid, 0) or 0),
+                # None means NOT COUNTED YET. A counted zero is a real answer
+                # -- the whole point of the sheet -- so the two must not be
+                # collapsed into the same falsy number.
+                "counted_quantity": (
+                    int(line.get("counted_quantity", 0) or 0) if line else None
+                ),
+                "counted_at": line.get("counted_at") if line else None,
+            }
+        )
+    lines.sort(key=lambda ln: (ln["product_name"] or "", ln["sku"] or ""))
+    return lines
+
+
 def _load_open_count(db, count_id: str, current_user: dict) -> dict:
     """The in-progress count session, or the right refusal.
 
@@ -2724,6 +2782,10 @@ async def get_stock_count(
         if not can_access_store_scoped(count_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Stock count session not found")
         count_doc.pop("_id", None)
+        # The sheet the counter works from: what this session expects to find,
+        # so a style whose last unit has walked (no label left to scan) still
+        # has a line to write a zero against.
+        count_doc["expected_lines"] = _expected_lines(db, count_doc)
         return count_doc
     except HTTPException:
         raise

@@ -7,9 +7,9 @@
 // server resolved the barcode, calculated a difference and threw it away --
 // which is why every completed count reported a perfect result.
 
-import { useState } from 'react';
-import { Barcode, AlertCircle, CheckCircle } from 'lucide-react';
-import api from '../../services/api';
+import { useState, useEffect, useCallback } from 'react';
+import { Barcode, AlertCircle, CheckCircle, Loader2, ListChecks } from 'lucide-react';
+import api, { inventoryApi } from '../../services/api';
 import clsx from 'clsx';
 
 interface Props {
@@ -18,6 +18,18 @@ interface Props {
   countId: string;
   /** Fired after a quantity is persisted, so the session header can refresh. */
   onRecorded?: (itemsCounted: number) => void;
+}
+
+/** One line of the count SHEET: something this session expects to find.
+ *  `counted_quantity: null` means nobody has answered for it yet -- a counted
+ *  ZERO is a real answer (the style has walked entirely) and must not read as
+ *  "not counted". */
+interface ExpectedLine {
+  product_id: string;
+  product_name: string;
+  sku: string;
+  system_quantity: number;
+  counted_quantity: number | null;
 }
 
 interface ScanResult {
@@ -43,6 +55,64 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [scannedItems, setScannedItems] = useState<ScanResult[]>([]);
+  const [sheet, setSheet] = useState<ExpectedLine[]>([]);
+  const [sheetLoading, setSheetLoading] = useState(true);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [savingLine, setSavingLine] = useState<string | null>(null);
+
+  // The count sheet: what this session expects to find. Without it the only
+  // way to answer for a style is to scan one of its units -- and if the last
+  // one has walked, so has its label.
+  const loadSheet = useCallback(async () => {
+    setSheetLoading(true);
+    try {
+      const doc = await inventoryApi.getStockCount(countId);
+      setSheet(doc?.expected_lines || []);
+    } catch {
+      setSheet([]);
+    } finally {
+      setSheetLoading(false);
+    }
+  }, [countId]);
+
+  useEffect(() => {
+    loadSheet();
+  }, [loadSheet]);
+
+  const saveLine = async (line: ExpectedLine) => {
+    const raw = drafts[line.product_id];
+    if (raw === undefined || raw === '') return;
+    const qty = parseInt(raw, 10);
+    if (Number.isNaN(qty) || qty < 0) {
+      setError('Enter a whole number of units (0 if none are on the shelf).');
+      return;
+    }
+    setSavingLine(line.product_id);
+    setError('');
+    try {
+      const res = await inventoryApi.recordCountItem(countId, {
+        product_id: line.product_id,
+        product_name: line.product_name,
+        sku: line.sku,
+        counted_quantity: qty,
+      });
+      setSheet((prev) =>
+        prev.map((l) => (l.product_id === line.product_id ? { ...l, counted_quantity: qty } : l))
+      );
+      setDrafts((prev) => {
+        const next = { ...prev };
+        delete next[line.product_id];
+        return next;
+      });
+      onRecorded?.(res?.items_counted ?? 0);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Could not record that quantity');
+    } finally {
+      setSavingLine(null);
+    }
+  };
+
+  const countedLines = sheet.filter((l) => l.counted_quantity !== null).length;
 
   const handleScan = async () => {
     if (!barcode.trim() || physicalCount === '') {
@@ -76,6 +146,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
         scanResult,
       ]);
       onRecorded?.(scanResult.items_counted ?? 0);
+      loadSheet();
 
       // Reset form
       setBarcode('');
@@ -103,6 +174,82 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
 
   return (
     <div className="space-y-6">
+      {/* THE COUNT SHEET. Every line the session expects, with a box to write
+          the answer in -- including a style whose last unit has walked, which
+          has no barcode left to scan and is exactly what a count is for. */}
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
+        <div className="p-4 border-b border-gray-200 flex items-center gap-2">
+          <ListChecks className="w-5 h-5 text-bv-red-500" />
+          <h3 className="text-lg font-semibold text-gray-900">Count sheet</h3>
+          <span className="text-sm text-gray-500">
+            {sheetLoading ? 'loading…' : `${countedLines} of ${sheet.length} lines answered`}
+          </span>
+        </div>
+        {sheetLoading ? (
+          <div className="p-6 flex justify-center">
+            <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+          </div>
+        ) : sheet.length === 0 ? (
+          <p className="p-4 text-sm text-gray-500">
+            The books show no stock for this count's scope, so there is nothing to count.
+          </p>
+        ) : (
+          <div className="max-h-96 overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-white border-b border-gray-200 sticky top-0">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500">Product</th>
+                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">Books say</th>
+                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">On the shelf</th>
+                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">&nbsp;</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sheet.map((line) => (
+                  <tr key={line.product_id} className="border-b border-gray-200">
+                    <td className="px-3 py-2">
+                      <p className="text-gray-900 text-xs font-medium">{line.product_name}</p>
+                      <p className="text-gray-500 text-xs">{line.sku}</p>
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-700">{line.system_quantity}</td>
+                    <td className="px-3 py-2 text-right">
+                      <input
+                        type="number"
+                        min="0"
+                        aria-label={`Counted quantity for ${line.product_name}`}
+                        className="w-20 px-2 py-1 bg-gray-100 border border-gray-300 rounded text-right text-gray-900"
+                        placeholder={line.counted_quantity === null ? '—' : String(line.counted_quantity)}
+                        value={drafts[line.product_id] ?? ''}
+                        onChange={(e) =>
+                          setDrafts((prev) => ({ ...prev, [line.product_id]: e.target.value }))
+                        }
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') saveLine(line);
+                        }}
+                        onBlur={() => saveLine(line)}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-right text-xs">
+                      {savingLine === line.product_id ? (
+                        <Loader2 className="w-4 h-4 animate-spin inline text-gray-400" />
+                      ) : line.counted_quantity === null ? (
+                        <span className="text-gray-400">not counted</span>
+                      ) : (
+                        <span className="text-green-600">counted {line.counted_quantity}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="px-4 py-3 text-xs text-gray-500 border-t border-gray-200">
+          Write 0 for a style with nothing left on the shelf — that is the one a
+          scanner can never find, because the last label left with the last frame.
+        </p>
+      </div>
+
       {/* Scan Form */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">

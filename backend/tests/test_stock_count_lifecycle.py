@@ -931,3 +931,72 @@ def test_counting_something_the_session_never_expected_does_not_inflate_coverage
     assert body["products_counted"] == 0, "no expected product was walked"
     assert body["coverage_percentage"] == 0.0
     assert body["full_count"] is False
+
+
+# ============================================================================
+# 8. THE COUNT SHEET: A STYLE THAT HAS WALKED ENTIRELY CAN STILL BE RECORDED
+# ============================================================================
+# The only wired door was the barcode scanner. If the last unit of a style has
+# gone, so has its label -- which is exactly the case a count exists to find.
+# The session must therefore hand the screen the LIST of what it expects, so
+# every expected line has a quantity box whether or not a unit survives.
+
+
+def test_the_session_hands_the_screen_the_lines_it_expects_to_find(
+    admin_client, mongo_db
+):
+    count_id, pids, _bc, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=2, units=2
+    )
+
+    r = admin_client.get(f"/inventory/stock-count/{count_id}")
+    assert r.status_code == 200, r.text
+    lines = r.json()["expected_lines"]
+
+    assert {ln["product_id"] for ln in lines} == set(pids), (
+        "the count sheet must list every product the session expects, "
+        "not only the ones whose barcode still exists on a shelf"
+    )
+    assert len(lines) == 2
+    for ln in lines:
+        assert ln["system_quantity"] == 2
+        assert ln["counted_quantity"] is None, "nothing counted yet"
+        assert ln["product_name"], "a line with no name cannot be counted"
+        assert ln["sku"]
+
+
+def test_a_style_with_nothing_left_on_the_shelf_can_be_counted_as_zero(
+    admin_client, mongo_db
+):
+    """Both frames of this style have walked. There is no label to scan, so
+    the counter types 0 against the sheet line -- and the loss is found."""
+    count_id, pids, _bc, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=1, units=2
+    )
+    pid = pids[0]
+
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/items",
+        json={"product_id": pid, "counted_quantity": 0},
+    )
+    assert r.status_code == 200, r.text
+
+    sheet = admin_client.get(f"/inventory/stock-count/{count_id}").json()
+    assert sheet["expected_lines"][0]["counted_quantity"] == 0, (
+        "a counted zero must read back as zero, never as 'not counted yet'"
+    )
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+    assert body["shrinkage_units"] == 2
+    assert body["shrinkage_value"] == 2000.0
+    assert body["full_count"] is True
+
+    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert (
+        mongo_db["stock_units"].count_documents(
+            {"product_id": pid, "status": "AVAILABLE"}
+        )
+        == 0
+    ), "the two frames that walked are off the books"
