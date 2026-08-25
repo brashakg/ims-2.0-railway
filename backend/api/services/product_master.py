@@ -1513,7 +1513,9 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     lands `ecom.status = DRAFT` (never live) with an SEO title + handle so the
     Online Store push (shopify_push.build_product_input reads ecom.status /
     ecom.handle / ecom.seo.{title,description,tags} + top-level name) has a
-    complete, reviewable-but-not-sellable object the moment it is created.
+    complete, reviewable-but-not-sellable object the moment it is created. It
+    also lands `ecom.locally_modified = True` so the row is QUEUED for the
+    manual Online Store push (see the comment on that field below).
     """
     attrs = dict(spine.get("attributes") or {})
     name = spine.get("name") or build_product_name(spine)
@@ -1552,6 +1554,19 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         "status": "DRAFT",
         "ecom": {
             "status": "DRAFT",
+            # BORN DIRTY -- the same convention ecom_collection_repository.create
+            # and ecom_menu_repository.create use for a new collection / menu: a
+            # row that has never reached Shopify belongs in the MANUAL push queue
+            # from the moment it is catalogued. Without it a freshly catalogued
+            # product was invisible to BOTH readers of this flag -- the operator's
+            # "push all pending" sweep (online_store_push.py, the dirty_products
+            # loop) and the `pending` count on the Online Store screen
+            # (online_store_push._product_counts) -- so the screen reported
+            # "pending: 0" while nothing had been queued: a SILENT miss, not an
+            # error. Queuing is NOT publishing: a human still presses the push
+            # button, and the flag is cleared only by a SUCCESSFUL Shopify write
+            # (shopify_push._writeback_product).
+            "locally_modified": True,
             "handle": handle or None,
             "seo": {
                 "title": seo_title or name or None,

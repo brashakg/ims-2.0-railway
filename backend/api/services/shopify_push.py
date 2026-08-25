@@ -1739,6 +1739,15 @@ def _writeback_product(
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
 
+    SYNC PATH -- this write only ever sets `locally_modified` to False, and must
+    NEVER set it to True. It is the push's own book-keeping (the Shopify gid it
+    just minted), not a human catalogue edit. Queuing from anywhere on the
+    Shopify sync side is the ping-pong hazard: push -> write-back marks dirty ->
+    the next sweep pushes it again -> forever, against a LIVE storefront. The
+    catalogue-edit doors that DO queue are product_master._build_pim_doc (born
+    dirty on create) and catalog._save_catalog_product (dirty by default, with an
+    explicit mark_dirty=False on the non-catalogue writes).
+
     `variant_gid` (optional) additionally persists ecom.shopify_variant_id -- the
     DEFAULT Shopify variant of this product. Without it a product created by IMS
     could never have its price corrected: ProductInput carries no price, so the

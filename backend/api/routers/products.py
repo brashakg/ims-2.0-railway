@@ -3415,6 +3415,18 @@ async def update_product(
                     _cat_patch["is_active"] = update_data["is_active"]
                 if "description" in update_data:
                     _cat_patch["description"] = update_data["description"]
+                # Queue the twin for the MANUAL Online Store push, but ONLY when
+                # a field the storefront actually shows moved. mrp / offer_price
+                # are the variant price fallbacks
+                # (shopify_push._resolve_variant_pricing) and description becomes
+                # descriptionHtml. cost_price / discount_category / hsn_code /
+                # gst_rate / is_active are in NO pushed payload -- flagging on
+                # those alone would queue a push that changes nothing on Shopify.
+                # Queuing is not publishing: a human still presses the button.
+                if any(
+                    _k in update_data for _k in ("mrp", "offer_price", "description")
+                ):
+                    _cat_patch["ecom.locally_modified"] = True
                 if _cat_patch:
                     from ..dependencies import get_db as _gdb
 
