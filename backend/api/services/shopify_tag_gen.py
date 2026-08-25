@@ -68,6 +68,21 @@ _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _SLUG_EDGE_DASH = re.compile(r"^-+|-+$")
 
 
+def slugify_brand_value(value: Any) -> str:
+    """The BRAND token's rule -- letters and digits only, no separator.
+
+    This is the ONE place the live store departs from the dashed slug: all 36
+    smart glasses on bettervision.in carry `brand_rayban`, never
+    `brand_ray-ban`, and the storefront's brand facet is built on that token.
+    Keeping it here means there is a single brand-slug rule in the codebase
+    (smartglass_listing's `<brand>_<line>` token imports this one rather than
+    re-implementing it, so one payload can never spell the same brand two
+    ways). "Ray-Ban" / "RayBan" / "ray ban" all collapse onto "rayban"."""
+    if value is None:
+        return ""
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
 def slugify_tag_value(value: Any) -> str:
     """Slugify a value to the Shopify tag convention. Booleans map to yes/no
     (mirrors BVI tagsForProductAttributes). Returns "" for blank/None so a
@@ -278,7 +293,11 @@ def generate_attribute_tags(
             raw = merged[attr_key]
             if raw is None or (isinstance(raw, str) and raw.strip() == ""):
                 continue
-            value = slugify_tag_value(raw)
+            value = (
+                slugify_brand_value(raw)
+                if prefix == "brand"
+                else slugify_tag_value(raw)
+            )
             if not value:
                 continue
             token = f"{prefix}_{value}"

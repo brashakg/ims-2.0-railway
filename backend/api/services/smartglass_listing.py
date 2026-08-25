@@ -47,6 +47,7 @@ from html import escape
 from typing import Any, Dict, List, Optional
 
 from .product_description import _clean  # filled + stringified attrs only
+from .shopify_tag_gen import slugify_brand_value
 
 STORE_NAME = "Better Vision"
 
@@ -54,6 +55,13 @@ STORE_NAME = "Better Vision"
 # NOT emitted by shopify_tag_gen (which only builds `<attr>_<value>` tokens), so
 # they are generated here instead of duplicating that module's registry.
 BASE_TAGS = ("product_smartglass", "product_sunglass")
+
+# Bare (prefix-less) facet tokens the live listings carry that no
+# `<attr>_<value>` rule would ever produce: the generation 30 of the 36 live
+# listings are grouped by, and the flag the 8 prescription Optics models carry.
+# Both read off the live store on 2026-08-25.
+GENERATION_TAG_PREFIX = "gen"
+PRESCRIPTION_TAG = "prescription_ready"
 
 MAX_SEO_TITLE = 70
 MAX_SEO_DESCRIPTION = 320
@@ -68,10 +76,12 @@ def _yes(value: Any) -> bool:
     return str(value or "").strip().lower() in _TRUTHY
 
 
-def _alnum(value: Any) -> str:
-    """Lower-case, letters+digits only. 'Ray-Ban' -> 'rayban' (this is how the
-    live brand-line tag reads: `rayban_meta`, not `ray-ban_meta`)."""
-    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+# The brand-token rule lives in shopify_tag_gen (which builds the `brand_` token
+# on the SAME payload) -- imported, not re-implemented, so the two can never
+# disagree about how "Ray-Ban" is spelled. 'Ray-Ban' -> 'rayban', giving
+# `rayban_meta` here and `brand_rayban` there, exactly as the 36 live listings
+# read.
+_alnum = slugify_brand_value
 
 
 def _dedupe_join(*parts: Any) -> str:
@@ -111,9 +121,11 @@ def _bullet_camera(a: Dict[str, str]) -> str:
     if not (mp or kind or video):
         return ""
     head = _dedupe_join(f"{mp}MP" if mp else "", (kind or "").lower(), "camera")
-    if video:
-        return f"{head} for photos and {video} video"
-    return head
+    text = f"{head} for photos and {video} video" if video else head
+    # Every bullet on the live listings opens on a capital. With no megapixel
+    # count the sentence starts on the camera TYPE, which is lower-cased so it
+    # reads as "12MP ultra-wide camera" when the count IS there.
+    return text[:1].upper() + text[1:]
 
 
 def _bullet_audio(a: Dict[str, str]) -> str:
@@ -256,14 +268,22 @@ def build_seo_description(attributes: Dict[str, Any]) -> str:
 
 def build_tags(attributes: Dict[str, Any]) -> List[str]:
     """The storefront facet tokens shopify_tag_gen does not emit: the two
-    product_* type tokens plus the `<brand>_<product line>` token (rayban_meta).
-    The attribute tokens (brand_/shape_/framematerial_/...) still come from
-    shopify_tag_gen at push time -- this does not duplicate them."""
+    product_* type tokens, the `<brand>_<product line>` token (rayban_meta),
+    the generation token (gen2) and the prescription flag. The attribute
+    tokens (brand_/shape_/framematerial_/...) still come from shopify_tag_gen
+    at push time -- this does not duplicate them."""
     a = _clean(attributes)
     tags = list(BASE_TAGS)
     brand, line = _alnum(a.get("brand_name")), _alnum(a.get("subbrand"))
     if brand and line:
         tags.append(f"{brand}_{line}")
+    # "Gen 2" -> gen2, the token 30 of the 36 live listings are grouped by. Only
+    # emitted when the digits are actually there, so nothing is invented.
+    digits = "".join(ch for ch in str(a.get("generation") or "") if ch.isdigit())
+    if digits:
+        tags.append(f"{GENERATION_TAG_PREFIX}{digits}")
+    if _yes(a.get("prescription_ready")):
+        tags.append(PRESCRIPTION_TAG)
     return tags
 
 

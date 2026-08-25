@@ -265,8 +265,13 @@ def test_tag_set_matches_the_live_storefront_vocabulary():
         "product_smartglass",
         "product_sunglass",
         "rayban_meta",
+        # 30 of the 36 live listings carry the generation token, and the 8
+        # Optics models carry the prescription flag.
+        "gen2",
+        "prescription_ready",
     }
-    # No product line -> no brand-line token, and never a dangling "rayban_".
+    # No product line -> no brand-line token, and never a dangling "rayban_";
+    # no generation and no prescription answer -> neither of those tokens.
     assert set(sgl.build_tags({"brand_name": "Ray-Ban"})) == {
         "product_smartglass",
         "product_sunglass",
@@ -279,7 +284,14 @@ def test_tags_do_not_duplicate_what_the_attribute_tag_generator_emits():
     from api.services.shopify_tag_gen import generate_attribute_tags
 
     attribute_tags = set(generate_attribute_tags("SMARTGLASSES", FULL_ATTRS))
-    assert "brand_ray-ban" in attribute_tags
+    # brand_rayban, NOT brand_ray-ban: the live "RAY - BAN" smart collection on
+    # bettervision.in rules on TAG = brand_rayban, and all 36 live smart glasses
+    # carry it. The dashed slug still applies to every OTHER value (the live
+    # store has an origin_made-in-italy collection) -- brand is the one
+    # exception, and shopify_tag_gen.slugify_brand_value is the only place it
+    # is spelled.
+    assert "brand_rayban" in attribute_tags
+    assert "brand_ray-ban" not in attribute_tags
     assert "shape_wayfarer" in attribute_tags
     assert "framematerial_acetate" in attribute_tags
     assert attribute_tags.isdisjoint(set(sgl.build_tags(FULL_ATTRS)))
@@ -580,3 +592,111 @@ def test_the_description_reaches_shopifys_storefront_body():
     )
     assert doc["description"] == body
     assert shopify_push.build_product_input(doc, [])["descriptionHtml"] == body
+
+
+# ---------------------------------------------------------------------------
+# 7. The PUSH payload has to look like the listings already on the storefront
+# ---------------------------------------------------------------------------
+# Fetched from the Better Vision Shopify admin on 2026-08-25 -- all 36 live
+# smart glasses, no exceptions:
+#   productType : "SmartGlass"      (never "SMARTGLASSES", never "Smart Glasses")
+#   brand token : "brand_rayban"    (never "brand_ray-ban")
+#   generation  : "gen2"            on 30 of 36
+#   prescription: "prescription_ready" on 8 of 36 (the Optics models)
+# A model catalogued through the new form must land in the same buckets, or it
+# is the only one of its kind the storefront filters cannot find.
+LIVE_PRODUCT_TYPE = "SmartGlass"
+LIVE_TAGS_SEEN = {
+    "brand_rayban",
+    "framematerial_acetate",
+    "gen2",
+    "prescription_ready",
+    "product_smartglass",
+    "product_sunglass",
+    "rayban_meta",
+    "shape_wayfarer",
+}
+
+
+def _pushed(attrs=None):
+    from api.services import shopify_push
+
+    doc = pm._build_pim_doc(
+        {
+            "category": "SMARTGLASSES",
+            "brand": "Ray-Ban",
+            "attributes": dict(FULL_ATTRS if attrs is None else attrs),
+            "sku": "SMTFRRAYMETA1",
+            "pim_product_id": "pim-push",
+        }
+    )
+    return shopify_push.build_product_input(doc, [])
+
+
+def test_pushed_product_type_is_the_one_the_storefront_uses():
+    assert _pushed()["productType"] == LIVE_PRODUCT_TYPE
+
+
+def test_the_brand_is_spelled_the_same_way_twice_in_one_payload():
+    """The generated `rayban_meta` token and the attribute `brand_` token are
+    the SAME brand; the live store spells both without the hyphen."""
+    tags = set(_pushed()["tags"])
+    assert "brand_rayban" in tags
+    assert "brand_ray-ban" not in tags
+    assert "rayban_meta" in tags
+
+
+def test_generation_and_prescription_reach_the_storefront_facets():
+    """30 of the 36 live listings carry `gen2`; the 8 Optics models carry
+    `prescription_ready`. A Gen-2 model catalogued through the new form used to
+    be the only Gen-2 product on the store without the tag."""
+    tags = set(_pushed()["tags"])
+    assert {"gen2", "prescription_ready"} <= tags
+
+
+def test_no_generation_no_gen_tag():
+    attrs = {k: v for k, v in FULL_ATTRS.items() if k != "generation"}
+    attrs["prescription_ready"] = "No"
+    tags = set(_pushed(attrs)["tags"])
+    assert not [t for t in tags if t.startswith("gen")]
+    assert "prescription_ready" not in tags
+
+
+def test_every_generated_tag_is_vocabulary_the_live_store_already_uses():
+    """Nothing invented: every token this payload adds beyond the attribute
+    generator's own `<prefix>_<value>` tokens must be one the store has."""
+    generated = set(sgl.build_tags(FULL_ATTRS))
+    assert generated <= LIVE_TAGS_SEEN, sorted(generated - LIVE_TAGS_SEEN)
+
+
+def test_no_bullet_ever_starts_lower_case():
+    """Every bullet on the live listings opens on a capital. With a camera TYPE
+    but no megapixel count the sentence used to open on the lower-cased type
+    ("ultra-wide camera for photos and 1080p video") -- one lower-case line in
+    an otherwise capitalised list. Swept over every fill pattern of the fields
+    that feed a bullet, not just the one that was reported."""
+    import itertools
+
+    keys = [
+        "camera_mp",
+        "camera_type",
+        "video_resolution",
+        "audio_type",
+        "microphone_count",
+        "voice_assistant",
+        "controls",
+        "battery_life_hours",
+        "charging_case",
+        "connectivity",
+        "storage_gb",
+        "shape",
+        "frame_material",
+        "prescription_ready",
+    ]
+    offenders = []
+    for mask in itertools.product((True, False), repeat=len(keys)):
+        attrs = {k: FULL_ATTRS[k] for k, keep in zip(keys, mask) if keep}
+        for bullet in sgl.build_spec_bullets(attrs):
+            if bullet[:1].isalpha() and not bullet[:1].isupper():
+                offenders.append(bullet)
+    assert not set(offenders), sorted(set(offenders))

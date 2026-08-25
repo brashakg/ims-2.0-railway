@@ -115,6 +115,7 @@ from api.services.shopify_auth import resolve_shopify_credentials
 
 # Attribute -> Shopify filter-tag generator (BVI parity). Pure, network-free.
 from .gtin import sanitise_gtin
+from .ecom_category_map import ims_to_shopify_type
 from .shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 logger = logging.getLogger(__name__)
@@ -707,7 +708,14 @@ def build_product_input(
     if product.get("brand"):
         inp["vendor"] = product["brand"]
     if product.get("category"):
-        inp["productType"] = str(product["category"])
+        # The STOREFRONT's productType vocabulary, not IMS's enum. Sending the
+        # raw enum ("SUNGLASS", "FRAME", "SMARTGLASSES") put every pushed
+        # product outside every smart collection on bettervision.in, which all
+        # rule on TYPE = "Sunglass" / "Spectacles" / "Contact Lenses"; the 36
+        # live smart glasses read "SmartGlass". ecom_category_map is the
+        # declared single source of truth for that translation and this is its
+        # door -- unknown categories still pass through unchanged (fail-soft).
+        inp["productType"] = ims_to_shopify_type(product["category"])
     body_html = seo.get("html") or product.get("description")
     if body_html:
         inp["descriptionHtml"] = body_html

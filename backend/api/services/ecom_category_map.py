@@ -38,8 +38,16 @@ from typing import Dict, List, Optional
 # Add a row here to teach the bridge a new category -- nothing else changes.
 # ---------------------------------------------------------------------------
 _TABLE: List[Dict[str, str]] = [
-    {"ims": "FRAME", "bvi": "SPECTACLES", "shopify": "Eyeglasses"},
-    {"ims": "SUNGLASS", "bvi": "SUNGLASSES", "shopify": "Sunglasses"},
+    # The Shopify column is the productType the LIVE storefront's smart
+    # collections actually match on (read off bettervision.in 2026-08-25, and
+    # the reason this table finally has a caller): 5 collections rule on
+    # TYPE="Spectacles", 12 on TYPE="Sunglass", and all 36 smart glasses carry
+    # TYPE="SmartGlass". The older BVI-era spellings ("Eyeglasses",
+    # "Sunglasses", "Smart Glasses") are kept as LEGACY rows further down so an
+    # inbound Shopify read still resolves them -- first row wins for the
+    # outbound direction, so those never go back out.
+    {"ims": "FRAME", "bvi": "SPECTACLES", "shopify": "Spectacles"},
+    {"ims": "SUNGLASS", "bvi": "SUNGLASSES", "shopify": "Sunglass"},
     {"ims": "OPTICAL_LENS", "bvi": "LENSES", "shopify": "Eyeglass Lenses"},
     {"ims": "CONTACT_LENS", "bvi": "CONTACT_LENSES", "shopify": "Contact Lenses"},
     {
@@ -50,13 +58,19 @@ _TABLE: List[Dict[str, str]] = [
     {"ims": "READING_GLASSES", "bvi": "READING_GLASSES", "shopify": "Reading Glasses"},
     {"ims": "WATCH", "bvi": "WATCHES", "shopify": "Watches"},
     {"ims": "SMARTWATCH", "bvi": "SMARTWATCHES", "shopify": "Smartwatches"},
-    {"ims": "SMARTGLASSES", "bvi": "SMARTGLASSES", "shopify": "Smart Glasses"},
+    {"ims": "SMARTGLASSES", "bvi": "SMARTGLASSES", "shopify": "SmartGlass"},
     {"ims": "WALL_CLOCK", "bvi": "CLOCKS", "shopify": "Clocks"},
     {"ims": "ACCESSORIES", "bvi": "ACCESSORIES", "shopify": "Accessories"},
     # Contact-lens care fluids live under BVI "SOLUTIONS"; IMS files them as
     # accessories (they are not a distinct IMS product category).
     {"ims": "ACCESSORIES", "bvi": "SOLUTIONS", "shopify": "Lens Solutions"},
     {"ims": "SERVICES", "bvi": "SERVICES", "shopify": "Services"},
+    # LEGACY inbound-only spellings (see the note at the top of the table).
+    # Placed last so `ims_to_shopify_type` never emits them, while
+    # `shopify_type_to_ims` still recognises a product that carries one.
+    {"ims": "FRAME", "bvi": "SPECTACLES", "shopify": "Eyeglasses"},
+    {"ims": "SUNGLASS", "bvi": "SUNGLASSES", "shopify": "Sunglasses"},
+    {"ims": "SMARTGLASSES", "bvi": "SMARTGLASSES", "shopify": "Smart Glasses"},
 ]
 
 # Build directed lookups once at import. For the many->one direction (two BVI

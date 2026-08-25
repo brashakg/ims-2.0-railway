@@ -20,9 +20,14 @@ from api.services import ecom_category_map as m  # noqa: E402
 
 
 # A representative slice of the known mappings: (ims, bvi, shopify).
+# The Shopify column is the productType the LIVE bettervision.in smart
+# collections match on, read off the store 2026-08-25 (TYPE="Spectacles" x5,
+# TYPE="Sunglass" x12, TYPE="SmartGlass" on all 36 smart glasses) -- the push
+# now sends these, so they are load-bearing rather than documentation.
 KNOWN = [
-    ("FRAME", "SPECTACLES", "Eyeglasses"),
-    ("SUNGLASS", "SUNGLASSES", "Sunglasses"),
+    ("FRAME", "SPECTACLES", "Spectacles"),
+    ("SUNGLASS", "SUNGLASSES", "Sunglass"),
+    ("SMARTGLASSES", "SMARTGLASSES", "SmartGlass"),
     ("CONTACT_LENS", "CONTACT_LENSES", "Contact Lenses"),
     ("READING_GLASSES", "READING_GLASSES", "Reading Glasses"),
     ("WATCH", "WATCHES", "Watches"),
@@ -57,9 +62,21 @@ def test_full_triangle_roundtrip():
 
 
 def test_shopify_lookup_is_case_insensitive():
-    assert m.shopify_type_to_ims("eyeglasses") == "FRAME"
-    assert m.shopify_type_to_ims("EYEGLASSES") == "FRAME"
-    assert m.shopify_type_to_bvi("  sunglasses  ") == "SUNGLASSES"
+    assert m.shopify_type_to_ims("spectacles") == "FRAME"
+    assert m.shopify_type_to_ims("SPECTACLES") == "FRAME"
+    assert m.shopify_type_to_bvi("  sunglass  ") == "SUNGLASSES"
+
+
+def test_the_older_shopify_spellings_still_read_back_but_never_go_out():
+    """Products pushed before the vocabulary was corrected carry "Eyeglasses" /
+    "Sunglasses" / "Smart Glasses". Those must still resolve INBOUND, while the
+    outbound direction only ever emits the spelling the live collections use."""
+    assert m.shopify_type_to_ims("Eyeglasses") == "FRAME"
+    assert m.shopify_type_to_ims("Sunglasses") == "SUNGLASS"
+    assert m.shopify_type_to_ims("Smart Glasses") == "SMARTGLASSES"
+    assert m.ims_to_shopify_type("FRAME") == "Spectacles"
+    assert m.ims_to_shopify_type("SUNGLASS") == "Sunglass"
+    assert m.ims_to_shopify_type("SMARTGLASSES") == "SmartGlass"
 
 
 def test_input_normalisation_for_enum_keys():
