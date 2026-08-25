@@ -180,12 +180,13 @@ def ist_date_str_from_stored(value: Any) -> str:
 
     Existing copies of this shape, to fold onto this definition rather than
     growing a fourth: ``api/routers/reports.py::_credit_note_date_ist``
-    (credit_note_ledger.created_at) and the inline ``_to_dt(closed_at)`` +
-    ``ist_date_str(...)`` pair in ``api/routers/finance.py``'s
-    cash-reconciliation summary (session stamps).
+    (credit_note_ledger.created_at) and, in ``api/routers/finance.py``'s
+    cash-reconciliation summary, the session-stamp day face -- an inline
+    ``_to_dt(closed_at)`` + ``ist_date_str(...)`` pair today, named
+    ``_ist_day_face`` once PR #999 lands. Grep for BOTH.
 
     NOT the same rule as the GSTR-1 ``invoice_date`` in
-    ``reports.py::get_gstr1_data``, which deliberately keeps a stored STRING
+    ``reports.py::_compute_gstr1``, which deliberately keeps a stored STRING
     unshifted -- see the comment at that site. For a string-stored order in
     the 00:00-05:30 IST band the two GST-facing documents would name
     different days (and on 1 April, different financial years). Production
