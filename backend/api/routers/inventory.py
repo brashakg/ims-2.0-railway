@@ -2785,6 +2785,14 @@ async def reconcile_stock_count(
                 # NOT swallowed: this used to sit inside a bare except that
                 # logged and carried on, so the endpoint reported a successful
                 # write-off over a failed one.
+                #
+                # ponytail: oldest-first among the units still AVAILABLE. A
+                # count records a QUANTITY per product, not which serials were
+                # on the shelf, so it cannot know WHICH unit is the missing
+                # one -- the quantity is right (that is what gates the sale),
+                # but the particular serial voided may not be the one that
+                # walked. If a serial-accurate write-off is ever wanted, the
+                # count sheet has to record scanned barcodes, not a number.
                 candidates = list(
                     stock_coll.find(
                         {
