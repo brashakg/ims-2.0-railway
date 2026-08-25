@@ -128,6 +128,24 @@ const MATRIX_REASON: Record<ReturnReason, string> = {
   OTHER: 'CHANGE_OF_MIND',
 };
 
+// EXCHANGE IS SWITCHED OFF (owner ruling 2026-08-25, lifecycle finding S1).
+// An exchange put the returned frame back on the shelf and took the price
+// difference, but never took the REPLACEMENT out of stock and never billed it:
+// a phantom frame plus a sale that reached no revenue figure, no GST return and
+// no Tally export -- on every exchange, with the drawer balancing perfectly.
+// The server refuses it too (returns.py `_gate_exchange_closed`), so the tile
+// says WHY and WHAT TO DO INSTEAD rather than failing at the end of the wizard.
+const RETURN_TYPE_OPTIONS: {
+  id: ReturnType; label: string; icon: typeof RotateCcw; desc: string; disabled: boolean;
+}[] = [
+  { id: 'RETURN', label: 'Return & Refund', icon: RotateCcw, disabled: false,
+    desc: 'Refund to original payment' },
+  { id: 'EXCHANGE', label: 'Exchange', icon: ArrowLeftRight, disabled: true,
+    desc: 'Do a Return & Refund for the item coming back, then ring up the replacement as a normal sale at the till.' },
+  { id: 'CREDIT_NOTE', label: 'Store Credit', icon: Receipt, disabled: false,
+    desc: 'Issue credit for future use' },
+];
+
 export default function ReturnsPage() {
   const { user } = useAuth();
   const [step, setStep] = useState<'search' | 'select' | 'review' | 'complete'>('search');
@@ -632,7 +650,7 @@ export default function ReturnsPage() {
         <div>
           <div className="eyebrow" style={{ marginBottom: 6 }}>Returns & Exchanges</div>
           <h1>Undo, gracefully.</h1>
-          <div className="hint">Refund to source, exchange for another SKU, or issue a store-credit note. Every action is audit-logged against the original invoice.</div>
+          <div className="hint">Refund to source or issue a store-credit note. Every action is audit-logged against the original invoice. Swapping an item? Do a Return &amp; Refund, then ring up the replacement as a normal sale.</div>
         </div>
         <div className="flex rounded-lg border border-gray-200 overflow-hidden self-start">
           {(['new', 'history'] as const).map((m) => (
@@ -648,19 +666,25 @@ export default function ReturnsPage() {
       <>
       {/* Return Type Selection */}
       <div className="flex gap-2">
-        {([
-          { id: 'RETURN' as const, label: 'Return & Refund', icon: RotateCcw, desc: 'Refund to original payment' },
-          { id: 'EXCHANGE' as const, label: 'Exchange', icon: ArrowLeftRight, desc: 'Replace with different product' },
-          { id: 'CREDIT_NOTE' as const, label: 'Store Credit', icon: Receipt, desc: 'Issue credit for future use' },
-        ]).map(t => (
+        {RETURN_TYPE_OPTIONS.map(t => (
           <button key={t.id} onClick={() => setReturnType(t.id)}
+            disabled={t.disabled}
+            aria-disabled={t.disabled}
             className={clsx('flex-1 p-3 rounded-xl border-2 text-left transition-all',
-              returnType === t.id ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
+              t.disabled ? 'border-gray-200 bg-gray-50 cursor-not-allowed'
+                : returnType === t.id ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
             <div className="flex items-center gap-2">
-              <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-red-600' : 'text-gray-500')} />
-              <span className={clsx('text-sm font-medium', returnType === t.id ? 'text-bv-red-700' : 'text-gray-700')}>{t.label}</span>
+              <t.icon className={clsx('w-5 h-5',
+                t.disabled ? 'text-gray-400' : returnType === t.id ? 'text-bv-red-600' : 'text-gray-500')} />
+              <span className={clsx('text-sm font-medium',
+                t.disabled ? 'text-gray-400' : returnType === t.id ? 'text-bv-red-700' : 'text-gray-700')}>{t.label}</span>
+              {t.disabled && (
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 bg-gray-200 rounded px-1.5 py-0.5">
+                  Switched off
+                </span>
+              )}
             </div>
-            <p className="text-xs text-gray-500 mt-1 ml-7">{t.desc}</p>
+            <p className={clsx('text-xs mt-1 ml-7', t.disabled ? 'text-gray-600' : 'text-gray-500')}>{t.desc}</p>
           </button>
         ))}
       </div>
