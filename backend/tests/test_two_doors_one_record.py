@@ -457,3 +457,195 @@ class TestTheFinanceDoorNeverFabricatesACount:
             closing_count_state="COUNTED",
         )
         assert _sessions(db)[0]["session_date"] == "2026-08-25"
+
+
+# ===========================================================================
+# ONE DRAWER, ONE ANSWER -- the Finance screen reports the shared count
+# ===========================================================================
+
+
+def _cr_sessions(db) -> List[Dict[str, Any]]:
+    return asyncio.run(
+        # Explicit args: a direct call leaves FastAPI Query(...) defaults in place.
+        finance_router.list_cash_register_sessions(
+            store_id=STORE, status=None, limit=50, current_user=USER
+        )
+    )["sessions"]
+
+
+class TestTheTwoScreensCannotShowTwoFigures:
+    @pytest.fixture(autouse=True)
+    def _fixed_clock(self, monkeypatch):
+        """Both doors must land on the SAME business day for this to be one
+        drawer. 12:00 UTC is 17:30 IST on the same date."""
+        monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T12:00:00")
+
+    def test_the_finance_list_reports_the_count_the_day_end_already_made(self, db):
+        """THE REPRODUCTION. POS Day-End closes the drawer at Rs 3,000. The
+        Finance screen then closes the SAME day with a 4 x Rs 500 grid. The
+        first count STANDS on the shared record, so the Finance list must
+        report Rs 3,000 too -- it used to report Rs 2,000 and a Rs 1,000
+        OVERAGE for a drawer the Z-Read said held Rs 3,000."""
+        _day_end_close(
+            db,
+            closing_cash=3000.0,
+            system_cash=3000.0,
+            closing_count=cd.CashCountInput(rows=_rows((500, 6)), state="COUNTED"),
+        )
+        shared = _sessions(db)[0]
+        assert shared["blind_count_paisa"] == 300000
+
+        closed = _cr_close(
+            db,
+            denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+            closing_count_state="COUNTED",
+        )
+
+        # ONE drawer, ONE counted figure -- on the close response, on the
+        # stored document, and on what the Finance screen reads back.
+        assert closed["counted"] == 3000.0
+        listed = _cr_sessions(db)
+        assert len(listed) == 1
+        assert listed[0]["counted"] == cd.paisa_to_rupees(shared["blind_count_paisa"])
+        assert listed[0]["counted"] == 3000.0
+        # ...and the screen is TOLD, rather than silently shown someone else's
+        # number.
+        assert listed[0]["counted_from_shared_record"] is True
+        assert listed[0]["till_count_differs"] is True
+        assert listed[0]["till_already_counted"] is True
+        # The variance is re-derived from the count that stands.
+        assert listed[0]["variance"] == round(3000.0 - listed[0]["expected"], 2)
+        # The shared record is NOT restated by the second door.
+        assert _sessions(db)[0]["blind_count_paisa"] == 300000
+
+    def test_the_finance_door_closing_first_still_owns_its_own_count(self, db):
+        """POSITIVE CONTROL. When this screen is the one that counts the
+        drawer, its own figure IS the shared figure -- nothing is adopted and
+        nothing is flagged."""
+        closed = _cr_close(
+            db,
+            denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+            closing_count_state="COUNTED",
+        )
+        shared = _sessions(db)[0]
+
+        assert closed["counted"] == 2000.0
+        assert shared["blind_count_paisa"] == 200000
+        listed = _cr_sessions(db)[0]
+        assert listed["counted"] == cd.paisa_to_rupees(shared["blind_count_paisa"])
+        assert listed["counted_from_shared_record"] is False
+        assert listed["till_count_differs"] is False
+
+
+# ===========================================================================
+# THE OPENING FLOAT DECLARED AT THE FINANCE DOOR REACHES THE SHARED RECORD
+# ===========================================================================
+
+
+def _cr_open(db, **body_kw):
+    body = finance_router.CashRegisterOpen(store_id=STORE, **body_kw)
+    return asyncio.run(finance_router.open_cash_register(body=body, current_user=USER))
+
+
+class TestTheOpeningFloatIsShared:
+    @pytest.fixture(autouse=True)
+    def _fixed_clock(self, monkeypatch):
+        monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T12:00:00")
+        monkeypatch.setattr(finance_router, "is_online_store", lambda *_a, **_k: False)
+
+    def test_a_float_declared_here_lands_on_the_shared_record(self, db):
+        """Rs 2,000 declared as 2 x Rs 500 + 10 x Rs 100. Without this the
+        shared record held opening_float_paisa 0 with
+        opening_float_not_recorded set, so expected cash and EVERY per-face
+        expected row were computed from nothing and the note-by-note verdict
+        was withheld for the whole store-day."""
+        opened = _cr_open(
+            db,
+            denominations=[
+                {"face": 500, "kind": "note", "pieces": 2},
+                {"face": 100, "kind": "note", "pieces": 10},
+            ],
+            opening_count_state="COUNTED",
+        )
+
+        session = _sessions(db)[0]
+        assert opened["till_link_ok"] is True
+        assert opened["till_session_id"] == session["session_id"]
+        assert session["opening_float_paisa"] == 200000
+        assert session["opening_float_not_recorded"] is False
+        # The NOTES, not just the total -- SET and COUNT.
+        assert {
+            (r["kind"], r["face"]): r["pieces"]
+            for r in session["opening_count"]["rows"]
+        } == {("note", 500): 2, ("note", 100): 10}
+        assert session["opening_count"]["state"] == "COUNTED"
+
+    def test_the_shared_float_survives_a_day_end_close_through_the_other_door(self, db):
+        _cr_open(
+            db,
+            denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+            opening_count_state="COUNTED",
+        )
+        res = _day_end_close(db, closing_cash=5000.0, system_cash=5000.0)
+
+        session = _sessions(db)[0]
+        assert session["opening_float_paisa"] == 200000
+        assert res["close"]["till_opening_float_not_recorded"] is False
+
+    def test_a_blank_opening_grid_declares_nothing_rather_than_zero(self, db):
+        """Blank is not zero at the open door either: an untouched grid must not
+        put "the drawer opened with Rs 0.00" on the record all three screens
+        read."""
+        _cr_open(db, denominations=[])
+
+        session = _sessions(db)[0]
+        assert session["opening_float_not_recorded"] is True
+        assert session["opening_count"]["state"] == "NOT_CAPTURED"
+
+    def test_a_float_already_declared_is_not_restated_by_this_screen(self, db):
+        """First answer wins, the same rule the closing count follows."""
+        till.open_session(
+            db,
+            store_id=STORE,
+            session_date=DATE,
+            opening_denominations=_rows((500, 10)),
+            opening_count_state="COUNTED",
+            actor=USER,
+        )
+        opened = _cr_open(
+            db,
+            denominations=[{"face": 500, "kind": "note", "pieces": 1}],
+            opening_count_state="COUNTED",
+        )
+
+        session = _sessions(db)[0]
+        assert session["opening_float_paisa"] == 500000  # NOT 50000
+        assert opened["till_float_already_declared"] is True
+
+    def test_a_float_declared_after_an_auto_opened_session_fills_the_gap(self, db):
+        """A close screen auto-opens a session with NO float on it. The first
+        DECLARED float fills that gap -- otherwise the per-face verdict stays
+        withheld for a store that opens on this screen."""
+        till.record_screen_close(db, store_id=STORE, session_date=DATE, actor=USER)
+        assert _sessions(db)[0]["opening_float_not_recorded"] is True
+
+        _cr_open(
+            db,
+            denominations=[{"face": 500, "kind": "note", "pieces": 3}],
+            opening_count_state="COUNTED",
+        )
+        session = _sessions(db)[0]
+        assert session["opening_float_paisa"] == 150000
+        assert session["opening_float_not_recorded"] is False
+
+    def test_a_broken_link_never_stops_the_drawer_opening(self, db, monkeypatch):
+        def _explode(*a, **k):
+            raise RuntimeError("mongo went away")
+
+        monkeypatch.setattr(till, "open_session", _explode)
+        opened = _cr_open(db, denominations=[{"face": 500, "kind": "note", "pieces": 1}])
+
+        assert opened["status"] == "OPEN"
+        assert opened["opening_float"] == 500.0
+        assert opened["till_link_ok"] is False
+        assert "mongo went away" in str(opened["till_link_error"])

@@ -454,6 +454,54 @@ def _next_zread_number(db, store_id: str, day: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _adopt_declared_float(
+    coll,
+    existing: Dict[str, Any],
+    *,
+    denoms: List[Dict[str, Any]],
+    declared_paisa: int,
+    opening_count_state: Optional[str],
+    actor: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Fill a declared opening float onto a session that has NONE on it.
+
+    A till session can exist before any float was declared: a close screen
+    auto-opens one for the day it is closing, and the record then says so with
+    ``opening_float_not_recorded``. The FIRST DECLARED float fills that gap --
+    without it, expected cash and every per-face expected row are computed from
+    an opening of zero and the note-by-note verdict is withheld for the whole
+    store-day. A float that was already declared STANDS: same "the first answer
+    wins" rule the closing count follows, so a second screen can never restate
+    somebody's float. Guarded update -- concurrent declarations, exactly one
+    wins. Returns the session as it now reads (unchanged on any failure)."""
+    if not existing.get("opening_float_not_recorded"):
+        return existing
+    session_id = existing.get("_id") or existing.get("session_id")
+    patch = {
+        "opening_float_paisa": int(declared_paisa),
+        "opening_denominations": denoms,
+        "opening_count": _denom.build_block(
+            denoms, int(declared_paisa), state=opening_count_state, actor=actor
+        ),
+        "opening_float_not_recorded": False,
+    }
+    try:
+        from pymongo import ReturnDocument
+
+        updated = coll.find_one_and_update(
+            {
+                "_id": session_id,
+                "status": STATUS_OPEN,
+                "opening_float_not_recorded": True,
+            },
+            {"$set": patch},
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception:  # noqa: BLE001
+        return existing
+    return updated or existing
+
+
 def open_session(
     db,
     *,
@@ -504,6 +552,18 @@ def open_session(
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None:
+        # The shared drawer already exists. If nobody had declared a float on
+        # it and this door just did, that declaration lands -- see
+        # _adopt_declared_float.
+        if bool(denoms) or opening_float_paisa is not None:
+            existing = _adopt_declared_float(
+                coll,
+                existing,
+                denoms=denoms,
+                declared_paisa=declared,
+                opening_count_state=opening_count_state,
+                actor=actor,
+            )
         existing["session_id"] = existing.get("_id")
         existing.pop("_id", None)
         return {"ok": True, "session": existing, "already_open": True}
@@ -761,6 +821,21 @@ def blind_submit(
 # ---------------------------------------------------------------------------
 # TWO DOORS, ONE RECORD
 # ---------------------------------------------------------------------------
+
+
+def record_screen_open(db, **kwargs: Any) -> Dict[str, Any]:
+    """Fail-soft wrapper around ``open_session`` for a SCREEN that declares an
+    opening float (Finance > Cash Register, POS).
+
+    Same rule as ``record_screen_close``: linking a screen to the shared record
+    must never be able to stop a store opening its till, so any failure is
+    reported on the caller's own record instead of raised. The float is stored
+    on the ONE (store, date) session, which is where expected cash and every
+    per-face expected row are computed from."""
+    try:
+        return open_session(db, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"link_failed:{exc}"}
 
 
 def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:

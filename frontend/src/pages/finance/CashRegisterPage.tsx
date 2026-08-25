@@ -148,7 +148,15 @@ export default function CashRegisterPage() {
         tolerance: tol,
       });
       const v = closed.variance ?? 0;
-      if (closed.variance_status === 'BALANCED') {
+      if (closed.counted_from_shared_record) {
+        // The drawer was already counted at POS Day-End. That count stands --
+        // say so, because the figure now on this screen is not the one that was
+        // just typed into the grid, and a silently swapped number is how the
+        // two screens came to disagree in the first place.
+        toast.warning(
+          `This drawer was already counted at Day-End (${inr(closed.counted)}). That count stands — your grid has been kept alongside it.`,
+        );
+      } else if (closed.variance_status === 'BALANCED') {
         toast.success('Cash register closed — drawer balanced');
       } else {
         toast.warning(
@@ -262,6 +270,15 @@ export default function CashRegisterPage() {
                       <td className="px-4 py-2 text-right">{inr(s.opening_float)}</td>
                       <td className="px-4 py-2 text-right">
                         {s.status === 'CLOSED' ? inr(s.counted) : '—'}
+                        {s.counted_from_shared_record && (
+                          <span
+                            data-testid="counted-at-day-end"
+                            title="Counted at POS Day-End. One drawer, one count."
+                            className="ml-1 text-[10px] font-medium text-amber-700"
+                          >
+                            Day-End
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-right text-gray-500">
                         {s.status === 'CLOSED' ? inr(s.expected) : '—'}

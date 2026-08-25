@@ -15,7 +15,7 @@ from ..utils.ist import (
     fy_start_year_ist,
 )
 from ..utils.online_gst import order_interstate_flag
-from typing import Optional, List, Dict, NamedTuple
+from typing import Any, Optional, List, Dict, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Body
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -4482,6 +4482,37 @@ async def open_cash_register(
     )
 
     now = _iso_now()
+
+    # TWO DOORS, ONE RECORD -- the OPEN half. The float declared here lands on
+    # the day's single till session, the same record POS Day-End closes onto.
+    # Without it the shared record holds an opening float of ZERO with
+    # opening_float_not_recorded set, so expected cash and EVERY per-face
+    # expected row are computed from nothing and the note-by-note verdict is
+    # withheld for a store that opens on this screen. Fail-soft: linking must
+    # never stop a store opening its drawer.
+    #
+    # NOTHING DECLARED -> NOTHING FORWARDED. A blank grid with no typed float
+    # makes `opening_float` 0.0 because it is the sum of nothing; forwarding
+    # that would put "the drawer opened with Rs 0.00" on the record all three
+    # screens read.
+    till_open = till_service.record_screen_open(
+        db,
+        store_id=store_id,
+        # The BUSINESS day, in the same IST frame the close half uses.
+        session_date=ist_date_str(_to_dt(now)) or str(now)[:10],
+        opening_denominations=denoms,
+        opening_count_state=body.opening_count_state,
+        opening_float_paisa=(
+            cash_denom.rupees_to_paisa(opening_float)
+            if (denoms or body.opening_float is not None)
+            else None
+        ),
+        shift=body.shift,
+        note=body.note,
+        actor=current_user,
+    )
+    till_session = till_open.get("session") or {}
+
     session_id = f"CR-{store_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     doc = {
         "session_id": session_id,
@@ -4504,6 +4535,19 @@ async def open_cash_register(
         "opened_by": current_user.get("user_id"),
         "opened_by_name": current_user.get("name"),
         "opening_note": body.note,
+        # The shared session this float was declared on, and whether it got
+        # there. A failure is stored, not swallowed into a fake success.
+        "till_session_id": till_session.get("session_id"),
+        "till_link_ok": bool(till_open.get("ok")),
+        "till_link_error": till_open.get("error"),
+        # True when the day's session already carried a declared float: that
+        # one STANDS and this screen's is not the shared one.
+        "till_float_already_declared": bool(
+            till_open.get("already_open")
+            and not till_session.get("opening_float_not_recorded")
+            and till_session.get("opening_float_paisa")
+            != cash_denom.rupees_to_paisa(opening_float)
+        ),
         # close-time fields, filled on /close
         "closed_at": None,
         "closed_by": None,
@@ -4524,6 +4568,22 @@ async def open_cash_register(
         )
     doc.pop("_id", None)
     return doc
+
+
+def _shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The counted figure ON THE SHARED TILL RECORD after a close linked to it,
+    or None when nothing was counted there (or the link failed).
+
+    This is the ONE answer for the store-day: whichever door counted the drawer
+    first owns it, and both screens must report that same number."""
+    session = (till_link or {}).get("session") or {}
+    value = session.get("blind_count_paisa")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post("/cash-register/close")
@@ -4653,6 +4713,30 @@ async def close_cash_register(
         actor=current_user,
     )
 
+    # ONE DRAWER, ONE COUNTED FIGURE. When the day was already counted through
+    # the other door, THAT count stands (record_screen_close never overwrites a
+    # signed-off count) -- so this screen must REPORT it rather than its own.
+    # Reporting its own is how one drawer on one day came to read Rs 2,000 on
+    # Finance > Cash Register and Rs 3,000 on the Z-Read. Only the COUNT is
+    # shared; the expected figure below is still this window's own arithmetic.
+    # The grid typed here is still stored as this screen's sheet, and a sheet
+    # that disagrees with the shared count flags itself (matches_amount False).
+    shared_paisa = _shared_counted_paisa(till_link)
+    count_adopted = (
+        shared_paisa is not None
+        and shared_paisa != cash_denom.rupees_to_paisa(counted)
+    )
+    if count_adopted:
+        counted = cash_denom.paisa_to_rupees(shared_paisa)
+        summary["counted"] = counted
+        summary["variance"] = cash_register.compute_variance(
+            counted, summary["expected"]
+        )
+        if not summary.get("negative_expected_advisory"):
+            summary["variance_status"] = cash_register.variance_status(
+                summary["variance"], body.tolerance
+            )
+
     update = {
         "status": "CLOSED",
         "closed_at": end_iso,
@@ -4673,8 +4757,13 @@ async def close_cash_register(
             till_link.get("opening_float_not_recorded")
         ),
         # True when this screen's counted figure and the shared record's differ
-        # -- i.e. a manual override was typed over the notes. Visible, not silent.
-        "till_count_differs": bool(till_link.get("count_differs")),
+        # -- a manual override typed over the notes, or a drawer the other door
+        # had already counted. Either way the shared figure is what is stored
+        # above, and this flag is how the screen says so out loud.
+        "till_count_differs": bool(till_link.get("count_differs")) or count_adopted,
+        # The count on this close came from the shared record, not from the
+        # grid on this screen.
+        "counted_from_shared_record": count_adopted,
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
