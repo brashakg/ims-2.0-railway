@@ -217,3 +217,101 @@ describe('the safety-cap number belongs to products only', () => {
     expect(info).toMatch(/run again to continue/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ROUND 3. The two fixes this page made in the last round had no test of their
+// own, and the cap notice promised progress a repeat press cannot make.
+// ---------------------------------------------------------------------------
+
+describe('the channel tile states what it found, either way', () => {
+  it('names the resolved publication instead of just staying quiet', async () => {
+    render(<OnlineShopifySyncPage />);
+    await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
+
+    // Delete the tile and the "says nothing when resolved" test still passes --
+    // so the tile has to be asserted PRESENT, with what it resolved.
+    expect(await screen.findByText(/Online Store channel/i)).toBeTruthy();
+    expect(screen.getByText(/publication pinned/i)).toBeTruthy();
+  });
+
+  it('reports a looked-up publication as resolved too (a fresh worker)', async () => {
+    (pushApi.getStatus as any).mockResolvedValue(
+      status({
+        online_store_publication_id: 'gid://shopify/Publication/77',
+        online_store_publication_source: 'looked_up',
+      }),
+    );
+
+    render(<OnlineShopifySyncPage />);
+
+    expect(await screen.findByText(/publication looked_up/i)).toBeTruthy();
+    expect(screen.queryByText(/presses will publish nothing/i)).toBeNull();
+  });
+});
+
+describe('the sweep names the products it deliberately left alone', () => {
+  it('shows the rows a hand take-down held back', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 2, failed: 0, noop: 0, taken_down_skipped: 3 }, 2),
+    );
+
+    await pressProducts();
+
+    expect(await screen.findByText(/3 skipped \(taken down\)/i)).toBeTruthy();
+    expect(toastCalls.map((t) => t.msg).join(' | ')).toMatch(/3 skipped \(taken down\)/i);
+  });
+
+  it('shows an archived row as not listed rather than as processed', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 0, failed: 0, noop: 0, archived_not_listed: 1 }, 0),
+    );
+
+    await pressProducts();
+
+    expect(await screen.findByText(/1 archived \(not listed\)/i)).toBeTruthy();
+    expect(screen.queryByText(/1 processed/)).toBeNull();
+  });
+
+  it('says nothing about take-downs or archives on a clean sweep', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
+    );
+
+    await pressProducts();
+
+    await screen.findByText(/25 processed/);
+    expect(screen.queryByText(/taken down/i)).toBeNull();
+    expect(screen.queryByText(/archived/i)).toBeNull();
+  });
+});
+
+describe('the cap notice must not promise progress a repeat press cannot make', () => {
+  it('does NOT say "run again to continue" when the press published nothing', async () => {
+    // The starvation shape: the cap was spent entirely on rows that were
+    // withheld, so pressing again changes nothing until they are fixed.
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 0, failed: 0, noop: 0, publish_withheld: 25 }, 0),
+      limit_reached: true,
+    });
+
+    await pressEntity(0); // Products
+
+    const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
+    expect(info).not.toMatch(/run again to continue/i);
+    expect(info).toMatch(/NOTHING was published/i);
+    expect(await screen.findByText(/pressing again will not help/i)).toBeTruthy();
+  });
+
+  it('still says "run again to continue" when the press DID publish', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
+      limit_reached: true,
+    });
+
+    await pressEntity(0);
+
+    const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
+    expect(info).toMatch(/run again to continue/i);
+    expect(screen.queryByText(/pressing again will not help/i)).toBeNull();
+  });
+});

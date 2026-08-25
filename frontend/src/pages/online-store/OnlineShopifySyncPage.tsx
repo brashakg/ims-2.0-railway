@@ -328,13 +328,15 @@ export default function OnlineShopifySyncPage() {
         const refused = Number(s?.refused_no_photo ?? 0);
         const withheld = Number(s?.publish_withheld ?? 0);
         const heldDown = Number(s?.taken_down_skipped ?? 0);
+        const archived = Number(s?.archived_not_listed ?? 0);
         const msg =
           `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
           (s?.failed ? ` · ${s.failed} failed` : '') +
           (s?.noop ? ` · ${s.noop} no-op` : '') +
           (refused ? ` · ${refused} refused (no photograph)` : '') +
           (withheld ? ` · ${withheld} NOT made visible` : '') +
-          (heldDown ? ` · ${heldDown} skipped (taken down)` : '');
+          (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
+          (archived ? ` · ${archived} archived (not listed)` : '');
         if (refused || withheld || s?.failed) toast.warning(msg);
         else toast.success(msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
@@ -342,9 +344,16 @@ export default function OnlineShopifySyncPage() {
         if (res.limit_reached) {
           const capText =
             ent.token === 'products' ? `the safety cap of ${res.batch_cap ?? 25} products` : 'the page safety cap';
+          // "Run again to continue" promises progress a repeat press can only
+          // make if THIS press made some. When nothing went live, say so
+          // instead — the reasons above are what has to change, not the count
+          // of presses.
           toast.info(
-            `${ent.label}: stopped at ${capText} — run again to continue (the pending count ` +
-              'below shows the remainder).',
+            Number(res.pushed_count ?? 0) > 0
+              ? `${ent.label}: stopped at ${capText} — run again to continue (the pending count ` +
+                  'below shows the remainder).'
+              : `${ent.label}: stopped at ${capText}, but NOTHING was published this press — ` +
+                  'pressing again will not help until the reasons above are fixed.',
           );
         }
       }
@@ -384,8 +393,11 @@ export default function OnlineShopifySyncPage() {
       if (res.limit_reached) {
         toast.info(
           `Stopped at a safety cap (${res.batch_cap ?? 25} PRODUCTS per press; other objects ` +
-            'stop at 500) — NOT everything was pushed. Click again to continue; the pending ' +
-            'counts below show the remainder.',
+            'stop at 500) — NOT everything was pushed. ' +
+            (Number(res.pushed_count ?? 0) > 0
+              ? 'Click again to continue; the pending counts below show the remainder.'
+              : 'NOTHING was published this press — clicking again will not help until the ' +
+                'reasons shown below are fixed.'),
         );
       }
       loadStatus();
@@ -645,6 +657,19 @@ export default function OnlineShopifySyncPage() {
                           </span>
                         ) : null;
                       })()}
+                      {(() => {
+                        const archived = Number(
+                          (sweep.summary?.[ent.token]?.archived_not_listed ?? 0) as number,
+                        );
+                        return archived > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Retired products: the update reached Shopify, but an archived product is not on the storefront — nobody can find it."
+                          >
+                            · {fmt(archived)} archived (not listed)
+                          </span>
+                        ) : null;
+                      })()}
                       {/* Push-locked SKUs the sweep excluded (from summary.products). */}
                       {(() => {
                         const blocked = Number(
@@ -663,8 +688,10 @@ export default function OnlineShopifySyncPage() {
                     {/* OS-046: a capped sweep must not read as complete. */}
                     {sweep.limit_reached && (
                       <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700">
-                        <AlertTriangle className="w-3 h-3" /> Stopped at the safety cap — run again to
-                        continue.
+                        <AlertTriangle className="w-3 h-3" />{' '}
+                        {Number(sweep.pushed_count ?? 0) > 0
+                          ? 'Stopped at the safety cap — run again to continue.'
+                          : 'Stopped at the safety cap, but NOTHING was published — pressing again will not help until the reasons above are fixed.'}
                       </p>
                     )}
                     {Array.isArray(sweep.results) && sweep.results.length > 0 ? (

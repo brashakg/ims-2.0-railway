@@ -1506,6 +1506,10 @@ export interface PushSweepResult {
           /** Products a take-down is holding off the storefront: the sweep
            *  skips them until someone presses that one product explicitly. */
           taken_down_skipped?: number;
+          /** Retired products: the update reached Shopify, but an ARCHIVED
+           *  product is not on the storefront, so it is never counted as
+           *  pushed -- `pushed` must always mean "a shopper can find it". */
+          archived_not_listed?: number;
         } | null
       >
     | null;
