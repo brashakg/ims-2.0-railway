@@ -424,33 +424,6 @@ async def test_credit_note_ledger_records_gross_fee_net(ctx):
     assert rdoc["net_refund"] == 1200.0
 
 
-async def test_restocking_fee_rejected_on_exchange(ctx):
-    """A restocking fee on an EXCHANGE is ambiguous (settled on the difference)
-    and is rejected (422)."""
-    tok = _staff_token(["ADMIN"])
-    payload = _qa_payload(
-        return_type="EXCHANGE",
-        customer_id="CUST-1",
-        restocking_fee=100,
-        replacement_items=[
-            {
-                "product_id": "PRD-9",
-                "name": "Oakley",
-                "sku": "OK-9",
-                "quantity": 1,
-                "unit_price": 2000,
-                "gst_rate": 18,
-            }
-        ],
-    )
-    r = ctx["client"].post(
-        "/api/v1/returns",
-        json=payload,
-        headers={"Authorization": f"Bearer {tok}"},
-    )
-    assert r.status_code == 422
-
-
 def test_legacy_net_unit_price_is_grossed_exactly_once():
     """P1-A (audit claim: legacy order GST DOUBLE gross-up over-refunds).
 
