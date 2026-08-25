@@ -2591,6 +2591,26 @@ async def complete_stock_count(
                 }
             )
 
+        # HOW MUCH OF THE SHELF WAS WALKED. The session has known the full
+        # expected set since it opened; nothing ever compared the two, so
+        # counting 1 product out of 400 completed as "everything matched" and
+        # the stat tile read Rs 0 missing for a shelf nobody looked at. A
+        # counter gets interrupted -- that is the lie that actually happens.
+        # Coverage is measured against the EXPECTED set only: a line for a
+        # product the session never expected is an overage, not coverage.
+        expected_ids = set(system_quantities.keys())
+        counted_ids = {i.get("product_id", "") for i in items}
+        products_expected = len(expected_ids)
+        products_not_counted = sorted(expected_ids - counted_ids)
+        products_counted = products_expected - len(products_not_counted)
+        coverage_pct = (
+            round((products_counted / products_expected) * 100, 2)
+            if products_expected
+            else 100.0
+        )
+        # A session that expected nothing on hand cannot be a partial count.
+        full_count = not products_not_counted
+
         # Overall metrics
         overall_var_pct = round(
             ((total_counted - total_system) / max(total_system, 1)) * 100, 2
@@ -2614,6 +2634,12 @@ async def complete_stock_count(
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
             "lines_moved_during_count": lines_moved,
+            "products_expected": products_expected,
+            "products_counted": products_counted,
+            "products_missed": len(products_not_counted),
+            "products_not_counted": products_not_counted,
+            "coverage_percentage": coverage_pct,
+            "full_count": full_count,
             "notes": request.notes if request else None,
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
@@ -2636,6 +2662,8 @@ async def complete_stock_count(
                         f"{total_overage} units over (Rs {overage_value:,.2f}) "
                         f"across {len(items)} counted lines. "
                         f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}%. "
+                        f"{products_counted} of {products_expected} expected "
+                        f"products were counted ({coverage_pct}%). "
                         "Investigate and reconcile."
                     ),
                     priority=pri,
@@ -2660,6 +2688,11 @@ async def complete_stock_count(
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
             "lines_moved_during_count": lines_moved,
+            "products_expected": products_expected,
+            "products_counted": products_counted,
+            "products_missed": len(products_not_counted),
+            "coverage_percentage": coverage_pct,
+            "full_count": full_count,
             "variances": variances,
         }
 

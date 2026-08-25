@@ -816,3 +816,118 @@ def test_a_genuine_shortage_on_a_shelf_that_never_moved_is_still_written_off(
         )
         == 3
     )
+
+
+# ============================================================================
+# 7. HOW MUCH OF THE SHELF WAS ACTUALLY WALKED
+# ============================================================================
+# The completion guard was only "at least one line". The session has known the
+# full expected set since it opened and never compared it, so counting 1
+# product out of 400 reported "everything matched" and a stat tile reading
+# Rs 0 missing for a shelf nobody walked. A counter gets interrupted; this is
+# the lie that will actually happen on a shop floor.
+#
+# These sessions are scoped to their OWN category so the expected set is
+# exactly what the test seeded (the module shares one engine, and a count with
+# no category snapshots every product in the store).
+
+
+def _start_in_own_category(client, mongo_db, *, products: int, units: int = 2):
+    """N products in a category of their own, and a session scoped to it."""
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    pids, barcodes = [], {}
+    for _ in range(products):
+        pid = _seed_product(mongo_db, cost=1000.0, category=category)
+        pids.append(pid)
+        barcodes[pid] = _seed_units(mongo_db, pid, units)
+    r = client.post("/inventory/stock-count/start", json={"category": category})
+    assert r.status_code == 200, r.text
+    return r.json()["count_id"], pids, barcodes, category
+
+
+def test_counting_one_product_out_of_four_is_not_everything_matched(
+    admin_client, mongo_db
+):
+    count_id, pids, barcodes, _ = _start_in_own_category(
+        admin_client, mongo_db, products=4
+    )
+
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={
+            "barcode": barcodes[pids[0]][0],
+            "physical_count": 2,
+            "count_id": count_id,
+        },
+    )
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+
+    assert body["products_expected"] == 4
+    assert body["products_counted"] == 1
+    assert body["products_missed"] == 3
+    assert body["coverage_percentage"] == 25.0
+    assert body["full_count"] is False, (
+        "1 of 4 products counted must never report as a full count -- "
+        "that is the 'everything matched' lie for a shelf nobody walked"
+    )
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["coverage_percentage"] == 25.0, "and it is PERSISTED"
+    assert doc["full_count"] is False
+    assert set(doc["products_not_counted"]) == set(pids[1:])
+
+
+def test_a_count_that_walked_every_expected_product_reports_a_full_count(
+    admin_client, mongo_db
+):
+    """The discriminator: coverage must still read 100% when it really is."""
+    count_id, pids, barcodes, _ = _start_in_own_category(
+        admin_client, mongo_db, products=2
+    )
+    for pid in pids:
+        admin_client.post(
+            "/inventory/stock-count-scan",
+            json={
+                "barcode": barcodes[pid][0],
+                "physical_count": 2,
+                "count_id": count_id,
+            },
+        )
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+
+    assert body["products_expected"] == 2
+    assert body["products_counted"] == 2
+    assert body["products_missed"] == 0
+    assert body["coverage_percentage"] == 100.0
+    assert body["full_count"] is True
+
+
+def test_counting_something_the_session_never_expected_does_not_inflate_coverage(
+    admin_client, mongo_db
+):
+    """Coverage is how much of the EXPECTED set was walked. A line for a
+    product the session never expected is an overage, not coverage."""
+    count_id, _pids, _bc, category = _start_in_own_category(
+        admin_client, mongo_db, products=2
+    )
+    stranger = _seed_product(mongo_db, cost=1000.0, category=category)  # none on hand
+
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/items",
+        json={"product_id": stranger, "counted_quantity": 1},
+    )
+    assert r.status_code == 200, r.text
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+
+    assert body["products_expected"] == 2
+    assert body["products_counted"] == 0, "no expected product was walked"
+    assert body["coverage_percentage"] == 0.0
+    assert body["full_count"] is False

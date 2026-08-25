@@ -33,6 +33,14 @@ interface StockAudit {
   overage_value?: number;
   lines_without_cost?: number;
   lines_moved_during_count?: number;
+  /** Coverage: how much of what the session EXPECTED was actually walked.
+   *  A count of 1 product out of 400 used to complete as "everything
+   *  matched" with a Rs 0 missing tile for a shelf nobody looked at. */
+  products_expected?: number;
+  products_counted?: number;
+  products_missed?: number;
+  coverage_percentage?: number;
+  full_count?: boolean;
   units_voided?: number;
   lines_skipped_moved?: number;
   units_not_voided?: number;
@@ -147,6 +155,11 @@ export function StockAudit() {
         overage_value: c.overage_value,
         lines_without_cost: c.lines_without_cost,
         lines_moved_during_count: c.lines_moved_during_count,
+        products_expected: c.products_expected,
+        products_counted: c.products_counted,
+        products_missed: c.products_missed,
+        coverage_percentage: c.coverage_percentage,
+        full_count: c.full_count,
         units_voided: c.units_voided,
         lines_skipped_moved: c.lines_skipped_moved,
         units_not_voided: c.units_not_voided,
@@ -193,12 +206,26 @@ export function StockAudit() {
       const movedNote = moved
         ? ` ${moved} line${moved === 1 ? '' : 's'} moved during the count (sold or received) — count ${moved === 1 ? 'it' : 'those'} again.`
         : '';
+      // "Everything matched" is only ever true of a FULL count. Saying it
+      // over 1 product out of 400 is the lie a partial count tells.
+      const expected = result.products_expected ?? 0;
+      const walked = result.products_counted ?? 0;
+      const coverage = result.full_count
+        ? ''
+        : ` Only ${walked} of ${expected} products on this shelf were counted (${result.coverage_percentage ?? 0}%) — the figures cover just those.`;
+      const headline = result.full_count
+        ? `Count complete — all ${expected} products counted`
+        : `Count part-done — ${walked} of ${expected} products counted`;
       if (!short && !over) {
-        toast.success(`Count complete — ${result.items_counted} lines, everything matched.${movedNote}`);
+        toast.success(
+          result.full_count
+            ? `${headline}, everything matched.${movedNote}`
+            : `${headline}.${coverage}${movedNote}`
+        );
       } else {
         toast.success(
-          `Count complete — ${short} short (${money(result.shrinkage_value)}), ` +
-            `${over} over (${money(result.overage_value)}).${movedNote}`
+          `${headline} — ${short} short (${money(result.shrinkage_value)}), ` +
+            `${over} over (${money(result.overage_value)}).${coverage}${movedNote}`
         );
       }
       loadAudits();
@@ -432,6 +459,15 @@ export function StockAudit() {
                       <div>
                         <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Items counted</p>
                         <p className="font-medium" style={{ color: 'var(--ink)' }}>{audit.items_counted}</p>
+                        {audit.products_expected !== undefined && audit.status !== 'in_progress' && (
+                          <p
+                            className="text-xs"
+                            style={{ color: audit.full_count ? 'var(--ok)' : 'var(--warn)' }}
+                          >
+                            {audit.products_counted} of {audit.products_expected} products
+                            {audit.full_count ? ' · full count' : ' · part-counted'}
+                          </p>
+                        )}
                       </div>
                       <div>
                         <p className="text-xs" style={{ color: 'var(--ink-4)' }}>By</p>
@@ -457,6 +493,21 @@ export function StockAudit() {
                         style={{ borderTop: '1px solid var(--line)' }}
                         onClick={(e) => e.stopPropagation()}
                       >
+                        {/* A part-done count must never be read as a clean
+                            shelf: the rupee figure below covers only the
+                            products that were actually walked. */}
+                        {audit.full_count === false && (
+                          <div
+                            className="rounded-lg p-3 text-sm"
+                            style={{ background: 'var(--bg-sunk)', color: 'var(--warn)' }}
+                          >
+                            Part-counted: {audit.products_counted} of {audit.products_expected} products
+                            were counted ({audit.coverage_percentage}%). The {audit.products_missed} product
+                            {audit.products_missed === 1 ? '' : 's'} nobody walked are not in these figures —
+                            they are neither checked nor clear.
+                          </div>
+                        )}
+
                         <div className="grid grid-cols-2 gap-3">
                           <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
                             <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Missing (short)</p>
@@ -578,7 +629,9 @@ export function StockAudit() {
                           </div>
                         ) : (
                           <p className="text-sm italic" style={{ color: 'var(--ink-4)' }}>
-                            Every counted line matched the books.
+                            {audit.full_count === false
+                              ? 'Every line that was counted matched the books — the rest of the shelf was not counted.'
+                              : 'Every counted line matched the books.'}
                           </p>
                         )}
                       </div>
