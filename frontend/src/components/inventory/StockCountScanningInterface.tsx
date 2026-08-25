@@ -1,12 +1,24 @@
 // ============================================================================
 // IMS 2.0 - Stock Count Scanning Interface
 // ============================================================================
-// Simple barcode scanner with physical count entry
+// The count sheet: scan (or type) a barcode, type what is physically on the
+// shelf, and the quantity is RECORDED onto the open count session. Before the
+// S2 fix this panel posted to the same endpoint without a session, so the
+// server resolved the barcode, calculated a difference and threw it away --
+// which is why every completed count reported a perfect result.
 
 import { useState } from 'react';
 import { Barcode, AlertCircle, CheckCircle } from 'lucide-react';
 import api from '../../services/api';
 import clsx from 'clsx';
+
+interface Props {
+  /** The in-progress count session every scan is written onto. Required:
+   *  a scan with nowhere to go is the defect this panel used to be. */
+  countId: string;
+  /** Fired after a quantity is persisted, so the session header can refresh. */
+  onRecorded?: (itemsCounted: number) => void;
+}
 
 interface ScanResult {
   barcode: string;
@@ -18,9 +30,12 @@ interface ScanResult {
   variance: number;
   variance_percent: number;
   notes?: string;
+  count_id?: string;
+  recorded?: boolean;
+  items_counted?: number | null;
 }
 
-export function StockCountScanningInterface() {
+export function StockCountScanningInterface({ countId, onRecorded }: Props) {
   const [barcode, setBarcode] = useState('');
   const [physicalCount, setPhysicalCount] = useState('');
   const [notes, setNotes] = useState('');
@@ -43,18 +58,31 @@ export function StockCountScanningInterface() {
         barcode: barcode.trim(),
         physical_count: parseInt(physicalCount),
         notes: notes || undefined,
+        count_id: countId,
       });
 
-      const scanResult = response.data;
+      const scanResult: ScanResult = response.data;
+      if (!scanResult.recorded) {
+        // Never let the counter walk away believing a number was saved.
+        setError('The count was NOT recorded. Reopen the session and scan again.');
+        setResult(null);
+        return;
+      }
       setResult(scanResult);
-      setScannedItems([...scannedItems, scanResult]);
+      // A re-scan of the same product REPLACES its line on the server, so the
+      // on-screen sheet mirrors that instead of showing the product twice.
+      setScannedItems([
+        ...scannedItems.filter((i) => i.product_id !== scanResult.product_id),
+        scanResult,
+      ]);
+      onRecorded?.(scanResult.items_counted ?? 0);
 
       // Reset form
       setBarcode('');
       setPhysicalCount('');
       setNotes('');
-    } catch (err) {
-      setError('Barcode not found or error processing scan');
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Barcode not found or error processing scan');
       setResult(null);
     } finally {
       setLoading(false);
@@ -79,8 +107,12 @@ export function StockCountScanningInterface() {
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <Barcode className="w-5 h-5 text-bv-red-500" />
-          Stock Count Scanner
+          Count sheet - scan and record
         </h3>
+        <p className="text-sm text-gray-500 mb-4">
+          Each scan writes the counted quantity onto this session. Scanning the
+          same product again replaces its line.
+        </p>
 
         <div className="space-y-4">
           <div>
@@ -138,7 +170,7 @@ export function StockCountScanningInterface() {
             disabled={loading}
             className="w-full px-4 py-2 bg-bv-red-600 text-white rounded font-medium hover:bg-bv-red-700 disabled:opacity-50 transition-colors"
           >
-            {loading ? 'Processing...' : 'Scan & Record'}
+            {loading ? 'Recording...' : 'Record counted quantity'}
           </button>
         </div>
       </div>
@@ -147,7 +179,7 @@ export function StockCountScanningInterface() {
       {result && (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
           <div className="flex items-start justify-between mb-3">
-            <h4 className="font-semibold text-gray-900">Last Scan Result</h4>
+            <h4 className="font-semibold text-gray-900">Recorded</h4>
             {result.variance === 0 ? (
               <CheckCircle className="w-5 h-5 text-green-600" />
             ) : (
@@ -187,7 +219,7 @@ export function StockCountScanningInterface() {
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="p-4 border-b border-gray-200">
             <h4 className="font-semibold text-gray-900">
-              Scanned Items ({scannedItems.length})
+              Recorded this session ({scannedItems.length})
             </h4>
           </div>
           <div className="max-h-64 overflow-y-auto">

@@ -3653,13 +3653,10 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/inventory/stock-count/{count_id}/reconcile",
-        "allowed": [
-            "ADMIN",
-            "AREA_MANAGER",
-            "CATALOG_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        # OWNER RULING 2026-08-25 (#8): writing off missing stock is ADMIN /
+        # SUPERADMIN ONLY, at every value. Counting stays open to the manager
+        # ladder; destroying it off the books does not.
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",

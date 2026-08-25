@@ -9,23 +9,34 @@
 // startStockCount / completeStockCount). BV brand tokens only.
 
 import { useState, useEffect, useMemo } from 'react';
-import { Plus, BarChart3, CheckCircle, Clock, Loader2, RefreshCw, Printer } from 'lucide-react';
+import { Plus, BarChart3, CheckCircle, Clock, Loader2, RefreshCw, Printer, Barcode } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
+import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
 
 interface StockAudit {
   count_id: string;
   audit_number: string;
   category: string;
   zone?: string;
-  status: 'in_progress' | 'completed';
+  status: 'in_progress' | 'completed' | 'reconciling' | 'reconciled';
   created_at: string;
   created_by_name: string;
   items_counted: number;
   variance_percentage?: number;
   shrinkage_percentage?: number;
+  shrinkage_units?: number;
+  shrinkage_value?: number;
+  overage_units?: number;
+  overage_value?: number;
+  lines_without_cost?: number;
+  units_voided?: number;
+  units_not_voided?: number;
+  shrinkage_value_written_off?: number;
+  reconciled_by?: string;
+  reconciled_at?: string;
   variances?: AuditVariance[];
 }
 
@@ -37,16 +48,39 @@ interface AuditVariance {
   physical_quantity: number;
   variance: number;
   variance_percentage: number;
+  unit_cost?: number;
+  variance_value?: number;
 }
+
+// Rupees, Indian grouping. A count is only useful when the answer is money.
+const money = (n?: number) =>
+  `₹${Math.round(Math.abs(n || 0)).toLocaleString('en-IN')}`;
 
 const statusChip = (status: string): string => {
   switch (status) {
     case 'in_progress':
       return 'info';
     case 'completed':
+      return 'warn';
+    case 'reconciled':
       return 'ok';
     default:
       return '';
+  }
+};
+
+const statusLabel = (status: string): string => {
+  switch (status) {
+    case 'in_progress':
+      return 'In progress';
+    case 'completed':
+      return 'Counted — awaiting write-off';
+    case 'reconciling':
+      return 'Writing off…';
+    case 'reconciled':
+      return 'Written off';
+    default:
+      return status;
   }
 };
 
@@ -54,7 +88,7 @@ const getStatusIcon = (status: string) => {
   switch (status) {
     case 'in_progress':
       return <BarChart3 className="w-3.5 h-3.5" />;
-    case 'completed':
+    case 'reconciled':
       return <CheckCircle className="w-3.5 h-3.5" />;
     default:
       return <Clock className="w-3.5 h-3.5" />;
@@ -75,6 +109,8 @@ export function StockAudit() {
   const [newCategory, setNewCategory] = useState('');
   const [newZone, setNewZone] = useState('');
   const [starting, setStarting] = useState(false);
+  const [openSheet, setOpenSheet] = useState<string | null>(null);
+  const [writingOff, setWritingOff] = useState<string | null>(null);
 
   const storeId = user?.activeStoreId || '';
 
@@ -97,6 +133,16 @@ export function StockAudit() {
         items_counted: c.items_counted || 0,
         variance_percentage: c.variance_percentage,
         shrinkage_percentage: c.shrinkage_percentage,
+        shrinkage_units: c.shrinkage_units,
+        shrinkage_value: c.shrinkage_value,
+        overage_units: c.overage_units,
+        overage_value: c.overage_value,
+        lines_without_cost: c.lines_without_cost,
+        units_voided: c.units_voided,
+        units_not_voided: c.units_not_voided,
+        shrinkage_value_written_off: c.shrinkage_value_written_off,
+        reconciled_by: c.reconciled_by,
+        reconciled_at: c.reconciled_at,
         variances: c.variances || [],
       }));
       setAudits(counts);
@@ -129,7 +175,16 @@ export function StockAudit() {
   const handleCompleteAudit = async (countId: string) => {
     try {
       const result = await inventoryApi.completeStockCount(countId);
-      toast.success(`Stock count completed! Variance: ${result.variance_percentage || 0}%`);
+      const short = result.shrinkage_units || 0;
+      const over = result.overage_units || 0;
+      if (!short && !over) {
+        toast.success(`Count complete — ${result.items_counted} lines, everything matched.`);
+      } else {
+        toast.success(
+          `Count complete — ${short} short (${money(result.shrinkage_value)}), ` +
+            `${over} over (${money(result.overage_value)}).`
+        );
+      }
       loadAudits();
     } catch (err: any) {
       // The server refuses a count with no lines recorded ("nothing has been
@@ -139,16 +194,47 @@ export function StockAudit() {
     }
   };
 
+  // Owner ruling 2026-08-25 (#8): the write-off is ADMIN / SUPERADMIN only, at
+  // every value. The server enforces it; hiding the button just avoids
+  // offering a manager a door that will 403.
+  const canWriteOff = (user?.roles || []).some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
+
+  const handleWriteOff = async (audit: StockAudit) => {
+    const short = audit.shrinkage_units || 0;
+    const ok = window.confirm(
+      `Write off ${short} missing unit${short === 1 ? '' : 's'} (${money(audit.shrinkage_value)} at cost) ` +
+        `found by ${audit.audit_number}?
+
+` +
+        'This removes them from stock permanently and records the loss. ' +
+        'Anything sold, transferred or returned since the count will be left alone.'
+    );
+    if (!ok) return;
+    setWritingOff(audit.count_id);
+    try {
+      const result = await inventoryApi.reconcileStockCount(audit.count_id);
+      const left = result.units_not_voided || 0;
+      toast.success(
+        `Wrote off ${result.units_voided || 0} unit(s), ${money(result.shrinkage_value_written_off)}.` +
+          (left ? ` ${left} could not be written off (moved since the count) - count again.` : '')
+      );
+      loadAudits();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Could not write off the missing stock');
+    } finally {
+      setWritingOff(null);
+    }
+  };
+
   const completedAudits = audits.filter((a) => a.status === 'completed');
+  const reconciledAudits = audits.filter((a) => a.status === 'reconciled');
   const inProgressAudits = audits.filter((a) => a.status === 'in_progress');
 
-  const avgShrinkage =
-    completedAudits.length > 0
-      ? (
-          completedAudits.reduce((sum, a) => sum + (a.shrinkage_percentage || 0), 0) /
-          completedAudits.length
-        ).toFixed(2)
-      : '0.00';
+  // What this store is missing, in rupees, across every count that has been
+  // completed. The shrinkage record used to be read by nothing, anywhere.
+  const missingValue = audits.reduce((sum, a) => sum + (a.shrinkage_value || 0), 0);
+  const missingUnits = audits.reduce((sum, a) => sum + (a.shrinkage_units || 0), 0);
+  const awaitingWriteOff = completedAudits.reduce((sum, a) => sum + (a.shrinkage_units || 0), 0);
 
   // Group completed/idle sessions by zone (display-fixture system). The
   // count sheet "groups by fixture instead of by shelf range" per the v2
@@ -200,16 +286,19 @@ export function StockAudit() {
           <div className="d">open sessions</div>
         </div>
         <div>
-          <div className="l">Completed</div>
-          <div className="v" style={{ color: 'var(--ok)' }}>{completedAudits.length}</div>
-          <div className="d good">signed off</div>
+          <div className="l">Written off</div>
+          <div className="v" style={{ color: 'var(--ok)' }}>{reconciledAudits.length}</div>
+          <div className="d good">corrected in stock</div>
         </div>
         <div>
-          <div className="l">Avg shrinkage</div>
-          <div className="v" style={{ color: Number(avgShrinkage) > 1 ? 'var(--warn)' : 'var(--ink)' }}>
-            {avgShrinkage}%
+          <div className="l">Stock missing</div>
+          <div className="v" style={{ color: missingUnits > 0 ? 'var(--err)' : 'var(--ink)' }}>
+            {money(missingValue)}
           </div>
-          <div className="d">{Number(avgShrinkage) > 1 ? 'above tolerance' : 'within tolerance'}</div>
+          <div className="d">
+            {missingUnits} unit{missingUnits === 1 ? '' : 's'} found short
+            {awaitingWriteOff > 0 ? ` · ${awaitingWriteOff} awaiting write-off` : ''}
+          </div>
         </div>
       </div>
 
@@ -224,26 +313,43 @@ export function StockAudit() {
       {!isLoading && inProgressAudits.length > 0 && (
         <div className="space-y-3 mb-5">
           {inProgressAudits.map((audit) => (
-            <div key={audit.count_id} className="count-banner">
-              <div className="icn">C</div>
-              <div>
-                <div className="t">
-                  Cycle count in progress
-                  {audit.zone ? ` · ${audit.zone}` : ''}
-                  {audit.category && audit.category !== 'All' ? ` · ${audit.category}` : ''}
+            <div key={audit.count_id}>
+              <div className="count-banner">
+                <div className="icn">C</div>
+                <div>
+                  <div className="t">
+                    Cycle count in progress
+                    {audit.zone ? ` · ${audit.zone}` : ''}
+                    {audit.category && audit.category !== 'All' ? ` · ${audit.category}` : ''}
+                  </div>
+                  <div className="s">
+                    {audit.audit_number} · started {audit.created_at ? new Date(audit.created_at).toLocaleString('en-IN') : '—'}
+                    {audit.created_by_name ? ` by ${audit.created_by_name}` : ''} · {audit.items_counted} SKUs counted
+                  </div>
                 </div>
-                <div className="s">
-                  {audit.audit_number} · started {audit.created_at ? new Date(audit.created_at).toLocaleString('en-IN') : '—'}
-                  {audit.created_by_name ? ` by ${audit.created_by_name}` : ''} · {audit.items_counted} SKUs counted
-                </div>
+                <span className="flex-1" />
+                <button
+                  className={clsx('btn', openSheet !== audit.count_id && 'accent')}
+                  onClick={() => setOpenSheet(openSheet === audit.count_id ? null : audit.count_id)}
+                >
+                  <Barcode className="w-4 h-4" />
+                  {openSheet === audit.count_id ? 'Hide count sheet' : 'Count stock'}
+                </button>
+                <button className="btn" onClick={() => window.print()}>
+                  <Printer className="w-4 h-4" /> Print
+                </button>
+                <button className="btn" onClick={() => handleCompleteAudit(audit.count_id)}>
+                  <CheckCircle className="w-4 h-4" /> Complete count
+                </button>
               </div>
-              <span className="flex-1" />
-              <button className="btn" onClick={() => window.print()}>
-                <Printer className="w-4 h-4" /> Count sheet
-              </button>
-              <button className="btn accent" onClick={() => handleCompleteAudit(audit.count_id)}>
-                <CheckCircle className="w-4 h-4" /> Complete count
-              </button>
+
+              {/* The step that did not exist: record what is actually on the
+                  shelf, line by line, onto this session. */}
+              {openSheet === audit.count_id && (
+                <div className="mt-3">
+                  <StockCountScanningInterface countId={audit.count_id} onRecorded={loadAudits} />
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -292,7 +398,7 @@ export function StockAudit() {
                       </div>
                       <span className={clsx('chip', statusChip(audit.status))}>
                         {getStatusIcon(audit.status)}
-                        {audit.status === 'in_progress' ? 'In progress' : 'Completed'}
+                        {statusLabel(audit.status)}
                       </span>
                     </div>
 
@@ -325,28 +431,78 @@ export function StockAudit() {
                     </div>
 
                     {/* Expanded detail */}
-                    {selectedAudit === audit.count_id && audit.status === 'completed' && (
-                      <div className="mt-4 pt-4 space-y-3" style={{ borderTop: '1px solid var(--line)' }}>
+                    {selectedAudit === audit.count_id && audit.status !== 'in_progress' && (
+                      <div
+                        className="mt-4 pt-4 space-y-3"
+                        style={{ borderTop: '1px solid var(--line)' }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <div className="grid grid-cols-2 gap-3">
                           <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
-                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Overall variance</p>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Missing (short)</p>
                             <p
                               className="font-bold text-lg"
-                              style={{ color: Math.abs(audit.variance_percentage || 0) > 5 ? 'var(--err)' : 'var(--ok)' }}
+                              style={{ color: (audit.shrinkage_units || 0) > 0 ? 'var(--err)' : 'var(--ok)' }}
                             >
-                              {audit.variance_percentage?.toFixed(2)}%
+                              {audit.shrinkage_units || 0} unit{(audit.shrinkage_units || 0) === 1 ? '' : 's'} · {money(audit.shrinkage_value)}
                             </p>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>at cost price</p>
                           </div>
                           <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
-                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Shrinkage</p>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Extra (over)</p>
                             <p
                               className="font-bold text-lg"
-                              style={{ color: (audit.shrinkage_percentage || 0) > 1 ? 'var(--warn)' : 'var(--ok)' }}
+                              style={{ color: (audit.overage_units || 0) > 0 ? 'var(--warn)' : 'var(--ok)' }}
                             >
-                              {audit.shrinkage_percentage?.toFixed(2)}%
+                              {audit.overage_units || 0} unit{(audit.overage_units || 0) === 1 ? '' : 's'} · {money(audit.overage_value)}
                             </p>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>never added to stock automatically</p>
                           </div>
                         </div>
+
+                        {(audit.lines_without_cost || 0) > 0 && (
+                          <p className="text-sm" style={{ color: 'var(--warn)' }}>
+                            {audit.lines_without_cost} line{(audit.lines_without_cost || 0) === 1 ? ' has' : 's have'} no
+                            cost price on the product, so the rupee figure above is lower than the real loss.
+                          </p>
+                        )}
+
+                        {/* The write-off. Before this it had no button anywhere in
+                            the app, so nothing a count found was ever corrected. */}
+                        {audit.status === 'completed' && (audit.shrinkage_units || 0) > 0 && (
+                          canWriteOff ? (
+                            <button
+                              className="btn accent"
+                              disabled={writingOff === audit.count_id}
+                              onClick={() => handleWriteOff(audit)}
+                            >
+                              {writingOff === audit.count_id ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <CheckCircle className="w-4 h-4" />
+                              )}
+                              Write off {audit.shrinkage_units} missing unit
+                              {(audit.shrinkage_units || 0) === 1 ? '' : 's'} ({money(audit.shrinkage_value)})
+                            </button>
+                          ) : (
+                            <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
+                              An admin has to write this off — counting is yours, removing stock from the books is not.
+                            </p>
+                          )
+                        )}
+
+                        {audit.status === 'reconciled' && (
+                          <p className="text-sm" style={{ color: 'var(--ink-3)' }}>
+                            Written off: {audit.units_voided || 0} unit{(audit.units_voided || 0) === 1 ? '' : 's'} ·{' '}
+                            {money(audit.shrinkage_value_written_off)}
+                            {(audit.units_not_voided || 0) > 0 && (
+                              <span style={{ color: 'var(--warn)' }}>
+                                {' '}· {audit.units_not_voided} left alone (moved during the count) — count those again.
+                              </span>
+                            )}
+                            {audit.reconciled_at ? ` · ${new Date(audit.reconciled_at).toLocaleString('en-IN')}` : ''}
+                          </p>
+                        )}
 
                         {audit.variances && audit.variances.filter((v) => v.variance !== 0).length > 0 ? (
                           <div className="overflow-x-auto">
@@ -354,9 +510,10 @@ export function StockAudit() {
                             <thead>
                               <tr>
                                 <th>Product</th>
-                                <th className="right">System</th>
+                                <th className="right">Expected</th>
                                 <th className="right">Counted</th>
                                 <th className="right">Δ</th>
+                                <th className="right">Value</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -374,6 +531,12 @@ export function StockAudit() {
                                         {v.variance > 0 ? `+${v.variance}` : v.variance}
                                       </span>
                                     </td>
+                                    <td
+                                      className="right mono"
+                                      style={{ color: v.variance < 0 ? 'var(--err)' : 'var(--ink-3)' }}
+                                    >
+                                      {v.unit_cost ? money(v.variance_value) : '—'}
+                                    </td>
                                   </tr>
                                 ))}
                             </tbody>
@@ -381,7 +544,7 @@ export function StockAudit() {
                           </div>
                         ) : (
                           <p className="text-sm italic" style={{ color: 'var(--ink-4)' }}>
-                            No variances found — perfect match!
+                            Every counted line matched the books.
                           </p>
                         )}
                       </div>

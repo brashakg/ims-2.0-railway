@@ -287,6 +287,13 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // Write off what the count found missing. ADMIN / SUPERADMIN only (owner
+  // ruling 2026-08-25 #8) -- the server is the gate, the UI just hides it.
+  reconcileStockCount: async (countId: string, notes?: string) => {
+    const response = await api.post(`/inventory/stock-count/${countId}/reconcile`, notes ? { notes } : {});
+    return response.data;
+  },
+
   getStockCount: async (countId: string) => {
     const response = await api.get(`/inventory/stock-count/${countId}`);
     return response.data;

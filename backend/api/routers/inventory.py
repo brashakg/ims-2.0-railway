@@ -2302,6 +2302,99 @@ async def start_stock_count(
     return count_doc
 
 
+def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
+    """Unit cost per product, for putting a rupee figure on a count variance.
+
+    ``products.cost_price`` is the moving-average purchase cost the rest of the
+    app values stock at (reports, reorder economics), with ``landed_cost`` as
+    the fallback the reorder engine also uses. A product with neither is
+    reported as 0.0 and COUNTED as un-costed by the caller, so a rupee total
+    is never quietly understated into looking like "no loss".
+
+    Products are keyed by ``_id``; a few writers also carry ``product_id``, so
+    both are matched and both are mapped.
+    """
+    costs: Dict[str, float] = {}
+    ids = [pid for pid in product_ids if pid]
+    if not ids:
+        return costs
+    cursor = db.get_collection("products").find(
+        {"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
+        {"_id": 1, "product_id": 1, "cost_price": 1, "landed_cost": 1},
+    )
+    for p in cursor:
+        cost = float(p.get("cost_price") or p.get("landed_cost") or 0.0)
+        for key in (p.get("_id"), p.get("product_id")):
+            if key:
+                costs[str(key)] = cost
+    return costs
+
+
+def _load_open_count(db, count_id: str, current_user: dict) -> dict:
+    """The in-progress count session, or the right refusal.
+
+    Shared by the two doors a counted quantity can arrive through (typed line
+    and barcode scan) so they can never drift on who may write to which
+    session: 404 hides a session belonging to another store, and a session
+    that is not in progress is never writable.
+    """
+    count_doc = db.get_collection("stock_counts").find_one({"count_id": count_id})
+    if not count_doc:
+        raise HTTPException(status_code=404, detail="Stock count session not found")
+    if not can_access_store_scoped(count_doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Stock count session not found")
+    if count_doc.get("status") != "in_progress":
+        raise HTTPException(status_code=400, detail="Stock count is not in progress")
+    return count_doc
+
+
+def _upsert_count_item(
+    db,
+    count_doc: dict,
+    *,
+    product_id: str,
+    product_name: str,
+    sku: str,
+    counted_quantity: int,
+    notes: Optional[str],
+    user_id: str,
+) -> int:
+    """Write one counted quantity onto the session; return the line count.
+
+    Re-counting the same product REPLACES its line (a recount corrects the
+    first pass, it does not add to it).
+
+    ponytail: read-modify-write of the whole `items` array, which is what the
+    original line-recording endpoint already did -- one counter per session is
+    the real-world shape. If two people ever count one session at once, move
+    to a positional `$[elem]` update.
+    """
+    items = list(count_doc.get("items", []) or [])
+    now_iso = datetime.utcnow().isoformat()
+    line = {
+        "product_id": product_id,
+        "product_name": product_name or "",
+        "sku": sku or "",
+        "counted_quantity": int(counted_quantity),
+        "notes": notes,
+        "counted_at": now_iso,
+        "counted_by": user_id,
+    }
+
+    for idx, existing in enumerate(items):
+        if existing.get("product_id") == product_id:
+            items[idx] = {**existing, **line}
+            break
+    else:
+        items.append(line)
+
+    db.get_collection("stock_counts").update_one(
+        {"count_id": count_doc["count_id"]},
+        {"$set": {"items": items, "items_counted": len(items)}},
+    )
+    return len(items)
+
+
 @router.post("/stock-count/{count_id}/items")
 async def record_count_item(
     count_id: str,
@@ -2317,51 +2410,22 @@ async def record_count_item(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        collection = db.get_collection("stock_counts")
-        count_doc = collection.find_one({"count_id": count_id})
-        if not count_doc:
-            raise HTTPException(status_code=404, detail="Stock count session not found")
-        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
-            raise HTTPException(status_code=404, detail="Stock count session not found")
-        if count_doc.get("status") != "in_progress":
-            raise HTTPException(
-                status_code=400, detail="Stock count is not in progress"
-            )
-
-        # Upsert item: if product already counted, update; else append
-        items = count_doc.get("items", [])
-        found = False
-        for existing in items:
-            if existing["product_id"] == item.product_id:
-                existing["counted_quantity"] = item.counted_quantity
-                existing["notes"] = item.notes
-                existing["counted_at"] = datetime.utcnow().isoformat()
-                existing["counted_by"] = current_user.get("user_id", "")
-                found = True
-                break
-
-        if not found:
-            items.append(
-                {
-                    "product_id": item.product_id,
-                    "product_name": item.product_name or "",
-                    "sku": item.sku or "",
-                    "counted_quantity": item.counted_quantity,
-                    "notes": item.notes,
-                    "counted_at": datetime.utcnow().isoformat(),
-                    "counted_by": current_user.get("user_id", ""),
-                }
-            )
-
-        collection.update_one(
-            {"count_id": count_id},
-            {"$set": {"items": items, "items_counted": len(items)}},
+        count_doc = _load_open_count(db, count_id, current_user)
+        items_counted = _upsert_count_item(
+            db,
+            count_doc,
+            product_id=item.product_id,
+            product_name=item.product_name or "",
+            sku=item.sku or "",
+            counted_quantity=item.counted_quantity,
+            notes=item.notes,
+            user_id=current_user.get("user_id", ""),
         )
 
         return {
             "message": "Item recorded",
             "count_id": count_id,
-            "items_counted": len(items),
+            "items_counted": items_counted,
         }
 
     except HTTPException:
@@ -2413,11 +2477,19 @@ async def complete_stock_count(
                 ),
             )
 
-        # Calculate variances
+        # Calculate variances. A count is only useful if the answer is in
+        # rupees as well as units -- "12 units short" means nothing until it
+        # reads "12 units short, Rs 24,000".
+        costs = _product_costs(db, [i.get("product_id", "") for i in items])
+
         variances = []
         total_system = 0
         total_counted = 0
         total_shrinkage = 0
+        total_overage = 0
+        shrinkage_value = 0.0
+        overage_value = 0.0
+        lines_without_cost = 0
 
         for item in items:
             pid = item["product_id"]
@@ -2425,11 +2497,20 @@ async def complete_stock_count(
             system = system_quantities.get(pid, 0)
             variance = counted - system
             var_pct = round((variance / max(system, 1)) * 100, 2)
+            unit_cost = float(costs.get(pid, 0.0) or 0.0)
+            variance_value = round(variance * unit_cost, 2)
 
             total_system += system
             total_counted += counted
             if variance < 0:
                 total_shrinkage += abs(variance)
+                shrinkage_value += abs(variance_value)
+            elif variance > 0:
+                total_overage += variance
+                overage_value += variance_value
+            if variance != 0 and unit_cost <= 0:
+                # The rupee figure for this line is unknown, not zero.
+                lines_without_cost += 1
 
             variances.append(
                 {
@@ -2440,6 +2521,8 @@ async def complete_stock_count(
                     "physical_quantity": counted,
                     "variance": variance,
                     "variance_percentage": var_pct,
+                    "unit_cost": round(unit_cost, 2),
+                    "variance_value": variance_value,
                 }
             )
 
@@ -2449,6 +2532,9 @@ async def complete_stock_count(
         )
         shrinkage_pct = round((total_shrinkage / max(total_system, 1)) * 100, 2)
 
+        shrinkage_value = round(shrinkage_value, 2)
+        overage_value = round(overage_value, 2)
+
         now = datetime.utcnow()
         update_data = {
             "status": "completed",
@@ -2457,6 +2543,11 @@ async def complete_stock_count(
             "variances": variances,
             "variance_percentage": overall_var_pct,
             "shrinkage_percentage": shrinkage_pct,
+            "shrinkage_units": total_shrinkage,
+            "shrinkage_value": shrinkage_value,
+            "overage_units": total_overage,
+            "overage_value": overage_value,
+            "lines_without_cost": lines_without_cost,
             "notes": request.notes if request else None,
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
@@ -2475,8 +2566,11 @@ async def complete_stock_count(
                     get_task_repository(),
                     title=f"Stock-count variance: {count_doc.get('audit_number', count_id)}",
                     description=(
-                        f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}% "
-                        f"across {len(items)} items. Investigate and reconcile."
+                        f"{total_shrinkage} units short (Rs {shrinkage_value:,.2f} at cost), "
+                        f"{total_overage} units over (Rs {overage_value:,.2f}) "
+                        f"across {len(items)} counted lines. "
+                        f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}%. "
+                        "Investigate and reconcile."
                     ),
                     priority=pri,
                     category="Inventory",
@@ -2494,6 +2588,11 @@ async def complete_stock_count(
             "items_counted": len(items),
             "variance_percentage": overall_var_pct,
             "shrinkage_percentage": shrinkage_pct,
+            "shrinkage_units": total_shrinkage,
+            "shrinkage_value": shrinkage_value,
+            "overage_units": total_overage,
+            "overage_value": overage_value,
+            "lines_without_cost": lines_without_cost,
             "variances": variances,
         }
 
@@ -2553,17 +2652,28 @@ class ReconcileStockCountRequest(BaseModel):
 async def reconcile_stock_count(
     count_id: str,
     request: Optional[ReconcileStockCountRequest] = None,
-    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+    # OWNER RULING 2026-08-25 (#8): a stock write-off is ADMIN / SUPERADMIN
+    # ONLY, at EVERY value -- no store-manager write-offs and therefore no
+    # rupee threshold. A store manager may COUNT (the doors above stay on
+    # _INVENTORY_ROLES); destroying stock off the books is not theirs.
+    # SUPERADMIN auto-passes inside require_roles.
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Apply a completed cycle-count to the stock ledger (INV-8).
+    """Write off what a completed cycle-count found missing (INV-8).
 
     For each variance line:
-    - Negative variance (shrinkage): written to ``stock_shrinkage`` for audit
-      and the stock_units document quantity is adjusted down.
+    - Negative variance (shrinkage): the oldest still-AVAILABLE units are
+      VOIDed and a valued row is written to ``stock_shrinkage`` for audit. A
+      unit that moved during the count (sold, transferred, returned) is never
+      taken -- the conditional write loses that race on purpose and the
+      shortfall is reported as ``units_not_voided``.
     - Positive variance (overage): recorded for review but NOT silently inflated
       (SYSTEM_INTENT: fail loudly / never fabricate stock).
 
-    Transitions the count document to ``status="reconciled"``.
+    Transitions ``completed`` -> ``reconciling`` (atomically claimed, so the
+    same count can never be written off twice) -> ``reconciled``. A failure
+    part-way leaves the count visibly stuck in ``reconciling`` rather than
+    reporting a write-off that did not happen.
     """
     db = _get_db()
     if db is None:
@@ -2595,6 +2705,20 @@ async def reconcile_stock_count(
                 detail="No variance data found — complete the count first",
             )
 
+        # CLAIM the count before touching any stock. The status read above is a
+        # check-then-act: two clicks of the button (or two managers) both saw
+        # "completed" and both wrote off the same shortfall, destroying twice
+        # the stock. This flip is atomic, so exactly one caller proceeds.
+        claimed = counts_coll.update_one(
+            {"count_id": count_id, "status": "completed"},
+            {"$set": {"status": "reconciling"}},
+        )
+        if getattr(claimed, "modified_count", 0) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This count is already being written off",
+            )
+
         # Build override map if supplied
         override_map: Dict[str, int] = {}
         if request and request.overrides:
@@ -2606,9 +2730,13 @@ async def reconcile_stock_count(
 
         now = datetime.utcnow()
         store_id = count_doc.get("store_id", "")
+        costs = _product_costs(db, [v.get("product_id", "") for v in variances])
         shrinkage_records = []
         overage_records = []
         reconciled_items = []
+        units_voided_total = 0
+        units_not_voided_total = 0
+        shrinkage_value_total = 0.0
 
         for v in variances:
             pid = v.get("product_id", "")
@@ -2634,6 +2762,57 @@ async def reconcile_stock_count(
                 # Stock units are serialized (one row per unit) so we
                 # VOID the excess rows rather than decrementing a counter.
                 shrinkage_qty = abs(net_variance)
+                unit_cost = float(costs.get(pid, 0.0) or 0.0)
+
+                # Void the oldest AVAILABLE units to reconcile stock.
+                #
+                # SAFETY: the write is CONDITIONAL on the unit still being
+                # AVAILABLE. Reading candidates and then writing them blind is
+                # a check-then-act -- POS claims a unit with an atomic
+                # find_one_and_update on status=="AVAILABLE", so a frame sold
+                # between the read and the write was being overwritten from
+                # SOLD to VOID: the sale destroyed, the customer's frame
+                # deleted from the books, and the shortfall still "corrected".
+                # Losing that race is now the CORRECT outcome -- a unit that
+                # moved during the count (sold, transferred, returned) is left
+                # exactly where it is and the shortfall is reported honestly
+                # instead of being taken out of a live sale.
+                #
+                # NOT swallowed: this used to sit inside a bare except that
+                # logged and carried on, so the endpoint reported a successful
+                # write-off over a failed one.
+                candidates = list(
+                    stock_coll.find(
+                        {
+                            "product_id": pid,
+                            "store_id": store_id,
+                            "status": "AVAILABLE",
+                        },
+                        sort=[("created_at", 1)],
+                        limit=shrinkage_qty,
+                    )
+                )
+                ids_to_void = [c["_id"] for c in candidates if "_id" in c]
+                voided = 0
+                if ids_to_void:
+                    res = stock_coll.update_many(
+                        {"_id": {"$in": ids_to_void}, "status": "AVAILABLE"},
+                        {
+                            "$set": {
+                                "status": "VOID",
+                                "voided_at": now.isoformat(),
+                                "void_reason": f"cycle-count-reconcile:{count_id}",
+                            }
+                        },
+                    )
+                    voided = int(getattr(res, "modified_count", 0) or 0)
+
+                not_voided = shrinkage_qty - voided
+                units_voided_total += voided
+                units_not_voided_total += not_voided
+                shrinkage_value = round(voided * unit_cost, 2)
+                shrinkage_value_total += shrinkage_value
+
                 shrinkage_records.append(
                     {
                         "shrinkage_id": str(uuid.uuid4()),
@@ -2644,6 +2823,15 @@ async def reconcile_stock_count(
                         "product_name": v.get("product_name", ""),
                         "sku": v.get("sku", ""),
                         "shrinkage_quantity": shrinkage_qty,
+                        # What the write-off actually did, not what it wanted
+                        # to do. A shrinkage row that claims 3 units when 1
+                        # could not be voided is the old silent failure.
+                        "units_voided": voided,
+                        "units_not_voided": not_voided,
+                        # A loss with no rupee figure is not a loss anyone can
+                        # act on: this is what the row is worth at cost.
+                        "unit_cost": round(unit_cost, 2),
+                        "shrinkage_value": shrinkage_value,
                         "system_quantity": system_qty,
                         "accepted_quantity": accepted_qty,
                         "recorded_at": now.isoformat(),
@@ -2651,34 +2839,9 @@ async def reconcile_stock_count(
                         "notes": request.notes if request else None,
                     }
                 )
-                # Void the oldest AVAILABLE units to reconcile stock
-                try:
-                    candidates = list(
-                        stock_coll.find(
-                            {
-                                "product_id": pid,
-                                "store_id": store_id,
-                                "status": "AVAILABLE",
-                            },
-                            sort=[("created_at", 1)],
-                            limit=shrinkage_qty,
-                        )
-                    )
-                    if candidates:
-                        ids_to_void = [c["_id"] for c in candidates if "_id" in c]
-                        if ids_to_void:
-                            stock_coll.update_many(
-                                {"_id": {"$in": ids_to_void}},
-                                {
-                                    "$set": {
-                                        "status": "VOID",
-                                        "voided_at": now.isoformat(),
-                                        "void_reason": f"cycle-count-reconcile:{count_id}",
-                                    }
-                                },
-                            )
-                except Exception as _e:
-                    logger.warning(f"[INV-8] stock void skipped for {pid}: {_e}")
+
+                reconciled_items[-1]["units_voided"] = voided
+                reconciled_items[-1]["units_not_voided"] = not_voided
 
             elif net_variance > 0:
                 # Overage: record for investigation only — do not inflate stock.
@@ -2690,12 +2853,13 @@ async def reconcile_stock_count(
                     }
                 )
 
-        # Persist shrinkage audit rows
+        # Persist shrinkage audit rows. NOT swallowed -- a lost audit trail for
+        # stock we have just destroyed is exactly the failure worth shouting
+        # about, and it used to be a log line under a 200.
         if shrinkage_records:
-            try:
-                shrinkage_coll.insert_many(shrinkage_records)
-            except Exception as _e:
-                logger.warning(f"[INV-8] shrinkage insert skipped: {_e}")
+            shrinkage_coll.insert_many(shrinkage_records)
+
+        shrinkage_value_total = round(shrinkage_value_total, 2)
 
         # Mark count as reconciled
         counts_coll.update_one(
@@ -2705,10 +2869,16 @@ async def reconcile_stock_count(
                     "status": "reconciled",
                     "reconciled_at": now.isoformat(),
                     "reconciled_by": current_user.get("user_id", ""),
+                    "reconciled_by_name": current_user.get(
+                        "full_name", current_user.get("username", "")
+                    ),
                     "reconciliation_notes": request.notes if request else None,
                     "reconciled_items": reconciled_items,
                     "shrinkage_count": len(shrinkage_records),
                     "overage_count": len(overage_records),
+                    "units_voided": units_voided_total,
+                    "units_not_voided": units_not_voided_total,
+                    "shrinkage_value_written_off": shrinkage_value_total,
                 }
             },
         )
@@ -2720,6 +2890,9 @@ async def reconcile_stock_count(
             "items_reconciled": len(reconciled_items),
             "shrinkage_lines": len(shrinkage_records),
             "overage_lines": len(overage_records),
+            "units_voided": units_voided_total,
+            "units_not_voided": units_not_voided_total,
+            "shrinkage_value_written_off": shrinkage_value_total,
             "overages_pending_review": overage_records,
             "reconciled_at": now.isoformat(),
         }
@@ -3219,6 +3392,13 @@ class BarcodeScanRequest(BaseModel):
     barcode: str
     physical_count: int = Field(..., ge=0)
     notes: Optional[str] = None
+    # The count session this scan belongs to. Without it the scan resolved a
+    # barcode, calculated a difference and THREW IT AWAY -- which is how every
+    # count in the business completed with nothing recorded (audit S2). With
+    # it, the scan is the count sheet: the counted quantity is written onto the
+    # session and the variance is measured against that session's opening
+    # snapshot, so what the counter sees is what completion will report.
+    count_id: Optional[str] = None
 
 
 @router.post("/stock-count-scan")
@@ -3238,6 +3418,14 @@ async def scan_barcode_for_count(
     try:
         stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
+
+        # Resolve the session FIRST when one was given, so a scan against a
+        # closed or someone else's count is refused before anything is read.
+        count_doc = (
+            _load_open_count(db, request.count_id, current_user)
+            if request.count_id
+            else None
+        )
 
         # Find stock by barcode
         stock = stock_coll.find_one({"barcode": request.barcode})
@@ -3291,6 +3479,28 @@ async def scan_barcode_for_count(
             product_name = "Unknown"
             sku = ""
 
+        # Inside a session the comparison is against that session's OPENING
+        # snapshot, not against live stock, so the variance the counter is
+        # shown is the same number completion will report. A product missing
+        # from the snapshot had nothing on hand when the count opened, so 0.
+        recorded = False
+        items_counted = None
+        if count_doc is not None:
+            system_count = int(
+                (count_doc.get("system_quantities") or {}).get(product_id, 0)
+            )
+            items_counted = _upsert_count_item(
+                db,
+                count_doc,
+                product_id=product_id,
+                product_name=product_name,
+                sku=sku,
+                counted_quantity=request.physical_count,
+                notes=request.notes,
+                user_id=current_user.get("user_id", ""),
+            )
+            recorded = True
+
         variance = request.physical_count - system_count
 
         return {
@@ -3303,6 +3513,9 @@ async def scan_barcode_for_count(
             "variance": variance,
             "variance_percent": round((variance / max(system_count, 1)) * 100, 2),
             "notes": request.notes,
+            "count_id": request.count_id,
+            "recorded": recorded,
+            "items_counted": items_counted,
         }
 
     except HTTPException:
