@@ -689,3 +689,130 @@ def test_a_second_write_off_landing_mid_flight_takes_no_stock(
         == 0
     ), "the losing caller destroyed stock the winner is already destroying"
     assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
+
+
+# ============================================================================
+# 6. A FRAME SOLD WHILE THE COUNT IS OPEN IS NOT MISSING
+# ============================================================================
+# The session snapshots on-hand when it OPENS. A frame sold at the till before
+# the counter reaches that shelf leaves the shelf one short of the snapshot,
+# so an honest count read as a shortage and the write-off then VOIDED a real,
+# sellable frame -- and under the owner's block-the-oversell ruling that
+# destroyed frame goes on to refuse a genuine sale.
+#
+# The fix is clock-free on purpose (comparing the till's local-naive
+# `sold_at` against the count's UTC ISO string is the BUG-104 mixed-clock
+# trap): at completion the snapshot is compared against LIVE on-hand, and any
+# line whose on-hand moved is flagged and left out of the shortage.
+
+
+def _sell_one_at_the_till(mongo_db, product_id: str, store_id: str = STORE):
+    """Claim one unit exactly the way POS does: an atomic find_one_and_update
+    on status == AVAILABLE, stamping the till's local-naive `sold_at`."""
+    return mongo_db["stock_units"].find_one_and_update(
+        {"product_id": product_id, "store_id": store_id, "status": "AVAILABLE"},
+        {"$set": {"status": "SOLD", "sold_at": datetime.now()}},
+    )
+
+
+def test_a_frame_sold_while_the_count_is_open_is_not_reported_as_missing(
+    admin_client, mongo_db
+):
+    """5 on the books, one sold at the till while the session is open, the
+    counter honestly counts the 4 on the shelf. Nothing is missing."""
+    pid = _seed_product(mongo_db, cost=1450.0)
+    barcodes = _seed_units(mongo_db, pid, 5)
+    count_id = _start(admin_client)
+
+    assert _sell_one_at_the_till(mongo_db, pid) is not None
+
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[4], "physical_count": 4, "count_id": count_id},
+    )
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+
+    assert body["shrinkage_units"] == 0, (
+        "a frame sold during the count is not a missing frame; "
+        f"got {body['shrinkage_units']} short worth Rs {body['shrinkage_value']}"
+    )
+    assert body["shrinkage_value"] == 0.0
+    assert body["lines_moved_during_count"] == 1
+    line = body["variances"][0]
+    assert line["moved_during_count"] is True
+    assert line["system_quantity"] == 5, "what the books said when the count opened"
+    assert line["system_quantity_now"] == 4, "what the books say now"
+
+
+def test_the_write_off_never_destroys_a_frame_that_moved_during_the_count(
+    admin_client, mongo_db
+):
+    """The end of the same day: an ADMIN presses write-off anyway. The frame
+    the shop still owns must survive -- 4 available before, 4 after."""
+    pid = _seed_product(mongo_db, cost=1450.0)
+    barcodes = _seed_units(mongo_db, pid, 5)
+    count_id = _start(admin_client)
+    _sell_one_at_the_till(mongo_db, pid)
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[4], "physical_count": 4, "count_id": count_id},
+    )
+    admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
+
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["units_voided"] == 0, "there was nothing missing to write off"
+    assert body["lines_skipped_moved"] == 1
+    assert (
+        mongo_db["stock_units"].count_documents(
+            {"product_id": pid, "store_id": STORE, "status": "AVAILABLE"}
+        )
+        == 4
+    ), "a good frame was destroyed and can no longer be sold"
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
+
+
+def test_a_frame_sold_after_its_shelf_was_counted_is_still_not_missing(
+    admin_client, mongo_db
+):
+    """The mirror case the opening snapshot already handled: the counter sees
+    all 5, then one sells before Complete. Still nothing missing."""
+    pid = _seed_product(mongo_db, cost=1450.0)
+    barcodes = _seed_units(mongo_db, pid, 5)
+    count_id = _start(admin_client)
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[0], "physical_count": 5, "count_id": count_id},
+    )
+    _sell_one_at_the_till(mongo_db, pid)
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+
+    assert body["shrinkage_units"] == 0
+    assert body["overage_units"] == 0, "and it must not read as a surplus either"
+
+
+def test_a_genuine_shortage_on_a_shelf_that_never_moved_is_still_written_off(
+    admin_client, mongo_db
+):
+    """The discriminator: suppressing moved lines must not suppress real
+    shrinkage on a shelf where nothing was sold."""
+    pid, count_id, _ = _counted_short(admin_client, mongo_db, on_hand=5, counted=3)
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={}
+    ).json()
+
+    assert body["units_voided"] == 2
+    assert body["lines_skipped_moved"] == 0
+    assert (
+        mongo_db["stock_units"].count_documents(
+            {"product_id": pid, "status": "AVAILABLE"}
+        )
+        == 3
+    )

@@ -32,7 +32,9 @@ interface StockAudit {
   overage_units?: number;
   overage_value?: number;
   lines_without_cost?: number;
+  lines_moved_during_count?: number;
   units_voided?: number;
+  lines_skipped_moved?: number;
   units_not_voided?: number;
   shrinkage_value_written_off?: number;
   reconciled_by?: string;
@@ -45,11 +47,17 @@ interface AuditVariance {
   product_name: string;
   sku: string;
   system_quantity: number;
+  system_quantity_now?: number;
   physical_quantity: number;
   variance: number;
   variance_percentage: number;
   unit_cost?: number;
   variance_value?: number;
+  /** Stock left or arrived while the session was open (sold at the till, a
+   *  delivery received, a return taken back). The difference between the
+   *  opening snapshot and the shelf is not a loss, so it is never written
+   *  off and never counted into the rupee figure. */
+  moved_during_count?: boolean;
 }
 
 // Rupees, Indian grouping. A count is only useful when the answer is money.
@@ -138,7 +146,9 @@ export function StockAudit() {
         overage_units: c.overage_units,
         overage_value: c.overage_value,
         lines_without_cost: c.lines_without_cost,
+        lines_moved_during_count: c.lines_moved_during_count,
         units_voided: c.units_voided,
+        lines_skipped_moved: c.lines_skipped_moved,
         units_not_voided: c.units_not_voided,
         shrinkage_value_written_off: c.shrinkage_value_written_off,
         reconciled_by: c.reconciled_by,
@@ -177,12 +187,18 @@ export function StockAudit() {
       const result = await inventoryApi.completeStockCount(countId);
       const short = result.shrinkage_units || 0;
       const over = result.overage_units || 0;
+      const moved = result.lines_moved_during_count || 0;
+      // Stock that moved while the session was open is not a loss, but the
+      // counter has to know those lines were left out of the figures.
+      const movedNote = moved
+        ? ` ${moved} line${moved === 1 ? '' : 's'} moved during the count (sold or received) — count ${moved === 1 ? 'it' : 'those'} again.`
+        : '';
       if (!short && !over) {
-        toast.success(`Count complete — ${result.items_counted} lines, everything matched.`);
+        toast.success(`Count complete — ${result.items_counted} lines, everything matched.${movedNote}`);
       } else {
         toast.success(
           `Count complete — ${short} short (${money(result.shrinkage_value)}), ` +
-            `${over} over (${money(result.overage_value)}).`
+            `${over} over (${money(result.overage_value)}).${movedNote}`
         );
       }
       loadAudits();
@@ -214,9 +230,13 @@ export function StockAudit() {
     try {
       const result = await inventoryApi.reconcileStockCount(audit.count_id);
       const left = result.units_not_voided || 0;
+      const skipped = result.lines_skipped_moved || 0;
       toast.success(
         `Wrote off ${result.units_voided || 0} unit(s), ${money(result.shrinkage_value_written_off)}.` +
-          (left ? ` ${left} could not be written off (moved since the count) - count again.` : '')
+          (left ? ` ${left} could not be written off (moved since the count) - count again.` : '') +
+          (skipped
+            ? ` ${skipped} line${skipped === 1 ? '' : 's'} left alone — that stock moved while the count was open.`
+            : '')
       );
       loadAudits();
     } catch (err: any) {
@@ -504,7 +524,7 @@ export function StockAudit() {
                           </p>
                         )}
 
-                        {audit.variances && audit.variances.filter((v) => v.variance !== 0).length > 0 ? (
+                        {audit.variances && audit.variances.filter((v) => v.variance !== 0 || v.moved_during_count).length > 0 ? (
                           <div className="overflow-x-auto">
                           <table className="tbl">
                             <thead>
@@ -518,24 +538,38 @@ export function StockAudit() {
                             </thead>
                             <tbody>
                               {audit.variances
-                                .filter((v) => v.variance !== 0)
+                                .filter((v) => v.variance !== 0 || v.moved_during_count)
                                 .map((v, i) => (
                                   <tr key={v.product_id || i}>
                                     <td>
                                       <span className="font-medium" style={{ color: 'var(--ink)' }}>{v.product_name || v.sku}</span>
+                                      {v.moved_during_count && (
+                                        <span className="block text-xs" style={{ color: 'var(--warn)' }}>
+                                          Books now say {v.system_quantity_now} — stock moved while the count was open
+                                        </span>
+                                      )}
                                     </td>
                                     <td className="right mono">{v.system_quantity}</td>
                                     <td className="right mono">{v.physical_quantity}</td>
                                     <td className="right">
-                                      <span className={clsx('chip', v.variance < 0 ? 'err' : 'ok')}>
-                                        {v.variance > 0 ? `+${v.variance}` : v.variance}
+                                      {/* A line whose stock moved mid-count is not a
+                                          shortage: nothing is written off and nothing
+                                          is added to the rupee figure. */}
+                                      <span
+                                        className={clsx('chip', v.moved_during_count ? 'warn' : v.variance < 0 ? 'err' : 'ok')}
+                                      >
+                                        {v.moved_during_count
+                                          ? 'Moved — count again'
+                                          : v.variance > 0
+                                            ? `+${v.variance}`
+                                            : v.variance}
                                       </span>
                                     </td>
                                     <td
                                       className="right mono"
-                                      style={{ color: v.variance < 0 ? 'var(--err)' : 'var(--ink-3)' }}
+                                      style={{ color: v.moved_during_count ? 'var(--ink-4)' : v.variance < 0 ? 'var(--err)' : 'var(--ink-3)' }}
                                     >
-                                      {v.unit_cost ? money(v.variance_value) : '—'}
+                                      {v.moved_during_count ? '—' : v.unit_cost ? money(v.variance_value) : '—'}
                                     </td>
                                   </tr>
                                 ))}

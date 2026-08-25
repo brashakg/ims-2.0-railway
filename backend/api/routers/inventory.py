@@ -2330,6 +2330,49 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
     return costs
 
 
+def _on_hand_now(db, store_id: str, product_ids: List[str]) -> Dict[str, int]:
+    """Live on-hand per product at this store, counted the SAME way the
+    session's opening snapshot was (one serialized row == one unit,
+    AVAILABLE + RESERVED).
+
+    Why this exists: the count compares what was counted against the snapshot
+    taken when the session OPENED. A frame sold at the till while the session
+    is open leaves the shelf one short of that snapshot, so an honest count
+    read as a shortage and the write-off then destroyed a real, sellable
+    frame -- which, under the block-the-oversell rule, goes on to refuse a
+    genuine sale. Comparing the snapshot with this live figure says whether a
+    line moved WITHOUT comparing any two clocks: the till stamps `sold_at`
+    with a local-naive datetime.now() and the count stamps a UTC ISO string,
+    and netting those against each other is the mixed-clock trap (BUG-104).
+    """
+    live: Dict[str, int] = {}
+    ids = [pid for pid in product_ids if pid]
+    if not ids or db is None:
+        return live
+    try:
+        rows = db.get_collection("stock_units").aggregate(
+            [
+                {
+                    "$match": {
+                        "store_id": store_id,
+                        "product_id": {"$in": ids},
+                        "status": {"$in": ["AVAILABLE", "RESERVED"]},
+                    }
+                },
+                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
+            ]
+        )
+        for r in rows:
+            live[str(r["_id"])] = int(r.get("qty", 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] live on-hand check failed: %s", exc)
+    # A product with every unit gone reports no group row at all -- that is a
+    # real zero, not "unknown", and it is exactly the movement worth catching.
+    for pid in ids:
+        live.setdefault(pid, 0)
+    return live
+
+
 def _load_open_count(db, count_id: str, current_user: dict) -> dict:
     """The in-progress count session, or the right refusal.
 
@@ -2483,6 +2526,13 @@ async def complete_stock_count(
         # rupees as well as units -- "12 units short" means nothing until it
         # reads "12 units short, Rs 24,000".
         costs = _product_costs(db, [i.get("product_id", "") for i in items])
+        # What the books say RIGHT NOW, against the snapshot this session
+        # opened with. Any line where the two differ has been sold,
+        # transferred, received or returned since the counter started, so the
+        # difference between snapshot and shelf is not a loss.
+        live_on_hand = _on_hand_now(
+            db, count_doc.get("store_id", ""), [i.get("product_id", "") for i in items]
+        )
 
         variances = []
         total_system = 0
@@ -2492,27 +2542,38 @@ async def complete_stock_count(
         shrinkage_value = 0.0
         overage_value = 0.0
         lines_without_cost = 0
+        lines_moved = 0
 
         for item in items:
             pid = item["product_id"]
             counted = item["counted_quantity"]
             system = system_quantities.get(pid, 0)
+            system_now = live_on_hand.get(pid, system)
+            # MOVED DURING THE COUNT: stock left or arrived while the session
+            # was open. Counting it against the opening snapshot manufactures
+            # a shortage out of a sale, and the write-off then destroys a
+            # frame the shop still owns and could still sell. Report the line,
+            # never bank it as a loss, and never let the write-off take it.
+            moved = system_now != system
             variance = counted - system
             var_pct = round((variance / max(system, 1)) * 100, 2)
             unit_cost = float(costs.get(pid, 0.0) or 0.0)
             variance_value = round(variance * unit_cost, 2)
 
-            total_system += system
-            total_counted += counted
-            if variance < 0:
-                total_shrinkage += abs(variance)
-                shrinkage_value += abs(variance_value)
-            elif variance > 0:
-                total_overage += variance
-                overage_value += variance_value
-            if variance != 0 and unit_cost <= 0:
-                # The rupee figure for this line is unknown, not zero.
-                lines_without_cost += 1
+            if moved:
+                lines_moved += 1
+            else:
+                total_system += system
+                total_counted += counted
+                if variance < 0:
+                    total_shrinkage += abs(variance)
+                    shrinkage_value += abs(variance_value)
+                elif variance > 0:
+                    total_overage += variance
+                    overage_value += variance_value
+                if variance != 0 and unit_cost <= 0:
+                    # The rupee figure for this line is unknown, not zero.
+                    lines_without_cost += 1
 
             variances.append(
                 {
@@ -2520,11 +2581,13 @@ async def complete_stock_count(
                     "product_name": item.get("product_name", ""),
                     "sku": item.get("sku", ""),
                     "system_quantity": system,
+                    "system_quantity_now": system_now,
                     "physical_quantity": counted,
                     "variance": variance,
                     "variance_percentage": var_pct,
                     "unit_cost": round(unit_cost, 2),
                     "variance_value": variance_value,
+                    "moved_during_count": moved,
                 }
             )
 
@@ -2550,6 +2613,7 @@ async def complete_stock_count(
             "overage_units": total_overage,
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
+            "lines_moved_during_count": lines_moved,
             "notes": request.notes if request else None,
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
@@ -2595,6 +2659,7 @@ async def complete_stock_count(
             "overage_units": total_overage,
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
+            "lines_moved_during_count": lines_moved,
             "variances": variances,
         }
 
@@ -2741,6 +2806,7 @@ async def reconcile_stock_count(
         units_voided_total = 0
         units_not_voided_total = 0
         shrinkage_value_total = 0.0
+        lines_skipped_moved = 0
 
         for v in variances:
             pid = v.get("product_id", "")
@@ -2748,6 +2814,25 @@ async def reconcile_stock_count(
             counted_qty = int(v.get("physical_quantity", 0) or 0)
             accepted_qty = override_map.get(pid, counted_qty)
             net_variance = accepted_qty - system_qty
+
+            # A line whose on-hand moved while the count was open is NOT a
+            # loss (completion flagged it). Writing it off would void a frame
+            # the shop still owns and can still sell.
+            if v.get("moved_during_count"):
+                lines_skipped_moved += 1
+                reconciled_items.append(
+                    {
+                        "product_id": pid,
+                        "product_name": v.get("product_name", ""),
+                        "sku": v.get("sku", ""),
+                        "system_quantity": system_qty,
+                        "physical_quantity": counted_qty,
+                        "accepted_quantity": counted_qty,
+                        "net_variance": 0,
+                        "skipped_reason": "stock moved during the count - count again",
+                    }
+                )
+                continue
 
             reconciled_items.append(
                 {
@@ -2893,6 +2978,7 @@ async def reconcile_stock_count(
                     "overage_count": len(overage_records),
                     "units_voided": units_voided_total,
                     "units_not_voided": units_not_voided_total,
+                    "lines_skipped_moved": lines_skipped_moved,
                     "shrinkage_value_written_off": shrinkage_value_total,
                 }
             },
@@ -2907,6 +2993,7 @@ async def reconcile_stock_count(
             "overage_lines": len(overage_records),
             "units_voided": units_voided_total,
             "units_not_voided": units_not_voided_total,
+            "lines_skipped_moved": lines_skipped_moved,
             "shrinkage_value_written_off": shrinkage_value_total,
             "overages_pending_review": overage_records,
             "reconciled_at": now.isoformat(),
