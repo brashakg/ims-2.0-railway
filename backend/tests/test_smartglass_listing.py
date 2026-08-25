@@ -516,3 +516,67 @@ async def test_the_ai_button_is_unchanged_for_every_other_category(monkeypatch):
     assert "<h4>Product Details</h4>" in html
     assert "<h4>Technical Specifications</h4>" in html
     assert "<li>" not in html
+
+
+# ---------------------------------------------------------------------------
+# 6. The description the form sends is not dropped on the floor
+# ---------------------------------------------------------------------------
+# Everything above is worthless if the text never leaves the browser.
+# ProductCreate did not model `description`, so pydantic silently discarded it
+# on every create and shopify_push.build_product_input pushed an EMPTY body --
+# the exact bug the `images` field had, pinned by test_product_images_persist.
+# This is that same pin for `description`.
+
+
+def _smartglass_create(**over):
+    from api.routers import products as pr
+
+    base = dict(
+        category="SMTFR",
+        brand="Ray-Ban",
+        model="RW4006",
+        attributes=dict(FULL_ATTRS),
+        mrp=41900,
+        offer_price=41900,
+    )
+    base.update(over)
+    return pr.ProductCreate(**base)
+
+
+def test_a_written_description_rides_the_create_payload_to_the_door():
+    from api.routers import products as pr
+
+    body = "<h2>Ray-Ban Meta Wayfarer</h2>\n<ul>\n<li>12MP camera</li>\n</ul>"
+    p = _smartglass_create(description=body)
+    assert p.description == body
+    assert pr._form_extra_fields(p)["description"] == body
+
+
+def test_an_absent_description_stays_absent():
+    """Nothing invented: no description sent means no description key, so the
+    smart-glass generator in _build_pim_doc still sees a blank and fills it."""
+    from api.routers import products as pr
+
+    p = _smartglass_create()
+    assert p.description is None
+    assert "description" not in pr._form_extra_fields(p)
+
+
+def test_the_description_reaches_shopifys_storefront_body():
+    """The whole point of modelling it: shopify_push reads
+    `ecom.seo.html or description`, so the projection must carry it through."""
+    from api.services import shopify_push
+
+    body = "<h2>Hand-written</h2>"
+    doc = pm._build_pim_doc(
+        {
+            "category": "SMARTGLASSES",
+            "brand": "Ray-Ban",
+            "attributes": dict(FULL_ATTRS),
+            "description": body,
+            "sku": "SMTFRRAYMETA1",
+            "pim_product_id": "pim-desc",
+        }
+    )
+    assert doc["description"] == body
+    assert shopify_push.build_product_input(doc, [])["descriptionHtml"] == body
