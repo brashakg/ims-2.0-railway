@@ -1415,6 +1415,14 @@ export interface PushMode {
   /** Convenience: writes_enabled && dispatch_mode==='live' && creds_present. */
   is_live?: boolean | null;
   api_version?: string | null;
+  /** THE THIRD DOOR. A press publishes to the Online Store sales channel; a
+   *  product published to no channel is invisible however ACTIVE it is. The
+   *  resolved publication gid, or null when it could not be resolved — in which
+   *  case every press will honestly WITHHOLD and nothing goes live. */
+  online_store_publication_id?: string | null;
+  /** 'pinned' (SHOPIFY_ONLINE_STORE_PUBLICATION_ID), 'looked_up', or
+   *  'unresolved'. */
+  online_store_publication_source?: string | null;
   /** Advisory note (the single-writer / cutover explanation). */
   single_writer_note?: string | null;
 }
@@ -1483,7 +1491,22 @@ export interface PushSweepResult {
   summary?:
     | Record<
         string,
-        { pushed?: number; failed?: number; noop?: number; blocked_skipped?: number } | null
+        {
+          pushed?: number;
+          failed?: number;
+          noop?: number;
+          blocked_skipped?: number;
+          /** Products the press REFUSED because they carry no photograph
+           *  ("no photo, no publish"). Never sent, never counted as pushed. */
+          refused_no_photo?: number;
+          /** Products that reached Shopify but were NOT made visible (no
+           *  resolvable Online Store publication, the photograph did not
+           *  attach, or the price was not provable). They stay queued. */
+          publish_withheld?: number;
+          /** Products a take-down is holding off the storefront: the sweep
+           *  skips them until someone presses that one product explicitly. */
+          taken_down_skipped?: number;
+        } | null
       >
     | null;
   /** The per-doc PushResult rows (SIMULATED plans when DARK). */
@@ -1555,6 +1578,8 @@ export const pushApi = {
           creds_present: mode.creds_present ?? null,
           is_live: mode.is_live ?? (mode.mode === 'LIVE'),
           api_version: mode.api_version ?? null,
+          online_store_publication_id: mode.online_store_publication_id ?? null,
+          online_store_publication_source: mode.online_store_publication_source ?? null,
           single_writer_note: mode.single_writer_note ?? null,
         },
         db_connected: !!data.db_connected,
@@ -1636,6 +1661,8 @@ export const pushApi = {
         dispatch_mode: mode.dispatch_mode ?? null,
         creds_present: mode.creds_present ?? null,
         api_version: mode.api_version ?? null,
+        online_store_publication_id: mode.online_store_publication_id ?? null,
+        online_store_publication_source: mode.online_store_publication_source ?? null,
         single_writer_note: mode.single_writer_note ?? null,
       },
       db_connected: data.db_connected ?? null,

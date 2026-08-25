@@ -259,7 +259,11 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     product = db["catalog_products"].find_one({"id": "P1"})
 
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.mode == "LIVE" and res.ok is True
+    assert res.mode == "LIVE"
+    # This fixture carries NO price, so the publish is withheld -- and a press
+    # that put nothing in front of a customer must say so (it is not a Shopify
+    # breakage either, hence its own reason rather than a bare failure).
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
     # The network boundary WAS hit: the product, then its photograph (the
@@ -948,7 +952,9 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
     )
     product = db["catalog_products"].find_one({"id": "P1"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.mode == "LIVE" and res.ok is True
+    assert res.mode == "LIVE"
+    # (Unpriced fixture -> the publish is withheld; the metafield side channel
+    # below is what this test is about.)
     # Three network calls: productCreate, ONE metafieldsSet chunk, then the
     # photograph (which rides the same press since 2026-08-25).
     assert len(spy.calls) == 3
@@ -987,8 +993,12 @@ def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
     )
     product = db["catalog_products"].find_one({"id": "P1"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True  # the product write itself succeeded
     assert res.mode == "LIVE"
+    # A metafield error is a SIDE CHANNEL: it never becomes the push's own
+    # verdict. (This unpriced fixture is withheld at the publish door -- a
+    # different, honestly reported outcome -- and "boom" is not the reason.)
+    assert res.reason == "publish_withheld"
+    assert "boom" not in (res.error or "")
     assert res.metafields["set"] == 0
     assert any("boom" in e for e in res.metafields["errors"])
     assert len(spy.calls) == 3  # + the photograph

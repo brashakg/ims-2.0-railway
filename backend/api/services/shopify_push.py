@@ -222,12 +222,29 @@ def push_mode_status(db) -> Dict[str, Any]:
       dispatch_mode   -- off / test / live
       creds_present   -- shop_url + access_token in the integrations collection?
       mode            -- LIVE only when all three align, else SIMULATED.
+
+    Plus THE THIRD DOOR, which the three gates say nothing about: the Online
+    Store publication. An ACTIVE product published to no sales channel is
+    invisible, so a press with no resolvable publication now honestly WITHHOLDS
+    -- and the owner should be able to see that BEFORE he presses, not discover
+    it one product at a time afterwards. Reported without a network call: the
+    pinned SHOPIFY_ONLINE_STORE_PUBLICATION_ID, else whatever a previous
+    lookup cached this process, else unresolved. (This replaces the deleted
+    publish_on_create flag -- publishing is no longer optional, so the honest
+    signal is "can we publish at all?".)
     """
     writes = ims_shopify_writes_enabled()
     disp = shopify_dispatch_mode()
     creds = _has_shopify_creds(db)
     live = bool(writes and disp == "live" and creds)
+    pinned = (os.getenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID") or "").strip()
+    pub_id = pinned or _publication_id_cache.get(_ONLINE_STORE_PUBLICATION_NAME)
     return {
+        "publishes_to_online_store": True,
+        "online_store_publication_id": pub_id or None,
+        "online_store_publication_source": (
+            "pinned" if pinned else ("looked_up" if pub_id else "unresolved")
+        ),
         "mode": MODE_LIVE if live else MODE_SIMULATED,
         "writes_enabled": writes,
         "dispatch_mode": disp,
@@ -2276,7 +2293,17 @@ async def push_product(
         # The press reached Shopify but the product is NOT visible. Leave it in
         # the queue so pressing again retries it once the price / photograph is
         # fixed -- see _requeue_unpublished for why this is not ping-pong.
-        if pub_summary is not None and not pub_summary.get("published") and pid:
+        #
+        # AND SAY SO. "One press, goes live" makes visibility the definition of
+        # success, so a press whose publish was withheld did NOT do what it was
+        # pressed for and must never come back ok. Reporting ok=True here was
+        # the owner's original bug one layer down: with the publication
+        # unresolvable a sweep answered "pushed: 5, failed: 0" over five
+        # invisible products and the toast was green. The withholding gets its
+        # OWN reason (never `failed`, which would read as a Shopify breakage)
+        # so the sweep buckets and shows it exactly like refused_no_photo.
+        published_ok = pub_summary is None or bool(pub_summary.get("published"))
+        if not published_ok and pid:
             _requeue_unpublished(db, pid)
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
@@ -2306,9 +2333,15 @@ async def push_product(
             entity="product",
             action=action,
             target_id=pid,
-            ok=True,
+            ok=published_ok,
             shopify_id=new_gid,
             payload=payload,
+            error=(
+                None
+                if published_ok
+                else ((pub_summary or {}).get("error") or "publish withheld")
+            ),
+            reason=None if published_ok else "publish_withheld",
             metafields=mf_summary,
             variant_prices=vp_summary,
             variants_seeded=seed_summary,

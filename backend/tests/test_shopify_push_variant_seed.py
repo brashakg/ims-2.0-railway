@@ -593,7 +593,10 @@ def test_live_create_harvests_partially_successful_bulk_create(monkeypatch):
     ]
 
     res = _run(shopify_push.push_product(db, product, variants))
-    assert res.ok is True  # the product push stays fail-soft either way
+    # The seeding error is a SIDE CHANNEL and never becomes the verdict; this
+    # unpriced press is not ok for the OTHER reason -- it published nothing
+    # (one press, goes live: an invisible product is not a success).
+    assert res.ok is False and res.reason == "publish_withheld"
 
     # The partial error IS reported...
     assert any("SKU has already been taken" in e for e in res.variants_seeded["errors"])
@@ -696,7 +699,10 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
         db["catalog_variants"].find_one({"sku": "S-SLV"}),
     ]
     res1 = _run(shopify_push.push_product(db, product, variants))
-    assert res1.ok is True and res1.action == "create"
+    # Unpriced -> the publish was withheld, so the press honestly reports not-ok
+    # while still harvesting the gids this test is about.
+    assert res1.ok is False and res1.reason == "publish_withheld"
+    assert res1.action == "create"
 
     black = db["catalog_variants"].find_one({"sku": "S-BLK"})
     gold = db["catalog_variants"].find_one({"sku": "S-GLD"})
@@ -823,7 +829,11 @@ def test_live_create_seed_failure_never_fails_the_product_push(monkeypatch):
     product = db["catalog_products"].find_one({"id": "P1"})
 
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True and res.mode == "LIVE"
+    assert res.mode == "LIVE"
+    # A SEEDING failure never becomes the push's verdict: the only reason this
+    # press is not ok is the withheld publish (nothing went in front of a
+    # customer), and the seeding error rides the side channel below.
+    assert res.reason == "publish_withheld"
     assert res.variants_seeded["updated"] == 0
     assert any("boom" in e for e in res.variants_seeded["errors"])
 
@@ -839,7 +849,8 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     )
     product = db["catalog_products"].find_one({"id": "P2"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True
+    # No price and no SKU anywhere -> nothing to seed AND nothing publishable.
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.variants_seeded is None
     assert spy.count_for("productVariantsBulkUpdate") == 0
     # productCreate + the photograph. Nothing else: no seeding call, and
@@ -1116,7 +1127,9 @@ def test_publish_withheld_when_seeding_failed(monkeypatch):
     db["catalog_products"].insert_one(_product(id="P6"))
     product = db["catalog_products"].find_one({"id": "P6"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True  # the product push itself stays fail-soft
+    # ok=False is the POINT: the product exists on Shopify but no customer can
+    # see it, and a press that published nothing must never report success.
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.publication == {
         "published": False,
         "error": "publish withheld: variant unpriced or seeding failed",

@@ -185,6 +185,9 @@ def shopify(monkeypatch):
     )
     monkeypatch.setattr(shopify_push, "_graphql", fake)
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", _PUB_GID)
+    # The resolved publication is cached per PROCESS, so one test's lookup would
+    # otherwise answer the next test's press.
+    shopify_push._publication_id_cache.clear()
     return fake
 
 
@@ -309,7 +312,8 @@ def test_publish_is_withheld_when_the_variant_could_not_be_priced(db, shopify):
 
     res = _run(shopify_push.push_product(db, doc, []))
 
-    assert res.ok is True
+    assert res.ok is False, "an invisible product was reported as pushed"
+    assert res.reason == "publish_withheld"
     assert shopify.calls_of("imsPublishablePublish") == []
     assert (res.publication or {}).get("published") is not True
 
@@ -346,6 +350,10 @@ def test_the_refusal_is_visible_and_never_counted_as_pushed(db, shopify, monkeyp
     assert bucket["pushed"] == 1
     assert bucket.get("refused_no_photo") == 1
     assert bucket["failed"] == 0, "a refusal must not be filed as a failure"
+    # ...and it must not be folded into the headline number either: "2 processed"
+    # over one product that went and one that was refused is the same lie in the
+    # place the operator actually reads.
+    assert out["pushed_count"] == 1
 
 
 def test_a_refused_product_stays_in_the_queue(db, shopify):
@@ -411,7 +419,8 @@ def test_publish_is_withheld_when_the_photograph_could_not_be_attached(db, shopi
     finally:
         shopify_push._graphql = shopify
 
-    assert res.ok is True
+    assert res.ok is False, "a product with no photograph on Shopify read as pushed"
+    assert res.reason == "publish_withheld"
     assert shopify.calls_of("imsPublishablePublish") == []
 
 
@@ -709,3 +718,80 @@ def test_publishing_writeback_never_re_queues_the_row(db, shopify):
         assert push_router._product_counts(db)["pending"] == 0
 
     assert len(shopify.calls_of("imsProductCreate")) == 1
+
+
+# ===========================================================================
+# F. A PRESS THAT PUBLISHED NOTHING NEVER REPORTS SUCCESS
+# ===========================================================================
+# The owner's original bug was a screen that said "pending: 0" while nothing
+# was queued. The same lie, one layer down: the product write succeeds, the
+# sales-channel publish is WITHHELD (no photograph on Shopify, no provable
+# price, or -- the one that bites on day one -- the Online Store publication
+# cannot be resolved because SHOPIFY_ONLINE_STORE_PUBLICATION_ID is unset and
+# the app lacks read_publications), and the press still reports ok. An honest
+# refusal, counted and shown, is always correct; a green toast over a no-op
+# never is.
+
+
+@pytest.fixture
+def no_publication(shopify, monkeypatch):
+    """The third door SHUT: nothing pins the publication and the lookup finds
+    no Online Store channel (unset env / missing read_publications scope)."""
+    monkeypatch.delenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", raising=False)
+    shopify_push._publication_id_cache.clear()
+    return shopify
+
+
+def test_a_press_that_published_nothing_is_not_ok(db, no_publication):
+    """The product reached Shopify but NO customer can see it. ok=True here is
+    the owner's original symptom: 'pushed, failed 0' next to an empty page."""
+    doc = _seed(db, _product())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok is False, "a press that published nothing reported success"
+    assert res.reason == "publish_withheld"
+    assert "publication" in (res.error or "").lower()
+    assert no_publication.calls_of("imsPublishablePublish") == []
+
+
+def test_an_unpriced_withheld_press_is_not_ok_either(db, shopify):
+    """Same rule on the other withholding branch -- the product exists on
+    Shopify, is invisible, and the press must say so."""
+    res = _withheld(db, shopify)
+
+    assert res.ok is False
+    assert res.reason == "publish_withheld"
+    assert "withheld" in (res.error or "").lower()
+
+
+def test_a_sweep_that_published_nothing_reports_nothing_pushed(db, no_publication, monkeypatch):
+    """THE REPRODUCTION: five products, zero publishes, and the sweep used to
+    answer pushed:5 failed:0 -- a green toast over an empty brand page."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    for i in range(5):
+        _seed(db, _product(pid="P%02d" % i))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    bucket = out["summary"]["products"]
+    assert bucket["pushed"] == 0, "the sweep counted invisible products as pushed"
+    assert bucket.get("publish_withheld") == 5
+    assert out["pushed_count"] == 0, "'5 processed' over five invisible products"
+    assert no_publication.calls_of("imsPublishablePublish") == []
+
+
+def test_the_owner_can_see_the_third_door_before_he_presses(db, monkeypatch):
+    """push_mode_status is the posture banner. It reports the two other gates;
+    without the publication it cannot say whether a press can go live at all."""
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", _PUB_GID)
+    shopify_push._publication_id_cache.clear()
+    armed = shopify_push.push_mode_status(db)
+    assert armed["online_store_publication_id"] == _PUB_GID
+    assert armed["online_store_publication_source"] == "pinned"
+
+    monkeypatch.delenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", raising=False)
+    shopify_push._publication_id_cache.clear()
+    dark = shopify_push.push_mode_status(db)
+    assert dark["online_store_publication_id"] is None
+    assert dark["online_store_publication_source"] == "unresolved"

@@ -573,6 +573,14 @@ async def push_all_pending(
             # would read as a Shopify error; folding it into `pushed` would be
             # the silent lie this whole change exists to end.
             bucket["refused_no_photo"] = bucket.get("refused_no_photo", 0) + 1
+        elif data.get("reason") == "publish_withheld":
+            # The product reached Shopify but is NOT visible (no publication,
+            # no photograph on Shopify, no provable price). Same treatment as a
+            # refusal and for the same reason: filing it under `pushed` is the
+            # green-toast-over-a-no-op this whole change exists to end, and
+            # filing it under `failed` would read as a Shopify breakage the
+            # operator cannot act on. Its own line, with its own count.
+            bucket["publish_withheld"] = bucket.get("publish_withheld", 0) + 1
         elif data.get("ok") and data.get("action") == "noop":
             # A clean no-op (nothing mapped/priced to send) is NOT a success
             # push -- tallied separately so the UI renders it honestly (OS-017:
@@ -701,10 +709,19 @@ async def push_all_pending(
             _write_audit(data, current_user)
             _tally("images", data)
 
+    # "N processed" must mean N objects the press actually did the work on.
+    # A photo-less REFUSAL never reached Shopify and a WITHHELD publish left the
+    # product invisible -- folding either into the processed number turns the
+    # screen into the same lie as "pending: 0" over an empty queue. They are
+    # counted, and shown, on their own lines in `summary`.
+    not_done = sum(
+        (b.get("refused_no_photo") or 0) + (b.get("publish_withheld") or 0)
+        for b in summary.values()
+    )
     return {
         "mode": mode,
         "db_connected": True,
-        "pushed_count": len(results),
+        "pushed_count": len(results) - not_done,
         # A sweep the cap stopped early must NEVER read as complete -- the
         # caller's "run again to continue" cue keys off this flag.
         "limit_reached": len(results) >= limit or cap_reached,

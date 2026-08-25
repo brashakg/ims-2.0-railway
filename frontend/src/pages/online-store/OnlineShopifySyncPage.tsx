@@ -321,16 +321,30 @@ export default function OnlineShopifySyncPage() {
         setSweeps((prev) => ({ ...prev, [ent.key]: res }));
         const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
         const s = res.summary?.[ent.token] ?? {};
-        toast.success(
+        // WHAT DID NOT GO. A refusal (no photograph) and a withheld publish (the
+        // product reached Shopify but no customer can see it) are neither
+        // successes nor Shopify breakages — and a press that reports only its
+        // successes is the "pending: 0 over an empty queue" lie one screen over.
+        const refused = Number(s?.refused_no_photo ?? 0);
+        const withheld = Number(s?.publish_withheld ?? 0);
+        const heldDown = Number(s?.taken_down_skipped ?? 0);
+        const msg =
           `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
-            (s?.failed ? ` (${s.failed} failed)` : '') +
-            (s?.noop ? ` (${s.noop} no-op)` : ''),
-        );
-        // OS-046: never let a capped sweep read as complete.
+          (s?.failed ? ` · ${s.failed} failed` : '') +
+          (s?.noop ? ` · ${s.noop} no-op` : '') +
+          (refused ? ` · ${refused} refused (no photograph)` : '') +
+          (withheld ? ` · ${withheld} NOT made visible` : '') +
+          (heldDown ? ` · ${heldDown} skipped (taken down)` : '');
+        if (refused || withheld || s?.failed) toast.warning(msg);
+        else toast.success(msg);
+        // OS-046: never let a capped sweep read as complete. The batch cap is a
+        // PRODUCTS number; collections/menus/images stop at the request limit.
         if (res.limit_reached) {
+          const capText =
+            ent.token === 'products' ? `the safety cap of ${res.batch_cap ?? 25} products` : 'the page safety cap';
           toast.info(
-            `${ent.label}: stopped at the safety cap of ${res.batch_cap ?? 100} — run again ` +
-              'to continue (the pending count below shows the remainder).',
+            `${ent.label}: stopped at ${capText} — run again to continue (the pending count ` +
+              'below shows the remainder).',
           );
         }
       }
@@ -369,9 +383,9 @@ export default function OnlineShopifySyncPage() {
       // front of customers); everything else at the 500-object valve.
       if (res.limit_reached) {
         toast.info(
-          `Stopped at the safety cap (${res.batch_cap ?? 500} products per press) — NOT ` +
-            'everything was pushed. Click again to continue; the pending counts below ' +
-            'show the remainder.',
+          `Stopped at a safety cap (${res.batch_cap ?? 25} PRODUCTS per press; other objects ` +
+            'stop at 500) — NOT everything was pushed. Click again to continue; the pending ' +
+            'counts below show the remainder.',
         );
       }
       loadStatus();
@@ -460,7 +474,31 @@ export default function OnlineShopifySyncPage() {
             on={mode?.creds_present}
             detail={mode?.creds_present ? 'shop_url + token set' : 'not configured'}
           />
+          {/* THE THIRD DOOR, shown BEFORE the press. The three gates above say
+              nothing about it: with no resolvable Online Store publication every
+              press honestly withholds and NOTHING goes live, however green the
+              other three are. */}
+          <GateChip
+            label="Online Store channel"
+            on={!!mode?.online_store_publication_id}
+            detail={
+              mode?.online_store_publication_id
+                ? `publication ${mode.online_store_publication_source ?? 'resolved'}`
+                : 'NOT resolved — presses will publish nothing'
+            }
+          />
         </div>
+        {mode?.is_live && !mode?.online_store_publication_id && (
+          <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              No Online Store sales channel is resolved, so a press can create the product but
+              cannot make it visible on bettervision.in. Set
+              SHOPIFY_ONLINE_STORE_PUBLICATION_ID (or grant the app the read_publications and
+              write_publications scopes) before pressing.
+            </span>
+          </p>
+        )}
         {mode?.single_writer_note && (
           <p className="mt-3 text-[11px] text-gray-500">{mode.single_writer_note}</p>
         )}
@@ -561,6 +599,49 @@ export default function OnlineShopifySyncPage() {
                             title="Nothing was sent for these — their variants have no Shopify mapping (gid) yet, or no usable price"
                           >
                             <MinusCircle className="w-3 h-3" /> {fmt(noop)} no-op (not pushed)
+                          </span>
+                        ) : null;
+                      })()}
+                      {/* THE REFUSALS AND THE WITHHOLDINGS. The backend counts
+                          them honestly; a screen that renders only the successes
+                          turns that honesty back into "35 processed" over 25 that
+                          went and 10 that never did. */}
+                      {(() => {
+                        const refused = Number(
+                          (sweep.summary?.[ent.token]?.refused_no_photo ?? 0) as number,
+                        );
+                        return refused > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Refused: these products have no photograph. A listing with an empty grey box is never published — add a photo and press again."
+                          >
+                            · {fmt(refused)} refused (no photograph)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const withheld = Number(
+                          (sweep.summary?.[ent.token]?.publish_withheld ?? 0) as number,
+                        );
+                        return withheld > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="These reached Shopify but were NOT made visible (no Online Store channel, the photograph did not attach, or the price could not be proved). They are still queued — fix the cause and press again."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(withheld)} NOT made visible
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const held = Number(
+                          (sweep.summary?.[ent.token]?.taken_down_skipped ?? 0) as number,
+                        );
+                        return held > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Taken off the website by hand. A bulk sweep never puts one back — open the product and press Send to website when it is ready."
+                          >
+                            · {fmt(held)} skipped (taken down)
                           </span>
                         ) : null;
                       })()}
