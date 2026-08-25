@@ -131,8 +131,11 @@ export function StockAudit() {
       const result = await inventoryApi.completeStockCount(countId);
       toast.success(`Stock count completed! Variance: ${result.variance_percentage || 0}%`);
       loadAudits();
-    } catch {
-      toast.error('Failed to complete stock count');
+    } catch (err: any) {
+      // The server refuses a count with no lines recorded ("nothing has been
+      // counted"). Swallowing that into a generic failure hid the one message
+      // the counter actually needs.
+      toast.error(err?.response?.data?.detail || 'Failed to complete stock count');
     }
   };
 

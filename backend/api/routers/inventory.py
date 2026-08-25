@@ -2311,8 +2311,10 @@ async def record_count_item(
     """Record a counted item in an active stock count session"""
     db = _get_db()
 
+    # Recording a counted quantity is a WRITE. "Item recorded (no DB)" told the
+    # counter their number was saved when nothing was saved -- fail loud.
     if db is None:
-        return {"message": "Item recorded (no DB)", "count_id": count_id}
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
         collection = db.get_collection("stock_counts")
@@ -2365,8 +2367,8 @@ async def record_count_item(
     except HTTPException:
         raise
     except Exception as e:
-        logger.warning(f"record_count_item error: {e}")
-        return {"message": "Item recorded", "count_id": count_id}
+        logger.error(f"record_count_item error: {e}")
+        raise HTTPException(status_code=500, detail="Could not record the counted quantity")
 
 
 @router.post("/stock-count/{count_id}/complete")
@@ -2378,8 +2380,10 @@ async def complete_stock_count(
     """Complete stock count — calculates variances between system and physical count"""
     db = _get_db()
 
+    # Completing is a WRITE that closes the session. Reporting "completed" with
+    # no DB behind it is the same lie as reporting a perfect variance.
     if db is None:
-        return {"message": "Stock count completed", "variances": []}
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
         collection = db.get_collection("stock_counts")
@@ -2395,6 +2399,19 @@ async def complete_stock_count(
 
         system_quantities = count_doc.get("system_quantities", {})
         items = count_doc.get("items", [])
+
+        # A count with no lines is NOT a count. Completing an empty session used
+        # to run this whole calculation over an empty list and hand the counter
+        # "Variance: 0%" -- a perfect result for a shelf nobody looked at. Every
+        # count run in the business reported that. Refuse instead.
+        if not items:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Nothing has been counted in this session. "
+                    "Record at least one counted quantity before completing it."
+                ),
+            )
 
         # Calculate variances
         variances = []
@@ -2483,8 +2500,8 @@ async def complete_stock_count(
     except HTTPException:
         raise
     except Exception as e:
-        logger.warning(f"complete_stock_count error: {e}")
-        return {"message": "Stock count completed", "variances": []}
+        logger.error(f"complete_stock_count error: {e}")
+        raise HTTPException(status_code=500, detail="Could not complete the stock count")
 
 
 @router.get("/stock-count/{count_id}")
