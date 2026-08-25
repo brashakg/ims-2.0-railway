@@ -152,15 +152,24 @@ def _validate_rx_number(value, field_name: str):
     return value
 
 
-def _validate_measurement(value, field_name: str):
+def _validate_measurement(value, field_name: str, *, zero_is_blank: bool = True):
     """Range-only check for a linear millimetre measurement (PD / base_curve /
     diameter): no 0.25 grid, no sign rules. Blank / None passes. A leading '+'
-    is accepted. Raises ValueError when out of range."""
+    is accepted. Raises ValueError when out of range.
+
+    `zero_is_blank` (default True, the historic behaviour) reads a literal "0"
+    as "not recorded" rather than as a measurement of zero millimetres. That is
+    a tolerance for LEGACY documents -- plenty of stored eyes carry pd "0"
+    meaning nothing was measured, and an amendment must not be blocked by a
+    value the clinician never typed. Pass False on a field with no legacy
+    corpus: a recorded 0 mm is then refused like any other impossible reading,
+    which is what the frontend has always done."""
     if value is None:
         return value
-    if isinstance(value, str) and value.strip() in ("", "0"):
-        # A blank measurement is "not recorded"; unlike a dioptric power, "0"
-        # is not a meaningful PD/BC/DIA so treat it as not-entered too.
+    blanks = ("", "0") if zero_is_blank else ("",)
+    if isinstance(value, str) and value.strip() in blanks:
+        # A blank measurement is "not recorded"; see `zero_is_blank` above for
+        # why a literal "0" is usually read the same way.
         return value
     num = _coerce_float(value, field_name)
     lo, hi = _limits_for(field_name)
@@ -168,6 +177,37 @@ def _validate_measurement(value, field_name: str):
         raise ValueError(
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
             f"Please double-check the prescription."
+        )
+    return value
+
+
+# VISUAL ACUITY. A Snellen fraction at 6 metres, plus the four standard
+# low-vision notations that IMS's own SOAP-note form already offers (Counting
+# Fingers / Hand Movement / Perception of Light / No Perception of Light). This
+# is the mirror of the frontend VA_SET in constants/rxLimits.ts, widened by
+# those four so the server can never refuse a record another IMS screen can
+# legitimately produce. It is a CLOSED set either way: "banana" and "20/9999"
+# were both saving with a 200 into a patient's clinical record because nothing
+# in backend/ had ever looked at this field.
+_VA_SET = (
+    "6/6", "6/9", "6/12", "6/18", "6/24", "6/36", "6/60",
+    "CF", "HM", "PL", "NPL",
+)
+
+
+def _validate_visual_acuity(value, field_name: str = "acuity"):
+    """Validate a visual-acuity string against the closed Snellen / low-vision
+    set. Blank / None passes ("not recorded"). Case-insensitive on the letter
+    notations. Raises ValueError on anything else; returns the value unchanged
+    so it can be used inline as a Pydantic field validator."""
+    if value is None:
+        return value
+    text = str(value).strip()
+    if text == "":
+        return value
+    if text.upper() not in {v.upper() for v in _VA_SET}:
+        raise ValueError(
+            f"{field_name} must be one of {', '.join(_VA_SET)}, got '{text}'"
         )
     return value
 

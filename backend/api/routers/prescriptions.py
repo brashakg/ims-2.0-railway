@@ -161,9 +161,11 @@ def _audit_rx(
 #   CL base_curve 8.0-9.5 mm - CL diameter 13.0-15.0 mm
 from ..services.rx_validation import (  # noqa: E402
     _RX_LIMITS,
+    _validate_measurement,
     _validate_rx_value,
     _validate_rx_number,
     _validate_axis,
+    _validate_visual_acuity,
 )
 
 # ============================================================================
@@ -252,6 +254,13 @@ class EyeData(BaseModel):
         # 40-80 binocular limit. See rx_validation._RX_LIMITS.
         return _validate_rx_value(v, "pd_mono")
 
+    @field_validator("acuity")
+    @classmethod
+    def validate_acuity(cls, v: Optional[str]) -> Optional[str]:
+        # Visual acuity is a CLOSED clinical set, not free text: "banana" and
+        # "20/9999" used to save with a 200 and print on the patient's card.
+        return _validate_visual_acuity(v, "acuity")
+
     @field_validator("prism")
     @classmethod
     def validate_prism(cls, v: Optional[str]) -> Optional[str]:
@@ -307,6 +316,11 @@ class CLEyeData(BaseModel):
     diameter: Optional[float] = None  # DIA, mm
     acuity: Optional[str] = None  # visual acuity, e.g. "6/6"
 
+    @field_validator("acuity")
+    @classmethod
+    def validate_acuity(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_visual_acuity(v, "acuity")
+
 
 class PrescriptionCreate(BaseModel):
     patient_id: str
@@ -359,6 +373,15 @@ class PrescriptionCreate(BaseModel):
     ipd: Optional[str] = None
     next_checkup: Optional[str] = None
     remarks: Optional[str] = None
+
+    @field_validator("ipd")
+    @classmethod
+    def validate_ipd(cls, v: Optional[str]) -> Optional[str]:
+        # BINOCULAR PD (40-80mm) -- the number that centres BOTH lenses. Its
+        # per-eye monocular twin was already gated; this one was not, on either
+        # this door or the clinical exam's. zero_is_blank=False: a 0mm IPD is
+        # anatomically impossible and this field carries no legacy "0" corpus.
+        return _validate_measurement(v, "pd", zero_is_blank=False)
 
     @model_validator(mode="after")
     def _validate_contact_lens_block(self) -> "PrescriptionCreate":
@@ -1439,6 +1462,20 @@ async def update_prescription(
     body = rx.model_dump(exclude_unset=True)
     if not body:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Fields the EDIT door writes that EyeDataEdit deliberately does not
+    # field-validate (it wants a business 400, not Pydantic's 422). Checked on
+    # what the CALLER SENT, never on the merged stored value: refusing to WRITE
+    # junk must not make an existing record with a legacy value un-editable.
+    try:
+        for eye_key in ("right_eye", "left_eye"):
+            sent = body.get(eye_key)
+            if isinstance(sent, dict):
+                _validate_visual_acuity(sent.get("acuity"), f"{eye_key} acuity")
+        if "ipd" in body:
+            _validate_measurement(body.get("ipd"), "pd", zero_is_blank=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # Re-validate spectacle powers against the canonical clinical ranges. We
     # call the SAME validators the create path / EyeData validators use, but

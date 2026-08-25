@@ -172,6 +172,15 @@ class TestParseAxis:
         # Some devices export "90.0" -- should be accepted as int.
         assert _parse_axis("90.0") == 90
 
+    def test_a_fractional_axis_is_REFUSED_not_truncated(self):
+        # An axis is a MERIDIAN. int(float("90.5")) used to hand back 90 --
+        # a different meridian, silently. A device reporting half a degree is
+        # reporting a fault; the import must surface it, not round it away.
+        with pytest.raises(ValueError, match="whole number"):
+            _parse_axis("90.5")
+        with pytest.raises(ValueError, match="whole number"):
+            _parse_axis("179.9")
+
 
 # ---------------------------------------------------------------------------
 # parse_device_csv -- Format A (Topcon/Nidek)

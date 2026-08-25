@@ -549,7 +549,11 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
     a power past the checks by leaving its twin key present-but-null.
     """
     from .prescriptions import _eye_value, _validate_eye_axis
-    from ..services.rx_validation import _validate_measurement, _validate_rx_value
+    from ..services.rx_validation import (
+        _validate_measurement,
+        _validate_rx_value,
+        _validate_visual_acuity,
+    )
 
     if not isinstance(eye, dict):
         return
@@ -584,6 +588,16 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
 
+    # VISUAL ACUITY. Free text on the wire, a closed clinical set in reality:
+    # "banana" and "20/9999" both saved with a 200 into the exam block AND into
+    # the mirrored prescription, because no validator in backend/ had ever
+    # looked at this field. The exam form gates it client-side, so the exposure
+    # is the direct API, a device/CSV import and the integrations.
+    try:
+        _validate_visual_acuity(_eye_value(eye, "va", "acuity"), "VA")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
     # PRISM travels as free text through a bare <input> on the Final Rx tab and
     # is persisted verbatim. Mirrors EyeData.validate_prism (0-10 dioptres).
     prism = _eye_value(eye, "prism")
@@ -602,6 +616,41 @@ def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
             )
 
     _validate_eye_axis(eye_label, cyl, eye.get("axis"), status_code=422)
+
+
+def _validate_eye_test_payload(data: "EyeTestData") -> None:
+    """The WHOLE clinical range gate for one exam payload, in one place.
+
+    Both write doors -- POST /tests/{id}/complete and PUT /tests/{id}/exam --
+    must apply identical checks: an amendment is a write of a medical power and
+    gets exactly what the first write got. They used to repeat the same five
+    calls, which is how the BINOCULAR IPD ended up gated in the browser and
+    nowhere on the server. One reader now, so a rule added here lands on both.
+    """
+    from ..services.rx_validation import _validate_measurement
+
+    _validate_eye_test_rx("Right eye", data.right_eye)
+    _validate_eye_test_rx("Left eye", data.left_eye)
+    # The three exam tabs that now reach the server. They used to be dropped in
+    # the browser, so no layer -- not the form, not the transport, not a
+    # Pydantic model, not a validator -- had ever looked at a lensometer or
+    # auto-ref power. -9999 went in and nothing objected.
+    _validate_exam_block("Lensometer", data.lensometer)
+    _validate_exam_block("Auto-Ref", data.auto_ref)
+    _validate_exam_block("Subjective Rx", data.subjective_rx)
+
+    # THE BINOCULAR IPD: the single number that centres BOTH lenses in the
+    # frame. It is not the per-eye monocular PD (already gated above as
+    # "pd_mono", 20-45mm) -- it is its 40-80mm twin, and it was validated in the
+    # browser and NOWHERE on the server, so an IPD of 9999 from a device
+    # import, a CSV or a direct call reached a billable prescription and the
+    # lab. zero_is_blank=False because this field is new on the exam document:
+    # there is no legacy corpus of "0" to tolerate, and a 0mm IPD is
+    # anatomically impossible, exactly as the form has always said.
+    try:
+        _validate_measurement(data.ipd, "pd", zero_is_blank=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"IPD: {exc}")
 
 
 def _validate_keratometry(eye_label: str, eye: dict) -> None:
@@ -1144,15 +1193,7 @@ async def complete_test(
     # success, so an out-of-range SPH/CYL/AXIS/ADD here would otherwise be
     # saved into an Rx the prescriptions endpoint would reject -- closing that
     # write-path gap. Raises 422 on a violation.
-    _validate_eye_test_rx("Right eye", data.right_eye)
-    _validate_eye_test_rx("Left eye", data.left_eye)
-    # ...and the same gate over the three exam tabs that now reach the server.
-    # These used to be dropped in the browser, so no layer -- not the form, not
-    # the transport, not a Pydantic model, not a validator -- had ever looked at
-    # a lensometer or auto-ref power. -9999 went in and nothing objected.
-    _validate_exam_block("Lensometer", data.lensometer)
-    _validate_exam_block("Auto-Ref", data.auto_ref)
-    _validate_exam_block("Subjective Rx", data.subjective_rx)
+    _validate_eye_test_payload(data)
 
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
@@ -1348,11 +1389,7 @@ async def amend_eye_test(
     The prior values are preserved on the document's append-only `amendments`
     list, so correcting a reading never erases what it replaced.
     """
-    _validate_eye_test_rx("Right eye", data.right_eye)
-    _validate_eye_test_rx("Left eye", data.left_eye)
-    _validate_exam_block("Lensometer", data.lensometer)
-    _validate_exam_block("Auto-Ref", data.auto_ref)
-    _validate_exam_block("Subjective Rx", data.subjective_rx)
+    _validate_eye_test_payload(data)
 
     test_repo = get_eye_test_repository()
     if test_repo is None:

@@ -310,3 +310,76 @@ class TestValidateAdvisory:
         # 99 is beyond the canonical +/-25 limit. The message is the canonical
         # validator's (field name lower-case: "sph value 99.0 is outside ...").
         assert any("sph" in iss.lower() for iss in body["issues"])
+# ---------------------------------------------------------------------------
+# VISUAL ACUITY + the BINOCULAR IPD are clinical values, not free text.
+# ---------------------------------------------------------------------------
+# `acuity` was unvalidated anywhere in backend/: "banana" and "20/9999" saved
+# with a 200 and printed on the patient's card. `ipd` (the number that centres
+# BOTH lenses) was gated in the browser only, so 9999 reached the lab through
+# any non-UI door. EyeDataEdit deliberately carries no field validators, so the
+# EDIT door checks these in the handler and answers 400, like its other
+# business rejections.
+
+
+class TestAcuityAndIpdOnTheEditDoor:
+    def _put(self, monkeypatch, body):
+        client = _client(["OPTOMETRIST"], _FakeRxRepo(_seed_doc()), monkeypatch)
+        return client.put("/prescriptions/rx-1", json=body)
+
+    def test_junk_acuity_is_refused(self, monkeypatch):
+        for bad in ("banana", "20/9999", "6/7"):
+            resp = self._put(monkeypatch, {"right_eye": {"acuity": bad}})
+            assert resp.status_code == 400, f"acuity {bad!r} was ACCEPTED: {resp.text[:200]}"
+            assert "acuity" in resp.text.lower()
+
+    def test_a_real_snellen_acuity_is_accepted(self, monkeypatch):
+        for good in ("6/6", "6/60", "CF", ""):
+            resp = self._put(monkeypatch, {"right_eye": {"acuity": good}})
+            assert resp.status_code == 200, f"acuity {good!r} was REFUSED: {resp.text[:200]}"
+
+    def test_an_impossible_ipd_is_refused(self, monkeypatch):
+        for bad in ("9999", "0", "6.25"):
+            resp = self._put(monkeypatch, {"ipd": bad})
+            assert resp.status_code == 400, f"ipd {bad!r} was ACCEPTED: {resp.text[:200]}"
+
+    def test_an_ordinary_ipd_is_accepted(self, monkeypatch):
+        for good in ("62.5", "40", "80", ""):
+            resp = self._put(monkeypatch, {"ipd": good})
+            assert resp.status_code == 200, f"ipd {good!r} was REFUSED: {resp.text[:200]}"
+
+    def test_a_legacy_junk_acuity_does_not_block_an_unrelated_edit(self, monkeypatch):
+        """The gate refuses to WRITE junk; it must not make an already-stored
+        record un-editable. A clinician correcting a sphere on a record whose
+        stored acuity is legacy junk still gets their edit."""
+        doc = _seed_doc()
+        doc["right_eye"]["acuity"] = "20/20"
+        client = _client(["OPTOMETRIST"], _FakeRxRepo(doc), monkeypatch)
+        resp = client.put("/prescriptions/rx-1", json={"right_eye": {"sph": "-2.00"}})
+        assert resp.status_code == 200, resp.text[:200]
+
+
+class TestAcuityAndIpdOnTheCREATEDoor:
+    """The create door validates at parse time (EyeData / PrescriptionCreate),
+    so its refusal is Pydantic's 422."""
+
+    def test_the_models_refuse_junk(self):
+        import pytest
+        from api.routers.prescriptions import EyeData, CLEyeData, PrescriptionCreate
+
+        for bad in ("banana", "20/9999", "6/7"):
+            with pytest.raises(Exception):
+                EyeData(acuity=bad)
+            with pytest.raises(Exception):
+                CLEyeData(acuity=bad)
+        for bad in ("9999", "0", "6.25"):
+            with pytest.raises(Exception):
+                PrescriptionCreate(patient_id="p", customer_id="c", ipd=bad)
+
+    def test_the_models_accept_real_values(self):
+        from api.routers.prescriptions import EyeData, CLEyeData, PrescriptionCreate
+
+        assert EyeData(acuity="6/9").acuity == "6/9"
+        assert CLEyeData(acuity="6/6").acuity == "6/6"
+        assert PrescriptionCreate(patient_id="p", customer_id="c", ipd="62.5").ipd == "62.5"
+        # Absent stays absent -- these are optional clinical fields.
+        assert PrescriptionCreate(patient_id="p", customer_id="c").ipd is None

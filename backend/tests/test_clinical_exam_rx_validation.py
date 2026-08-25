@@ -220,3 +220,83 @@ def test_a_signed_string_round_trips_through_validation():
 
     assert _validate_rx_value("+4.00", "sph") == "+4.00"
     assert _validate_rx_value("-4.00", "sph") == "-4.00"
+# ---------------------------------------------------------------------------
+# THE BINOCULAR IPD. Both write doors, because both mint/rewrite the Rx.
+# ---------------------------------------------------------------------------
+# The IPD is the number that centres BOTH lenses in the frame. The exam form
+# gates it (40-80mm) but the server never looked at it, so an IPD of 9999 --
+# from a device import, a CSV, an integration or a direct call -- reached a
+# billable prescription and the lab. The per-eye MONOCULAR PD was already
+# gated; this is its binocular twin.
+
+
+def _put_exam(body: dict):
+    return _client().put("/clinical/tests/test-1/exam", json=body)
+
+
+DOORS = {"complete": _post, "exam": _put_exam}
+
+BAD_IPD = ["9999", "0", "6.25", "banana"]
+
+
+@pytest.mark.parametrize("door", sorted(DOORS))
+@pytest.mark.parametrize("bad", BAD_IPD)
+def test_an_impossible_binocular_ipd_is_rejected(door: str, bad: str):
+    body = dict(CLEAN_FINAL)
+    body["ipd"] = bad
+    resp = DOORS[door](body)
+    assert resp.status_code == 422, (
+        f"{door}: an IPD of {bad!r} was ACCEPTED -- {resp.status_code} {resp.text[:300]}"
+    )
+    assert "pd" in resp.text.lower(), f"{door}: the refusal never names the PD -- {resp.text[:300]}"
+
+
+@pytest.mark.parametrize("door", sorted(DOORS))
+@pytest.mark.parametrize("good", ["62.5", "40", "80", ""])
+def test_an_ordinary_binocular_ipd_is_accepted(door: str, good: str):
+    """POSITIVE CONTROL, including the boundaries and 'not recorded'."""
+    body = dict(CLEAN_FINAL)
+    body["ipd"] = good
+    _assert_accepted(DOORS[door](body), f"{door} ipd={good!r}")
+
+
+@pytest.mark.parametrize("door", sorted(DOORS))
+def test_an_absent_ipd_is_accepted(door: str):
+    _assert_accepted(DOORS[door](dict(CLEAN_FINAL)), f"{door} no ipd")
+
+
+# ---------------------------------------------------------------------------
+# VISUAL ACUITY. Free text on the server; a Snellen fraction in the clinic.
+# ---------------------------------------------------------------------------
+# `va` (exam) and `acuity` (prescription) were unvalidated anywhere in backend/:
+# "banana" and "20/9999" both saved with a 200 into the exam block and the
+# mirrored prescription. The rule existed on the client only (rxLimits VA_SET).
+
+BAD_VA = ["banana", "20/9999", "6/7"]
+
+
+@pytest.mark.parametrize("surface", ALL_SURFACES)
+@pytest.mark.parametrize("bad", BAD_VA)
+def test_junk_visual_acuity_is_rejected(surface: str, bad: str):
+    resp = _post(_body_with(surface, {"va": bad}))
+    assert resp.status_code == 422, (
+        f"{surface}: a VA of {bad!r} was ACCEPTED -- {resp.status_code} {resp.text[:300]}"
+    )
+
+
+@pytest.mark.parametrize("surface", ALL_SURFACES)
+@pytest.mark.parametrize("good", ["6/6", "6/9", "6/60", ""])
+def test_a_real_snellen_acuity_is_accepted(surface: str, good: str):
+    _assert_accepted(_post(_body_with(surface, {"va": good})), f"{surface} va={good!r}")
+
+
+def test_junk_acuity_is_rejected_on_the_prescriptions_endpoint_too():
+    """The mirrored prescription has its own door (`acuity`), and it is the one
+    that prints on the patient's card."""
+    from api.services.rx_validation import _validate_visual_acuity
+
+    for bad in BAD_VA:
+        with pytest.raises(ValueError):
+            _validate_visual_acuity(bad, "right eye acuity")
+    for good in ("6/6", "6/18", "", None):
+        assert _validate_visual_acuity(good, "right eye acuity") == good

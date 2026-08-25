@@ -50,7 +50,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from ..services.rx_validation import _STEP_FIELDS, _limits_for
+from ..services.rx_validation import _STEP_FIELDS, _limits_for, _validate_axis
 from .auth import get_current_user, require_roles
 
 logger = logging.getLogger(__name__)
@@ -113,24 +113,28 @@ def _parse_rx_float(raw: str, field: str) -> Optional[float]:
 
 
 def _parse_axis(raw: str) -> Optional[int]:
-    """Parse and range-check an AXIS value (1-180 whole degrees)."""
+    """Parse and range-check an AXIS value (1-180 WHOLE degrees).
+
+    An axis is a MERIDIAN, not a magnitude. `int(float(stripped))` TRUNCATED a
+    fractional reading -- 90.5 became 90, a different meridian, with nothing
+    said -- while the error text claimed the value "is not a whole number".
+    A device that exports a fractional axis is telling us something is wrong;
+    the import must say so rather than round it into plausibility.
+
+    The 1-180 range and the whole-degree rule come from the ONE canonical
+    validator (rx_validation._validate_axis), not from a copy here. Only the
+    "0 / - / N/A means no axis recorded" device convention is local.
+    """
     if raw is None:
         return None
-    stripped = raw.strip()
+    stripped = str(raw).strip()
     if stripped in ("", "0", "-", "N/A", "n/a"):
         return None
     try:
-        value = int(float(stripped))
-    except ValueError:
-        raise ValueError(
-            f"AXIS value '{raw}' is not a whole number. "
-            "Check the device CSV export."
-        )
-    if not (1 <= value <= 180):
-        raise ValueError(
-            f"AXIS value {value} is outside the valid range (1-180 degrees)."
-        )
-    return value
+        _validate_axis(stripped)
+    except ValueError as exc:
+        raise ValueError(f"AXIS: {exc} Check the device CSV export.")
+    return int(float(stripped))
 
 
 # ---------------------------------------------------------------------------
