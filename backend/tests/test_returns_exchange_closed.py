@@ -19,7 +19,8 @@ defect was born:
   3. the refusal is a plain-English instruction a cashier can act on - it names
      the return AND the fresh sale - not a code and not a bare "not allowed";
   4. RETURN and CREDIT_NOTE still complete, and an EXCHANGE recorded BEFORE the
-     change still reads and still lists (read-only history survives).
+     change still reads, still lists, is still filterable and can still have its
+     restock retried (nothing in flight breaks).
 
 A test that only asserts "400" would pass against a door slammed with no
 instructions, which the owner explicitly ruled out.
@@ -41,6 +42,7 @@ from tests.test_returns_gst_refund import (  # noqa: E402
     _FakeOrderRepo,
     _FakeCustomerRepo,
     _FakeColl,
+    _FakeResult,
     _qa_order,
     _qa_payload,
     _staff_token,
@@ -75,13 +77,41 @@ class _ListableColl(_FakeColl):
         def __iter__(self):
             return iter(self._docs)
 
+    @staticmethod
+    def _match(doc, query):
+        for key, want in (query or {}).items():
+            got = doc.get(key)
+            if isinstance(want, dict) and "$ne" in want:
+                if got == want["$ne"]:
+                    return False
+                continue
+            if got != want:
+                return False
+        return True
+
     def find(self, query=None, projection=None):
-        q = query or {}
         return self._Cursor(
             {k: v for k, v in d.items() if k != "_id"}
             for d in self.docs
-            if all(d.get(k) == v for k, v in q.items())
+            if self._match(d, query or {})
         )
+
+    def find_one_and_update(self, query, update, return_document=None, **_kw):
+        """The atomic restock claim (``$ne``-guarded) the retry endpoint uses."""
+        for doc in self.docs:
+            if self._match(doc, query):
+                doc.update((update or {}).get("$set") or {})
+                out = dict(doc)
+                out.pop("_id", None)
+                return out
+        return None
+
+    def update_one(self, query, update, **_kw):
+        for doc in self.docs:
+            if self._match(doc, query):
+                doc.update((update or {}).get("$set") or {})
+                return _FakeResult(1)
+        return _FakeResult(0)
 
 
 class _FakeProductRepo:
@@ -299,3 +329,34 @@ def test_history_can_still_be_filtered_to_exchanges(monkeypatch):
     assert r.status_code == 200, r.text
     ids = [d["return_id"] for d in r.json()["returns"]]
     assert ids == ["RET-OLD-EXCH"], r.text
+
+
+def test_an_old_exchange_can_still_have_its_restock_retried(monkeypatch):
+    """Ruling 3 again: the reversal path on an exchange already recorded must
+    not be swept up by the closed door. The retry endpoint takes no return_type,
+    so this pins that no gate was bolted on at the router level either."""
+    client, returns_coll = _ctx(monkeypatch)
+    returns_coll.insert_one(
+        {
+            "return_id": "RET-OLD-EXCH",
+            "return_type": "EXCHANGE",
+            "store_id": "BV-PUN-01",
+            "order_id": "ORD-BOK01",
+            "restock_applied": False,
+            "items": [
+                {
+                    "product_id": "PRD-1",
+                    "sku": "RB-1",
+                    "product_name": "Ray-Ban Sunglass",
+                    "return_qty": 1,
+                    "unit_price": 1404.2,
+                    "condition": "GOOD",
+                    "restock": True,
+                }
+            ],
+            "created_at": "2026-08-01T10:00:00",
+        }
+    )
+    r = client.post("/api/v1/returns/RET-OLD-EXCH/restock", headers=_HDR)
+    assert r.status_code == 200, r.text
+    assert r.json()["return_id"] == "RET-OLD-EXCH"
