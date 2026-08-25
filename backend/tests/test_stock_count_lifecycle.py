@@ -1276,3 +1276,72 @@ def test_finishing_a_part_audited_count_does_not_double_the_audit_trail(
     )
     assert {r["product_id"] for r in rows} == set(pids)
     assert sum(r["units_voided"] for r in rows) == 4
+
+
+# ============================================================================
+# 11. AN OVERRIDE MAY NEVER WRITE OFF MORE THAN THE COUNT FOUND
+# ============================================================================
+# The write-off accepts per-product overrides. Nothing bounded them by what
+# was counted, so an override of 0 on a count that found NOTHING missing voided
+# the whole shelf -- with no record of who set the number.
+
+
+def test_an_override_cannot_write_off_more_than_the_count_found(
+    admin_client, mongo_db
+):
+    pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=5)
+
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile",
+        json={"overrides": [{"product_id": pid, "accepted_quantity": 0}]},
+    )
+
+    assert r.status_code == 400, (
+        "an override below the counted quantity destroys stock the count "
+        f"never said was missing; got {r.status_code} {r.text}"
+    )
+    assert (
+        mongo_db["stock_units"].count_documents(
+            {"product_id": pid, "status": "AVAILABLE"}
+        )
+        == 5
+    ), "the whole shelf was voided by a number nobody counted"
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
+    assert (
+        mongo_db["stock_counts"].find_one({"count_id": count_id})["status"]
+        == "completed"
+    ), "a refused override must not park the count in reconciling"
+
+
+def test_an_override_that_accepts_more_than_was_counted_is_stamped_on_the_record(
+    admin_client, mongo_db
+):
+    """Overriding UPWARDS is the legitimate case (a recount found more), it
+    writes off LESS, and the record has to say a human changed the number."""
+    pid, count_id, _bc = _counted_short(
+        admin_client, mongo_db, on_hand=5, counted=2, cost=1000.0
+    )
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile",
+        json={"overrides": [{"product_id": pid, "accepted_quantity": 4}]},
+    ).json()
+
+    assert body["units_voided"] == 1, "3 were counted short, 1 is accepted as missing"
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert row["accepted_quantity"] == 4
+    assert row["counted_quantity"] == 2
+    assert row["override_applied"] is True
+    assert row["overridden_by"] == "u-count", "who changed the number"
+
+
+def test_a_write_off_with_no_override_is_not_stamped_as_overridden(
+    admin_client, mongo_db
+):
+    """The discriminator: the stamp must mean something."""
+    _pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=3)
+    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert row["override_applied"] is False
+    assert row.get("overridden_by") is None

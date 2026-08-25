@@ -2869,6 +2869,46 @@ async def reconcile_stock_count(
                 detail="No variance data found — complete the count first",
             )
 
+        # Build the override map BEFORE the claim, so a refused override
+        # leaves the count exactly where it was instead of parking it in
+        # "reconciling" with no way back.
+        #
+        # BOUND: an override may never accept LESS than was counted. Nothing
+        # bounded these, so accepted_quantity 0 on a count that found nothing
+        # missing voided the entire shelf. Accepting MORE than was counted is
+        # the legitimate direction (a recount found more) and writes off less.
+        counted_by_product = {
+            v.get("product_id"): int(v.get("physical_quantity", 0) or 0)
+            for v in variances
+        }
+        override_map: Dict[str, int] = {}
+        if request and request.overrides:
+            for ov in request.overrides:
+                pid = ov.get("product_id") or ""
+                qty = ov.get("accepted_quantity")
+                if not pid or qty is None:
+                    continue
+                accepted = max(0, int(qty))
+                if pid not in counted_by_product:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Cannot accept a quantity for a product this count "
+                            f"never recorded ({pid})"
+                        ),
+                    )
+                if accepted < counted_by_product[pid]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "An accepted quantity may not be lower than what was "
+                            f"counted ({accepted} accepted vs {counted_by_product[pid]} "
+                            "counted). That would write off stock the count never "
+                            "said was missing -- recount the shelf instead."
+                        ),
+                    )
+                override_map[pid] = accepted
+
         # CLAIM the count before touching any stock. The status read above is a
         # check-then-act: two clicks of the button (or two managers) both saw
         # "completed" and both wrote off the same shortfall, destroying twice
@@ -2882,15 +2922,6 @@ async def reconcile_stock_count(
                 status_code=409,
                 detail="This count is already being written off",
             )
-
-        # Build override map if supplied
-        override_map: Dict[str, int] = {}
-        if request and request.overrides:
-            for ov in request.overrides:
-                pid = ov.get("product_id") or ""
-                qty = ov.get("accepted_quantity")
-                if pid and qty is not None:
-                    override_map[pid] = max(0, int(qty))
 
         now = datetime.utcnow()
         store_id = count_doc.get("store_id", "")
@@ -3025,7 +3056,18 @@ async def reconcile_stock_count(
                         "unit_cost": round(unit_cost, 2),
                         "shrinkage_value": shrinkage_value,
                         "system_quantity": system_qty,
+                        "counted_quantity": counted_qty,
                         "accepted_quantity": accepted_qty,
+                        # Whether a human moved the number away from what was
+                        # counted, and who. An unstamped override is a loss
+                        # nobody owns.
+                        "override_applied": pid in override_map
+                        and accepted_qty != counted_qty,
+                        "overridden_by": (
+                            current_user.get("user_id", "")
+                            if (pid in override_map and accepted_qty != counted_qty)
+                            else None
+                        ),
                         "recorded_at": now.isoformat(),
                         "recorded_by": current_user.get("user_id", ""),
                         "notes": request.notes if request else None,
