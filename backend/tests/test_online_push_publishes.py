@@ -452,6 +452,60 @@ def test_a_live_product_missing_its_photo_gets_one_on_the_next_press(db, shopify
 
 
 # ===========================================================================
+# C. A PRESS THAT DID NOT ACHIEVE VISIBILITY STAYS QUEUED
+# ===========================================================================
+# The publish can be WITHHELD after the product write succeeded (unpriced,
+# the photograph did not attach, the publication could not be resolved). The
+# product write-back clears the dirty flag, so without this the row would be
+# on Shopify, invisible, and OUT of the queue -- pending 0 and an empty brand
+# page, the exact lie this whole change exists to end.
+
+
+def _withheld(db, shopify, pid="P1"):
+    """A press that creates the product but cannot publish it: no price."""
+    doc = _product(pid=pid)
+    doc.pop("mrp", None)
+    doc.pop("offer_price", None)
+    _seed(db, doc)
+    return _run(shopify_push.push_product(db, doc, []))
+
+
+def test_a_press_whose_publish_was_withheld_leaves_the_row_queued(db, shopify):
+    res = _withheld(db, shopify)
+
+    assert (res.publication or {}).get("published") is not True
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["locally_modified"] is True, (
+        "the product is on Shopify, invisible, and no longer in the queue"
+    )
+    assert push_router._product_counts(db)["pending"] == 1
+
+
+def test_the_withheld_row_keeps_its_shopify_id_so_a_retry_never_duplicates(db, shopify):
+    """It stays queued so a re-press retries it -- and the retry must land on
+    the SAME Shopify product, not mint a second one."""
+    res = _withheld(db, shopify)
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_product_id"] == shopify.product_id
+    assert res.shopify_id == shopify.product_id
+
+
+def test_a_press_that_DID_publish_still_drains_the_queue(db, shopify):
+    """CONTROL: the requeue must not fire on the happy path, or the sweep would
+    push the same product forever against a LIVE storefront."""
+    _seed(db, _product())
+
+    _run(shopify_push.push_product(db, _load_doc(db, "P1"), []))
+
+    assert push_router._product_counts(db)["pending"] == 0
+
+
+def _load_doc(db, pid):
+    return copy.deepcopy(db["catalog_products"].find_one({"id": pid}))
+
+
+# ===========================================================================
 # D. THE BATCH CAP -- one wrong press is bounded
 # ===========================================================================
 

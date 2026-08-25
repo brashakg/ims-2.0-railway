@@ -140,6 +140,11 @@ def _force_live(monkeypatch, responses):
             }
         },
     )
+    # The press PUBLISHES now, and a press that could not publish leaves the
+    # row queued on purpose (_requeue_unpublished). Pin the Online Store
+    # publication so these fixtures exercise a press that actually went live;
+    # the withholding cases pin their own conditions.
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _RouterSpy(responses)
     monkeypatch.setattr(shopify_push, "_graphql", spy)
     return spy

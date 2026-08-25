@@ -81,6 +81,10 @@ def _force_live(monkeypatch, graphql_response):
         lambda db, storefront_id="BV": {"shop_url": "test.myshopify.com",
                     "access_token": "shpat_test", "source": "vault"},
     )
+    # The press PUBLISHES now, and a press that could not publish leaves the
+    # row queued on purpose (_requeue_unpublished). Pin the Online Store
+    # publication so these fixtures exercise a press that actually went live.
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _SpyGraphQL(graphql_response)
     monkeypatch.setattr(shopify_push, "_graphql", spy)
     return spy
@@ -264,11 +268,17 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     assert "imsProductCreate(" in spy.calls[0]["query"]
     assert "productCreateMedia" in spy.calls[1]["query"]
 
-    # Idempotency write-back: the gid is now on the doc + dirty cleared.
+    # Idempotency write-back: the gid is now on the doc.
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_product_id"] == "gid://shopify/Product/111"
-    assert saved["ecom"]["locally_modified"] is False
     assert "last_pushed_at" in saved["ecom"]
+    # ...and the row is STILL QUEUED, because this fixture carries no price:
+    # publish is withheld for an unpriced product (a 0.00 listing is worse
+    # than no listing), and a press that reached Shopify without making the
+    # product VISIBLE must not de-queue it -- otherwise the product sits on
+    # Shopify, invisible, with the screen reporting nothing pending.
+    # (The drain-on-success half is test_online_push_dirty_flag.py.)
+    assert saved["ecom"]["locally_modified"] is True
 
 
 def test_push_product_live_repush_updates_not_duplicates(monkeypatch):

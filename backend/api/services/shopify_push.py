@@ -1895,6 +1895,35 @@ def _writeback_product(
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
 
 
+def _requeue_unpublished(db, product_id: str) -> None:
+    """Put a row BACK in the push queue after a press that reached Shopify but
+    did NOT make the product visible (publish withheld: unpriced, the photograph
+    did not attach, the Online Store publication could not be resolved).
+
+    THIS IS NOT THE PING-PONG HAZARD. _writeback_product must never set the flag,
+    because that write is the push's own book-keeping and would re-queue a press
+    that fully succeeded -- forever. This is the opposite case: the press did NOT
+    do what it was pressed for. Clearing the flag anyway would leave the product
+    ON Shopify, INVISIBLE, and OUT of the queue -- `pending: 0` next to an empty
+    brand page, which is the exact lie this whole change exists to end. It
+    re-queues ONLY on the not-published branch, so a successful publish still
+    drains the queue (the control test), and the batch cap bounds how often a
+    stubbornly-unpublishable row can be retried per press.
+
+    Read-merge-write of the whole ecom sub-doc (the _writeback_product idiom).
+    Fail-soft: any error is logged, never raised."""
+    try:
+        coll = db["catalog_products"]
+        doc = coll.find_one({"id": product_id})
+        if doc is None:
+            return
+        ecom = dict(doc.get("ecom") or {})
+        ecom["locally_modified"] = True
+        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
+
+
 def _writeback_variant(
     db,
     variant: Dict[str, Any],
@@ -2244,6 +2273,11 @@ async def push_product(
                     "published": False,
                     "error": "publish withheld: variant unpriced or seeding failed",
                 }
+        # The press reached Shopify but the product is NOT visible. Leave it in
+        # the queue so pressing again retries it once the price / photograph is
+        # fixed -- see _requeue_unpublished for why this is not ping-pong.
+        if pub_summary is not None and not pub_summary.get("published") and pid:
+            _requeue_unpublished(db, pid)
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.

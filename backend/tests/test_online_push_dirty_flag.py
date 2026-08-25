@@ -174,6 +174,11 @@ def _force_live(monkeypatch, graphql_response):
             "source": "vault",
         },
     )
+    # The press PUBLISHES now, and a press that could not publish leaves the
+    # row queued on purpose (_requeue_unpublished). Pin the Online Store
+    # publication so these fixtures exercise a press that actually went live;
+    # the withholding cases pin their own conditions.
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     monkeypatch.setattr(shopify_push, "_graphql", _fake_graphql)
     return calls
 
@@ -270,13 +275,23 @@ def _seed_pushed(db, product_id="P1"):
             "sku": "SKU-1",
             "title": "Ray-Ban RB2140",
             "description": "old copy",
-            # A product already live on Shopify necessarily has a photograph --
-            # the publish rule ("no photo, no publish") refuses one without.
+            # A product already live on Shopify necessarily has a photograph
+            # and a price: the publish rule ("no photo, no publish") refuses
+            # one without a photo, and an unpriced product is withheld from
+            # publishing -- and a press that could not publish deliberately
+            # leaves the row QUEUED, which would mask the flag lifecycle
+            # this file is about.
             "images": ["https://cdn.example.com/rb2140.jpg"],
+            "mrp": 5000.0,
+            "offer_price": 4000.0,
+
             "inventory": {"locations": {"BV-01": 3}, "total_quantity": 3},
             "ecom": {
                 "status": "PUBLISHED",
                 "shopify_product_id": "gid://shopify/Product/111",
+                # already seeded by an earlier successful push, so this press
+                # neither re-seeds nor is withheld for an unpriced variant.
+                "shopify_variant_id": "gid://shopify/ProductVariant/222",
                 "locally_modified": False,
             },
         }
@@ -345,7 +360,16 @@ def test_successful_push_clears_the_flag_and_pending_returns_to_zero(db, monkeyp
                 "productUpdate": {
                     "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
                     "userErrors": [],
-                }
+                },
+                # One press now also attaches the photograph and publishes, and
+                # publish is WITHHELD unless the photo provably landed -- a
+                # withheld press deliberately leaves the row QUEUED, so this
+                # fixture has to answer the media call too or the flag
+                # lifecycle under test never happens.
+                "productCreateMedia": {
+                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "mediaUserErrors": [],
+                },
             }
         },
     )
@@ -377,7 +401,16 @@ def test_shopify_writeback_never_requeues_the_row(db, monkeypatch):
                 "productUpdate": {
                     "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
                     "userErrors": [],
-                }
+                },
+                # One press now also attaches the photograph and publishes, and
+                # publish is WITHHELD unless the photo provably landed -- a
+                # withheld press deliberately leaves the row QUEUED, so this
+                # fixture has to answer the media call too or the flag
+                # lifecycle under test never happens.
+                "productCreateMedia": {
+                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "mediaUserErrors": [],
+                },
             }
         },
     )
