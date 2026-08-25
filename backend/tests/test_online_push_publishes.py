@@ -840,3 +840,48 @@ def test_an_explicit_press_is_what_puts_a_taken_down_product_back(db, shopify, m
     saved = db["catalog_products"].find_one({"id": "P1"})["ecom"]
     assert saved["status"] == "PUBLISHED"
     assert "taken_down_at" not in saved, "the take-down marker outlived the press"
+
+
+def test_a_photograph_shopify_could_not_fetch_is_not_a_photograph(db, shopify):
+    """SHOULD-FIX 5. Shopify mints the MediaImage id BEFORE it fetches the bytes
+    and marks the node FAILED when the url turns out to be unfetchable. Counting
+    the id as a photograph publishes exactly the empty grey box the rule
+    exists to prevent."""
+    doc = _seed(db, _product())
+    real = shopify.__call__
+
+    async def _media_never_fetched(dbx, query, variables):
+        if "imsProductCreateMedia" in query:
+            shopify.calls.append({"op": "imsProductCreateMedia", "variables": variables})
+            return {
+                "data": {
+                    "productCreateMedia": {
+                        "media": [
+                            {
+                                "id": "gid://shopify/MediaImage/77",
+                                "status": "FAILED",
+                                "mediaErrors": [
+                                    {
+                                        "code": "EXTERNAL_VIDEO_NOT_FOUND",
+                                        "details": "image could not be downloaded",
+                                        "message": "Media could not be created",
+                                    }
+                                ],
+                            }
+                        ],
+                        "mediaUserErrors": [],
+                    }
+                }
+            }
+        return await real(dbx, query, variables)
+
+    shopify_push._graphql = _media_never_fetched
+    try:
+        res = _run(shopify_push.push_product(db, doc, []))
+    finally:
+        shopify_push._graphql = shopify
+
+    assert (res.photos or {}).get("attached") == 0
+    assert res.ok is False and res.reason == "publish_withheld"
+    assert shopify.calls_of("imsPublishablePublish") == []
+    assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["locally_modified"] is True

@@ -623,7 +623,7 @@ mutation imsMenuUpdate($id: ID!, $title: String!, $handle: String!, $items: [Men
 _PRODUCT_CREATE_MEDIA = """
 mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
   productCreateMedia(productId: $productId, media: $media) {
-    media { ... on MediaImage { id } }
+    media { ... on MediaImage { id status mediaErrors { code details message } } }
     mediaUserErrors { field message }
   }
 }
@@ -1817,7 +1817,37 @@ async def _attach_product_photos(
     if err:
         return {"attached": 0, "error": err}
     nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
-    return {"attached": len([n for n in nodes if (n or {}).get("id")])}
+    # AN ID IS NOT A PHOTOGRAPH. Shopify mints the MediaImage id BEFORE it
+    # fetches the bytes off the url, so counting ids would call a 404 image a
+    # photograph and publish the empty grey box the rule exists to prevent.
+    # A node Shopify has already marked FAILED is not a photo.
+    #
+    # ponytail: this only catches the failure Shopify reports in THIS response.
+    # The fetch is asynchronous, so a node that is still PROCESSING here can go
+    # FAILED minutes later and nothing re-reads it -- the residue the
+    # online_sync_health parity/uploads audit is for. Upgrade path if it bites:
+    # re-read `media(first:n){status}` on the next press and take the product
+    # down rather than leave a grey box up.
+    ok_nodes: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for n in nodes:
+        n = n or {}
+        if not n.get("id"):
+            continue
+        (failed if str(n.get("status") or "").upper() == "FAILED" else ok_nodes).append(n)
+    if failed and not ok_nodes:
+        detail = "; ".join(
+            str(e.get("details") or e.get("message") or e.get("code") or "")
+            for n in failed
+            for e in (n.get("mediaErrors") or [])
+            if isinstance(e, dict)
+        )
+        return {
+            "attached": 0,
+            "error": "Shopify could not fetch the photograph"
+            + (": %s" % detail if detail else ""),
+        }
+    return {"attached": len(ok_nodes)}
 
 
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
