@@ -338,7 +338,7 @@ class TestAcuityAndIpdOnTheEditDoor:
             assert resp.status_code == 200, f"acuity {good!r} was REFUSED: {resp.text[:200]}"
 
     def test_an_impossible_ipd_is_refused(self, monkeypatch):
-        for bad in ("9999", "0", "6.25"):
+        for bad in ("9999", "6.25", "banana"):
             resp = self._put(monkeypatch, {"ipd": bad})
             assert resp.status_code == 400, f"ipd {bad!r} was ACCEPTED: {resp.text[:200]}"
 
@@ -346,6 +346,17 @@ class TestAcuityAndIpdOnTheEditDoor:
         for good in ("62.5", "40", "80", ""):
             resp = self._put(monkeypatch, {"ipd": good})
             assert resp.status_code == 200, f"ipd {good!r} was REFUSED: {resp.text[:200]}"
+
+    def test_a_legacy_zero_ipd_does_not_block_an_edit(self, monkeypatch):
+        """DELIBERATE, and the one place it differs from the create/exam doors.
+
+        The Edit form loads the stored IPD into its box and sends it back
+        unchanged, so a legacy "0" on an old record is indistinguishable from a
+        typed one. Refusing it would stop a clinician correcting a SPHERE on
+        that record. A 0mm IPD is still refused where a NEW value is being
+        recorded (create, and the exam form's own gate)."""
+        resp = self._put(monkeypatch, {"ipd": "0", "right_eye": {"sph": "-2.00"}})
+        assert resp.status_code == 200, resp.text[:200]
 
     def test_a_legacy_junk_acuity_does_not_block_an_unrelated_edit(self, monkeypatch):
         """The gate refuses to WRITE junk; it must not make an already-stored

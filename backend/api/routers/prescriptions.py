@@ -1473,7 +1473,14 @@ async def update_prescription(
             if isinstance(sent, dict):
                 _validate_visual_acuity(sent.get("acuity"), f"{eye_key} acuity")
         if "ipd" in body:
-            _validate_measurement(body.get("ipd"), "pd", zero_is_blank=False)
+            # zero_is_blank left at its default HERE, unlike the create and exam
+            # doors. The clinic Edit form loads the stored IPD into the box and
+            # sends it straight back (`ipd: rxData.ipd || undefined`), so a
+            # legacy "0" on an old record arrives looking exactly like a typed
+            # one -- and refusing it would stop a clinician correcting a SPHERE
+            # on that record. 9999 and 6.25 are still refused; a stored 0 is
+            # read as "never measured", which is what it means.
+            _validate_measurement(body.get("ipd"), "pd")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
