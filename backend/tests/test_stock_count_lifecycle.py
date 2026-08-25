@@ -1000,3 +1000,49 @@ def test_a_style_with_nothing_left_on_the_shelf_can_be_counted_as_zero(
         )
         == 0
     ), "the two frames that walked are off the books"
+
+
+# ============================================================================
+# 9. WRITING OFF A COUNT MUST NOT ERASE IT FROM THE ACCOUNTABILITY REPORT
+# ============================================================================
+# /inventory/accountability/shrinkage queried status == "completed" only, and
+# the write-off flips the count to "reconciled" -- so the one report that
+# names who was responsible for a shelf lost the count the moment the loss was
+# confirmed. Nothing ever reached "reconciled" before this branch, so nobody
+# had seen it happen.
+
+
+def test_a_written_off_count_still_names_who_was_responsible(admin_client, mongo_db):
+    mongo_db["stock_accountability"].delete_many({"store_id": STORE})
+    mongo_db["stock_accountability"].insert_one(
+        {
+            "store_id": STORE,
+            "category": "ALL",
+            "staff_id": "u-ravi",
+            "staff_name": "Ravi",
+        }
+    )
+    _pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=3)
+
+    before = admin_client.get("/inventory/accountability/shrinkage").json()["rows"]
+    audit_numbers = {r["audit_number"] for r in before}
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["audit_number"] in audit_numbers
+    assert [r for r in before if r["audit_number"] == doc["audit_number"]][0][
+        "custodian_name"
+    ] == "Ravi"
+
+    assert (
+        admin_client.post(
+            f"/inventory/stock-count/{count_id}/reconcile", json={}
+        ).status_code
+        == 200
+    )
+
+    after = admin_client.get("/inventory/accountability/shrinkage").json()["rows"]
+    row = [r for r in after if r["audit_number"] == doc["audit_number"]]
+    assert row, (
+        "writing off the loss erased the count from the only report that says "
+        "who was responsible for that shelf"
+    )
+    assert row[0]["custodian_name"] == "Ravi"

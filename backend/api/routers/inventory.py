@@ -3337,7 +3337,14 @@ async def accountability_shrinkage(
         return {"rows": []}
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    q: dict = {"status": "completed", "completed_at": {"$gte": cutoff}}
+    # A count that has been WRITTEN OFF is not off the hook: it is the one
+    # whose loss was confirmed. Querying "completed" alone dropped every count
+    # from this report the moment an admin wrote it off -- the only report
+    # that names who was responsible for the shelf.
+    q: dict = {
+        "status": {"$in": ["completed", "reconciled"]},
+        "completed_at": {"$gte": cutoff},
+    }
     if active_store:
         q["store_id"] = active_store
     try:
