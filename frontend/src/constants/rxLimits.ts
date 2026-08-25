@@ -66,16 +66,39 @@ export const RX_LIMITS: Record<RxLimitField, RxLimit> = {
   diameter: { min: 13.0, max: 15.0, step: 0.1, label: 'Diameter' },
 };
 
-/** Allowed visual-acuity (Snellen, 6m) values. Empty string = not recorded. */
-export const VA_SET = ['6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
+/**
+ * THE allowed visual-acuity values: the Snellen fractions at 6 metres PLUS the
+ * four standard low-vision notations. Empty string = not recorded.
+ *
+ * Counting Fingers / Hand Movement / Perception of Light / No Perception of
+ * Light are everyday findings in a dense cataract, an advanced glaucoma or a
+ * post-op eye. A gate that offers only Snellen does not make the finding go
+ * away -- it makes the optometrist pick the nearest fraction, and a CF eye
+ * lands in the record as 6/60. So this set is the SERVER's set, exactly:
+ * backend/api/services/rx_validation.py `_VA_SET`, pinned by
+ * backend/tests/test_va_set_parity.py so the two can never drift again.
+ *
+ * Every VA dropdown in the app reads VA_OPTIONS below. Do not start a sixth
+ * copy of this list.
+ */
+export const VA_SET = [
+  '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60',
+  'CF', 'HM', 'PL', 'NPL',
+] as const;
 export type VAValue = (typeof VA_SET)[number];
 
-/** True if `v` is an allowed VA string (blank passes as "not recorded"). */
+/** VA_SET with a leading blank, for a `<select>` where "not recorded" is a
+ *  legitimate choice. THE list every VA dropdown renders. */
+export const VA_OPTIONS = ['', ...VA_SET] as const;
+
+/** True if `v` is an allowed VA string (blank passes as "not recorded").
+ *  Case-insensitive on the letter notations, matching the server, so a typed
+ *  `cf` is not refused here and accepted there. */
 export function isValidVA(v: string | null | undefined): boolean {
   if (v === null || v === undefined) return true;
-  const s = String(v).trim();
+  const s = String(v).trim().toUpperCase();
   if (s === '') return true;
-  return (VA_SET as readonly string[]).includes(s);
+  return (VA_SET as readonly string[]).some((allowed) => allowed.toUpperCase() === s);
 }
 
 /**

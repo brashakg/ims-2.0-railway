@@ -30,6 +30,8 @@ vi.mock('../../print/storeIdentity', () => ({
 
 import { MemoryRouter } from 'react-router-dom';
 import { EyeTestForm } from '../EyeTestForm';
+import { eyeTestWriteBody } from '../eyeTestPayload';
+import type { EyeTestData } from '../eyeTestTypes';
 
 const PATIENT = { id: 'p1', name: 'Asha Kumari', phone: '9000000001', age: 44 };
 
@@ -302,5 +304,89 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
     expect((screen.getByLabelText('Right ADD') as HTMLInputElement).value).toBe('+2.00');
     typeInto('Right PD', '32');
     expect((screen.getByLabelText('Right PD') as HTMLInputElement).value).toBe('32.0');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A LOW-VISION ACUITY MUST BE RECORDABLE.
+// ---------------------------------------------------------------------------
+// Counting Fingers, Hand Movement and Perception of Light are what a dense
+// cataract, an advanced glaucoma or a fresh post-op eye actually reads -- daily
+// findings in six optical stores. The exam form's VA gate arrived on this
+// branch with the SEVEN Snellen fractions while the server was widened to
+// eleven, so the form refused four values its own API accepts. The optometrist
+// cannot make the finding go away; the realistic outcome is a CF eye written
+// down as 6/60, which is a false clinical record produced by the gate itself.
+//
+// These drive the real form and assert on the REAL WIRE BODY -- the exact
+// object ClinicalPage hands to clinicalApi -- not on component state.
+// ---------------------------------------------------------------------------
+describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction', () => {
+  const LOW_VISION = ['CF', 'HM', 'PL', 'NPL'];
+
+  for (const notation of LOW_VISION) {
+    it(`saves ${notation} on the Subjective Rx, verbatim on the wire`, async () => {
+      const onSave = renderForm();
+      openTab(/Subjective Rx/);
+      typeInto('Right VA', notation);
+      save();
+
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      expect(alertText()).toBeNull();
+
+      const body = eyeTestWriteBody(onSave.mock.calls[0][0] as EyeTestData);
+      expect(body.subjectiveRx?.rightEye?.va).toBe(notation);
+    });
+  }
+
+  it('accepts a lower-case cf, exactly as the server does', async () => {
+    const onSave = renderForm();
+    openTab(/Subjective Rx/);
+    typeInto('Right VA', 'cf');
+    save();
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(alertText()).toBeNull();
+  });
+
+  it('records the low-vision finding on the LEFT eye too', async () => {
+    const onSave = renderForm();
+    openTab(/Subjective Rx/);
+    typeInto('Left VA', 'HM');
+    save();
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const body = eyeTestWriteBody(onSave.mock.calls[0][0] as EyeTestData);
+    expect(body.subjectiveRx?.leftEye?.va).toBe('HM');
+  });
+
+  // NEGATIVE CONTROLS. Widening the set must not turn the gate off: junk and a
+  // non-existent Snellen line are still refused, on the client as on the server
+  // (backend/tests/test_clinical_exam_rx_validation.py BAD_VA).
+  for (const junk of ['banana', '6/7', '20/20']) {
+    it(`still REFUSES ${junk}`, async () => {
+      const onSave = renderForm();
+      openTab(/Subjective Rx/);
+      typeInto('Right VA', junk);
+      save();
+
+      await waitFor(() => expect(alertText()).toBeTruthy());
+      expect(alertText()).toMatch(/VA must be one of/i);
+      // The banner names the set the optometrist may choose from. Listing only
+      // the seven fractions is how the form told them CF was not allowed.
+      expect(alertText()).toMatch(/CF, HM, PL, NPL/);
+      expect(onSave).not.toHaveBeenCalled();
+    });
+  }
+
+  it('still accepts the ordinary Snellen values', async () => {
+    const onSave = renderForm();
+    openTab(/Subjective Rx/);
+    typeInto('Right VA', '6/6');
+    typeInto('Left VA', '6/60');
+    save();
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(alertText()).toBeNull();
   });
 });

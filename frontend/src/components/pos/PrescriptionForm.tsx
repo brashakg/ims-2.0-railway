@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
 import { RxPowerInput } from '../clinical/RxPowerInput';
-import { validateEyeDetailed } from '../../constants/rxLimits';
+import { validateEyeDetailed, VA_OPTIONS } from '../../constants/rxLimits';
 import { useToast } from '../../context/ToastContext';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
@@ -11,7 +11,6 @@ const CL_MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY',
 // Spectacle Final-Rx option lists -- kept in sync with the clinical Final-Rx
 // tab (components/clinical/FinalRxTab + eyeTestTypes) so a POS-captured Rx and
 // a clinic-captured Rx offer identical choices.
-const VA_OPTIONS = ['', '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
 const BASE_OPTIONS = ['', 'IN', 'OUT', 'UP', 'DOWN'] as const;
 const LENS_TYPES = ['Single Vision', 'Bifocal', 'Progressive', 'Office Lens', 'Anti-Fatigue'] as const;
 

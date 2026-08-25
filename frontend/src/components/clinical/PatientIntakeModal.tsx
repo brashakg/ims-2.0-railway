@@ -30,11 +30,8 @@ import {
   emptyCustomerFormData,
   type CustomerFormData,
 } from '../../utils/customerPayload';
-import { validateEyePair } from '../../constants/rxLimits';
+import { validateEyePair, VA_OPTIONS } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
-
-// Visual-acuity options — kept in sync with the clinic Final-Rx / POS form.
-const VA_OPTIONS = ['', '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
 
 // Per-eye refraction values (strings while editing; parsed on submit).
 interface EyeRx {

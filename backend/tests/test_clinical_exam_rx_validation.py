@@ -285,8 +285,14 @@ def test_junk_visual_acuity_is_rejected(surface: str, bad: str):
 
 
 @pytest.mark.parametrize("surface", ALL_SURFACES)
-@pytest.mark.parametrize("good", ["6/6", "6/9", "6/60", ""])
+@pytest.mark.parametrize(
+    "good", ["6/6", "6/9", "6/60", "", "CF", "HM", "PL", "NPL"]
+)
 def test_a_real_snellen_acuity_is_accepted(surface: str, good: str):
+    """Snellen AND the four low-vision notations. Counting Fingers / Hand
+    Movement / Perception of Light / No PL are everyday findings in a dense
+    cataract or an advanced glaucoma; a gate that refuses them does not delete
+    the finding, it makes the optometrist record a CF eye as 6/60."""
     _assert_accepted(_post(_body_with(surface, {"va": good})), f"{surface} va={good!r}")
 
 
@@ -300,3 +306,51 @@ def test_junk_acuity_is_rejected_on_the_prescriptions_endpoint_too():
             _validate_visual_acuity(bad, "right eye acuity")
     for good in ("6/6", "6/18", "", None):
         assert _validate_visual_acuity(good, "right eye acuity") == good
+
+
+# ---------------------------------------------------------------------------
+# THE TWO VA LISTS ARE ONE LIST. Asserted as a SET and a COUNT.
+# ---------------------------------------------------------------------------
+# This file's header and rxLimits.ts's header each promise the other is their
+# mirror. They stopped being mirrors the moment the server was widened to the
+# four low-vision notations and the client was not: the exam form then refused
+# CF/HM/PL/NPL that this very endpoint accepts, so the optometrist's only way
+# to save was to pick a Snellen fraction the patient cannot read. A comment
+# cannot hold two files together; this test can.
+
+def _frontend_va_set() -> list:
+    """The VA_SET literal as the TypeScript file actually declares it."""
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "frontend" / "src" / "constants" / "rxLimits.ts"
+    text = src.read_text(encoding="utf-8")
+    m = re.search(r"export const VA_SET = \[(.*?)\] as const;", text, re.S)
+    assert m, f"VA_SET literal not found in {src} -- did it move or change shape?"
+    return re.findall(r"'([^']+)'", m.group(1))
+
+
+def test_the_frontend_and_backend_visual_acuity_sets_are_identical():
+    from api.services.rx_validation import _VA_SET
+
+    frontend = _frontend_va_set()
+    assert set(frontend) == set(_VA_SET), (
+        "the VA lists have drifted -- "
+        f"client-only={sorted(set(frontend) - set(_VA_SET))}, "
+        f"server-only={sorted(set(_VA_SET) - set(frontend))}. "
+        "A value the server accepts but the client refuses cannot be recorded "
+        "at all; a value the client offers but the server refuses is a 422 in "
+        "the optometrist's face."
+    )
+    assert len(frontend) == len(_VA_SET) == 11, (
+        f"expected 11 VA values on each side, got {len(frontend)} client / "
+        f"{len(_VA_SET)} server (duplicates in either list?)"
+    )
+
+
+def test_every_low_vision_notation_survives_the_validator_verbatim():
+    """The four are not merely 'not rejected' -- they are stored as typed."""
+    from api.services.rx_validation import _validate_visual_acuity
+
+    for notation in ("CF", "HM", "PL", "NPL"):
+        assert _validate_visual_acuity(notation, "right eye acuity") == notation
