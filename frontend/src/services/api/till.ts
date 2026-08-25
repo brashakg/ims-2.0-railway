@@ -95,17 +95,23 @@ export interface ZRead {
   history?: Array<{ action: string; at: string; by_name?: string; reason?: string }>;
 }
 
+/** COUNTED | SUGGESTED | NOT_CAPTURED. Omitted = the grid was never touched,
+ *  which the server records as NOT_CAPTURED -- never as an empty drawer. */
+export type CountState = 'COUNTED' | 'SUGGESTED' | 'NOT_CAPTURED';
+
 export interface OpenPayload {
   store_id?: string;
   session_date?: string;
   shift?: string;
   opening_denominations: DenominationLine[];
+  opening_count_state?: CountState;
   opening_float_paisa?: number;
   note?: string;
 }
 
 export interface BlindSubmitPayload {
   blind_denominations: DenominationLine[];
+  closing_count_state?: CountState;
   blind_count_paisa?: number;
   cash_payouts_paisa?: number;
   idempotency_key?: string;

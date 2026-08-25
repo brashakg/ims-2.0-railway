@@ -15,6 +15,15 @@ import {
   AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Globe,
 } from 'lucide-react';
 import clsx from 'clsx';
+import DenominationGrid from '../../components/cash/DenominationGrid';
+import {
+  blankDenoms,
+  denomTotal,
+  setPieces as setRowPieces,
+  hasCount,
+  toCountInput,
+  type DenomRow,
+} from '../../utils/denominations';
 
 interface DaySummary {
   totalSales: number;
@@ -43,6 +52,10 @@ export default function DayEndReport() {
   const [isLoading, setIsLoading] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [closingCash, setClosingCash] = useState('');
+  // The notes and coins behind that figure. Untouched = nobody counted,
+  // which is recorded as exactly that -- never as a drawer holding nothing.
+  const [closeDenoms, setCloseDenoms] = useState<DenomRow[]>(blankDenoms());
+  const [showCount, setShowCount] = useState(false);
   const [closingNotes, setClosingNotes] = useState('');
   const [isClosed, setIsClosed] = useState(false);
   const [closeInfo, setCloseInfo] = useState<DayEndClose | null>(null);
@@ -164,7 +177,25 @@ export default function DayEndReport() {
     return s;
   }, [orders]);
 
-  const cashVariance = closingCash ? Math.round(parseFloat(closingCash) - summary.cashCollected) : null;
+  // WHAT WAS ACTUALLY COUNTED, or null if nobody counted. A typed figure
+  // wins (a manager may know the drawer better than a half-filled grid);
+  // otherwise the notes ARE the count -- that is what is in the drawer.
+  const gridTotal = denomTotal(closeDenoms);
+  const countedCash: number | null =
+    closingCash !== '' && !Number.isNaN(parseFloat(closingCash))
+      ? parseFloat(closingCash)
+      : hasCount(closeDenoms)
+        ? gridTotal
+        : null;
+  // NO COUNT -> NO VARIANCE. A variance against a drawer nobody counted is
+  // a number invented out of a blank field, and it used to read as the
+  // whole day's cash having walked out.
+  const cashVariance =
+    countedCash === null ? null : Math.round(countedCash - summary.cashCollected);
+  const setClosePieces = (i: number, pieces: number) => {
+    setShowCount(true);
+    setCloseDenoms((rows) => setRowPieces(rows, i, pieces));
+  };
 
   const handleCloseDay = async () => {
     if (isClosing) return;
@@ -173,11 +204,14 @@ export default function DayEndReport() {
       const res = await reportsApi.createDayEndClose({
         date: reportDate,
         store_id: storeId || undefined,
-        // closing_cash = physically counted; system_cash = POS-computed cash.
-        // Both default sensibly so the close is recordable even if the count
-        // field is left blank.
-        closing_cash: closingCash ? parseFloat(closingCash) : 0,
+        // closing_cash = physically counted. OMITTED when nobody counted --
+        // it used to be sent as 0, which persisted an emptied drawer and a
+        // variance of minus the day's takings for a cashier who simply did
+        // not type anything. Absence is now recorded as absence.
+        closing_cash: countedCash ?? undefined,
         system_cash: summary.cashCollected,
+        // The notes and coins. Undefined when the grid was never touched.
+        closing_count: toCountInput(closeDenoms, showCount),
         notes: closingNotes || undefined,
       });
       setIsClosed(true);
@@ -312,12 +346,20 @@ export default function DayEndReport() {
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">Physical Cash Count</label>
                 <input type="number" value={closingCash} onChange={e => setClosingCash(e.target.value)}
-                  placeholder="Enter actual cash in drawer"
+                  placeholder={hasCount(closeDenoms) ? fc(gridTotal) : 'Enter actual cash in drawer'}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm print:hidden" />
-                {closingCash && <p className="text-sm font-medium mt-1 print:block hidden">{fc(parseFloat(closingCash))}</p>}
+                {countedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(countedCash)}</p>}
               </div>
               <div>
-                {cashVariance !== null && (
+                {cashVariance === null ? (
+                  <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
+                    <p className="text-xs text-gray-500">Variance</p>
+                    <p className="text-sm font-semibold text-gray-600">Not counted</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Closing without a count records the day as never counted &mdash; not as an empty drawer.
+                    </p>
+                  </div>
+                ) : (
                   <div className={clsx('p-3 rounded-lg', cashVariance === 0 ? 'bg-green-50' : 'bg-red-50')}>
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className={clsx('text-xl font-bold', cashVariance === 0 ? 'text-green-600' : 'text-red-600')}>
@@ -327,6 +369,35 @@ export default function DayEndReport() {
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* WHICH notes and coins. A drawer that balances to the rupee can
+                still hide two mistakes that cancelled out; counting note by
+                note is the only way anyone ever sees them. */}
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setShowCount((v) => !v)}
+                className="flex items-center gap-1.5 text-sm font-medium text-gray-700 print:hidden"
+              >
+                {showCount ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                Count the notes and coins
+                {hasCount(closeDenoms) && (
+                  <span className="text-xs text-gray-500 font-normal">({fc(gridTotal)})</span>
+                )}
+              </button>
+              {showCount && (
+                <div className="mt-3 max-w-md">
+                  <DenominationGrid rows={closeDenoms} onChange={setClosePieces} showHeader />
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+                    <span className="text-sm text-gray-500">Counted by denomination</span>
+                    <span className="text-lg font-semibold text-gray-900 tabular-nums">{fc(gridTotal)}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Optional. Skipping it records the day as not counted note-by-note &mdash; it never records a zero.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
           )}
@@ -397,11 +468,17 @@ export default function DayEndReport() {
                     Closed {new Date(closeInfo.closed_at).toLocaleString('en-IN')}
                   </p>
                   <p className="text-sm mt-1 text-gray-600">
-                    Counted {fc(closeInfo.closing_cash)} vs system {fc(closeInfo.system_cash)}
-                    {closeInfo.variance !== 0 && (
-                      <span className={clsx('font-semibold ml-1', closeInfo.variance > 0 ? 'text-amber-600' : 'text-red-600')}>
-                        ({closeInfo.variance > 0 ? '+' : ''}{fc(closeInfo.variance)})
-                      </span>
+                    {closeInfo.closing_cash == null ? (
+                      <>Cash was not counted. System cash {fc(closeInfo.system_cash ?? 0)}.</>
+                    ) : (
+                      <>
+                        Counted {fc(closeInfo.closing_cash)} vs system {fc(closeInfo.system_cash ?? 0)}
+                        {closeInfo.variance != null && closeInfo.variance !== 0 && (
+                          <span className={clsx('font-semibold ml-1', closeInfo.variance > 0 ? 'text-amber-600' : 'text-red-600')}>
+                            ({closeInfo.variance > 0 ? '+' : ''}{fc(closeInfo.variance)})
+                          </span>
+                        )}
+                      </>
                     )}
                   </p>
                   {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}

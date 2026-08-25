@@ -20,8 +20,6 @@ import {
   Unlock,
   AlertTriangle,
   CheckCircle2,
-  Banknote,
-  Coins,
   EyeOff,
   Globe,
 } from 'lucide-react';
@@ -32,31 +30,17 @@ import {
   tillApi,
   paisaToInr,
   type TillSession,
-  type DenomKind,
   type VarianceStatus,
 } from '../../services/api/till';
 import { returnsApi } from '../../services/api/returns';
-
-const NOTE_FACES = [500, 200, 100, 50, 20, 10];
-const COIN_FACES = [20, 10, 5, 2, 1];
-
-interface DenomRow {
-  face: number;
-  kind: DenomKind;
-  pieces: number;
-}
-
-function blankDenoms(): DenomRow[] {
-  return [
-    ...NOTE_FACES.map((face) => ({ face, kind: 'note' as DenomKind, pieces: 0 })),
-    ...COIN_FACES.map((face) => ({ face, kind: 'coin' as DenomKind, pieces: 0 })),
-  ];
-}
-
-// Sum the grid in PAISA (face is rupees; *100 once at the boundary).
-function denomTotalPaisa(rows: DenomRow[]): number {
-  return rows.reduce((sum, r) => sum + r.face * 100 * (r.pieces || 0), 0);
-}
+import DenomGrid from '../../components/cash/DenominationGrid';
+import {
+  blankDenoms,
+  denomTotalPaisa,
+  setPieces as setRowPieces,
+  hasCount,
+  type DenomRow,
+} from '../../utils/denominations';
 
 function fmtDateTime(iso?: string | null): string {
   if (!iso) return '—';
@@ -75,43 +59,6 @@ function CAN_LOCK(roles: string[]): boolean {
 function varianceTone(status: VarianceStatus): string {
   if (status === 'BALANCED') return 'text-emerald-700';
   return 'text-red-700';
-}
-
-function DenomGrid({
-  rows,
-  onChange,
-  disabled,
-}: {
-  rows: DenomRow[];
-  onChange: (i: number, pieces: number) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
-      {rows.map((r, i) => (
-        <div key={`${r.kind}-${r.face}`} className="flex items-center justify-between px-3 py-1.5 text-sm">
-          <span className="flex items-center gap-2 text-gray-700">
-            {r.kind === 'note' ? <Banknote className="w-4 h-4 text-gray-400" /> : <Coins className="w-4 h-4 text-gray-400" />}
-            <span className="tabular-nums">{`₹${r.face}`}</span>
-            <span className="text-gray-400 text-xs uppercase">{r.kind}</span>
-          </span>
-          <span className="flex items-center gap-3">
-            <input
-              type="number"
-              min={0}
-              value={r.pieces || ''}
-              disabled={disabled}
-              onChange={(e) => onChange(i, Math.max(0, parseInt(e.target.value, 10) || 0))}
-              className="w-20 px-2 py-1 border border-gray-300 rounded text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-bv disabled:bg-gray-50"
-            />
-            <span className="w-24 text-right text-gray-500 tabular-nums">
-              {paisaToInr(r.face * 100 * (r.pieces || 0))}
-            </span>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 export default function BlindEodTallyPage() {
@@ -209,9 +156,9 @@ export default function BlindEodTallyPage() {
   const blindTotalPaisa = denomTotalPaisa(blindDenoms);
 
   const setOpenPieces = (i: number, pieces: number) =>
-    setOpenDenoms((d) => d.map((r, idx) => (idx === i ? { ...r, pieces } : r)));
+    setOpenDenoms((d) => setRowPieces(d, i, pieces));
   const setBlindPieces = (i: number, pieces: number) =>
-    setBlindDenoms((d) => d.map((r, idx) => (idx === i ? { ...r, pieces } : r)));
+    setBlindDenoms((d) => setRowPieces(d, i, pieces));
 
   const onOpen = async () => {
     if (!storeId) {
@@ -226,6 +173,8 @@ export default function BlindEodTallyPage() {
         store_id: storeId,
         shift,
         opening_denominations: openDenoms.filter((r) => r.pieces > 0),
+        // An untouched grid is NOT a float of nothing. Say which it was.
+        opening_count_state: hasCount(openDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         opening_float_paisa: openTotalPaisa,
       });
       toast.success(res?.already_open ? "Today's drawer is already open — joined it" : 'Till opened');
@@ -244,6 +193,7 @@ export default function BlindEodTallyPage() {
     try {
       await tillApi.blindSubmit(activeSession.session_id, {
         blind_denominations: blindDenoms.filter((r) => r.pieces > 0),
+        closing_count_state: hasCount(blindDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         blind_count_paisa: blindTotalPaisa,
         cash_payouts_paisa: Math.round((parseFloat(payouts) || 0) * 100),
         idempotency_key: `${activeSession.session_id}:blind`,

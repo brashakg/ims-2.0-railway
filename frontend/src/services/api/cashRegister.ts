@@ -77,10 +77,15 @@ export interface SessionsResponse {
   expected_preview: ExpectedPreview | null;
 }
 
+/** COUNTED | SUGGESTED | NOT_CAPTURED. Omitted = the grid was never touched,
+ *  which the server records as NOT_CAPTURED -- never as an empty drawer. */
+export type CountState = 'COUNTED' | 'SUGGESTED' | 'NOT_CAPTURED';
+
 export interface OpenPayload {
   store_id?: string;
   shift?: string;
   denominations: DenominationLine[];
+  opening_count_state?: CountState;
   opening_float?: number;
   note?: string;
 }
@@ -88,6 +93,7 @@ export interface OpenPayload {
 export interface ClosePayload {
   session_id: string;
   denominations: DenominationLine[];
+  closing_count_state?: CountState;
   bank_deposit?: number;
   counted_override?: number;
   tolerance?: number;
