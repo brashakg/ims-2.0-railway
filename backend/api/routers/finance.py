@@ -15,7 +15,7 @@ from ..utils.ist import (
     fy_start_year_ist,
 )
 from ..utils.online_gst import order_interstate_flag
-from typing import Optional, List, Dict, NamedTuple
+from typing import Any, Optional, List, Dict, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Body
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -34,6 +34,8 @@ from ..services.salary_visibility import (
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
 from ..services import je_service
+from ..services import cash_denominations as cash_denom
+from ..services import eod_tally as till_service
 from ..services import name_resolver
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
@@ -3852,23 +3854,31 @@ async def get_period_status(
 _CASH_SESSIONS = "cash_register_sessions"
 
 
-class DenominationLine(BaseModel):
-    face: int = Field(..., description="Face value in rupees, e.g. 500")
-    pieces: int = Field(0, ge=0, description="Number of notes/coins of this face")
-    kind: str = Field("note", description="'note' or 'coin'")
+# The count-sheet line is defined ONCE, in services/cash_denominations.py.
+# This alias keeps the name this router has always used without holding a
+# fourth copy of the shape for the four to drift apart. The LIST is
+# ``cash_denom.CountSheet`` -- lenient rows inside a strict list still 422'd a
+# sheet sent as a bare string, which is a refusal one level up.
+DenominationLine = cash_denom.DenominationRow
 
 
 class CashRegisterOpen(BaseModel):
     store_id: Optional[str] = None
     shift: Optional[str] = None  # AM / PM / FULL (free text)
-    denominations: List[DenominationLine] = Field(default_factory=list)
+    denominations: cash_denom.CountSheet = Field(default_factory=list)
+    # COUNTED | SUGGESTED | NOT_CAPTURED -- an untouched grid is recorded as
+    # never counted, never as an empty float.
+    opening_count_state: Optional[str] = None
     opening_float: Optional[float] = None  # optional override of denom sum
     note: Optional[str] = None
 
 
 class CashRegisterClose(BaseModel):
     session_id: str
-    denominations: List[DenominationLine] = Field(default_factory=list)
+    denominations: cash_denom.CountSheet = Field(default_factory=list)
+    # COUNTED | SUGGESTED | NOT_CAPTURED -- so a close with an untouched
+    # grid is recorded as never counted rather than as an empty drawer.
+    closing_count_state: Optional[str] = None
     bank_deposit: float = 0.0
     counted_override: Optional[float] = None  # optional override of denom sum
     tolerance: float = 0.0
@@ -4474,6 +4484,37 @@ async def open_cash_register(
     )
 
     now = _iso_now()
+
+    # TWO DOORS, ONE RECORD -- the OPEN half. The float declared here lands on
+    # the day's single till session, the same record POS Day-End closes onto.
+    # Without it the shared record holds an opening float of ZERO with
+    # opening_float_not_recorded set, so expected cash and EVERY per-face
+    # expected row are computed from nothing and the note-by-note verdict is
+    # withheld for a store that opens on this screen. Fail-soft: linking must
+    # never stop a store opening its drawer.
+    #
+    # NOTHING DECLARED -> NOTHING FORWARDED. A blank grid with no typed float
+    # makes `opening_float` 0.0 because it is the sum of nothing; forwarding
+    # that would put "the drawer opened with Rs 0.00" on the record all three
+    # screens read.
+    till_open = till_service.record_screen_open(
+        db,
+        store_id=store_id,
+        # The BUSINESS day, in the same IST frame the close half uses.
+        session_date=ist_date_str(_to_dt(now)) or str(now)[:10],
+        opening_denominations=denoms,
+        opening_count_state=body.opening_count_state,
+        opening_float_paisa=(
+            cash_denom.rupees_to_paisa(opening_float)
+            if (denoms or body.opening_float is not None)
+            else None
+        ),
+        shift=body.shift,
+        note=body.note,
+        actor=current_user,
+    )
+    till_session = till_open.get("session") or {}
+
     session_id = f"CR-{store_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     doc = {
         "session_id": session_id,
@@ -4481,11 +4522,34 @@ async def open_cash_register(
         "status": "OPEN",
         "shift": (body.shift or "").upper() or None,
         "opening_float": opening_float,
+        # LEGACY SHAPE, unchanged -- every existing reader of this collection
+        # keeps working byte-for-byte.
         "opening_denominations": denoms,
+        # THE SHARED SHAPE. Same rows, plus the state, so a float nobody
+        # counted reads NOT_CAPTURED instead of as an empty drawer.
+        "opening_count": cash_denom.build_block(
+            denoms,
+            cash_denom.rupees_to_paisa(opening_float),
+            state=body.opening_count_state,
+            actor=current_user,
+        ),
         "opened_at": now,
         "opened_by": current_user.get("user_id"),
         "opened_by_name": current_user.get("name"),
         "opening_note": body.note,
+        # The shared session this float was declared on, and whether it got
+        # there. A failure is stored, not swallowed into a fake success.
+        "till_session_id": till_session.get("session_id"),
+        "till_link_ok": bool(till_open.get("ok")),
+        "till_link_error": till_open.get("error"),
+        # True when the day's session already carried a declared float: that
+        # one STANDS and this screen's is not the shared one.
+        "till_float_already_declared": bool(
+            till_open.get("already_open")
+            and not till_session.get("opening_float_not_recorded")
+            and till_session.get("opening_float_paisa")
+            != cash_denom.rupees_to_paisa(opening_float)
+        ),
         # close-time fields, filled on /close
         "closed_at": None,
         "closed_by": None,
@@ -4506,6 +4570,22 @@ async def open_cash_register(
         )
     doc.pop("_id", None)
     return doc
+
+
+def _shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The counted figure ON THE SHARED TILL RECORD after a close linked to it,
+    or None when nothing was counted there (or the link failed).
+
+    This is the ONE answer for the store-day: whichever door counted the drawer
+    first owns it, and both screens must report that same number."""
+    session = (till_link or {}).get("session") or {}
+    value = session.get("blind_count_paisa")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post("/cash-register/close")
@@ -4546,10 +4626,29 @@ async def close_cash_register(
     denoms = cash_register.normalize_denominations(
         [d.model_dump() for d in body.denominations]
     )
+    # The sheet exactly as it will be stored, built ONCE here; its amount is
+    # restated at the bottom, when the counted figure is final.
+    closing_block = cash_denom.build_block(
+        denoms, 0, state=body.closing_count_state, actor=current_user
+    )
+    # NOBODY COUNTED -> NO COUNTED FIGURE. The sum of a blank grid is 0.00 --
+    # the sum of nothing -- and persisting it said the drawer WAS counted and
+    # found empty: a full-day negative variance and a SHORT verdict against a
+    # manager who simply never counted. Blank is an absence, at this door too.
+    # `is_captured` is the same authority the shared record uses, so an
+    # explicit COUNTED ("counted, and there was none") is still a real zero,
+    # and so is a typed override of 0.
+    counted_recorded = (
+        cash_denom.is_captured(closing_block) or body.counted_override is not None
+    )
     counted = (
-        round(float(body.counted_override), 2)
-        if body.counted_override is not None
-        else cash_register.total_from_denominations(denoms)
+        (
+            round(float(body.counted_override), 2)
+            if body.counted_override is not None
+            else cash_register.total_from_denominations(denoms)
+        )
+        if counted_recorded
+        else None
     )
 
     summary = cash_register.build_close_summary(
@@ -4563,13 +4662,20 @@ async def close_cash_register(
     )
     # build_close_summary uses the denoms total for counted; honour an override.
     summary["counted"] = counted
-    summary["variance"] = cash_register.compute_variance(counted, summary["expected"])
+    summary["variance"] = (
+        None
+        if counted is None
+        else cash_register.compute_variance(counted, summary["expected"])
+    )
     # RECOMPUTE THE VERDICT -- but NEVER resurrect an over/short verdict that
-    # build_close_summary deliberately withheld. A negative expected drawer means
-    # a cash-in is missing; re-deriving the status here overwrote
-    # NEGATIVE_EXPECTED with a phantom OVERAGE and persisted it next to its own
-    # amber note saying the verdict was withheld.
-    if summary.get("negative_expected_advisory"):
+    # build_close_summary deliberately withheld. No count means no variance and
+    # so no verdict at all; a negative expected drawer means a cash-in is
+    # missing, and re-deriving the status here overwrote NEGATIVE_EXPECTED with
+    # a phantom OVERAGE and persisted it next to its own amber note saying the
+    # verdict was withheld.
+    if counted is None:
+        summary["variance_status"] = cash_register.NOT_COUNTED
+    elif summary.get("negative_expected_advisory"):
         summary["variance_status"] = cash_register.NEGATIVE_EXPECTED
     else:
         summary["variance_status"] = cash_register.variance_status(
@@ -4601,12 +4707,91 @@ async def close_cash_register(
         db, store_id, start_iso, end_iso, cash_refunds
     )
 
+    # TWO DOORS, ONE RECORD: this close and POS Day-End land the SAME counted
+    # drawer on the SAME till session for the day, so the two screens can never
+    # hold two different answers. The rupee arithmetic above is UNCHANGED --
+    # this only links and shares the count. Fail-soft: linking must never stop
+    # a store closing its till, and a failure is reported, not hidden.
+    till_link = till_service.record_screen_close(
+        db,
+        store_id=store_id,
+        # The BUSINESS day, in the same frame everything else uses. `end_iso`
+        # is a NAIVE-UTC instant, so slicing its first ten characters reads
+        # the UTC day: a till closed between 00:00 and 05:30 IST would link
+        # to YESTERDAY's session while this console files the very same row
+        # under today (it already parses-then-shifts, just below). Same
+        # helper, same answer.
+        session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
+        closing_rows=[d.model_dump() for d in body.denominations],
+        closing_count_state=body.closing_count_state,
+        # The counted figure this screen is storing. It is only forwarded as the
+        # count when no grid came with it; with a grid, the notes rule and this
+        # is used to notice a `counted_override` that disagrees with them.
+        #
+        # NOTHING COUNTED -> NOTHING FORWARDED. `counted` is None when nobody
+        # counted, and a None never becomes a Rs 0.00 submitted to the shared
+        # record -- that is the blank-persisted-as-emptied defect this work
+        # removes, and the record all three screens read is the worst place for
+        # it. Same test as the figure this screen stores: one answer, not two.
+        counted_paisa=(
+            cash_denom.rupees_to_paisa(counted) if counted is not None else None
+        ),
+        actor=current_user,
+    )
+
+    # ONE DRAWER, ONE COUNTED FIGURE. When the day was already counted through
+    # the other door, THAT count stands (record_screen_close never overwrites a
+    # signed-off count) -- so this screen must REPORT it rather than its own.
+    # Reporting its own is how one drawer on one day came to read Rs 2,000 on
+    # Finance > Cash Register and Rs 3,000 on the Z-Read. Only the COUNT is
+    # shared; the expected figure below is still this window's own arithmetic.
+    # The grid typed here is still stored as this screen's sheet, and a sheet
+    # that disagrees with the shared count flags itself (matches_amount False).
+    shared_paisa = _shared_counted_paisa(till_link)
+    count_adopted = shared_paisa is not None and (
+        counted is None or shared_paisa != cash_denom.rupees_to_paisa(counted)
+    )
+    if count_adopted:
+        counted = cash_denom.paisa_to_rupees(shared_paisa)
+        summary["counted"] = counted
+        summary["variance"] = cash_register.compute_variance(
+            counted, summary["expected"]
+        )
+        # There IS a count now, so the withheld NOT_COUNTED verdict must not
+        # survive -- only NEGATIVE_EXPECTED still outranks the arithmetic.
+        summary["variance_status"] = (
+            cash_register.NEGATIVE_EXPECTED
+            if summary.get("negative_expected_advisory")
+            else cash_register.variance_status(summary["variance"], body.tolerance)
+        )
+
     update = {
         "status": "CLOSED",
         "closed_at": end_iso,
         "closed_by": current_user.get("user_id"),
         "closed_by_name": current_user.get("name"),
         "closing_denominations": denoms,
+        # The shared Cash Count Block + the session it belongs to. The block
+        # was built above; this points it at the figure actually being stored.
+        "closing_count": cash_denom.restate_amount(
+            closing_block, cash_denom.rupees_to_paisa(counted)
+        ),
+        "till_session_id": till_link.get("session_id"),
+        "till_link_ok": bool(till_link.get("ok")),
+        "till_link_error": till_link.get("error"),
+        "till_already_counted": bool(till_link.get("already_counted")),
+        "till_counted": bool(till_link.get("counted")),
+        "till_opening_float_not_recorded": bool(
+            till_link.get("opening_float_not_recorded")
+        ),
+        # True when this screen's counted figure and the shared record's differ
+        # -- a manual override typed over the notes, or a drawer the other door
+        # had already counted. Either way the shared figure is what is stored
+        # above, and this flag is how the screen says so out loud.
+        "till_count_differs": bool(till_link.get("count_differs")) or count_adopted,
+        # The count on this close came from the shared record, not from the
+        # grid on this screen.
+        "counted_from_shared_record": count_adopted,
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
@@ -4919,8 +5104,13 @@ async def cash_reconciliation_summary(
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = round(float(s.get("expected", 0) or 0), 2)
-        counted = round(float(s.get("counted", 0) or 0), 2)
-        variance = round(counted - expected, 2)
+        # A DRAWER NOBODY COUNTED HAS NO FIGURE HERE EITHER. `counted` is None
+        # on such a close record; `float(None or 0)` would have rebuilt the
+        # fabricated zero -- and its full-day shortfall -- one screen further
+        # along, which is where a manager actually reads it.
+        raw_counted = s.get("counted")
+        counted = None if raw_counted is None else round(float(raw_counted or 0), 2)
+        variance = None if counted is None else round(counted - expected, 2)
         tol = float(s.get("tolerance", 0) or 0)
         closed_by = s.get("closed_by")
         if closed_by and not s.get("closed_by_name"):
@@ -4949,7 +5139,9 @@ async def cash_reconciliation_summary(
                 # below bucket on; the session's own OVER/SHORT wording is not
                 # interchangeable with it.)
                 "variance_status": (
-                    cash_register.NEGATIVE_EXPECTED
+                    cash_register.NOT_COUNTED
+                    if counted is None
+                    else cash_register.NEGATIVE_EXPECTED
                     if s.get("negative_expected_advisory")
                     else _recon_status(variance, tol)
                 ),
@@ -4973,6 +5165,9 @@ async def cash_reconciliation_summary(
                 "closed_by": closed_by,
                 "closed_by_name": s.get("closed_by_name"),
                 "closed_at": closed_at,
+                # The shared till session this close landed on, if any. Used
+                # below to make sure ONE counted drawer is ONE row here.
+                "till_session_id": s.get("till_session_id"),
             }
         )
 
@@ -4997,8 +5192,13 @@ async def cash_reconciliation_summary(
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
         expected = _p2r(s.get("expected_cash_paisa"))
-        counted = _p2r(s.get("blind_count_paisa"))
-        variance = round(counted - expected, 2)
+        # Same rule on the Z-Read side: `blind_count_paisa` stays None until
+        # somebody counts, so an uncounted drawer reports no figure, not zero.
+        counted = (
+            None if s.get("blind_count_paisa") is None
+            else _p2r(s.get("blind_count_paisa"))
+        )
+        variance = None if counted is None else round(counted - expected, 2)
         tol = _p2r(s.get("tolerance_paisa"))
         locked_by = s.get("locked_by")
         if locked_by and not s.get("locked_by_name"):
@@ -5026,8 +5226,11 @@ async def cash_reconciliation_summary(
                 "variance": variance,
                 # Trust the engine's stored status when present (it used the
                 # configured tolerance); else classify with the same band.
-                "variance_status": s.get("variance_status")
-                or _recon_status(variance, tol),
+                "variance_status": (
+                    cash_register.NOT_COUNTED
+                    if counted is None
+                    else s.get("variance_status") or _recon_status(variance, tol)
+                ),
                 "tolerance": tol,
                 "by_mode": _norm_by_mode(s.get("by_mode")),
                 "by_mode_basis": "NET_OF_RECORDED_REFUNDS",
@@ -5049,6 +5252,29 @@ async def cash_reconciliation_summary(
                 "zread_number": s.get("zread_number"),
             }
         )
+
+    # --- 2b) ONE COUNTED DRAWER, ONE ROW -----------------------------------
+    # Since both close screens land on the SAME till session, a drawer closed
+    # from Finance > Cash Register and then locked as a Z-Read would otherwise
+    # appear TWICE in this grid -- the same money counted once, reported as two
+    # days' worth. Where a cash-register row names a till session that is also
+    # in this grid, the till row is the survivor (it is the shared record, and
+    # it carries the Z-Read number); the cash-register row is folded into it so
+    # nothing about who closed it is lost.
+    till_row_ids = {
+        r["session_id"] for r in rows if r.get("source") == "BLIND_EOD" and r.get("session_id")
+    }
+    if till_row_ids:
+        by_id = {r["session_id"]: r for r in rows if r.get("source") == "BLIND_EOD"}
+        survivors: List[dict] = []
+        for r in rows:
+            linked = r.get("till_session_id")
+            if r.get("source") == "CASH_REGISTER" and linked in till_row_ids:
+                by_id[linked]["also_closed_from"] = r.get("session_id")
+                by_id[linked]["also_closed_from_source"] = "CASH_REGISTER"
+                continue
+            survivors.append(r)
+        rows = survivors
 
     # Resolve any missing closer names in one batch, then backfill.
     if pending_user_ids:

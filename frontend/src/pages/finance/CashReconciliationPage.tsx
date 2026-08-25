@@ -90,11 +90,17 @@ const STATUS_CHIP: Record<ReconStatus, string> = {
   BALANCED: 'bg-green-50 text-green-700',
   OVERAGE: 'bg-amber-50 text-amber-700',
   SHORTAGE: 'bg-red-50 text-red-700',
+  // The two WITHHELD verdicts are grey: neither is an over or a short, and
+  // colouring them as one is how a drawer nobody counted read as stolen cash.
+  NEGATIVE_EXPECTED: 'bg-gray-100 text-gray-600',
+  NOT_COUNTED: 'bg-gray-100 text-gray-600',
 };
 const STATUS_ROW: Record<ReconStatus, string> = {
   BALANCED: '',
   OVERAGE: 'bg-amber-50/40',
   SHORTAGE: 'bg-red-50/40',
+  NEGATIVE_EXPECTED: '',
+  NOT_COUNTED: '',
 };
 
 const HQ_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'];
@@ -454,7 +460,13 @@ function RowGroup({
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.cash_sales)}</td>
         <td className="px-3 py-2 text-right text-gray-700">{inr(row.expected_cash)}</td>
-        <td className="px-3 py-2 text-right text-gray-900 font-medium">{inr(row.counted_cash)}</td>
+        <td className="px-3 py-2 text-right text-gray-900 font-medium">
+          {row.counted_cash == null ? (
+            <span className="text-gray-500 text-xs font-normal">Not counted</span>
+          ) : (
+            inr(row.counted_cash)
+          )}
+        </td>
         <td className="px-3 py-2 text-right">
           <VarianceChip status={status} variance={row.variance} />
         </td>
@@ -508,10 +520,14 @@ function RowGroup({
                   <div className="border-t border-gray-100 pt-1.5">
                     <DRow label="Expected in drawer" value={inr(row.expected_cash)} strong />
                   </div>
-                  <DRow label="Counted (physical)" value={inr(row.counted_cash)} strong />
+                  <DRow
+                    label="Counted (physical)"
+                    value={row.counted_cash == null ? 'Not counted' : inr(row.counted_cash)}
+                    strong
+                  />
                   <DRow
                     label="Variance"
-                    value={signedInr(row.variance)}
+                    value={row.variance == null ? 'No count, no variance' : signedInr(row.variance)}
                     tone={status === 'SHORTAGE' ? 'bad' : status === 'OVERAGE' ? 'warn' : undefined}
                     strong
                   />
@@ -667,7 +683,20 @@ function DRow({
   );
 }
 
-function VarianceChip({ status, variance }: { status: ReconStatus; variance: number }) {
+function VarianceChip({ status, variance }: { status: ReconStatus; variance: number | null }) {
+  // A withheld verdict shows WHY it is withheld -- never a number that reads
+  // as a real over or short. NOT_COUNTED is a drawer nobody counted;
+  // NEGATIVE_EXPECTED is an expected figure that computed below zero.
+  if (status === 'NOT_COUNTED' || variance == null) {
+    return (
+      <span
+        title="Closed without a count. Not counted is not an empty drawer."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.NOT_COUNTED}`}
+      >
+        Not counted
+      </span>
+    );
+  }
   return (
     <span
       className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium tabular-nums ${STATUS_CHIP[status]}`}

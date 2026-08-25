@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional
 
 from pymongo.errors import DuplicateKeyError
 
+from . import cash_denominations as _denom
+
 _SESSIONS_COLLECTION = "till_sessions"
 
 # Status lifecycle (the blind state machine):
@@ -63,12 +65,11 @@ NEGATIVE_EXPECTED_MESSAGE = (
     "this variance."
 )
 
-# Indian denomination ladder (paisa-exact). face is RUPEES; the count grid sums
-# face*pieces in RUPEES then we convert to paisa once at the boundary so float
-# noise never accumulates. Rs 2000 is withdrawn (kept out of the default grid,
-# same as the existing cash_register module).
-NOTE_FACES = (500, 200, 100, 50, 20, 10)
-COIN_FACES = (10, 5, 2, 1)
+# Indian denomination ladder (paisa-exact) -- defined ONCE in
+# services/cash_denominations.py and re-exported here so the till module has no
+# second copy of the face values to drift from.
+NOTE_FACES = _denom.NOTE_FACES
+COIN_FACES = _denom.COIN_FACES
 
 # E2 policy keys (registered in policy_registry.py). Defaults here mirror the
 # registry so a direct service call (no policy doc) still behaves.
@@ -122,62 +123,23 @@ def _session_day_window(session: Dict[str, Any]):
     return start, start + timedelta(days=1)
 
 
-def _coerce_pieces(value: Any) -> int:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return n if n > 0 else 0
-
-
-def _coerce_face(value: Any) -> Optional[int]:
-    try:
-        f = int(value)
-    except (TypeError, ValueError):
-        return None
-    return f if f > 0 else None
-
-
 def normalize_denominations(rows: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Clean a list of {face, kind, pieces} dicts: drop bad faces, clamp pieces
     to non-negative ints, default kind to 'note', and attach the computed line
     total in PAISA (face*100*pieces). Order is preserved as supplied so the
-    stored doc mirrors what the cashier entered."""
-    out: List[Dict[str, Any]] = []
-    for r in rows or []:
-        if not isinstance(r, dict):
-            continue
-        face = _coerce_face(r.get("face"))
-        if face is None:
-            continue
-        pieces = _coerce_pieces(r.get("pieces"))
-        kind = str(r.get("kind") or "note").lower()
-        if kind not in ("note", "coin"):
-            kind = "note"
-        out.append(
-            {
-                "face": face,
-                "kind": kind,
-                "pieces": pieces,
-                "line_total_paisa": face * 100 * pieces,
-            }
-        )
-    return out
+    stored doc mirrors what the cashier entered. Delegates to the shared
+    normaliser -- there is only one."""
+    return _denom.normalize_rows(rows)
 
 
 def total_paisa_from_denominations(rows: Optional[List[Dict[str, Any]]]) -> int:
     """Sum of face*100*pieces across denomination rows, in PAISA. Pure."""
-    return sum(r["line_total_paisa"] for r in normalize_denominations(rows))
+    return _denom.total_paisa(rows)
 
 
 def denomination_ladder() -> List[Dict[str, Any]]:
     """The blank denomination grid the UI starts from (pieces all zero)."""
-    rows: List[Dict[str, Any]] = []
-    for face in NOTE_FACES:
-        rows.append({"face": face, "kind": "note", "pieces": 0})
-    for face in COIN_FACES:
-        rows.append({"face": face, "kind": "coin", "pieces": 0})
-    return rows
+    return _denom.denomination_ladder()
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +292,135 @@ def compute_expected(
 
 
 # ---------------------------------------------------------------------------
+# The per-face drawer ledger (denominated tally)
+# ---------------------------------------------------------------------------
+
+
+def compute_face_ledger(
+    db,
+    store_id: str,
+    window_start: Any,
+    window_end: Any,
+    *,
+    opening_count: Optional[Dict[str, Any]] = None,
+    closing_count: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Tally the drawer FACE BY FACE across the day.
+
+        opening float
+          + notes taken in on every cash sale
+          - notes handed back as change
+          - notes handed back on cash refunds
+          - notes paid out of the till
+          = what each face SHOULD be at close
+        vs the closing count = the per-face discrepancy
+
+    This is a COUNT ledger, in pieces. It never touches, derives or replaces a
+    rupee amount: the rupee expected/variance figures come from
+    ``compute_expected`` exactly as before, and a store that captures no
+    breakdowns still gets those figures unchanged.
+
+    A NOT_CAPTURED block contributes NOTHING (unknown is not zero), so
+    ``coverage`` reports how much of the day actually carries a breakdown --
+    without it a manager could read a clean per-face tally that simply means
+    nobody counted anything.
+
+    The window is built by ``tender_reconciliation.window_match`` -- the SAME
+    builder the rupee reader uses, so the two can never disagree about which
+    sales belong to the day. DB absent / read failure -> an honest empty
+    envelope, never a fabricated tally."""
+    from . import tender_reconciliation as tr
+
+    expected: Dict[Any, int] = {}
+    counted: Dict[Any, int] = {}
+    coverage = {
+        "cash_sale_legs": 0,
+        "cash_sale_legs_counted": 0,
+        "refund_legs": 0,
+        "refund_legs_counted": 0,
+        "payouts": 0,
+        "payouts_counted": 0,
+        "flagged": 0,
+    }
+    _denom.accumulate(expected, opening_count, +1)
+    _denom.accumulate(counted, closing_count, +1)
+    if _denom.is_flagged(opening_count):
+        coverage["flagged"] += 1
+    if _denom.is_flagged(closing_count):
+        coverage["flagged"] += 1
+
+    read_ok = True
+    if db is not None:
+        match = tr.window_match(store_id, window_start, window_end)
+        try:
+            for order in db.get_collection("orders").find(
+                match, {"_id": 0, "payments": 1}
+            ):
+                for pay in order.get("payments") or []:
+                    if str((pay or {}).get("method") or "").upper() != "CASH":
+                        continue
+                    coverage["cash_sale_legs"] += 1
+                    tendered = (pay or {}).get("cash_tendered_count")
+                    change = (pay or {}).get("cash_change_count")
+                    if _denom.is_captured(tendered) or _denom.is_captured(change):
+                        coverage["cash_sale_legs_counted"] += 1
+                    # Notes IN, notes OUT. Two separate movements -- a single
+                    # net figure carries no face information at all.
+                    _denom.accumulate(expected, tendered, +1)
+                    _denom.accumulate(expected, change, -1)
+                    if _denom.is_flagged(tendered) or _denom.is_flagged(change):
+                        coverage["flagged"] += 1
+                    if (pay or {}).get("cash_leg_balanced") is False:
+                        coverage["flagged"] += 1
+        except Exception:  # noqa: BLE001
+            read_ok = False
+        try:
+            ret_match = tr.window_match(store_id, window_start, window_end)
+            ret_match["status"] = "COMPLETED"
+            ret_match["historical"] = {"$ne": True}
+            for ret in db.get_collection("returns").find(
+                ret_match, {"_id": 0, "refund_tenders": 1}
+            ):
+                for leg in ret.get("refund_tenders") or []:
+                    if str((leg or {}).get("method") or "").upper() != "CASH":
+                        continue
+                    coverage["refund_legs"] += 1
+                    block = (leg or {}).get("cash_count")
+                    if _denom.is_captured(block):
+                        coverage["refund_legs_counted"] += 1
+                    if _denom.is_flagged(block):
+                        coverage["flagged"] += 1
+                    _denom.accumulate(expected, block, -1)
+        except Exception:  # noqa: BLE001
+            read_ok = False
+        try:
+            exp_match = tr.window_match(store_id, window_start, window_end)
+            exp_match["payment_mode"] = "CASH"
+            for row in db.get_collection("expenses").find(
+                exp_match, {"_id": 0, "cash_count": 1}
+            ):
+                coverage["payouts"] += 1
+                block = (row or {}).get("cash_count")
+                if _denom.is_captured(block):
+                    coverage["payouts_counted"] += 1
+                if _denom.is_flagged(block):
+                    coverage["flagged"] += 1
+                _denom.accumulate(expected, block, -1)
+        except Exception:  # noqa: BLE001
+            read_ok = False
+
+    rows = _denom.ledger_rows(expected, counted)
+    return {
+        "rows": rows,
+        "coverage": coverage,
+        "read_ok": read_ok,
+        "opening_captured": _denom.is_captured(opening_count),
+        "closing_captured": _denom.is_captured(closing_count),
+        "difference_paisa": sum(r["difference_paisa"] for r in rows),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Z-Read number (atomic per-store-per-day counter)
 # ---------------------------------------------------------------------------
 
@@ -363,12 +454,61 @@ def _next_zread_number(db, store_id: str, day: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _adopt_declared_float(
+    coll,
+    existing: Dict[str, Any],
+    *,
+    denoms: List[Dict[str, Any]],
+    declared_paisa: int,
+    opening_count_state: Optional[str],
+    actor: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Fill a declared opening float onto a session that has NONE on it.
+
+    A till session can exist before any float was declared: a close screen
+    auto-opens one for the day it is closing, and the record then says so with
+    ``opening_float_not_recorded``. The FIRST DECLARED float fills that gap --
+    without it, expected cash and every per-face expected row are computed from
+    an opening of zero and the note-by-note verdict is withheld for the whole
+    store-day. A float that was already declared STANDS: same "the first answer
+    wins" rule the closing count follows, so a second screen can never restate
+    somebody's float. Guarded update -- concurrent declarations, exactly one
+    wins. Returns the session as it now reads (unchanged on any failure)."""
+    if not existing.get("opening_float_not_recorded"):
+        return existing
+    session_id = existing.get("_id") or existing.get("session_id")
+    patch = {
+        "opening_float_paisa": int(declared_paisa),
+        "opening_denominations": denoms,
+        "opening_count": _denom.build_block(
+            denoms, int(declared_paisa), state=opening_count_state, actor=actor
+        ),
+        "opening_float_not_recorded": False,
+    }
+    try:
+        from pymongo import ReturnDocument
+
+        updated = coll.find_one_and_update(
+            {
+                "_id": session_id,
+                "status": STATUS_OPEN,
+                "opening_float_not_recorded": True,
+            },
+            {"$set": patch},
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception:  # noqa: BLE001
+        return existing
+    return updated or existing
+
+
 def open_session(
     db,
     *,
     store_id: str,
     session_date: str,
     opening_denominations: Optional[List[Dict[str, Any]]] = None,
+    opening_count_state: Optional[str] = None,
     opening_float_paisa: Optional[int] = None,
     shift: Optional[str] = None,
     note: Optional[str] = None,
@@ -412,6 +552,18 @@ def open_session(
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None:
+        # The shared drawer already exists. If nobody had declared a float on
+        # it and this door just did, that declaration lands -- see
+        # _adopt_declared_float.
+        if bool(denoms) or opening_float_paisa is not None:
+            existing = _adopt_declared_float(
+                coll,
+                existing,
+                denoms=denoms,
+                declared_paisa=declared,
+                opening_count_state=opening_count_state,
+                actor=actor,
+            )
         existing["session_id"] = existing.get("_id")
         existing.pop("_id", None)
         return {"ok": True, "session": existing, "already_open": True}
@@ -428,13 +580,29 @@ def open_session(
         "status": STATUS_OPEN,
         "shift": (shift or "").upper() or None,
         "opening_float_paisa": declared,
+        # LEGACY SHAPE, unchanged: every existing reader of this collection
+        # keeps working byte-for-byte.
         "opening_denominations": denoms,
+        # THE SHARED SHAPE (services/cash_denominations.py). Same rows, plus
+        # the state (so an uncounted float reads NOT_CAPTURED rather than as an
+        # empty drawer) and the flag when the declared float and the notes
+        # disagree. The declared float remains the money either way.
+        "opening_count": _denom.build_block(
+            denoms, declared, state=opening_count_state, actor=actor
+        ),
+        # A session opened for a day nobody declared a float on (the auto-open
+        # a close screen does for a past date) has an opening float of ZERO
+        # because that is the only arithmetic available -- but a float nobody
+        # recorded is NOT a float of nothing. This flag is how the screen says
+        # so out loud instead of letting a fabricated variance stand.
+        "opening_float_not_recorded": not (bool(denoms) or opening_float_paisa is not None),
         "opened_at": now,
         "opened_by": cashier_id,
         "opening_note": note,
         # blind-submit + lock fields (hidden / null until those steps)
         "blind_count_paisa": None,
         "blind_denominations": [],
+        "closing_count": _denom.not_captured_block(0),
         "cash_payouts_paisa": 0,
         "expected_cash_paisa": None,
         "variance_paisa": None,
@@ -495,7 +663,9 @@ def blind_submit(
     session_id: str,
     *,
     blind_denominations: Optional[List[Dict[str, Any]]] = None,
+    closing_count_state: Optional[str] = None,
     blind_count_paisa: Optional[int] = None,
+    allow_uncounted_total: bool = False,
     cash_payouts_paisa: int = 0,
     window_start: Any = None,
     window_end: Any = None,
@@ -541,7 +711,14 @@ def blind_submit(
 
     denoms = normalize_denominations(blind_denominations)
     denom_total = total_paisa_from_denominations(denoms)
-    if blind_count_paisa is not None and int(blind_count_paisa) != denom_total:
+    # ``allow_uncounted_total``: a total with NO grid behind it is not a UI bug,
+    # it is the legacy single-number close (POS Day-End types a figure and skips
+    # the breakdown). There is nothing for the total to disagree WITH, so the
+    # integrity check has nothing to check. It still applies in full the moment
+    # a grid exists, and the native blind-EOD door never passes this flag -- its
+    # behaviour is unchanged.
+    skip_integrity = bool(allow_uncounted_total) and not denoms
+    if blind_count_paisa is not None and not skip_integrity and int(blind_count_paisa) != denom_total:
         # Denomination integrity: a supplied total must match the grid exactly.
         return {
             "ok": False,
@@ -588,6 +765,12 @@ def blind_submit(
                 "$set": {
                     "status": STATUS_BLIND_SUBMITTED,
                     "blind_denominations": denoms,
+                    # The shared shape alongside the legacy list. A close with
+                    # no grid entered reads NOT_CAPTURED -- an uncounted drawer
+                    # must never look like an emptied one.
+                    "closing_count": _denom.build_block(
+                        denoms, counted, state=closing_count_state, actor=actor
+                    ),
                     "blind_count_paisa": counted,
                     "cash_payouts_paisa": payouts,
                     "expected_cash_paisa": expected_cash_paisa,
@@ -633,6 +816,184 @@ def blind_submit(
     )
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
+
+
+# ---------------------------------------------------------------------------
+# TWO DOORS, ONE RECORD
+# ---------------------------------------------------------------------------
+
+
+def record_screen_open(db, **kwargs: Any) -> Dict[str, Any]:
+    """Fail-soft wrapper around ``open_session`` for a SCREEN that declares an
+    opening float (Finance > Cash Register, POS).
+
+    Same rule as ``record_screen_close``: linking a screen to the shared record
+    must never be able to stop a store opening its till, so any failure is
+    reported on the caller's own record instead of raised. The float is stored
+    on the ONE (store, date) session, which is where expected cash and every
+    per-face expected row are computed from."""
+    try:
+        return open_session(db, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"link_failed:{exc}"}
+
+
+def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
+    """Fail-soft wrapper. See ``_record_screen_close``.
+
+    Linking a close to the shared record must NEVER be able to stop a store
+    closing its day, so every exception below this line -- a database blip, a
+    malformed legacy session, anything -- becomes a reported failure rather
+    than a 500 on the close screen. The screen's own record is written either
+    way, and the failure is stored on it rather than swallowed."""
+    try:
+        return _record_screen_close(db, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"link_failed:{exc}"}
+
+
+def _record_screen_close(
+    db,
+    *,
+    store_id: str,
+    session_date: str,
+    closing_rows: Optional[List[Dict[str, Any]]] = None,
+    closing_count_state: Optional[str] = None,
+    counted_paisa: Optional[int] = None,
+    cash_payouts_paisa: int = 0,
+    actor: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Land a closing count from EITHER close screen on the SAME till session.
+
+    POS Day-End and Finance > Cash Register are two DOORS. This is the one
+    RECORD behind them. Whichever screen closes first creates (or joins) the
+    single (store, date) session -- guarded by the collection's partial unique
+    index -- and submits the count. Whichever closes second finds that session
+    already counted and joins it: it does NOT open a second drawer and does NOT
+    overwrite the first count. Two screens can therefore never show two
+    different answers for one day, because there is only one answer.
+
+    A CLOSE WITH NOTHING COUNTED SUBMITS NOTHING. If the screen sent neither a
+    grid nor a typed total, the session is opened/joined and left OPEN -- it is
+    NOT blind-submitted with a count of zero. Writing zero here would put the
+    exact defect this work removes (blank persisted as an emptied drawer) onto
+    the shared record, where three screens would then read it.
+
+    FAIL-SOFT BY DESIGN. Every failure path returns ``ok: False`` with a reason
+    rather than raising -- and ``record_screen_close`` catches anything that
+    still escapes -- because linking to the shared record must not be able to
+    stop a store closing its day. The calling screen's own record is written
+    either way, and a failure here is surfaced, not swallowed into a fake
+    success."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        return {"ok": False, "error": "no_db"}
+    try:
+        existing = coll.find_one(
+            {
+                "store_id": store_id,
+                "session_date": session_date,
+                "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"read_failed:{exc}"}
+
+    created = False
+    if existing is None:
+        opened = open_session(
+            db,
+            store_id=store_id,
+            session_date=session_date,
+            actor=actor,
+        )
+        if not opened.get("ok"):
+            return {"ok": False, "error": opened.get("error", "open_failed")}
+        existing = opened["session"]
+        created = not opened.get("already_open", False)
+
+    session_id = existing.get("session_id") or existing.get("_id")
+    status = str(existing.get("status"))
+    # A day whose float nobody declared: expected cash is computed with an
+    # opening of zero because that is the only arithmetic available. The
+    # caller carries this flag onto its own record so the screen can say so
+    # rather than letting a fabricated variance stand unexplained.
+    float_missing = bool(existing.get("opening_float_not_recorded"))
+    if status in (STATUS_BLIND_SUBMITTED, STATUS_LOCKED):
+        # Already counted through the other door. The first count STANDS -- a
+        # second screen must not be able to quietly restate a signed-off
+        # drawer. The caller links to it and says so.
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "session": existing,
+            "created": created,
+            "opening_float_not_recorded": float_missing,
+            "already_counted": True,
+        }
+
+    rows = normalize_denominations(closing_rows)
+    state_captured = str(closing_count_state or "").upper() in (
+        _denom.STATE_COUNTED,
+        _denom.STATE_SUGGESTED,
+    )
+    if not rows and not state_captured and counted_paisa is None:
+        # Nothing was counted at all. Link the day to its session; submit no
+        # count. An OPEN session is an honest "not counted yet"; a submitted
+        # zero would be a lie the whole till reads.
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "session": existing,
+            "created": created,
+            "opening_float_not_recorded": float_missing,
+            "already_counted": False,
+            "counted": False,
+            "not_captured": True,
+        }
+
+    # The grid rules when there is a grid: the till's own integrity check (a
+    # supplied total must equal the notes) stays in force. A typed total is only
+    # forwarded when no grid came with it -- the legacy single-number close.
+    forward_total = None if rows else counted_paisa
+    res = blind_submit(
+        db,
+        session_id,
+        blind_denominations=closing_rows,
+        closing_count_state=closing_count_state,
+        blind_count_paisa=forward_total,
+        allow_uncounted_total=not rows,
+        cash_payouts_paisa=cash_payouts_paisa,
+        actor=actor,
+    )
+    if not res.get("ok"):
+        if res.get("error") in ("already_submitted", "already_locked"):
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "created": created,
+            "opening_float_not_recorded": float_missing,
+                "already_counted": True,
+                "counted": True,
+            }
+        return {"ok": False, "error": res.get("error", "submit_failed")}
+    submitted = int((res["session"] or {}).get("blind_count_paisa") or 0)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "session": res["session"],
+        "created": created,
+        "opening_float_not_recorded": float_missing,
+        "already_counted": False,
+        "counted": True,
+        "submitted_paisa": submitted,
+        # The screen's own figure and the shared record's figure are the same
+        # number unless the screen used an override that disagreed with its own
+        # notes. That is a pre-existing hazard; here it becomes visible.
+        "count_differs": (
+            counted_paisa is not None and int(counted_paisa) != submitted
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1284,20 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "opening_float_paisa": opening,
         "opening_denominations": session.get("opening_denominations") or [],
         "blind_denominations": session.get("blind_denominations") or [],
+        # The shared Cash Count Blocks + the face-by-face tally of the day.
+        # Purely additive to the rupee figures above, which are computed exactly
+        # as before and are unaffected by whether anyone counted notes.
+        "opening_count": session.get("opening_count")
+        or _denom.not_captured_block(opening),
+        "closing_count": session.get("closing_count")
+        or _denom.not_captured_block(int(counted or 0)),
+        "face_ledger": compute_face_ledger(
+            db,
+            session.get("store_id"),
+            *_session_day_window(session),
+            opening_count=session.get("opening_count"),
+            closing_count=session.get("closing_count"),
+        ),
         "by_mode": session.get("by_mode") or {},
         # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
         # expected. cash_sales is GROSS collected; cash_refunds is the recorded

@@ -4,12 +4,45 @@
 
 import api from './client';
 
+/** One line of a count sheet, as stored. */
+export interface CashCountRow {
+  face: number;
+  kind: 'note' | 'coin';
+  pieces: number;
+  line_total_paisa: number;
+}
+
+/** The Cash Count Block. NOT_CAPTURED means nobody counted -- which is why
+ *  `matches_amount` is null there rather than false, and why every money field
+ *  on a close can be null. Absence is a state; it is never a zero. */
+export interface CashCountBlock {
+  state: 'COUNTED' | 'SUGGESTED' | 'NOT_CAPTURED';
+  rows: CashCountRow[];
+  total_paisa: number;
+  amount_paisa: number;
+  matches_amount: boolean | null;
+  captured_by: string | null;
+  captured_at: string | null;
+}
+
 export interface DayEndClose {
   store_id: string;
   date: string;
-  closing_cash: number;
-  system_cash: number;
-  variance: number;
+  /** null when nobody counted the drawer. NOT zero. */
+  closing_cash: number | null;
+  system_cash: number | null;
+  /** null when there was no count to compare against. */
+  variance: number | null;
+  closing_count?: CashCountBlock;
+  cash_counted?: boolean;
+  /** The shared till session this close landed on -- the SAME record Finance >
+   *  Cash Register closes onto, so the two screens cannot disagree. */
+  till_session_id?: string | null;
+  till_link_ok?: boolean;
+  till_link_error?: string | null;
+  till_already_counted?: boolean;
+  till_counted?: boolean;
+  till_opening_float_not_recorded?: boolean;
   notes: string | null;
   closed_by: string | null;
   closed_at: string;
@@ -207,8 +240,11 @@ export const reportsApi = {
   createDayEndClose: async (body: {
     date: string;
     store_id?: string;
-    closing_cash: number;
-    system_cash: number;
+    /** Omit when nobody counted -- the server records NOT_CAPTURED, and a
+     *  close is never refused for want of a count. */
+    closing_cash?: number;
+    system_cash?: number;
+    closing_count?: { rows: Array<{ face: number; kind: 'note' | 'coin'; pieces: number }>; state: string };
     notes?: string;
   }) => {
     const r = await api.post('/reports/day-end-close', body);

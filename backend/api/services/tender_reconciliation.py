@@ -435,6 +435,12 @@ def _window_match(store_id: str, start: Any, end: Any) -> Dict[str, Any]:
     return match
 
 
+# Public alias. The denominated per-face drawer ledger (eod_tally) must scan
+# EXACTLY the window this module scans, or the two Day-End readers would
+# disagree about which sales are in the day. One window builder, two readers.
+window_match = _window_match
+
+
 # ---------------------------------------------------------------------------
 # Daily snapshot + atomic lock
 # ---------------------------------------------------------------------------
