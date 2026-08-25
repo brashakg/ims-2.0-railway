@@ -2495,6 +2495,41 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
 
 
 # ============================================================================
+# THE EXCHANGE DOOR IS CLOSED (owner ruling 2026-08-25, lifecycle finding S1)
+# ============================================================================
+# An exchange put the returned frame back on the shelf (:3152, :3575) and
+# settled the price difference at the till -- and never touched the REPLACEMENT
+# at all. It was not decremented from stock and no invoice was ever raised for
+# it. Every exchange therefore left behind one phantom frame the system still
+# believed it owned, plus a real hand-over that reached no revenue figure, no
+# GST return and no Tally export. The drawer balanced to the paisa, so nothing
+# ever looked wrong.
+#
+# The ruling is to SHUT THE DOOR rather than half-build the billing -- a half-
+# implemented exchange is exactly how this defect was born. Staff take the item
+# back as a RETURN and then ring the replacement up as an ordinary sale; both of
+# those paths already decrement stock and raise a bill correctly today. An
+# exchange that raises a real second bill comes later as its own change, which
+# is why the pricing/settlement machinery below is left intact rather than
+# deleted.
+#
+# Closed at the SERVER, not just on the screen: an old browser tab or a direct
+# call would otherwise still open the leak. Reading, listing, filtering and
+# reversing EXCHANGE records already written is deliberately untouched.
+_EXCHANGE_CLOSED_MSG = (
+    "Exchanges are switched off. Take the item back as a Return & Refund, "
+    "then ring up the replacement as a normal sale at the till -- that way it "
+    "leaves stock and the customer gets a bill for it."
+)
+
+
+def _gate_exchange_closed(return_type: Optional[str]) -> None:
+    """Refuse an EXCHANGE with an instruction a cashier can act on."""
+    if str(return_type or "").strip().upper() == "EXCHANGE":
+        raise HTTPException(status_code=400, detail=_EXCHANGE_CLOSED_MSG)
+
+
+# ============================================================================
 # ENDPOINTS
 # ============================================================================
 
@@ -2521,6 +2556,7 @@ async def quote_return(
     the cashier what is legitimately refundable per tender instead of guessing
     -- the same figures ``_gate_refund_tenders_against_order`` enforces on POST.
     """
+    _gate_exchange_closed(body.return_type)
     order = _resolve_order(body)
     if order is None:
         raise HTTPException(status_code=404, detail="Original order not found")
@@ -2665,6 +2701,9 @@ async def create_return(
     duplicating the financial record. Fail-soft: any lookup failure falls
     through to the normal (non-idempotent) path.
     """
+    # Before ANYTHING else -- an EXCHANGE must not even replay an idempotency
+    # key, because the door it would replay through is shut.
+    _gate_exchange_closed(body.return_type)
     # POS-14: idempotency guard -- look for an existing return with this key.
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.

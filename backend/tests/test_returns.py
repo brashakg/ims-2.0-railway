@@ -508,50 +508,6 @@ def test_create_credit_note_issues_store_credit(ctx):
     assert ctx["customer_repo"].customers["CUST-1"]["store_credit"] == 2000.0
 
 
-def test_exchange_collect_does_not_issue_credit(ctx):
-    tok = _staff_token(["SALES_CASHIER"])
-    payload = _payload(
-        return_type="EXCHANGE",
-        customer_id="CUST-1",
-        replacement_items=[
-            {"product_id": "PRD-9", "name": "Oakley", "sku": "OK-9", "quantity": 1, "unit_price": 2500}
-        ],
-    )
-    # returned_value = 1500, replacement = 2500 -> COLLECT 1000
-    r = ctx["client"].post(
-        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
-    )
-    assert r.status_code == 201
-    data = r.json()
-    assert data["settlement"]["direction"] == "COLLECT"
-    assert data["collect_amount"] == 1000.0
-    assert data["credit_amount"] is None
-    # COLLECT must NOT issue store credit.
-    assert ctx["ledger_coll"].docs == []
-
-
-def test_exchange_refund_issues_credit_for_difference(ctx):
-    tok = _staff_token(["ADMIN"])
-    payload = _payload(
-        return_type="EXCHANGE",
-        customer_id="CUST-1",
-        replacement_items=[
-            {"product_id": "PRD-9", "name": "Local frame", "sku": "LF-9", "quantity": 1, "unit_price": 900}
-        ],
-    )
-    # returned_value = 1500, replacement = 900 -> REFUND 600 as store credit
-    r = ctx["client"].post(
-        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
-    )
-    assert r.status_code == 201
-    data = r.json()
-    assert data["settlement"]["direction"] == "REFUND"
-    assert data["credit_amount"] == 600.0
-    assert len(ctx["ledger_coll"].docs) == 1
-    assert ctx["ledger_coll"].docs[0]["amount"] == 600.0
-    assert ctx["customer_repo"].customers["CUST-1"]["store_credit"] == 600.0
-
-
 def test_create_rejects_no_items(ctx):
     tok = _staff_token(["ADMIN"])
     payload = _payload()
