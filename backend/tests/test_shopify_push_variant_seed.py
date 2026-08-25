@@ -34,7 +34,7 @@ THE FIX (covered here):
     products are never silently re-priced); opt in with
     SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
   * Optional Online Store publish on create, default OFF
-    (SHOPIFY_PUBLISH_ON_CREATE), never for a DRAFT.
+    on every product push, but never for an ARCHIVED product.
   * The three DARK gates and the SIMULATED dry-run are untouched.
 
 ***** SAFETY-CRITICAL: every Shopify call is MOCKED. ***** The network boundary
@@ -969,17 +969,24 @@ def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):
 
 
 # ===========================================================================
-# 5. Sales-channel publish -- default OFF
+# 5. Sales-channel publish -- unconditional (owner ruling 2026-08-25)
 # ===========================================================================
+# "One press, goes live." Publish used to sit behind SHOPIFY_PUBLISH_ON_CREATE
+# (default OFF); the flag is gone. What survives from the old contract is the
+# WITHHOLDING: an unpriced product still never goes visible (a 0.00 listing is
+# worse than no listing), and ARCHIVED is still never resurrected.
 
 
-def test_publish_is_off_by_default(monkeypatch):
+def test_publish_needs_no_flag(monkeypatch):
+    """The press publishes on its own. No env flag is set here."""
     monkeypatch.delenv("SHOPIFY_PUBLISH_ON_CREATE", raising=False)
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
         {
             "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
             "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+            "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
         },
     )
     db = _EngineDB()
@@ -988,16 +995,17 @@ def test_publish_is_off_by_default(monkeypatch):
     db["catalog_products"].insert_one(_product(id="P3"))
     product = db["catalog_products"].find_one({"id": "P3"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.publication is None
-    assert spy.count_for("publishablePublish") == 0
-    assert shopify_push.publish_on_create_enabled() is False
+    assert res.publication == {
+        "published": True,
+        "publication_id": "gid://shopify/Publication/77",
+    }
+    assert spy.count_for("publishablePublish") == 1
 
 
-def test_publish_on_create_when_flag_on_and_product_is_priced_and_active(monkeypatch):
+def test_publish_on_create_when_product_is_priced_and_active(monkeypatch):
     """Publish fires ONLY on the happy path: ACTIVE + seeding succeeded with a
     PRICED row. (The old fixture was priceless and asserted published:True --
     it proved the 0.00 hole instead of guarding it; panel must-fix 1.)"""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1024,10 +1032,11 @@ def test_publish_on_create_when_flag_on_and_product_is_priced_and_active(monkeyp
     ]
 
 
-def test_a_draft_is_never_published_even_with_the_flag_on(monkeypatch):
-    """The owner's publish gate: the 2,032 staged DRAFTs must stay invisible --
-    even a fully PRICED draft (priced fixture per panel must-fix 1)."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
+def test_an_archived_product_is_never_published(monkeypatch):
+    """What replaced the old DRAFT gate. Owner ruling 2026-08-25: ecom.status
+    DRAFT is the un-advanced create-time default that shut the door in the first
+    place, so a press now publishes it. ARCHIVED is a DELIBERATE retirement and
+    is still never resurrected -- even a fully PRICED one."""
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1037,10 +1046,10 @@ def test_a_draft_is_never_published_even_with_the_flag_on(monkeypatch):
         },
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one(_product(id="P5", ecom={"status": "DRAFT"}))
+    db["catalog_products"].insert_one(_product(id="P5", ecom={"status": "ARCHIVED"}))
     product = db["catalog_products"].find_one({"id": "P5"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.payload["status"] == "DRAFT"
+    assert res.payload["status"] == "ARCHIVED"
     assert res.publication is None
     assert spy.count_for("publishablePublish") == 0
 
@@ -1049,7 +1058,6 @@ def test_publish_withheld_when_seeding_failed(monkeypatch):
     """Panel must-fix 1(a): seeding is fail-soft, so a bulk-update userError at
     go-live would previously still publish -- an ACTIVE product LIVE at 0.00.
     The precondition now withholds publish and reports why."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1083,7 +1091,6 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     never go visible -- Shopify's auto-created variant sits at 0.00. Covers
     BOTH unpriced shapes: SKU-only seeding (priced_rows == 0) and
     nothing-to-seed at all (seed_summary is None)."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1125,13 +1132,13 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
 
 def test_push_mode_status_reports_the_new_flags(monkeypatch):
     monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
-    monkeypatch.delenv("SHOPIFY_PUBLISH_ON_CREATE", raising=False)
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
     status = shopify_push.push_mode_status(None)
     assert status["mode"] == "SIMULATED"
     assert status["price_on_update"] is False
-    assert status["publish_on_create"] is False
+    # publish_on_create is GONE -- publish is no longer optional.
+    assert "publish_on_create" not in status
 
 
 # ===========================================================================

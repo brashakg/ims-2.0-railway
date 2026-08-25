@@ -67,15 +67,14 @@ SHOPIFY_ONLINE_LOCATION_ID / the integrations config.
 Optional env flags (all default OFF -- nothing changes unless the owner sets them):
   SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
                                   an UPDATE of an already-mapped product.
-  SHOPIFY_PUBLISH_ON_CREATE=1     publish a newly created ACTIVE product to the
-                                  Online Store sales channel (publishablePublish).
-                                  A DRAFT is NEVER published, and publish is
-                                  WITHHELD unless the variant seeding succeeded
-                                  with at least one PRICED row (a product must
-                                  never go visible at 0.00). The publication id
-                                  can be pinned with SHOPIFY_ONLINE_STORE_PUBLICATION_ID
-                                  (else it is looked up once via `publications`,
-                                  which needs the read_publications scope).
+
+Sales-channel publish is NOT optional and has no flag (owner ruling 2026-08-25,
+"one press, goes live"): every product push publishes to the Online Store
+channel, because an ACTIVE product published to no channel is invisible on the
+storefront. Publish is still WITHHELD unless the price is provably right and the
+product has a photograph ON SHOPIFY. The publication id can be pinned with
+SHOPIFY_ONLINE_STORE_PUBLICATION_ID (else it is looked up once via `publications`,
+which needs the read_publications scope).
 
 FAIL-SOFT: every function returns a structured PushResult and NEVER raises. A
 Shopify/GraphQL error becomes {ok: False, error: ...}; a missing doc becomes a
@@ -168,9 +167,10 @@ class PushResult:
     # are the oversell-guard stock targets persisted for the resolver). None
     # elsewhere.
     variants_seeded: Optional[Any] = None
-    # Product CREATE only, and only when SHOPIFY_PUBLISH_ON_CREATE is on: the
-    # Online-Store sales-channel publish side channel. None when the flag is off
-    # (the default) or the product is a DRAFT.
+    # Product pushes only: the Online-Store sales-channel publish side channel
+    # ({published, publication_id} or {published: False, error}). Runs on every
+    # product push (create AND update). None when the push never reached the
+    # publish step (dry-run, refusal, ARCHIVED).
     publication: Optional[Any] = None
     # Collection pushes only (CUSTOM): the manual-membership side channel (the
     # collectionAddProducts step -- IMS's stored manual member list reproduced on
@@ -207,16 +207,6 @@ def price_on_update_enabled() -> bool:
     return _env_on("SHOPIFY_PUSH_PRICE_ON_UPDATE")
 
 
-def publish_on_create_enabled() -> bool:
-    """SHOPIFY_PUBLISH_ON_CREATE -- default OFF.
-
-    OFF (default): a newly created product is NOT published to the Online Store
-    sales channel, so it stays invisible on the storefront exactly as today.
-    ON: an ACTIVE new product is published via publishablePublish. A DRAFT is
-    never published regardless of the flag (the owner's publish gate)."""
-    return _env_on("SHOPIFY_PUBLISH_ON_CREATE")
-
-
 def push_mode_status(db) -> Dict[str, Any]:
     """Report the CURRENT push posture without pushing anything (drives GET
     /online-store/push/status). Pure read; never raises.
@@ -241,7 +231,6 @@ def push_mode_status(db) -> Dict[str, Any]:
         "api_version": SHOPIFY_API_VERSION,
         # Additive, default-OFF behaviour flags (see the module docstring).
         "price_on_update": price_on_update_enabled(),
-        "publish_on_create": publish_on_create_enabled(),
         "single_writer_note": (
             "IMS is the single Shopify writer (BVI was retired on 2026-07-20). "
             "Push runs LIVE only when IMS_SHOPIFY_WRITES=1 AND "
@@ -648,7 +637,7 @@ mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkI
 }
 """
 
-# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE, default OFF). A product that
+# Sales-channel publish. A product that
 # is ACTIVE but published to NO channel is invisible on the storefront; this is
 # the step that puts it on the Online Store. Only `userErrors` is selected so
 # the operation stays valid across Admin API versions.
@@ -694,10 +683,21 @@ def build_product_input(
         or product.get("sku")
         or "Untitled product"
     )
-    status_map = {"DRAFT": "DRAFT", "PUBLISHED": "ACTIVE", "ARCHIVED": "ARCHIVED"}
+    # OWNER RULING 2026-08-25 -- "one press, goes live": pressing push IS the act
+    # of putting the product in front of customers, so the payload goes out
+    # ACTIVE. This used to map ecom.status through {DRAFT->DRAFT, PUBLISHED->
+    # ACTIVE, ARCHIVED->ARCHIVED} defaulting to DRAFT -- and since every product
+    # is BORN ecom.status=DRAFT and nothing in IMS ever advanced it, every push
+    # ever made sent a DRAFT. The press reported "sent, failed 0" and the brand
+    # page stayed empty. ARCHIVED is the one status still honoured: it is a
+    # deliberate retirement, not an un-advanced create-time default.
     inp: Dict[str, Any] = {
         "title": title,
-        "status": status_map.get(str(ecom.get("status") or "").upper(), "DRAFT"),
+        "status": (
+            "ARCHIVED"
+            if str(ecom.get("status") or "").upper() == "ARCHIVED"
+            else "ACTIVE"
+        ),
     }
     sid = ecom.get("shopify_product_id")
     if sid:
@@ -906,6 +906,21 @@ def _resolve_variant_pricing(
         or _price_float(pricing.get("mrp"))
     )
     return price, mrp
+
+
+def _has_publishable_price(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> bool:
+    """EVERY variant resolves to a positive selling price. Pure.
+
+    The publish precondition for a press that did no seeding (an update whose
+    variants all already carry their gid). One priceless variant is enough to
+    put a 0.00 buy-button on the storefront, so this is `all`, not `any`. A
+    product with no catalog_variants rows is judged on its single implied
+    default variant, which _resolve_variant_pricing resolves from the product /
+    ecom pricing."""
+    rows = list(variants or []) or [{}]
+    return all(_resolve_variant_pricing(product, v)[0] > 0 for v in rows)
 
 
 def _variants_for_price_push(
@@ -1493,7 +1508,7 @@ async def _seed_variants_after_write(
 
 
 # ---------------------------------------------------------------------------
-# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE -- default OFF)
+# Sales-channel publish -- the door that makes an ACTIVE product visible
 # ---------------------------------------------------------------------------
 
 
@@ -1527,8 +1542,10 @@ async def _resolve_online_store_publication_id(db) -> Optional[str]:
 async def _publish_to_online_store(db, product_gid: str) -> Dict[str, Any]:
     """LIVE-only: publish ONE product to the Online Store sales channel so an
     ACTIVE product is actually visible on the storefront. Fail-SOFT side channel
-    (reported, never flips the push's ok). Only ever called on a CREATE, only
-    when SHOPIFY_PUBLISH_ON_CREATE is on, and never for a DRAFT."""
+    (reported, never flips the push's ok). Called on EVERY product push whose
+    payload is ACTIVE, create or update -- publishablePublish is idempotent, so
+    re-publishing an already-published product is a no-op. The caller withholds
+    it unless the price and the photograph are both provably right."""
     pub_id = await _resolve_online_store_publication_id(db)
     if not pub_id:
         return {
@@ -1735,6 +1752,7 @@ def _writeback_product(
     shopify_id: str,
     variant_gid: Optional[str] = None,
     inventory_item_gid: Optional[str] = None,
+    status: Optional[str] = None,
 ) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
@@ -1763,6 +1781,13 @@ def _writeback_product(
     variant row matches a SKU). The caller only ever passes it for the
     product-level pseudo-variant, and it too is set-only, never cleared.
 
+    `status` (optional) records what the storefront now shows: "PUBLISHED" after
+    a successful sales-channel publish, "DRAFT" after a take-down. ecom.status is
+    READ in six places (the Online Store screen's DRAFT / PUBLISHED cards, the
+    storefront-visibility helpers in online_catalog / buy_desk) and before this
+    was written "PUBLISHED" in ZERO -- so IMS said DRAFT about a product that was
+    live. Set-only: None leaves the stored value alone.
+
     We READ-MERGE-WRITE the whole `ecom` sub-doc (read the doc, mutate the ecom
     dict in Python, $set ecom back) rather than `$set {"ecom.shopify_product_id":
     ...}`. Both are correct on real Mongo, but the merge-write also works on the
@@ -1781,6 +1806,8 @@ def _writeback_product(
             ecom["shopify_variant_id"] = variant_gid
         if inventory_item_gid:
             ecom["shopify_inventory_item_id"] = inventory_item_gid
+        if status:
+            ecom["status"] = status
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
@@ -2045,31 +2072,44 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
-        # Sales-channel publish (default OFF): an ACTIVE product published to no
-        # channel is invisible on the storefront. DRAFTs are never published.
+        # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
+        # published to NO channel is invisible on bettervision.in. This used to
+        # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
+        # to a CREATE, so it effectively never ran -- and re-pressing one of the
+        # rows already mapped to Shopify (all of which got there as DRAFTs) could
+        # never make it visible. Owner ruling 2026-08-25 "one press, goes live":
+        # it now runs on every product push, create or update. publishablePublish
+        # is idempotent, so re-publishing an already-published product is a no-op.
         #
-        # PUBLISH PRECONDITION (adversarial-panel must-fix 1): publishing is
-        # WITHHELD unless the seeding step provably priced the variant --
-        # seed_summary exists, carries zero errors, and at least one seeded row
-        # carried a price. Seeding is fail-SOFT (a bulk-update userError or a
-        # priceless-but-PUBLISHED product leaves ok=True), so without this gate
-        # a transient Shopify error at go-live -- or a product with no
-        # resolvable price at all -- would put an ACTIVE product LIVE on the
-        # storefront at Shopify's auto-created 0.00.
+        # PUBLISH PRECONDITION (adversarial-panel must-fix 1, still enforced):
+        # publishing is WITHHELD unless the price is provably right, because
+        # seeding is fail-SOFT (a bulk-update userError or a priceless product
+        # still leaves ok=True) and a 0.00 listing is worse than no listing.
+        #   * a press that SEEDED (create, or an update that repaired/reseeded):
+        #     the seeding must have run clean AND priced at least one row.
+        #   * a press that needed NO seeding: every variant already carries the
+        #     gid an earlier successful seed wrote, so its price is already on
+        #     Shopify -- but IMS must still hold a positive price for every row.
         pub_summary = None
-        if (
-            new_gid
-            and action == "create"
-            and publish_on_create_enabled()
-            and payload.get("status") == "ACTIVE"
-        ):
-            seed_priced_ok = (
-                seed_summary is not None
-                and not seed_summary.get("errors")
-                and int(seed_summary.get("priced_rows") or 0) > 0
-            )
-            if seed_priced_ok:
+        if new_gid and payload.get("status") == "ACTIVE":
+            if seed_summary is not None:
+                priced_ok = (
+                    not seed_summary.get("errors")
+                    and int(seed_summary.get("priced_rows") or 0) > 0
+                )
+            elif full_reseed or repair_only:
+                # Seeding was due but produced nothing to seed -- no price and
+                # no SKU anywhere. Never publish that.
+                priced_ok = False
+            else:
+                priced_ok = _has_publishable_price(product, variants)
+            if priced_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
+                if pub_summary.get("published") and pid:
+                    # IMS must agree with the storefront (see _writeback_product
+                    # `status`): the DRAFT/PUBLISHED cards and every
+                    # storefront-visibility helper read ecom.status.
+                    _writeback_product(db, pid, new_gid, status="PUBLISHED")
             else:
                 pub_summary = {
                     "published": False,
