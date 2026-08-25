@@ -26,6 +26,7 @@ import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
+import { apiDetailMessage } from '../../utils/errorHandler';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { eyeTestWriteBody } from '../../components/clinical/eyeTestPayload';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
@@ -277,20 +278,11 @@ export function ClinicalPage() {
       setSelectedPatient(null);
       setCurrentTestId(null);
       await loadData();
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Surface the backend's specific validation message (e.g. "Right eye CYL
       // value -50 is outside the valid range (-6 to 6)") instead of a generic
       // failure, so the optometrist knows which field to fix.
-      const detail = err?.response?.data?.detail;
-      let msg = 'Failed to save eye test';
-      if (typeof detail === 'string') {
-        msg = detail;
-      } else if (Array.isArray(detail) && detail.length > 0) {
-        const first = detail[0];
-        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : '';
-        msg = field ? `${field}: ${first?.msg || 'invalid value'}` : first?.msg || msg;
-      }
-      toast.error(msg);
+      toast.error(apiDetailMessage(err, 'Failed to save eye test'));
     }
   };
 

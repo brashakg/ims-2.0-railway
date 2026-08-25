@@ -29,6 +29,7 @@ import type { StoredEyeTest } from './eyeTestHydrate';
 import type { EyeTestData, PatientInfo } from './eyeTestTypes';
 // PATIENT SAFETY: one display formatter, one blank-vs-zero rule.
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
+import { apiDetailMessage } from '../../utils/errorHandler';
 
 interface FamilyMember {
   patient_id: string | null;
@@ -358,19 +359,16 @@ export function ClinicPrescriptionHistory({
       setEditingRx(null);
       setEditingTest(null);
       await load();
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Surface the backend's specific message (e.g. "Right eye CYL value -50
       // is outside the valid range") so the optometrist knows which field to
-      // fix, instead of a generic failure.
-      const detail = err?.response?.data?.detail;
-      let msg = 'Failed to update eye test';
-      if (typeof detail === 'string') msg = detail;
-      else if (Array.isArray(detail) && detail.length > 0) {
-        const first = detail[0];
-        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : '';
-        msg = field ? `${field}: ${first?.msg || 'invalid value'}` : first?.msg || msg;
-      }
+      // fix, instead of a generic failure. As a TOAST as well as the banner:
+      // the exam screen is a full-screen overlay ON TOP of the panel that
+      // banner lives in, so on this path the banner alone is invisible and a
+      // refused save would look like nothing happened.
+      const msg = apiDetailMessage(err, 'Failed to update eye test');
       setFormError(msg);
+      toast.error(msg);
     } finally {
       setSaving(false);
     }

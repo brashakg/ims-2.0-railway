@@ -49,8 +49,9 @@ vi.mock('../../../context/AuthContext', () => ({
     user: { id: 'u1', name: 'Dr Rao', roles: ['OPTOMETRIST'], activeStoreId: 'BV-BOK-01' },
   }),
 }));
+const toastError = vi.fn();
 vi.mock('../../../context/ToastContext', () => ({
-  useToast: () => ({ error: () => {}, success: () => {}, warning: () => {}, info: () => {} }),
+  useToast: () => ({ error: (...a: unknown[]) => toastError(...a), success: () => {}, warning: () => {}, info: () => {} }),
 }));
 vi.mock('../../print/storeIdentity', () => ({
   resolveStoreIdentity: () => Promise.resolve(null),
@@ -143,6 +144,7 @@ const STORED_TEST = {
 };
 
 beforeEach(() => {
+  toastError.mockReset();
   getFamilyRx.mockReset();
   getTest.mockReset();
   amendTest.mockReset();
@@ -313,6 +315,26 @@ describe('the binocular IPD is never invented', () => {
     save();
     await waitFor(() => expect(amendTest).toHaveBeenCalledTimes(1));
     expect(amendTest.mock.calls[0][1].ipd).toBeUndefined();
+  });
+});
+
+describe('a refused amendment is not silent', () => {
+  it('shows the message the server sent, over the exam screen', async () => {
+    // The exam screen is a full-screen overlay on top of the panel the inline
+    // error banner lives in, so a banner alone would be invisible: a refused
+    // save would look like nothing happened, and the clinician would walk away
+    // believing a corrected power was stored.
+    amendTest.mockRejectedValue({
+      response: {
+        data: { detail: 'Lensometer Right eye SPH value -9999 is outside the valid range (-25 to 25)' },
+      },
+    });
+    await openExamEditor();
+    save();
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError.mock.calls[0][0]).toContain('-9999');
+    expect(toastError.mock.calls[0][0]).toContain('Lensometer');
   });
 });
 
