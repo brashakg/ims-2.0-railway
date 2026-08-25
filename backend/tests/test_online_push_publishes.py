@@ -1063,3 +1063,39 @@ def test_a_failed_row_is_never_counted_as_processed(db, shopify, monkeypatch):
         "'%d processed' over three products no shopper can find"
         % out["pushed_count"]
     )
+
+
+def test_a_success_with_no_product_id_is_not_reported_as_processed(
+    db, shopify, monkeypatch
+):
+    """A 200 carrying no errors, no userErrors AND no product.
+
+    Everything downstream is gated on the product id -- metafields, variant
+    seeding, the photo attach and the publish block all skip -- so the result
+    would collapse to ok=True and the operator would read a green "1 processed"
+    over a product that does not exist on Shopify. Outside Shopify's documented
+    contract, but "processed means visible" is the invariant this whole change
+    rests on and it has no exceptions.
+
+    The row must also stay QUEUED so the next press creates it properly -- a
+    press that lies AND drops the product would be the worse failure."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _seed(db, _product(pid="P-NOGID"))
+
+    async def _no_product(db_, query, variables):
+        if _Shopify._op(query) == "imsProductCreate":
+            return {"data": {"productCreate": {"product": None, "userErrors": []}}}
+        return await shopify(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", _no_product)
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert out["pushed_count"] == 0, (
+        "'%d processed' over a product Shopify never created" % out["pushed_count"]
+    )
+    assert out["summary"]["products"].get("pushed", 0) == 0
+    assert shopify.calls_of("imsPublishablePublish") == []
+    row = db.get_collection("catalog_products").find_one({"id": "P-NOGID"})
+    assert (row.get("ecom") or {}).get("locally_modified") is True, (
+        "the product was dropped from the queue as well as mis-reported"
+    )

@@ -2246,6 +2246,27 @@ async def push_product(
             )
         prod = ((body.get("data") or {}).get(field_name) or {}).get("product") or {}
         new_gid = prod.get("id") or existing_gid
+        if not new_gid:
+            # A 200 with no errors, no userErrors AND no product id. Outside
+            # Shopify's documented contract, but everything downstream is gated
+            # on the gid -- metafields, variant seeding, the photo attach and
+            # the publish block all skip -- so pub_summary stays None and
+            # published_ok would collapse to True: a green "1 processed" over a
+            # product that does not exist. The row IS left queued, so the next
+            # press creates it properly; this only stops the press LYING about
+            # the one that failed. "Processed means visible" is the invariant
+            # this whole change rests on, and it has no exceptions.
+            return PushResult(
+                entity="product",
+                action=action,
+                ok=False,
+                reason="no_product_id",
+                payload=payload,
+                error=(
+                    "Shopify returned success but no product -- nothing was "
+                    "created. The product is still queued; press again."
+                ),
+            )
         if new_gid and pid:
             _writeback_product(db, pid, new_gid)
         # Metafields ride AFTER the product write so the gid always exists.
