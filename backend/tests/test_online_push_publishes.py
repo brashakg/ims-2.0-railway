@@ -795,3 +795,48 @@ def test_the_owner_can_see_the_third_door_before_he_presses(db, monkeypatch):
     dark = shopify_push.push_mode_status(db)
     assert dark["online_store_publication_id"] is None
     assert dark["online_store_publication_source"] == "unresolved"
+
+
+def test_a_take_down_survives_an_edit_and_the_next_sweep(db, shopify, monkeypatch):
+    """THE HOLE THE TAKE-DOWN LEFT. Delist writes DRAFT and clears the dirty
+    flag -- but build_product_input maps everything except ARCHIVED to ACTIVE,
+    so the ONLY thing holding a product down was the flag being false. Take a
+    bad listing down, let someone edit it to fix it (any price/description save
+    re-queues the row), and the next routine queue-drain used to put it straight
+    back in front of customers, mid-fix."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+    _run(push_router.take_down_product("P1", current_user=_admin()))
+    before = len(shopify.calls_of("imsPublishablePublish"))
+    # The catalogue edit door (products.py / catalog.py) re-queues the row.
+    db["catalog_products"].update_one(
+        {"id": "P1"}, {"$set": {"ecom.locally_modified": True}}
+    )
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert len(shopify.calls_of("imsPublishablePublish")) == before, (
+        "a bulk sweep re-listed a product a human had taken down"
+    )
+    # Skipped is not silent: it gets its own count, like every other refusal.
+    assert out["summary"]["products"].get("taken_down_skipped") == 1
+    assert out["pushed_count"] == 0
+
+
+def test_an_explicit_press_is_what_puts_a_taken_down_product_back(db, shopify, monkeypatch):
+    """CONTROL, and the escape hatch: the sweep must not resurrect it, but the
+    owner pressing THAT product must -- and that press clears the marker, so the
+    row rejoins the ordinary queue afterwards."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    _live_product(db)
+    _run(push_router.take_down_product("P1", current_user=_admin()))
+    shopify.media_on_existing = 1
+    before = len(shopify.calls_of("imsPublishablePublish"))
+
+    out = _run(push_router.push_product("P1", current_user=_admin()))
+
+    assert out["result"]["ok"] is True
+    assert len(shopify.calls_of("imsPublishablePublish")) == before + 1
+    saved = db["catalog_products"].find_one({"id": "P1"})["ecom"]
+    assert saved["status"] == "PUBLISHED"
+    assert "taken_down_at" not in saved, "the take-down marker outlived the press"

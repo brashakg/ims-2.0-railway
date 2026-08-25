@@ -610,10 +610,21 @@ async def push_all_pending(
         #    anything -> FAIL CLOSED: pass blocked=None so push_product skips each
         #    (never ship a possibly-banned product on a DB blip -- finding #18).
         dirty_products: List[Dict] = []
+        # TAKEN DOWN BY HAND -> a bulk sweep NEVER puts it back. The take-down
+        # writes DRAFT and clears the flag, but any catalogue edit re-queues the
+        # row and the mapper sends everything except ARCHIVED as ACTIVE -- so
+        # without this the owner pulls a bad listing, someone edits it to fix
+        # it, and the next queue-drain re-lists it mid-fix. Only an explicit
+        # per-product press clears the marker (a successful publish does).
+        taken_down_skipped = 0
         for doc in _all_docs(db, "catalog_products"):
             ecom = doc.get("ecom")
-            if ecom and ecom.get("locally_modified"):
-                dirty_products.append(doc)
+            if not (ecom and ecom.get("locally_modified")):
+                continue
+            if ecom.get("taken_down_at"):
+                taken_down_skipped += 1
+                continue
+            dirty_products.append(doc)
         dirty_skus = [d.get("sku") for d in dirty_products if d.get("sku")]
         blocked_set, block_verifiable = online_block.classify_blocked_skus(
             db, dirty_skus
@@ -646,6 +657,10 @@ async def push_all_pending(
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "blocked_skipped"
             ] = blocked_skipped
+        if taken_down_skipped:
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
+                "taken_down_skipped"
+            ] = taken_down_skipped
 
     # OPT-IN price/barcode resync (never in the default set -- the product
     # sweep above already pushes prices as part of each product push). Targets

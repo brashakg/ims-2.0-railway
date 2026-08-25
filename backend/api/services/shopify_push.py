@@ -1905,6 +1905,17 @@ def _writeback_product(
             ecom["shopify_inventory_item_id"] = inventory_item_gid
         if status:
             ecom["status"] = status
+            # THE TAKE-DOWN MARKER. Delist writes DRAFT and clears the dirty
+            # flag, but build_product_input maps everything except ARCHIVED to
+            # ACTIVE -- so the only thing holding a product down was the flag
+            # being false, and any catalogue edit re-queues it for the next
+            # sweep to silently re-list mid-fix. Stamped here (and cleared by a
+            # successful publish, the only writer of PUBLISHED) so the SWEEP can
+            # skip it until a human presses that one product explicitly.
+            if status == "DRAFT":
+                ecom["taken_down_at"] = _now()
+            elif status == "PUBLISHED":
+                ecom.pop("taken_down_at", None)
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
