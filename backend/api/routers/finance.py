@@ -3856,14 +3856,16 @@ _CASH_SESSIONS = "cash_register_sessions"
 
 # The count-sheet line is defined ONCE, in services/cash_denominations.py.
 # This alias keeps the name this router has always used without holding a
-# fourth copy of the shape for the four to drift apart.
+# fourth copy of the shape for the four to drift apart. The LIST is
+# ``cash_denom.CountSheet`` -- lenient rows inside a strict list still 422'd a
+# sheet sent as a bare string, which is a refusal one level up.
 DenominationLine = cash_denom.DenominationRow
 
 
 class CashRegisterOpen(BaseModel):
     store_id: Optional[str] = None
     shift: Optional[str] = None  # AM / PM / FULL (free text)
-    denominations: List[DenominationLine] = Field(default_factory=list)
+    denominations: cash_denom.CountSheet = Field(default_factory=list)
     # COUNTED | SUGGESTED | NOT_CAPTURED -- an untouched grid is recorded as
     # never counted, never as an empty float.
     opening_count_state: Optional[str] = None
@@ -3873,7 +3875,7 @@ class CashRegisterOpen(BaseModel):
 
 class CashRegisterClose(BaseModel):
     session_id: str
-    denominations: List[DenominationLine] = Field(default_factory=list)
+    denominations: cash_denom.CountSheet = Field(default_factory=list)
     # COUNTED | SUGGESTED | NOT_CAPTURED -- so a close with an untouched
     # grid is recorded as never counted rather than as an empty drawer.
     closing_count_state: Optional[str] = None

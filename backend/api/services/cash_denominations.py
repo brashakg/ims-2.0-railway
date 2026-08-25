@@ -43,9 +43,9 @@ No emoji (Windows cp1252).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Annotated, Any, Dict, Iterable, List, Optional, Tuple
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # The ONE ladder. Indian currency in circulation (RBI): Rs 2000 is withdrawn.
@@ -67,10 +67,15 @@ _VALID_STATES = (STATE_COUNTED, STATE_SUGGESTED, STATE_NOT_CAPTURED)
 # Ceilings, not gates. Every figure in a count block ends up in a Mongo
 # document, and BSON integers are 8 bytes (max 9.22e18) -- an absurd
 # ``pieces``/``face``/scalar would raise OverflowError on the write, i.e. a 500
-# on a sale. These caps keep the arithmetic representable
-# (MAX_FACE * 100 * MAX_PIECES = 1e15, and a whole sheet of such rows still
-# fits) while a garbage entry stays RECORDED and FLAGGED instead of rejected.
-# All three are far beyond anything a real drawer can hold.
+# on a sale. These caps keep the arithmetic representable while a garbage entry
+# stays RECORDED and FLAGGED instead of rejected. All three are far beyond
+# anything a real drawer can hold.
+#
+# A ROW is capped at MAX_FACE * 100 * MAX_PIECES = 1e15. A SHEET IS NOT THE SUM
+# OF ITS CAPS: 9,224 such rows already exceed 9.22e18, so every place that adds
+# rows up (``_sheet_total_paisa``, ``merge_rows``) applies the cap AGAIN to the
+# total. Capping the row alone was the same 500-on-a-sale one order of
+# magnitude up.
 MAX_PIECES = 10**7
 MAX_FACE = 10**6
 MAX_PAISA = 10**15
@@ -193,9 +198,21 @@ def normalize_rows(rows: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str, A
     return out
 
 
+def _sheet_total_paisa(norm: Iterable[Dict[str, Any]]) -> int:
+    """The total of an ALREADY-NORMALISED sheet, in paisa, capped at MAX_PAISA.
+
+    THE ONE PLACE A SHEET IS ADDED UP. A row is capped, but a sheet of capped
+    rows is not: ~9,224 rows at the ceilings overflow the 8-byte BSON int, and
+    that OverflowError is a 500 on the write -- the same failure the row cap
+    exists to prevent. Rows are non-negative by construction (pieces >= 0,
+    face > 0), so the cap is a ceiling only. An absurd sheet is stored, capped
+    and FLAGGED through ``matches_amount`` -- never refused."""
+    return min(sum(r["line_total_paisa"] for r in norm), MAX_PAISA)
+
+
 def total_paisa(rows: Optional[Iterable[Dict[str, Any]]]) -> int:
     """Sum of face*100*pieces across count rows, in PAISA. Pure."""
-    return sum(r["line_total_paisa"] for r in normalize_rows(rows))
+    return _sheet_total_paisa(normalize_rows(rows))
 
 
 def merge_rows(*row_lists: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -223,7 +240,10 @@ def merge_rows(*row_lists: Optional[Iterable[Dict[str, Any]]]) -> List[Dict[str,
     )
     out: List[Dict[str, Any]] = []
     for kind, face in order + extras:
-        pieces = merged.get((kind, face), 0)
+        # Re-clamp: folding many capped rows onto ONE face makes a piece count
+        # no single row could hold, and face * 100 * that is an 8-byte
+        # overflow on the write (see the ceiling note at the top).
+        pieces = _coerce_pieces(merged.get((kind, face), 0))
         if pieces <= 0:
             continue
         out.append(
@@ -354,7 +374,7 @@ def build_block(
         return not_captured_block(amount_paisa)
 
     resolved = requested or STATE_COUNTED
-    total = sum(r["line_total_paisa"] for r in norm)
+    total = _sheet_total_paisa(norm)
     try:
         amount = int(amount_paisa or 0)
     except (TypeError, ValueError):
@@ -389,7 +409,7 @@ def build_drawer_block(
         requested = None
     if requested == STATE_NOT_CAPTURED or (requested is None and not norm):
         return not_captured_block(0)
-    total = sum(r["line_total_paisa"] for r in norm)
+    total = _sheet_total_paisa(norm)
     return build_block(norm, total, state=requested or STATE_COUNTED, actor=actor, now=now)
 
 
@@ -428,6 +448,18 @@ class DenominationRow(_LenientModel):
     face: Any = Field(default=None, description="Face value in whole rupees")
     kind: Any = Field(default=KIND_NOTE, description="'note' or 'coin'")
     pieces: Any = Field(default=0, description="How many of them")
+
+
+def _rows_or_nothing(value: Any) -> Any:
+    """A count sheet that is not a LIST at all -- a bare string, a number --
+    is an unusable sheet, not a bad request: it becomes an empty one."""
+    return value if isinstance(value, list) else []
+
+
+#: A whole count sheet on the wire. Use this, never a bare
+#: ``List[DenominationRow]``: the row model is lenient but the LIST around it
+#: still 422'd, which is the same refusal one level up.
+CountSheet = Annotated[List[DenominationRow], BeforeValidator(_rows_or_nothing)]
 
 
 class CashCountInput(_LenientModel):
@@ -552,6 +584,25 @@ def is_captured(block: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(block, dict):
         return False
     return str(block.get("state")) in (STATE_COUNTED, STATE_SUGGESTED)
+
+
+def restate_amount(
+    block: Dict[str, Any], amount_paisa: Any
+) -> Dict[str, Any]:
+    """Point a DRAWER-COUNT block at the figure actually being stored, and
+    re-derive ``matches_amount`` from it. Mutates and returns the block.
+
+    A drawer block is built before the close knows its final counted figure (a
+    typed override, or a count the other door already owns), so its
+    ``amount_paisa`` would otherwise reconcile against a stale zero. An
+    un-captured block claims nothing and keeps ``matches_amount: None``."""
+    try:
+        block["amount_paisa"] = int(amount_paisa or 0)
+    except (TypeError, ValueError):
+        block["amount_paisa"] = 0
+    if is_captured(block):
+        block["matches_amount"] = block["total_paisa"] == block["amount_paisa"]
+    return block
 
 
 def is_flagged(block: Optional[Dict[str, Any]]) -> bool:

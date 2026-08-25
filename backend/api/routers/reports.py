@@ -5852,11 +5852,9 @@ async def create_day_end_close(
     if closing_cash is not None:
         # For a DRAWER COUNT the count is the amount, so the block reconciles
         # against the figure being stored rather than against a stale zero.
-        closing_block["amount_paisa"] = cash_denom.rupees_to_paisa(closing_cash)
-        if cash_denom.is_captured(closing_block):
-            closing_block["matches_amount"] = (
-                closing_block["total_paisa"] == closing_block["amount_paisa"]
-            )
+        cash_denom.restate_amount(
+            closing_block, cash_denom.rupees_to_paisa(closing_cash)
+        )
     system_cash = (
         round(float(body.system_cash), 2) if body.system_cash is not None else None
     )

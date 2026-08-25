@@ -69,6 +69,7 @@ from api.routers.returns import (  # noqa: E402
     RefundTenderLine,
     _normalize_refund_tenders,
 )
+from api.routers.finance import CashRegisterClose  # noqa: E402
 from api.routers.till import OpenSession  # noqa: E402
 from api.services import cash_denominations as cd  # noqa: E402
 from database.repositories.order_repository import OrderRepository  # noqa: E402
@@ -410,6 +411,45 @@ class TestGarbageInTheCountSheetNeverTouchesTheSale:
             assert block["rows"][0]["pieces"] == cd.MAX_PIECES
             assert block["total_paisa"] < 2**63
 
+    async def test_an_absurd_SHEET_is_written_not_a_500(self, sale):
+        """THE CLAMP CAPPED A ROW, NEVER THE SHEET. A row maxes out at
+        MAX_FACE * 100 * MAX_PIECES = 1e15, so ~9,224 of them already exceed
+        the 8-byte BSON int -- and the sheet total is what goes into the
+        document. 9,300 rows returned HTTP 500 with ZERO payments persisted
+        and payment_status UNPAID: the same swallowing catch, one order of
+        magnitude up. Capped and FLAGGED, never refused."""
+        rows = _t_rows(*[(cd.MAX_FACE, cd.MAX_PIECES)] * 10_000)
+
+        ctx = sale(order_id="ORD-BIG-SHEET")
+        await _pay(
+            ctx["order_id"],
+            _body(cash_tendered={"rows": rows, "state": "COUNTED"}),
+        )
+        pay = _paid_row(ctx)
+
+        # THE REAL ENCODER: this is the production failure (OverflowError on
+        # the write). mongomock stores unbounded Python ints and never sees it.
+        assert bson.encode(pay)
+        assert pay["amount"] == 1600.0
+        block = pay["cash_tendered_count"]
+        # Every row is still RECORDED -- nothing was dropped to make it fit.
+        assert len(block["rows"]) == 10_000
+        assert block["total_paisa"] == cd.MAX_PAISA
+        assert block["total_paisa"] < 2**63
+        assert block["matches_amount"] is False  # flagged, not silently "right"
+
+    def test_folding_absurd_rows_onto_one_face_is_capped_too(self):
+        """The other place a sheet is added up: ``merge_rows`` folds several
+        legs onto one row per (kind, face), and 10,000 capped rows on the SAME
+        face make a piece count no single row could hold -- face * 100 * that
+        is the same overflow on the returns door, which folds two CASH legs."""
+        merged = cd.merge_rows(*[[{"face": cd.MAX_FACE, "pieces": cd.MAX_PIECES}]] * 10_000)
+
+        assert len(merged) == 1
+        assert merged[0]["pieces"] == cd.MAX_PIECES
+        assert merged[0]["line_total_paisa"] == cd.MAX_PAISA
+        assert bson.encode({"rows": merged})
+
 
 # ===========================================================================
 # THE OTHER TWO DOORS -- the same shared wire model
@@ -551,3 +591,15 @@ class TestTheDrawerDoors:
             ("note", 100, cd.MAX_PIECES),
         ]
         assert bson.encode({"opening_denominations": rows})
+
+    @pytest.mark.parametrize("junk", ["ninety five hundred", 500, {"face": 500}])
+    def test_a_whole_sheet_sent_as_junk_is_an_empty_sheet_not_a_422(self, junk):
+        """The ROW model was lenient while the LIST around it was not, so a
+        sheet sent as a bare string still 422'd -- a refusal one level up, at
+        the same doors whose rule is that a count sheet never blocks the
+        money."""
+        assert OpenSession(opening_denominations=junk).opening_denominations == []
+        assert (
+            CashRegisterClose(session_id="CR-1", denominations=junk).denominations
+            == []
+        )

@@ -116,7 +116,9 @@ def _raise(res: Dict[str, Any]):
 
 # The count-sheet line is defined ONCE, in services/cash_denominations.py.
 # This alias keeps the name this router has always used without holding a
-# second copy of the shape for the two to drift apart.
+# second copy of the shape for the two to drift apart. The LIST is
+# ``cash_denom.CountSheet`` -- lenient rows inside a strict list still 422'd a
+# sheet sent as a bare string, which is a refusal one level up.
 DenominationLine = cash_denom.DenominationRow
 
 
@@ -124,7 +126,7 @@ class OpenSession(BaseModel):
     store_id: Optional[str] = None
     session_date: Optional[str] = Field(None, description="IST day YYYY-MM-DD; defaults to today")
     shift: Optional[str] = None
-    opening_denominations: List[DenominationLine] = Field(default_factory=list)
+    opening_denominations: cash_denom.CountSheet = Field(default_factory=list)
     opening_count_state: Optional[str] = Field(
         None, description="COUNTED | SUGGESTED | NOT_CAPTURED (blank is not zero)"
     )
@@ -133,7 +135,7 @@ class OpenSession(BaseModel):
 
 
 class BlindSubmit(BaseModel):
-    blind_denominations: List[DenominationLine] = Field(default_factory=list)
+    blind_denominations: cash_denom.CountSheet = Field(default_factory=list)
     closing_count_state: Optional[str] = Field(
         None, description="COUNTED | SUGGESTED | NOT_CAPTURED (blank is not zero)"
     )
