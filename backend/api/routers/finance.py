@@ -34,6 +34,8 @@ from ..services.salary_visibility import (
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
 from ..services import je_service
+from ..services import cash_denominations as cash_denom
+from ..services import eod_tally as till_service
 from ..services import name_resolver
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
@@ -3852,16 +3854,19 @@ async def get_period_status(
 _CASH_SESSIONS = "cash_register_sessions"
 
 
-class DenominationLine(BaseModel):
-    face: int = Field(..., description="Face value in rupees, e.g. 500")
-    pieces: int = Field(0, ge=0, description="Number of notes/coins of this face")
-    kind: str = Field("note", description="'note' or 'coin'")
+# The count-sheet line is defined ONCE, in services/cash_denominations.py.
+# This alias keeps the name this router has always used without holding a
+# fourth copy of the shape for the four to drift apart.
+DenominationLine = cash_denom.DenominationRow
 
 
 class CashRegisterOpen(BaseModel):
     store_id: Optional[str] = None
     shift: Optional[str] = None  # AM / PM / FULL (free text)
     denominations: List[DenominationLine] = Field(default_factory=list)
+    # COUNTED | SUGGESTED | NOT_CAPTURED -- an untouched grid is recorded as
+    # never counted, never as an empty float.
+    opening_count_state: Optional[str] = None
     opening_float: Optional[float] = None  # optional override of denom sum
     note: Optional[str] = None
 
@@ -3869,6 +3874,9 @@ class CashRegisterOpen(BaseModel):
 class CashRegisterClose(BaseModel):
     session_id: str
     denominations: List[DenominationLine] = Field(default_factory=list)
+    # COUNTED | SUGGESTED | NOT_CAPTURED -- so a close with an untouched
+    # grid is recorded as never counted rather than as an empty drawer.
+    closing_count_state: Optional[str] = None
     bank_deposit: float = 0.0
     counted_override: Optional[float] = None  # optional override of denom sum
     tolerance: float = 0.0
@@ -4400,7 +4408,17 @@ async def open_cash_register(
         "status": "OPEN",
         "shift": (body.shift or "").upper() or None,
         "opening_float": opening_float,
+        # LEGACY SHAPE, unchanged -- every existing reader of this collection
+        # keeps working byte-for-byte.
         "opening_denominations": denoms,
+        # THE SHARED SHAPE. Same rows, plus the state, so a float nobody
+        # counted reads NOT_CAPTURED instead of as an empty drawer.
+        "opening_count": cash_denom.build_block(
+            denoms,
+            cash_denom.rupees_to_paisa(opening_float),
+            state=body.opening_count_state,
+            actor=current_user,
+        ),
         "opened_at": now,
         "opened_by": current_user.get("user_id"),
         "opened_by_name": current_user.get("name"),
@@ -4520,12 +4538,62 @@ async def close_cash_register(
         db, store_id, start_iso, end_iso, cash_refunds
     )
 
+    # TWO DOORS, ONE RECORD: this close and POS Day-End land the SAME counted
+    # drawer on the SAME till session for the day, so the two screens can never
+    # hold two different answers. The rupee arithmetic above is UNCHANGED --
+    # this only links and shares the count. Fail-soft: linking must never stop
+    # a store closing its till, and a failure is reported, not hidden.
+    till_link = till_service.record_screen_close(
+        db,
+        store_id=store_id,
+        # The BUSINESS day, in the same frame everything else uses. `end_iso`
+        # is a NAIVE-UTC instant, so slicing its first ten characters reads
+        # the UTC day: a till closed between 00:00 and 05:30 IST would link
+        # to YESTERDAY's session while this console files the very same row
+        # under today (it already parses-then-shifts, just below). Same
+        # helper, same answer.
+        session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
+        closing_rows=[d.model_dump() for d in body.denominations],
+        closing_count_state=body.closing_count_state,
+        # The counted figure this screen is storing. It is only forwarded as the
+        # count when no grid came with it; with a grid, the notes rule and this
+        # is used to notice a `counted_override` that disagrees with them.
+        #
+        # NOTHING COUNTED -> NOTHING FORWARDED. `counted` is 0.0 when the grid
+        # is blank and no override was typed, because it is the sum of nothing.
+        # Passing that on would submit "the drawer held Rs 0.00" to the shared
+        # record -- the exact blank-persisted-as-emptied defect this work
+        # removes, moved onto the record all three screens read.
+        counted_paisa=(
+            cash_denom.rupees_to_paisa(counted)
+            if (denoms or body.counted_override is not None)
+            else None
+        ),
+        actor=current_user,
+    )
+
     update = {
         "status": "CLOSED",
         "closed_at": end_iso,
         "closed_by": current_user.get("user_id"),
         "closed_by_name": current_user.get("name"),
         "closing_denominations": denoms,
+        # The shared Cash Count Block + the session it belongs to.
+        "closing_count": cash_denom.build_block(
+            denoms, cash_denom.rupees_to_paisa(counted),
+            state=body.closing_count_state, actor=current_user,
+        ),
+        "till_session_id": till_link.get("session_id"),
+        "till_link_ok": bool(till_link.get("ok")),
+        "till_link_error": till_link.get("error"),
+        "till_already_counted": bool(till_link.get("already_counted")),
+        "till_counted": bool(till_link.get("counted")),
+        "till_opening_float_not_recorded": bool(
+            till_link.get("opening_float_not_recorded")
+        ),
+        # True when this screen's counted figure and the shared record's differ
+        # -- i.e. a manual override was typed over the notes. Visible, not silent.
+        "till_count_differs": bool(till_link.get("count_differs")),
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
@@ -4897,6 +4965,9 @@ async def cash_reconciliation_summary(
                 "closed_by": closed_by,
                 "closed_by_name": s.get("closed_by_name"),
                 "closed_at": closed_at,
+                # The shared till session this close landed on, if any. Used
+                # below to make sure ONE counted drawer is ONE row here.
+                "till_session_id": s.get("till_session_id"),
             }
         )
 
@@ -4973,6 +5044,29 @@ async def cash_reconciliation_summary(
                 "zread_number": s.get("zread_number"),
             }
         )
+
+    # --- 2b) ONE COUNTED DRAWER, ONE ROW -----------------------------------
+    # Since both close screens land on the SAME till session, a drawer closed
+    # from Finance > Cash Register and then locked as a Z-Read would otherwise
+    # appear TWICE in this grid -- the same money counted once, reported as two
+    # days' worth. Where a cash-register row names a till session that is also
+    # in this grid, the till row is the survivor (it is the shared record, and
+    # it carries the Z-Read number); the cash-register row is folded into it so
+    # nothing about who closed it is lost.
+    till_row_ids = {
+        r["session_id"] for r in rows if r.get("source") == "BLIND_EOD" and r.get("session_id")
+    }
+    if till_row_ids:
+        by_id = {r["session_id"]: r for r in rows if r.get("source") == "BLIND_EOD"}
+        survivors: List[dict] = []
+        for r in rows:
+            linked = r.get("till_session_id")
+            if r.get("source") == "CASH_REGISTER" and linked in till_row_ids:
+                by_id[linked]["also_closed_from"] = r.get("session_id")
+                by_id[linked]["also_closed_from_source"] = "CASH_REGISTER"
+                continue
+            survivors.append(r)
+        rows = survivors
 
     # Resolve any missing closer names in one batch, then backfill.
     if pending_user_ids:

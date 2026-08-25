@@ -530,6 +530,12 @@ def open_session(
         "opening_count": _denom.build_block(
             denoms, declared, state=opening_count_state, actor=actor
         ),
+        # A session opened for a day nobody declared a float on (the auto-open
+        # a close screen does for a past date) has an opening float of ZERO
+        # because that is the only arithmetic available -- but a float nobody
+        # recorded is NOT a float of nothing. This flag is how the screen says
+        # so out loud instead of letting a fabricated variance stand.
+        "opening_float_not_recorded": not (bool(denoms) or opening_float_paisa is not None),
         "opened_at": now,
         "opened_by": cashier_id,
         "opening_note": note,
@@ -599,6 +605,7 @@ def blind_submit(
     blind_denominations: Optional[List[Dict[str, Any]]] = None,
     closing_count_state: Optional[str] = None,
     blind_count_paisa: Optional[int] = None,
+    allow_uncounted_total: bool = False,
     cash_payouts_paisa: int = 0,
     window_start: Any = None,
     window_end: Any = None,
@@ -644,7 +651,14 @@ def blind_submit(
 
     denoms = normalize_denominations(blind_denominations)
     denom_total = total_paisa_from_denominations(denoms)
-    if blind_count_paisa is not None and int(blind_count_paisa) != denom_total:
+    # ``allow_uncounted_total``: a total with NO grid behind it is not a UI bug,
+    # it is the legacy single-number close (POS Day-End types a figure and skips
+    # the breakdown). There is nothing for the total to disagree WITH, so the
+    # integrity check has nothing to check. It still applies in full the moment
+    # a grid exists, and the native blind-EOD door never passes this flag -- its
+    # behaviour is unchanged.
+    skip_integrity = bool(allow_uncounted_total) and not denoms
+    if blind_count_paisa is not None and not skip_integrity and int(blind_count_paisa) != denom_total:
         # Denomination integrity: a supplied total must match the grid exactly.
         return {
             "ok": False,
@@ -742,6 +756,169 @@ def blind_submit(
     )
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
+
+
+# ---------------------------------------------------------------------------
+# TWO DOORS, ONE RECORD
+# ---------------------------------------------------------------------------
+
+
+def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
+    """Fail-soft wrapper. See ``_record_screen_close``.
+
+    Linking a close to the shared record must NEVER be able to stop a store
+    closing its day, so every exception below this line -- a database blip, a
+    malformed legacy session, anything -- becomes a reported failure rather
+    than a 500 on the close screen. The screen's own record is written either
+    way, and the failure is stored on it rather than swallowed."""
+    try:
+        return _record_screen_close(db, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"link_failed:{exc}"}
+
+
+def _record_screen_close(
+    db,
+    *,
+    store_id: str,
+    session_date: str,
+    closing_rows: Optional[List[Dict[str, Any]]] = None,
+    closing_count_state: Optional[str] = None,
+    counted_paisa: Optional[int] = None,
+    cash_payouts_paisa: int = 0,
+    actor: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Land a closing count from EITHER close screen on the SAME till session.
+
+    POS Day-End and Finance > Cash Register are two DOORS. This is the one
+    RECORD behind them. Whichever screen closes first creates (or joins) the
+    single (store, date) session -- guarded by the collection's partial unique
+    index -- and submits the count. Whichever closes second finds that session
+    already counted and joins it: it does NOT open a second drawer and does NOT
+    overwrite the first count. Two screens can therefore never show two
+    different answers for one day, because there is only one answer.
+
+    A CLOSE WITH NOTHING COUNTED SUBMITS NOTHING. If the screen sent neither a
+    grid nor a typed total, the session is opened/joined and left OPEN -- it is
+    NOT blind-submitted with a count of zero. Writing zero here would put the
+    exact defect this work removes (blank persisted as an emptied drawer) onto
+    the shared record, where three screens would then read it.
+
+    FAIL-SOFT BY DESIGN. Every failure path returns ``ok: False`` with a reason
+    rather than raising -- and ``record_screen_close`` catches anything that
+    still escapes -- because linking to the shared record must not be able to
+    stop a store closing its day. The calling screen's own record is written
+    either way, and a failure here is surfaced, not swallowed into a fake
+    success."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        return {"ok": False, "error": "no_db"}
+    try:
+        existing = coll.find_one(
+            {
+                "store_id": store_id,
+                "session_date": session_date,
+                "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"read_failed:{exc}"}
+
+    created = False
+    if existing is None:
+        opened = open_session(
+            db,
+            store_id=store_id,
+            session_date=session_date,
+            actor=actor,
+        )
+        if not opened.get("ok"):
+            return {"ok": False, "error": opened.get("error", "open_failed")}
+        existing = opened["session"]
+        created = not opened.get("already_open", False)
+
+    session_id = existing.get("session_id") or existing.get("_id")
+    status = str(existing.get("status"))
+    # A day whose float nobody declared: expected cash is computed with an
+    # opening of zero because that is the only arithmetic available. The
+    # caller carries this flag onto its own record so the screen can say so
+    # rather than letting a fabricated variance stand unexplained.
+    float_missing = bool(existing.get("opening_float_not_recorded"))
+    if status in (STATUS_BLIND_SUBMITTED, STATUS_LOCKED):
+        # Already counted through the other door. The first count STANDS -- a
+        # second screen must not be able to quietly restate a signed-off
+        # drawer. The caller links to it and says so.
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "session": existing,
+            "created": created,
+            "opening_float_not_recorded": float_missing,
+            "already_counted": True,
+        }
+
+    rows = normalize_denominations(closing_rows)
+    state_captured = str(closing_count_state or "").upper() in (
+        _denom.STATE_COUNTED,
+        _denom.STATE_SUGGESTED,
+    )
+    if not rows and not state_captured and counted_paisa is None:
+        # Nothing was counted at all. Link the day to its session; submit no
+        # count. An OPEN session is an honest "not counted yet"; a submitted
+        # zero would be a lie the whole till reads.
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "session": existing,
+            "created": created,
+            "opening_float_not_recorded": float_missing,
+            "already_counted": False,
+            "counted": False,
+            "not_captured": True,
+        }
+
+    # The grid rules when there is a grid: the till's own integrity check (a
+    # supplied total must equal the notes) stays in force. A typed total is only
+    # forwarded when no grid came with it -- the legacy single-number close.
+    forward_total = None if rows else counted_paisa
+    res = blind_submit(
+        db,
+        session_id,
+        blind_denominations=closing_rows,
+        closing_count_state=closing_count_state,
+        blind_count_paisa=forward_total,
+        allow_uncounted_total=not rows,
+        cash_payouts_paisa=cash_payouts_paisa,
+        actor=actor,
+    )
+    if not res.get("ok"):
+        if res.get("error") in ("already_submitted", "already_locked"):
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "created": created,
+            "opening_float_not_recorded": float_missing,
+                "already_counted": True,
+                "counted": True,
+            }
+        return {"ok": False, "error": res.get("error", "submit_failed")}
+    submitted = int((res["session"] or {}).get("blind_count_paisa") or 0)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "session": res["session"],
+        "created": created,
+        "opening_float_not_recorded": float_missing,
+        "already_counted": False,
+        "counted": True,
+        "submitted_paisa": submitted,
+        # The screen's own figure and the shared record's figure are the same
+        # number unless the screen used an override that disagreed with its own
+        # notes. That is a pre-existing hazard; here it becomes visible.
+        "count_differs": (
+            counted_paisa is not None and int(counted_paisa) != submitted
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
