@@ -56,6 +56,12 @@ _PATTERN = re.compile(
     r"|datetime\([^)]*,\s*1\s*\)"
     r"|23,\s*59,\s*59"
     r"|\.replace\(day=1\)"
+    # Round-5 widening (the nexus nightly-export find): `replace(hour=0, ...)`
+    # collapses an instant to ITS OWN frame's midnight. On an IST wall clock
+    # that is the IST day start; on a UTC instant it is the UTC box day, which
+    # is the IST day shifted 5h30m late -- and when the job that uses it runs
+    # on an IST schedule, the two disagree about which day is finished.
+    r"|replace\(hour=0"
 )
 
 _SKIP_DIRS = {"tests", "__pycache__", ".git", "node_modules", ".venv"}
@@ -505,6 +511,61 @@ ALLOWED = {
     ): (
         "Upper half of the leave from_date calendar year bound above -- "
         "same ruling, two occurrences."
+    ),
+    # -----------------------------------------------------------------------
+    # Round-5 widening survivors: replace(hour=0, ...). The question at each
+    # site is WHOSE midnight: an IST wall clock collapsed to midnight is the
+    # IST day start (correct); a UTC instant collapsed to midnight is the UTC
+    # box day, which only survives here where it is a self-consistent key or
+    # a same-frame duration, never a business-day window on an IST schedule.
+    # -----------------------------------------------------------------------
+    (
+        "api/routers/analytics.py",
+        "start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)",
+    ): (
+        "RULED, round 3: the whole /analytics/dashboard family reads the box "
+        "clock (end_date = datetime.now()) for its period windows, and the "
+        "docstring at the site records why a half-fix is worse -- it would "
+        "anchor the revenue figures and the customer split on the SAME "
+        "screen to two different midnights. A dashboard band, not a dated "
+        "document; scheduled by nobody."
+    ),
+    (
+        "api/routers/reports.py",
+        "today = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)",
+    ): (
+        "Already the IST frame: now_ist() is the IST wall clock, so its "
+        "midnight IS the IST day start (and the value feeds strftime date "
+        "STRINGS compared against IST business-day columns). This is the "
+        "correct shape, kept visible so the pattern's next reader can tell "
+        "the two cases apart."
+    ),
+    (
+        "core/subagents.py",
+        "today = now.replace(hour=0, minute=0, second=0, microsecond=0)",
+    ): (
+        "SOPComplianceAgent, the PRE-Phase-3 legacy agent module superseded "
+        "by agents/implementations/. It bounds `till_closings.date` -- a "
+        "collection NO code anywhere writes and which does not exist in "
+        "production (verified 2026-08-24), so the query matches nothing "
+        "regardless of frame. It is also manual-trigger-only (SUPERADMIN "
+        "POST /agents/run-all), never scheduled, so no IST-vs-UTC schedule "
+        "skew like the nexus export's can arise. Ruled rather than fixed: "
+        "shifting a dead query in a superseded module is churn. If anyone "
+        "ever writes till_closings, this becomes a real day-frame bug and "
+        "must move to the BOUND rule first."
+    ),
+    (
+        "agents/implementations/taskmaster.py",
+        ".replace(hour=0, minute=0, second=0, microsecond=0)",
+    ): (
+        "RULED, round 3 (comment at the site): a PO-dedupe KEY, not a "
+        "displayed date -- both sides are aware-UTC ISO strings this same "
+        "function writes, one self-consistent frame, nothing dropped. A run "
+        "straddling UTC midnight can double-draft one PO, but every "
+        "auto-draft is Tier-2 requires_approval so a human sees both. "
+        "Aligning would desync this dedupe-key class from follow_ups/kicker "
+        "and open a one-off duplicate window at the switchover."
     ),
 }
 
