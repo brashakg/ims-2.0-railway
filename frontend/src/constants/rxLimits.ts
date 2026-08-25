@@ -61,7 +61,14 @@ export const RX_LIMITS: Record<RxLimitField, RxLimit> = {
   add: { min: 0.75, max: 4.0, step: 0.25, plusOnly: true, label: 'ADD' },
   pd: { min: 40, max: 80, step: 0.5, label: 'PD' },
   pd_mono: { min: 20, max: 45, step: 0.5, label: 'PD' },
-  k: { min: 30, max: 60, step: 0.01, label: 'K reading' },
+  // KERATOMETRY has NO step grid. The server says so in as many words
+  // (rx_validation _RX_LIMITS: "NOT on the 0.25 grid (devices report
+  // 0.05/0.125 steps)") and range-checks it alone. A 0.01 grid here refused
+  // 43.125 -- a reading an auto-refractometer genuinely produces and the
+  // server genuinely stores -- so a record written by a device or the API
+  // could not be re-saved from the Edit screen. `isOnStep` treats a step of
+  // 0 as "no grid".
+  k: { min: 30, max: 60, step: 0, label: 'K reading' },
   base_curve: { min: 8.0, max: 9.5, step: 0.1, label: 'Base Curve' },
   diameter: { min: 13.0, max: 15.0, step: 0.1, label: 'Diameter' },
 };
