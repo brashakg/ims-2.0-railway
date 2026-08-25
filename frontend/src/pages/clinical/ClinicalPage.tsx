@@ -27,7 +27,7 @@ import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
-import { examTabsPayload, finalRxPayload } from '../../components/clinical/eyeTestPayload';
+import { eyeTestWriteBody } from '../../components/clinical/eyeTestPayload';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
 import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
@@ -270,102 +270,7 @@ export function ClinicalPage() {
       // here. It used to run every power through parseFloat, which is exactly
       // where a typed "+4.00" became the number 4 and the explicit plus was
       // destroyed for good.
-      const re = data.finalRx?.rightEye;
-      const le = data.finalRx?.leftEye;
-
-      await clinicalApi.completeTest(currentTestId, {
-        // The four exam tabs. They used to stop here: this handler read only
-        // finalRx / chiefComplaint / clinicalFindings / soapNote, and the API
-        // client had no field for the rest, so a lensometer or slit-lamp
-        // reading never left the browser.
-        ...examTabsPayload(data),
-        examDate: data.examDate || undefined,
-        optometristName: data.optometristName || undefined,
-        chiefComplaint: data.chiefComplaint || undefined,
-        vduUsage: data.vduUsage || undefined,
-        // Final Rx: signed strings, sign intact end-to-end.
-        ...finalRxPayload(data.finalRx),
-        notes: data.chiefComplaint || '',
-        // C6-B: also persist the structured exam findings the form already
-        // collects (chief complaint + per-eye aided VA from the Final Rx) into
-        // the test record's `clinical_findings` block, so they're queryable
-        // (VA trend across visits, search by complaint) rather than only buried
-        // in `notes`/per-eye. Only sent when non-empty -> a refraction-only test
-        // is unchanged. Net-new inputs (IOP/diagnosis/...) land here once the
-        // EyeTestForm grows those fields (follow-up).
-        clinicalFindings: (() => {
-          const cf: Record<string, string | number> = {};
-          if (data.chiefComplaint) cf.chiefComplaint = data.chiefComplaint;
-          if (re?.va) cf.vaRightAided = re.va;
-          if (le?.va) cf.vaLeftAided = le.va;
-          // The new internal Clinical Findings card (IOP / diagnosis / colour
-          // vision / cover test / dominant eye). Only forward filled fields;
-          // IOP -> number so the backend's 0-80 mmHg bound applies.
-          const f = data.clinicalFindings;
-          if (f) {
-            if (f.iopRight) cf.iopRight = parseFloat(f.iopRight);
-            if (f.iopLeft) cf.iopLeft = parseFloat(f.iopLeft);
-            if (f.diagnosis) cf.diagnosis = f.diagnosis;
-            if (f.colourVision) cf.colourVision = f.colourVision;
-            if (f.coverTest) cf.coverTest = f.coverTest;
-            if (f.dominantEye) cf.dominantEye = f.dominantEye;
-          }
-          return Object.keys(cf).length > 0 ? cf : undefined;
-        })(),
-        // CLI-11: forward the structured SOAP note when the optometrist filled
-        // at least one field. An entirely empty SOAP note is omitted so the
-        // backend keeps the test as a refraction-only record (unchanged).
-        soapNote: (() => {
-          const sn = data.soapNote;
-          if (!sn) return undefined;
-          const hasText =
-            sn.chiefComplaint || sn.historyPresentIllness || sn.ocularHistory ||
-            sn.systemicHistory || sn.familyHistory || sn.medications || sn.allergies ||
-            sn.vduUsage || sn.vaRightUnaided || sn.vaLeftUnaided || sn.vaRightAided ||
-            sn.vaLeftAided || sn.vaBinocular || sn.iopRight || sn.iopLeft ||
-            sn.colourVision || sn.coverTest || sn.dominantEye || sn.pupils ||
-            sn.ocularMotility || sn.slitLampSummary || sn.fundusSummary ||
-            sn.assessment || (sn.dxCodes && sn.dxCodes.length > 0) ||
-            sn.plan || sn.planReferral || sn.planFollowUp || sn.patientInstructions;
-          if (!hasText) return undefined;
-          // Shape matches the backend SoapNote camelCase aliases.
-          return {
-            chiefComplaint: sn.chiefComplaint || undefined,
-            historyPresentIllness: sn.historyPresentIllness || undefined,
-            ocularHistory: sn.ocularHistory || undefined,
-            systemicHistory: sn.systemicHistory || undefined,
-            familyHistory: sn.familyHistory || undefined,
-            medications: sn.medications || undefined,
-            allergies: sn.allergies || undefined,
-            vduUsage: sn.vduUsage || undefined,
-            vaRightUnaided: sn.vaRightUnaided || undefined,
-            vaLeftUnaided: sn.vaLeftUnaided || undefined,
-            vaRightAided: sn.vaRightAided || undefined,
-            vaLeftAided: sn.vaLeftAided || undefined,
-            vaBinocular: sn.vaBinocular || undefined,
-            iopRight: sn.iopRight ? parseFloat(sn.iopRight) : undefined,
-            iopLeft: sn.iopLeft ? parseFloat(sn.iopLeft) : undefined,
-            colourVision: sn.colourVision || undefined,
-            coverTest: sn.coverTest || undefined,
-            dominantEye: sn.dominantEye || undefined,
-            pupils: sn.pupils || undefined,
-            ocularMotility: sn.ocularMotility || undefined,
-            slitLampSummary: sn.slitLampSummary || undefined,
-            fundusSummary: sn.fundusSummary || undefined,
-            assessment: sn.assessment || undefined,
-            dxCodes:
-              sn.dxCodes && sn.dxCodes.length > 0
-                ? sn.dxCodes.map(d => ({ code: d.code, description: d.description, system: d.system }))
-                : undefined,
-            plan: sn.plan || undefined,
-            planReferral: sn.planReferral || undefined,
-            planReferralTo: sn.planReferralTo || undefined,
-            planFollowUp: sn.planFollowUp || undefined,
-            planFollowUpWeeks: sn.planFollowUpWeeks || undefined,
-            patientInstructions: sn.patientInstructions || undefined,
-          };
-        })(),
-      });
+      await clinicalApi.completeTest(currentTestId, eyeTestWriteBody(data));
 
       toast.success('Eye test saved successfully');
       setShowEyeTestForm(false);

@@ -5,7 +5,7 @@
 // Lensometer, Slit Lamp, Auto-Refractometer, Subjective Rx, Final Rx,
 // SOAP Note (CLI-11 structured EHR), Uploads
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   X,
@@ -49,6 +49,7 @@ import {
 } from './eyeTestTypes';
 
 import { validateEyeTest } from './eyeTestValidation';
+import { hydrateEyeTest } from './eyeTestHydrate';
 import { LensometerTab } from './LensometerTab';
 import { SlitLampTab } from './SlitLampTab';
 import { AutoRefTab } from './AutoRefTab';
@@ -60,7 +61,15 @@ import { SoapNoteForm } from './SoapNoteForm';
 // Re-export for backward compatibility
 export type { EyeTestData } from './eyeTestTypes';
 
-export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName = '' }: EyeTestFormProps) {
+export function EyeTestForm({
+  isOpen,
+  onClose,
+  onSave,
+  patient,
+  optometristName = '',
+  initialTest = null,
+  saveLabel,
+}: EyeTestFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   // Resolve the issuing store + legal entity for the inline Rx print (legal
@@ -83,38 +92,55 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   // another tab to fix it, and a toast is gone by the time they get there.
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // ---- EDIT MODE ---------------------------------------------------------
+  // The clinic's Edit pencil used to open an Rx-ONLY form, so lensometer and
+  // slit-lamp readings could not be corrected at all. It now reopens THIS
+  // screen, and `initialTest` (the stored exam) is what fills it in.
+  //
+  // Seeded AT MOUNT, as each tab's INITIAL state -- deliberately not from an
+  // effect. An effect renders the form empty for one commit first, and a
+  // clinical form that is briefly blank is a clinical form that can be saved
+  // blank. The caller keys this component by test id, so a different exam
+  // arrives as a fresh mount and seeds again.
+  const seed = useMemo(
+    () => (initialTest ? hydrateEyeTest(initialTest) : null),
+    [initialTest],
+  );
+
   // Header data
-  const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
-  const [optometrist, setOptometrist] = useState(optometristName);
-  const [chiefComplaint, setChiefComplaint] = useState('');
-  const [vduUsage, setVduUsage] = useState('None');
+  const [examDate, setExamDate] = useState(
+    seed?.examDate || new Date().toISOString().split('T')[0],
+  );
+  const [optometrist, setOptometrist] = useState(seed?.optometristName || optometristName);
+  const [chiefComplaint, setChiefComplaint] = useState(seed?.chiefComplaint ?? '');
+  const [vduUsage, setVduUsage] = useState(seed?.vduUsage || 'None');
 
   // Tab data
-  const [lensometerData, setLensometerData] = useState<LensometerData>({
+  const [lensometerData, setLensometerData] = useState<LensometerData>(seed?.lensometer ?? {
     rightEye: createEmptyPowerReading(),
     leftEye: createEmptyPowerReading(),
     remarks: '',
   });
 
-  const [slitLampData, setSlitLampData] = useState<SlitLampData>({
+  const [slitLampData, setSlitLampData] = useState<SlitLampData>(seed?.slitLamp ?? {
     rightEye: createEmptySlitLampEye(),
     leftEye: createEmptySlitLampEye(),
     remarks: '',
   });
 
-  const [autoRefData, setAutoRefData] = useState<AutoRefData>({
+  const [autoRefData, setAutoRefData] = useState<AutoRefData>(seed?.autoRef ?? {
     rightEye: { ...createEmptyPowerReading(), k1: '', k1Axis: '', k2: '', k2Axis: '' },
     leftEye: { ...createEmptyPowerReading(), k1: '', k1Axis: '', k2: '', k2Axis: '' },
     remarks: '',
   });
 
-  const [subjectiveRxData, setSubjectiveRxData] = useState<SubjectiveRxData>({
+  const [subjectiveRxData, setSubjectiveRxData] = useState<SubjectiveRxData>(seed?.subjectiveRx ?? {
     rightEye: createEmptyPowerReading(),
     leftEye: createEmptyPowerReading(),
     remarks: '',
   });
 
-  const [finalRxData, setFinalRxData] = useState<FinalRxData>({
+  const [finalRxData, setFinalRxData] = useState<FinalRxData>(seed?.finalRx ?? {
     rightEye: { ...createEmptyPowerReading(), prism: '', base: '' },
     leftEye: { ...createEmptyPowerReading(), prism: '', base: '' },
     rightAdd: '',
@@ -126,10 +152,10 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   });
 
   const [clinicalFindings, setClinicalFindings] =
-    useState<ClinicalFindingsData>(createEmptyClinicalFindings());
+    useState<ClinicalFindingsData>(seed?.clinicalFindings ?? createEmptyClinicalFindings());
 
   // CLI-11: structured SOAP exam note.
-  const [soapNote, setSoapNote] = useState<SoapNoteData>(createEmptySoapNote());
+  const [soapNote, setSoapNote] = useState<SoapNoteData>(seed?.soapNote ?? createEmptySoapNote());
 
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
 
@@ -456,7 +482,7 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
             ) : (
               <Save className="w-4 h-4" />
             )}
-            Save Prescription
+            {saveLabel ?? 'Save Prescription'}
           </button>
         </div>
       </div>

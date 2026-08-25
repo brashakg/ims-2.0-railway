@@ -180,6 +180,57 @@ export interface ConversionDashboard {
   rows: ConversionRow[];
 }
 
+// The body of an eye-test write. ONE contract, shared by the first save
+// (completeTest) and every later correction (amendTest) -- a second copy would
+// be a second place for the exam tabs to be forgotten.
+export interface EyeTestWriteBody {
+  // SIGNED STRINGS, not numbers. This contract used to be `number | null`,
+  // and that type was where the plus sign died: the form holds "+4.00",
+  // parseFloat made it 4, the server stored str(4.0) = "4.0", and the lab
+  // job-card, the customer's Rx portal and the Customer-360 block all printed
+  // a positive power with no sign. The backend field is Optional[str] and
+  // float("+4.00") == 4.0, so the signed string round-trips untouched.
+  rightEye: {
+    sphere: string | null; cylinder: string | null; axis: string | null;
+    add?: string | null; pd?: string | null;
+    prism?: string | null; base?: string | null; va?: string | null;
+  };
+  leftEye: {
+    sphere: string | null; cylinder: string | null; axis: string | null;
+    add?: string | null; pd?: string | null;
+    prism?: string | null; base?: string | null; va?: string | null;
+  };
+  pd?: number;
+  // Parity fields mirrored into the prescriptions collection (see
+  // clinical.complete_test): single IPD, lens type, next-checkup date.
+  ipd?: string;
+  lensRecommendation?: string;
+  nextCheckup?: string;
+  notes?: string;
+  // C6-B: optional full-exam findings (VA / IOP / history / diagnosis / ...).
+  // Omit entirely for a quick refraction-only test — the backend stores the
+  // test exactly as before when this is absent.
+  clinicalFindings?: ClinicalFindings;
+  // CLI-11: optional structured SOAP exam note (S/O/A/P + Dx codes). Omit
+  // entirely for a refraction-only test. Can also be saved/updated after
+  // completion via saveSoapNote().
+  soapNote?: SoapNotePayload;
+  // The four exam tabs. Until 2026-08-24 these had NO field here at all --
+  // they were not "dropped", they were unrepresentable, so a lensometer or
+  // auto-ref reading could never leave the browser and no validator on any
+  // layer ever saw one. Powers travel as SIGNED STRINGS ("+4.00") so the
+  // explicit plus survives to the printed card and the lab job-card.
+  lensometer?: ExamRefractionPayload;
+  autoRef?: AutoRefPayload;
+  subjectiveRx?: ExamRefractionPayload;
+  slitLamp?: SlitLampPayload;
+  // Exam header, also previously dropped.
+  examDate?: string;
+  optometristName?: string;
+  chiefComplaint?: string;
+  vduUsage?: string;
+}
+
 export const clinicalApi = {
   // Queue management
   getQueue: async (storeId: string) => {
@@ -246,57 +297,23 @@ export const clinicalApi = {
     return response.data;
   },
 
-  completeTest: async (testId: string, data: {
-    // SIGNED STRINGS, not numbers. This contract used to be `number | null`,
-    // and that type was where the plus sign died: the form holds "+4.00",
-    // parseFloat made it 4, the server stored str(4.0) = "4.0", and the lab
-    // job-card, the customer's Rx portal and the Customer-360 block all printed
-    // a positive power with no sign. The backend field is Optional[str] and
-    // float("+4.00") == 4.0, so the signed string round-trips untouched.
-    rightEye: {
-      sphere: string | null; cylinder: string | null; axis: string | null;
-      add?: string | null; pd?: string | null;
-      prism?: string | null; base?: string | null; va?: string | null;
-    };
-    leftEye: {
-      sphere: string | null; cylinder: string | null; axis: string | null;
-      add?: string | null; pd?: string | null;
-      prism?: string | null; base?: string | null; va?: string | null;
-    };
-    pd?: number;
-    // Parity fields mirrored into the prescriptions collection (see
-    // clinical.complete_test): single IPD, lens type, next-checkup date.
-    ipd?: string;
-    lensRecommendation?: string;
-    nextCheckup?: string;
-    notes?: string;
-    // C6-B: optional full-exam findings (VA / IOP / history / diagnosis / ...).
-    // Omit entirely for a quick refraction-only test — the backend stores the
-    // test exactly as before when this is absent.
-    clinicalFindings?: ClinicalFindings;
-    // CLI-11: optional structured SOAP exam note (S/O/A/P + Dx codes). Omit
-    // entirely for a refraction-only test. Can also be saved/updated after
-    // completion via saveSoapNote().
-    soapNote?: SoapNotePayload;
-    // The four exam tabs. Until 2026-08-24 these had NO field here at all --
-    // they were not "dropped", they were unrepresentable, so a lensometer or
-    // auto-ref reading could never leave the browser and no validator on any
-    // layer ever saw one. Powers travel as SIGNED STRINGS ("+4.00") so the
-    // explicit plus survives to the printed card and the lab job-card.
-    lensometer?: ExamRefractionPayload;
-    autoRef?: AutoRefPayload;
-    subjectiveRx?: ExamRefractionPayload;
-    slitLamp?: SlitLampPayload;
-    // Exam header, also previously dropped.
-    examDate?: string;
-    optometristName?: string;
-    chiefComplaint?: string;
-    vduUsage?: string;
-  }) => {
+  completeTest: async (testId: string, data: EyeTestWriteBody) => {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);
     return response.data;
   },
 
+  /**
+   * Amend an ALREADY-COMPLETED exam -- what the clinic Edit screen saves.
+   *
+   * Same body as completeTest by design: the Edit screen IS the exam screen, so
+   * it sends the same seven tabs. A separate endpoint because POST /complete
+   * also flips status, mints the mirrored prescription and fires the
+   * sales-floor handover, and refuses outright once a test is completed.
+   */
+  amendTest: async (testId: string, data: EyeTestWriteBody) => {
+    const response = await api.put(`/clinical/tests/${testId}/exam`, data);
+    return response.data;
+  },
   // F50: send a COMPLETED test's Rx to the sales floor as an in-app handover.
   // Mints a CLINICAL_RX handoff (8h TTL) + an in-app bell per recipient. NO
   // outbound message. Recommendations are free-text (max 5 rows). Behind a

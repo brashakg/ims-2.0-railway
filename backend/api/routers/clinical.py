@@ -728,6 +728,33 @@ def _power_for_storage(eye: dict, *keys) -> str:
     return "" if value is None else str(value)
 
 
+def _eye_for_rx_storage(eye: dict) -> dict:
+    """One eye of the FINAL Rx, in the shape the prescriptions collection stores.
+
+    An ABSENT power/axis means "not tested for this eye" -> stored blank. Never
+    fabricate a 0.00 power or a 180 axis into a billable Rx (audit P1). A
+    genuine plano "0" is preserved, because "no correction needed" is a
+    finding and not an absence.
+
+    This was written out twice per call site (once per eye) in the completion
+    handler; the amend handler would have made it four copies of a rule about
+    what reaches a dispensable prescription.
+    """
+    return {
+        "sph": _power_for_storage(eye, "sphere", "sph"),
+        "cyl": _power_for_storage(eye, "cylinder", "cyl"),
+        "axis": _axis_for_storage(eye),
+        "add": _power_for_storage(eye, "add", "addition"),
+        # str(x.get("pd", "")) stored the literal "None" when the per-eye PD box
+        # was left blank (the key is PRESENT with a null), which later blocked
+        # every edit of that eye.
+        "pd": _power_for_storage(eye, "pd"),
+        "prism": (eye.get("prism") or None),
+        "base": (eye.get("base") or None),
+        "acuity": (eye.get("acuity") or eye.get("va") or None),
+    }
+
+
 def _to_camel_case(snake_str: str) -> str:
     """Convert snake_case to camelCase"""
     components = snake_str.split("_")
@@ -1191,6 +1218,10 @@ async def complete_test(
             # written and the stored document is unchanged.
             exam_blocks=_exam_blocks_for_storage(data),
             exam_header=_exam_header_for_storage(data),
+            # Stored on the EXAM too, not only on the mirrored prescription --
+            # otherwise the Edit screen reopens with an empty IPD box.
+            ipd=data.ipd,
+            next_checkup=data.next_checkup,
         )
 
         if success:
@@ -1243,40 +1274,8 @@ async def complete_test(
                         "full_name", current_user.get("username", "")
                     ),
                     "eye_test_id": test_id,
-                    # An ABSENT power/axis means "not tested for this eye" -> leave
-                    # it blank, never fabricate a 0.00 power or a 180 axis into a
-                    # billable Rx (audit P1). A genuine plano "0" is preserved.
-                    "right_eye": {
-                        "sph": _power_for_storage(data.right_eye, "sphere", "sph"),
-                        "cyl": _power_for_storage(data.right_eye, "cylinder", "cyl"),
-                        "axis": _axis_for_storage(data.right_eye),
-                        "add": _power_for_storage(data.right_eye, "add", "addition"),
-                        # str(x.get("pd", "")) stored the literal "None" when the
-                        # per-eye PD box was left blank (the key is PRESENT with a
-                        # null), which later blocked every edit of that eye.
-                        "pd": _power_for_storage(data.right_eye, "pd"),
-                        "prism": (data.right_eye.get("prism") or None),
-                        "base": (data.right_eye.get("base") or None),
-                        "acuity": (
-                            data.right_eye.get("acuity")
-                            or data.right_eye.get("va")
-                            or None
-                        ),
-                    },
-                    "left_eye": {
-                        "sph": _power_for_storage(data.left_eye, "sphere", "sph"),
-                        "cyl": _power_for_storage(data.left_eye, "cylinder", "cyl"),
-                        "axis": _axis_for_storage(data.left_eye),
-                        "add": _power_for_storage(data.left_eye, "add", "addition"),
-                        "pd": _power_for_storage(data.left_eye, "pd"),
-                        "prism": (data.left_eye.get("prism") or None),
-                        "base": (data.left_eye.get("base") or None),
-                        "acuity": (
-                            data.left_eye.get("acuity")
-                            or data.left_eye.get("va")
-                            or None
-                        ),
-                    },
+                    "right_eye": _eye_for_rx_storage(data.right_eye),
+                    "left_eye": _eye_for_rx_storage(data.left_eye),
                     "lens_recommendation": data.lens_recommendation,
                     "coating_recommendation": data.coating_recommendation,
                     "ipd": data.ipd,
@@ -1321,6 +1320,144 @@ async def complete_test(
 
     # Fallback for demo
     return {"message": "Test completed", "testId": test_id}
+
+
+@router.put("/tests/{test_id}/exam")
+async def amend_eye_test(
+    test_id: str,
+    data: EyeTestData,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
+):
+    """Amend an already-completed eye test -- the clinic's Edit screen.
+
+    The Edit pencil used to open an Rx-ONLY form, so the lensometer, slit-lamp,
+    auto-ref and subjective-refraction readings could not be corrected: roughly
+    a hundred captured values with nineteen of them editable. It now reopens the
+    SAME seven-tab exam screen the reading was typed into, and this is where
+    that screen saves.
+
+    Why not reuse POST /complete: that call also flips status to COMPLETED,
+    stamps completed_at, mints the mirrored prescription document and fires the
+    sales-floor handover. It refuses outright once a test is COMPLETED, and for
+    good reason -- re-running it to save an edit would duplicate the Rx and the
+    handover. This endpoint writes only what the exam screen owns.
+
+    Same validation gate as completion, deliberately: an amendment is a write of
+    a medical power and gets exactly the checks the first write got.
+
+    The prior values are preserved on the document's append-only `amendments`
+    list, so correcting a reading never erases what it replaced.
+    """
+    _validate_eye_test_rx("Right eye", data.right_eye)
+    _validate_eye_test_rx("Left eye", data.left_eye)
+    _validate_exam_block("Lensometer", data.lensometer)
+    _validate_exam_block("Auto-Ref", data.auto_ref)
+    _validate_exam_block("Subjective Rx", data.subjective_rx)
+
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    existing = test_repo.find_by_id(test_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+    # Cross-store IDOR guard, same as completion: 404-hide a test in another
+    # store rather than confirming it exists.
+    _store_scope_or_404(existing, current_user)
+
+    now_iso = datetime.utcnow().isoformat()
+    soap_note_dict = None
+    if data.soap_note is not None:
+        soap_note_dict = data.soap_note.model_dump(exclude_none=True)
+        # An amendment does NOT re-date the note it corrects. The exam screen
+        # sends the note back without its provenance, so re-stamping here would
+        # move recorded_at to today and re-attribute the whole note to whoever
+        # made the correction. The original recorder and time stay; who changed
+        # it, and when, is on `amended_by` / `amended_at` and the `amendments`
+        # list. Only a note that has no provenance at all gets stamped now.
+        prior_note = existing.get("soap_note") or {}
+        soap_note_dict.setdefault(
+            "recorded_by",
+            prior_note.get("recorded_by") or current_user.get("user_id", ""),
+        )
+        soap_note_dict.setdefault(
+            "recorded_at", prior_note.get("recorded_at") or now_iso
+        )
+
+    ok = test_repo.amend_test(
+        test_id=test_id,
+        right_eye=data.right_eye,
+        left_eye=data.left_eye,
+        pd=data.pd,
+        notes=data.notes,
+        lens_recommendation=data.lens_recommendation,
+        coating_recommendation=data.coating_recommendation,
+        clinical_findings=(
+            data.clinical_findings.model_dump(exclude_none=True)
+            if data.clinical_findings
+            else None
+        ),
+        soap_note=soap_note_dict,
+        exam_blocks=_exam_blocks_for_storage(data),
+        exam_header=_exam_header_for_storage(data),
+        ipd=data.ipd,
+        next_checkup=data.next_checkup,
+        amended_by=current_user.get("user_id", ""),
+        amended_at=now_iso,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to amend test")
+
+    # Keep the mirrored prescription in step with the corrected Final Rx --
+    # otherwise the amendment would fix the exam record while the document the
+    # LAB and the PATIENT actually read still carried the old power.
+    rx_repo = get_prescription_repository()
+    prescription_id = None
+    if rx_repo is not None:
+        linked = rx_repo.find_by_eye_test(test_id)
+        if linked:
+            prescription_id = linked.get("prescription_id")
+            rx_update = {
+                "right_eye": _eye_for_rx_storage(data.right_eye),
+                "left_eye": _eye_for_rx_storage(data.left_eye),
+                "updated_at": now_iso,
+            }
+            # A field the exam screen did NOT carry must never blank the stored
+            # one -- the same rule the exam tabs follow. It matters most for a
+            # legacy exam saved before the IPD was persisted on the test
+            # document: the box opens empty, and an empty box must not reach
+            # the lab as "no pupillary distance".
+            for key, value in (
+                ("ipd", data.ipd),
+                ("lens_recommendation", data.lens_recommendation),
+                ("next_checkup", data.next_checkup),
+            ):
+                if value is not None and str(value).strip() != "":
+                    rx_update[key] = value
+            rx_repo.update(prescription_id, rx_update)
+
+    # Completion is audited (EYE_TEST_RECORDED); a later correction of the same
+    # clinical record is the same class of write and is audited too. The
+    # document's own append-only `amendments` list holds WHAT changed; this is
+    # the Activity-Log entry saying WHO changed it and when.
+    _audit_clinical(
+        "EYE_TEST_AMENDED",
+        test_id,
+        current_user,
+        store_id=existing.get("store_id"),
+        detail={
+            "customer_id": existing.get("customer_id"),
+            "patient_id": existing.get("patient_id"),
+            "prescription_id": prescription_id,
+        },
+    )
+
+    return {
+        "testId": test_id,
+        "prescriptionId": prescription_id,
+        "amended": True,
+        "message": "Eye test amended",
+    }
 
 
 # ============================================================================

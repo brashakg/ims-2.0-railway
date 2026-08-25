@@ -88,7 +88,8 @@ class _FakeEyeTestRepo:
     def complete_test(self, test_id, right_eye, left_eye, pd=None, notes=None,
                       lens_recommendation=None, coating_recommendation=None,
                       clinical_findings=None, soap_note=None,
-                      exam_blocks=None, exam_header=None):
+                      exam_blocks=None, exam_header=None,
+                      ipd=None, next_checkup=None):
         for d in self._docs:
             if d.get("test_id") == test_id:
                 d["status"] = "COMPLETED"
