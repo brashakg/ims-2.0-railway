@@ -72,6 +72,7 @@ from ..services import ap_engine
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
+from ..services import product_master as _pm
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -105,6 +106,11 @@ class PurchaseInvoiceLine(BaseModel):
     unit_price: float = Field(0, ge=0)
     taxable: Optional[float] = Field(default=None, ge=0)
     gst_rate: float = Field(0, ge=0, le=100)
+    # Ruling 12: the prices on the INVOICE are the actual ones. unit_price is
+    # the actual cost (the true-up already treats it as authoritative); `mrp` is
+    # the actual retail price printed on the vendor's bill. Optional -- an
+    # invoice that does not restate the MRP leaves the product's alone.
+    mrp: Optional[float] = Field(default=None, gt=0)
 
 
 class PurchaseInvoiceCreate(BaseModel):
@@ -589,6 +595,131 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+def _assert_products_catalogued(db, lines) -> None:
+    """Ruling 15: the INVOICE is the gate. It may only proceed for products that
+    are properly catalogued -- and it must say WHICH detail is missing, by name.
+
+    The permissive front (a PO line typed in for an item nobody had catalogued)
+    is only safe because the purchase cannot be FINALISED until someone has
+    finished the product. Reads the same chokepoint everything else does,
+    product_master.compute_catalog_status, so there is no second done-rule.
+
+    Fail-soft ONLY on a missing DB/product collection: a lookup failure must not
+    invent an incomplete product, but a product we CAN read and that IS
+    incomplete is a hard 422 before any write.
+    """
+    if db is None:
+        return
+    pids = []
+    for ln in lines or []:
+        pid = getattr(ln, "product_id", None) or (
+            ln.get("product_id") if isinstance(ln, dict) else None
+        )
+        if pid and pid not in pids:
+            pids.append(pid)
+    if not pids:
+        return
+    try:
+        found = {
+            p.get("product_id"): p
+            for p in db.get_collection("products").find(
+                {"product_id": {"$in": pids}}, {"_id": 0}
+            )
+        }
+    except Exception:  # noqa: BLE001 - cannot read: do not invent a failure
+        return
+    blocked = []
+    for pid in pids:
+        prod = found.get(pid)
+        if prod is None:
+            continue
+        gaps = _pm.compute_catalog_status(prod)[1]
+        if gaps:
+            blocked.append(
+                {
+                    "product_id": pid,
+                    "product": prod.get("name")
+                    or " ".join(
+                        str(prod.get(k) or "") for k in ("brand", "model")
+                    ).strip()
+                    or prod.get("sku"),
+                    "missing": [_pm.field_label(g) for g in gaps],
+                }
+            )
+    if blocked:
+        first = blocked[0]
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PRODUCT_NOT_CATALOGUED",
+                "message": (
+                    f"{first['product']} is still missing "
+                    f"{', '.join(first['missing'])}"
+                    + (
+                        f" (and {len(blocked) - 1} other item(s) on this bill)"
+                        if len(blocked) > 1
+                        else ""
+                    )
+                    + ". Finish cataloguing it, then book the bill."
+                ),
+                "lines": blocked,
+            },
+        )
+
+
+def _apply_invoice_mrp(db, lines, invoice_id) -> Optional[list]:
+    """Ruling 12: the MRP on the vendor's invoice is the actual retail price.
+
+    Writes it onto the product and returns {product_id, old_mrp, new_mrp} for
+    the audit row, so a change of retail price is never silent. Only lines that
+    actually carry an MRP are touched, and an unchanged value is a no-op.
+    STRICTLY fail-soft, like the cost true-up: this runs AFTER the booking and
+    must never roll it back.
+    """
+    try:
+        if db is None:
+            return None
+        products = db.get_collection("products")
+        applied = []
+        seen = set()
+        for ln in lines or []:
+            pid = ln.get("product_id")
+            new_mrp = ln.get("mrp")
+            if not pid or new_mrp is None or pid in seen:
+                continue
+            seen.add(pid)
+            cur = products.find_one({"product_id": pid}, {"_id": 0, "mrp": 1}) or {}
+            old = cur.get("mrp")
+            try:
+                if old is not None and round(float(old), 2) == round(
+                    float(new_mrp), 2
+                ):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            products.update_one(
+                {"product_id": pid},
+                {
+                    "$set": {
+                        "mrp": round(float(new_mrp), 2),
+                        "mrp_source": "PURCHASE_INVOICE",
+                        "mrp_source_id": invoice_id,
+                        "mrp_updated_at": datetime.now().isoformat(),
+                    }
+                },
+            )
+            applied.append(
+                {
+                    "product_id": pid,
+                    "old_mrp": old,
+                    "new_mrp": round(float(new_mrp), 2),
+                }
+            )
+        return applied or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Create (book AP + ITC from lines, with IGST classification)
 # ---------------------------------------------------------------------------
@@ -619,6 +750,27 @@ async def create_purchase_invoice(
     # below (via _load_linked_dcs), so the single-GRN guard skips them.
     if body.grn_id and not body.linked_dc_ids:
         _load_standard_grn(body.grn_id)
+
+    # Ruling 15 -- the bill must be LINKED to the goods-received record. An
+    # invoice raised against a purchase order but no receipt settles a purchase
+    # whose quantities nobody has tallied; the 3-way match then has nothing to
+    # compare the bill to and every rejected unit is billable. A non-PO invoice
+    # (services, freight, an expense bill) is unaffected.
+    if body.po_id and not body.grn_id and not body.linked_dc_ids:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "GRN_LINK_REQUIRED",
+                "message": (
+                    "Link the goods receipt for this order before booking the "
+                    "bill - the quantities have to be tallied before the "
+                    "purchase is final."
+                ),
+            },
+        )
+
+    # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
+    _assert_products_catalogued(db, body.lines)
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
@@ -905,6 +1057,12 @@ async def create_purchase_invoice(
     # write can never roll back or block the recorded payable.
     valuation_updates = _apply_valuation_trueup(db, doc, computed, config)
 
+    # Ruling 12 -- the MRP on the bill is the actual retail price. Same
+    # fail-soft discipline as the cost true-up, and audited below.
+    mrp_updates = _apply_invoice_mrp(
+        db, [ln.model_dump() for ln in body.lines], invoice_id
+    )
+
     # Audit the booking (fail-soft -- never blocks the save).
     try:
         audit = get_audit_repository()
@@ -931,6 +1089,7 @@ async def create_purchase_invoice(
                         "match_exceptions": (match or {}).get("exceptions"),
                         "valuation_method": config.get("valuation_method"),
                         "valuation_updates": valuation_updates,
+                        "mrp_updates": mrp_updates,
                         # F9 -- DC bulk-tally audit trail.
                         "linked_dc_ids": body.linked_dc_ids,
                         "dc_matched_ids": stamped_dc_ids,

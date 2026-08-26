@@ -440,13 +440,18 @@ def _workshop_client(
 
 
 def _grn_item(product_id, qty):
-    """A fully-accepted GRN/DC line (received == accepted, none rejected)."""
+    """A fully-accepted GRN/DC line (received == accepted, none rejected).
+
+    tallied=True: ruling 14 requires the receiver to tick every line of a
+    PO-backed receipt (ignored on a Delivery Challan, which has no order).
+    """
     return {
         "product_id": product_id,
         "product_name": f"Lens {product_id}",
         "received_qty": qty,
         "accepted_qty": qty,
         "rejected_qty": 0,
+        "tallied": True,
     }
 
 

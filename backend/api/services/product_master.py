@@ -414,6 +414,17 @@ _FIELD_LABELS: Dict[str, str] = {
     "blue_cut_lens": "Blue-Cut Lens",
     "lens_colour": "Lens Colour",
     "lens_material": "Lens Material",
+    # The money + server-derived sentinels compute_catalog_status reports as
+    # done_gaps. They are not per-category attributes, but they surface in the
+    # SAME "what is missing" lists (the purchase-invoice gate reads them), so
+    # they belong in the one label registry rather than a second local map.
+    "category": "Category",
+    "mrp": "MRP",
+    "offer_price": "Selling Price",
+    "cost_price": "Cost Price",
+    "hsn_code": "HSN Code",
+    "gst_rate": "GST Rate",
+    "MRP_BELOW_OFFER": "Selling price is above MRP",
 }
 
 

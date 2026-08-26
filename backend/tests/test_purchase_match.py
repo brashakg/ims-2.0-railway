@@ -323,7 +323,23 @@ class _FakeDB:
             ],
             "stores": [{"store_id": "S1", "entity_id": "E1"}],
             "products": [
-                {"product_id": "P1", "cost_price": 100.0},
+                # A REAL, fully catalogued product: the purchase-invoice gate
+                # (ruling 15) refuses to settle a bill for an incomplete one, so
+                # a two-field stub here would be a fixture that no longer
+                # resembles anything the router can legitimately bill.
+                {
+                    "product_id": "P1",
+                    "sku": "FR-0001",
+                    "category": "FRAME",
+                    "brand": "Ray-Ban",
+                    "model": "RB3025",
+                    "color": "G-15",
+                    "mrp": 200.0,
+                    "offer_price": 180.0,
+                    "cost_price": 100.0,
+                    "hsn_code": "9003",
+                    "gst_rate": 5.0,
+                },
             ],
             "stock_units": [
                 # The 10 AVAILABLE units of P1 at S1 are the ones GRN G1 just

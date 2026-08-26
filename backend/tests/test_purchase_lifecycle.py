@@ -109,9 +109,34 @@ class _Coll:
 
     def find(self, flt=None, projection=None):
         flt = flt or {}
-        return [
-            dict(d) for d in self.rows if all(d.get(k) == v for k, v in flt.items())
-        ]
+
+        def _hit(d):
+            for k, v in flt.items():
+                if isinstance(v, dict) and "$in" in v:
+                    if d.get(k) not in v["$in"]:
+                        return False
+                elif d.get(k) != v:
+                    return False
+            return True
+
+        return [dict(d) for d in self.rows if _hit(d)]
+
+    def update_one(self, flt, update, upsert=False):
+        for d in self.rows:
+            if all(d.get(k) == v for k, v in flt.items()):
+                d.update(update.get("$set", {}))
+                return type("R", (), {"modified_count": 1, "matched_count": 1})()
+        return type("R", (), {"modified_count": 0, "matched_count": 0})()
+
+    def count_documents(self, flt):
+        return len(self.find(flt))
+
+    def delete_one(self, flt):
+        for i, d in enumerate(self.rows):
+            if all(d.get(k) == v for k, v in flt.items()):
+                del self.rows[i]
+                break
+        return type("R", (), {"deleted_count": 1})()
 
 
 class _DB:
@@ -649,3 +674,128 @@ class TestGoodsReceiptTally:
                 product_id="P1", received_qty=20, accepted_qty=18, rejected_qty=0
             )
         assert "must equal" in str(exc.value)
+
+# =========================================================================== #
+# R15 / R12 -- the invoice is the gate, and the authority on price
+# =========================================================================== #
+
+from api.routers import purchase_invoices as pi_mod  # noqa: E402
+
+_COMPLETE_PRODUCT = {
+    "product_id": "P1",
+    "sku": "FR-0001",
+    "name": "Ray-Ban RB3025",
+    "category": "FRAME",
+    "brand": "Ray-Ban",
+    "model": "RB3025",
+    "color": "G-15",
+    "mrp": 7990.0,
+    "offer_price": 6990.0,
+    "cost_price": 3200.0,
+    "hsn_code": "9003",
+    "gst_rate": 5.0,
+}
+
+# The product a PO line typed in: real, but with no selling price yet.
+_PROVISIONAL_PRODUCT = {
+    k: v for k, v in _COMPLETE_PRODUCT.items() if k != "offer_price"
+}
+_PROVISIONAL_PRODUCT = {**_PROVISIONAL_PRODUCT, "provisional": True, "is_active": False}
+
+
+def _line(**over):
+    ln = {"product_id": "P1", "qty": 18, "unit_price": 3400, "gst_rate": 5}
+    ln.update(over)
+    return pi_mod.PurchaseInvoiceLine(**ln)
+
+
+def _book(products, po_id="PO1", grn_id="G1", lines=None):
+    # copy: the fake collection mutates in place, and these fixtures are
+    # module-level dicts shared by every test in the class.
+    db = _DB(products=[dict(p) for p in products], vendor_bills=[], vendors=[])
+    saved = (pi_mod._get_db, pi_mod.get_vendor_repository, pi_mod.get_audit_repository)
+    pi_mod._get_db = lambda: db
+
+    class _V:
+        def find_by_id(self, _i):
+            return {"vendor_id": "V1", "trade_name": "Acme", "credit_days": 30}
+
+    pi_mod.get_vendor_repository = lambda: _V()
+    pi_mod.get_audit_repository = lambda: None
+    try:
+        body = pi_mod.PurchaseInvoiceCreate(
+            vendor_id="V1",
+            invoice_number="INV-GATE-1",
+            invoice_date="2026-08-26",
+            po_id=po_id,
+            grn_id=grn_id,
+            lines=lines or [_line()],
+        )
+        out = asyncio.run(
+            pi_mod.create_purchase_invoice(
+                body, {"user_id": "u1", "roles": ["ACCOUNTANT"]}
+            )
+        )
+        return out, db
+    finally:
+        (
+            pi_mod._get_db,
+            pi_mod.get_vendor_repository,
+            pi_mod.get_audit_repository,
+        ) = saved
+
+
+@pytest.fixture(autouse=True)
+def _no_grn_repo():
+    """Keep the ACCEPTED-GRN check out of the way: these tests are about the
+    catalogue gate and the price authority, not the GRN status guard."""
+    saved = pi_mod.get_grn_repository
+    pi_mod.get_grn_repository = lambda: None
+    yield
+    pi_mod.get_grn_repository = saved
+
+
+class TestTheInvoiceIsTheGate:
+    def test_a_bill_cannot_settle_an_item_that_is_still_incomplete(self):
+        with pytest.raises(HTTPException) as exc:
+            _book([_PROVISIONAL_PRODUCT])
+        assert exc.value.status_code == 422
+        d = exc.value.detail
+        assert d["code"] == "PRODUCT_NOT_CATALOGUED"
+        # It must say WHICH detail is missing, in words the owner reads.
+        assert d["lines"][0]["missing"] == ["Selling Price"]
+        assert "Ray-Ban RB3025 is still missing Selling Price" in d["message"]
+
+    def test_the_same_bill_books_once_the_item_is_finished(self):
+        out, db = _book([_COMPLETE_PRODUCT])
+        assert out["invoice_number"] == "INV-GATE-1"
+        assert len(db.get_collection("vendor_bills").rows) == 1
+
+    def test_a_bill_against_an_order_must_name_the_goods_receipt(self):
+        with pytest.raises(HTTPException) as exc:
+            _book([_COMPLETE_PRODUCT], grn_id=None)
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+
+    def test_an_invoice_with_no_order_is_untouched(self):
+        """Services, freight and expense bills have no PO and no receipt."""
+        out, _ = _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
+        assert out["invoice_number"] == "INV-GATE-1"
+
+
+class TestTheInvoiceIsTheAuthorityOnPrice:
+    def test_the_billed_mrp_becomes_the_product_mrp_and_is_recorded(self):
+        out, db = _book(
+            [_COMPLETE_PRODUCT], lines=[_line(mrp=8490)]
+        )
+        assert out["invoice_number"] == "INV-GATE-1"
+        p = db.get_collection("products").find_one({"product_id": "P1"})
+        assert p["mrp"] == 8490.0
+        assert p["mrp_source"] == "PURCHASE_INVOICE"
+        assert p["mrp_source_id"] == out["invoice_id"]
+
+    def test_a_bill_that_does_not_restate_the_mrp_leaves_it_alone(self):
+        _out, db = _book([_COMPLETE_PRODUCT])
+        p = db.get_collection("products").find_one({"product_id": "P1"})
+        assert p["mrp"] == 7990.0
+        assert "mrp_source" not in p
