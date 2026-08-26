@@ -29,9 +29,11 @@ import type { Supplier } from './purchaseTypes';
 // `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
 // (two exports of that name in one module is a compile error on main).
 //
-// Both states are read from GSTINs and NOTHING else -- the same two inputs
-// purchase_invoice_engine.determine_place_of_supply uses when it stamps the
-// bill. An address is not a registration: stores.py sets a store's state_code
+// Both states are read from GSTINs and NOTHING else -- the same source
+// purchase_invoice_engine.determine_place_of_supply reads when it stamps the
+// bill. (That engine also accepts an explicit place-of-supply override, which
+// a card has no way to know about; with none passed it is the two GSTINs.)
+// An address is not a registration: stores.py sets a store's state_code
 // from its ADDRESS while its gstin is the entity's registration for that state,
 // falling back to the entity's PRIMARY GSTIN elsewhere (WizOpt's online store
 // bills under BV Opticals Pvt Ltd). Reading the address first made this card
