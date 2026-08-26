@@ -29,10 +29,13 @@ import type { Supplier } from './purchaseTypes';
 // `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
 // (two exports of that name in one module is a compile error on main).
 //
-// Mirrors the ONE backend rule, purchase_invoice_engine.determine_place_of_supply:
-// both states known AND different => IGST. A missing state is 'unknown' and says
-// so -- calling it "same state" would print a CGST+SGST promise the bill will not
-// keep.
+// Same rule as purchase_invoice_engine.determine_place_of_supply for the two
+// KNOWN cases: both states known and different => IGST, equal => CGST + SGST.
+// It deliberately does NOT copy that engine's third branch. The engine defaults
+// an unknown pair to intra-state because it must return a number for a bill;
+// this is a card, and a card is a statement to a human. "Same state" over a
+// vendor whose state nobody has established is a claim about that vendor, not a
+// conservative default -- so it says unknown instead.
 type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
 
 function taxSplit(vendorStateCode: string, buyerStateCode: string): TaxSplit {
