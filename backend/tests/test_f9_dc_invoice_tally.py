@@ -921,10 +921,12 @@ class TestDcInvoiceTally:
 
     def test_non_dc_invoice_has_na_dc_match_status(self):
         # Acceptance #12: an invoice with no linked_dc_ids -> dc_match_status N_A.
+        # No product_id on the line: ruling 15 requires a goods receipt for any
+        # bill that names goods, so an unlinked bill is a services/expense one.
         db = _FakeDB()
         c = _pi_client_full(db, _GRNRepo(db))
         body = _invoice_body(
-            [{"product_id": "P1", "qty": 10, "unit_price": 100, "gst_rate": 5}]
+            [{"description": "Freight", "qty": 10, "unit_price": 100, "gst_rate": 5}]
         )
         r = c.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text

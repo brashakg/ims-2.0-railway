@@ -870,27 +870,48 @@ async def create_purchase_invoice(
     if body.grn_id and not body.linked_dc_ids:
         _load_standard_grn(body.grn_id)
 
-    # Ruling 15 -- the bill must be LINKED to the goods-received record. An
-    # invoice raised against a purchase order but no receipt settles a purchase
-    # whose quantities nobody has tallied; the 3-way match then has nothing to
-    # compare the bill to and every rejected unit is billable. A non-PO invoice
-    # (services, freight, an expense bill) is unaffected.
-    line_products = _line_products(db, body.lines)
-    if body.po_id and not body.grn_id and not body.linked_dc_ids:
+    # Ruling 15 -- the bill must be LINKED to the goods-received record. A bill
+    # for goods nobody counted in settles a purchase whose quantities were
+    # never tallied: the 3-way match has nothing to compare the bill to, and
+    # the rejected-goods hold (ruling 7) cannot fire either, because it is
+    # reached through the GRN.
+    #
+    # THE TRIGGER IS THE GOODS, NOT THE PAPERWORK. Gating on po_id alone made
+    # the whole of ruling 15 optional -- leaving the purchase-order box blank
+    # booked a bill for 20 stocked frames with no receipt at all. Any line that
+    # NAMES a product is a goods line. A bill that names no product (services,
+    # freight, rent, an expense bill) has no receipt to link and is untouched.
+    #
+    # Naming the id is the trigger, not finding it: whether the products spine
+    # can be read must not decide whether a bill needs a receipt, or an
+    # unreadable DB (or a typo'd id) would be the bypass instead.
+    #
+    # A genuine no-order purchase (goods bought over the counter, no PO) is NOT
+    # left without a route: it has a named, visible path already -- record a
+    # Delivery Challan goods receipt for it (GRNCreate allows a DC with no
+    # po_id) and book the bill against that. The message says so, because an
+    # accountant who cannot see the way out will find the bypass instead.
+    if (
+        not body.grn_id
+        and not body.linked_dc_ids
+        and (body.po_id or _line_product_ids(body.lines))
+    ):
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "GRN_LINK_REQUIRED",
                 "message": (
-                    "Link the goods receipt for this order before booking the "
-                    "bill - the quantities have to be tallied before the "
-                    "purchase is final."
+                    "Link the goods receipt for this bill before booking it - "
+                    "the quantities have to be tallied before the purchase is "
+                    "final. If these goods arrived without a purchase order, "
+                    "record a Delivery Challan goods receipt for them first, "
+                    "then book the bill against it."
                 ),
             },
         )
 
     # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
-    _assert_products_catalogued(body.lines, line_products)
+    _assert_products_catalogued(body.lines, _line_products(db, body.lines))
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double

@@ -494,9 +494,29 @@ class TestCreateRunsMatch:
         assert len(db.collections["vendor_bills"]) == 1
 
     def test_no_po_grn_link_has_no_match(self):
+        """A bill with nothing to match against gets no verdict.
+
+        The line carries NO product_id: ruling 15 now requires a goods receipt
+        for any bill that names goods, so the only invoice that legitimately
+        reaches the booking with no PO and no GRN is one for services /
+        freight / an expense -- which is exactly the unmatched case this test
+        is about.
+        """
         db = _FakeDB()
         cli = _app(db)  # no PO/GRN repos
-        body = _body(po_id=None, grn_id=None, invoice_number="INV-NOLINK")
+        body = _body(
+            po_id=None,
+            grn_id=None,
+            invoice_number="INV-NOLINK",
+            lines=[
+                {
+                    "description": "Courier charges",
+                    "qty": 1,
+                    "unit_price": 1000,
+                    "gst_rate": 18,
+                }
+            ],
+        )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
         assert r.json()["match_status"] is None

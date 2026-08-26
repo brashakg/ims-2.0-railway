@@ -783,9 +783,42 @@ class TestTheInvoiceIsTheGate:
         assert exc.value.status_code == 422
         assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
 
-    def test_an_invoice_with_no_order_is_untouched(self):
-        """Services, freight and expense bills have no PO and no receipt."""
-        out, _ = _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
+    def test_a_bill_for_goods_must_name_the_receipt_even_with_no_po(self):
+        """The hole ruling 15 left open: the gate only fired when a PO was
+        named, so leaving the purchase-order box blank booked a bill for 20
+        stocked frames with no tally, no 3-way match and no rejected-goods
+        hold. The GOODS are the trigger, not the paperwork."""
+        with pytest.raises(HTTPException) as exc:
+            _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+        # ...and it must name the way out, or a real counter purchase is stuck.
+        assert "Delivery Challan" in exc.value.detail["message"]
+
+    def test_a_product_id_we_cannot_find_still_needs_the_receipt(self):
+        """Naming the id is the trigger, not finding it. The catalogue gate
+        skips an id that is not on the products spine, so if the receipt gate
+        keyed off the LOOKUP too, a typo'd (or unreadable) product id would be
+        the bypass that leaving the PO blank used to be."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [],  # products collection is empty: the id resolves to nothing
+                po_id=None,
+                grn_id=None,
+                lines=[_line(product_id="GHOST")],
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+
+    def test_an_invoice_that_names_no_goods_is_untouched(self):
+        """Services, freight, rent and expense bills carry no product line at
+        all -- they have no receipt to link and must stay bookable."""
+        out, _ = _book(
+            [_COMPLETE_PRODUCT],
+            po_id=None,
+            grn_id=None,
+            lines=[_line(product_id=None, description="Courier charges")],
+        )
         assert out["invoice_number"] == "INV-GATE-1"
 
     def test_a_missing_cost_price_never_blocks_the_bill_that_carries_it(self):
