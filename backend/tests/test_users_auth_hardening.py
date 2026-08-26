@@ -1658,9 +1658,17 @@ def test_grn_document_route_refuses_a_foreign_blob(monkeypatch):
 
 
 def _grn_items(vendors_router):
+    # Ruling 14 (tallied) is a receiving-workflow precondition, not this file's
+    # subject: every test here is about WHO may receive and WHOSE document may
+    # be bound. Tick the line so the request reaches the permission/attachment
+    # checks these tests exist to exercise.
     return [
         vendors_router.GRNItemCreate(
-            product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0
+            product_id="P1",
+            received_qty=5,
+            accepted_qty=5,
+            rejected_qty=0,
+            tallied=True,
         )
     ]
 

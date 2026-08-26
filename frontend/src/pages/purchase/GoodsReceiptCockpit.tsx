@@ -59,6 +59,12 @@ interface ReceiveLine {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason: string;
+  // Ruling 14: the receiver ticks each line to say "I counted this one against
+  // what was ordered". Starts UNticked -- the server refuses a PO-backed
+  // receipt with an unticked line (422 LINES_NOT_TALLIED). Express receiving
+  // declares the tally once at the header; this two-step form is the fallback
+  // for exactly the deliveries that were NOT clean, so it ticks line by line.
+  tallied: boolean;
   // P2: supplier batch + expiry for contact lenses (optional; dates the minted
   // units for FEFO). Left blank for frames / undated spectacle lenses.
   batch_code: string;
@@ -557,6 +563,7 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: '',
+        tallied: false,
         batch_code: l.batch_code,
         expiry_date: l.expiry_date,
         unit_price: l.unit_price,
@@ -662,6 +669,15 @@ export function GoodsReceiptCockpit() {
       toast.error('Upload the vendor invoice/challan before submitting');
       return;
     }
+    // Ruling 14 -- the tally. Mirrored server-side (422 LINES_NOT_TALLIED);
+    // this is the friendly version so the receiver is not sent a raw 422.
+    const untallied = receiveLines.filter((l) => !l.tallied);
+    if (untallied.length > 0) {
+      toast.error(
+        `Tick every line to confirm what arrived (${untallied.length} still unchecked)`,
+      );
+      return;
+    }
 
     const items: GRNItemInput[] = receiveLines
       .filter((l) => l.received_qty > 0)
@@ -671,6 +687,7 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: l.rejection_reason || undefined,
+        tallied: l.tallied,
         batch_code: l.batch_code.trim() || undefined,
         expiry_date: l.expiry_date.trim() || undefined,
       }));
@@ -1078,13 +1095,14 @@ export function GoodsReceiptCockpit() {
                   <div className="card-head">
                     <h3>
                       Line items &middot;{' '}
-                      {receiveLines.filter((l) => l.received_qty > 0).length}/
-                      {receiveLines.length} with receipt
+                      {receiveLines.filter((l) => l.tallied).length}/
+                      {receiveLines.length} tallied
                     </h3>
                   </div>
                   <table className="tbl">
                     <thead>
                       <tr>
+                        <th>Tally</th>
                         <th>Item</th>
                         <th className="right">Ordered</th>
                         <th className="right">Received</th>
@@ -1096,6 +1114,23 @@ export function GoodsReceiptCockpit() {
                     <tbody>
                       {receiveLines.map((line, idx) => (
                         <tr key={idx}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={line.tallied}
+                              aria-label={`Tally line ${idx + 1}: ${line.product_name}`}
+                              onChange={(e) => {
+                                const v = e.target.checked;
+                                startTransition(() =>
+                                  setReceiveLines((prev) =>
+                                    prev.map((l, i) =>
+                                      i === idx ? { ...l, tallied: v } : l,
+                                    ),
+                                  ),
+                                );
+                              }}
+                            />
+                          </td>
                           <td>
                             <div
                               className="font-medium"

@@ -291,6 +291,33 @@ class _FakeDB:
         return _FakeCollection(self.collections.setdefault(name, []))
 
 
+class _StubRepo:
+    """A repository whose find_by_id always yields the one doc it was given."""
+
+    def __init__(self, doc):
+        self._doc = doc
+
+    def find_by_id(self, _id):
+        return dict(self._doc)
+
+
+# The goods receipt every GOODS bill in this file is booked against. Ruling 15
+# refuses a bill whose lines name a product unless it links the receipt that
+# says the quantities were counted in, so the shared body carries grn_id "G1"
+# and this is the ACCEPTED STANDARD GRN behind it. The tests below are about
+# the GST split / AP + ITC booking / role gating / duplicate handling -- the
+# receipt is their premise, not their subject.
+_ACCEPTED_GRN = {
+    "grn_id": "G1",
+    "grn_number": "GRN-1",
+    "vendor_id": "V1",
+    "store_id": "S1",
+    "status": "ACCEPTED",
+    "grn_subtype": "STANDARD",
+    "items": [{"product_id": "P1", "product_name": "Frame X", "accepted_qty": 10}],
+}
+
+
 def _app(db, roles=("ACCOUNTANT",), uid="u1"):
     """Standalone app with the purchase_invoices router + a fake DB injected."""
     app = FastAPI()
@@ -312,7 +339,7 @@ def _app(db, roles=("ACCOUNTANT",), uid="u1"):
     pi_router._get_db = lambda: db
     pi_router.get_vendor_repository = lambda: None
     pi_router.get_purchase_order_repository = lambda: None
-    pi_router.get_grn_repository = lambda: None
+    pi_router.get_grn_repository = lambda: _StubRepo(_ACCEPTED_GRN)
     pi_router.get_audit_repository = lambda: None
     return TestClient(app)
 
@@ -344,6 +371,9 @@ def _invoice_body(**over):
         "invoice_number": "INV-001",
         "invoice_date": "2026-05-01",
         "recipient_entity_id": "E1",
+        # Ruling 15: a bill whose lines NAME a product must link its goods
+        # receipt. _ACCEPTED_GRN is that receipt (see _app).
+        "grn_id": "G1",
         "lines": [
             {
                 "product_id": "P1",
