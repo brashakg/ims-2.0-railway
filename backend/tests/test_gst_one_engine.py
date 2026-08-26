@@ -18,6 +18,7 @@ Everything is driven through the real functions -- no stubbed subjects.
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 import asyncio
 
@@ -355,6 +356,42 @@ def test_ambiguous_heading_9004_still_says_which_rates_it_covers():
 
 
 # ============================================================================
+# ROUND 3 / A -- a code UNDER a settled heading must resolve, or the screen
+# knows a rate the server refuses to state
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "code,rate",
+    [
+        ("900319", 5.0),  # frames of other materials (metal, titanium, wood)
+        ("900140", 5.0),  # spectacle lenses of glass
+        ("900190", 5.0),  # anything else under the 9001 lens heading
+        ("910229", 18.0),  # other wrist watches, under the 9102 heading
+    ],
+)
+def test_a_code_under_a_settled_heading_takes_the_headings_rate(code, rate):
+    """9003 is declared settled at 5% for the WHOLE heading, and 9001 likewise
+    -- but the table only lists 900311 and 900150, so 900319 (metal frames) and
+    900140 (glass lenses) resolved to nothing. The frontend DID hold both, at
+    5%, so the screen stated a rate the server would not stand behind. The
+    heading is the thing that was declared; every code inside it inherits."""
+    assert resolve_gst_rate_strict(code) == (rate, None)
+
+
+def test_inheriting_a_heading_does_not_reopen_the_ones_that_refuse():
+    """The inheritance is off the DECLARED headings only. 9004 (corrective 5%
+    vs non-corrective 18%) and 9021 (complete devices NIL vs parts 18%) are
+    deliberately not declared, so their children must not start answering
+    either -- 900499 and 902190 are the shapes that would zero-rate a
+    hearing-aid part or 5%-rate a pair of sunglasses."""
+    for code in ("900499", "902190", "90049900"):
+        rate, missing = resolve_gst_rate_strict(code)
+        assert rate is None, f"{code} must not resolve to {rate}"
+        assert missing
+
+
+# ============================================================================
 # MUST-FIX 6 -- the ORDER and the BILL must not return opposite verdicts
 # ============================================================================
 
@@ -437,32 +474,53 @@ def _entity_db():
     )
 
 
-def test_the_bill_keeps_todays_recipient_until_the_owner_arms_the_change(monkeypatch):
-    """The residual disagreement, held OPEN on purpose. The bill resolves the
-    recipient as the entity's PRIMARY GSTIN, ignoring the receiving shop, so a
-    Maharashtra shop's purchase from a Maharashtra vendor is booked inter-state
-    while the order says intra-state. Changing the bill would RE-CLASSIFY what
-    live purchase bills produce, and this business does not re-state -- so the
-    default is unchanged and the owner arms it."""
-    monkeypatch.setattr(pi, "_recipient_state_follows_store", lambda: False)
-    recipient = pi._resolve_recipient(
-        _entity_db(), "E1", None, pi._store_place_of_supply(_MH_SHOP_WITH_JH_GSTIN)
-    )
+def test_the_bill_receives_on_the_primary_gstin_and_says_so_out_loud():
+    """The residual disagreement, pinned as LIVE BEHAVIOUR -- nothing stubbed.
+
+    A two-state entity buying for a shop outside its primary state: the BILL
+    receives on the entity's primary (Jharkhand) registration and reads
+    inter-state, while the purchase ORDER reads the receiving shop's own state
+    and says intra-state. That is what production does today, on every code
+    path, with no switch anywhere to change it.
+
+    An earlier round shipped an owner "gate" here that was supposed to make the
+    two agree. It could not be armed by anybody -- its policy key was absent
+    from the registry, so policy_engine.get_policy returned the caller's default
+    before it ever looked at the DB, the entity, the store or the environment --
+    and the test that "proved" it worked monkeypatched the very function whose
+    unreachability WAS the defect. The dead path is gone. This test asserts the
+    real answer instead of a stubbed one, so it changes the day someone changes
+    recipient resolution for real, and never before.
+    """
+    recipient = pi._resolve_recipient(_entity_db(), "E1", None, None)
     assert recipient["recipient_gstin"] == "20AABCU9603R1ZM"  # the JH primary
     assert _bill_verdict(_MH_VENDOR, recipient["recipient_gstin"]) is True
-
-
-def test_arming_the_gate_makes_the_bill_agree_with_the_order(monkeypatch):
-    """Same purchase, gate ON: the receiving shop's own state picks which of our
-    GSTINs receives, so the bill lands on the Maharashtra registration and
-    agrees with the purchase order -- CGST + SGST on both."""
-    monkeypatch.setattr(pi, "_recipient_state_follows_store", lambda: True)
-    recipient = pi._resolve_recipient(
-        _entity_db(), "E1", None, pi._store_place_of_supply(_MH_SHOP_WITH_JH_GSTIN)
-    )
-    assert recipient["recipient_gstin"] == "27AABCU9603R1ZX"
-    assert _bill_verdict(_MH_VENDOR, recipient["recipient_gstin"]) is False
     assert _po_verdict(_MH_VENDOR, _MH_SHOP_WITH_JH_GSTIN) is False
+
+
+def test_no_purchase_invoice_setting_is_read_through_an_unregistered_key():
+    """The class of bug the gate was: a policy key nobody registered.
+
+    ``policy_engine.get_policy`` returns the caller's ``default`` the instant
+    ``policy_registry.REGISTRY`` has no spec for the key -- before the DB, the
+    entity, the store or the env var is consulted. A setting read that way is
+    not "off by default", it is unreachable, and no settings screen, DB row or
+    Railway variable can ever turn it on. Scoped to this router, which is where
+    it happened; five other keys elsewhere in the backend are read the same way
+    and are a separate piece of work.
+    """
+    import re
+
+    from api.services import policy_registry as reg
+
+    src = pathlib.Path(pi.__file__).read_text(encoding="utf-8")
+    keys = re.findall(r'get_policy\(\s*"([^"]+)"', src)
+    unreachable = [k for k in keys if k not in reg.REGISTRY]
+    assert unreachable == [], (
+        "purchase_invoices.py reads policy keys that policy_registry.REGISTRY "
+        "does not define, so nothing can ever switch them on: "
+        + ", ".join(unreachable)
+    )
 
 
 def test_one_state_parser_answers_for_the_order_the_bill_and_the_sale():

@@ -519,41 +519,6 @@ def _entity_gstin_for_state(entity: dict, state_code: Optional[str]) -> Optional
     return first.get("gstin") if isinstance(first, dict) else None
 
 
-def _recipient_state_follows_store() -> bool:
-    """Owner gate: should the BILL pick our receiving GSTIN by the DELIVERY
-    STORE's state instead of the entity's primary registration?
-
-    OFF by default, and deliberately so. Place of supply for goods is where
-    delivery terminates, and the purchase ORDER already resolves the recipient
-    that way -- so with this OFF the order and the bill still disagree for one
-    shape of purchase: an entity that holds GSTINs in TWO states buying for a
-    shop that is not in its primary state. Turning it ON makes them agree.
-
-    It is NOT on by default because it CHANGES the inter-state classification
-    live purchase bills produce, and this business has a standing
-    no-restatement rule: filed rows are never re-classified. The owner turns
-    this on with a cut-off date. The path below is complete and tested either
-    way; nothing about it is speculative wiring.
-    """
-    try:
-        from ..services.policy_engine import get_policy
-
-        return bool(get_policy("pm.purchase_recipient_follows_store", default=False))
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _store_place_of_supply(store_doc) -> Optional[str]:
-    """The receiving shop's own 2-digit state, or None when the gate is off."""
-    if not _recipient_state_follows_store() or not isinstance(store_doc, dict):
-        return None
-    return (
-        pinv.state_code_of(store_doc.get("state_code"))
-        or pinv.state_code_of(store_doc.get("state"))
-        or None
-    )
-
-
 def _resolve_recipient(db, body_entity_id, body_gstin, body_pos) -> dict:
     """Resolve {recipient_entity_id, recipient_gstin} for an invoice.
 
@@ -1063,23 +1028,25 @@ async def draft_invoice_from_grn(
     supplier_gstin = _vendor_gstin(db, vendor, vendor_id) if vendor_id else None
     # Default the recipient to the entity that owns the receiving store.
     recipient_entity_id = None
-    store_doc = None
     try:
         if db is not None and grn.get("store_id"):
             store_doc = db.get_collection("stores").find_one(
                 {"store_id": grn.get("store_id")},
-                {"_id": 0, "entity_id": 1, "state_code": 1, "state": 1},
+                {"_id": 0, "entity_id": 1},
             )
             recipient_entity_id = (store_doc or {}).get("entity_id")
     except Exception:
         recipient_entity_id = None
-    # None unless the owner has armed _recipient_state_follows_store, in which
-    # case the receiving SHOP's state picks which of our GSTINs receives -- the
-    # same side the purchase order already uses. See that helper for why it is
-    # off by default.
-    recipient = _resolve_recipient(
-        db, recipient_entity_id, None, _store_place_of_supply(store_doc)
-    )
+    # No place-of-supply hint: the bill receives on the entity's PRIMARY
+    # registration. For a single-state entity that is the only GSTIN it has.
+    # For an entity registered in TWO states buying for a shop outside its
+    # primary state, this still classifies differently from the purchase order
+    # (which reads the receiving shop's own state) -- a known, open
+    # disagreement. Changing it would RE-CLASSIFY live purchase bills, and this
+    # business does not re-state, so it is an owner decision that has not been
+    # taken. It is written down here and in the PR rather than half-built: a
+    # switch nobody can reach is not a decision, it is dead code.
+    recipient = _resolve_recipient(db, recipient_entity_id, None, None)
 
     raw_lines = pinv.lines_from_grn(grn, po)
     computed = pinv.compute_invoice(
