@@ -292,20 +292,6 @@ export function gstinStateCode(gstin?: string | null): string {
   return /^[0-9]{2}/.test(s) ? s.slice(0, 2) : '';
 }
 
-// Is a supply between these two GST states inter-state (IGST) or not?
-// Mirrors the ONE backend rule -- purchase_invoice_engine.determine_place_of_supply:
-// both states known AND different => inter-state; anything unknown stays
-// intra-state, so an incomplete record is never silently routed to IGST.
-export function isInterStateSupply(
-  supplierStateCode?: string | null,
-  buyerStateCode?: string | null,
-): boolean {
-  const a = (supplierStateCode || '').trim();
-  const b = (buyerStateCode || '').trim();
-  if (!a || !b) return false;
-  return a !== b;
-}
-
 // Get all HSN codes as dropdown options. 6-digit only (owner 2026-07-05):
 // the 4-digit "turnover <= 5 Cr" simplification was removed app-wide.
 export function getHSNOptions(): Array<{ value: string; label: string; gstRate: number }> {

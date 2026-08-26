@@ -111,10 +111,26 @@ describe('SupplierPanel GST treatment chip', () => {
     expect(await screen.findByText(/Maharashtra/)).toBeInTheDocument();
   });
 
-  it('says nothing about IGST vs CGST when the buying store has no GST state', () => {
+  it('reads as UNKNOWN, never as "same state", when the buying store has no GST state', () => {
+    // The dangerous shape: a helper that answers "is this inter-state?" with a
+    // boolean has no way to say "I do not know", so false doubles as "same
+    // state" and the card prints "Same state - CGST + SGST" over a vendor whose
+    // tax split nobody has established. That is a wrong-tax statement shown to
+    // staff. Unknown must read as unknown.
     storeInfo.current = { storeName: 'X', address: '', city: '', state: '', pincode: '' };
     render(<SupplierPanel suppliers={[base]} />);
+    expect(screen.getByText(/tax split unknown/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no tax chip at all for an unregistered vendor', () => {
+    // No GSTIN means no GST on the purchase -- neither split applies, and the
+    // GSTIN line already says "Unregistered".
+    const unregistered: Supplier = { ...base, gstNumber: '', stateCode: undefined, state: '' };
+    render(<SupplierPanel suppliers={[unregistered]} />);
+    expect(screen.getByText(/unregistered \(no gstin\)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/tax split unknown/i)).not.toBeInTheDocument();
   });
 });

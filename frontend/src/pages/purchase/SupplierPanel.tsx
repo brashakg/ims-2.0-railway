@@ -21,8 +21,36 @@ import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
-import { gstinStateCode, isInterStateSupply } from '../../constants/gst';
+import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+
+// How a purchase from this vendor is taxed. Local and NOT exported on purpose:
+// the canonical exported helper lands in the sibling PR claude/po-gst-and-ux as
+// `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
+// (two exports of that name in one module is a compile error on main).
+//
+// Mirrors the ONE backend rule, purchase_invoice_engine.determine_place_of_supply:
+// both states known AND different => IGST. A missing state is 'unknown' and says
+// so -- calling it "same state" would print a CGST+SGST promise the bill will not
+// keep.
+type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
+
+function taxSplit(vendorStateCode: string, buyerStateCode: string): TaxSplit {
+  if (!vendorStateCode || !buyerStateCode) return 'unknown';
+  return vendorStateCode === buyerStateCode ? 'cgst_sgst' : 'igst';
+}
+
+const TAX_SPLIT_LABEL: Record<TaxSplit, string> = {
+  igst: 'Other state - IGST',
+  cgst_sgst: 'Same state - CGST + SGST',
+  unknown: 'Tax split unknown',
+};
+
+const TAX_SPLIT_CLASS: Record<TaxSplit, string> = {
+  igst: 'bg-amber-50 text-amber-700',
+  cgst_sgst: 'bg-emerald-50 text-emerald-700',
+  unknown: 'bg-gray-100 text-gray-600',
+};
 
 interface SupplierPanelProps {
   suppliers: Supplier[];
@@ -46,8 +74,7 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
       {suppliers.map((supplier) => {
         const vendorStateCode = supplier.stateCode || gstinStateCode(supplier.gstNumber);
         const vendorState = supplier.state || stateNames[vendorStateCode] || '';
-        const interState = isInterStateSupply(vendorStateCode, buyerStateCode);
-        const gstKnown = Boolean(vendorStateCode && buyerStateCode);
+        const split = taxSplit(vendorStateCode, buyerStateCode);
         return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
@@ -124,15 +151,12 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
               ) : (
                 <span className="text-gray-500">Unregistered (no GSTIN)</span>
               )}
-              {gstKnown && (
-                <span
-                  className={`px-2 py-0.5 text-xs rounded ${
-                    interState
-                      ? 'bg-amber-50 text-amber-700'
-                      : 'bg-emerald-50 text-emerald-700'
-                  }`}
-                >
-                  {interState ? 'Other state - IGST' : 'Same state - CGST + SGST'}
+              {/* Only a REGISTERED vendor has a GST split to state. An
+                  unregistered one charges no GST at all, and the line above
+                  already says so. */}
+              {supplier.gstNumber && (
+                <span className={`px-2 py-0.5 text-xs rounded ${TAX_SPLIT_CLASS[split]}`}>
+                  {TAX_SPLIT_LABEL[split]}
                 </span>
               )}
             </div>
