@@ -1099,3 +1099,19 @@ def test_a_success_with_no_product_id_is_not_reported_as_processed(
     assert (row.get("ecom") or {}).get("locally_modified") is True, (
         "the product was dropped from the queue as well as mis-reported"
     )
+    # THE DISCRIMINATING ASSERTION. Everything above is also true when the
+    # guard CRASHES: push_product ends in a bare `except Exception` that is
+    # documented "never propagate", so a TypeError inside the guard returns an
+    # ok=False row with the same counts, the same absent publish call and the
+    # same still-queued row. This test passed for a whole CI run over a guard
+    # that raised TypeError on every call (a required PushResult field was
+    # missing); only pylint caught it. Pin the REASON, which only the guard
+    # itself can set, and refuse an error string that is a Python exception.
+    [res] = [r for r in out["results"] if r.get("target_id") == "P-NOGID"]
+    assert res.get("reason") == "no_product_id", (
+        "the no-gid guard did not run -- this row was produced by the "
+        "fail-soft catch-all instead: %r" % (res.get("error"),)
+    )
+    assert "Error" not in (res.get("error") or ""), (
+        "the operator is being shown a Python exception: %r" % (res.get("error"),)
+    )

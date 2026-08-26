@@ -2257,8 +2257,10 @@ async def push_product(
             # the one that failed. "Processed means visible" is the invariant
             # this whole change rests on, and it has no exceptions.
             return PushResult(
+                mode=MODE_LIVE,
                 entity="product",
                 action=action,
+                target_id=pid,
                 ok=False,
                 reason="no_product_id",
                 payload=payload,
