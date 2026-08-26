@@ -483,6 +483,14 @@ def test_one_state_parser_answers_for_the_order_the_bill_and_the_sale():
         "xyz",
         "99AAAAA0000A1Z5",
         "27AAFCM3456N1Z",
+        # State codes that do NOT exist in GST: 25 (Daman & Diu, merged
+        # into 26 in 2020) and 28 (old Andhra Pradesh, replaced by 37 in
+        # 2014). A second, more forgiving parser takes these at face value
+        # and asserts a state that is not a state; the shared one refuses
+        # and the supply degrades to intra-state. They must not disagree.
+        "25AAAAA0000A1Z5",
+        "28AAAAA0000A1Z5",
+        "902",
     ]:
         engine = pinv.state_code_of(raw)
         shared = resolve_state_code(raw)
