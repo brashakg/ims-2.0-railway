@@ -861,10 +861,49 @@ async def update_vendor(
         if update_data.get("vendor_code"):
             update_data["vendor_code"] = update_data["vendor_code"].strip().upper()
 
+        # An EXPLICIT clear (JSON `"gstin": null`) means "this vendor is not
+        # registered after all". Leaving gstin_status at REGISTERED with no
+        # number would be a row that contradicts itself, so clear both unless
+        # the caller said otherwise. An OMITTED key still leaves the stored
+        # GSTIN alone -- exclude_unset above is what keeps the two different.
+        if "gstin" in update_data and update_data["gstin"] is None:
+            update_data.setdefault("gstin_status", "UNREGISTERED")
+
+        # What actually changed, captured before the bookkeeping stamps are
+        # added. Recorded as a diff rather than an allowlist of "important"
+        # fields: an allowlist is a second thing to keep in step with
+        # VendorUpdate and goes stale in silence, and every field on this door
+        # moves money or identity -- gstin re-taxes every future bill
+        # (IGST <-> CGST+SGST), credit_limit and is_active gate buying at all.
+        changed = {
+            key: {"from": existing.get(key), "to": value}
+            for key, value in update_data.items()
+            if existing.get(key) != value
+        }
+
         update_data["updated_by"] = current_user.get("user_id")
         update_data["updated_at"] = datetime.now().isoformat()
 
         vendor_repo.update(vendor_id, update_data)
+
+        # Fail-soft, same contract as the portal-token audits in this file: a
+        # lost audit row is bad, but blocking the correction of a wrong GSTIN --
+        # the thing this endpoint exists for -- is worse.
+        if changed:
+            try:
+                audit = get_audit_repository()
+                if audit is not None:
+                    audit.create(
+                        {
+                            "action": "vendor.update",
+                            "entity_type": "vendor",
+                            "entity_id": vendor_id,
+                            "user_id": current_user.get("user_id"),
+                            "detail": {"changed": changed},
+                        }
+                    )
+            except Exception:
+                pass
 
     return {"vendor_id": vendor_id, "message": "Vendor updated successfully"}
 

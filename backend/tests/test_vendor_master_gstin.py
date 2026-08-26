@@ -300,3 +300,113 @@ class TestEditVendorRoundTrips:
         r = client.put(f"/api/v1/vendors/{b}", json={"gstin": JH_GSTIN})
         assert r.status_code == 400, r.text
         assert repo.find_by_id(b)["gstin"] == MH_GSTIN
+
+
+# ---------------------------------------------------------------------------
+# A GSTIN change re-taxes every future bill. It must leave a record.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def audit_rows(monkeypatch):
+    """Capture what update_vendor writes to the shared audit repository."""
+    from api.routers import vendors as vendors_module
+
+    rows: list = []
+
+    class _FakeAudit:
+        @staticmethod
+        def create(row):
+            rows.append(row)
+
+    monkeypatch.setattr(
+        vendors_module, "get_audit_repository", lambda: _FakeAudit, raising=False
+    )
+    return rows
+
+
+class TestAVendorEditIsAudited:
+    def test_changing_the_gstin_records_the_old_and_new_number(
+        self, vendor_client, audit_rows
+    ):
+        client, repo = vendor_client
+        vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
+            "vendor_id"
+        ]
+
+        assert client.put(
+            f"/api/v1/vendors/{vid}", json={"gstin": MH_GSTIN}
+        ).status_code == 200
+
+        updates = [r for r in audit_rows if r["action"] == "vendor.update"]
+        assert len(updates) == 1, audit_rows
+        row = updates[0]
+        assert row["entity_type"] == "vendor"
+        assert row["entity_id"] == vid
+        assert row["user_id"] == "u1"
+
+        changed = row["detail"]["changed"]
+        # The old number is the thing you cannot reconstruct afterwards.
+        assert changed["gstin"] == {"from": JH_GSTIN, "to": MH_GSTIN}
+        # The whole SET, not just the count: the state moved with the GSTIN and
+        # that is what actually flips IGST vs CGST+SGST on every later bill.
+        assert set(changed) == {"gstin", "state", "state_code"}
+        assert changed["state_code"] == {"from": "20", "to": "27"}
+        assert changed["state"] == {"from": "Jharkhand", "to": "Maharashtra"}
+
+    def test_a_credit_limit_change_is_recorded_too(self, vendor_client, audit_rows):
+        client, _ = vendor_client
+        vid = client.post(
+            "/api/v1/vendors", json=_body(gstin=JH_GSTIN, credit_limit=250000)
+        ).json()["vendor_id"]
+
+        assert client.put(
+            f"/api/v1/vendors/{vid}", json={"credit_limit": 900000}
+        ).status_code == 200
+
+        changed = audit_rows[-1]["detail"]["changed"]
+        assert changed == {"credit_limit": {"from": 250000, "to": 900000}}
+
+    def test_a_no_op_edit_writes_no_audit_row(self, vendor_client, audit_rows):
+        client, _ = vendor_client
+        vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
+            "vendor_id"
+        ]
+        # Same city it already has -- nothing changed, so nothing to record.
+        assert client.put(
+            f"/api/v1/vendors/{vid}", json={"city": "Ranchi"}
+        ).status_code == 200
+        assert [r for r in audit_rows if r["action"] == "vendor.update"] == []
+
+
+class TestClearingTheGstin:
+    def test_clearing_the_gstin_really_unregisters_the_vendor(self, vendor_client):
+        client, repo = vendor_client
+        vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
+            "vendor_id"
+        ]
+        assert repo.find_by_id(vid)["gstin"] == JH_GSTIN
+
+        # Explicit null -- "this vendor turned out not to be registered".
+        r = client.put(f"/api/v1/vendors/{vid}", json={"gstin": None})
+        assert r.status_code == 200, r.text
+
+        doc = repo.find_by_id(vid)
+        assert doc["gstin"] is None
+        # ...and the row does not go on claiming to be REGISTERED.
+        assert doc["gstin_status"] == "UNREGISTERED"
+
+    def test_an_omitted_gstin_key_never_wipes_the_stored_number(self, vendor_client):
+        client, repo = vendor_client
+        vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
+            "vendor_id"
+        ]
+        # An edit that does not mention the GSTIN at all must leave it alone --
+        # otherwise every phone-number correction would unregister the vendor.
+        assert client.put(
+            f"/api/v1/vendors/{vid}", json={"mobile": "9800000001"}
+        ).status_code == 200
+        doc = repo.find_by_id(vid)
+        assert doc["gstin"] == JH_GSTIN
+        assert doc["gstin_status"] == "REGISTERED"
+        assert doc["mobile"] == "9800000001"
