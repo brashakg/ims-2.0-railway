@@ -158,10 +158,40 @@ class VendorUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class POItemNewProduct(BaseModel):
+    """The identity a buyer types for an item that is not catalogued YET.
+
+    Owner ruling 13: you order from a vendor's list before the product exists in
+    IMS, so the system must stop being the obstacle at the FRONT of the flow.
+    These are exactly the fields he named -- brand, model no, colour code, size
+    and MRP. The line's own `unit_price` is the cost price (provisional: the
+    purchase INVOICE later corrects it to the actual one, ruling 12).
+
+    There is deliberately NO selling price here: see product_master's provisional
+    door. Without one the product can never stamp ACTIVE, so it can never be
+    sold before a cataloguer finishes it.
+    """
+
+    # FRAME is the overwhelmingly common case at the buy desk; any registry
+    # category is accepted and resolved server-side.
+    category: str = "FRAME"
+    brand: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    colour: Optional[str] = None
+    size: Optional[str] = None
+    mrp: float = Field(..., gt=0)
+
+
 class POItemCreate(BaseModel):
-    product_id: str
-    product_name: str
-    sku: str
+    # Ruling 13: a line references EITHER an existing catalogued product OR
+    # carries the identity of one that does not exist yet, which the server
+    # materialises into a real (provisional, unsellable) spine row before the PO
+    # is written. product_id stays the join key for everything downstream --
+    # receiving, the stock mint, the invoice and the 3-way match all key on it.
+    product_id: Optional[str] = None
+    product_name: Optional[str] = None
+    sku: Optional[str] = None
+    new_product: Optional[POItemNewProduct] = None
     # A PO line must order at least one unit at a non-negative price. Without
     # these bounds a negative quantity / price would persist a corrupt PO and
     # poison the subtotal/GST math (subtotal = sum(quantity * unit_price)).
@@ -173,6 +203,27 @@ class POItemCreate(BaseModel):
     hsn: Optional[str] = None
     gst_rate: Optional[float] = Field(default=None, ge=0, le=100)
     category: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_product_identity(self):
+        """A line names an existing product OR describes a new one -- never both,
+        never neither. Both would be ambiguous about which identity the receipt
+        and the bill are settled against."""
+        has_id = bool((self.product_id or "").strip())
+        has_new = self.new_product is not None
+        if has_id and has_new:
+            raise ValueError(
+                "a PO line cannot both reference an existing product and "
+                "describe a new one"
+            )
+        if not has_id and not has_new:
+            raise ValueError(
+                "a PO line needs either a catalogued product or the new item's "
+                "brand, model, colour, size and MRP"
+            )
+        if has_id and not (self.product_name or "").strip():
+            raise ValueError("product_name is required for a catalogued line")
+        return self
 
 
 class POCreate(BaseModel):
@@ -1259,13 +1310,74 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
+    # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
+    # identity instead of a product_id becomes a REAL row on the products spine
+    # here, through the ONE product door, born provisional: inactive, no selling
+    # price, catalog_status DRAFT. That keeps product_id the single join key for
+    # receiving, the stock mint, the invoice and the 3-way match, instead of
+    # forking identity into a second placeholder system.
+    product_repo = get_product_repository()
+    for it in po.items:
+        if it.new_product is None:
+            continue
+        np = it.new_product
+        try:
+            created = _pm.create_via_door(
+                {
+                    "category": np.category,
+                    "brand": np.brand,
+                    "model": np.model,
+                    "colour": np.colour,
+                    "size": np.size,
+                    "mrp": np.mrp,
+                    # The PO rate is the PROVISIONAL cost (ruling 10); the
+                    # purchase invoice corrects it to the actual one (ruling 12).
+                    "cost_price": it.unit_price or None,
+                    "as_draft": True,
+                    "provisional": True,
+                },
+                source="FORM",
+                actor=current_user.get("user_id"),
+                actor_name=current_user.get("username"),
+                product_repo=product_repo,
+                audit_repo=get_audit_repository(),
+                db=_get_db(),
+            )
+        except _pm.ProductMasterError as err:
+            # An identical brand+model+colour+size already exists: reuse it
+            # rather than refusing the order or minting a twin. The buyer has
+            # just typed a description of a product we already know.
+            if err.status == 409 and (err.conflict or {}).get("product_id"):
+                it.product_id = err.conflict["product_id"]
+                it.product_name = it.product_name or err.conflict.get("name")
+                it.sku = it.sku or err.conflict.get("sku")
+                it.new_product = None
+                continue
+            raise HTTPException(
+                status_code=err.status,
+                detail={
+                    "code": "NEW_PRODUCT_INVALID",
+                    "message": err.message,
+                    "field": err.field,
+                },
+            ) from err
+        it.product_id = created.get("product_id")
+        it.product_name = (
+            it.product_name
+            or created.get("name")
+            or f"{np.brand} {np.model}".strip()
+        )
+        it.sku = created.get("sku")
+        it.new_product = None
+
     # Hub Phase 2: every PO line must reference a REAL catalogued product on the
     # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
     # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
     # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
     # (DARK by default) so the existing free-text Create-PO form keeps working
-    # until the Buy Desk picker ships. Fail-soft when no product repo.
-    product_repo = get_product_repository()
+    # until the Buy Desk picker ships. Fail-soft when no product repo. A line
+    # that arrived as a typed-in new product has just been given a real id
+    # above, so it passes this gate like any other.
     if product_repo is not None and _po_catalog_gate_on():
         unknown = [
             it.product_id
@@ -1315,7 +1427,7 @@ async def create_po(
         tax += line_tax
         stored_items.append(
             {
-                **item.model_dump(),
+                **item.model_dump(exclude={"new_product"}),
                 "tax_rate": rate,
                 "hsn": item.hsn or prod.get("hsn_code"),
                 "line_tax": line_tax,
@@ -1772,6 +1884,13 @@ async def send_po(
                     blocked.append(
                         {"product_id": pid, "missing": ["product_not_found"]}
                     )
+                    continue
+                # Ruling 13: a PROVISIONAL row exists precisely because the buyer
+                # is ordering something nobody has catalogued yet. Blocking the
+                # send on its (inevitable) gaps would put the obstacle back at
+                # the front of the flow. The strictness now lives at the INVOICE
+                # (ruling 15), which refuses to settle an incomplete product.
+                if prod.get("provisional"):
                     continue
                 gaps = set(_pm.compute_catalog_status(prod)[1]) - {"cost_price"}
                 if gaps:
