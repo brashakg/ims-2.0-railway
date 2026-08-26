@@ -129,7 +129,12 @@ _REL = (
 _HEX = (
     "NOT A DATE. A uuid4 hex slice used to build a unique test id. The [:10] "
     "arm of the pattern exists for `stamp[:10]` day faces -- the exact line "
-    "that started this -- and cannot tell a hex slice apart."
+    "that started this -- and cannot tell a hex slice apart. KEEP THESE THREE: "
+    "they are the only f-string hits in the scan, so they double as the "
+    "cross-version canary for the PEP 701 tokenizer split described in "
+    "_code_only. If the scanner ever stops looking inside f-strings on some "
+    "Python, `test_the_allow_list_has_not_gone_stale` says so immediately -- "
+    "which is how that drift was caught the first time, on CI's 3.10/3.11."
 )
 
 ALLOWED = {
@@ -350,12 +355,30 @@ ALLOWED = {
 }
 
 
+_FSTRING = re.compile(r"^[a-zA-Z]*[fF]['\"]")
+
+
 def _code_only(path):
     """(raw lines, code-only lines) -- string and comment tokens blanked.
 
     Blanking them is what lets this guard scan test files that TALK about the
     trap, and sibling guards that carry production source as data, without
     tripping on the prose.
+
+    F-STRINGS ARE LEFT ALONE, and that is a VERSION-COMPATIBILITY fix, not a
+    preference. PEP 701 changed the tokenizer in 3.12: from then on an f-string
+    arrives as FSTRING_START / FSTRING_MIDDLE plus real code tokens for each
+    ``{...}``, but on 3.10 and 3.11 the whole thing is ONE STRING token. Blank
+    STRING blindly and this guard sees different files on the CI matrix
+    (3.10/3.11) than on a 3.12+ laptop -- which is exactly how it first went
+    red: three `f"...{uuid.uuid4().hex[:10]}"` lines were hits locally and
+    invisible on CI, so their allow-list entries read as stale. Skipping
+    f-strings on every version makes the scan identical everywhere.
+
+    The cost is that the LITERAL half of an f-string is also scanned, so an
+    f-string whose text happens to contain e.g. ".today()" is a false positive.
+    That is the safe direction: it asks for a reasoned allow-list entry rather
+    than quietly missing a seed.
     """
     with io.open(path, "rb") as fh:
         tokens = list(tokenize.tokenize(fh.readline))
@@ -363,6 +386,8 @@ def _code_only(path):
     grid = {i + 1: list(line) for i, line in enumerate(raw)}
     for tok in tokens:
         if tok.type not in (tokenize.STRING, tokenize.COMMENT):
+            continue
+        if tok.type == tokenize.STRING and _FSTRING.match(tok.string):
             continue
         (r1, c1), (r2, c2) = tok.start, tok.end
         for row in range(r1, r2 + 1):
