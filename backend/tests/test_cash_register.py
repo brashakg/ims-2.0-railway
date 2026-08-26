@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -33,20 +32,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.services import cash_register as cr  # noqa: E402
 from api.routers import finance  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 # CI's asyncio_mode=auto runs coroutine tests; the endpoint tests here use the
 # synchronous TestClient, but we mark the module so the convention is explicit.
 pytestmark = pytest.mark.asyncio
-
-
-def _ist_day(iso_utc: str) -> str:
-    """IST business day ('YYYY-MM-DD') of a naive-UTC ISO stamp.
-
-    Deliberately hand-rolled (+05:30 then take the date) and NOT
-    ``api.utils.ist.ist_date_str``: a fixture that asks the code under test
-    what the right answer is can never catch that code being wrong."""
-    return (datetime.fromisoformat(iso_utc) + timedelta(hours=5, minutes=30)).date().isoformat()
-
 
 
 @pytest.fixture(autouse=True)
@@ -326,7 +316,7 @@ class TestCashRegisterEndpoints:
                 # window. Shift by hand -- calling the production helper to
                 # build the fixture would let a broken helper agree with
                 # itself.
-                "expense_date": _ist_day(opened_at),
+                "expense_date": business_day(opened_at),
             }
         )
 

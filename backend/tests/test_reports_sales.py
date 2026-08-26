@@ -24,16 +24,14 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date as _d, datetime, timedelta, timezone
+from datetime import date as _d, datetime, timedelta
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# ---------------------------------------------------------------------------
-# BUG-104 TRAP -- read before adding a test here
-# ---------------------------------------------------------------------------
+# BUG-104 TRAP -- read before adding a test here.
 # Orders are STORED with a naive `datetime.now()` `created_at`, which on the box
 # (and on Railway, and on the CI runner) is the UTC wall clock. The /sales/*
 # endpoints are QUERIED with `from_date`/`to_date`, which the router turns into
@@ -42,23 +40,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # (right: it is the stored frame) but never reuse its `.date()` as the query
 # face or as an expected daily-bucket key, or every run between 00:00 and 05:30
 # IST asks for a day the seeded row is not in and the endpoint honestly returns
-# nothing.
-#
-# The +05:30 is spelled out by hand here on purpose. Building the expectation
-# with `api.utils.ist` would make the fixture agree with the helper it is
-# supposed to be checking.
-_IST_OFFSET = timedelta(hours=5, minutes=30)
-
-
-def _business_day(stored_utc: datetime) -> str:
-    """The IST business day ('YYYY-MM-DD') of a naive-UTC stored instant."""
-    return (stored_utc + _IST_OFFSET).date().isoformat()
-
-
-def _ist_now() -> datetime:
-    """IST business wall clock as a naive datetime (for year/month windows)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None) + _IST_OFFSET
-
+# nothing. tests/ist_business_day.py explains why the shift is hand-rolled.
+from tests.ist_business_day import business_day as _business_day  # noqa: E402
+from tests.ist_business_day import business_now as _ist_now  # noqa: E402
 
 
 # ============================================================================

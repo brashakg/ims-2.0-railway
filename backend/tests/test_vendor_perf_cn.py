@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import vendors  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from tests.ist_business_day import business_now  # noqa: E402
 from api.routers.vendors import DebitNoteCreate, VENDOR_CN_TYPES  # noqa: E402
 from api.services.ap_engine import build_ledger  # noqa: E402
 
@@ -128,9 +129,16 @@ VENDOR = {"vendor_id": "v1", "trade_name": "Acme", "legal_name": "Acme Pvt"}
 
 
 def test_performance_includes_mtd_spend(monkeypatch):
-    this_month = datetime.now().strftime("%Y-%m-15")
-    last_month_year, last_month = divmod(datetime.now().month - 2, 12)
-    old = f"{datetime.now().year + last_month_year}-{last_month + 1:02d}-15"
+    # BUG-104 TRAP: `_vendor_mtd_spend` matches `bill_date` against
+    # `now_ist().strftime("%Y-%m")` -- the IST month. `datetime.now()` on the
+    # box is the UTC wall clock, so between 00:00 and 05:30 IST on the 1st its
+    # month is the PREVIOUS one and this fixture would file both "current"
+    # bills under last month. Verified failing at 2026-09-01 01:40 IST before
+    # this change.
+    ist = business_now()
+    this_month = ist.strftime("%Y-%m-15")
+    last_month_year, last_month = divmod(ist.month - 2, 12)
+    old = f"{ist.year + last_month_year}-{last_month + 1:02d}-15"
     db = _FakeDB(
         {
             "vendor_bills": [

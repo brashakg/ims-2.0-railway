@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.services import shiprocket  # noqa: E402
 from api.routers import shipping as shipping_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 
 def _run(coro):
@@ -157,13 +158,10 @@ def test_build_payload_missing_created_at_defaults_to_today():
     # is YESTERDAY and this assertion fails for no reason but the hour.
     # Computed by hand (+05:30) rather than through `api.utils.ist`, so the
     # expectation cannot inherit a bug from the helper it is checking.
-    ist_today = (
-        datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5, minutes=30)
-    ).date()
     p = shiprocket.build_shipment_payload(
         {"order_id": "ORD-4", "grand_total": 1.0, "items": [], "created_at": None}, {}
     )
-    assert p["order_date"] == ist_today.isoformat()
+    assert p["order_date"] == business_day()
 
 
 def test_build_payload_empty_cart_gets_summary_line():
