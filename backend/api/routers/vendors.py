@@ -107,7 +107,7 @@ def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -
     return True
 
 
-def _po_gst_parties(vendor, store) -> dict:
+def _po_gst_parties(vendor, store_doc) -> dict:
     """Decide the PLACE OF SUPPLY for a purchase order: the vendor supplies, the
     delivery store receives.
 
@@ -123,15 +123,20 @@ def _po_gst_parties(vendor, store) -> dict:
     """
     from ..services.org_validation import resolve_state_code
 
-    vendor = vendor if isinstance(vendor, dict) else {}
-    store = store if isinstance(store, dict) else {}
-    vendor_gstin = str(vendor.get("gstin") or "").strip()
-    store_gstin = str(store.get("gstin") or "").strip()
+    # NB: `store_doc`, never `store` -- this module binds the name `store` to a
+    # get_file_store() handle, and the file-store guard in
+    # test_users_auth_hardening resolves handles by NAME across the whole file,
+    # so a dict called `store` here reads as an unscoped read of the bucket that
+    # also holds employee Aadhaar/PAN scans.
+    vendor_doc = vendor if isinstance(vendor, dict) else {}
+    store_doc = store_doc if isinstance(store_doc, dict) else {}
+    vendor_gstin = str(vendor_doc.get("gstin") or "").strip()
+    store_gstin = str(store_doc.get("gstin") or "").strip()
     vendor_state = resolve_state_code(
-        vendor_gstin, vendor.get("state_code"), vendor.get("state")
+        vendor_gstin, vendor_doc.get("state_code"), vendor_doc.get("state")
     )
     store_state = resolve_state_code(
-        store_gstin, store.get("state_code"), store.get("state")
+        store_gstin, store_doc.get("state_code"), store_doc.get("state")
     )
     known = bool(vendor_state and store_state)
     return {
