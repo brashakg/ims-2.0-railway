@@ -10,6 +10,7 @@ import {
   Mail,
   MapPin,
   Truck,
+  Receipt,
   Link2,
   Copy,
   Check,
@@ -18,21 +19,36 @@ import {
 } from 'lucide-react';
 import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { useGstStateCodes } from '../../hooks/useGstStateCodes';
+import { gstinStateCode, isInterStateSupply } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 
 interface SupplierPanelProps {
   suppliers: Supplier[];
+  /** Opens the supplier editor. Optional so the panel renders standalone. */
+  onEdit?: (supplier: Supplier) => void;
 }
 
-export function SupplierPanel({ suppliers }: SupplierPanelProps) {
+export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   // The "Generate vendor portal link" action used to live on the (now
   // retired) VendorManagement page. Re-homed here onto the real Suppliers
   // view so the feature isn't lost (PR #454 deleted the only UI for it).
   const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
+  // The buying store's own GST state decides how a purchase from each vendor
+  // is taxed. Same state -> CGST + SGST; another state -> IGST.
+  const storeInfo = useStorePrintInfo();
+  const buyerStateCode = storeInfo?.stateCode || gstinStateCode(storeInfo?.gstin);
+  const stateNames = useGstStateCodes();
 
   return (
     <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
-      {suppliers.map((supplier) => (
+      {suppliers.map((supplier) => {
+        const vendorStateCode = supplier.stateCode || gstinStateCode(supplier.gstNumber);
+        const vendorState = supplier.state || stateNames[vendorStateCode] || '';
+        const interState = isInterStateSupply(vendorStateCode, buyerStateCode);
+        const gstKnown = Boolean(vendorStateCode && buyerStateCode);
+        return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
             <div className="flex-1">
@@ -67,7 +83,13 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
                 <Link2 className="w-3.5 h-3.5" />
                 Portal link
               </button>
-              <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+              <button
+                type="button"
+                onClick={() => onEdit?.(supplier)}
+                aria-label={`Edit ${supplier.name}`}
+                title={`Edit ${supplier.name}`}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
                 <Edit className="w-5 h-5 text-gray-600" />
               </button>
             </div>
@@ -88,7 +110,31 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
             </div>
             <div className="flex items-center gap-2 text-sm">
               <MapPin className="w-4 h-4 text-gray-500" />
-              <span className="text-gray-700">{supplier.city}, {supplier.state}</span>
+              <span className="text-gray-700">
+                {[supplier.city, vendorState].filter(Boolean).join(', ') || 'No address'}
+              </span>
+            </div>
+            {/* GSTIN + what it means for tax. The state comes from the GSTIN
+                itself, so a wrong number is visible here instead of showing up
+                later as a wrongly-taxed purchase. */}
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <Receipt className="w-4 h-4 text-gray-500" />
+              {supplier.gstNumber ? (
+                <span className="font-mono text-gray-700">{supplier.gstNumber}</span>
+              ) : (
+                <span className="text-gray-500">Unregistered (no GSTIN)</span>
+              )}
+              {gstKnown && (
+                <span
+                  className={`px-2 py-0.5 text-xs rounded ${
+                    interState
+                      ? 'bg-amber-50 text-amber-700'
+                      : 'bg-emerald-50 text-emerald-700'
+                  }`}
+                >
+                  {interState ? 'Other state - IGST' : 'Same state - CGST + SGST'}
+                </span>
+              )}
             </div>
           </div>
 
@@ -120,7 +166,8 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
 
       {suppliers.length === 0 && (
         <div className="col-span-2 text-center py-12">
