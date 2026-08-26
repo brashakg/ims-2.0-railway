@@ -50,7 +50,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .gst_rates import gst_rate_for_category, hsn_for_category
+from .gst_rates import (
+    gst_rate_for_category,
+    hsn_for_category,
+    resolve_gst_rate_strict,
+)
 from .gtin import classify_gtin, is_valid_gtin, normalise_candidate
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
@@ -1257,11 +1261,25 @@ def normalise_payload(
             except Exception:  # noqa: BLE001 - derivation is fail-soft
                 dc = None
 
-    # GST / HSN: explicit value wins; else derive from the canonical table so
-    # the master rate always equals what POS bills (gst_rates.py).
+    # GST / HSN: THE HSN DECIDES THE RATE.
+    #
+    # A GST rate is a legal consequence of the HSN, not a second opinion typed
+    # next to it, so whatever the HSN settles is what gets stored -- the
+    # owner-editable hsn_gst_master first, then the canonical table
+    # (resolve_gst_rate_strict, the same call the purchase side makes in
+    # vendors._po_line_gst_rate off the same hsn_code). Deriving it HERE is what
+    # lets every screen show a product's catalogued rate and be showing the rate
+    # the server will actually charge, instead of each screen keeping an
+    # HSN -> rate table of its own and drifting.
+    #
+    # An explicit rate, then the category default, remain the fallback for an
+    # HSN the tables do not settle (a typed tariff code, an ambiguous heading).
     resolved_hsn = hsn_code or hsn_for_category(canonical)
+    rate_from_hsn, _hsn_unsettled = resolve_gst_rate_strict(resolved_hsn)
     resolved_gst = (
-        gst_rate if gst_rate is not None else gst_rate_for_category(canonical)
+        rate_from_hsn
+        if rate_from_hsn is not None
+        else (gst_rate if gst_rate is not None else gst_rate_for_category(canonical))
     )
 
     # SKU: accept a supplied (possibly legacy) SKU as-is if it passes the

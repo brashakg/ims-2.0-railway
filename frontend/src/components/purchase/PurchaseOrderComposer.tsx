@@ -22,7 +22,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, FileText, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { hsnRate } from '../../constants/gst';
 import { vendorsApi } from '../../services/api/inventory';
 
 /** Today in the browser's own calendar, as the yyyy-mm-dd an <input type="date">
@@ -149,11 +148,21 @@ export interface PurchaseOrderComposerProps {
  *  settled at all, and -- when it is not -- what is missing, in the buyer's
  *  words.
  *
- *  HSN FIRST, exactly like the server (gst_rates.resolve_gst_rate_strict): the
- *  rate legally follows the HSN, so a catalogue rate that disagrees with the
- *  product's own HSN is a data error, not a second opinion. Previewing the
- *  catalogue rate instead is how the screen came to show Rs 50 of GST on
- *  sunglasses the server then stored at Rs 180.
+ *  THE RATE COMES OFF THE PRODUCT, and nothing here works it out. The product's
+ *  catalogued `gst_rate` IS the rate its HSN settles -- the cataloguing door
+ *  derives it from the HSN server-side (product_master.normalise_payload ->
+ *  gst_rates.resolve_gst_rate_strict), which is the same call, over the same
+ *  owner-editable table, that the purchase side makes when it stores the line
+ *  (vendors._po_line_gst_rate). So showing the catalogued rate here IS showing
+ *  the rate the server will charge.
+ *
+ *  This screen deliberately keeps NO HSN -> rate table of its own. It used to,
+ *  and the two tables drifted: the screen held 900319 at 5% while the server
+ *  held no 900319 at all, and the server settled 852580 and every 4-digit
+ *  heading that the screen was blind to. Two copies of a tax rule is how you
+ *  get a purchase order that promises a vendor one number and books another.
+ *  The HSN still travels with the line -- shown, and demanded, because a GST
+ *  purchase document needs one -- it just does not price it here.
  *
  *  ONE rule for every door that opens a PO line -- the manual form's picker and
  *  the Buy Desk's bulk draft (which used to open every line at a flat 18%). */
@@ -164,19 +173,13 @@ export function gstForProduct(picked: { gstRate?: number | null; hsn?: string | 
   gstMissing: string | null;
 } {
   const hsn = (picked.hsn ?? '').trim() || null;
-  const fromHsn = hsnRate(hsn);
-  const catalogued =
+  const rate =
     typeof picked.gstRate === 'number' && picked.gstRate >= 0 ? picked.gstRate : null;
-  const rate = fromHsn ?? catalogued;
   return {
     taxRate: rate ?? 0,
     hsn,
     gstResolved: rate !== null,
-    gstMissing: !hsn
-      ? 'no HSN on this product'
-      : fromHsn === null
-        ? `HSN ${hsn} is not in the GST rate list`
-        : null,
+    gstMissing: !hsn ? 'no HSN on this product' : null,
   };
 }
 

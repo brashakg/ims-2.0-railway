@@ -98,6 +98,7 @@ CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
 from ..services.gst_rates import (
     gst_rate_for_category,
     hsn_for_category,
+    resolve_gst_rate_strict as _gst_strict,
     GST_CATEGORY_TABLE,
 )
 
@@ -3248,6 +3249,21 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+
+        # The HSN decides the rate on EDIT too, not just at create. Without
+        # this, the create door derived gst_rate from hsn_code and a later PUT
+        # could set either one alone -- so a product could be edited into a
+        # stored rate its own HSN does not carry, which is precisely the drift
+        # the door exists to stop, one screen over. Same call, same
+        # owner-editable table (services/gst_rates.resolve_gst_rate_strict) as
+        # the create door and as the purchase side. Only runs when this edit
+        # touches HSN or rate; an HSN the table cannot settle leaves whatever
+        # the editor sent alone.
+        if "hsn_code" in update_data or "gst_rate" in update_data:
+            _eff_hsn = update_data.get("hsn_code") or existing.get("hsn_code")
+            _rate_from_hsn, _ = _gst_strict(_eff_hsn)
+            if _rate_from_hsn is not None:
+                update_data["gst_rate"] = _rate_from_hsn
 
         # Hub Phase 0: deep-merge a partial attributes patch onto the existing
         # attributes so a DRAFT's in-attributes gap (CL power/expiry_date,

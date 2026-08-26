@@ -8,7 +8,6 @@
 export interface HSNCode {
   code: string;
   description: string;
-  gstRate: number;
   category: 'LENS' | 'FRAME' | 'SPECTACLE' | 'CONTACT_LENS' | 'SUNGLASSES' | 'ACCESSORIES' | 'WATCH' | 'SMARTWATCH' | 'CLOCK' | 'HEARING_AID' | 'SERVICE';
 }
 
@@ -20,88 +19,86 @@ export interface HSNCode {
 //  40% — Luxury/sin goods (not applicable to optical)
 // ============================================================================
 
-// HSN Codes for Optical & Lifestyle Products (GST 2.0)
+// HSN Codes for Optical & Lifestyle Products.
+//
+// CODE + DESCRIPTION ONLY -- deliberately NO RATE. The rate a code carries is
+// the SERVER's answer (services/gst_rates.resolve_gst_rate_strict, over the
+// owner-editable hsn_gst_master), and it is applied where it matters: the
+// cataloguing door derives a product's stored gst_rate from its HSN, and the
+// purchase side resolves the same way off the same HSN. A rate column here
+// would be a second copy of that rule in a place that cannot be told when the
+// rule changes -- which is exactly how this table came to state 5% on HSN
+// 900319 while the server refused to state anything at all.
+//
+// So: this list names the codes a cataloguer may pick. It does not price them.
 export const HSN_CODES: Record<string, HSNCode> = {
   // Chapter 90: Optical instruments
   '900130': {
     code: '900130',
     description: 'Contact lenses',
-    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'CONTACT_LENS',
   },
   '900140': {
     code: '900140',
     description: 'Spectacle lenses of glass',
-    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'LENS',
   },
   '900150': {
     code: '900150',
     description: 'Spectacle lenses of other materials (CR-39, polycarbonate, hi-index)',
-    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'LENS',
   },
   '900311': {
     code: '900311',
     description: 'Frames of plastics for spectacles',
-    gstRate: 5,    // GST 2.0: reduced from 18%
     category: 'FRAME',
   },
   '900319': {
     code: '900319',
     description: 'Frames of other materials (metal, titanium, wood)',
-    gstRate: 5,    // GST 2.0: reduced from 18%
     category: 'FRAME',
   },
   '900410': {
     code: '900410',
     description: 'Sunglasses',
-    gstRate: 18,   // Unchanged — non-corrective eyewear
     category: 'SUNGLASSES',
   },
   '900490': {
     code: '900490',
     description: 'Corrective spectacles, goggles and the like',
-    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'SPECTACLE',
   },
   // Chapter 91: Watches
   '910111': {
     code: '910111',
     description: 'Wrist watches with mechanical display',
-    gstRate: 18,
     category: 'WATCH',
   },
   '910221': {
     code: '910221',
     description: 'Wrist watches, smart watches (electronic)',
-    gstRate: 18,
     category: 'SMARTWATCH',
   },
   '910500': {
     code: '910500',
     description: 'Clocks (wall clocks, alarm clocks)',
-    gstRate: 18,
     category: 'CLOCK',
   },
   // Chapter 90: Hearing aids (NIL / exempt for complete devices; parts 18%)
   '902140': {
     code: '902140',
     description: 'Hearing aids (complete device) — NIL/exempt; parts attract 18%',
-    gstRate: 0,
     category: 'HEARING_AID',
   },
   // Accessories & Services
   '392690': {
     code: '392690',
     description: 'Spectacle cases, cleaning cloths, accessories (plastics)',
-    gstRate: 18,
     category: 'ACCESSORIES',
   },
   '998599': {
     code: '998599',
     description: 'Optical services (fitting, repair, adjustment)',
-    gstRate: 18,
     category: 'SERVICE',
   },
 };
@@ -285,12 +282,11 @@ export function validateGSTNumber(gstin: string): boolean {
 
 // Get all HSN codes as dropdown options. 6-digit only (owner 2026-07-05):
 // the 4-digit "turnover <= 5 Cr" simplification was removed app-wide.
-export function getHSNOptions(): Array<{ value: string; label: string; gstRate: number }> {
-  const codes = HSN_CODES;
-  return Object.values(codes).map((hsn) => ({
+// No rate in the label: the option names a code, the server prices it.
+export function getHSNOptions(): Array<{ value: string; label: string }> {
+  return Object.values(HSN_CODES).map((hsn) => ({
     value: hsn.code,
-    label: `${hsn.code} - ${hsn.description} (GST: ${hsn.gstRate}%)`,
-    gstRate: hsn.gstRate,
+    label: `${hsn.code} - ${hsn.description}`,
   }));
 }
 
@@ -375,19 +371,4 @@ export function isInterStateSupply(
   const codeB = gstStateCode(b.gstin);
   if (codeA && codeB) return codeA !== codeB;
   return null;
-}
-
-/** The GST rate an HSN settles, or null when this table does not hold it.
- *
- *  HSN-FIRST, the same order the server uses (gst_rates.resolve_gst_rate_strict):
- *  the HSN is what the rate legally follows, and a catalogue rate that
- *  disagrees with the product's own HSN is a data error, not a second opinion.
- *  Without this the screen previewed the catalogued rate while the server
- *  charged the HSN's -- a pair of sunglasses catalogued at 5% with HSN 900410
- *  showed Rs 50 of GST and stored Rs 180. */
-export function hsnRate(hsn?: string | null): number | null {
-  const code = (hsn ?? '').trim();
-  if (!code) return null;
-  const hit = HSN_CODES[code];
-  return hit ? hit.gstRate : null;
 }

@@ -29,6 +29,7 @@ import {
   applyPickedProduct,
   todayForDateInput,
 } from '../PurchaseOrderComposer';
+import { HSN_CODES, getHSNOptions } from '../../../constants/gst';
 import type { ComposerLine, PurchaseOrderComposerProps } from '../PurchaseOrderComposer';
 
 const LINE = (over: Partial<ComposerLine> = {}): ComposerLine => ({
@@ -155,19 +156,39 @@ describe('PurchaseOrderComposer — the rate comes from the product', () => {
     expect(screen.queryByText(/^18%$/)).toBeNull();
   });
 
-  it('previews the rate the HSN settles, not a catalogue rate that disagrees', () => {
-    // Sunglasses catalogued at 5% but carrying HSN 900410 (18%). The server
-    // resolves HSN-first and stores Rs 180; the screen used to show Rs 50.
+  it('previews the catalogued rate on the product — it does not price the HSN itself', () => {
+    // The catalogued rate IS the rate the HSN settles: the cataloguing door
+    // derives gst_rate from hsn_code server-side, with the same resolver the
+    // purchase side uses on the same HSN. So the screen shows the stored rate
+    // and is showing what will be charged.
+    //
+    // 852580 (smartglasses) is the case that proves the screen no longer works
+    // rates out for itself: it is 18% on the server and sits on 35 of the 68
+    // live products, and the frontend's old HSN table had never heard of it.
     const picked = applyPickedProduct(LINE({ taxRate: 0, hsn: null, gstResolved: false }), {
       productId: 'p',
-      productName: 'Oakley',
-      sku: 'OK1',
-      gstRate: 5,
-      hsn: '900410',
+      productName: 'Ray-Ban Meta Wayfarer',
+      sku: 'RBM1',
+      gstRate: 18,
+      hsn: '852580',
     });
     expect(picked.taxRate).toBe(18);
     expect(picked.gstResolved).toBe(true);
     expect(picked.gstMissing).toBeNull();
+  });
+
+  it('keeps NO HSN → rate table of its own', () => {
+    // The disease this whole round is about: one business rule with two
+    // implementations. The frontend used to hold 13 HSN codes WITH rates, the
+    // backend a different 13, and 10 of 16 measured codes disagreed — the
+    // screen stated 5% on HSN 900319 where the server would state nothing.
+    // Deleting the rate column is what makes that impossible; a test that
+    // asserted the two tables matched would have kept the bug and added a
+    // tripwire. If a `gstRate` reappears on an HSN entry, this fails.
+    const entries = Object.values(HSN_CODES) as Array<Record<string, unknown>>;
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.filter((h) => 'gstRate' in h)).toEqual([]);
+    expect(getHSNOptions().filter((o) => 'gstRate' in o)).toEqual([]);
   });
 
   it('flags a product with a rate but NO HSN, and names it on the order', () => {

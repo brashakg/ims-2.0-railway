@@ -549,8 +549,19 @@ def resolve_gst_rate_strict(hsn_code=None):
             return rate, None
 
     rates = _rates_under(hc, by_hsn)
-    if len(hc) == 4 and hc in _SETTLED_HSN_HEADINGS and len(rates) == 1:
-        return next(iter(rates)), None
+
+    # A heading DECLARED settled carries one rate across the whole heading, so
+    # any code under it inherits that rate -- not just the bare heading itself.
+    # Without this the table answered 9003 (5%) but refused 900319, the metal
+    # frames that sit inside it, and the screen that DID hold 900319 stated a
+    # rate the server would not stand behind. Unanimity is re-checked off the
+    # children on every call, so a heading that stops agreeing with itself (a
+    # revision landing on one child) goes back to refusing on its own.
+    heading = hc[:4]
+    if heading in _SETTLED_HSN_HEADINGS:
+        under = _rates_under(heading, by_hsn)
+        if len(under) == 1:
+            return next(iter(under)), None
 
     if len(rates) > 1:
         shown = " / ".join(f"{r:g}%" for r in sorted(rates))

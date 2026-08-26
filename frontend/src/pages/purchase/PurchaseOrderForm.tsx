@@ -14,7 +14,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
-import { hsnRate, isInterStateSupply } from '../../constants/gst';
+import { isInterStateSupply } from '../../constants/gst';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type { ComposerVendorOption } from '../../components/purchase/PurchaseOrderComposer';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
@@ -261,13 +261,16 @@ function ProductSearchSelect({
                   <div className="text-xs text-gray-500 flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5">
                     <span className="font-mono">{p.sku}</span>
                     {hit.category ? <span>{String(hit.category).replace(/_/g, ' ').toLowerCase()}</span> : null}
-                    {/* The rate follows the HSN, the same order the server
-                        resolves in -- and a missing HSN is flagged on its own,
-                        because a product can carry a catalogued rate and still
-                        have no HSN, which a purchase order may not. */}
-                    {(hsnRate(p.hsn) ?? p.gstRate) !== null ? (
+                    {/* The product's own catalogued rate -- which the
+                        cataloguing door derived from this very HSN, server-side,
+                        so it is the rate the purchase order will be stored at.
+                        This list keeps no HSN -> rate table of its own. A
+                        missing HSN is still flagged on its own, because a
+                        product can carry a rate and have no HSN, which a GST
+                        purchase document may not. */}
+                    {p.gstRate !== null ? (
                       <span>
-                        {hsnRate(p.hsn) ?? p.gstRate}% GST{p.hsn ? ` · HSN ${p.hsn}` : ''}
+                        {p.gstRate}% GST{p.hsn ? ` · HSN ${p.hsn}` : ''}
                       </span>
                     ) : (
                       <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium">
