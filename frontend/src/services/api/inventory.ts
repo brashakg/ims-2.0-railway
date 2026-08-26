@@ -760,6 +760,9 @@ export const vendorsApi = {
       accepted_qty: number;
       rejected_qty?: number;
       rejection_reason?: string;
+      // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
+      // refused (422 LINES_NOT_TALLIED) until every line carries it.
+      tallied?: boolean;
     }>;
     notes?: string;
   }) => {

@@ -720,6 +720,83 @@ def _apply_invoice_mrp(db, lines, invoice_id) -> Optional[list]:
         return None
 
 
+class CataloguingRequest(BaseModel):
+    """Ask a cataloguer to finish the products blocking a bill."""
+
+    product_ids: List[str] = Field(..., min_length=1)
+    note: Optional[str] = None
+
+
+@router.post("/request-cataloguing", status_code=201)
+async def request_cataloguing(
+    body: CataloguingRequest,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """The way past the gate for the person who is stopped by it.
+
+    An accountant holds no `products:write` -- deliberately: whoever settles the
+    money does not also define the product. So when the invoice refuses an
+    incomplete product, the accountant's only move would otherwise be to find a
+    developer. This raises the P2 task for the cataloguer instead, naming the
+    products and exactly what each one is missing.
+
+    A gate you can clear by asking a named colleague is a gate. A gate whose
+    only exit is a developer is a wall.
+    """
+    db = _get_db()
+    items = []
+    for pid in dict.fromkeys(body.product_ids):
+        prod = None
+        if db is not None:
+            try:
+                prod = db.get_collection("products").find_one(
+                    {"product_id": pid}, {"_id": 0}
+                )
+            except Exception:  # noqa: BLE001
+                prod = None
+        gaps = _pm.compute_catalog_status(prod)[1] if prod else []
+        items.append(
+            {
+                "product_id": pid,
+                "product": (prod or {}).get("name")
+                or " ".join(
+                    str((prod or {}).get(k) or "") for k in ("brand", "model")
+                ).strip()
+                or pid,
+                "missing": [_pm.field_label(g) for g in gaps],
+            }
+        )
+
+    lines = [
+        f"- {i['product']}: needs "
+        + (", ".join(i["missing"]) if i["missing"] else "review")
+        for i in items
+    ]
+    try:
+        from ..services.task_triggers import create_system_task
+        from ..dependencies import get_task_repository
+
+        create_system_task(
+            get_task_repository(),
+            title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+            description=(
+                "A purchase invoice cannot be booked until these products are "
+                "catalogue-complete:\n"
+                + "\n".join(lines)
+                + (f"\n\nNote: {body.note}" if body.note else "")
+            ),
+            priority="P2",
+            category="Catalog",
+            store_id=current_user.get("active_store_id"),
+            dedupe_ref="catalogue-for-bill:"
+            + ",".join(sorted(i["product_id"] for i in items)),
+        )
+    except Exception:  # noqa: BLE001 - asking must never 500 the screen
+        logger.warning("[PI] could not raise the cataloguing task", exc_info=True)
+
+    return {"requested": items, "message": "Cataloguing requested"}
+
+
 # ---------------------------------------------------------------------------
 # Create (book AP + ITC from lines, with IGST classification)
 # ---------------------------------------------------------------------------

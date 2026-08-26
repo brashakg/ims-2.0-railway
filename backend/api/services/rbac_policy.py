@@ -6774,6 +6774,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/match",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # Ruling 15: the invoice gate refuses an incomplete product, and the
+    # accountant holds no products:write. This raises the cataloguing task for
+    # them -- same accounting gate as the rest of the bill screen.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/request-cataloguing",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception",

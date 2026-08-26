@@ -799,3 +799,59 @@ class TestTheInvoiceIsTheAuthorityOnPrice:
         p = db.get_collection("products").find_one({"product_id": "P1"})
         assert p["mrp"] == 7990.0
         assert "mrp_source" not in p
+
+class _TaskRepo:
+    def __init__(self):
+        self.rows = []
+
+    def find_many(self, _flt):
+        return []
+
+    def create(self, doc):
+        self.rows.append(doc)
+        return doc
+
+
+class TestAskingForCataloguing:
+    """The accountant is stopped by the gate and holds no products:write. They
+    must be able to ask the cataloguer, not hunt for a developer."""
+
+    def _ask(self, products, product_ids):
+        db = _DB(products=[dict(p) for p in products])
+        tasks = _TaskRepo()
+        from api import dependencies as deps
+
+        saved = (pi_mod._get_db, deps.get_task_repository)
+        pi_mod._get_db = lambda: db
+        deps.get_task_repository = lambda: tasks
+        try:
+            body = pi_mod.CataloguingRequest(product_ids=product_ids)
+            out = asyncio.run(
+                pi_mod.request_cataloguing(
+                    body,
+                    {
+                        "user_id": "u1",
+                        "roles": ["ACCOUNTANT"],
+                        "active_store_id": "BV-01",
+                    },
+                )
+            )
+            return out, tasks
+        finally:
+            pi_mod._get_db, deps.get_task_repository = saved
+
+    def test_it_names_the_product_and_exactly_what_is_missing(self):
+        out, tasks = self._ask([_PROVISIONAL_PRODUCT], ["P1"])
+        assert out["requested"] == [
+            {
+                "product_id": "P1",
+                "product": "Ray-Ban RB3025",
+                "missing": ["Selling Price"],
+            }
+        ]
+        assert len(tasks.rows) == 1
+        task = tasks.rows[0]
+        assert task["category"] == "Catalog"
+        assert task["priority"] == "P2"
+        assert "Ray-Ban RB3025: needs Selling Price" in task["description"]
+        assert task["status"] == "OPEN"

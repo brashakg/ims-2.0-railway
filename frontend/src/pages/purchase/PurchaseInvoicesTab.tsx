@@ -46,12 +46,33 @@ const inr = (n?: number) => `₹${(Math.round((n || 0) * 100) / 100).toLocaleStr
 // 18% sunglasses/watches/accessories, plus 0/28 for completeness).
 const GST_RATES = [0, 5, 12, 18, 28];
 
+// The server's `detail` is a string on some routes and a structured object
+// ({code, message, lines}) on others -- the purchase-invoice gates are the
+// latter. String()-ing an object rendered "[object Object]" at the user, which
+// is how a precise refusal ("...is still missing Selling Price") became
+// unreadable. Prefer the object's own message.
 function errMsg(e: unknown, fb: string) {
   if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string } } }).response;
-    if (r?.data?.detail) return String(r.data.detail);
+    const r = (e as { response?: { data?: { detail?: unknown } } }).response;
+    const d = r?.data?.detail;
+    if (typeof d === 'string' && d) return d;
+    if (d && typeof d === 'object') {
+      const m = (d as { message?: string }).message;
+      if (m) return m;
+    }
   }
   return e instanceof Error ? e.message : fb;
+}
+
+// The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
+// ask the cataloguer without retyping them.
+function blockedProductIds(e: unknown): string[] {
+  if (!e || typeof e !== 'object' || !('response' in e)) return [];
+  const d = (e as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+  if (!d || typeof d !== 'object') return [];
+  const det = d as { code?: string; lines?: Array<{ product_id?: string }> };
+  if (det.code !== 'PRODUCT_NOT_CATALOGUED') return [];
+  return (det.lines || []).map((l) => l.product_id).filter((x): x is string => !!x);
 }
 
 // Pull a 2-digit state code from a place_of_supply ("27", "27-Maharashtra")
@@ -691,9 +712,17 @@ function GrnPickerModal({
       setLoading(true);
       try {
         const storeId = user?.activeStoreId;
-        // Only ACCEPTED GRNs are billable (goods physically verified into stock).
-        const res = await vendorsApi.getGRNs({ status: 'ACCEPTED', ...(storeId ? { store_id: storeId } : {}) });
-        setGrns(res?.grns ?? []);
+        const scope = storeId ? { store_id: storeId } : {};
+        // Only ACCEPTED GRNs are billable (goods physically verified into
+        // stock). PARTIALLY_ACCEPTED ones are listed too, but not billable:
+        // some lines are HELD because their product is not catalogued yet, and
+        // a receipt that simply vanished from this list with no explanation was
+        // a dead end -- the accountant had nothing to act on.
+        const [ok, held] = await Promise.all([
+          vendorsApi.getGRNs({ status: 'ACCEPTED', ...scope }),
+          vendorsApi.getGRNs({ status: 'PARTIALLY_ACCEPTED', ...scope }),
+        ]);
+        setGrns([...(ok?.grns ?? []), ...(held?.grns ?? [])]);
       } catch {
         setGrns([]);
       } finally {
@@ -764,19 +793,52 @@ function GrnPickerModal({
             </div>
           ) : (
             <div className="space-y-2">
-              {grns.map((g) => (
+              {grns.map((g) => {
+                const heldLines: Array<{ product_id?: string }> = g.unresolved_lines || [];
+                const held = g.status === 'PARTIALLY_ACCEPTED' || heldLines.length > 0;
+                return (
                 <div key={g.grn_id} className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
                   <div>
                     <div className="font-medium text-gray-900">{g.grn_number} <span className="text-xs font-normal text-gray-500">· {g.vendor_name || g.vendor_id}</span></div>
                     <div className="text-xs text-gray-500">
                       PO {g.po_number || '-'} · Supplier inv {g.vendor_invoice_no || '-'} · {g.total_accepted ?? 0} units accepted
                     </div>
+                    {held ? (
+                      <div className="text-xs text-amber-700 mt-0.5">
+                        {heldLines.length || 'Some'} line(s) are waiting to be catalogued — this receipt
+                        cannot be invoiced until they are finished.
+                      </div>
+                    ) : null}
                   </div>
-                  <button type="button" onClick={() => pick(g)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
-                    {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice
-                  </button>
+                  {held ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ids = heldLines.map((l) => l.product_id).filter(Boolean) as string[];
+                        if (ids.length === 0) { toast.error('Nothing to request on this receipt'); return; }
+                        setBusyId(g.grn_id);
+                        try {
+                          await purchaseInvoicesApi.requestCataloguing(ids);
+                          toast.success('Asked the cataloguer to finish these items');
+                        } catch (e) {
+                          toast.error(errMsg(e, 'Could not raise the cataloguing request'));
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                      disabled={busyId === g.grn_id}
+                      className="btn sm disabled:opacity-60"
+                    >
+                      {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : null} Ask for cataloguing
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => pick(g)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
+                      {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice
+                    </button>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -1033,7 +1095,18 @@ function InvoiceFormDrawer({
       toast.success('Purchase invoice booked');
       onBooked();
     } catch (e) {
+      const blocked = blockedProductIds(e);
       toast.error(errMsg(e, 'Failed to book purchase invoice'));
+      if (blocked.length > 0) {
+        // The accountant holds no products:write, so the refusal has to come
+        // with a way forward: raise the task for the cataloguer.
+        try {
+          await purchaseInvoicesApi.requestCataloguing(blocked);
+          toast.info('Asked the cataloguer to finish these items — the bill can be booked after that');
+        } catch {
+          /* the refusal above is the message that matters */
+        }
+      }
     } finally {
       setSaving(false);
     }
