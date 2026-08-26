@@ -113,15 +113,29 @@ def _po_gst_parties(vendor, store_doc) -> dict:
 
     Same-state supply -> CGST + SGST. Different states -> IGST. This business
     runs 3 legal entities across 4 GSTINs in 2 states, so "our state" is NOT a
-    constant: it is read off the DELIVERY STORE's own GSTIN (which stores.py
-    derives from its entity), never assumed.
+    constant.
 
-    Falls back to the party's declared state when a GSTIN is absent (an
-    unregistered vendor still has a state). When either side is unknown the
-    supply is treated as intra-state -- the same safe default the sales invoice
-    uses -- and flagged `assumed` so the screen can say so rather than pretend.
+    THE SAME ENGINE THE PURCHASE BILL USES. determine_place_of_supply /
+    state_code_of in services/purchase_invoice_engine.py already classify the
+    vendor's bill; the order that precedes it now calls exactly those, so the
+    order and the bill cannot return opposite verdicts on one purchase.
+
+    One thing this passes that the bill does not: the delivery store's OWN
+    declared state, as the explicit place of supply. Place of supply for goods
+    is where delivery terminates -- and stores.py `_derive_store_gstin` falls
+    back to the entity's PRIMARY registration when the entity holds none in the
+    store's state, so a Maharashtra shop can be stamped with a Jharkhand GSTIN.
+    Reading the shop's own state first keeps the physical delivery, not the
+    paperwork fallback, in charge.
+
+    Returns the same FIELD NAMES the bill writes (`supply_place_recipient`,
+    `supplier_state`, `interstate`) with the same meanings. There is
+    deliberately NO bare `place_of_supply` key: on a bill that name means the
+    SUPPLIER state (itc_reconcile keys on it), so a PO carrying it under the
+    recipient meaning would flip every inter-state purchase to intra-state the
+    day anything copied it onto a bill.
     """
-    from ..services.org_validation import resolve_state_code
+    from ..services import purchase_invoice_engine as pinv
 
     # NB: `store_doc`, never `store` -- this module binds the name `store` to a
     # get_file_store() handle, and the file-store guard in
@@ -132,31 +146,34 @@ def _po_gst_parties(vendor, store_doc) -> dict:
     store_doc = store_doc if isinstance(store_doc, dict) else {}
     vendor_gstin = str(vendor_doc.get("gstin") or "").strip()
     store_gstin = str(store_doc.get("gstin") or "").strip()
-    vendor_state = resolve_state_code(
-        vendor_gstin, vendor_doc.get("state_code"), vendor_doc.get("state")
+    store_declared = pinv.state_code_of(
+        store_doc.get("state_code")
+    ) or pinv.state_code_of(store_doc.get("state"))
+    pos, interstate = pinv.determine_place_of_supply(
+        vendor_gstin, store_gstin, store_declared
     )
-    store_state = resolve_state_code(
-        store_gstin, store_doc.get("state_code"), store_doc.get("state")
-    )
-    known = bool(vendor_state and store_state)
+    supplier_state = pinv.state_code_of(vendor_gstin)
     return {
         "vendor_gstin": vendor_gstin,
-        "vendor_state_code": vendor_state,
+        "supplier_state": supplier_state or None,
         "store_gstin": store_gstin,
-        "store_state_code": store_state,
-        "interstate": bool(known and vendor_state != store_state),
-        "place_of_supply": store_state or vendor_state,
-        "place_of_supply_assumed": not known,
+        "supply_place_recipient": pos,
+        "interstate": interstate,
+        # True when we could not prove the classification from GST numbers, so
+        # the screen says "shown as within-state" instead of asserting it.
+        "supply_place_assumed": not (supplier_state and pos),
     }
 
 
-def _po_line_gst_rate(item, prod) -> tuple:
+def _po_line_gst_rate(line, prod) -> tuple:
     """Rate (percent) for ONE purchase-order line, HSN-first, and what is
     missing when it cannot be settled.
 
-    Returns ``(rate, hsn, source, missing)``. ``rate`` is None ONLY when nothing
-    could settle it -- and then ``missing`` says why in plain English and the
-    line is stored UNRESOLVED with zero tax rather than taxed at a guessed rate.
+    ``line`` is a plain dict (every door hands one in: the manual form dumps its
+    pydantic model, the two auto-drafters build theirs). Returns
+    ``(rate, hsn, source, missing)``. ``rate`` is None ONLY when nothing could
+    settle it -- and then ``missing`` says why in plain English and the line is
+    stored UNRESOLVED with zero tax rather than taxed at a guessed rate.
 
     Order: an explicit rate on the request wins; otherwise the line's / the
     product's HSN is resolved against the owner-editable HSN table (so a GST
@@ -165,10 +182,12 @@ def _po_line_gst_rate(item, prod) -> tuple:
     """
     from ..services.gst_rates import resolve_gst_rate_strict
 
+    line = line if isinstance(line, dict) else {}
     prod = prod if isinstance(prod, dict) else {}
-    hsn = item.hsn or prod.get("hsn_code")
-    if item.gst_rate is not None:
-        return item.gst_rate, hsn, "line", None
+    hsn = line.get("hsn") or prod.get("hsn_code")
+    given = line.get("gst_rate")
+    if given is not None:
+        return given, hsn, "line", None
     rate, missing = resolve_gst_rate_strict(hsn)
     if rate is not None:
         return rate, hsn, "hsn", None
@@ -182,6 +201,130 @@ def _po_line_gst_rate(item, prod) -> tuple:
         except (TypeError, ValueError):
             pass
     return None, hsn, "", missing
+
+
+def build_po_gst(raw_lines, product_of, vendor, store_doc) -> dict:
+    """THE per-line GST computation for EVERY door that writes a purchase order.
+
+    Three doors write into `purchase_orders`: the manual Create-PO form
+    (`create_po` below), the per-power CL/lens auto-draft
+    (`routers/cl_po.py::generate_cl_po`) and the demand-forecast auto-draft
+    (`create_po_from_forecast` below). The last two used to book a flat
+    ``subtotal * 0.18`` and store lines with NO `tax_rate` at all, so a
+    contact-lens order was over-taxed by 13 points AND the bill later drafted
+    off it (`purchase_invoice_engine.lines_from_grn` reads `po_line["tax_rate"]`)
+    charged 0%. Both bugs came from the rule living in one caller instead of in
+    one place, so it lives HERE and every door calls it.
+
+    ``raw_lines``  -- list of dicts, each with at least product_id / quantity /
+                      unit_price, optionally hsn / gst_rate. Every other key on
+                      the line (power cell, description, sku...) is carried
+                      through onto the stored item untouched.
+    ``product_of`` -- callable(product_id) -> product dict or None. The doors
+                      differ in where a product lives (products spine, lens
+                      catalog), so each hands in its own lookup.
+
+    Returns {items, subtotal, tax, total, gst_summary, parties, interstate,
+    warnings}. `warnings` names EVERY line whose HSN could not settle the rate,
+    including the ones that were taxed anyway from the catalogue rate -- HSN is
+    mandatory on a GST purchase document, so "taxed" is not the same as "fine".
+    """
+    from ..services.gst_rates import split_gst
+
+    parties = _po_gst_parties(vendor, store_doc)
+    interstate = parties["interstate"]
+
+    items = []
+    warnings = []
+    subtotal = 0.0
+    tax = 0.0
+    for raw in raw_lines or []:
+        line = dict(raw) if isinstance(raw, dict) else {}
+        try:
+            qty = float(line.get("quantity") or 0)
+            unit_price = float(line.get("unit_price") or 0)
+        except (TypeError, ValueError):
+            qty, unit_price = 0.0, 0.0
+        line_total = round(qty * unit_price, 2)
+        prod = None
+        if callable(product_of):
+            try:
+                prod = product_of(line.get("product_id"))
+            except Exception as exc:  # noqa: BLE001 - a lookup miss is not fatal
+                logger.warning("[VENDOR] PO product lookup failed: %s", exc)
+        rate, hsn, source, missing = _po_line_gst_rate(line, prod)
+        line_tax = round(line_total * ((rate or 0.0) / 100.0), 2)
+        cgst, sgst, igst = split_gst(line_tax, interstate)
+        subtotal += line_total
+        tax += line_tax
+        if missing:
+            warnings.append(
+                {
+                    "product_id": line.get("product_id"),
+                    "product_name": line.get("product_name"),
+                    "missing": missing,
+                    # False = no rate at all, so the line carries zero tax.
+                    # True = taxed from the catalogue rate, but the HSN is
+                    # still missing/unusable and the document needs one.
+                    "taxed": rate is not None,
+                }
+            )
+        items.append(
+            {
+                **line,
+                "tax_rate": rate if rate is not None else 0.0,
+                "gst_source": source,
+                "gst_unresolved": rate is None,
+                "gst_missing": missing,
+                "hsn": hsn,
+                "line_tax": line_tax,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+                "ordered_qty": line.get("quantity"),
+                "received_qty": 0,
+                "line_status": "OPEN",
+            }
+        )
+
+    subtotal = round(subtotal, 2)
+    tax = round(tax, 2)
+    return {
+        "items": items,
+        "subtotal": subtotal,
+        "tax": tax,
+        "total": round(subtotal + tax, 2),
+        "gst_summary": {
+            "cgst": round(sum(i["cgst"] for i in items), 2),
+            "sgst": round(sum(i["sgst"] for i in items), 2),
+            "igst": round(sum(i["igst"] for i in items), 2),
+            "tax": tax,
+        },
+        "parties": parties,
+        "interstate": interstate,
+        "warnings": warnings,
+    }
+
+
+def po_gst_context(store_id, vendor_id):
+    """(vendor_doc, store_doc) for a PO's place-of-supply decision. Fail-soft:
+    a missing repo/doc degrades to None, which build_po_gst reads as
+    'assumed intra-state' rather than inventing a state."""
+    vendor_doc = None
+    store_doc = None
+    try:
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None and vendor_id:
+            vendor_doc = vendor_repo.find_by_id(vendor_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] PO vendor lookup failed: %s", exc)
+    try:
+        store_repo = get_store_repository()
+        if store_repo is not None and store_id:
+            store_doc = store_repo.find_by_id(store_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] PO store lookup failed: %s", exc)
+    return vendor_doc, store_doc
 
 # Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
@@ -1311,6 +1454,8 @@ async def create_pos_from_forecast(
         if not body.dry_run and reorder_items:
             po_repo = get_purchase_order_repository()
             vendor_repo = get_vendor_repository()
+            # The receiving shop is the same for every group -- read it once.
+            _, _store_doc = po_gst_context(active_store, None)
 
             for v_id, lines in reorder_items.items():
                 vendor = None
@@ -1322,9 +1467,16 @@ async def create_pos_from_forecast(
 
                 po_id = str(uuid.uuid4())
                 po_number = generate_po_number(active_store)
-                subtotal = sum(ln["quantity"] * ln["unit_price"] for ln in lines)
-                tax = subtotal * 0.18
-                total = subtotal + tax
+                # SAME per-line GST as the manual door (build_po_gst): the rate
+                # comes off each product's HSN and splits CGST+SGST vs IGST from
+                # the vendor's and the shop's GST numbers. This used to be a
+                # flat `subtotal * 0.18` with no per-line tax_rate stored, which
+                # over-taxed every 5% lens/frame order AND made the bill later
+                # drafted off it charge 0%.
+                computed = build_po_gst(lines, prod_docs.get, vendor, _store_doc)
+                subtotal = computed["subtotal"]
+                tax = computed["tax"]
+                total = computed["total"]
 
                 po_doc = {
                     "po_id": po_id,
@@ -1332,10 +1484,13 @@ async def create_pos_from_forecast(
                     "vendor_id": v_id,
                     "vendor_name": vendor.get("trade_name") or vendor.get("legal_name"),
                     "delivery_store_id": active_store,
-                    "items": lines,
-                    "subtotal": round(subtotal, 2),
-                    "tax_amount": round(tax, 2),
-                    "total_amount": round(total, 2),
+                    "items": computed["items"],
+                    "subtotal": subtotal,
+                    "tax_amount": tax,
+                    "total_amount": total,
+                    "gst_summary": computed["gst_summary"],
+                    "gst_warnings": computed["warnings"],
+                    **computed["parties"],
                     "status": "DRAFT",
                     "source": "demand_forecast",
                     "forecast_horizon_days": horizon,
@@ -1453,71 +1608,41 @@ async def create_po(
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").
-    # Read the delivery store's own GSTIN -- with 3 entities over 4 GSTINs in 2
-    # states, "our state" is never a constant.
-    store_doc = None
-    try:
-        store_repo = get_store_repository()
-        if store_repo is not None:
-            store_doc = store_repo.find_by_id(po.delivery_store_id)
-    except Exception as _st_exc:  # noqa: BLE001 - GST falls back to "assumed"
-        logger.warning("[VENDOR] PO store lookup failed: %s", _st_exc)
-    parties = _po_gst_parties(vendor if vendor_repo is not None else None, store_doc)
-    interstate = parties["interstate"]
+    # Read the delivery store -- with 3 entities over 4 GSTINs in 2 states,
+    # "our state" is never a constant.
+    _, store_doc = po_gst_context(po.delivery_store_id, None)
 
-    # Per-line GST, resolved from the line's HSN (captured at cataloguing), and
-    # split per GST norms. A line whose HSN cannot settle a rate is stored
-    # UNRESOLVED with zero tax and a plain-English reason -- never taxed at a
-    # guessed rate, because a PO goes to a real vendor.
-    from ..services.gst_rates import split_gst
+    # Per-line GST + place-of-supply split: ONE shared computation, the same
+    # one both automatic PO doors call (see build_po_gst). Products are fetched
+    # ONCE here and reused for the cost promote below.
+    products = {}
+    if product_repo is not None:
+        for it in po.items:
+            if it.product_id not in products:
+                products[it.product_id] = product_repo.find_by_id(it.product_id)
+    computed = build_po_gst(
+        [it.model_dump() for it in po.items],
+        products.get,
+        vendor if vendor_repo is not None else None,
+        store_doc,
+    )
+    stored_items = computed["items"]
+    subtotal = computed["subtotal"]
+    tax = computed["tax"]
+    total = computed["total"]
+    gst_summary = computed["gst_summary"]
+    parties = computed["parties"]
+    interstate = computed["interstate"]
+    gst_warnings = computed["warnings"]
 
-    subtotal = 0.0
-    tax = 0.0
-    stored_items = []
-    unresolved_gst = []
+    # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so raising
+    # the PO finishes the cataloguing. Done on CREATE, not on send: the buyer
+    # has agreed the price the moment the line is saved, a draft PO may never be
+    # sent, and the next of 40 lines should already see the product as costed.
+    # Never overwrites an existing cost.
     cost_filled = []
     for item in po.items:
-        line_total = round(item.quantity * item.unit_price, 2)
-        prod = (
-            product_repo.find_by_id(item.product_id)
-            if product_repo is not None
-            else None
-        )
-        rate, hsn, source, missing = _po_line_gst_rate(item, prod)
-        line_tax = round(line_total * ((rate or 0.0) / 100.0), 2)
-        cgst, sgst, igst = split_gst(line_tax, interstate)
-        subtotal += line_total
-        tax += line_tax
-        if rate is None:
-            unresolved_gst.append(
-                {
-                    "product_id": item.product_id,
-                    "product_name": item.product_name,
-                    "missing": missing,
-                }
-            )
-        stored_items.append(
-            {
-                **item.model_dump(),
-                "tax_rate": rate if rate is not None else 0.0,
-                "gst_source": source,
-                "gst_unresolved": rate is None,
-                "gst_missing": missing,
-                "hsn": hsn,
-                "line_tax": line_tax,
-                "cgst": cgst,
-                "sgst": sgst,
-                "igst": igst,
-                "ordered_qty": item.quantity,
-                "received_qty": 0,
-                "line_status": "OPEN",
-            }
-        )
-        # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so
-        # raising the PO finishes the cataloguing. Done on CREATE, not on send:
-        # the buyer has agreed the price the moment the line is saved, a draft
-        # PO may never be sent, and the next of 40 lines should already see the
-        # product as costed. Never overwrites an existing cost.
+        prod = products.get(item.product_id)
         if _promote_cost_from_rate(
             item.product_id,
             prod,
@@ -1528,15 +1653,14 @@ async def create_po(
             cost_filled.append(
                 {"product_id": item.product_id, "cost_price": round(item.unit_price, 2)}
             )
-    subtotal = round(subtotal, 2)
-    tax = round(tax, 2)
-    total = round(subtotal + tax, 2)
-    gst_summary = {
-        "cgst": round(sum(i["cgst"] for i in stored_items), 2),
-        "sgst": round(sum(i["sgst"] for i in stored_items), 2),
-        "igst": round(sum(i["igst"] for i in stored_items), 2),
-        "tax": tax,
-    }
+            # Keep the cached doc honest: two lines of one PO may carry the same
+            # product, and the second must see the cost the first just wrote
+            # (otherwise it overwrites it at its own price).
+            products[item.product_id] = {
+                **(prod or {}),
+                "cost_price": round(item.unit_price, 2),
+                "cost_source": _PO_PROVISIONAL_COST_SOURCE,
+            }
 
     if po_repo is not None:
         po_repo.create(
@@ -1589,7 +1713,11 @@ async def create_po(
         "total_amount": total,
         "interstate": interstate,
         "gst_summary": gst_summary,
-        "gst_unresolved": unresolved_gst,
+        # EVERY line whose HSN could not settle the rate -- including the ones
+        # taxed anyway off the catalogue rate. HSN is mandatory on a GST
+        # purchase document, so a taxed line with no HSN is still a problem the
+        # buyer has to be told about.
+        "gst_warnings": gst_warnings,
         "cost_filled": cost_filled,
         "message": "Purchase order created",
     }

@@ -455,42 +455,113 @@ for _hsn, _rate in GST_CATEGORY_TABLE.values():
     if _hsn:
         _HSN_RATES.setdefault(_hsn, set()).add(_rate)
 
+# A real HSN is 4 (heading), 6 (sub-heading) or 8 (tariff item) digits. Anything
+# else -- "902", "91", "90031" -- is a typo or a truncation, and must never be
+# answered by walking the table for codes that merely start with it.
+_HSN_LENGTHS = (4, 6, 8)
+
+# The 4-digit HEADINGS this table is authoritative for, i.e. where we are
+# willing to answer a bare heading from its 6-digit children.
+#
+# THE TRAP THIS CLOSES: the table holds ONE child of heading 9021 -- 902140,
+# complete hearing aids at NIL -- while the heading also covers hearing-aid
+# PARTS at 18% (see the module docstring). Aggregating children therefore
+# answered "9021 -> 0%", with full confidence and no warning, and a purchase
+# order for hearing-aid parts went to the vendor zero-rated. A heading is only
+# as safe as the table's coverage OF THAT HEADING, which is a fact about GST,
+# not something an algorithm can infer -- so it is declared here, by hand.
+#
+# Deliberately ABSENT: 9004 (corrective 5% vs non-corrective 18%) and 9021
+# (complete devices NIL vs parts 18%). Both refuse, and say why.
+# The rates themselves are NOT repeated here: they are still read off the
+# children, so a rate revision in GST_CATEGORY_TABLE (or in the owner-editable
+# hsn_gst_master) flows through, and a heading that later stops agreeing with
+# itself starts refusing again on its own.
+_SETTLED_HSN_HEADINGS = frozenset(
+    {
+        "9001",  # spectacle + contact lenses -- 5% across the goods we buy
+        "9003",  # frames and mountings, incl. parts -- 5% for the whole heading
+        "8525",  # transmission apparatus / electronic eyewear -- 18%
+        "9101",  # wrist watches -- 18%
+        "9102",  # other watches, smart watches -- 18%
+        "9105",  # clocks -- 18%
+        "3926",  # other articles of plastics (cases, cloths) -- 18%
+    }
+)
+
+
+def _rates_under(prefix: str, by_hsn: dict) -> set:
+    """Every rate the tables carry for a code starting with ``prefix``."""
+    rates = {rate for code, rate in by_hsn.items() if code.startswith(prefix)}
+    for code, rset in _HSN_RATES.items():
+        if code.startswith(prefix):
+            rates |= rset
+    return rates
+
+
+def _exact_rate(hc: str, by_hsn: dict):
+    """The rate for an EXACT code, master first, then the canonical table."""
+    if hc in by_hsn:
+        return by_hsn[hc]
+    exact = _HSN_RATES.get(hc)
+    if exact and len(exact) == 1:
+        return next(iter(exact))
+    return None
+
 
 def resolve_gst_rate_strict(hsn_code=None):
     """HSN-first GST resolution that REFUSES to guess.
 
     Returns ``(rate, missing)``: ``(float, None)`` when the HSN settles a single
     rate, or ``(None, "<plain-English reason>")`` when it does not. Never
-    raises. Lookup order: the owner-editable ``hsn_gst_master`` (exact code),
-    the canonical static table (exact code), then a PREFIX match so a 4-digit
-    HSN ("9003", the choice for turnover <= Rs 5 Cr) resolves through its
-    6-digit children -- but ONLY when every child agrees on one rate.
+    raises.
+
+    Lookup order:
+      1. the code EXACTLY, in the owner-editable ``hsn_gst_master`` then the
+         canonical static table;
+      2. for an 8-digit tariff item, its 6-digit parent -- a sub-item inherits
+         the rate of the broader entry above it, which is the only direction
+         inheritance is safe in;
+      3. for a 4-digit heading, its children -- but ONLY for a heading declared
+         in ``_SETTLED_HSN_HEADINGS``, because a heading the table covers only
+         partly would otherwise answer with one sub-item's rate.
+    Anything else refuses and says what to do about it.
     """
     hc = str(hsn_code or "").strip()
     if not hc:
         return None, "no HSN on this product"
+    if not hc.isdigit() or len(hc) not in _HSN_LENGTHS:
+        return None, (
+            f"'{hc}' is not a valid HSN - an HSN is 4, 6 or 8 digits"
+        )
 
     by_hsn = _load_lookup().get("by_hsn", {})
-    if hc in by_hsn:
-        return by_hsn[hc], None
-    exact = _HSN_RATES.get(hc)
-    if exact and len(exact) == 1:
-        return next(iter(exact)), None
+    rate = _exact_rate(hc, by_hsn)
+    if rate is not None:
+        return rate, None
 
-    rates = set()
-    for code, rate in by_hsn.items():
-        if code.startswith(hc):
-            rates.add(rate)
-    for code, rset in _HSN_RATES.items():
-        if code.startswith(hc):
-            rates |= rset
-    if len(rates) == 1:
+    # An 8-digit tariff item sits UNDER its 6-digit sub-heading and takes its
+    # rate. Never the reverse: a heading is broader than its sub-item, so a
+    # sub-item's rate can never speak for the heading.
+    if len(hc) == 8:
+        rate = _exact_rate(hc[:6], by_hsn)
+        if rate is not None:
+            return rate, None
+
+    rates = _rates_under(hc, by_hsn)
+    if len(hc) == 4 and hc in _SETTLED_HSN_HEADINGS and len(rates) == 1:
         return next(iter(rates)), None
+
     if len(rates) > 1:
         shown = " / ".join(f"{r:g}%" for r in sorted(rates))
         return None, (
             f"HSN {hc} covers more than one GST rate ({shown}) - "
             "give the product its full HSN"
+        )
+    if len(hc) == 4 and rates:
+        return None, (
+            f"HSN {hc} is a 4-digit heading whose rate we do not hold for the "
+            "whole heading - give the product its full 6-digit HSN"
         )
     return None, f"HSN {hc} is not in the GST rate list"
 

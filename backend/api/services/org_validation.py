@@ -303,4 +303,15 @@ def resolve_state_code(*candidates) -> str:
         code = _valid_code(normalize_state_code(s))
         if code:
             return code
+        # LAST: a bare leading 2-digit code. This is NOT a nicety -- it is the
+        # GST portal's own display form ("27-Maharashtra", "20-Jharkhand"),
+        # what imported customer/vendor rows carry, and what a truncated or
+        # mistyped GSTIN still leads with. Without it those all resolve to "",
+        # which reads as "unknown state" -> intra-state -> an out-of-state B2B
+        # sale billed CGST+SGST instead of IGST and filed in the wrong GSTR-1
+        # bucket. The code is still validated against INDIAN_STATE_CODES, so
+        # "99..." or "1900" resolve to nothing rather than to a fake state.
+        code = _valid_code(s[:2])
+        if code:
+            return code
     return ""

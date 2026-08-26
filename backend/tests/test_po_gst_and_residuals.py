@@ -199,9 +199,14 @@ def test_intrastate_po_splits_cgst_sgst(monkeypatch):
     doc = po_repo.created
     # Jharkhand vendor -> Jharkhand store: SAME state, so CGST + SGST, no IGST.
     assert doc["interstate"] is False
-    assert doc["vendor_state_code"] == "20"
-    assert doc["store_state_code"] == "20"
-    assert doc["place_of_supply_assumed"] is False
+    assert doc["supplier_state"] == "20"
+    assert doc["supply_place_recipient"] == "20"
+    assert doc["supply_place_assumed"] is False
+    # A purchase order must NOT carry a bare `place_of_supply`: on a vendor
+    # BILL that name means the SUPPLIER state (itc_reconcile keys on it), so a
+    # PO storing the RECIPIENT under the same name would flip every inter-state
+    # purchase to intra-state the day anything carried it onto a bill.
+    assert "place_of_supply" not in doc
     line = doc["items"][0]
     # HSN 900311 -> 5% on 2000 = 100, halved into CGST 50 + SGST 50.
     assert line["tax_rate"] == 5.0
@@ -222,8 +227,8 @@ def test_interstate_po_raises_igst(monkeypatch):
     doc = po_repo.created
     # Maharashtra vendor -> Jharkhand store: DIFFERENT states, one IGST charge.
     assert doc["interstate"] is True
-    assert doc["vendor_state_code"] == "27"
-    assert doc["store_state_code"] == "20"
+    assert doc["supplier_state"] == "27"
+    assert doc["supply_place_recipient"] == "20"
     line = doc["items"][0]
     assert line["tax_rate"] == 5.0
     assert (line["cgst"], line["sgst"], line["igst"]) == (0.0, 0.0, 100.0)
@@ -297,11 +302,12 @@ def test_product_with_no_hsn_is_flagged_not_guessed(monkeypatch):
     assert line["tax_rate"] == 0.0
     assert line["line_tax"] == 0.0
     assert line["gst_missing"] == "no HSN on this product"
-    assert out["gst_unresolved"] == [
+    assert out["gst_warnings"] == [
         {
             "product_id": "P1",
             "product_name": "Ray-Ban Aviator",
             "missing": "no HSN on this product",
+            "taxed": False,
         }
     ]
 
@@ -331,12 +337,46 @@ def test_unknown_hsn_with_a_catalogued_rate_is_taxed_but_still_says_why(monkeypa
     monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepoWith(_JH_VENDOR))
     _patch_store(monkeypatch, _JH_STORE)
 
-    asyncio.run(create_po(_one_frame_po(), current_user=_user()))
+    out = asyncio.run(create_po(_one_frame_po(), current_user=_user()))
     line = po_repo.created["items"][0]
     assert line["gst_unresolved"] is False
     assert line["gst_source"] == "catalogue"
     assert line["tax_rate"] == 5.0
     assert line["gst_missing"] == "HSN 123456 is not in the GST rate list"
+    # ... and it is SURFACED. A line that was taxed is not the same as a line
+    # that is fine.
+    assert out["gst_warnings"] == [
+        {
+            "product_id": "P1",
+            "product_name": "Ray-Ban Aviator",
+            "missing": "HSN 123456 is not in the GST rate list",
+            "taxed": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize("no_hsn", [None, "", "   "])
+def test_a_taxed_line_with_no_hsn_at_all_is_still_reported(monkeypatch, no_hsn):
+    """HSN is MANDATORY on a GST purchase document. A product with a catalogue
+    rate but no HSN was taxed silently and named nowhere -- so a purchase order
+    went to a real vendor with no HSN on it and no warning anywhere. Surfacing
+    only the lines whose RATE is null misses exactly this line."""
+    po_repo = _FakePORepo()
+    rated_but_hsn_less = _frame_product(hsn_code=no_hsn)
+    _patch(monkeypatch, po_repo, _FakeProductRepo({"P1": rated_but_hsn_less}))
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepoWith(_JH_VENDOR))
+    _patch_store(monkeypatch, _JH_STORE)
+
+    out = asyncio.run(create_po(_one_frame_po(), current_user=_user()))
+    line = po_repo.created["items"][0]
+    # It IS taxed -- a person chose 5% at cataloguing, that is not a guess.
+    assert line["tax_rate"] == 5.0
+    assert line["gst_unresolved"] is False
+    assert line["gst_missing"] == "no HSN on this product"
+    # ... and the buyer is told, on THIS order.
+    assert [w["missing"] for w in out["gst_warnings"]] == ["no HSN on this product"]
+    assert out["gst_warnings"][0]["taxed"] is True
+    assert out["gst_warnings"][0]["product_name"] == "Ray-Ban Aviator"
 
 
 def test_four_digit_hsn_resolves_when_its_children_agree(monkeypatch):
@@ -383,7 +423,7 @@ def test_unknown_vendor_state_says_assumed_rather_than_pretending(monkeypatch):
 
     asyncio.run(create_po(_one_frame_po(), current_user=_user()))
     doc = po_repo.created
-    assert doc["place_of_supply_assumed"] is True
+    assert doc["supply_place_assumed"] is True
     assert doc["interstate"] is False  # safe default, same as the sales invoice
 
 

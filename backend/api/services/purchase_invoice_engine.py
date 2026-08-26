@@ -33,17 +33,6 @@ paisa even on odd-paise tax amounts (e.g. 5.01 -> 2.50 + 2.51).
 
 from typing import List, Optional, Tuple
 
-try:
-    # Reuse the canonical state-code normaliser (handles "MH" / "Maharashtra" /
-    # "27" / a full GSTIN's 2-char prefix). Import defensively so the engine is
-    # importable in isolation for unit tests even if the package layout shifts.
-    from .org_validation import normalize_state_code as _normalize_state_code
-except Exception:  # pragma: no cover - defensive fallback
-
-    def _normalize_state_code(value):
-        return value
-
-
 def _f(v) -> float:
     """Coerce anything to a 2dp float, defaulting to 0.0. Never raises."""
     try:
@@ -59,21 +48,23 @@ def state_code_of(value: Optional[str]) -> str:
     "27" / "27-Maharashtra", a 2-letter abbreviation ("MH"), or a full state
     name. Returns "" when nothing usable can be derived (so a missing supplier
     or recipient GSTIN degrades to intra-state rather than mis-classifying).
+
+    THIN ALIAS over org_validation.resolve_state_code -- the ONE state parser
+    the sale side (orders.py), the purchase ORDER (vendors.py) and this
+    purchase BILL all share. Two parsers is how the same vendor/store pair came
+    to get opposite tax verdicts on the order and on the bill.
+
+    One deliberate difference from the old local copy: a 2-digit prefix that is
+    not a real GST state code ("99AAA...", a legacy "25"/"28" registration that
+    no longer exists) now resolves to "" instead of being taken at face value,
+    which degrades to intra-state -- the conservative default this engine
+    already documents -- rather than asserting a state that does not exist.
     """
-    if value is None:
+    try:
+        from .org_validation import resolve_state_code as _resolve_state_code
+    except Exception:  # pragma: no cover - defensive, matches the import above
         return ""
-    s = str(value).strip().upper()
-    if not s:
-        return ""
-    # A GSTIN (or any 15-char id) embeds the state code in the first two digits.
-    if len(s) >= 12 and s[:2].isdigit():
-        return s[:2]
-    # Otherwise let the canonical normaliser map abbr / name / code -> "NN".
-    norm = _normalize_state_code(s)
-    norm = str(norm or "").strip().upper()
-    if len(norm) >= 2 and norm[:2].isdigit():
-        return norm[:2]
-    return ""
+    return _resolve_state_code(value)
 
 
 def determine_place_of_supply(
@@ -118,17 +109,15 @@ def split_line_gst(taxable, gst_rate, interstate: bool) -> dict:
     whole tax is IGST, otherwise it splits CGST = round(tax/2) and SGST = the
     residual so CGST + SGST == tax to the paisa.
     """
+    from .gst_rates import split_gst
+
     tax_base = _f(taxable)
     rate = _f(gst_rate)
     gst = round(tax_base * rate / 100.0, 2)
-    if interstate:
-        cgst = 0.0
-        sgst = 0.0
-        igst = gst
-    else:
-        cgst = round(gst / 2, 2)
-        sgst = round(gst - cgst, 2)  # residual -> exact sum
-        igst = 0.0
+    # ONE split for the whole app: the sales invoice, the purchase order and
+    # this purchase bill all call gst_rates.split_gst, so an inter-state supply
+    # can never be halved one way on a sale and another on a purchase.
+    cgst, sgst, igst = split_gst(gst, interstate)
     return {
         "taxable": tax_base,
         "gst_rate": rate,

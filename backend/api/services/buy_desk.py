@@ -115,4 +115,10 @@ def build_row(
         # set — the draft-PO modal preselects it (fail-soft to manual pick).
         # Same field the demand-forecast PO generator groups by (vendors.py).
         "preferred_vendor_id": product.get("preferred_vendor_id") or None,
+        # The product's own GST identity, so the Buy Desk's quick-draft PO can
+        # preview the rate that will ACTUALLY be charged instead of opening
+        # every line at a flat 18% (frames, spectacle lenses and contact lenses
+        # are all 5%). The server still resolves the stored rate from the HSN.
+        "hsn_code": product.get("hsn_code") or None,
+        "gst_rate": product.get("gst_rate"),
     }

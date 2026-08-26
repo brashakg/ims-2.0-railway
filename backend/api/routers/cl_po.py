@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
-from .vendors import generate_po_number
+from .vendors import build_po_gst, generate_po_number, po_gst_context
 from ..dependencies import (
     get_audit_repository,
     get_purchase_order_repository,
@@ -306,6 +306,40 @@ def _make_vendor_resolver(db):
     return _resolver
 
 
+def _make_product_resolver(db):
+    """product_id (or lens_line_id) -> the doc that carries its HSN.
+
+    A per-power draft line is EITHER a stocked product (`products`) OR a lens
+    line (`lens_catalog`, whose validator stamps `hsn_code`, defaulting to
+    9001). The shared PO GST helper only ever asks "what does this line's
+    product look like", so both live behind one lookup. Cached per item;
+    fail-soft None -> the line is stored GST-unresolved with a plain-English
+    reason rather than taxed at a guessed rate.
+    """
+    cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def _resolver(item_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not item_id:
+            return None
+        key = str(item_id)
+        if key in cache:
+            return cache[key]
+        doc: Optional[Dict[str, Any]] = None
+        if db is not None:
+            try:
+                doc = db.get_collection("products").find_one({"product_id": key})
+                if not doc:
+                    doc = db.get_collection("lens_catalog").find_one(
+                        {"lens_line_id": key}
+                    )
+            except Exception:  # noqa: BLE001
+                doc = None
+        cache[key] = doc
+        return doc
+
+    return _resolver
+
+
 def _audit(action: str, *, entity_id: str, actor: dict, store_id: str, detail: dict) -> None:
     """One audit row on non-dry-run creation. Fail-soft: an audit hiccup must
     never undo / 500 a draft that was already created."""
@@ -411,6 +445,11 @@ async def generate_cl_po(
 
     created_pos: List[Dict[str, Any]] = []
     now_iso = datetime.now().isoformat()
+    # Everything a PO line's GST needs that is NOT on the line: the product /
+    # lens-line doc it came from (for its HSN) and the receiving shop (for the
+    # place of supply). Read once for the whole draft.
+    product_of = _make_product_resolver(db)
+    _, store_doc = po_gst_context(store_id, None)
     for idx, grp in enumerate(group_summaries):
         po_id = str(uuid.uuid4())
         # generate_po_number now allocates an ATOMIC per-store/FY serial (S5), so
@@ -418,18 +457,29 @@ async def generate_cl_po(
         # suffix needed (the old minute-grained format could collide within one
         # call, which the -{idx} suffix used to guard).
         po_number = generate_po_number(store_id)
-        subtotal = grp["subtotal"]
-        tax = round(subtotal * 0.18, 2)
+        # SAME per-line GST as the manual Create-PO door (vendors.build_po_gst):
+        # each line's rate off its own HSN, split CGST+SGST vs IGST from the
+        # vendor's and the shop's GST numbers. This was a flat
+        # `subtotal * 0.18` that stored no per-line tax_rate at all, so a
+        # contact-lens order (5%) was over-taxed by 13 points AND the bill later
+        # drafted off it charged 0% (lines_from_grn reads po_line["tax_rate"]).
+        vendor_doc, _ = po_gst_context(None, grp["vendor_id"])
+        computed = build_po_gst(grp["lines"], product_of, vendor_doc, store_doc)
+        subtotal = computed["subtotal"]
+        tax = computed["tax"]
         po_doc = {
             "po_id": po_id,
             "po_number": po_number,
             "vendor_id": grp["vendor_id"],  # may be None -> FE disables send
             "vendor_name": grp["vendor_name"],
             "delivery_store_id": store_id,
-            "items": grp["lines"],
+            "items": computed["items"],
             "subtotal": subtotal,
             "tax_amount": tax,
-            "total_amount": round(subtotal + tax, 2),
+            "total_amount": computed["total"],
+            "gst_summary": computed["gst_summary"],
+            "gst_warnings": computed["warnings"],
+            **computed["parties"],
             "status": "DRAFT",
             "source": "cl_po_generator",
             "source_detail": source,
