@@ -392,4 +392,3 @@ def pytest_unconfigure(config):
     freezer = getattr(config, "_ims_ist_clock", None)
     if freezer is not None:
         freezer.stop()
-

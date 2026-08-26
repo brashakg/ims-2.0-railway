@@ -134,10 +134,15 @@ _HEX = (
 
 ALLOWED = {
     # -- uuid hex slices ----------------------------------------------------
-    ("test_cataloguer_attribution.py", '"store_id": f"S-attrib-{uuid.uuid4().hex[:10]}",'): _HEX,
-    ("test_inventory_correctness.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
+    (
+        "test_cataloguer_attribution.py",
+        '"store_id": f"S-attrib-{uuid.uuid4().hex[:10]}",',
+    ): _HEX,
+    (
+        "test_inventory_correctness.py",
+        '"barcode": f"BC-{uuid.uuid4().hex[:10]}",',
+    ): _HEX,
     ("test_inventory_quantity.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
-
     # -- clinical Test-History range ----------------------------------------
     ("test_clinical_rx_list_range.py", "today = date.today().isoformat()"): (
         "SAME FRAME AS PRODUCTION: clinical.py:1080 `_resolve_test_date_range` "
@@ -157,47 +162,82 @@ ALLOWED = {
         "Upper bound of the week/month keyword windows -- same helper, same "
         "frame as the router. Residue as above."
     ),
-    ("test_clinical_rx_list_range.py", "assert f == (date.today() - timedelta(days=6)).isoformat()"): (
+    (
+        "test_clinical_rx_list_range.py",
+        "assert f == (date.today() - timedelta(days=6)).isoformat()",
+    ): (
         "Lower bound of the 7-day keyword window: a SPAN check (t - f == 6 "
         "days) written as two absolute faces. Both come off the same clock "
         "read as the helper's, so a frame shift moves both."
     ),
-    ("test_clinical_rx_list_range.py", "assert f == (date.today() - timedelta(days=29)).isoformat()"): (
-        "Lower bound of the 30-day keyword window; the same span check."
-    ),
-    ("test_clinical_rx_list_range.py", "old = (date.today() - timedelta(days=200)).isoformat()"): (
+    (
+        "test_clinical_rx_list_range.py",
+        "assert f == (date.today() - timedelta(days=29)).isoformat()",
+    ): ("Lower bound of the 30-day keyword window; the same span check."),
+    (
+        "test_clinical_rx_list_range.py",
+        "old = (date.today() - timedelta(days=200)).isoformat()",
+    ): (
         "A row deliberately 200 days old, used to assert it falls OUTSIDE the "
         "default window. One day of frame drift cannot move a 200-day-old row "
         "inside a 30-day window."
     ),
-    ("test_clinical_rx_list_range.py", 'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]'): (
+    (
+        "test_clinical_rx_list_range.py",
+        'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
+    ): (
         "Fake-repo emulation: the in-memory stand-in reproduces the real "
         "prescription repo's own lexical compare on the stored date string. It "
         "seeds nothing; it imitates the code under test."
     ),
-
     # -- validators that only care about past / today / future --------------
-    ("test_customer_validation.py", "_YESTERDAY = date.today() - timedelta(days=1)"): _REL,
+    (
+        "test_customer_validation.py",
+        "_YESTERDAY = date.today() - timedelta(days=1)",
+    ): _REL,
     ("test_customer_validation.py", "_TODAY = date.today()"): (
         _REL + " The 'today is accepted' case is the boundary itself: the rule "
         "is `dob <= the validator's own today`, so both sides shift as one."
     ),
-    ("test_customer_validation.py", "_TOMORROW = date.today() + timedelta(days=1)"): _REL,
-    ("test_order_delivery_and_cart_discount.py", "future = date.today() + timedelta(days=7)"): _REL,
+    (
+        "test_customer_validation.py",
+        "_TOMORROW = date.today() + timedelta(days=1)",
+    ): _REL,
+    (
+        "test_order_delivery_and_cart_discount.py",
+        "future = date.today() + timedelta(days=7)",
+    ): _REL,
     ("test_orders_hardening.py", "today = date.today()"): _REL,
     ("test_orders_hardening.py", "future = date.today() + timedelta(days=30)"): _REL,
     ("test_orders_hardening.py", "past = date.today() - timedelta(days=1)"): _REL,
     ("test_pos_workshop_autolink.py", "far = date.today() + timedelta(days=400)"): _REL,
     ("test_pos_workshop_autolink.py", "soon = date.today() + timedelta(days=30)"): _REL,
-    ("test_pos_workshop_autolink.py", "delivery_date=date.today() - timedelta(days=1),"): _REL,
-    ("test_unification_5_ensure_customer.py", "future = date.today() + timedelta(days=10)"): _REL,
-    ("test_unification_customer_guards.py", "CustomerUpdate(dob=date.today() + timedelta(days=1))"): _REL,
-    ("test_marketing_correctness.py", "yesterday = (date.today() - timedelta(days=1)).isoformat()"): _REL,
+    (
+        "test_pos_workshop_autolink.py",
+        "delivery_date=date.today() - timedelta(days=1),",
+    ): _REL,
+    (
+        "test_unification_5_ensure_customer.py",
+        "future = date.today() + timedelta(days=10)",
+    ): _REL,
+    (
+        "test_unification_customer_guards.py",
+        "CustomerUpdate(dob=date.today() + timedelta(days=1))",
+    ): _REL,
+    (
+        "test_marketing_correctness.py",
+        "yesterday = (date.today() - timedelta(days=1)).isoformat()",
+    ): _REL,
     ("test_marketing_correctness.py", "today = date.today().isoformat()"): _REL,
-    ("test_marketing_correctness.py", "future_date = (date.today() + timedelta(days=7)).isoformat()"): _REL,
-
+    (
+        "test_marketing_correctness.py",
+        "future_date = (date.today() + timedelta(days=7)).isoformat()",
+    ): _REL,
     # -- leave notice: a DIFFERENCE in days, both ends off one clock ---------
-    ("test_f26_remote_approval.py", "self.from_date = date.today() + timedelta(days=from_days_ahead)"): (
+    (
+        "test_f26_remote_approval.py",
+        "self.from_date = date.today() + timedelta(days=from_days_ahead)",
+    ): (
         "NOTICE PERIOD, a difference. `_is_fast_path_leave` measures from_date "
         "minus its own today against the policy threshold, so both ends move "
         "together under a frame shift."
@@ -205,26 +245,37 @@ ALLOWED = {
     ("test_f26_remote_approval.py", "self.to_date = date.today() + timedelta("): (
         "Continuation of the leave-window construction above; same difference."
     ),
-    ("test_f26_remote_approval.py", 'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=1), "S1") is True'): (
-        "1 day of notice against a 2-day threshold -- a difference, not a day."
-    ),
-    ("test_f26_remote_approval.py", 'assert hr_router._is_fast_path_leave("SICK", date.today(), "S1") is True'): (
-        "Zero notice against a 2-day threshold -- a difference, not a day."
-    ),
-    ("test_f26_remote_approval.py", 'assert hr_router._is_fast_path_leave("EARNED", date.today() + timedelta(days=1), "S1") is False'): (
+    (
+        "test_f26_remote_approval.py",
+        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=1), "S1") is True',
+    ): ("1 day of notice against a 2-day threshold -- a difference, not a day."),
+    (
+        "test_f26_remote_approval.py",
+        'assert hr_router._is_fast_path_leave("SICK", date.today(), "S1") is True',
+    ): ("Zero notice against a 2-day threshold -- a difference, not a day."),
+    (
+        "test_f26_remote_approval.py",
+        'assert hr_router._is_fast_path_leave("EARNED", date.today() + timedelta(days=1), "S1") is False',
+    ): (
         "Asserts the leave TYPE gate, not the date; the date is 1 day of "
         "notice either way."
     ),
-    ("test_f26_remote_approval.py", 'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is False'): (
-        "5 days of notice against a 2-day threshold -- a difference, not a day."
-    ),
-    ("test_f26_remote_approval.py", 'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is True'): (
+    (
+        "test_f26_remote_approval.py",
+        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is False',
+    ): ("5 days of notice against a 2-day threshold -- a difference, not a day."),
+    (
+        "test_f26_remote_approval.py",
+        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is True',
+    ): (
         "The same 5-day notice re-asserted under a monkeypatched 7-day "
         "threshold; still a difference."
     ),
-
     # -- deliberate widening -------------------------------------------------
-    ("test_off_till_expenses.py", "_TOMORROW = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()"): (
+    (
+        "test_off_till_expenses.py",
+        "_TOMORROW = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()",
+    ): (
         "DELIBERATE WIDENING, explained in a 12-line comment at the site. One "
         "test closes a session through the REAL endpoint, so closed_at comes "
         "off the server clock; the summary window is stretched to TOMORROW so "
@@ -233,7 +284,6 @@ ALLOWED = {
         "subject is the CONTENT of the closed row, and date filtering is "
         "pinned separately by the seeded-row test in the same file."
     ),
-
     # -- the day is the payload, not the query -------------------------------
     ("test_points.py", "return _d.today().isoformat()"): (
         "The points-sheet date is SUPPLIED IN THE PAYLOAD, and points.py:525 "
@@ -246,7 +296,6 @@ ALLOWED = {
         "Yesterday's sheet, supplied in the payload for the same reason -- a "
         "second distinct day, not a query against an IST window."
     ),
-
     # -- walkouts: the router's IST clock is frozen to match ------------------
     ("test_walkouts.py", "return _d.today().isoformat()"): (
         "This file installs `frozen_walkouts_now`, which freezes the walkouts "
@@ -262,9 +311,11 @@ ALLOWED = {
         "counts are seeded off the SAME clock read, so both land in whichever "
         "month that is. Verified at 2026-09-01 01:40 IST."
     ),
-
     # -- same frame as production --------------------------------------------
-    ("test_prescription_backdate.py", 'today_prefix = datetime.now().strftime("%Y-%m-%d")'): (
+    (
+        "test_prescription_backdate.py",
+        'today_prefix = datetime.now().strftime("%Y-%m-%d")',
+    ): (
         "SAME FRAME AS PRODUCTION: prescriptions.py stamps the default "
         "`prescription_date` with a naive `datetime.now()`, so the assertion "
         "reads back exactly what the writer wrote. Whether a clinical Rx date "
@@ -282,9 +333,11 @@ ALLOWED = {
         "reads as EXPIRED between 00:00 and 05:30 IST. Move `_today_iso` to "
         "the IST day and this fixture moves with it."
     ),
-
     # -- neither a seed nor a query ------------------------------------------
-    ("test_rpt5_rpt6_analytics.py", 'stub.to_date_str = lambda v: str(v)[:10] if v else ""'): (
+    (
+        "test_rpt5_rpt6_analytics.py",
+        'stub.to_date_str = lambda v: str(v)[:10] if v else ""',
+    ): (
         "A STUB standing in for `api.utils.dates.to_date_str`, reproducing "
         "that helper's documented string pass-through. It seeds nothing."
     ),
