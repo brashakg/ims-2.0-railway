@@ -808,17 +808,27 @@ export const vendorsApi = {
 
   // Vendor portal token (May 2026) — admin generates a signed URL the
   // lens lab opens directly without an IMS user account.
-  generatePortalToken: async (vendorId: string, expiresDays?: number) => {
+  // The backend answers with `portal_path` (a RELATIVE path) and the TTL field
+  // is `ttl_days` -- this client used to read `portal_url` and send
+  // `expires_days`, so the admin's "Portal URL" box rendered `undefined` (the
+  // owner's "portal link is just blank") and a custom validity was ignored.
+  // The absolute URL is built here from the origin the admin is already on,
+  // which is the same host the vendor will open.
+  generatePortalToken: async (vendorId: string, ttlDays?: number) => {
     const response = await api.post(
       `/vendors/${vendorId}/portal-token`,
-      expiresDays ? { expires_days: expiresDays } : {},
+      ttlDays ? { ttl_days: ttlDays } : {},
     );
-    return response.data as {
+    const data = response.data as {
       token_id: string;
-      portal_url: string;
+      portal_path: string;
       expires_at: string;
       vendor_id: string;
       vendor_name: string;
+    };
+    return {
+      ...data,
+      portal_url: `${window.location.origin}${data.portal_path}`,
     };
   },
 
