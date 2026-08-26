@@ -31,6 +31,20 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+# BUG-104 TRAP -- read before adding a test here.
+# Orders are STORED with a naive `datetime.now()` `created_at`, which on the box
+# (and on Railway, and on the CI runner) is the UTC wall clock. The /sales/*
+# endpoints are QUERIED with `from_date`/`to_date`, which the router turns into
+# a window with `ist_day_start_utc` -- an IST BUSINESS day. Those two are the
+# same calendar day only between 05:30 and 24:00 IST. Seed with `datetime.now()`
+# (right: it is the stored frame) but never reuse its `.date()` as the query
+# face or as an expected daily-bucket key, or every run between 00:00 and 05:30
+# IST asks for a day the seeded row is not in and the endpoint honestly returns
+# nothing. tests/ist_business_day.py explains why the shift is hand-rolled.
+from tests.ist_business_day import business_day as _business_day  # noqa: E402
+from tests.ist_business_day import business_now as _ist_now  # noqa: E402
+
+
 # ============================================================================
 # Test fakes — minimal Mongo emulator that supports the date range
 # operator the helpers use.
@@ -210,7 +224,7 @@ def test_sales_summary_returns_real_revenue(client, auth_headers, patched_report
     _seed_order(fake_db, order_id="O2", grand_total=2100.0, tax_amount=100.0,
                 total_discount=200.0, created_at=today)
 
-    today_d = today.date().isoformat()
+    today_d = _business_day(today)
     resp = client.get(
         f"/api/v1/reports/sales/summary?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -236,7 +250,7 @@ def test_sales_summary_excludes_cancelled_and_draft(
                 status="CANCELLED")
     _seed_order(fake_db, order_id="DR", grand_total=99999.0, created_at=today,
                 status="DRAFT")
-    today_d = today.date().isoformat()
+    today_d = _business_day(today)
     resp = client.get(
         f"/api/v1/reports/sales/summary?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -257,7 +271,7 @@ def test_sales_summary_respects_date_window(
     _seed_order(fake_db, order_id="OUT",
                 grand_total=99999.0,
                 created_at=now - timedelta(days=120))
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/sales/summary?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -283,7 +297,7 @@ def test_sales_summary_returns_daily_trend_and_categories(
         ],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/sales/summary?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -324,9 +338,9 @@ def test_sales_daily_groups_by_date(client, auth_headers, patched_reports):
     rows = resp.json()["data"]
     assert len(rows) == 2
     by_date = {r["date"]: r for r in rows}
-    assert by_date[today_dt.date().isoformat()]["sales"] == 3000.0
-    assert by_date[today_dt.date().isoformat()]["orders"] == 2
-    assert by_date[yest.date().isoformat()]["sales"] == 500.0
+    assert by_date[_business_day(today_dt)]["sales"] == 3000.0
+    assert by_date[_business_day(today_dt)]["orders"] == 2
+    assert by_date[_business_day(yest)]["sales"] == 500.0
 
 
 # ============================================================================
@@ -356,7 +370,7 @@ def test_sales_by_category_sums_item_revenue(
         ],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/sales/by-category"
         f"?from_date={today_d}&to_date={today_d}",
@@ -386,7 +400,7 @@ def test_sales_by_category_handles_legacy_item_fields(
         ],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/sales/by-category"
         f"?from_date={today_d}&to_date={today_d}",
@@ -408,7 +422,8 @@ def test_sales_growth_mom_yoy(client, auth_headers, patched_reports):
     yields the correct % change."""
     fake_db = patched_reports["db"]
     now = datetime.now()
-    cur_year, cur_month = now.year, now.month
+    _ist = _ist_now()  # the month the endpoint windows on is the IST month
+    cur_year, cur_month = _ist.year, _ist.month
     # Current month: ₹3,000 across 3 orders
     _seed_order(fake_db, order_id="C1", grand_total=1000.0, created_at=now)
     _seed_order(fake_db, order_id="C2", grand_total=1000.0, created_at=now)
@@ -447,9 +462,10 @@ def test_sales_growth_zero_prior_period_no_crash(
     fake_db = patched_reports["db"]
     now = datetime.now()
     _seed_order(fake_db, order_id="ONLY", grand_total=1000.0, created_at=now)
+    _ist = _ist_now()  # IST month, same reason as above
     resp = client.get(
         f"/api/v1/reports/sales/growth"
-        f"?year={now.year}&month={now.month}",
+        f"?year={_ist.year}&month={_ist.month}",
         headers=auth_headers,
     )
     assert resp.status_code == 200
@@ -501,7 +517,7 @@ def test_staff_ranking_uses_grand_total_not_legacy_fields(
     fake_db.get_collection("orders").docs[-1]["sales_person_id"] = "user-rupesh"
     fake_db.get_collection("orders").docs[-1]["sales_person_name"] = "Rupesh"
 
-    today_d = today.date().isoformat()
+    today_d = _business_day(today)
     resp = client.get(
         f"/api/v1/reports/staff/ranking?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -535,8 +551,8 @@ def test_sales_comparison_uses_grand_total(
         created_at=now - timedelta(days=10),
     )
 
-    today_d = now.date().isoformat()
-    yest = (now - timedelta(days=6)).date().isoformat()
+    today_d = _business_day(now)
+    yest = _business_day(now - timedelta(days=6))
     resp = client.get(
         f"/api/v1/reports/sales/comparison?from_date={yest}&to_date={today_d}",
         headers=auth_headers,
@@ -566,7 +582,7 @@ def test_discount_analysis_aggregates_per_category(
         ],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/discount/analysis?from_date={today_d}&to_date={today_d}",
         headers=auth_headers,
@@ -593,7 +609,7 @@ def test_expense_vs_revenue_computes_margin(
                 "category": "FRAME", "cost_price": 300.0}],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/finance/expense-vs-revenue"
         f"?from_date={today_d}&to_date={today_d}",
@@ -640,7 +656,7 @@ def test_customer_acquisition_retention_pct_is_share_of_buyers(
             "grand_total": 800.0, "created_at": now, "status": "CONFIRMED",
         })
 
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/customers/acquisition"
         f"?from_date={today_d}&to_date={today_d}",
@@ -670,7 +686,7 @@ def test_brand_sellthrough_uses_item_revenue_helper(
         ],
         created_at=now,
     )
-    today_d = now.date().isoformat()
+    today_d = _business_day(now)
     resp = client.get(
         f"/api/v1/reports/inventory/brand-sellthrough"
         f"?from_date={today_d}&to_date={today_d}",

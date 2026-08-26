@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.services import shiprocket  # noqa: E402
 from api.routers import shipping as shipping_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 
 def _run(coro):
@@ -151,10 +152,16 @@ def test_build_payload_handles_datetime_created_at():
 
 
 def test_build_payload_missing_created_at_defaults_to_today():
+    # BUG-104 TRAP: the fallback is `ist_today()` -- the day the COURIER is
+    # told the order was placed, which is the IST business day. `datetime.now()`
+    # on the box is the UTC wall clock, so between 00:00 and 05:30 IST its date
+    # is YESTERDAY and this assertion fails for no reason but the hour.
+    # Computed by hand (+05:30) rather than through `api.utils.ist`, so the
+    # expectation cannot inherit a bug from the helper it is checking.
     p = shiprocket.build_shipment_payload(
         {"order_id": "ORD-4", "grand_total": 1.0, "items": [], "created_at": None}, {}
     )
-    assert p["order_date"] == datetime.now().date().isoformat()
+    assert p["order_date"] == business_day()
 
 
 def test_build_payload_empty_cart_gets_summary_line():

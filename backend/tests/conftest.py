@@ -5,9 +5,13 @@ Shared fixtures for backend tests.
 Uses FastAPI TestClient with the real app but no external DB dependency.
 """
 
-import pytest
-import sys
+import datetime as _dt
+import io
 import os
+import re as _re
+import sys
+
+import pytest
 
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -114,7 +118,7 @@ def _reset_churn_collections():
         pass
 
 
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(config, items):
     """Force a deterministic, machine-independent collection order. pytest's
     default order follows the filesystem directory-scan order, which differs
     between this container and the CI runner -- so an order-sensitive failure
@@ -125,6 +129,44 @@ def pytest_collection_modifyitems(items):
     failure. Inert under pytest-randomly (only installed locally) when that
     plugin is left active; pass -p no:randomly to honour this order."""
     items.sort(key=lambda it: str(getattr(it, "fspath", "") or it.nodeid))
+    _skip_own_frozen_clock_modules(config, items)
+
+
+# Three BUG-104 files build their OWN frozen clock as a datetime subclass with a
+# custom metaclass (`class _FrozenDatetime(datetime, metaclass=...)`). freezegun
+# replaces `datetime.datetime` with its own metaclassed FakeDatetime, and Python
+# refuses to derive from two unrelated metaclasses -- so under IMS_TEST_IST_CLOCK
+# every test in those files dies with "metaclass conflict". That is a HARNESS
+# COLLISION, not a finding: those files pin FIXED instants on both sides and have
+# nothing to learn from a shifted session clock. Skip them, matched by shape
+# rather than by name so a fourth one is skipped too instead of erroring.
+_OWN_FROZEN_CLOCK = _re.compile(r"datetime\s*,\s*metaclass=")
+_own_frozen_clock_cache = {}
+
+
+def _skip_own_frozen_clock_modules(config, items):
+    if getattr(config, "_ims_ist_clock", None) is None:
+        return
+    reason = (
+        "IMS_TEST_IST_CLOCK: this module builds its own datetime subclass with a "
+        "custom metaclass, which cannot derive from freezegun's FakeDatetime. It "
+        "pins fixed instants, so a shifted session clock has nothing to add."
+    )
+    marker = pytest.mark.skip(reason=reason)
+    for item in items:
+        path = str(getattr(item, "fspath", "") or "")
+        if not path.endswith(".py"):
+            continue
+        hit = _own_frozen_clock_cache.get(path)
+        if hit is None:
+            try:
+                source = io.open(path, encoding="utf-8", errors="replace").read()
+            except OSError:
+                source = ""
+            hit = bool(_OWN_FROZEN_CLOCK.search(source))
+            _own_frozen_clock_cache[path] = hit
+        if hit:
+            item.add_marker(marker)
 
 
 def _noop_close(*_args, **_kwargs):
@@ -289,3 +331,64 @@ def staff_headers():
         }
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# IMS_TEST_IST_CLOCK -- run a whole session at a chosen IST wall-clock time
+# ---------------------------------------------------------------------------
+# The backend suite was red every night between 00:00 and 05:30 IST and green
+# all day: the box runs UTC, so in that band the UTC date is YESTERDAY, and any
+# fixture that seeded a business date off the box clock asked for a day its own
+# row was not in. A bug you can only reproduce by staying up is a bug nobody
+# verifies, so this hook moves the clock instead:
+#
+#     IMS_TEST_IST_CLOCK=01:40              pytest tests/test_cash_register.py
+#     IMS_TEST_IST_CLOCK=05:29              pytest tests/...   # last minute in the band
+#     IMS_TEST_IST_CLOCK=05:31              pytest tests/...   # first minute out
+#     IMS_TEST_IST_CLOCK="2026-09-01 01:40" pytest tests/...   # month start, in the band
+#
+# "HH:MM" means today's IST date at that time; "YYYY-MM-DD HH:MM" pins the date
+# too (month and financial-year starts are where the month-window bugs hide).
+# Time still TICKS -- an open-then-close ordering inside a test has to stay
+# real, so this is not a freeze.
+#
+# Unset (the default, and CI's default) this hook does nothing at all.
+_IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+
+
+def pytest_configure(config):
+    target = os.environ.get("IMS_TEST_IST_CLOCK", "").strip()
+    if not target:
+        return
+    if " " in target:
+        day_str, time_str = target.split(" ", 1)
+        base = _dt.date.fromisoformat(day_str)
+    else:
+        time_str, base = target, _dt.datetime.now(_IST).date()
+    hour, minute = (int(part) for part in time_str.split(":"))
+    want_ist = _dt.datetime(base.year, base.month, base.day, hour, minute, tzinfo=_IST)
+    want_utc_naive = want_ist.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+
+    # pydantic.v1 subclasses datetime.date with its own metaclass. If
+    # freezegun's FakeDate is installed first, that subclassing dies with
+    # "metaclass conflict" the moment FastAPI lazily imports pydantic.v1 --
+    # every collection errors. Import it before the freeze starts.
+    from pydantic import v1 as _pydantic_v1  # noqa: F401
+    from freezegun import freeze_time
+
+    freezer = freeze_time(want_utc_naive, tick=True)
+    freezer.start()
+    config._ims_ist_clock = freezer
+    print(
+        "\n[IMS_TEST_IST_CLOCK] session clock: IST %s == UTC %s\n"
+        % (
+            want_ist.strftime("%Y-%m-%d %H:%M"),
+            want_utc_naive.strftime("%Y-%m-%d %H:%M"),
+        )
+    )
+
+
+def pytest_unconfigure(config):
+    freezer = getattr(config, "_ims_ist_clock", None)
+    if freezer is not None:
+        freezer.stop()
