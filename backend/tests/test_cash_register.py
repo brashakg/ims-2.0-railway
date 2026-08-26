@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.services import cash_register as cr  # noqa: E402
 from api.routers import finance  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 # CI's asyncio_mode=auto runs coroutine tests; the endpoint tests here use the
 # synchronous TestClient, but we mark the module so the convention is explicit.
@@ -307,7 +308,15 @@ class TestCashRegisterEndpoints:
                 "amount": 500,
                 "payment_mode": "CASH",
                 "status": "APPROVED",
-                "expense_date": opened_at[:10],
+                # BUG-104 TRAP: `opened_at` is `_iso_now()` ==
+                # datetime.utcnow().isoformat(), so opened_at[:10] is the UTC
+                # day. `expense_date` is filtered by `_ist_day_window`, an IST
+                # BUSINESS day. Between 00:00 and 05:30 IST the two are
+                # different days and the seeded expense drops out of the
+                # window. Shift by hand -- calling the production helper to
+                # build the fixture would let a broken helper agree with
+                # itself.
+                "expense_date": business_day(opened_at),
             }
         )
 
