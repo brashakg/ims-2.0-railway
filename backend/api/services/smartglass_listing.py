@@ -22,7 +22,8 @@ products already use:
 
   * spec bullets    -- one <li> per filled field group; a BLANK FIELD OMITS ITS
                        BULLET ENTIRELY (never an empty or "undefined" line),
-  * storefront tags -- product_smartglass / product_sunglass / <brand>_<line>,
+  * storefront tags -- product_smartglass / product_sunglass (the latter only
+                       when the model is not prescription) / <brand>_<line>,
                        the tokens the storefront facets on that the attribute
                        tag generator (shopify_tag_gen) does NOT emit,
   * SEO title/desc  -- "... | Better Vision" + the one-sentence genuine /
@@ -51,10 +52,15 @@ from .shopify_tag_gen import slugify_brand_value
 
 STORE_NAME = "Better Vision"
 
-# Storefront facet tokens every smart glass carries on the live store. They are
-# NOT emitted by shopify_tag_gen (which only builds `<attr>_<value>` tokens), so
+# Storefront facet tokens a smart glass carries on the live store. They are NOT
+# emitted by shopify_tag_gen (which only builds `<attr>_<value>` tokens), so
 # they are generated here instead of duplicating that module's registry.
-BASE_TAGS = ("product_smartglass", "product_sunglass")
+# `product_sunglass` is CONDITIONAL: the live `sunglass` collection is
+# disjunctive on TAG = product_sunglass, so it is what puts a product on the
+# Sunglasses page -- and none of the 8 live prescription models carry it (read
+# off the store 2026-08-25). See build_tags.
+SUNGLASS_TAG = "product_sunglass"
+BASE_TAGS = ("product_smartglass", SUNGLASS_TAG)
 
 # Bare (prefix-less) facet tokens the live listings carry that no
 # `<attr>_<value>` rule would ever produce: the generation 30 of the 36 live
@@ -216,16 +222,22 @@ def build_spec_bullets(attributes: Dict[str, Any]) -> List[str]:
 def build_headline(attributes: Dict[str, Any]) -> str:
     """The listing <h2>: model + generation + colour + lens, as the live ones do."""
     a = _clean(attributes)
+    # The product's IDENTITY is its model. `shape` is a generic silhouette the
+    # form offers (Round/Square/Cat-Eye/...) and is a LAST-RESORT stand-in, not
+    # an extra word: no live listing names a shape next to the model, and the
+    # silhouette already has its own spec bullet.
     head = _dedupe_join(
         a.get("brand_name"),
         a.get("subbrand"),
-        a.get("model_name") or a.get("model_no"),
-        a.get("shape"),
+        a.get("model_name") or a.get("model_no") or a.get("shape"),
     )
     gen = a.get("generation")
-    if gen:
+    if gen and head:
         head = f"{head} ({gen})".strip()
-    colour = a.get("frame_color") or a.get("colour_name") or a.get("colour_code")
+    # NOT colour_code: that is the REQUIRED field and it holds a manufacturer
+    # code ("601/7150"), never a colour a customer reads. An unnamed colour is
+    # simply not printed.
+    colour = a.get("frame_color") or a.get("colour_name")
     if colour:
         head = f"{head} - {colour}".strip(" -")
     lens = a.get("lens_colour")
@@ -240,7 +252,7 @@ def build_seo_title(attributes: Dict[str, Any]) -> str:
     core = _dedupe_join(
         a.get("brand_name"),
         a.get("subbrand"),
-        a.get("shape") or a.get("model_name") or a.get("model_no"),
+        a.get("model_name") or a.get("model_no") or a.get("shape"),
         a.get("frame_color") or a.get("colour_name"),
     )
     suffix = f" Smart Glasses | {STORE_NAME}"
@@ -274,6 +286,12 @@ def build_tags(attributes: Dict[str, Any]) -> List[str]:
     at push time -- this does not duplicate them."""
     a = _clean(attributes)
     tags = list(BASE_TAGS)
+    # A prescription model is NOT a sunglass: the live `sunglass` collection
+    # rules on this tag disjunctively, so carrying it would file a clear-lens
+    # Rx frame on the Sunglasses page. All 8 live prescription_ready models go
+    # without it; the tinted models keep it.
+    if _yes(a.get("prescription_ready")):
+        tags.remove(SUNGLASS_TAG)
     brand, line = _alnum(a.get("brand_name")), _alnum(a.get("subbrand"))
     if brand and line:
         tags.append(f"{brand}_{line}")
@@ -299,11 +317,14 @@ def build_description_html(
     paragraph when one was written (the AI Auto-fill button, or typed by hand --
     it is never invented here), then the <ul> spec bullets.
 
-    Returns "" when there is neither a headline nor a single filled spec, so a
-    contentless product is left alone rather than pushed an empty shell."""
+    Returns "" unless at least ONE spec bullet was filled: this body IS the
+    spec sheet, and a lone <h2> that only restates the product title is not a
+    description. So a smart glass catalogued the old way (brand + model +
+    colour code, no specs) is left with no description at all, exactly as
+    before this module existed, rather than being published a wrong one."""
     headline = build_headline(attributes)
     bullets = build_spec_bullets(attributes)
-    if not headline and not bullets:
+    if not bullets:
         return ""
     parts: List[str] = []
     if headline:

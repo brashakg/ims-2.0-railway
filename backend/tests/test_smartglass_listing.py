@@ -43,7 +43,14 @@ from api.services import smartglass_listing as sgl  # noqa: E402
 
 
 # A full Ray-Ban Meta payload, transcribed from what the LIVE listing
-# "Rayban META RW4006 601/7150 50 Black SmartGlasses" states in its own bullets.
+# "Rayban META RW4006 601/7150 50 Black SmartGlasses" states in its own bullets
+# -- with ONE deliberate divergence: `shape` is a DIFFERENT word from
+# `model_name`. The live Meta models happen to be named after their own
+# silhouette ("Wayfarer" is both), and while the fixture said "Wayfarer" twice
+# no test could tell which field the code had read: build_seo_title was reading
+# the OPTIONAL shape in preference to the REQUIRED model_name and the suite
+# passed anyway. `Rectangle` is live vocabulary too (the Blayzer Optics models
+# carry shape_rectangle), and it is what makes the two fields separable.
 FULL_ATTRS = {
     "brand_name": "Ray-Ban",
     "subbrand": "Meta",
@@ -51,7 +58,7 @@ FULL_ATTRS = {
     "model_no": "RW4006",
     "colour_code": "601/7150",
     "generation": "Gen 2",
-    "shape": "Wayfarer",
+    "shape": "Rectangle",
     "frame_material": "Acetate",
     "frame_color": "Black",
     "lens_colour": "Green",
@@ -78,7 +85,7 @@ EXPECTED_BULLETS = [
     "Capacitive touch controls on the temple",
     "Up to ~4 hours per charge, plus a portable charging case",
     "Wi-Fi 6 and Bluetooth 5.2 connectivity; 32GB on-board storage",
-    "Classic wayfarer silhouette in acetate",
+    "Classic rectangle silhouette in acetate",
     "Prescription-ready (single-vision and progressive lenses)",
 ]
 
@@ -202,6 +209,46 @@ def test_new_fields_are_additive_not_suddenly_mandatory():
     ]
 
 
+def test_a_minimal_old_style_save_still_publishes_nothing():
+    """The PR's claim that a smart glass catalogued the old way still saves
+    exactly as it does today is about what the save PRODUCES, not merely about
+    whether validation passes. Brand + model + colour code and
+    nothing else has no spec sheet to publish, so the storefront body must stay
+    ABSENT, exactly as before this module existed.
+
+    It must certainly never be the colour CODE: colour_code is the REQUIRED
+    field and holds a manufacturer code ("601/7150") that no customer reads,
+    while the optional frame_color holds the words the live listings print.
+    Reading the code as a fallback made the DEFAULT path -- the one where only
+    the required fields are filled -- publish "<h2>Ray-Ban Wayfarer - 601</h2>"
+    as the entire product page body."""
+    minimal = {"brand_name": "Ray-Ban", "model_name": "Wayfarer", "colour_code": "601"}
+    pm.validate_attributes("SMARTGLASSES", minimal)
+
+    assert sgl.build_description_html(minimal) == ""
+    doc = pm._build_pim_doc(
+        {
+            "category": "SMARTGLASSES",
+            "brand": "Ray-Ban",
+            "attributes": dict(minimal),
+            "sku": "SMTFRRAYWAY1",
+            "pim_product_id": "pim-minimal",
+        }
+    )
+    assert doc["description"] is None, doc["description"]
+
+    # ...and the code is still not printed as a colour once there IS a spec
+    # sheet for it to be printed on.
+    with_spec = dict(minimal, camera_mp=12)
+    html = sgl.build_description_html(with_spec)
+    assert html.startswith("<h2>Ray-Ban Wayfarer</h2>"), html
+    assert "601" not in html, html
+
+    # Degenerate input publishes nothing rather than "<h2>(Gen)</h2>".
+    assert sgl.build_headline({"generation": "Gen"}) == ""
+    assert sgl.build_description_html({"generation": "Gen"}) == ""
+
+
 # ---------------------------------------------------------------------------
 # 2. The listing generates from the fields
 # ---------------------------------------------------------------------------
@@ -263,10 +310,10 @@ def test_nothing_filled_yields_no_description_rather_than_an_empty_shell():
 def test_tag_set_matches_the_live_storefront_vocabulary():
     assert set(sgl.build_tags(FULL_ATTRS)) == {
         "product_smartglass",
-        "product_sunglass",
         "rayban_meta",
         # 30 of the 36 live listings carry the generation token, and the 8
-        # Optics models carry the prescription flag.
+        # Optics models carry the prescription flag. Those 8 carry NO
+        # product_sunglass -- see the next test.
         "gen2",
         "prescription_ready",
     }
@@ -276,6 +323,25 @@ def test_tag_set_matches_the_live_storefront_vocabulary():
         "product_smartglass",
         "product_sunglass",
     }
+
+
+def test_a_prescription_model_is_not_filed_on_the_sunglasses_page():
+    """The live `sunglass` collection (handle "sunglass", 23 products) is
+    DISJUNCTIVE and one of its three rules is TAG = product_sunglass -- so that
+    tag ALONE puts a product on the Sunglasses page. Read off the store
+    2026-08-25: all 8 prescription_ready smart glasses carry NO
+    product_sunglass, while the tinted Gen-2 models do. Emitting it
+    unconditionally filed every clear-lens prescription model as a sunglass."""
+    rx = dict(FULL_ATTRS, prescription_ready="Yes")
+    tinted = dict(FULL_ATTRS, prescription_ready="No")
+
+    assert "product_sunglass" not in sgl.build_tags(rx)
+    assert "prescription_ready" in sgl.build_tags(rx)
+    assert "product_sunglass" in sgl.build_tags(tinted)
+    assert "prescription_ready" not in sgl.build_tags(tinted)
+    # It is a smart glass either way.
+    assert "product_smartglass" in sgl.build_tags(rx)
+    assert "product_smartglass" in sgl.build_tags(tinted)
 
 
 def test_tags_do_not_duplicate_what_the_attribute_tag_generator_emits():
@@ -292,7 +358,7 @@ def test_tags_do_not_duplicate_what_the_attribute_tag_generator_emits():
     # is spelled.
     assert "brand_rayban" in attribute_tags
     assert "brand_ray-ban" not in attribute_tags
-    assert "shape_wayfarer" in attribute_tags
+    assert "shape_rectangle" in attribute_tags
     assert "framematerial_acetate" in attribute_tags
     assert attribute_tags.isdisjoint(set(sgl.build_tags(FULL_ATTRS)))
 
@@ -309,6 +375,33 @@ def test_seo_title_and_description_follow_the_store_pattern():
     assert "best price" in desc
     assert "pan-India" in desc
     assert len(desc) <= sgl.MAX_SEO_DESCRIPTION
+
+
+def test_the_listing_names_the_model_never_the_generic_silhouette():
+    """model_name is REQUIRED on SMARTGLASSES; `shape` is OPTIONAL and the form
+    offers generic silhouettes (Round, Square, Cat-Eye, Aviator, ...). Reading
+    shape FIRST put "Ray-Ban Meta Cat-Eye" on Google for a Skyler -- the
+    product's own name never appeared -- while all 36 live seo.titles name the
+    model. The silhouette already has its own spec bullet; it is a last-resort
+    stand-in for the name, never an addition to it."""
+    skyler = {
+        "brand_name": "Ray-Ban",
+        "subbrand": "Meta",
+        "model_name": "Skyler",
+        "shape": "Cat-Eye",
+        "frame_color": "Shiny Black",
+    }
+    assert (
+        sgl.build_seo_title(skyler)
+        == "Ray-Ban Meta Skyler Shiny Black Smart Glasses | Better Vision"
+    )
+    assert sgl.build_headline(skyler) == "Ray-Ban Meta Skyler - Shiny Black"
+
+    # No model name at all -> the shape is better than nothing, but only then.
+    assert (
+        sgl.build_seo_title({"brand_name": "Ray-Ban", "shape": "Cat-Eye"})
+        == "Ray-Ban Cat-Eye Smart Glasses | Better Vision"
+    )
 
 
 def test_yes_no_fields_read_as_yes_no_not_as_text():
@@ -431,9 +524,8 @@ def test_a_catalogued_smart_glass_carries_a_full_listing_into_the_pim_doc():
     assert "pan-India" in doc["ecom"]["seo"]["description"]
     # The product's own tags survive; the generated ones are UNIONED on.
     assert doc["ecom"]["seo"]["tags"][0] == "clearance"
-    assert {"product_smartglass", "product_sunglass", "rayban_meta"} <= set(
-        doc["ecom"]["seo"]["tags"]
-    )
+    assert {"product_smartglass", "rayban_meta"} <= set(doc["ecom"]["seo"]["tags"])
+    assert "product_sunglass" not in doc["ecom"]["seo"]["tags"]  # prescription
 
 
 def test_a_sunglass_pim_doc_is_untouched_by_the_smartglass_generator():
