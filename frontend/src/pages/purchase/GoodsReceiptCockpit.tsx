@@ -267,18 +267,34 @@ export function GoodsReceiptCockpit() {
   // stays receivable, which used to read as "nothing happened". These rows
   // surface that state with one-click Accept (mint stock) / Void (duplicate).
   const [pendingGrns, setPendingGrns] = useState<
-    Array<{ grn_id: string; grn_number: string; vendor_invoice_no?: string; created_at?: string; items?: unknown[] }>
+    Array<{
+      grn_id: string;
+      grn_number: string;
+      vendor_invoice_no?: string;
+      created_at?: string;
+      items?: unknown[];
+      // A PARTIALLY_ACCEPTED receipt is one whose uncatalogued lines were HELD:
+      // real stock was minted for the rest, and the held lines are waiting for
+      // someone to finish the product. It belongs in this panel too -- it was
+      // the one state the panel did not query, while the accept-time toast
+      // sent people here to find it.
+      status?: string;
+      heldLines?: number;
+    }>
   >([]);
   const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
 
   const loadPendingGrns = useCallback(
     async (vid: string) => {
       try {
-        const res = await vendorsApi.getGRNs({
-          store_id: storeId || undefined,
-          status: 'PENDING',
-        });
-        const rows = (res.grns || res.items || res || []) as Array<Record<string, unknown>>;
+        const scope = { store_id: storeId || undefined };
+        const [pend, part] = await Promise.all([
+          vendorsApi.getGRNs({ ...scope, status: 'PENDING' }),
+          vendorsApi.getGRNs({ ...scope, status: 'PARTIALLY_ACCEPTED' }),
+        ]);
+        const collect = (res: Record<string, unknown>) =>
+          ((res.grns || res.items || res || []) as Array<Record<string, unknown>>) || [];
+        const rows = [...collect(pend), ...collect(part)];
         setPendingGrns(
           (Array.isArray(rows) ? rows : [])
             .filter((g) => !vid || g.vendor_id === vid || !g.vendor_id)
@@ -288,6 +304,8 @@ export function GoodsReceiptCockpit() {
               vendor_invoice_no: g.vendor_invoice_no ? String(g.vendor_invoice_no) : undefined,
               created_at: g.created_at ? String(g.created_at) : undefined,
               items: Array.isArray(g.items) ? g.items : [],
+              status: String(g.status || 'PENDING'),
+              heldLines: Array.isArray(g.unresolved_lines) ? g.unresolved_lines.length : 0,
             }))
         );
       } catch {
@@ -685,7 +703,7 @@ export function GoodsReceiptCockpit() {
         );
         if (acc.grn_status === 'PARTIALLY_ACCEPTED') {
           toast.warning(
-            'Some lines were held because their product is not catalogued yet — catalogue them, then accept the GRN from the Pending receipts panel.',
+            'Some lines were held because their product is not catalogued yet — finish those products, then press "Add to stock" again on this receipt in the "Receipts still waiting" panel below.',
           );
         }
       } catch (acceptErr) {
@@ -1337,13 +1355,16 @@ export function GoodsReceiptCockpit() {
                     <div className="flex items-center gap-2 mb-2">
                       <AlertCircle className="w-4 h-4 text-amber-600" />
                       <h3 className="font-semibold text-gray-900">
-                        Pending receipts — not yet added to stock ({pendingGrns.length})
+                        Receipts still waiting ({pendingGrns.length})
                       </h3>
                     </div>
                     <p className="text-xs text-gray-600 mb-3">
-                      These GRNs were created but never accepted, so their units are NOT in
-                      stock and their POs still show as receivable. Accept the correct one;
-                      void duplicates (voiding is safe — a pending GRN has added nothing).
+                      A <strong>pending</strong> receipt was created but never accepted, so its
+                      units are NOT in stock and its PO still shows as receivable — accept the
+                      correct one, and void duplicates (safe: a pending GRN has added nothing).
+                      A <strong>partly accepted</strong> one put most of its goods into stock but
+                      held the lines whose product is not catalogued yet; finish those products,
+                      then press "Add to stock" again to release them.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1358,7 +1379,12 @@ export function GoodsReceiptCockpit() {
                         >
                           <div className="min-w-0 text-sm">
                             <span className="font-medium text-gray-900">{g.grn_number}</span>{' '}
-                            <PurchaseStatusChip status="PENDING" kind="grn" />
+                            <PurchaseStatusChip status={g.status || 'PENDING'} kind="grn" />
+                            {g.status === 'PARTIALLY_ACCEPTED' && (
+                              <span className="text-amber-700">
+                                {' '}· {g.heldLines || 'some'} line(s) waiting to be catalogued
+                              </span>
+                            )}
                             {g.vendor_invoice_no && (
                               <span className="text-gray-500"> · Inv {g.vendor_invoice_no}</span>
                             )}
@@ -1381,15 +1407,17 @@ export function GoodsReceiptCockpit() {
                               )}
                               Add to stock
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                              disabled={grnActionBusy === g.grn_id}
-                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                              Void (duplicate)
-                            </button>
+                            {g.status === 'PARTIALLY_ACCEPTED' ? null : (
+                              <button
+                                type="button"
+                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                                disabled={grnActionBusy === g.grn_id}
+                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                Void (duplicate)
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}
