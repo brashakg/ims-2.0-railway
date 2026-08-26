@@ -679,3 +679,43 @@ def test_propose_from_reopened_session_is_409(db):
     with pytest.raises(svc.BlindStockTakeError) as exc:
         eng.propose_adjustment(sid, store_id="BV-1", actor=_manager())
     assert exc.value.status == 409
+
+
+# ============================================================================
+# THE SECOND DOOR THAT ANSWERED "PERFECT" TO A COUNT OF NOTHING
+# ============================================================================
+# Locking a session with no submitted lines returned total_skus 0, matched 0,
+# short 0, within_tolerance TRUE -- the same lie the cycle count used to tell,
+# on a route any manager can reach.
+
+
+def test_locking_a_session_with_nothing_submitted_is_refused(db):
+    eng = svc.BlindStockTakeEngine(db)
+    sess = eng.open_session(store_id="BV-1", actor=_counter())
+    sid = sess["session_id"]
+
+    with pytest.raises(svc.BlindStockTakeError) as exc:
+        eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 10}), tolerance=0)
+
+    assert exc.value.status == 400
+    assert "counted" in str(exc.value).lower()
+    still = eng.get(sid)
+    assert still["status"] == svc.STATUS_OPEN, (
+        "a refused lock must leave the session open, not half-locked"
+    )
+    assert "summary" not in still, "and it must not report a perfect count"
+
+
+def test_a_session_with_one_submitted_line_still_locks(db):
+    """The discriminator: the guard is 'nothing counted', not 'not enough'."""
+    eng = svc.BlindStockTakeEngine(db)
+    sess = eng.open_session(store_id="BV-1", actor=_counter())
+    sid = sess["session_id"]
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 10}],
+                     store_id="BV-1", actor=_counter())
+
+    locked = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                                 on_hand_resolver=_on_hand({"P-A": 10}), tolerance=0)
+    assert locked["status"] == svc.STATUS_LOCKED
+    assert locked["summary"]["total_skus"] == 1

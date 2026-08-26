@@ -45,6 +45,17 @@ from api.routers import clinical  # noqa: E402
 from api.routers import prescriptions  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 
+# The IST BUSINESS day, spelled out independently in tests/ist_business_day.py.
+# Deliberately NOT api.utils.ist: a fixture that asks the code under test what
+# the answer should be would agree with a broken helper and report green.
+from ist_business_day import business_day  # noqa: E402
+
+def _days_before(n: int) -> str:
+    """N days back from the IST business day, as YYYY-MM-DD."""
+    from datetime import date as _d
+    y, m, d = (int(x) for x in business_day().split("-"))
+    return (_d(y, m, d) - timedelta(days=n)).isoformat()
+
 
 # ============================================================================
 # In-memory fakes
@@ -67,7 +78,7 @@ class _FakeEyeTestRepo:
 
     def get_today_completed_tests(self, store_id):
         self.today_calls += 1
-        today = date.today().isoformat()
+        today = business_day()
         return [
             d
             for d in self._docs
@@ -193,18 +204,18 @@ class TestResolveTestDateRange:
         assert t == "2026-01-31"
 
     def test_today_keyword(self):
-        iso = date.today().isoformat()
+        iso = business_day()
         assert clinical._resolve_test_date_range("today", None, None) == (iso, iso)
 
     def test_week_keyword_is_last_7_days_inclusive(self):
         f, t = clinical._resolve_test_date_range("week", None, None)
-        assert t == date.today().isoformat()
-        assert f == (date.today() - timedelta(days=6)).isoformat()
+        assert t == business_day()
+        assert f == _days_before(6)
 
     def test_month_keyword_is_last_30_days(self):
         f, t = clinical._resolve_test_date_range("month", None, None)
-        assert t == date.today().isoformat()
-        assert f == (date.today() - timedelta(days=29)).isoformat()
+        assert t == business_day()
+        assert f == _days_before(29)
 
     def test_all_and_unknown_and_empty_yield_no_bounds(self):
         assert clinical._resolve_test_date_range("all", None, None) == (None, None)
@@ -228,8 +239,8 @@ class TestResolveTestDateRange:
 
 
 def _seed_tests():
-    today = date.today().isoformat()
-    old = (date.today() - timedelta(days=200)).isoformat()
+    today = business_day()
+    old = _days_before(200)
     return [
         {
             "test_id": "t-today",
@@ -284,7 +295,7 @@ class TestClinicalTestsRange:
     def test_explicit_from_to_queries_range(self, monkeypatch):
         repo = _FakeEyeTestRepo(_seed_tests())
         client = _clinical_client(monkeypatch, test_repo=repo)
-        old = (date.today() - timedelta(days=200)).isoformat()
+        old = _days_before(200)
         resp = client.get(
             "/clinical/tests",
             params={"store_id": "store-001", "from": old, "to": old},

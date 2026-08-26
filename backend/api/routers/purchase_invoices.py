@@ -962,6 +962,27 @@ async def create_purchase_invoice(
 # ---------------------------------------------------------------------------
 
 
+def _stamp_bill_actor_names(db, bills: list) -> None:
+    """Add ``*_name`` beside the raw user ids the AP screens print.
+
+    Two of them reach the owner as prose: the override banner
+    ("Override approved by ...", exception_override.approved_by) and the recon
+    console's tick tooltips / last-updated line (recon.<flag>_by,
+    recon.last_updated_by). Every writer stamps a user id ("user-superadmin"),
+    never a name, so those lines used to read the id straight out. The name was
+    in the users collection all along -- nobody looked it up.
+
+    In place, batched (one users read per id-set), fail-soft: an id that no
+    longer resolves gets no ``_name`` and the screen falls back to the id.
+    """
+    from ..services.name_resolver import stamp_user_names
+
+    from .purchase_recon import RECON_ACTOR_FIELDS
+
+    stamp_user_names(db, [b.get("exception_override") for b in bills], ("approved_by",))
+    stamp_user_names(db, [b.get("recon") for b in bills], RECON_ACTOR_FIELDS)
+
+
 @router.get("")
 @router.get("/")
 async def list_purchase_invoices(
@@ -996,6 +1017,7 @@ async def list_purchase_invoices(
     rows.sort(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
+    _stamp_bill_actor_names(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
 
 
@@ -1446,10 +1468,14 @@ async def approve_invoice_exception(
     except Exception:
         pass
 
+    # Name the approver on a COPY, after the write: the stored override must
+    # keep the raw id, so a renamed user is never frozen into the audit trail.
+    echo = dict(override["exception_override"])
+    _stamp_bill_actor_names(db, [{"exception_override": echo}])
     return {
         "invoice_id": invoice_id,
         "match_status": pmatch.MATCH_OVERRIDE,
-        "exception_override": override["exception_override"],
+        "exception_override": echo,
     }
 
 
@@ -1899,4 +1925,5 @@ async def get_purchase_invoice(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    _stamp_bill_actor_names(db, [doc])
     return doc

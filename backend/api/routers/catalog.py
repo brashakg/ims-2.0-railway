@@ -1172,7 +1172,50 @@ def _catalog_coll():
     return _coll(_get_db(), "catalog_products")
 
 
-def _save_catalog_product(product: Dict) -> None:
+def _mark_online_dirty(product: Dict) -> None:
+    """Queue this catalog_products doc for the next MANUAL Online Store push.
+
+    `ecom.locally_modified` is the ONE dirty flag the push reads -- both to pick
+    the rows the operator's "push all pending" sweep sends AND to compute the
+    `pending` number shown on the Online Store screen
+    (online_store_push._product_counts). Nothing on the product doors used to
+    set it, so a catalogued product was never queued and the screen truthfully
+    reported the flag while lying about the work: "pending: 0".
+
+    Same convention as ecom_collection_repository / ecom_menu_repository,
+    adapted to one difference: those repos can use `setdefault` because their
+    payload is a PATCH, whereas the catalog doors save the WHOLE stored doc --
+    which already carries `locally_modified: False` once a push has cleared it.
+    A setdefault here would therefore never re-queue an already-pushed product.
+    So this assigns, and the opt-out is an explicit `mark_dirty=False` at the
+    call site instead.
+
+    The `ecom` sub-doc is created when absent: a doc with no `ecom` is not even
+    counted as `staged`, so the flag would have nowhere to live and the count
+    would stay blind. Queuing is NOT publishing -- a human still presses the
+    button, and only a SUCCESSFUL Shopify write clears the flag again
+    (shopify_push._writeback_product)."""
+    ecom = product.get("ecom")
+    if not isinstance(ecom, dict):
+        ecom = {}
+        product["ecom"] = ecom
+    # A doc created without an `ecom` key (the catalog door and bulk import)
+    # would otherwise be counted as staged+pending while belonging to NO status
+    # bucket -- the Online Store screen's DRAFT and PUBLISHED cards would both
+    # show 0 for a row sitting in the queue. Same default _build_pim_doc uses.
+    # "The count was the lie" is this change's whole thesis; do not reintroduce
+    # it one card over.
+    ecom.setdefault("status", "DRAFT")
+    ecom["locally_modified"] = True
+
+
+def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
+    # Dirty by DEFAULT: every save through this door is a human catalogue edit
+    # unless it says otherwise. Writes that are NOT a catalogue edit -- a stock
+    # movement, the retired Shopify-sync bookkeeping stamp, the soft-delete
+    # stamp -- pass mark_dirty=False and say why at the call site.
+    if mark_dirty:
+        _mark_online_dirty(product)
     coll = _catalog_coll()
     if coll is not None:
         # Explicit update-or-insert. The previous `update_one(..., upsert=True)`
@@ -1197,14 +1240,23 @@ def _save_catalog_product(product: Dict) -> None:
             CATALOG_PRODUCTS[product["id"]] = product
 
 
-def _save_catalog_product_cas(product: Dict, expected_raw_updated_at) -> bool:
+def _save_catalog_product_cas(
+    product: Dict, expected_raw_updated_at, *, mark_dirty: bool = True
+) -> bool:
     """Compare-and-swap save for the optimistic-concurrency PUT path: the
     write only lands when the stored updated_at STILL equals the raw value
     read at load time (filtered on the raw datetime-or-string value so
     imported docs match). Returns False when another writer got in between --
     the caller 409s. The plain check-then-write left a multi-round-trip
     window where two overlapping saves both passed the timestamp check and
-    the loser silently clobbered the winner's fixes."""
+    the loser silently clobbered the winner's fixes.
+
+    Marks the row dirty for the Online Store push by default, exactly like
+    _save_catalog_product (this is the same catalogue-edit door, just with an
+    optimistic-concurrency filter). The stamp happens before the write attempt;
+    when the CAS loses the write does not land, so nothing is queued."""
+    if mark_dirty:
+        _mark_online_dirty(product)
     coll = _catalog_coll()
     if coll is not None:
         res = coll.update_one(
@@ -2391,6 +2443,15 @@ async def promote_catalog_product(
     # Stamp the catalog doc (partial $set -- promote is the ONLY writer of
     # these flags). Fail-soft: the spine row is the sellability truth; a
     # failed stamp leaves a stale queue entry, never an unsellable product.
+    #
+    # This write deliberately BYPASSES _save_catalog_product, so it never
+    # queues the row for the Online Store push -- correctly. needs_review /
+    # pos_ready / promoted_* are internal review workflow, in no pushed Shopify
+    # payload. The one field here that IS pushed content is a newly minted
+    # `sku`, and it needs no flag: a product only reaches promote from the
+    # review queue, where it is still dirty from creation (born dirty in
+    # product_master._build_pim_doc / the catalog create door), so the minted
+    # sku rides along on the first push that ever happens.
     stamp: Dict[str, Any] = {
         "needs_review": False,
         "pos_ready": True,
@@ -2477,7 +2538,12 @@ async def delete_catalog_product(
     product["deleted_at"] = datetime.now().isoformat()
     product["deleted_by"] = current_user.get("user_id")
 
-    _save_catalog_product(product)
+    # NOT a catalogue edit: `is_active` / deleted_at / deleted_by appear in NO
+    # pushed Shopify payload (build_product_input reads title, ecom.status /
+    # handle / seo, brand, category, description, attributes) -- queuing here
+    # would send a push that changes nothing on the storefront. Removing a live
+    # listing has its own path (shopify_push.push_product_delist).
+    _save_catalog_product(product, mark_dirty=False)
 
     # Products-convergence: deactivate the SPINE twin too (shared id) so a
     # soft-deleted catalog product can't still be sold at POS. Fail-soft.
@@ -2533,7 +2599,11 @@ async def adjust_product_inventory(
     )
     product["updated_at"] = datetime.now().isoformat()
 
-    _save_catalog_product(product)
+    # NOT a catalogue edit: a stock movement. Quantity is never pushed from the
+    # product payload (online qty is the derived allocation, written by the
+    # stock write-back), so flagging here would queue a no-change push on every
+    # sale and GRN.
+    _save_catalog_product(product, mark_dirty=False)
     return {
         "product_id": product_id,
         "location_id": location_id,
@@ -2608,7 +2678,13 @@ async def sync_product_to_shopify(
     result = await _sync_product_to_shopify(product, sync_config)
     product["shopify"] = result
     product["updated_at"] = datetime.now().isoformat()
-    _save_catalog_product(product)
+    # SYNC PATH -- deliberately does NOT queue the row. This write is sync
+    # book-keeping (the retired-marker stamp), not a human catalogue edit.
+    # Marking a row dirty from anything on the Shopify sync side is the
+    # ping-pong hazard: push -> write-back marks dirty -> next sweep pushes it
+    # again -> forever, against a LIVE storefront. Same reason
+    # shopify_push._writeback_product only ever sets the flag to False.
+    _save_catalog_product(product, mark_dirty=False)
 
     return {
         "product_id": product_id,
@@ -2643,7 +2719,9 @@ async def bulk_sync_products_to_shopify(
         result = await _sync_product_to_shopify(product, sync_config)
         product["shopify"] = result
         product["updated_at"] = datetime.now().isoformat()
-        _save_catalog_product(product)
+        # SYNC PATH -- same reason as the single sync above: never queue from
+        # the Shopify sync side (ping-pong).
+        _save_catalog_product(product, mark_dirty=False)
         synced += 1
 
     return {

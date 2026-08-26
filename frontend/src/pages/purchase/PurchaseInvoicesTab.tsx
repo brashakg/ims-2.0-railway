@@ -38,7 +38,7 @@ import {
 import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import type { Supplier } from './purchaseTypes';
+import { byPerson, type Supplier } from './purchaseTypes';
 import type { UserRole } from '../../types';
 
 const inr = (n?: number) => `₹${(Math.round((n || 0) * 100) / 100).toLocaleString('en-IN')}`;
@@ -1477,7 +1477,7 @@ function InvoiceDetailDrawer({
               </p>
               {override && (
                 <p className="text-[11px] text-blue-700 mt-1">
-                  Override approved{override.approved_by ? ` by ${override.approved_by}` : ''}
+                  Override approved{byPerson(override.approved_by_name, override.approved_by)}
                   {override.approved_at ? ` on ${String(override.approved_at).slice(0, 10)}` : ''}
                   {override.reason ? ` - "${override.reason}"` : ''}
                 </p>

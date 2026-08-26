@@ -77,14 +77,30 @@ def _make_vendors_app(override_user=None):
 # ---------------------------------------------------------------------------
 
 class TestReconcileGating:
-    """POST /inventory/stock-count/{id}/reconcile must require inventory roles."""
+    """POST /inventory/stock-count/{id}/reconcile is the STOCK WRITE-OFF.
+
+    OWNER RULING 2026-08-25 (#8): writing off missing stock is ADMIN /
+    SUPERADMIN ONLY, at every value -- the manager-plus-threshold option was
+    overridden, so there is no rupee threshold either. A store manager may
+    COUNT (start / record / complete all stay on the inventory role set); a
+    store manager may not remove stock from the books.
+    """
 
     @pytest.fixture(scope="class")
     def client(self):
         return TestClient(TestClient(FastAPI()).app)  # unused; use per-test
 
-    BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"], ["ACCOUNTANT"]]
-    ALLOWED_ROLES = [["STORE_MANAGER"], ["CATALOG_MANAGER"], ["ADMIN"]]
+    BLOCKED_ROLES = [
+        ["SALES_STAFF"],
+        ["CASHIER"],
+        ["OPTOMETRIST"],
+        ["ACCOUNTANT"],
+        ["STORE_MANAGER"],
+        ["CATALOG_MANAGER"],
+        ["WORKSHOP_STAFF"],
+        ["AREA_MANAGER"],
+    ]
+    ALLOWED_ROLES = [["ADMIN"], ["SUPERADMIN"]]
 
     @pytest.mark.parametrize("roles", BLOCKED_ROLES)
     def test_blocked_roles(self, roles):

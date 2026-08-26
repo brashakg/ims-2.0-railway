@@ -188,7 +188,7 @@ def test_push_product_skips_a_blocked_product(monkeypatch):
          "products": [{"sku": "SKU-X", "position": 0}]}
     )
     product = {"id": "P1", "sku": "SKU-X", "title": "Banned",
-               "ecom": {"status": "PUBLISHED"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
     res = _run(shopify_push.push_product(db, product, []))
     assert res.mode == shopify_push.MODE_BLOCKED
     assert res.action == "skip"
@@ -203,7 +203,7 @@ def test_push_product_not_skipped_when_unblocked(monkeypatch):
         {"collection_id": "C-OK", "collection_type": "CUSTOM", "online_sync_blocked": False,
          "products": [{"sku": "SKU-Y", "position": 0}]}
     )
-    product = {"id": "P2", "sku": "SKU-Y", "title": "Fine", "ecom": {"status": "PUBLISHED"}}
+    product = {"id": "P2", "sku": "SKU-Y", "title": "Fine", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
     res = _run(shopify_push.push_product(db, product, []))
     assert res.mode == shopify_push.MODE_SIMULATED  # normal dry-run, not blocked
     assert res.ok is True
@@ -212,7 +212,7 @@ def test_push_product_not_skipped_when_unblocked(monkeypatch):
 def test_push_product_delist_plans_draft_when_dark(monkeypatch):
     _force_dark(monkeypatch)
     db = _EngineDB()
-    product = {"id": "P1", "ecom": {"shopify_product_id": "gid://shopify/Product/1",
+    product = {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1",
                                     "status": "PUBLISHED"}}
     res = _run(shopify_push.push_product_delist(db, product))
     assert res.mode == shopify_push.MODE_SIMULATED
@@ -224,7 +224,7 @@ def test_push_product_delist_plans_draft_when_dark(monkeypatch):
 
 def test_push_product_delist_noop_when_not_on_shopify(monkeypatch):
     _force_dark(monkeypatch)
-    res = _run(shopify_push.push_product_delist(_EngineDB(), {"id": "P9", "ecom": {}}))
+    res = _run(shopify_push.push_product_delist(_EngineDB(), {"id": "P9", "images": ["https://cdn.example.com/p.jpg"], "ecom": {}}))
     assert res.action == "noop"
     assert res.ok is True
 
@@ -260,7 +260,7 @@ def test_block_endpoint_sets_flag_and_plans_delist(
     # An already-synced member (carries a Shopify gid) -> a block must delist it.
     conn.db["catalog_products"].insert_one(
         {"id": "P-A", "sku": "SKU-A",
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}}
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}}
     )
 
     r = client.post("/api/v1/online-store/collections/C1/block", headers=auth_headers)
@@ -295,7 +295,7 @@ def test_unblock_endpoint_reverses_flag_and_requeues(
     )
     conn.db["catalog_products"].insert_one(
         {"id": "P-A", "sku": "SKU-A",
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": False}}
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": False}}
     )
 
     r = client.post("/api/v1/online-store/collections/C2/unblock", headers=auth_headers)
@@ -451,7 +451,7 @@ def test_block_live_counts_delisted_not_planned(
     )
     conn.db["catalog_products"].insert_one(
         {"id": "P-A", "sku": "SKU-A",
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}}
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}}
     )
     r = client.post("/api/v1/online-store/collections/CL/block", headers=auth_headers)
     assert r.status_code == 200, r.text
@@ -557,10 +557,10 @@ def test_all_pending_sweep_excludes_blocked_products(monkeypatch):
          "products": [{"sku": "SKU-BAD", "position": 0}]}
     )
     conn.db["catalog_products"].insert_one(
-        {"id": "P-BAD", "sku": "SKU-BAD", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+        {"id": "P-BAD", "sku": "SKU-BAD", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
     )
     conn.db["catalog_products"].insert_one(
-        {"id": "P-OK", "sku": "SKU-OK", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+        {"id": "P-OK", "sku": "SKU-OK", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
     )
 
     out = _run(osp.push_all_pending(entities="products", limit=500,
@@ -603,7 +603,7 @@ def test_push_product_fails_closed_on_block_config_error(monkeypatch):
     """A block-config read error must SKIP the push (fail closed), never fall
     through to a SIMULATED/LIVE create that could ship a banned product (#18)."""
     _force_dark(monkeypatch)  # boom-spy: also proves no network is reached
-    product = {"id": "P1", "sku": "X", "title": "T", "ecom": {"status": "PUBLISHED"}}
+    product = {"id": "P1", "sku": "X", "title": "T", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
     res = _run(shopify_push.push_product(_RaisingDB(), product, []))
     assert res.mode == shopify_push.MODE_BLOCKED
     assert res.action == "skip"

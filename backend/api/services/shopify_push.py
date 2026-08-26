@@ -67,15 +67,18 @@ SHOPIFY_ONLINE_LOCATION_ID / the integrations config.
 Optional env flags (all default OFF -- nothing changes unless the owner sets them):
   SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
                                   an UPDATE of an already-mapped product.
-  SHOPIFY_PUBLISH_ON_CREATE=1     publish a newly created ACTIVE product to the
-                                  Online Store sales channel (publishablePublish).
-                                  A DRAFT is NEVER published, and publish is
-                                  WITHHELD unless the variant seeding succeeded
-                                  with at least one PRICED row (a product must
-                                  never go visible at 0.00). The publication id
-                                  can be pinned with SHOPIFY_ONLINE_STORE_PUBLICATION_ID
-                                  (else it is looked up once via `publications`,
-                                  which needs the read_publications scope).
+
+Sales-channel publish is NOT optional and has no flag (owner ruling 2026-08-25,
+"one press, goes live"): every product push publishes to the Online Store
+channel, because an ACTIVE product published to no channel is invisible on the
+storefront. Publish is still WITHHELD unless the price is provably right and the
+product has a photograph ON SHOPIFY. The publication id can be pinned with
+SHOPIFY_ONLINE_STORE_PUBLICATION_ID (else it is looked up once via `publications`,
+which needs the read_publications scope); publishablePublish itself needs
+write_publications, which is granted in the Shopify app, not in this repo. When
+it cannot be resolved the publish is WITHHELD and the press reports
+reason="publish_withheld" -- it never claims success. Owner-facing setup steps:
+docs/SHOPIFY_PUBLISH_GO_LIVE.md.
 
 FAIL-SOFT: every function returns a structured PushResult and NEVER raises. A
 Shopify/GraphQL error becomes {ok: False, error: ...}; a missing doc becomes a
@@ -168,9 +171,10 @@ class PushResult:
     # are the oversell-guard stock targets persisted for the resolver). None
     # elsewhere.
     variants_seeded: Optional[Any] = None
-    # Product CREATE only, and only when SHOPIFY_PUBLISH_ON_CREATE is on: the
-    # Online-Store sales-channel publish side channel. None when the flag is off
-    # (the default) or the product is a DRAFT.
+    # Product pushes only: the Online-Store sales-channel publish side channel
+    # ({published, publication_id} or {published: False, error}). Runs on every
+    # product push (create AND update). None when the push never reached the
+    # publish step (dry-run, refusal, ARCHIVED).
     publication: Optional[Any] = None
     # Collection pushes only (CUSTOM): the manual-membership side channel (the
     # collectionAddProducts step -- IMS's stored manual member list reproduced on
@@ -178,6 +182,11 @@ class PushResult:
     # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
     # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
     membership: Optional[Any] = None
+    # Product pushes only: the photograph side channel ({attached: n} or
+    # {attached: 0, error}). Set when THIS press attached the product's photos
+    # to Shopify (productCreateMedia); None when the Shopify product already
+    # carried media, or the push never got that far.
+    photos: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -207,16 +216,6 @@ def price_on_update_enabled() -> bool:
     return _env_on("SHOPIFY_PUSH_PRICE_ON_UPDATE")
 
 
-def publish_on_create_enabled() -> bool:
-    """SHOPIFY_PUBLISH_ON_CREATE -- default OFF.
-
-    OFF (default): a newly created product is NOT published to the Online Store
-    sales channel, so it stays invisible on the storefront exactly as today.
-    ON: an ACTIVE new product is published via publishablePublish. A DRAFT is
-    never published regardless of the flag (the owner's publish gate)."""
-    return _env_on("SHOPIFY_PUBLISH_ON_CREATE")
-
-
 def push_mode_status(db) -> Dict[str, Any]:
     """Report the CURRENT push posture without pushing anything (drives GET
     /online-store/push/status). Pure read; never raises.
@@ -227,12 +226,29 @@ def push_mode_status(db) -> Dict[str, Any]:
       dispatch_mode   -- off / test / live
       creds_present   -- shop_url + access_token in the integrations collection?
       mode            -- LIVE only when all three align, else SIMULATED.
+
+    Plus THE THIRD DOOR, which the three gates say nothing about: the Online
+    Store publication. An ACTIVE product published to no sales channel is
+    invisible, so a press with no resolvable publication now honestly WITHHOLDS
+    -- and the owner should be able to see that BEFORE he presses, not discover
+    it one product at a time afterwards. Reported without a network call: the
+    pinned SHOPIFY_ONLINE_STORE_PUBLICATION_ID, else whatever a previous
+    lookup cached this process, else unresolved. (This replaces the deleted
+    publish_on_create flag -- publishing is no longer optional, so the honest
+    signal is "can we publish at all?".)
     """
     writes = ims_shopify_writes_enabled()
     disp = shopify_dispatch_mode()
     creds = _has_shopify_creds(db)
     live = bool(writes and disp == "live" and creds)
+    pinned = (os.getenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID") or "").strip()
+    pub_id = pinned or _publication_id_cache.get(_ONLINE_STORE_PUBLICATION_NAME)
     return {
+        "publishes_to_online_store": True,
+        "online_store_publication_id": pub_id or None,
+        "online_store_publication_source": (
+            "pinned" if pinned else ("looked_up" if pub_id else "unresolved")
+        ),
         "mode": MODE_LIVE if live else MODE_SIMULATED,
         "writes_enabled": writes,
         "dispatch_mode": disp,
@@ -241,7 +257,6 @@ def push_mode_status(db) -> Dict[str, Any]:
         "api_version": SHOPIFY_API_VERSION,
         # Additive, default-OFF behaviour flags (see the module docstring).
         "price_on_update": price_on_update_enabled(),
-        "publish_on_create": publish_on_create_enabled(),
         "single_writer_note": (
             "IMS is the single Shopify writer (BVI was retired on 2026-07-20). "
             "Push runs LIVE only when IMS_SHOPIFY_WRITES=1 AND "
@@ -249,6 +264,33 @@ def push_mode_status(db) -> Dict[str, Any]:
             "Shopify credentials are configured; otherwise it is SIMULATED."
         ),
     }
+
+
+async def push_mode_status_resolved(db) -> Dict[str, Any]:
+    """push_mode_status PLUS the one `publications` lookup the pre-press tile
+    needs in order to be TRUE.
+
+    push_mode_status is a pure read, so the best it can report is the pinned id
+    or whatever THIS process happened to cache -- and the backend runs four
+    uvicorn workers (backend/Dockerfile). After every deploy all four caches are
+    empty, so the tile said "NOT resolved -- presses will publish nothing" about
+    a shop whose very next press publishes fine, and then flapped green/red
+    depending on which worker answered. A red tile the owner learns to ignore is
+    worse than no tile at all: it is the only warning before the door this whole
+    change opens.
+
+    So when the gates are LIVE and nothing is known yet, ASK Shopify -- once per
+    process, because the answer lands in the same cache the push path reads.
+    Fail-soft: an unreachable lookup leaves the honest `unresolved` (and DARK
+    never calls out at all -- there are no credentials to call with).
+    """
+    status = push_mode_status(db)
+    if status["is_live"] and status["online_store_publication_source"] == "unresolved":
+        gid = await _resolve_online_store_publication_id(db)
+        if gid:
+            status["online_store_publication_id"] = gid
+            status["online_store_publication_source"] = "looked_up"
+    return status
 
 
 def _has_shopify_creds(db, storefront_id: str = "BV") -> bool:
@@ -529,6 +571,7 @@ mutation imsProductCreate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
+      media(first: 1) { nodes { id } }
     }
     userErrors { field message }
   }
@@ -548,6 +591,7 @@ mutation imsProductUpdate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
+      media(first: 1) { nodes { id } }
     }
     userErrors { field message }
   }
@@ -610,7 +654,7 @@ mutation imsMenuUpdate($id: ID!, $title: String!, $handle: String!, $items: [Men
 _PRODUCT_CREATE_MEDIA = """
 mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
   productCreateMedia(productId: $productId, media: $media) {
-    media { ... on MediaImage { id } }
+    media { ... on MediaImage { id status mediaErrors { code details message } } }
     mediaUserErrors { field message }
   }
 }
@@ -648,7 +692,7 @@ mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkI
 }
 """
 
-# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE, default OFF). A product that
+# Sales-channel publish. A product that
 # is ACTIVE but published to NO channel is invisible on the storefront; this is
 # the step that puts it on the Online Store. Only `userErrors` is selected so
 # the operation stays valid across Admin API versions.
@@ -694,10 +738,21 @@ def build_product_input(
         or product.get("sku")
         or "Untitled product"
     )
-    status_map = {"DRAFT": "DRAFT", "PUBLISHED": "ACTIVE", "ARCHIVED": "ARCHIVED"}
+    # OWNER RULING 2026-08-25 -- "one press, goes live": pressing push IS the act
+    # of putting the product in front of customers, so the payload goes out
+    # ACTIVE. This used to map ecom.status through {DRAFT->DRAFT, PUBLISHED->
+    # ACTIVE, ARCHIVED->ARCHIVED} defaulting to DRAFT -- and since every product
+    # is BORN ecom.status=DRAFT and nothing in IMS ever advanced it, every push
+    # ever made sent a DRAFT. The press reported "sent, failed 0" and the brand
+    # page stayed empty. ARCHIVED is the one status still honoured: it is a
+    # deliberate retirement, not an un-advanced create-time default.
     inp: Dict[str, Any] = {
         "title": title,
-        "status": status_map.get(str(ecom.get("status") or "").upper(), "DRAFT"),
+        "status": (
+            "ARCHIVED"
+            if str(ecom.get("status") or "").upper() == "ARCHIVED"
+            else "ACTIVE"
+        ),
     }
     sid = ecom.get("shopify_product_id")
     if sid:
@@ -906,6 +961,21 @@ def _resolve_variant_pricing(
         or _price_float(pricing.get("mrp"))
     )
     return price, mrp
+
+
+def _has_publishable_price(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> bool:
+    """EVERY variant resolves to a positive selling price. Pure.
+
+    The publish precondition for a press that did no seeding (an update whose
+    variants all already carry their gid). One priceless variant is enough to
+    put a 0.00 buy-button on the storefront, so this is `all`, not `any`. A
+    product with no catalog_variants rows is judged on its single implied
+    default variant, which _resolve_variant_pricing resolves from the product /
+    ecom pricing."""
+    rows = list(variants or []) or [{}]
+    return all(_resolve_variant_pricing(product, v)[0] > 0 for v in rows)
 
 
 def _variants_for_price_push(
@@ -1493,7 +1563,7 @@ async def _seed_variants_after_write(
 
 
 # ---------------------------------------------------------------------------
-# Sales-channel publish (SHOPIFY_PUBLISH_ON_CREATE -- default OFF)
+# Sales-channel publish -- the door that makes an ACTIVE product visible
 # ---------------------------------------------------------------------------
 
 
@@ -1527,8 +1597,10 @@ async def _resolve_online_store_publication_id(db) -> Optional[str]:
 async def _publish_to_online_store(db, product_gid: str) -> Dict[str, Any]:
     """LIVE-only: publish ONE product to the Online Store sales channel so an
     ACTIVE product is actually visible on the storefront. Fail-SOFT side channel
-    (reported, never flips the push's ok). Only ever called on a CREATE, only
-    when SHOPIFY_PUBLISH_ON_CREATE is on, and never for a DRAFT."""
+    (reported, never flips the push's ok). Called on EVERY product push whose
+    payload is ACTIVE, create or update -- publishablePublish is idempotent, so
+    re-publishing an already-published product is a no-op. The caller withholds
+    it unless the price and the photograph are both provably right."""
     pub_id = await _resolve_online_store_publication_id(db)
     if not pub_id:
         return {
@@ -1706,6 +1778,109 @@ def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def product_photo_urls(product: Dict[str, Any]) -> List[str]:
+    """Every usable PHOTOGRAPH URL on a catalog product doc, in display order.
+    Pure; deduped; never raises.
+
+    This is the single answer to "does this product have a photograph?" -- the
+    owner's publish rule ("no photo, no publish") and the media actually sent to
+    Shopify are both driven from THIS list, so the check and the payload can
+    never disagree.
+
+    Field precedence mirrors the rest of the app (catalogue_pdf._image_url_of,
+    products.list_products' image_url alias): the singular `image_url`, then the
+    `images[]` array (strings or {url|src} dicts), then a bare `image`.
+
+    ONLY absolute http(s) URLs count. Shopify pulls the bytes over the internet
+    from the URL we hand it; a private /uploads/... path is unfetchable, so
+    counting one as a photograph would publish exactly the empty grey box the
+    rule exists to prevent (the same rule online_sync_health.uploads_image_audit
+    already flags rows on).
+
+    NOTE: this deliberately does NOT read the `product_images` design queue.
+    Those rows push on their own, LATER press (push_image), and a photo that
+    arrives after the product is already visible does not protect the
+    storefront. A product whose only photo lives in the design queue is refused
+    rather than published bare -- conservative, and the operator fixes it by
+    putting the photo on the product."""
+    out: List[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, dict):
+            value = value.get("url") or value.get("src")
+        if not isinstance(value, str):
+            return
+        url = value.strip()
+        if url.lower().startswith(("http://", "https://")) and url not in out:
+            out.append(url)
+
+    _add(product.get("image_url"))
+    imgs = product.get("images")
+    if isinstance(imgs, (list, tuple)):
+        for item in imgs:
+            _add(item)
+    _add(product.get("image"))
+    return out
+
+
+async def _attach_product_photos(
+    db, product_gid: str, urls: List[str]
+) -> Dict[str, Any]:
+    """LIVE-only: attach the product's photographs to the Shopify product in the
+    SAME press that wrote the product (productCreateMedia). Fail-SOFT side
+    channel -- reported on the result, never flips the push's ok -- but the
+    caller WITHHOLDS the publish when nothing attached, so a media failure
+    leaves an invisible product rather than a visible grey box.
+
+    Only ever called when the Shopify product carries no media yet, so a
+    re-press can never pile a duplicate copy of the same photo onto a live
+    listing."""
+    media = build_media_inputs([{"url": u} for u in urls])
+    if not media:
+        return {"attached": 0, "error": "no usable photograph"}
+    try:
+        body = await _graphql(
+            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+        return {"attached": 0, "error": str(e)}
+    err = _user_errors_media(body)
+    if err:
+        return {"attached": 0, "error": err}
+    nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
+    # AN ID IS NOT A PHOTOGRAPH. Shopify mints the MediaImage id BEFORE it
+    # fetches the bytes off the url, so counting ids would call a 404 image a
+    # photograph and publish the empty grey box the rule exists to prevent.
+    # A node Shopify has already marked FAILED is not a photo.
+    #
+    # ponytail: this only catches the failure Shopify reports in THIS response.
+    # The fetch is asynchronous, so a node that is still PROCESSING here can go
+    # FAILED minutes later and nothing re-reads it -- the residue the
+    # online_sync_health parity/uploads audit is for. Upgrade path if it bites:
+    # re-read `media(first:n){status}` on the next press and take the product
+    # down rather than leave a grey box up.
+    ok_nodes: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for n in nodes:
+        n = n or {}
+        if not n.get("id"):
+            continue
+        (failed if str(n.get("status") or "").upper() == "FAILED" else ok_nodes).append(n)
+    if failed and not ok_nodes:
+        detail = "; ".join(
+            str(e.get("details") or e.get("message") or e.get("code") or "")
+            for n in failed
+            for e in (n.get("mediaErrors") or [])
+            if isinstance(e, dict)
+        )
+        return {
+            "attached": 0,
+            "error": "Shopify could not fetch the photograph"
+            + (": %s" % detail if detail else ""),
+        }
+    return {"attached": len(ok_nodes)}
+
+
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build Shopify CreateMediaInput[] from APPROVED product_images. Prefer the
     designer's edited asset; fall back to the source url."""
@@ -1735,9 +1910,19 @@ def _writeback_product(
     shopify_id: str,
     variant_gid: Optional[str] = None,
     inventory_item_gid: Optional[str] = None,
+    status: Optional[str] = None,
 ) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
+
+    SYNC PATH -- this write only ever sets `locally_modified` to False, and must
+    NEVER set it to True. It is the push's own book-keeping (the Shopify gid it
+    just minted), not a human catalogue edit. Queuing from anywhere on the
+    Shopify sync side is the ping-pong hazard: push -> write-back marks dirty ->
+    the next sweep pushes it again -> forever, against a LIVE storefront. The
+    catalogue-edit doors that DO queue are product_master._build_pim_doc (born
+    dirty on create) and catalog._save_catalog_product (dirty by default, with an
+    explicit mark_dirty=False on the non-catalogue writes).
 
     `variant_gid` (optional) additionally persists ecom.shopify_variant_id -- the
     DEFAULT Shopify variant of this product. Without it a product created by IMS
@@ -1753,6 +1938,13 @@ def _writeback_product(
     _inventory_item_id_for_sku all read ecom.shopify_inventory_item_id when no
     variant row matches a SKU). The caller only ever passes it for the
     product-level pseudo-variant, and it too is set-only, never cleared.
+
+    `status` (optional) records what the storefront now shows: "PUBLISHED" after
+    a successful sales-channel publish, "DRAFT" after a take-down. ecom.status is
+    READ in six places (the Online Store screen's DRAFT / PUBLISHED cards, the
+    storefront-visibility helpers in online_catalog / buy_desk) and before this
+    was written "PUBLISHED" in ZERO -- so IMS said DRAFT about a product that was
+    live. Set-only: None leaves the stored value alone.
 
     We READ-MERGE-WRITE the whole `ecom` sub-doc (read the doc, mutate the ecom
     dict in Python, $set ecom back) rather than `$set {"ecom.shopify_product_id":
@@ -1772,11 +1964,53 @@ def _writeback_product(
             ecom["shopify_variant_id"] = variant_gid
         if inventory_item_gid:
             ecom["shopify_inventory_item_id"] = inventory_item_gid
+        if status:
+            ecom["status"] = status
+            # THE TAKE-DOWN MARKER. Delist writes DRAFT and clears the dirty
+            # flag, but build_product_input maps everything except ARCHIVED to
+            # ACTIVE -- so the only thing holding a product down was the flag
+            # being false, and any catalogue edit re-queues it for the next
+            # sweep to silently re-list mid-fix. Stamped here (and cleared by a
+            # successful publish, the only writer of PUBLISHED) so the SWEEP can
+            # skip it until a human presses that one product explicitly.
+            if status == "DRAFT":
+                ecom["taken_down_at"] = _now()
+            elif status == "PUBLISHED":
+                ecom.pop("taken_down_at", None)
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
+
+
+def _requeue_unpublished(db, product_id: str) -> None:
+    """Put a row BACK in the push queue after a press that reached Shopify but
+    did NOT make the product visible (publish withheld: unpriced, the photograph
+    did not attach, the Online Store publication could not be resolved).
+
+    THIS IS NOT THE PING-PONG HAZARD. _writeback_product must never set the flag,
+    because that write is the push's own book-keeping and would re-queue a press
+    that fully succeeded -- forever. This is the opposite case: the press did NOT
+    do what it was pressed for. Clearing the flag anyway would leave the product
+    ON Shopify, INVISIBLE, and OUT of the queue -- `pending: 0` next to an empty
+    brand page, which is the exact lie this whole change exists to end. It
+    re-queues ONLY on the not-published branch, so a successful publish still
+    drains the queue (the control test), and the batch cap bounds how often a
+    stubbornly-unpublishable row can be retried per press.
+
+    Read-merge-write of the whole ecom sub-doc (the _writeback_product idiom).
+    Fail-soft: any error is logged, never raised."""
+    try:
+        coll = db["catalog_products"]
+        doc = coll.find_one({"id": product_id})
+        if doc is None:
+            return
+        ecom = dict(doc.get("ecom") or {})
+        ecom["locally_modified"] = True
+        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 
 
 def _writeback_variant(
@@ -1921,6 +2155,29 @@ async def push_product(
         )
     variants = variants or []
     ecom = product.get("ecom") or {}
+
+    # THE PHOTO RULE (owner ruling 2026-08-25): "Refuse -- no photo, no
+    # publish." A listing with a name, a price and an empty grey box is worse
+    # for the brand than absence. Since a press now PUBLISHES (see
+    # build_product_input), a push with no photograph is refused outright,
+    # BEFORE the dark/live branch -- so there is no path, dry-run or live, on
+    # which a photo-less product reaches Shopify at all. The row is NOT
+    # de-queued (nothing here writes back), so adding a photo and pressing
+    # again ships it.
+    photos = product_photo_urls(product)
+    if not photos:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            shopify_id=ecom.get("shopify_product_id"),
+            error="refused: no photograph -- a product with no photograph is "
+            "never published to the storefront",
+            reason="no_photo",
+        )
+
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
     # Attribute -> metafield side channel (owner 2026-07-05): planned in the
@@ -1989,6 +2246,29 @@ async def push_product(
             )
         prod = ((body.get("data") or {}).get(field_name) or {}).get("product") or {}
         new_gid = prod.get("id") or existing_gid
+        if not new_gid:
+            # A 200 with no errors, no userErrors AND no product id. Outside
+            # Shopify's documented contract, but everything downstream is gated
+            # on the gid -- metafields, variant seeding, the photo attach and
+            # the publish block all skip -- so pub_summary stays None and
+            # published_ok would collapse to True: a green "1 processed" over a
+            # product that does not exist. The row IS left queued, so the next
+            # press creates it properly; this only stops the press LYING about
+            # the one that failed. "Processed means visible" is the invariant
+            # this whole change rests on, and it has no exceptions.
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                reason="no_product_id",
+                payload=payload,
+                error=(
+                    "Shopify returned success but no product -- nothing was "
+                    "created. The product is still queued; press again."
+                ),
+            )
         if new_gid and pid:
             _writeback_product(db, pid, new_gid)
         # Metafields ride AFTER the product write so the gid always exists.
@@ -2036,36 +2316,97 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
-        # Sales-channel publish (default OFF): an ACTIVE product published to no
-        # channel is invisible on the storefront. DRAFTs are never published.
+        # THE PHOTOGRAPH, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
+        # photo on Shopify" are different questions, and only the second one
+        # protects the storefront -- photographs used to push on a SEPARATE,
+        # LATER press (push_image over the design queue), so a product could go
+        # visible before its photo arrived. The refusal above proved IMS has a
+        # photograph; this puts it on Shopify before anything is published.
         #
-        # PUBLISH PRECONDITION (adversarial-panel must-fix 1): publishing is
-        # WITHHELD unless the seeding step provably priced the variant --
-        # seed_summary exists, carries zero errors, and at least one seeded row
-        # carried a price. Seeding is fail-SOFT (a bulk-update userError or a
-        # priceless-but-PUBLISHED product leaves ok=True), so without this gate
-        # a transient Shopify error at go-live -- or a product with no
-        # resolvable price at all -- would put an ACTIVE product LIVE on the
-        # storefront at Shopify's auto-created 0.00.
+        # Only when the Shopify product carries NO media yet (read straight off
+        # the create/update response's media selection -- no extra call): that
+        # covers the create, repairs a product an OLDER press put up bare, and
+        # can never pile a duplicate copy onto an already-photographed listing.
+        photo_summary = None
+        existing_media = ((prod.get("media") or {}).get("nodes")) or []
+        if new_gid and not existing_media:
+            photo_summary = await _attach_product_photos(db, new_gid, photos)
+        photo_on_shopify = bool(existing_media) or bool(
+            (photo_summary or {}).get("attached")
+        )
+        # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
+        # published to NO channel is invisible on bettervision.in. This used to
+        # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
+        # to a CREATE, so it effectively never ran -- and re-pressing one of the
+        # rows already mapped to Shopify (all of which got there as DRAFTs) could
+        # never make it visible. Owner ruling 2026-08-25 "one press, goes live":
+        # it now runs on every product push, create or update. publishablePublish
+        # is idempotent, so re-publishing an already-published product is a no-op.
+        #
+        # PUBLISH PRECONDITION (adversarial-panel must-fix 1, still enforced):
+        # publishing is WITHHELD unless the price is provably right, because
+        # seeding is fail-SOFT (a bulk-update userError or a priceless product
+        # still leaves ok=True) and a 0.00 listing is worse than no listing.
+        #   * a press that SEEDED (create, or an update that repaired/reseeded):
+        #     the seeding must have run clean AND priced at least one row.
+        #   * a press that needed NO seeding: every variant already carries the
+        #     gid an earlier successful seed wrote, so its price is already on
+        #     Shopify -- but IMS must still hold a positive price for every row.
         pub_summary = None
-        if (
-            new_gid
-            and action == "create"
-            and publish_on_create_enabled()
-            and payload.get("status") == "ACTIVE"
-        ):
-            seed_priced_ok = (
-                seed_summary is not None
-                and not seed_summary.get("errors")
-                and int(seed_summary.get("priced_rows") or 0) > 0
-            )
-            if seed_priced_ok:
+        if new_gid and payload.get("status") == "ACTIVE":
+            if seed_summary is not None:
+                priced_ok = (
+                    not seed_summary.get("errors")
+                    and int(seed_summary.get("priced_rows") or 0) > 0
+                )
+            elif full_reseed or repair_only:
+                # Seeding was due but produced nothing to seed -- no price and
+                # no SKU anywhere. Never publish that.
+                priced_ok = False
+            else:
+                priced_ok = _has_publishable_price(product, variants)
+            if priced_ok and photo_on_shopify:
                 pub_summary = await _publish_to_online_store(db, new_gid)
+                if pub_summary.get("published") and pid:
+                    # IMS must agree with the storefront (see _writeback_product
+                    # `status`): the DRAFT/PUBLISHED cards and every
+                    # storefront-visibility helper read ecom.status.
+                    _writeback_product(db, pid, new_gid, status="PUBLISHED")
+            elif not photo_on_shopify:
+                # The attach is fail-soft, so a media error must not leave the
+                # product VISIBLE without its photograph -- that is exactly the
+                # grey box the rule exists to prevent.
+                pub_summary = {
+                    "published": False,
+                    "error": "publish withheld: the photograph did not reach Shopify",
+                }
             else:
                 pub_summary = {
                     "published": False,
                     "error": "publish withheld: variant unpriced or seeding failed",
                 }
+        # The press reached Shopify but the product is NOT visible. Leave it in
+        # the queue so pressing again retries it once the price / photograph is
+        # fixed -- see _requeue_unpublished for why this is not ping-pong.
+        #
+        # AND SAY SO. "One press, goes live" makes visibility the definition of
+        # success, so a press whose publish was withheld did NOT do what it was
+        # pressed for and must never come back ok. Reporting ok=True here was
+        # the owner's original bug one layer down: with the publication
+        # unresolvable a sweep answered "pushed: 5, failed: 0" over five
+        # invisible products and the toast was green. The withholding gets its
+        # OWN reason (never `failed`, which would read as a Shopify breakage)
+        # so the sweep buckets and shows it exactly like refused_no_photo.
+        published_ok = pub_summary is None or bool(pub_summary.get("published"))
+        if not published_ok and pid:
+            _requeue_unpublished(db, pid)
+        # AN ARCHIVED ROW IS NOT A LISTING. The Shopify write succeeded and the
+        # retirement is deliberate, so this is neither a failure nor a
+        # withholding -- but no shopper can find the product, and "N processed"
+        # is rendered to the owner as "these are live on bettervision.in now".
+        # This is the last path where `pushed` would not mean `visible`, so it
+        # gets its own reason and its own line, exactly like a refusal.
+        archived_not_listed = published_ok and payload.get("status") == "ARCHIVED"
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.
@@ -2094,13 +2435,24 @@ async def push_product(
             entity="product",
             action=action,
             target_id=pid,
-            ok=True,
+            ok=published_ok,
             shopify_id=new_gid,
             payload=payload,
+            error=(
+                None
+                if published_ok
+                else ((pub_summary or {}).get("error") or "publish withheld")
+            ),
+            reason=(
+                ("archived_not_listed" if archived_not_listed else None)
+                if published_ok
+                else "publish_withheld"
+            ),
             metafields=mf_summary,
             variant_prices=vp_summary,
             variants_seeded=seed_summary,
             publication=pub_summary,
+            photos=photo_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
@@ -2120,14 +2472,34 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
     from online" cutover to take an already-synced, now-blocked product OFF the
     storefront.
 
-    REVERSIBLE by design: the Shopify product is NEVER deleted, and this does NOT
-    touch the IMS ecom.status -- so after an unblock a normal push_product rebuilds
-    the ProductInput from the unchanged ecom.status (PUBLISHED -> ACTIVE) and the
-    product re-publishes. Unlike push_product this is NOT gated by
+    REVERSIBLE by design: the Shopify product is NEVER deleted and its gid is
+    KEPT, so putting it back is a normal push (and can never mint a duplicate
+    listing). Unlike push_product this is NOT gated by
     is_blocked_from_online (it IS the block action). Obeys the same three dark
     gates: SIMULATED plan when dark, LIVE productUpdate only behind the gates.
     Only acts when the product already carries a Shopify gid (else a clean noop --
-    nothing to delist). Never raises."""
+    nothing to delist). Never raises.
+
+    AFTER A SUCCESSFUL LIVE DELIST the IMS row is brought into line with the
+    storefront (owner ruling 2026-08-25 -- take-down is the reversibility that
+    makes one-press publishing survivable):
+      * ecom.status -> DRAFT. ecom.status is READ in six places (the Online
+        Store screen's DRAFT/PUBLISHED cards, the storefront-visibility
+        helpers); leaving it PUBLISHED would have IMS insisting a product is
+        on a storefront it was just pulled from. This does NOT re-shut the
+        publish door: build_product_input maps everything except ARCHIVED to
+        ACTIVE, so pressing publish again puts it straight back.
+      * ecom.locally_modified -> False. Without this a taken-down product
+        that happened to be dirty would be RESURRECTED by the very next
+        sweep, seconds later. Taking one down has to stick until a human
+        asks for it back.
+    Both live in HERE rather than in the caller because both callers -- the
+    block cutover and the take-down button -- need the same truth: this row
+    is off the storefront.
+
+    The gid is deliberately re-written unchanged: _writeback_product is
+    set-only for the mapping, so the take-down can never lose the Shopify id
+    (losing it would make the next push CREATE A DUPLICATE live product)."""
     pid = product.get("id") or product.get("product_id")
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -2173,6 +2545,8 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
                 payload=payload,
                 error=err,
             )
+        if pid:
+            _writeback_product(db, pid, existing_gid, status="DRAFT")
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
