@@ -68,8 +68,13 @@ const base: Supplier = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Buying store is in Jharkhand (20) unless a test says otherwise.
-  storeInfo.current = { storeName: 'BV Bokaro', address: '', city: '', state: 'Jharkhand', pincode: '', stateCode: '20' };
+  // Buying store is REGISTERED in Jharkhand (20) unless a test says otherwise.
+  // Its gstin is what taxes the purchase; stores.py stamps it from the entity's
+  // registrations, while state_code below comes from the store's address.
+  storeInfo.current = {
+    storeName: 'BV Bokaro', address: '', city: '', state: 'Jharkhand', pincode: '',
+    stateCode: '20', gstin: '20AABCU9603R1Z1',
+  };
 });
 
 describe('SupplierPanel edit button', () => {
@@ -122,6 +127,35 @@ describe('SupplierPanel GST treatment chip', () => {
     expect(screen.getByText(/tax split unknown/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+  });
+
+  it("uses the store's REGISTRATION, never its address, to decide the split", () => {
+    // The configuration this business actually has: a store whose address is in
+    // one state while it bills under an entity registered in another (WizOpt's
+    // online store bills under BV Opticals Pvt Ltd). stores.py derives
+    // state_code from the ADDRESS and gstin from the ENTITY, so the two
+    // legitimately disagree.
+    //
+    // determine_place_of_supply reads the recipient GSTIN and nothing else, so
+    // an address-first card prints the opposite verdict to the bill it is
+    // sitting next to. Registration wins.
+    storeInfo.current = {
+      storeName: 'WizOpt Online', address: '', city: '', state: 'Maharashtra',
+      pincode: '', stateCode: '27', gstin: '20AABCU9603R1Z1',
+    };
+    render(<SupplierPanel suppliers={[base]} />);
+    expect(screen.getByText(/CGST \+ SGST/i)).toBeInTheDocument();
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+  });
+
+  it("uses the vendor's GSTIN, never a stale stored state code, for the split", () => {
+    // Same rule on the other side. A vendor row can carry a state_code written
+    // before its GSTIN was corrected; the bill will be taxed off the GSTIN, so
+    // the card must be too.
+    const moved: Supplier = { ...base, stateCode: '20', state: 'Jharkhand', gstNumber: '27AAPFU0939F1ZV' };
+    render(<SupplierPanel suppliers={[moved]} />);
+    expect(screen.getByText(/\bIGST\b/i)).toBeInTheDocument();
+    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
   });
 
   it('shows no tax chip at all for an unregistered vendor', () => {

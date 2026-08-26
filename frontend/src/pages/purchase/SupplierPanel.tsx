@@ -29,13 +29,19 @@ import type { Supplier } from './purchaseTypes';
 // `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
 // (two exports of that name in one module is a compile error on main).
 //
-// Same rule as purchase_invoice_engine.determine_place_of_supply for the two
-// KNOWN cases: both states known and different => IGST, equal => CGST + SGST.
-// It deliberately does NOT copy that engine's third branch. The engine defaults
-// an unknown pair to intra-state because it must return a number for a bill;
-// this is a card, and a card is a statement to a human. "Same state" over a
-// vendor whose state nobody has established is a claim about that vendor, not a
-// conservative default -- so it says unknown instead.
+// Both states are read from GSTINs and NOTHING else -- the same two inputs
+// purchase_invoice_engine.determine_place_of_supply uses when it stamps the
+// bill. An address is not a registration: stores.py sets a store's state_code
+// from its ADDRESS while its gstin is the entity's registration for that state,
+// falling back to the entity's PRIMARY GSTIN elsewhere (WizOpt's online store
+// bills under BV Opticals Pvt Ltd). Reading the address first made this card
+// print the OPPOSITE verdict to the bill for exactly those stores.
+//
+// The one place it departs from the engine, on purpose: the engine must return
+// a boolean for a bill, so an unknown pair falls back to intra-state. A card is
+// a statement to a human, and "Same state - CGST + SGST" over a pair nobody has
+// established is a wrong-tax claim, not a conservative default -- so unknown
+// reads as unknown, never as the engine's fallback.
 type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
 
 function taxSplit(vendorStateCode: string, buyerStateCode: string): TaxSplit {
@@ -66,17 +72,19 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   // retired) VendorManagement page. Re-homed here onto the real Suppliers
   // view so the feature isn't lost (PR #454 deleted the only UI for it).
   const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
-  // The buying store's own GST state decides how a purchase from each vendor
-  // is taxed. Same state -> CGST + SGST; another state -> IGST.
+  // The buying store's own GST REGISTRATION decides how a purchase from each
+  // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
   const storeInfo = useStorePrintInfo();
-  const buyerStateCode = storeInfo?.stateCode || gstinStateCode(storeInfo?.gstin);
+  const buyerStateCode = gstinStateCode(storeInfo?.gstin);
   const stateNames = useGstStateCodes();
 
   return (
     <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
       {suppliers.map((supplier) => {
-        const vendorStateCode = supplier.stateCode || gstinStateCode(supplier.gstNumber);
-        const vendorState = supplier.state || stateNames[vendorStateCode] || '';
+        const vendorStateCode = gstinStateCode(supplier.gstNumber);
+        // Display only -- an unregistered vendor still has an address to show.
+        const vendorState =
+          supplier.state || stateNames[supplier.stateCode || vendorStateCode] || '';
         const split = taxSplit(vendorStateCode, buyerStateCode);
         return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
