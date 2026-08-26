@@ -149,6 +149,10 @@ ALLOWED = {
     ): _HEX,
     ("test_inventory_quantity.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
     (
+        "test_stock_count_lifecycle.py",
+        'bc = f"BC-{uuid.uuid4().hex[:10]}"',
+    ): _HEX,
+    (
         "test_clinical_rx_list_range.py",
         'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
     ): (
