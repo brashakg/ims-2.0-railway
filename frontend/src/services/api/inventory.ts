@@ -621,12 +621,20 @@ export const vendorsApi = {
     trade_name: string;
     vendor_type?: string;
     gstin_status: string;
-    gstin?: string;
+    // null (not undefined) when there is no GSTIN -- see updateVendor below.
+    gstin?: string | null;
     address: string;
     city: string;
     state: string;
     mobile: string;
     email?: string;
+    // The supplier's own code, the person you ring, and the credit ceiling.
+    // The Add-Supplier form has always collected these; leaving them off this
+    // type made the correct call a compile error (TS2353 on an inline object
+    // literal) and invited the next author to "fix" it by deleting the field.
+    vendor_code?: string;
+    contact_person?: string;
+    credit_limit?: number;
     credit_days?: number;
   }) => {
     const response = await api.post('/vendors', vendor);
@@ -641,6 +649,15 @@ export const vendorsApi = {
     state: string;
     mobile: string;
     email: string;
+    // Correcting a typo'd GSTIN is the whole point of the vendor editor; it
+    // must be expressible here or the correct call does not compile.
+    // `null` = clear it (this vendor is not registered after all). Omitting the
+    // key leaves the stored GSTIN alone -- the server drops unset fields.
+    gstin: string | null;
+    gstin_status: string;
+    vendor_code: string;
+    contact_person: string;
+    credit_limit: number;
     credit_days: number;
     is_active: boolean;
   }>) => {

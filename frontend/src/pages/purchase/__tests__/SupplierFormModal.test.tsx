@@ -107,6 +107,25 @@ describe('SupplierFormModal in edit mode', () => {
     });
   });
 
+  it('sends an EXPLICIT null when the GST box is cleared, not an absent key', async () => {
+    // `gstin: undefined` disappears in JSON.stringify, the server's
+    // exclude_unset then treats "not sent" as "leave it alone", and the old
+    // GSTIN survives -- so a registered vendor could never be made
+    // unregistered, and the clear LOOKED like it had worked.
+    render(<SupplierFormModal supplier={existing} onClose={() => {}} onSaved={() => {}} />);
+
+    fireEvent.change(label(/gst number/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save supplier/i }));
+
+    await waitFor(() => expect(updateVendor).toHaveBeenCalledTimes(1));
+    const payload = updateVendor.mock.calls[0][1];
+    expect('gstin' in payload).toBe(true);
+    expect(payload.gstin).toBeNull();
+    expect(payload.gstin_status).toBe('UNREGISTERED');
+    // The key must survive serialisation -- that is the whole bug.
+    expect(JSON.parse(JSON.stringify(payload))).toHaveProperty('gstin', null);
+  });
+
   it('surfaces the server\'s reason when the save is refused', async () => {
     updateVendor.mockRejectedValue({
       response: { data: { detail: 'Vendor with this GSTIN already exists' } },

@@ -97,10 +97,22 @@ export function SupplierFormModal({
       return;
     }
 
-    const gstin = gst.trim().toUpperCase() || undefined;
+    // Empty box -> null, NOT undefined. JSON.stringify drops undefined keys,
+    // so an unregistered-from-now-on vendor sent nothing at all, the server's
+    // exclude_unset dropped it, the old GSTIN survived -- and the clear looked
+    // like it had worked. null is an explicit "no GSTIN".
+    const gstin = gst.trim().toUpperCase() || null;
     setIsSaving(true);
     try {
-      const shared = {
+      // Annotated, NOT inferred. An un-annotated object handed to the API as a
+      // variable is never excess-property-checked, so a field this form sends
+      // that no client contract knows about compiles happily and is then thrown
+      // away by the server -- exactly how contact_person / vendor_code were
+      // collected and lost. The annotation makes `tsc -b` refuse a field that
+      // is on NEITHER signature. (It cannot catch a field dropped from just one
+      // of the two: an intersection keeps the property from the other side.)
+      const shared: Parameters<typeof vendorsApi.updateVendor>[1] &
+        Parameters<typeof vendorsApi.createVendor>[0] = {
         legal_name: name.trim(),
         trade_name: name.trim(),
         gstin_status: gstin ? 'REGISTERED' : 'UNREGISTERED',
