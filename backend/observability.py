@@ -16,10 +16,15 @@ Exports:
                                             POSTs a formatted Block Kit
                                             message to SLACK_WEBHOOK_URL for
                                             qualifying severities
-  - is_slack_configured()                   True if SLACK_WEBHOOK_URL set
+  - is_slack_configured()                   True if a webhook is configured
+
+The webhook URL comes from Settings -> Integrations -> Slack when saved there,
+otherwise from SLACK_WEBHOOK_URL. Either way an unconfigured Slack is a
+silent no-op.
 
 Env vars (all optional):
-  - SLACK_WEBHOOK_URL       Incoming webhook URL for anomaly alerts.
+  - SLACK_WEBHOOK_URL       Incoming webhook URL for anomaly alerts
+                            (fallback for the Settings -> Integrations tile).
   - SLACK_ALERT_SEVERITY    Minimum severity to notify (default CRITICAL).
                             Options: CRITICAL | HIGH | MEDIUM | LOW
   - SLACK_TIMEOUT           Seconds before a slack POST gives up (default 10).
@@ -51,9 +56,25 @@ _SEVERITY_COLOR = {
 }
 
 
+def _slack_webhook() -> str:
+    """Resolve the incoming-webhook URL: Settings -> Integrations -> Slack
+    first, then SLACK_WEBHOOK_URL. Read fresh so a saved webhook works
+    without a redeploy.
+
+    Guarded import: observability is a leaf module that must keep working in
+    a slim build with no `api` package, so we fall back to env-only there.
+    """
+    try:
+        from api.services.integration_config import get_slack_config
+
+        return get_slack_config().get("webhook_url", "")
+    except Exception:  # pragma: no cover - slim build without the api package
+        return os.getenv("SLACK_WEBHOOK_URL", "").strip()
+
+
 def is_slack_configured() -> bool:
-    """True if SLACK_WEBHOOK_URL is set."""
-    return bool(os.getenv("SLACK_WEBHOOK_URL", "").strip())
+    """True if a Slack webhook is configured (screen or SLACK_WEBHOOK_URL)."""
+    return bool(_slack_webhook())
 
 
 def _should_alert(severity: str) -> bool:
@@ -98,7 +119,7 @@ async def notify_slack(severity: str, title: str, body: str,
     otherwise - including when Slack is not configured or severity is below
     the configured threshold. Never raises.
     """
-    webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+    webhook = _slack_webhook()
     if not webhook:
         return False
     if not _should_alert(severity):

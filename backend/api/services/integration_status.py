@@ -12,10 +12,11 @@ populated (e.g. "key_id"), never their contents. No secret ever leaves
 the process through this surface.
 
 It deliberately reads `os.getenv` fresh each call so the report reflects
-the current process environment. Note that the providers themselves read
-several of these vars at module-import time, so a Railway variable change
-takes effect for them on the next redeploy (Railway restarts on a
-variable change, so the report and the providers converge after deploy).
+the current process environment, and reads the `integrations` collection
+fresh for the same reason. The messaging/alerting providers (MSG91, Slack,
+PageSpeed) resolve their credentials per call in the same order this report
+declares - collection first, then env - so the report and the providers
+cannot disagree.
 
 ASCII only (Windows cp1252).
 """
@@ -61,18 +62,24 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "msg91_whatsapp",
         "label": "MSG91 WhatsApp",
         "powers": "Rx-expiry / birthday / follow-up / order / task WhatsApp alerts (MEGAPHONE)",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["MSG91_API_KEY", "MSG91_WHATSAPP_INTEGRATED_NUMBER"],
         "env_optional": ["MSG91_WHATSAPP_NAMESPACE"],
+        "collection_type": "whatsapp",
+        "collection_required": ["api_key", "whatsapp_number"],
+        "collection_optional": ["sms_template_id", "sender"],
         "dispatch_gated": True,
     },
     {
         "id": "msg91_sms",
         "label": "MSG91 SMS",
         "powers": "DLT transactional SMS fallback (MEGAPHONE)",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["MSG91_API_KEY", "MSG91_SMS_TEMPLATE_ID"],
         "env_optional": ["MSG91_SENDER"],
+        "collection_type": "whatsapp",
+        "collection_required": ["api_key", "sms_template_id"],
+        "collection_optional": ["sender"],
         "dispatch_gated": True,
     },
     {
@@ -90,9 +97,22 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "pagespeed",
         "label": "Google PageSpeed (PIXEL)",
         "powers": "PIXEL Lighthouse / accessibility audits",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["PAGESPEED_API_KEY"],
         "env_optional": ["FRONTEND_BASE_URL"],
+        "collection_type": "pagespeed",
+        "collection_required": ["api_key"],
+        "dispatch_gated": False,
+    },
+    {
+        "id": "slack",
+        "label": "Slack",
+        "powers": "CRITICAL / HIGH anomaly alerts raised by ORACLE",
+        "source": "env_or_collection",
+        "env_required": ["SLACK_WEBHOOK_URL"],
+        "env_optional": ["SLACK_ALERT_SEVERITY"],
+        "collection_type": "slack",
+        "collection_required": ["webhook_url"],
         "dispatch_gated": False,
     },
     {

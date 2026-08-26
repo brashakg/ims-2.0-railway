@@ -4,17 +4,16 @@
 // Configure SMS/WhatsApp notification providers and templates
 
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import {
   MessageSquare,
   Mail,
   Bell,
   Settings,
-  Save,
   TestTube2,
   AlertCircle,
-  Loader2,
-  Eye,
-  EyeOff,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -27,23 +26,63 @@ import {
 import clsx from 'clsx';
 import { settingsApi } from '../../services/api/settings';
 
+/** One channel's live readiness. Read-only by design - the credential that
+ *  makes it green is entered in Settings -> Integrations. */
+function ChannelStatusRow({
+  label,
+  provider,
+  connected,
+  detail,
+}: {
+  label: string;
+  provider: string;
+  connected: boolean;
+  detail: string;
+}) {
+  return (
+    <div className="flex items-center justify-between p-3 rounded-lg border border-gray-200">
+      <div>
+        <p className="font-medium text-gray-900">
+          {label} <span className="text-gray-500 font-normal">via {provider}</span>
+        </p>
+        <p className="text-sm text-gray-500">{detail}</p>
+      </div>
+      <span
+        className={clsx(
+          'flex items-center gap-1.5 text-sm font-medium',
+          connected ? 'text-green-700' : 'text-gray-500'
+        )}
+      >
+        {connected ? (
+          <CheckCircle2 className="w-4 h-4" />
+        ) : (
+          <XCircle className="w-4 h-4" />
+        )}
+        {connected ? 'Connected' : 'Not connected'}
+      </span>
+    </div>
+  );
+}
+
 export function NotificationSettings() {
   const { hasRole } = useAuth();
   const toast = useToast();
 
   const [activeTab, setActiveTab] = useState<'provider' | 'templates'>('provider');
-  const [isSaving, setIsSaving] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
 
-  // Provider Configuration
+  // Live connection status, READ-ONLY. Credentials are entered once, in
+  // Settings -> Integrations -> "WhatsApp Business (MSG91)", which is the
+  // config the message sender actually reads. This screen used to offer its
+  // own API-key box that nothing ever read, so a key typed here looked saved
+  // and sent nothing.
   const [providerConfig, setProviderConfig] = useState<NotificationProviderConfig>({
     provider: 'MSG91',
-    apiKey: '',
-    apiSecret: '',
     senderId: '',
-    webhookUrl: '',
     isActive: false,
   });
+  const [smsReady, setSmsReady] = useState(false);
+  // Server-side send switch (DISPATCH_MODE). Displayed, never editable here.
+  const [dispatchMode, setDispatchMode] = useState<string>('off');
 
   // Template states
   const [templates, setTemplates] = useState<NotificationTemplate[]>(
@@ -59,13 +98,12 @@ export function NotificationSettings() {
   }, []);
 
   const loadSettings = async () => {
-    // Load provider config from API.
+    // Load live channel status from the API.
     // GET /settings/notifications/providers returns a NESTED shape:
     //   { whatsapp: { provider, enabled, sender }, sms: {...}, email: {...}, dispatch_mode }
-    // (NOT the flat api_key/sender_id/is_active the old code read). Secret
-    // values (API keys) are never returned by this endpoint — they live in the
-    // integrations collection — so we seed provider/sender/enabled only and
-    // leave apiKey blank for the user to (re)enter.
+    // `enabled` is the SAME resolution the sender uses (Settings ->
+    // Integrations first, then the MSG91_* env vars), so "Connected" here
+    // means a send would really go out. No credential value is ever returned.
     try {
       const data = await settingsApi.getNotificationProviders();
       if (data) {
@@ -75,8 +113,10 @@ export function NotificationSettings() {
           ...prev,
           provider: (wa.provider ?? sms.provider ?? prev.provider) as NotificationProvider,
           senderId: wa.sender ?? sms.sender ?? '',
-          isActive: Boolean(wa.enabled ?? sms.enabled ?? false),
+          isActive: Boolean(wa.enabled ?? false),
         }));
+        setSmsReady(Boolean(sms.enabled ?? false));
+        setDispatchMode(String(data.dispatch_mode ?? 'off'));
       }
     } catch {
       // API unavailable — leave default state; no toast needed on initial load
@@ -118,24 +158,6 @@ export function NotificationSettings() {
     }
   };
 
-  const handleSaveProvider = async () => {
-    setIsSaving(true);
-    try {
-      await settingsApi.updateNotificationProvider({
-        provider: providerConfig.provider,
-        api_key: providerConfig.apiKey ?? '',
-        api_secret: providerConfig.apiSecret,
-        sender_id: providerConfig.senderId,
-        webhook_url: providerConfig.webhookUrl,
-        is_active: providerConfig.isActive,
-      });
-      toast.success('Provider settings saved successfully');
-    } catch (error: any) {
-      toast.error(error?.message || 'Failed to save settings');
-    } finally {
-      setIsSaving(false);
-    }
-  };
 
   const handleToggleTemplate = async (templateId: string) => {
     const current = templates.find((t) => t.id === templateId);
@@ -180,8 +202,10 @@ export function NotificationSettings() {
       return;
     }
 
-    if (!providerConfig.isActive || !providerConfig.apiKey) {
-      toast.error('Please configure and activate a notification provider first');
+    if (!providerConfig.isActive && !smsReady) {
+      toast.error(
+        'No messaging credentials yet. Add them in Settings -> Integrations -> WhatsApp Business (MSG91).'
+      );
       return;
     }
 
@@ -244,177 +268,65 @@ export function NotificationSettings() {
       {/* Provider Configuration Tab */}
       {activeTab === 'provider' && (
         <div className="space-y-4">
-          {/* Info Banner */}
+          {/* Where credentials live. This screen deliberately has no key
+              boxes: it shows what IS connected and sends you to the one
+              place that sets it. */}
           <div className="card bg-blue-50 border-blue-200">
             <div className="flex gap-3">
               <MessageSquare className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
               <div className="text-sm text-blue-900">
-                <p className="font-medium mb-1">Supported Providers</p>
+                <p className="font-medium mb-1">Messaging credentials live in Integrations</p>
                 <p className="text-blue-800">
-                  Choose from MSG91, Twilio, or Gupshup for SMS and WhatsApp Business API integration.
-                  Ensure your provider account has DLT (Distributed Ledger Technology) compliance for India.
+                  Better Vision sends WhatsApp and SMS through MSG91. The auth key,
+                  WhatsApp number, SMS template ID and sender ID are entered once under{' '}
+                  <Link to="/settings?tab=integrations" className="underline font-medium">
+                    Settings &rarr; Integrations &rarr; WhatsApp Business (MSG91)
+                  </Link>
+                  . Your MSG91 account must be DLT-registered for Indian telecom rules.
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Provider Selection */}
+          {/* Live connection status */}
           <div className="card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Select Provider</h3>
-            <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-              {(['MSG91', 'TWILIO', 'GUPSHUP'] as NotificationProvider[]).map((provider) => (
-                <button
-                  key={provider}
-                  onClick={() => setProviderConfig({ ...providerConfig, provider })}
-                  className={clsx(
-                    'p-4 rounded-lg border-2 transition-all text-center',
-                    providerConfig.provider === provider
-                      ? 'border-purple-500 bg-purple-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  )}
-                >
-                  <MessageSquare className="w-8 h-8 mx-auto mb-2 text-purple-600" />
-                  <span className="font-medium text-gray-900">{provider}</span>
-                </button>
-              ))}
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Connection status</h3>
+            <div className="space-y-3">
+              <ChannelStatusRow
+                label="WhatsApp"
+                provider={providerConfig.provider}
+                connected={providerConfig.isActive}
+                detail={
+                  providerConfig.isActive
+                    ? `Sending from ${providerConfig.senderId || 'your MSG91 number'}`
+                    : 'Auth key or WhatsApp number missing'
+                }
+              />
+              <ChannelStatusRow
+                label="SMS"
+                provider={providerConfig.provider}
+                connected={smsReady}
+                detail={
+                  smsReady
+                    ? 'DLT template and sender ID are set'
+                    : 'Auth key or SMS template ID missing'
+                }
+              />
             </div>
-          </div>
 
-          {/* Provider Credentials */}
-          <div className="card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              {providerConfig.provider} Configuration
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  API Key <span className="text-red-500">*</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type={showApiKey ? 'text' : 'password'}
-                    value={providerConfig.apiKey}
-                    onChange={(e) =>
-                      setProviderConfig({ ...providerConfig, apiKey: e.target.value })
-                    }
-                    className="input-field w-full pr-10"
-                    placeholder="Enter your API key"
-                  />
-                  <button
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500"
-                  >
-                    {showApiKey ? (
-                      <EyeOff className="w-4 h-4" />
-                    ) : (
-                      <Eye className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {providerConfig.provider === 'MSG91' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Auth Key (Sender ID)
-                  </label>
-                  <input
-                    type="text"
-                    value={providerConfig.senderId}
-                    onChange={(e) =>
-                      setProviderConfig({ ...providerConfig, senderId: e.target.value })
-                    }
-                    className="input-field w-full"
-                    placeholder="e.g., BTRVST"
-                  />
-                </div>
-              )}
-
-              {providerConfig.provider === 'TWILIO' && (
-                <>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Account SID
-                    </label>
-                    <input
-                      type="text"
-                      value={providerConfig.apiSecret}
-                      onChange={(e) =>
-                        setProviderConfig({ ...providerConfig, apiSecret: e.target.value })
-                      }
-                      className="input-field w-full"
-                      placeholder="Enter Account SID"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Phone Number (Sender)
-                    </label>
-                    <input
-                      type="text"
-                      value={providerConfig.senderId}
-                      onChange={(e) =>
-                        setProviderConfig({ ...providerConfig, senderId: e.target.value })
-                      }
-                      className="input-field w-full"
-                      placeholder="+1234567890"
-                    />
-                  </div>
-                </>
-              )}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Webhook URL (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={providerConfig.webhookUrl}
-                  onChange={(e) =>
-                    setProviderConfig({ ...providerConfig, webhookUrl: e.target.value })
-                  }
-                  className="input-field w-full"
-                  placeholder="https://your-domain.com/webhook"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  For delivery reports and message status updates
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                <div>
-                  <p className="font-medium text-gray-900">Enable Notifications</p>
-                  <p className="text-sm text-gray-500">
-                    Activate this provider to start sending notifications
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={providerConfig.isActive}
-                    onChange={(e) =>
-                      setProviderConfig({ ...providerConfig, isActive: e.target.checked })
-                    }
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-500"></div>
-                </label>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  onClick={handleSaveProvider}
-                  disabled={isSaving}
-                  className="btn-primary flex items-center gap-2"
-                >
-                  {isSaving ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Save className="w-4 h-4" />
-                  )}
-                  Save Configuration
-                </button>
-              </div>
+            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+              <p className="font-medium text-gray-900">
+                Sending mode: <span className="uppercase">{dispatchMode}</span>
+              </p>
+              <p className="text-sm text-gray-500 mt-1">
+                {dispatchMode === 'live'
+                  ? 'Messages go to real customers.'
+                  : dispatchMode === 'test'
+                    ? 'Messages go only to the single test number set on the server.'
+                    : 'Nothing is sent to customers yet. Messages are logged only.'}{' '}
+                This switch is set on the server, on purpose, so it can never be
+                flipped by accident from a screen.
+              </p>
             </div>
           </div>
         </div>

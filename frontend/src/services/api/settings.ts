@@ -212,17 +212,9 @@ export const settingsApi = {
     return response.data;
   },
 
-  updateNotificationProvider: async (provider: {
-    provider: string;
-    api_key: string;
-    api_secret?: string;
-    sender_id?: string;
-    webhook_url?: string;
-    is_active: boolean;
-  }) => {
-    const response = await api.put('/settings/notifications/providers', provider);
-    return response.data;
-  },
+  // No updateNotificationProvider: the Notifications screen no longer takes
+  // credentials. They are set in Settings -> Integrations, which is the only
+  // config the message sender reads.
 
   // Notification Logs
   getNotificationLogs: async (params?: {
@@ -450,27 +442,11 @@ export const adminIntegrationApi = {
     return response.data;
   },
 
-  // WhatsApp
-  getWhatsappConfig: async () => {
-    const response = await api.get('/admin/integrations/whatsapp');
-    return response.data;
-  },
-
-  setWhatsappConfig: async (data: { apiKey: string; phoneNumberId: string; businessId: string; enabled: boolean }) => {
-    // SEC-5: backend WhatsappConfig uses snake_case field names.
-    const response = await api.post('/admin/integrations/whatsapp', {
-      api_key: data.apiKey,
-      phone_number_id: data.phoneNumberId,
-      business_id: data.businessId,
-      enabled: data.enabled,
-    });
-    return response.data;
-  },
-
-  testWhatsappConnection: async () => {
-    const response = await api.post('/admin/integrations/whatsapp/test');
-    return response.data;
-  },
+  // WhatsApp / SMS credentials are NOT here. They live in one place --
+  // Settings -> Integrations -> "WhatsApp Business (MSG91)" -- which is the
+  // config the message sender actually reads. The old /admin/integrations/
+  // whatsapp + /sms endpoints wrote a rival set of field names into the same
+  // record and wiped it; they have been removed.
 
   // Tally
   getTallyConfig: async () => {
@@ -578,22 +554,6 @@ export const adminIntegrationApi = {
     return response.data;
   },
 
-  // SMS Gateway
-  getSmsConfig: async () => {
-    const response = await api.get('/admin/integrations/sms');
-    return response.data;
-  },
-
-  setSmsConfig: async (data: { provider: string; apiKey: string; senderId: string; enabled: boolean }) => {
-    // SEC-5: backend SmsConfig uses snake_case field names.
-    const response = await api.post('/admin/integrations/sms', {
-      provider: data.provider,
-      api_key: data.apiKey,
-      sender_id: data.senderId,
-      enabled: data.enabled,
-    });
-    return response.data;
-  },
 };
 
 // ============================================================================

@@ -1171,27 +1171,52 @@ async def update_invoice_settings(
 # ============================================================================
 
 
+def _strip_provider_secrets(doc: dict) -> dict:
+    """Drop any credential-shaped key from a notification_providers document.
+
+    Credentials belong in the `integrations` collection, encrypted at rest and
+    resolved by api.services.integration_config. This singleton is for
+    non-secret channel preferences only, so a secret must never enter it and
+    must never leave it. Uses the same field-name set as the at-rest crypto.
+    """
+    return {k: v for k, v in doc.items() if k.lower() not in _SENSITIVE_FIELDS}
+
+
 @router.get("/notifications/providers")
 async def get_notification_providers(
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Channel provider config (SMS / WhatsApp / Email). Frontend
-    settingsApi.getNotificationProviders was 404'ing. Reads the
-    `notification_providers` singleton; falls back to env-driven
-    defaults so the Settings → Notifications tab always renders."""
+    """Channel provider config (SMS / WhatsApp / Email).
+
+    `enabled` answers "would a send actually work right now": it comes from
+    the SAME resolution the sender uses (Settings -> Integrations first, then
+    the MSG91_* env vars), not from whether an env var happened to be set at
+    boot. Anything else would make this readout lie once a credential is
+    saved on the screen.
+
+    `dispatch_mode` is reported from the environment and is READ-ONLY here --
+    it is the server-side safety gate for outbound messaging and is never
+    settable from a screen.
+
+    Never returns a credential value.
+    """
     import os
 
+    from agents.providers import provider_ready
+    from api.services.integration_config import get_msg91_config
+
+    msg91 = get_msg91_config()
     coll = _get_settings_collection("notification_providers")
     defaults = {
         "whatsapp": {
             "provider": "MSG91",
-            "enabled": bool(os.getenv("MSG91_API_KEY")),
-            "sender": os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", ""),
+            "enabled": provider_ready("whatsapp"),
+            "sender": msg91.get("whatsapp_number", ""),
         },
         "sms": {
             "provider": "MSG91",
-            "enabled": bool(os.getenv("MSG91_API_KEY")),
-            "sender": os.getenv("MSG91_SENDER", "BVOPTL"),
+            "enabled": provider_ready("sms"),
+            "sender": msg91.get("sender", ""),
         },
         "email": {"provider": "SMTP", "enabled": False, "sender": ""},
         "dispatch_mode": os.getenv("DISPATCH_MODE", "off"),
@@ -1200,7 +1225,9 @@ async def get_notification_providers(
         doc = coll.find_one({"_id": "notification_providers"})
         if doc:
             doc.pop("_id", None)
-            defaults.update(doc)
+            # Legacy rows may still hold a plaintext api_key from before this
+            # endpoint refused secrets. Never hand one back out.
+            defaults.update(_strip_provider_secrets(doc))
     return defaults
 
 
@@ -1209,16 +1236,24 @@ async def update_notification_providers(
     providers: dict,
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
+    """Store non-secret channel preferences.
+
+    Credential-shaped fields are DROPPED, not stored: this collection is not
+    encrypted at rest and nothing reads a credential from it. The MSG91 auth
+    key lives in Settings -> Integrations -> WhatsApp Business (MSG91), which
+    is the config the sender actually reads.
+    """
     coll = _get_settings_collection("notification_providers")
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
     providers = {k: v for k, v in providers.items() if k != "_id"}
+    providers = _strip_provider_secrets(providers)
     providers["updated_at"] = datetime.now().isoformat()
     coll.update_one({"_id": "notification_providers"}, {"$set": providers}, upsert=True)
     doc = coll.find_one({"_id": "notification_providers"})
     if doc:
         doc.pop("_id", None)
-    return doc or {}
+    return _strip_provider_secrets(doc) if doc else {}
 
 
 @router.get("/notifications/logs")
