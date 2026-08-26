@@ -33,6 +33,7 @@ paisa even on odd-paise tax amounts (e.g. 5.01 -> 2.50 + 2.51).
 
 from typing import List, Optional, Tuple
 
+
 def _f(v) -> float:
     """Coerce anything to a 2dp float, defaulting to 0.0. Never raises."""
     try:

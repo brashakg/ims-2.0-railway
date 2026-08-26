@@ -326,6 +326,7 @@ def po_gst_context(store_id, vendor_id):
         logger.warning("[VENDOR] PO store lookup failed: %s", exc)
     return vendor_doc, store_doc
 
+
 # Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
 _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
