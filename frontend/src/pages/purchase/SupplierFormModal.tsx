@@ -109,7 +109,15 @@ export function SupplierFormModal({
     // looked like it had a state while no bill could be classified CGST+SGST
     // vs IGST for it again. A sentinel that looks like data is worse than a
     // refusal the user can act on.
-    if (!effectiveStateCode) {
+    //
+    // "A code the server's list does not know" counts as no state: a legacy row
+    // predating GSTIN validation can hold a number whose first two digits are
+    // not an Indian state, and the seed above would otherwise carry those two
+    // digits through the clear and post them as the state. Skipped when the
+    // list has not loaded -- then there is nothing to check against, and the
+    // server validates it again anyway.
+    const stateListLoaded = Object.keys(stateNames).length > 0;
+    if (!effectiveStateCode || (stateListLoaded && !stateNames[effectiveStateCode])) {
       toast.error(
         "Pick the vendor's state - it decides whether their bills are CGST + SGST or IGST.",
       );

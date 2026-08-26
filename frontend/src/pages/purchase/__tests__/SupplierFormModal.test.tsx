@@ -191,6 +191,25 @@ describe('SupplierFormModal state-from-GSTIN', () => {
     expect(createVendor).not.toHaveBeenCalled();
   });
 
+  it('refuses a state code the server does not recognise, rather than posting it', async () => {
+    // A legacy row can hold a GSTIN written before the number was validated,
+    // whose first two digits are not an Indian state at all. The State box is
+    // seeded from that number, so clearing the GSTIN would otherwise carry
+    // those two digits through and post them as the vendor's state -- which
+    // derive_vendor_state keeps verbatim with no code, the same dead end as
+    // the 'N/A' placeholder.
+    const legacy: Supplier = { ...existing, gstNumber: '88AABCU9603R1ZF', stateCode: undefined, state: '' };
+    render(<SupplierFormModal supplier={legacy} onClose={() => {}} onSaved={() => {}} />);
+
+    fireEvent.change(label(/gst number/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save supplier/i }));
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('state')),
+    );
+    expect(updateVendor).not.toHaveBeenCalled();
+  });
+
   it('asks for the state instead of inventing one, when there is no GSTIN', async () => {
     // A brand-new unregistered vendor with no state picked. The old form posted
     // state: 'N/A' on the user's behalf -- a sentinel that looks like data.
