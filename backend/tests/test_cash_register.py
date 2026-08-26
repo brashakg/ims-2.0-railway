@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -36,6 +37,16 @@ from api.routers.auth import get_current_user  # noqa: E402
 # CI's asyncio_mode=auto runs coroutine tests; the endpoint tests here use the
 # synchronous TestClient, but we mark the module so the convention is explicit.
 pytestmark = pytest.mark.asyncio
+
+
+def _ist_day(iso_utc: str) -> str:
+    """IST business day ('YYYY-MM-DD') of a naive-UTC ISO stamp.
+
+    Deliberately hand-rolled (+05:30 then take the date) and NOT
+    ``api.utils.ist.ist_date_str``: a fixture that asks the code under test
+    what the right answer is can never catch that code being wrong."""
+    return (datetime.fromisoformat(iso_utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+
 
 
 @pytest.fixture(autouse=True)
@@ -307,7 +318,15 @@ class TestCashRegisterEndpoints:
                 "amount": 500,
                 "payment_mode": "CASH",
                 "status": "APPROVED",
-                "expense_date": opened_at[:10],
+                # BUG-104 TRAP: `opened_at` is `_iso_now()` ==
+                # datetime.utcnow().isoformat(), so opened_at[:10] is the UTC
+                # day. `expense_date` is filtered by `_ist_day_window`, an IST
+                # BUSINESS day. Between 00:00 and 05:30 IST the two are
+                # different days and the seeded expense drops out of the
+                # window. Shift by hand -- calling the production helper to
+                # build the fixture would let a broken helper agree with
+                # itself.
+                "expense_date": _ist_day(opened_at),
             }
         )
 
