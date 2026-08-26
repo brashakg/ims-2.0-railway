@@ -65,7 +65,7 @@ function mapVendorToSupplier(v: any): Supplier {
 // Field mapping: backend purchase_order doc -> frontend PurchaseOrder shape
 // ============================================================================
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
+export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
   // Per-product header fallback for POs created before the per-line
   // received_qty field (S1) existed.
   const headerReceived: Record<string, number> = po.received_qty_by_product ?? {};
