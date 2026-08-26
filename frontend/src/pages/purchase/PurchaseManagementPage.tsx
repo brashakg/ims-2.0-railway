@@ -76,8 +76,12 @@ function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     sku: item.sku ?? '',
     quantity: item.ordered_qty ?? item.quantity ?? 0,
     unitCost: item.unit_price ?? item.unit_cost ?? 0,
-    taxRate: item.tax_rate ?? 18,
-    total: item.total ?? (item.quantity ?? 0) * (item.unit_price ?? item.unit_cost ?? 0) * (1 + (item.tax_rate ?? 18) / 100),
+    // NOT 18. A line with no stored rate has NO rate -- the two automatic PO
+    // doors used to write lines without one, and defaulting to 18 here
+    // inflated every displayed line total by 18% of money that was never
+    // charged. Show what is actually on the order.
+    taxRate: item.tax_rate ?? 0,
+    total: item.total ?? (item.quantity ?? 0) * (item.unit_price ?? item.unit_cost ?? 0) * (1 + (item.tax_rate ?? 0) / 100),
     receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
   }));
 
@@ -93,6 +97,11 @@ function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     subtotal: po.subtotal ?? 0,
     taxAmount: po.tax_amount ?? 0,
     total: po.total_amount ?? po.total ?? 0,
+    // Read the split back off the stored order instead of re-deriving it: the
+    // server decided CGST+SGST vs IGST from the two GST numbers, and its answer
+    // is the one that gets filed.
+    gstSummary: po.gst_summary ?? undefined,
+    interstate: typeof po.interstate === 'boolean' ? po.interstate : undefined,
     approvedBy: po.approved_by,
     receivedDate: po.received_date ?? po.received_at?.split('T')[0],
     notes: po.notes,

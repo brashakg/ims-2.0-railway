@@ -34,6 +34,11 @@ export interface BuyDeskRow {
   /** The product's preferred vendor (when set) — used to preselect the vendor
    *  in the draft-PO modal. Optional: older payloads may omit it. */
   preferred_vendor_id?: string | null;
+  /** The product's own GST identity, so a quick-draft PO line opens at the rate
+   *  that will actually be charged rather than a flat 18%. Optional: older
+   *  payloads omit them, and the line then says its rate is not set. */
+  hsn_code?: string | null;
+  gst_rate?: number | null;
 }
 
 export interface BuyDeskRowsResponse {

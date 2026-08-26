@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, FileText, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { hsnRate } from '../../constants/gst';
 import { vendorsApi } from '../../services/api/inventory';
 
 /** Today in the browser's own calendar, as the yyyy-mm-dd an <input type="date">
@@ -60,6 +61,12 @@ export interface ComposerLine {
   productDetail?: string;
   /** False when nothing on the product could settle a GST rate. */
   gstResolved?: boolean;
+  /** WHY this line's GST is not settled, in the buyer's words -- and the ONE
+   *  thing the amber flags key on, so the screen warns about exactly what the
+   *  server warns about (its `gst_missing`). Non-empty even when the line IS
+   *  taxed: a product with a catalogue rate but NO HSN is still a purchase
+   *  document with no HSN on it, which is not allowed. */
+  gstMissing?: string | null;
   // Set true once the operator (or a caller default) has typed a cost -- guards
   // the last-cost prefill from ever overwriting a value someone chose.
   costTouched?: boolean;
@@ -138,6 +145,41 @@ export interface PurchaseOrderComposerProps {
   onCancel?: () => void;
 }
 
+/** What GST a product settles for a PO line: the rate to show, whether it is
+ *  settled at all, and -- when it is not -- what is missing, in the buyer's
+ *  words.
+ *
+ *  HSN FIRST, exactly like the server (gst_rates.resolve_gst_rate_strict): the
+ *  rate legally follows the HSN, so a catalogue rate that disagrees with the
+ *  product's own HSN is a data error, not a second opinion. Previewing the
+ *  catalogue rate instead is how the screen came to show Rs 50 of GST on
+ *  sunglasses the server then stored at Rs 180.
+ *
+ *  ONE rule for every door that opens a PO line -- the manual form's picker and
+ *  the Buy Desk's bulk draft (which used to open every line at a flat 18%). */
+export function gstForProduct(picked: { gstRate?: number | null; hsn?: string | null }): {
+  taxRate: number;
+  hsn: string | null;
+  gstResolved: boolean;
+  gstMissing: string | null;
+} {
+  const hsn = (picked.hsn ?? '').trim() || null;
+  const fromHsn = hsnRate(hsn);
+  const catalogued =
+    typeof picked.gstRate === 'number' && picked.gstRate >= 0 ? picked.gstRate : null;
+  const rate = fromHsn ?? catalogued;
+  return {
+    taxRate: rate ?? 0,
+    hsn,
+    gstResolved: rate !== null,
+    gstMissing: !hsn
+      ? 'no HSN on this product'
+      : fromHsn === null
+        ? `HSN ${hsn} is not in the GST rate list`
+        : null,
+  };
+}
+
 // Helper the manual form's picker calls to fill a line's product identity while
 // preserving any cost the buyer already typed. Exported so the picker cell can
 // build the same shape.
@@ -154,7 +196,7 @@ export function applyPickedProduct(
   },
 ): ComposerLine {
   const keepCost = line.costTouched || line.unitCost > 0;
-  const rate = typeof picked.gstRate === 'number' && picked.gstRate >= 0 ? picked.gstRate : null;
+  const { taxRate, hsn, gstResolved, gstMissing } = gstForProduct(picked);
   return {
     ...line,
     productId: picked.productId,
@@ -166,10 +208,11 @@ export function applyPickedProduct(
     unitCost: keepCost ? line.unitCost : picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0,
     // The picked product carries its own GST rate + HSN. Nothing is guessed:
     // a product with neither leaves the line unresolved and visibly flagged.
-    taxRate: rate ?? 0,
-    hsn: picked.hsn ?? null,
+    taxRate,
+    hsn,
     productDetail: picked.detail ?? '',
-    gstResolved: rate !== null,
+    gstResolved,
+    gstMissing,
     lastPaid: null,
   };
 }
@@ -195,6 +238,9 @@ const blankLine = (): ComposerLine => ({
   hsn: null,
   productDetail: '',
   gstResolved: false,
+  // Nothing is wrong with an empty line yet -- it has no product to be wrong
+  // about. The flag appears the moment a product without an HSN is picked.
+  gstMissing: null,
   costTouched: false,
   lastPaid: null,
 });
@@ -344,9 +390,11 @@ export function PurchaseOrderComposer({
   const cgst = interstate ? 0 : taxAmount / 2;
   const sgst = interstate ? 0 : taxAmount - cgst;
   const igst = interstate ? taxAmount : 0;
-  // Lines whose product could not tell us a GST rate. Named, not guessed.
+  // Lines whose GST the product could not settle. Keyed on gstMissing -- the
+  // SAME field the server warns on -- not on a separate derivation, so a line
+  // that is taxed off a catalogue rate but carries NO HSN is still named here.
   const unresolvedGst = useMemo(
-    () => lines.filter((l) => l.productId && !l.gstResolved),
+    () => lines.filter((l) => l.productId && (l.gstMissing || !l.gstResolved)),
     [lines],
   );
 
@@ -490,6 +538,7 @@ export function PurchaseOrderComposer({
                         hsn: null,
                         productDetail: '',
                         gstResolved: false,
+                        gstMissing: null,
                         lastPaid: null,
                       }),
                   })}
@@ -541,6 +590,9 @@ export function PurchaseOrderComposer({
                         {line.taxRate}%
                         {line.hsn ? (
                           <span className="text-xs text-gray-400"> · HSN {line.hsn}</span>
+                        ) : null}
+                        {line.productId && line.gstMissing ? (
+                          <span className="block text-xs text-amber-700">No HSN</span>
                         ) : null}
                       </p>
                     )}
@@ -630,12 +682,15 @@ export function PurchaseOrderComposer({
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <div>
             <p className="font-medium">
-              No GST rate for {unresolvedGst.length} {unresolvedGst.length === 1 ? 'product' : 'products'}
+              GST needs an HSN on {unresolvedGst.length}{' '}
+              {unresolvedGst.length === 1 ? 'product' : 'products'}
             </p>
             <p className="text-xs mt-0.5">
-              {unresolvedGst.map((l) => l.productName || l.sku).join(', ')} — add the HSN number on the
-              product so its tax can be worked out. The order can still be raised; the tax on it will
-              be short until the HSN is filled in.
+              {unresolvedGst
+                .map((l) => `${l.productName || l.sku} (${l.gstMissing || 'no GST rate'})`)
+                .join(', ')}{' '}
+              — add the HSN number on the product. An HSN is required on a purchase order, and
+              until it is filled in the tax on any line with no rate is short.
             </p>
           </div>
         </div>

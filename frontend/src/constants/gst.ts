@@ -353,7 +353,20 @@ export function gstStateCode(...candidates: Array<string | null | undefined>): s
 }
 
 /** true = inter-state (IGST), false = intra-state (CGST + SGST),
- *  null = cannot be told from what we hold (caller should say so, not guess). */
+ *  null = cannot be told from what we hold (caller must say so, not guess).
+ *
+ *  `null` is deliberately NOT `false`. A falsy unknown renders as
+ *  "Same state - CGST + SGST" on every vendor whose GST number is missing,
+ *  which is a wrong TAX LABEL stated with confidence, not a blank.
+ *
+ *  Only the two GST NUMBERS decide. This mirrors the server exactly --
+ *  purchase_invoice_engine.determine_place_of_supply reads the supplier and
+ *  recipient GSTINs and nothing else -- so the preview on screen and the split
+ *  that actually gets stored can never contradict each other. A party's
+ *  declared `state` is accepted (callers hand over the whole vendor/shop) but
+ *  does NOT decide: an address is not a registration, and the tax turns on the
+ *  registration. With no GSTIN the answer is "cannot tell", and the totals box
+ *  says which assumption it is showing. */
 export function isInterStateSupply(
   a: { gstin?: string | null; state?: string | null },
   b: { gstin?: string | null; state?: string | null },
@@ -361,8 +374,20 @@ export function isInterStateSupply(
   const codeA = gstStateCode(a.gstin);
   const codeB = gstStateCode(b.gstin);
   if (codeA && codeB) return codeA !== codeB;
-  const nameA = (a.state ?? '').trim().toLowerCase();
-  const nameB = (b.state ?? '').trim().toLowerCase();
-  if (nameA && nameB) return nameA !== nameB;
   return null;
+}
+
+/** The GST rate an HSN settles, or null when this table does not hold it.
+ *
+ *  HSN-FIRST, the same order the server uses (gst_rates.resolve_gst_rate_strict):
+ *  the HSN is what the rate legally follows, and a catalogue rate that
+ *  disagrees with the product's own HSN is a data error, not a second opinion.
+ *  Without this the screen previewed the catalogued rate while the server
+ *  charged the HSN's -- a pair of sunglasses catalogued at 5% with HSN 900410
+ *  showed Rs 50 of GST and stored Rs 180. */
+export function hsnRate(hsn?: string | null): number | null {
+  const code = (hsn ?? '').trim();
+  if (!code) return null;
+  const hit = HSN_CODES[code];
+  return hit ? hit.gstRate : null;
 }

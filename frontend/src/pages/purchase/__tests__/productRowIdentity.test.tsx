@@ -84,14 +84,25 @@ describe('place of supply from the two GST numbers', () => {
     expect(isInterStateSupply({ ...MH, state: 'Jharkhand' }, JH)).toBe(true);
   });
 
-  it('falls back to the declared states when a GSTIN is missing', () => {
-    expect(isInterStateSupply({ state: 'Maharashtra' }, JH)).toBe(true);
-    expect(isInterStateSupply({ state: 'jharkhand' }, JH)).toBe(false);
+  it('will not decide the tax off an address when a GSTIN is missing', () => {
+    // A declared state is not a registration, and the tax turns on the
+    // registration. The SERVER decides from the two GSTINs and nothing else
+    // (purchase_invoice_engine.determine_place_of_supply), so reading the
+    // address here would preview IGST on an order the server stores as
+    // CGST + SGST -- wrong money on screen.
+    expect(isInterStateSupply({ state: 'Maharashtra' }, JH)).toBeNull();
+    expect(isInterStateSupply({ state: 'jharkhand' }, JH)).toBeNull();
   });
 
   it('answers "cannot tell" rather than guessing', () => {
+    // EXACTLY one answer for the unknown side, and it is not `false`.
+    // A falsy unknown renders as "Same state - CGST + SGST" on every
+    // vendor whose GST number is missing: a wrong TAX LABEL stated with
+    // confidence. The caller has to be able to tell the two apart.
     expect(isInterStateSupply({}, JH)).toBeNull();
     expect(isInterStateSupply(JH, {})).toBeNull();
+    expect(isInterStateSupply({}, {})).toBeNull();
+    expect(isInterStateSupply({}, JH)).not.toBe(false);
   });
 });
 

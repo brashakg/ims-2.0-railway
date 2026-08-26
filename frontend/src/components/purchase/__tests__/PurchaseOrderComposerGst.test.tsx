@@ -40,6 +40,7 @@ const LINE = (over: Partial<ComposerLine> = {}): ComposerLine => ({
   taxRate: 5,
   hsn: '900311',
   gstResolved: true,
+  gstMissing: null,
   costTouched: true,
   lastPaid: null,
   ...over,
@@ -145,14 +146,59 @@ describe('PurchaseOrderComposer — the rate comes from the product', () => {
     expect(picked.productDetail).toBe('GOLD · 52 · MRP ₹6,000');
   });
 
+  it('a fresh blank line carries NO rate at all, not a flat 18%', () => {
+    // blankLine() -- what "Add Item" appends and what an empty composer opens
+    // with. A flat 18 here quietly over-taxes every frame, spectacle lens and
+    // contact lens on the page (all 5%) in the preview the buyer signs off.
+    renderComposer({ initialLines: [] });
+    expect(screen.getByText(/^0%$/)).toBeTruthy();
+    expect(screen.queryByText(/^18%$/)).toBeNull();
+  });
+
+  it('previews the rate the HSN settles, not a catalogue rate that disagrees', () => {
+    // Sunglasses catalogued at 5% but carrying HSN 900410 (18%). The server
+    // resolves HSN-first and stores Rs 180; the screen used to show Rs 50.
+    const picked = applyPickedProduct(LINE({ taxRate: 0, hsn: null, gstResolved: false }), {
+      productId: 'p',
+      productName: 'Oakley',
+      sku: 'OK1',
+      gstRate: 5,
+      hsn: '900410',
+    });
+    expect(picked.taxRate).toBe(18);
+    expect(picked.gstResolved).toBe(true);
+    expect(picked.gstMissing).toBeNull();
+  });
+
+  it('flags a product with a rate but NO HSN, and names it on the order', () => {
+    // An HSN is required on a GST purchase document. A catalogue rate makes
+    // the line taxable, it does not make the document legal -- so "taxed" must
+    // not silence the flag.
+    const picked = applyPickedProduct(LINE({ hsn: null }), {
+      productId: 'p',
+      productName: 'Nameless Frame',
+      sku: 'NF1',
+      gstRate: 5,
+      hsn: null,
+    });
+    expect(picked.taxRate).toBe(5);
+    expect(picked.gstResolved).toBe(true);
+    expect(picked.gstMissing).toBe('no HSN on this product');
+
+    renderComposer({ initialLines: [picked] });
+    expect(screen.getByText(/GST needs an HSN on 1 product/i)).toBeTruthy();
+    expect(screen.getByText(/no HSN on this product/i)).toBeTruthy();
+  });
+
   it('names the products whose GST rate is unknown instead of taxing them', () => {
     renderComposer({
       initialLines: [LINE({ productName: 'Nameless Frame', taxRate: 0, gstResolved: false })],
     });
-    expect(screen.getByText(/No GST rate for 1 product/i)).toBeTruthy();
+    expect(screen.getByText(/GST needs an HSN on 1 product/i)).toBeTruthy();
     // Twice: once in the line itself, once named in the warning.
     expect(screen.getAllByText(/Nameless Frame/).length).toBe(2);
     expect(screen.getByText(/add the HSN number on the product/i)).toBeTruthy();
+    expect(screen.getByText(/no GST rate/i)).toBeTruthy();
     expect(screen.getByText(/Rate not set/i)).toBeTruthy();
     // Nothing invented: no tax charged on a rate nobody knows.
     expect(amountFor('Grand Total')).toBe('₹2,000');

@@ -14,7 +14,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
-import { isInterStateSupply } from '../../constants/gst';
+import { hsnRate, isInterStateSupply } from '../../constants/gst';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type { ComposerVendorOption } from '../../components/purchase/PurchaseOrderComposer';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
@@ -261,15 +261,27 @@ function ProductSearchSelect({
                   <div className="text-xs text-gray-500 flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5">
                     <span className="font-mono">{p.sku}</span>
                     {hit.category ? <span>{String(hit.category).replace(/_/g, ' ').toLowerCase()}</span> : null}
-                    {p.gstRate !== null ? (
+                    {/* The rate follows the HSN, the same order the server
+                        resolves in -- and a missing HSN is flagged on its own,
+                        because a product can carry a catalogued rate and still
+                        have no HSN, which a purchase order may not. */}
+                    {(hsnRate(p.hsn) ?? p.gstRate) !== null ? (
                       <span>
-                        {p.gstRate}% GST{p.hsn ? ` · HSN ${p.hsn}` : ''}
+                        {hsnRate(p.hsn) ?? p.gstRate}% GST{p.hsn ? ` · HSN ${p.hsn}` : ''}
                       </span>
                     ) : (
                       <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium">
-                        No HSN — GST unknown
+                        GST rate unknown
                       </span>
                     )}
+                    {!p.hsn ? (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium"
+                        title="A purchase order must carry an HSN for every line. Add it on the product."
+                      >
+                        No HSN
+                      </span>
+                    ) : null}
                     {p.hasCost ? (
                       <span>
                         {'₹'}
@@ -452,12 +464,13 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
               // Say what is missing rather than letting a short tax total pass
               // unnoticed -- the server is the authority on the rate, so this
-              // reports what it actually stored.
-              const unresolved = resp.gst_unresolved ?? [];
-              if (unresolved.length > 0) {
+              // reports what it actually stored, including the lines it taxed
+              // off a catalogue rate but could not tie to an HSN.
+              const warnings = resp.gst_warnings ?? [];
+              if (warnings.length > 0) {
                 toast.warning(
-                  `No GST rate for ${unresolved
-                    .map((u) => u.product_name || u.product_id)
+                  `GST needs attention on ${warnings
+                    .map((w) => `${w.product_name || w.product_id} (${w.missing})`)
                     .join(', ')} — add the HSN number on the product.`,
                 );
               }
