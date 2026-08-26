@@ -751,6 +751,7 @@ export function OrdersPage() {
                   statusHistory={selectedOrder.statusHistory}
                   createdAt={selectedOrder.createdAt}
                   createdBy={selectedOrder.createdBy}
+                  createdByName={selectedOrder.created_by_name}
                 />
 
                 {/* Order Status Timeline & Notifications */}

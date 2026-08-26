@@ -353,7 +353,13 @@ export interface Payment {
 export interface StatusHistory {
   status: OrderStatus;
   timestamp: string;
+  /** Raw user id of whoever moved the order. This IS the audit record --
+   *  it is never overwritten, only named beside. */
   changedBy: string;
+  /** The person's display name, resolved server-side from `users`. Absent
+   *  when the id resolves to nobody, in which case the screen prints the id
+   *  verbatim rather than inventing a name. */
+  changed_by_name?: string;
 }
 
 export interface Order {
@@ -376,6 +382,8 @@ export interface Order {
   orderStatus: OrderStatus;
   paymentStatus: PaymentStatus;
   createdBy: string;
+  /** Display name for `createdBy` -- same rule as StatusHistory.changed_by_name. */
+  created_by_name?: string;
   createdAt: string;
   deliveredAt?: string;
   statusHistory?: StatusHistory[];

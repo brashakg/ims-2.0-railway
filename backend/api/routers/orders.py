@@ -325,6 +325,51 @@ def order_to_frontend(order: dict) -> dict:
     return result
 
 
+def orders_to_frontend(orders: list) -> list:
+    """Map a batch of orders to the frontend shape AND name the people in them.
+
+    THE STATUS TIMELINE IS AN AUDIT TRAIL, and an audit trail that cannot name
+    the person is not one. Every writer stamps ``current_user["user_id"]``
+    (create_order, the confirm door, _claim_order_status), never a name, so the
+    drawer timeline printed "Changed by: user-superadmin" straight out. The
+    display name was in the users collection the whole time -- nobody looked.
+
+    Resolution happens HERE, on the way OUT, on the mapped COPY. The stored
+    ``status_history`` keeps the raw id, so renaming a user never rewrites --
+    or freezes a stale name into -- an audit record that already happened.
+
+    ONE users read for the whole page (never one per row), fail-soft: an id
+    that resolves to nobody gets NO ``_name`` sibling and the screen falls back
+    to printing the id verbatim. That stays traceable, and an invented name in
+    an audit trail is worse than an ugly one.
+
+    Routers call THIS, not order_to_frontend, so a list endpoint cannot ship a
+    nameless row by forgetting a line.
+    """
+    rows = [order_to_frontend(o) for o in orders]
+    try:
+        from ..services.name_resolver import user_name_map
+
+        # (holder dict, the id field it already carries, the name field to add)
+        targets = [(r, "createdBy", "created_by_name") for r in rows if r] + [
+            (e, "changedBy", "changed_by_name")
+            for r in rows
+            if r
+            for e in (r.get("statusHistory") or [])
+            if isinstance(e, dict)
+        ]
+        if not targets:
+            return rows
+        names = user_name_map(_get_db(), [d.get(k) for d, k, _ in targets])
+        for holder, id_field, name_field in targets:
+            raw_id = holder.get(id_field)
+            if raw_id and str(raw_id) in names:
+                holder[name_field] = names[str(raw_id)]
+    except Exception:  # noqa: BLE001 - a missing name must never 500 an order
+        pass
+    return rows
+
+
 def item_to_frontend(item: dict) -> dict:
     """Convert order item from snake_case to camelCase"""
     if not item:
@@ -916,7 +961,7 @@ async def list_orders(
         # Convert to frontend format (camelCase)
         from ..utils.pagination import paginate
 
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = orders_to_frontend(orders)
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(orders_formatted, page=page, page_size=limit)
         result["orders"] = result["data"]  # backward compat
@@ -942,7 +987,7 @@ async def get_pending_deliveries(
 
     if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = orders_to_frontend(orders)
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -959,7 +1004,7 @@ async def get_unpaid_orders(
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = orders_to_frontend(orders)
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -976,7 +1021,7 @@ async def get_overdue_orders(
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = orders_to_frontend(orders)
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -994,7 +1039,7 @@ async def search_orders(
 
     if repo is not None:
         orders = repo.search_orders(q, active_store)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = orders_to_frontend(orders)
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -2924,7 +2969,7 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
                     order["tracking_token"] = ensure_tracking_token(repo, order)
                 except Exception:  # noqa: BLE001
                     pass
-            return order_to_frontend(order)
+            return orders_to_frontend([order])[0]
         raise HTTPException(status_code=404, detail="Order not found")
 
     return {"id": order_id}

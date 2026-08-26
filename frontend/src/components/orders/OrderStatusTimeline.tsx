@@ -8,6 +8,9 @@ interface OrderStatusTimelineProps {
   statusHistory?: StatusHistory[];
   createdAt: string;
   createdBy?: string;
+  /** Resolved display name for createdBy (server-side). Optional: when the id
+   *  resolves to nobody we print the id, never an invented name. */
+  createdByName?: string;
 }
 
 const STATUS_COLORS: Record<string, { icon: string; color: string; bgColor: string }> = {
@@ -19,7 +22,7 @@ const STATUS_COLORS: Record<string, { icon: string; color: string; bgColor: stri
   CANCELLED: { icon: '✕', color: 'text-red-600', bgColor: 'bg-red-100' },
 };
 
-export function OrderStatusTimeline({ statusHistory, createdAt, createdBy }: OrderStatusTimelineProps) {
+export function OrderStatusTimeline({ statusHistory, createdAt, createdBy, createdByName }: OrderStatusTimelineProps) {
   // FORCE IST: `toLocaleString('en-IN')` defaults to the BROWSER's local zone,
   // so the same UTC instant rendered as "27 May 2026 at 8:49 pm" on the
   // Orders list (a different formatter that already pins IST) showed as
@@ -42,6 +45,7 @@ export function OrderStatusTimeline({ statusHistory, createdAt, createdBy }: Ord
       status: 'DRAFT' as const,
       timestamp: createdAt,
       changedBy: createdBy || 'System',
+      changed_by_name: createdByName,
     },
     ...(statusHistory || []),
   ];
@@ -70,7 +74,11 @@ export function OrderStatusTimeline({ statusHistory, createdAt, createdBy }: Ord
                   <p className={`font-medium ${config.color}`}>{entry.status}</p>
                   <p className="text-xs text-gray-500">{formatDateTime(entry.timestamp)}</p>
                 </div>
-                <p className="text-xs text-gray-600 mt-1">Changed by: {entry.changedBy}</p>
+                {/* NAME the person. Every writer stamps a user id, so this line used
+                    to read "Changed by: user-superadmin". The name is resolved
+                    server-side; when an id resolves to nobody we fall back to the id
+                    itself -- traceable, and never a made-up name in an audit trail. */}
+                <p className="text-xs text-gray-600 mt-1">Changed by: {entry.changed_by_name || entry.changedBy}</p>
               </div>
             </div>
           );
