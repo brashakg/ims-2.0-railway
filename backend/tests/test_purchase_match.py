@@ -326,13 +326,18 @@ class _FakeDB:
                 {"product_id": "P1", "cost_price": 100.0},
             ],
             "stock_units": [
-                # 10 AVAILABLE units of P1 at store S1 (on-hand for the blend).
+                # The 10 AVAILABLE units of P1 at S1 are the ones GRN G1 just
+                # minted -- that is what the real accept path stamps on every
+                # unit it creates (vendors.py:3362 source_type/source_id). They
+                # are therefore NOT prior on-hand: see S9.
                 *[
                     {
                         "stock_id": f"U{i}",
                         "product_id": "P1",
                         "store_id": "S1",
                         "status": "AVAILABLE",
+                        "source_type": "GRN",
+                        "source_id": "G1",
                     }
                     for i in range(10)
                 ]
@@ -482,9 +487,15 @@ class TestCreateRunsMatch:
 
 
 class TestValuationTrueUp:
-    def test_booking_updates_moving_average_cost(self):
+    def test_invoice_cost_is_not_blended_with_its_own_delivery(self):
+        """S9: the ONLY stock on hand is the 10 units this GRN just minted, so
+        there is no prior layer to blend with -- the billed price IS the cost.
+
+        The old assertion here was 110.0: the delivery was counted once as
+        "existing on-hand" and again as the incoming layer, so every price rise
+        was halved and cost of goods was permanently understated.
+        """
         db = _FakeDB()
-        # P1: 10 units on-hand @100. Invoice 10 @120 -> blended 110.
         cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
         body = _body(
             invoice_number="INV-VAL-1",
@@ -494,9 +505,36 @@ class TestValuationTrueUp:
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
         prod = [p for p in db.collections["products"] if p["product_id"] == "P1"][0]
-        assert prod["cost_price"] == 110.0
-        assert prod["moving_avg_cost"] == 110.0
+        assert prod["cost_price"] == 120.0
+        assert prod["moving_avg_cost"] == 120.0
         assert prod["cost_source"] == "PURCHASE_INVOICE"
+
+    def test_prior_stock_still_blends_with_the_new_delivery(self):
+        """The counterpart: units that were on the shelf BEFORE this delivery
+        (a different source_id) are real prior on-hand and must still blend.
+        10 prior @100 + 10 billed @120 -> 110."""
+        db = _FakeDB()
+        db.collections["stock_units"].extend(
+            {
+                "stock_id": f"OLD{i}",
+                "product_id": "P1",
+                "store_id": "S1",
+                "status": "AVAILABLE",
+                "source_type": "GRN",
+                "source_id": "G-EARLIER",
+            }
+            for i in range(10)
+        )
+        cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
+        body = _body(
+            invoice_number="INV-VAL-2",
+            lines=[{"product_id": "P1", "qty": 10, "unit_price": 120, "gst_rate": 5}],
+            total=1260,
+        )
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
+        assert r.status_code == 201, r.text
+        prod = [p for p in db.collections["products"] if p["product_id"] == "P1"][0]
+        assert prod["cost_price"] == 110.0
 
 
 class TestMatchEndpoint:

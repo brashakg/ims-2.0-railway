@@ -4656,6 +4656,54 @@ async def list_vendor_bills(
     return {"bills": bills, "total": len(bills)}
 
 
+def _rejected_goods_hold(db, bill_id: Optional[str]) -> Optional[str]:
+    """Owner ruling 7: a purchase bill may not be passed for payment while goods
+    on its goods receipt were REJECTED and no debit note has been raised.
+
+    Returns a plain-English reason to refuse the payment, or None when the bill
+    is clear. Reads the bill -> its GRN -> the rejected quantities, then looks
+    for a debit note that references either that GRN or the bill itself (the
+    DebitNoteCreate schema has carried `grn_id` -- "link to the rejected-goods
+    GRN" -- since it was written; nothing had ever read it). Fail-soft: any
+    error returns None, because a lookup failure must not block a legitimate
+    payment.
+    """
+    if db is None or not bill_id:
+        return None
+    try:
+        bill = db.get_collection("vendor_bills").find_one(
+            {"bill_id": bill_id}, {"_id": 0, "grn_id": 1, "bill_number": 1}
+        )
+        if not bill or not bill.get("grn_id"):
+            return None
+        grn_id = bill["grn_id"]
+        grn = db.get_collection("grns").find_one(
+            {"grn_id": grn_id}, {"_id": 0, "items": 1, "grn_number": 1}
+        )
+        if not grn:
+            return None
+        rejected = 0
+        for it in grn.get("items") or []:
+            try:
+                rejected += int(it.get("rejected_qty") or 0)
+            except (TypeError, ValueError):
+                continue
+        if rejected <= 0:
+            return None
+        notes = db.get_collection("vendor_debit_notes")
+        for flt in ({"grn_id": grn_id}, {"bill_id": bill_id}):
+            if notes.find_one(flt, {"_id": 0, "debit_note_id": 1}):
+                return None
+        return (
+            f"{rejected} unit(s) on goods receipt "
+            f"{grn.get('grn_number') or grn_id} were rejected and no debit note "
+            f"has been raised against the vendor. Raise the debit note for the "
+            f"rejected goods first - then this bill can be paid."
+        )
+    except Exception:  # noqa: BLE001 - a lookup failure must not block payment
+        return None
+
+
 @router.post("/{vendor_id}/payments", status_code=201)
 async def create_vendor_payment(
     vendor_id: str,
@@ -4685,6 +4733,16 @@ async def create_vendor_payment(
         from .finance import check_period_locked
 
         check_period_locked(db, payment.payment_date)
+
+    # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
+    # exists. Until now a rejection inside the 5% match tolerance was paid in
+    # full, silently -- we paid for the defects AND claimed the ITC on them.
+    hold = _rejected_goods_hold(db, payment.bill_id)
+    if hold:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "REJECTED_GOODS_NO_DEBIT_NOTE", "message": hold},
+        )
 
     payment_id = str(uuid.uuid4())
     doc = {

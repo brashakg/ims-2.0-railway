@@ -371,13 +371,23 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
         return None
 
 
-def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
+def _product_state_for_valuation(
+    db, product_ids, store_id=None, exclude_grn_id=None
+) -> dict:
     """Build {product_id: {on_hand_qty, cost_price}} for the moving-average
     true-up: the CURRENT on-hand quantity (count of AVAILABLE serialized
     stock_units) and current cost (product cost_price / landed_cost) per
     product. Fail-soft: any error yields an empty/partial map (the true-up then
     treats missing products as zero on-hand at zero cost -> takes the invoice
-    cost, which is the correct first-receipt behaviour)."""
+    cost, which is the correct first-receipt behaviour).
+
+    S9: `exclude_grn_id` subtracts the units THIS delivery minted. The blend
+    adds the invoiced quantity as the incoming layer, so counting the same
+    delivery again in the "existing" on-hand made every delivery appear twice in
+    its own average and dragged the new cost back toward the old one (receive 10
+    @100, be billed @120 -> 110 instead of 120). Subtracting only the units
+    still AVAILABLE from this GRN is exactly right: a unit from this delivery
+    that has already sold is no longer AVAILABLE, so it was never in the count."""
     state: dict = {}
     if db is None or not product_ids:
         return state
@@ -413,8 +423,19 @@ def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
             except Exception:
                 # very old pymongo / fake: fall back to count()
                 cnt = coll.count(flt) if hasattr(coll, "count") else 0
+            # S9: take this delivery's own units back out of the "existing"
+            # on-hand. Counted as a second equality query rather than a $ne so
+            # the arithmetic is identical on Mongo and on the test doubles.
+            own = 0
+            if exclude_grn_id:
+                own_flt = dict(flt)
+                own_flt["source_id"] = exclude_grn_id
+                try:
+                    own = int(coll.count_documents(own_flt) or 0)
+                except Exception:
+                    own = 0
             state.setdefault(pid, {"cost_price": None, "on_hand_qty": 0})
-            state[pid]["on_hand_qty"] = int(cnt or 0)
+            state[pid]["on_hand_qty"] = max(0, int(cnt or 0) - own)
     except Exception:
         pass
     return state
@@ -441,7 +462,9 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
-        product_state = _product_state_for_valuation(db, pids, store_id)
+        product_state = _product_state_for_valuation(
+            db, pids, store_id, exclude_grn_id=grn_id
+        )
         updates = pmatch.valuation_trueup_for_invoice(
             lines, product_state, config.get("valuation_method")
         )

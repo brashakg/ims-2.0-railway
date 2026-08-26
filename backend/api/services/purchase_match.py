@@ -279,6 +279,7 @@ def three_way_match(
     Rules (each compared against tolerance_pct):
       * qty: |invoiced - ordered| and |received - ordered| within tolerance.
         A short/over receipt OR an over/under-invoice vs the order is flagged.
+      * qty: invoiced > accepted (received) -> EXCEPTION with NO tolerance (F2).
       * price: |invoice_unit_price - po_unit_price| within tolerance.
       * a product invoiced/received that is NOT on the PO -> EXCEPTION
         ("not on purchase order").
@@ -348,6 +349,22 @@ def three_way_match(
                     reasons.append(
                         "Invoiced but no goods received against this PO line"
                     )
+            # F2 -- BILL vs RECEIPT. The two comparisons above both measure
+            # against the ORDER, so a delivery that was short or partly rejected
+            # inside the tolerance was billed in full and paid silently. You may
+            # never be billed for more than was ACCEPTED into stock, and a
+            # rejected unit is not a rounding difference -- NO tolerance applies.
+            if (
+                inv_line is not None
+                and received_qty is not None
+                and received_qty > 0
+                and invoiced_qty > received_qty
+            ):
+                reasons.append(
+                    f"Invoiced qty {invoiced_qty:g} exceeds the accepted qty "
+                    f"{received_qty:g} on the goods receipt - billed for goods "
+                    f"that were rejected or never arrived"
+                )
             # Price: invoice vs PO.
             if inv_line is not None and po_unit_price is not None:
                 price_var_pct = _pct_diff(invoice_unit_price, po_unit_price)
