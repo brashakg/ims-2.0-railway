@@ -20,9 +20,17 @@
 // PO's unit price), so a zero-cost line is blocked up front.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { FileText, Loader2, Plus, Trash2 } from 'lucide-react';
+import { AlertTriangle, FileText, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { vendorsApi } from '../../services/api/inventory';
+
+/** Today in the browser's own calendar, as the yyyy-mm-dd an <input type="date">
+ *  understands. Used as the picker's floor -- the SERVER is what actually
+ *  refuses a past date (a picker minimum is a courtesy, not a rule). */
+export function todayForDateInput(now: Date = new Date()): string {
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
 
 // A vendor as the composer needs it. Each caller maps its own source shape
 // (purchase `Supplier` / vendors list) down to this before handing it over.
@@ -40,7 +48,18 @@ export interface ComposerLine {
   sku: string;
   quantity: number;
   unitCost: number;
+  /** GST percent for this line. Comes from the picked product's own catalogued
+   *  rate (which was settled from its HSN), NOT from a flat house default --
+   *  frames are 5% and sunglasses 18%, so one number for everything was simply
+   *  wrong. 0 with gstResolved false means "we do not know yet", which the row
+   *  says out loud instead of quietly charging something. */
   taxRate: number;
+  /** The product's HSN, shown so a buyer can see WHY the rate is what it is. */
+  hsn?: string | null;
+  /** Colour / size / MRP -- what tells two frames of one model apart. */
+  productDetail?: string;
+  /** False when nothing on the product could settle a GST rate. */
+  gstResolved?: boolean;
   // Set true once the operator (or a caller default) has typed a cost -- guards
   // the last-cost prefill from ever overwriting a value someone chose.
   costTouched?: boolean;
@@ -73,6 +92,11 @@ export interface ComposerSubmitPayload {
 export interface PurchaseOrderComposerProps {
   mode: 'page' | 'modal';
   vendors: ComposerVendorOption[];
+  /** Is this an inter-state purchase? true -> IGST, false -> CGST + SGST,
+   *  null/undefined -> we cannot tell from the GST numbers we hold, so the
+   *  totals say so rather than pretending. The caller works this out from the
+   *  chosen vendor and the receiving store (see isInterStateSupply). */
+  interstate?: boolean | null;
   vendorsLoading?: boolean;
   initialVendorId?: string;
   initialLines?: ComposerLine[];
@@ -87,7 +111,15 @@ export interface PurchaseOrderComposerProps {
   renderProductCell: (args: {
     line: ComposerLine;
     index: number;
-    pickProduct: (p: { productId: string; productName: string; sku: string; costPrice?: number }) => void;
+    pickProduct: (p: {
+      productId: string;
+      productName: string;
+      sku: string;
+      costPrice?: number;
+      gstRate?: number | null;
+      hsn?: string | null;
+      detail?: string;
+    }) => void;
     clearProduct: () => void;
   }) => ReactNode;
   /** Show the "Add Item" affordance so the buyer can append blank lines (manual
@@ -95,6 +127,9 @@ export interface PurchaseOrderComposerProps {
   allowAddLine?: boolean;
   /** Optional post-append hook (rarely needed) fired after a blank line is added. */
   onAddLine?: () => void;
+  /** Told which vendor is selected, so the caller can work out the place of
+   *  supply (and hand `interstate` back down). */
+  onVendorChange?: (vendorId: string) => void;
   /** Whether a line may be removed. Manual form: yes (min 1). Buy Desk: no. */
   allowRemoveLine?: boolean;
   onSubmit: (payload: ComposerSubmitPayload) => Promise<void>;
@@ -108,9 +143,18 @@ export interface PurchaseOrderComposerProps {
 // build the same shape.
 export function applyPickedProduct(
   line: ComposerLine,
-  picked: { productId: string; productName: string; sku: string; costPrice?: number },
+  picked: {
+    productId: string;
+    productName: string;
+    sku: string;
+    costPrice?: number;
+    gstRate?: number | null;
+    hsn?: string | null;
+    detail?: string;
+  },
 ): ComposerLine {
   const keepCost = line.costTouched || line.unitCost > 0;
+  const rate = typeof picked.gstRate === 'number' && picked.gstRate >= 0 ? picked.gstRate : null;
   return {
     ...line,
     productId: picked.productId,
@@ -120,6 +164,12 @@ export function applyPickedProduct(
     // can always override. This is NOT the last-paid prefill (that runs off the
     // vendor lookup) -- it's the catalog's own cost_price fallback.
     unitCost: keepCost ? line.unitCost : picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0,
+    // The picked product carries its own GST rate + HSN. Nothing is guessed:
+    // a product with neither leaves the line unresolved and visibly flagged.
+    taxRate: rate ?? 0,
+    hsn: picked.hsn ?? null,
+    productDetail: picked.detail ?? '',
+    gstResolved: rate !== null,
     lastPaid: null,
   };
 }
@@ -138,7 +188,13 @@ const blankLine = (): ComposerLine => ({
   sku: '',
   quantity: 1,
   unitCost: 0,
-  taxRate: 18,
+  // NOT 18. An empty line has no product yet, so it has no rate yet; picking
+  // the product brings its own. The old flat 18% over-taxed every frame,
+  // spectacle lens and contact lens on the page (all 5%).
+  taxRate: 0,
+  hsn: null,
+  productDetail: '',
+  gstResolved: false,
   costTouched: false,
   lastPaid: null,
 });
@@ -146,6 +202,7 @@ const blankLine = (): ComposerLine => ({
 export function PurchaseOrderComposer({
   mode,
   vendors,
+  interstate = null,
   vendorsLoading = false,
   initialVendorId = '',
   initialLines,
@@ -153,6 +210,7 @@ export function PurchaseOrderComposer({
   renderProductCell,
   allowAddLine = false,
   onAddLine,
+  onVendorChange,
   allowRemoveLine = false,
   onSubmit,
   submitLabel = 'Create as Draft',
@@ -178,6 +236,12 @@ export function PurchaseOrderComposer({
   useEffect(() => {
     if (initialVendorId) setVendorId((prev) => prev || initialVendorId);
   }, [initialVendorId]);
+
+  // Hand the current vendor to the caller so it can resolve the place of
+  // supply. One effect covers both the operator's pick and an async preselect.
+  useEffect(() => {
+    onVendorChange?.(vendorId);
+  }, [vendorId, onVendorChange]);
 
   // --- exposed line mutators (the product cell reaches these via context-free
   // callbacks passed down through renderProductCell's closure in each caller) --
@@ -269,13 +333,22 @@ export function PurchaseOrderComposer({
   }, [vendorId]);
 
   // ------------------------------------------------------------------------
-  const lineTotal = (l: ComposerLine) => l.quantity * l.unitCost * (1 + l.taxRate / 100);
+  const lineTax = (l: ComposerLine) => (l.quantity * l.unitCost * l.taxRate) / 100;
+  const lineTotal = (l: ComposerLine) => l.quantity * l.unitCost + lineTax(l);
   const subtotal = useMemo(() => lines.reduce((s, l) => s + l.quantity * l.unitCost, 0), [lines]);
-  const taxAmount = useMemo(
-    () => lines.reduce((s, l) => s + (l.quantity * l.unitCost * l.taxRate) / 100, 0),
+  const taxAmount = useMemo(() => lines.reduce((s, l) => s + lineTax(l), 0), [lines]);
+  const grandTotal = subtotal + taxAmount;
+  // Same money either way -- only WHICH tax it is changes, and that decides the
+  // return it is filed in. Inter-state = one IGST charge; within the state =
+  // CGST + SGST, half each.
+  const cgst = interstate ? 0 : taxAmount / 2;
+  const sgst = interstate ? 0 : taxAmount - cgst;
+  const igst = interstate ? taxAmount : 0;
+  // Lines whose product could not tell us a GST rate. Named, not guessed.
+  const unresolvedGst = useMemo(
+    () => lines.filter((l) => l.productId && !l.gstResolved),
     [lines],
   );
-  const grandTotal = subtotal + taxAmount;
 
   const handleSubmit = async () => {
     if (!vendorId) {
@@ -367,10 +440,12 @@ export function PurchaseOrderComposer({
           <input
             type="date"
             value={expectedDate}
+            min={todayForDateInput()}
             onChange={(e) => setExpectedDate(e.target.value)}
             className="input-field"
             aria-label="Expected Delivery Date"
           />
+          <p className="mt-1 text-xs text-gray-400">Today or later — a delivery cannot be promised in the past.</p>
         </div>
       </div>
 
@@ -394,20 +469,33 @@ export function PurchaseOrderComposer({
           {lines.map((line, index) => {
             const paidDate = formatPaidDate(line.lastPaid?.date);
             return (
-              <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+              // UI/UX (owner item 3): the product gets a FULL-WIDTH row of its
+              // own instead of being squeezed into 5 of 12 columns beside the
+              // numbers. On a 40-line PO the buyer scans identities down one
+              // column and numbers down another, and neither is truncated.
+              <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Product</label>
+                  {renderProductCell({
+                    line,
+                    index,
+                    pickProduct: (p) =>
+                      setLines((prev) => prev.map((l, i) => (i === index ? applyPickedProduct(l, p) : l))),
+                    clearProduct: () =>
+                      updateLine(index, {
+                        productId: '',
+                        productName: '',
+                        sku: '',
+                        taxRate: 0,
+                        hsn: null,
+                        productDetail: '',
+                        gstResolved: false,
+                        lastPaid: null,
+                      }),
+                  })}
+                </div>
                 <div className="grid grid-cols-12 gap-2 items-start">
-                  <div className="col-span-12 tablet:col-span-5">
-                    <label className="block text-xs text-gray-600 mb-1">Product</label>
-                    {renderProductCell({
-                      line,
-                      index,
-                      pickProduct: (p) =>
-                        setLines((prev) => prev.map((l, i) => (i === index ? applyPickedProduct(l, p) : l))),
-                      clearProduct: () =>
-                        updateLine(index, { productId: '', productName: '', sku: '', lastPaid: null }),
-                    })}
-                  </div>
-                  <div className="col-span-4 tablet:col-span-1">
+                  <div className="col-span-4 tablet:col-span-2">
                     <label className="block text-xs text-gray-600 mb-1">Qty</label>
                     <input
                       type="number"
@@ -441,14 +529,30 @@ export function PurchaseOrderComposer({
                       </p>
                     ) : null}
                   </div>
-                  <div className="col-span-8 tablet:col-span-2 text-right">
-                    <label className="block text-xs text-gray-600 mb-1">Total</label>
+                  <div className="col-span-6 tablet:col-span-3">
+                    <label className="block text-xs text-gray-600 mb-1">GST</label>
+                    {line.productId && !line.gstResolved ? (
+                      <p className="text-sm py-2 text-amber-700 flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        <span>Rate not set</span>
+                      </p>
+                    ) : (
+                      <p className="text-sm text-gray-900 py-2">
+                        {line.taxRate}%
+                        {line.hsn ? (
+                          <span className="text-xs text-gray-400"> · HSN {line.hsn}</span>
+                        ) : null}
+                      </p>
+                    )}
+                  </div>
+                  <div className="col-span-6 tablet:col-span-3 text-right">
+                    <label className="block text-xs text-gray-600 mb-1">Line Total</label>
                     <p className="text-sm font-semibold text-gray-900 py-2">
                       {'₹'}
                       {lineTotal(line).toLocaleString('en-IN')}
                     </p>
                   </div>
-                  <div className="col-span-4 tablet:col-span-1 flex justify-end">
+                  <div className="col-span-12 tablet:col-span-1 flex justify-end">
                     {allowRemoveLine ? (
                       <button
                         type="button"
@@ -468,23 +572,42 @@ export function PurchaseOrderComposer({
         </div>
       </div>
 
-      {/* Totals */}
+      {/* Totals -- GST shown as it will actually be charged and filed */}
       <div className="flex justify-end">
-        <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
+        <div className="w-72 space-y-2 p-4 bg-gray-50 rounded-lg">
           <div className="flex justify-between text-sm">
-            <span className="text-gray-600">Subtotal</span>
+            <span className="text-gray-600">Taxable value</span>
             <span className="font-medium text-gray-900">
               {'₹'}
               {subtotal.toLocaleString('en-IN')}
             </span>
           </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-600">Tax</span>
-            <span className="font-medium text-gray-900">
-              {'₹'}
-              {taxAmount.toLocaleString('en-IN')}
-            </span>
-          </div>
+          {interstate ? (
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">IGST</span>
+              <span className="font-medium text-gray-900">
+                {'₹'}
+                {igst.toLocaleString('en-IN')}
+              </span>
+            </div>
+          ) : (
+            <>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">CGST</span>
+                <span className="font-medium text-gray-900">
+                  {'₹'}
+                  {cgst.toLocaleString('en-IN')}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">SGST</span>
+                <span className="font-medium text-gray-900">
+                  {'₹'}
+                  {sgst.toLocaleString('en-IN')}
+                </span>
+              </div>
+            </>
+          )}
           <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
             <span className="text-gray-900">Grand Total</span>
             <span className="text-gray-900">
@@ -492,8 +615,31 @@ export function PurchaseOrderComposer({
               {grandTotal.toLocaleString('en-IN')}
             </span>
           </div>
+          <p className="text-xs text-gray-400 pt-1">
+            {interstate === null
+              ? 'Shown as a within-state purchase — add the GST number to this vendor and to this shop and the correct split will be used.'
+              : interstate
+                ? 'Different states — the vendor charges IGST.'
+                : 'Same state — the vendor charges CGST + SGST.'}
+          </p>
         </div>
       </div>
+
+      {unresolvedGst.length > 0 ? (
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">
+              No GST rate for {unresolvedGst.length} {unresolvedGst.length === 1 ? 'product' : 'products'}
+            </p>
+            <p className="text-xs mt-0.5">
+              {unresolvedGst.map((l) => l.productName || l.sku).join(', ')} — add the HSN number on the
+              product so its tax can be worked out. The order can still be raised; the tax on it will
+              be short until the HSN is filled in.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Notes */}
       <div>

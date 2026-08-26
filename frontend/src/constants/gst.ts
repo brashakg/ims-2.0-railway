@@ -324,3 +324,45 @@ export default {
   GSTR1_SECTIONS,
   GSTR3B_TABLES,
 };
+
+// ============================================================================
+// PLACE OF SUPPLY — inter-state (IGST) vs intra-state (CGST + SGST)
+// ============================================================================
+// India: a supply INSIDE one state is split half-and-half into CGST + SGST; a
+// supply ACROSS states is a single IGST charge. Which one applies is decided by
+// comparing the two parties' states -- for a SALE, the store's vs the
+// customer's; for a PURCHASE, the vendor's vs the receiving store's. This
+// business runs 3 legal entities over 4 GSTINs in 2 states, so neither side is
+// a constant.
+//
+// A GSTIN carries its state in its first two digits, so two GSTINs settle it
+// exactly. Falling back to the declared state name is a best effort. These are
+// SCREEN previews: the server recomputes the split from the GST numbers on file
+// and its answer is the one that is stored.
+
+/** The 2-digit GST state code out of the first usable candidate (a 15-char
+ *  GSTIN, or an already-bare 2-digit code). '' when none resolves. */
+export function gstStateCode(...candidates: Array<string | null | undefined>): string {
+  for (const candidate of candidates) {
+    const s = (candidate ?? '').toString().trim();
+    if (!s) continue;
+    if (s.length === 15 && /^\d{2}/.test(s)) return s.slice(0, 2);
+    if (/^\d{2}$/.test(s)) return s;
+  }
+  return '';
+}
+
+/** true = inter-state (IGST), false = intra-state (CGST + SGST),
+ *  null = cannot be told from what we hold (caller should say so, not guess). */
+export function isInterStateSupply(
+  a: { gstin?: string | null; state?: string | null },
+  b: { gstin?: string | null; state?: string | null },
+): boolean | null {
+  const codeA = gstStateCode(a.gstin);
+  const codeB = gstStateCode(b.gstin);
+  if (codeA && codeB) return codeA !== codeB;
+  const nameA = (a.state ?? '').trim().toLowerCase();
+  const nameB = (b.state ?? '').trim().toLowerCase();
+  if (nameA && nameB) return nameA !== nameB;
+  return null;
+}
