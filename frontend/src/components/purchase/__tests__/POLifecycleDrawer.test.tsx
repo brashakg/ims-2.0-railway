@@ -105,6 +105,36 @@ describe('POLifecycleDrawer — timeline rendering', () => {
     // ref + detail joined on one muted line
     expect(screen.getByText(/Emailed to vendor/)).toBeInTheDocument();
   });
+
+  it('names the PERSON who did each event, not their role', async () => {
+    // Owner report: the timeline read "SUPERADMIN" where a name belongs. The
+    // server now sends `by` (a display name); the drawer must print it.
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [
+          { kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z', ref: 'PO-2026-0042', by: 'Dinesh Kumar Gupta' },
+          { kind: 'sent', label: 'Sent', at: '2026-06-02T11:00:00Z', ref: 'PO-2026-0042', detail: 'PO sent to the vendor', by: 'Shyam Sunder' },
+        ],
+      }),
+    );
+    renderDrawer();
+
+    expect(await screen.findByText(/by Dinesh Kumar Gupta/)).toBeInTheDocument();
+    expect(screen.getByText(/by Shyam Sunder/)).toBeInTheDocument();
+  });
+
+  it('names nobody when the event carries no person', async () => {
+    // Degrade honestly: an event with no stored actor must not borrow a name.
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [{ kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z', ref: 'PO-2026-0042' }],
+      }),
+    );
+    renderDrawer();
+
+    await screen.findByTestId('po-timeline-event');
+    expect(screen.queryByText(/\bby\b/)).not.toBeInTheDocument();
+  });
 });
 
 describe('POLifecycleDrawer — next-step derivation', () => {
