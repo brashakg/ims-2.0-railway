@@ -199,6 +199,12 @@ class BlindStockTakeEngine:
         if sess is None:
             raise BlindStockTakeError("count session not found", status=404, code="not_found")
         items = sess.get("items") or []
+        if not items:
+            # A session with nothing submitted used to lock and report
+            # total_skus 0 / short 0 / within_tolerance TRUE -- a perfect count
+            # of a shelf nobody walked. Refuse it; the session stays OPEN.
+            raise BlindStockTakeError(
+                "nothing was counted in this session", status=400, code="empty_count")
         pids = [it.get("product_id") for it in items if it.get("product_id")]
         on_hand = on_hand_resolver(store_id, pids) or {}
         costs = (cost_resolver(pids) if cost_resolver else {}) or {}
