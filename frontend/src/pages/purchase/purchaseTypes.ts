@@ -70,8 +70,6 @@ export interface POItem {
   receivedQty?: number;
 }
 
-/** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
- *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */
 // An audit stamp names a PERSON. The backend resolves the raw user id it
 // stores ("user-superadmin") into a display name and returns it beside the id
 // as <field>_name; that name is ABSENT when the id no longer matches a user.
@@ -82,6 +80,8 @@ export function byPerson(name?: string | null, id?: string | null): string {
   return who ? ` by ${who}` : '';
 }
 
+/** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
+ *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */
 export const RECEIVABLE_PO_STATUSES: readonly POStatus[] = [
   'SENT',
   'ACKNOWLEDGED',
