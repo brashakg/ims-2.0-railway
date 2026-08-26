@@ -54,8 +54,15 @@ export function SupplierFormModal({
   const [address, setAddress] = useState(supplier?.address ?? '');
   const [city, setCity] = useState(supplier?.city ?? '');
   // Only used when there is no GSTIN. Holds the 2-digit GST code.
+  //
+  // Seeded even for a vendor that HAS a GSTIN, from the registration first and
+  // the stored code second -- the same precedence as derive_vendor_state. The
+  // box is hidden while a GSTIN is present, so this is invisible right up to
+  // the moment the number is cleared; seeding it '' is what made clearing a
+  // GSTIN also throw the vendor's state away. Losing the registration does not
+  // move the vendor: an unregistered vendor is still in the same place.
   const [stateCode, setStateCode] = useState(
-    supplier?.gstNumber ? '' : supplier?.stateCode ?? '',
+    gstinStateCode(supplier?.gstNumber) || supplier?.stateCode || '',
   );
   const [gst, setGST] = useState(supplier?.gstNumber ?? '');
   const [paymentTerms, setPaymentTerms] = useState(supplier?.paymentTerms ?? 30);
@@ -96,6 +103,18 @@ export function SupplierFormModal({
       setGSTError(problem);
       return;
     }
+    // Ask, never invent. With no GSTIN to read the state off, the placeholder
+    // this used to post ('N/A') reached derive_vendor_state as an unrecognised
+    // state NAME: it was stored verbatim with state_code null, so the vendor
+    // looked like it had a state while no bill could be classified CGST+SGST
+    // vs IGST for it again. A sentinel that looks like data is worse than a
+    // refusal the user can act on.
+    if (!effectiveStateCode) {
+      toast.error(
+        "Pick the vendor's state - it decides whether their bills are CGST + SGST or IGST.",
+      );
+      return;
+    }
 
     // Empty box -> null, NOT undefined. JSON.stringify drops undefined keys,
     // so an unregistered-from-now-on vendor sent nothing at all, the server's
@@ -121,7 +140,8 @@ export function SupplierFormModal({
         city: city.trim() || 'N/A',
         // Send the code we derived, not a typed name. The server re-derives
         // from the GSTIN anyway; sending the same thing keeps the two honest.
-        state: effectiveStateCode || 'N/A',
+        // Never a placeholder: the guard above refuses the save instead.
+        state: effectiveStateCode,
         mobile: phone.trim(),
         email: email.trim() || undefined,
         vendor_code: code.trim().toUpperCase() || undefined,

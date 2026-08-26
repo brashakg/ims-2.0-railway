@@ -126,6 +126,26 @@ describe('SupplierFormModal in edit mode', () => {
     expect(JSON.parse(JSON.stringify(payload))).toHaveProperty('gstin', null);
   });
 
+  it('keeps the vendor in the same state when the GSTIN is cleared', async () => {
+    // Clearing the number is about the REGISTRATION, not about where the
+    // vendor is. This form used to seed its hidden State box to '' for any
+    // vendor that had a GSTIN, so the moment the number went the derived state
+    // went with it and the payload carried the placeholder 'N/A' -- which
+    // derive_vendor_state stores verbatim with state_code null. The vendor
+    // silently stopped being classifiable CGST+SGST vs IGST, and the card went
+    // on showing "Jharkhand" until someone reloaded.
+    render(<SupplierFormModal supplier={existing} onClose={() => {}} onSaved={() => {}} />);
+
+    fireEvent.change(label(/gst number/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save supplier/i }));
+
+    await waitFor(() => expect(updateVendor).toHaveBeenCalledTimes(1));
+    const payload = updateVendor.mock.calls[0][1];
+    expect(payload.gstin).toBeNull();
+    expect(payload.state).toBe('20');
+    expect(payload.state).not.toBe('N/A');
+  });
+
   it('surfaces the server\'s reason when the save is refused', async () => {
     updateVendor.mockRejectedValue({
       response: { data: { detail: 'Vendor with this GSTIN already exists' } },
@@ -168,6 +188,21 @@ describe('SupplierFormModal state-from-GSTIN', () => {
     fireEvent.click(screen.getByRole('button', { name: /save supplier/i }));
 
     expect(await screen.findByText(/15 characters/i)).toBeInTheDocument();
+    expect(createVendor).not.toHaveBeenCalled();
+  });
+
+  it('asks for the state instead of inventing one, when there is no GSTIN', async () => {
+    // A brand-new unregistered vendor with no state picked. The old form posted
+    // state: 'N/A' on the user's behalf -- a sentinel that looks like data.
+    // There is nothing to derive from, so the only honest move is to ask.
+    render(<SupplierFormModal onClose={() => {}} onCreated={() => {}} />);
+    fireEvent.change(label(/company name/i), { target: { value: 'Acme Lens Co' } });
+    fireEvent.change(label(/phone/i), { target: { value: '9000000000' } });
+    fireEvent.click(screen.getByRole('button', { name: /save supplier/i }));
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('state')),
+    );
     expect(createVendor).not.toHaveBeenCalled();
   });
 

@@ -396,6 +396,32 @@ class TestClearingTheGstin:
         # ...and the row does not go on claiming to be REGISTERED.
         assert doc["gstin_status"] == "UNREGISTERED"
 
+    def test_clearing_the_gstin_leaves_the_vendor_in_the_same_state(self, vendor_client):
+        """Losing a registration does not move the vendor.
+
+        The server already gets this right: with `state` omitted it re-derives
+        from the row's own stored state, so the clear keeps Jharkhand. This
+        pins that contract, because the SUPPLIER FORM now depends on it -- it
+        used to post `state: "N/A"` alongside the null GSTIN, and
+        derive_vendor_state keeps an unrecognised state name verbatim with NO
+        code, leaving a vendor whose bills can no longer be classified
+        CGST+SGST vs IGST at all.
+        """
+        client, repo = vendor_client
+        vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
+            "vendor_id"
+        ]
+        assert repo.find_by_id(vid)["state_code"] == "20"
+
+        assert client.put(
+            f"/api/v1/vendors/{vid}", json={"gstin": None}
+        ).status_code == 200
+
+        doc = repo.find_by_id(vid)
+        assert doc["gstin"] is None
+        assert doc["state"] == "Jharkhand"
+        assert doc["state_code"] == "20"
+
     def test_an_omitted_gstin_key_never_wipes_the_stored_number(self, vendor_client):
         client, repo = vendor_client
         vid = client.post("/api/v1/vendors", json=_body(gstin=JH_GSTIN)).json()[
