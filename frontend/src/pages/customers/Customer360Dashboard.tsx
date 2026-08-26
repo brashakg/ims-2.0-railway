@@ -41,6 +41,8 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
 import { PrescriptionHistoryModal } from '../../components/clinical/PrescriptionHistoryModal';
+// PATIENT SAFETY: one power formatter; a blank power is not a recorded 0.
+import { formatPowerOrDash } from '../../utils/rxPowerValue';
 import clsx from 'clsx';
 
 type Customer360Tab = 'overview' | 'prescriptions' | 'orders' | 'interactions' | 'loyalty' | 'preferences';
@@ -806,16 +808,21 @@ function PrescriptionsTab({ prescriptions, customerId, customerName }: Prescript
 
           {/* Prescription Details */}
           <div className="grid grid-cols-2 gap-4 text-sm">
+            {/* Powers through the ONE formatter: a positive power shows its
+                explicit "+", and `|| '-'` is gone -- it turned a recorded plano
+                (a real finding: this eye needs no correction) into a dash that
+                claims nothing was measured. AXIS keeps `|| '-'` deliberately:
+                0 is not a meridian, so there a falsy value really is absent. */}
             <div>
               <p className="text-gray-500">Right Eye (OD)</p>
               <p className="text-gray-900">
-                SPH: {rx.rightEyeSph || '-'} | CYL: {rx.rightEyeCyl || '-'} | AXIS: {rx.rightEyeAxis || '-'}
+                SPH: {formatPowerOrDash(rx.rightEyeSph)} | CYL: {formatPowerOrDash(rx.rightEyeCyl)} | AXIS: {rx.rightEyeAxis || '-'}
               </p>
             </div>
             <div>
               <p className="text-gray-500">Left Eye (OS)</p>
               <p className="text-gray-900">
-                SPH: {rx.leftEyeSph || '-'} | CYL: {rx.leftEyeCyl || '-'} | AXIS: {rx.leftEyeAxis || '-'}
+                SPH: {formatPowerOrDash(rx.leftEyeSph)} | CYL: {formatPowerOrDash(rx.leftEyeCyl)} | AXIS: {rx.leftEyeAxis || '-'}
               </p>
             </div>
           </div>

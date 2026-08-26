@@ -59,7 +59,9 @@ class _FakeTestRepo:
 
     def complete_test(self, test_id, right_eye, left_eye, pd=None, notes=None,
                       lens_recommendation=None, coating_recommendation=None,
-                      clinical_findings=None, soap_note=None):
+                      clinical_findings=None, soap_note=None,
+                      exam_blocks=None, exam_header=None,
+                      ipd=None, next_checkup=None):
         if not self._doc or self._doc.get("test_id") != test_id:
             return False
         self.complete_calls += 1
@@ -71,6 +73,13 @@ class _FakeTestRepo:
             self._doc["clinical_findings"] = clinical_findings
         if soap_note:
             self._doc["soap_note"] = soap_note
+        # The lensometer / slit-lamp / auto-ref / subjective-refraction tabs and
+        # the exam header. Mirrored key-for-key like the real repo -- a double
+        # narrower than production is how a signature change gets missed.
+        for key, value in (exam_blocks or {}).items():
+            self._doc[key] = value
+        for key, value in (exam_header or {}).items():
+            self._doc[key] = value
         return True
 
 

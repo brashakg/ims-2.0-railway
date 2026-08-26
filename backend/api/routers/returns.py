@@ -52,6 +52,7 @@ from ..dependencies import (
     get_stock_repository,
     validate_store_access,
 )
+from ..services import cash_denominations as cash_denom
 from ..services import restock_engine
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
@@ -140,6 +141,11 @@ class RefundTenderLine(BaseModel):
 
     method: str = Field(..., description="CASH / UPI / CARD / BANK")
     amount: float = Field(..., ge=0)
+    # Which notes and coins physically left the drawer on THIS leg. Optional,
+    # CASH-only, and purely an attached record: the 400 gate below compares
+    # `amount` against the net refund and a denomination sum never enters that
+    # comparison. A leg with no breakdown is stored NOT_CAPTURED, never zero.
+    cash_count: Optional[cash_denom.CashCountInput] = None
 
 
 class ReturnCreate(BaseModel):
@@ -723,6 +729,11 @@ def _normalize_refund_tenders(
     # Folding here also makes the PERSISTED breakdown canonical for the readers.
     folded: Dict[str, float] = {}
     order_seen: List[str] = []
+    # The notes fold with the legs they belong to. Two CASH legs that fold into
+    # one canonical Rs 5,900 row must carry the SUM of their two count sheets,
+    # or the folded row would report half the money as notes.
+    counted_rows: Dict[str, List[Dict[str, Any]]] = {}
+    counted_state: Dict[str, str] = {}
     for t in raw:
         method = str(getattr(t, "method", "") or "").strip().upper()
         canon = canonicalize_tender(method)
@@ -744,9 +755,37 @@ def _normalize_refund_tenders(
         if canon not in folded:
             order_seen.append(canon)
         folded[canon] = round(folded.get(canon, 0.0) + amt, 2)
-    out: List[Dict[str, Any]] = [
-        {"method": m, "amount": folded[m]} for m in order_seen
-    ]
+        leg_count = getattr(t, "cash_count", None)
+        if leg_count is not None:
+            # Raw off the wire -- merge_rows runs them through the ONE
+            # normaliser, which is also the only thing that copes with a
+            # sheet a caller sent as junk.
+            counted_rows.setdefault(canon, []).append(leg_count.rows)
+            # SUGGESTED is only kept when EVERY folded leg was suggested; one
+            # human-counted leg makes the folded row a counted row.
+            state = str(leg_count.state or cash_denom.STATE_COUNTED).upper()
+            prior = counted_state.get(canon)
+            counted_state[canon] = (
+                state if prior is None or prior == state else cash_denom.STATE_COUNTED
+            )
+    out: List[Dict[str, Any]] = []
+    for m in order_seen:
+        row: Dict[str, Any] = {"method": m, "amount": folded[m]}
+        # CASH-only: a UPI or store-credit refund has no notes to count. The
+        # block is attached to the row and NEVER consulted by the balance gate
+        # below -- the amount is what must equal the net refund.
+        if m == "CASH":
+            amount_paisa = cash_denom.rupees_to_paisa(folded[m])
+            if m in counted_rows:
+                merged = cash_denom.merge_rows(*counted_rows[m])
+                row["cash_count"] = cash_denom.build_block(
+                    merged,
+                    amount_paisa,
+                    state=counted_state.get(m) or cash_denom.STATE_COUNTED,
+                )
+            else:
+                row["cash_count"] = cash_denom.not_captured_block(amount_paisa)
+        out.append(row)
     total = round(sum(folded.values()), 2)
     if not out:
         return None, False
@@ -2456,6 +2495,41 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
 
 
 # ============================================================================
+# THE EXCHANGE DOOR IS CLOSED (owner ruling 2026-08-25, lifecycle finding S1)
+# ============================================================================
+# An exchange put the returned frame back on the shelf (:3152, :3575) and
+# settled the price difference at the till -- and never touched the REPLACEMENT
+# at all. It was not decremented from stock and no invoice was ever raised for
+# it. Every exchange therefore left behind one phantom frame the system still
+# believed it owned, plus a real hand-over that reached no revenue figure, no
+# GST return and no Tally export. The drawer balanced to the paisa, so nothing
+# ever looked wrong.
+#
+# The ruling is to SHUT THE DOOR rather than half-build the billing -- a half-
+# implemented exchange is exactly how this defect was born. Staff take the item
+# back as a RETURN and then ring the replacement up as an ordinary sale; both of
+# those paths already decrement stock and raise a bill correctly today. An
+# exchange that raises a real second bill comes later as its own change, which
+# is why the pricing/settlement machinery below is left intact rather than
+# deleted.
+#
+# Closed at the SERVER, not just on the screen: an old browser tab or a direct
+# call would otherwise still open the leak. Reading, listing, filtering and
+# reversing EXCHANGE records already written is deliberately untouched.
+_EXCHANGE_CLOSED_MSG = (
+    "Exchanges are switched off. Take the item back as a Return & Refund, "
+    "then ring up the replacement as a normal sale at the till -- that way it "
+    "leaves stock and the customer gets a bill for it."
+)
+
+
+def _gate_exchange_closed(return_type: Optional[str]) -> None:
+    """Refuse an EXCHANGE with an instruction a cashier can act on."""
+    if str(return_type or "").strip().upper() == "EXCHANGE":
+        raise HTTPException(status_code=400, detail=_EXCHANGE_CLOSED_MSG)
+
+
+# ============================================================================
 # ENDPOINTS
 # ============================================================================
 
@@ -2482,6 +2556,7 @@ async def quote_return(
     the cashier what is legitimately refundable per tender instead of guessing
     -- the same figures ``_gate_refund_tenders_against_order`` enforces on POST.
     """
+    _gate_exchange_closed(body.return_type)
     order = _resolve_order(body)
     if order is None:
         raise HTTPException(status_code=404, detail="Original order not found")
@@ -2626,6 +2701,9 @@ async def create_return(
     duplicating the financial record. Fail-soft: any lookup failure falls
     through to the normal (non-idempotent) path.
     """
+    # Before ANYTHING else -- an EXCHANGE must not even replay an idempotency
+    # key, because the door it would replay through is shut.
+    _gate_exchange_closed(body.return_type)
     # POS-14: idempotency guard -- look for an existing return with this key.
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.

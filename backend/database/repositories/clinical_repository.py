@@ -148,6 +148,41 @@ class EyeTestRepository(BaseRepository):
         }
         return self.create(test_data)
 
+    @staticmethod
+    def _prescription_block(
+        right_eye: Dict,
+        left_eye: Dict,
+        pd: Optional[float],
+        notes: Optional[str],
+        lens_recommendation: Optional[str],
+        coating_recommendation: Optional[str],
+        ipd: Optional[str],
+        next_checkup: Optional[str],
+    ) -> Dict:
+        """The Final-Rx blob stored ON THE TEST DOCUMENT.
+
+        ONE builder for both writes -- the first completion and every later
+        amendment -- so the exam record cannot be one shape when it is written
+        and another shape when it is corrected.
+
+        `ipd` (the BINOCULAR pupillary distance) and `next_checkup` are stored
+        here because they used to be written ONLY to the mirrored prescription.
+        The exam therefore had no IPD to give back, the Edit screen opened that
+        box blank, and saving would have pushed the blank at the lab-facing
+        prescription. `pd` is a different number -- it is filled from a
+        MONOCULAR per-eye PD -- and is never a substitute for ipd.
+        """
+        return {
+            "right_eye": right_eye,
+            "left_eye": left_eye,
+            "pd": pd,
+            "ipd": ipd,
+            "next_checkup": next_checkup,
+            "notes": notes,
+            "lens_recommendation": lens_recommendation,
+            "coating_recommendation": coating_recommendation,
+        }
+
     def complete_test(
         self,
         test_id: str,
@@ -159,6 +194,10 @@ class EyeTestRepository(BaseRepository):
         coating_recommendation: Optional[str] = None,
         clinical_findings: Optional[Dict] = None,
         soap_note: Optional[Dict] = None,
+        exam_blocks: Optional[Dict] = None,
+        exam_header: Optional[Dict] = None,
+        ipd: Optional[str] = None,
+        next_checkup: Optional[str] = None,
     ) -> bool:
         """Complete eye test with prescription data.
 
@@ -175,19 +214,108 @@ class EyeTestRepository(BaseRepository):
         update_data = {
             "status": "COMPLETED",
             "completed_at": datetime.now().isoformat(),
-            "prescription": {
-                "right_eye": right_eye,
-                "left_eye": left_eye,
-                "pd": pd,
-                "notes": notes,
-                "lens_recommendation": lens_recommendation,
-                "coating_recommendation": coating_recommendation
-            }
+            "prescription": self._prescription_block(
+                right_eye,
+                left_eye,
+                pd,
+                notes,
+                lens_recommendation,
+                coating_recommendation,
+                ipd,
+                next_checkup,
+            ),
         }
         if clinical_findings:
             update_data["clinical_findings"] = clinical_findings
         if soap_note:
             update_data["soap_note"] = soap_note
+        # The four exam tabs (lensometer / slit_lamp / auto_ref / subjective_rx)
+        # and the exam header. Each key is written only when the caller supplied
+        # it, so a refraction-only test stores exactly the document it always
+        # did, and an amendment that omits a tab never blanks the stored one.
+        for key, value in (exam_blocks or {}).items():
+            update_data[key] = value
+        for key, value in (exam_header or {}).items():
+            update_data[key] = value
+        return self.update(test_id, update_data)
+
+    def amend_test(
+        self,
+        test_id: str,
+        right_eye: Dict,
+        left_eye: Dict,
+        pd: Optional[float] = None,
+        notes: Optional[str] = None,
+        lens_recommendation: Optional[str] = None,
+        coating_recommendation: Optional[str] = None,
+        clinical_findings: Optional[Dict] = None,
+        soap_note: Optional[Dict] = None,
+        exam_blocks: Optional[Dict] = None,
+        exam_header: Optional[Dict] = None,
+        ipd: Optional[str] = None,
+        next_checkup: Optional[str] = None,
+        amended_by: Optional[str] = None,
+        amended_at: Optional[str] = None,
+    ) -> bool:
+        """Amend an ALREADY-COMPLETED test in place (the clinic Edit screen).
+
+        Deliberately NOT `complete_test`: that call also flips status, stamps
+        completed_at, and its caller creates the mirrored prescription and the
+        sales-floor handover. Re-running it to save an edit would duplicate
+        those. This writes only what the exam screen owns.
+
+        The previous version of the exam is pushed onto an ``amendments`` list
+        BEFORE the overwrite, so an amended clinical record keeps its history
+        rather than silently losing the reading it replaced. Nothing in the app
+        rewrites that list -- it is append-only evidence of what was changed.
+
+        A tab the caller omits is left ALONE, never blanked: `exam_blocks` only
+        carries the tabs the form actually sent.
+        """
+        current = self.find_by_id(test_id)
+        if not current:
+            return False
+
+        # Snapshot exactly the keys this amendment is about to overwrite.
+        snapshot_keys = ["prescription", "clinical_findings", "soap_note"]
+        snapshot_keys += list((exam_blocks or {}).keys())
+        snapshot_keys += list((exam_header or {}).keys())
+        previous = {k: current.get(k) for k in snapshot_keys if k in current}
+
+        update_data: Dict = {
+            "prescription": self._prescription_block(
+                right_eye,
+                left_eye,
+                pd,
+                notes,
+                lens_recommendation,
+                coating_recommendation,
+                ipd,
+                next_checkup,
+            )
+        }
+        if clinical_findings is not None:
+            update_data["clinical_findings"] = clinical_findings
+        if soap_note is not None:
+            update_data["soap_note"] = soap_note
+        for key, value in (exam_blocks or {}).items():
+            update_data[key] = value
+        for key, value in (exam_header or {}).items():
+            update_data[key] = value
+
+        stamped_at = amended_at or datetime.now().isoformat()
+        update_data["amended_at"] = stamped_at
+        if amended_by:
+            update_data["amended_by"] = amended_by
+        history = list(current.get("amendments") or [])
+        history.append(
+            {
+                "amended_at": stamped_at,
+                "amended_by": amended_by,
+                "previous": previous,
+            }
+        )
+        update_data["amendments"] = history
         return self.update(test_id, update_data)
 
     def save_soap_note(self, test_id: str, soap_note: Dict) -> bool:

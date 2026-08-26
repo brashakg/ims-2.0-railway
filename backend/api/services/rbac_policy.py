@@ -1073,6 +1073,16 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/tests/{test_id}/complete",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # Amend an already-completed exam (the clinic Edit screen, which reopens the
+    # full seven-tab form). Amending a recorded medical power is the same act as
+    # recording it, so it takes the SAME gate as completion, plus the per-object
+    # store guard the handler enforces.
+    {
+        "method": "PUT",
+        "path": "/api/v1/clinical/tests/{test_id}/exam",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     # F50 -- send a completed Rx to the sales floor (in-app handover). Same gate
     # as test completion (require_roles(*_CLINICAL_ROLES); SUPERADMIN implicit).
     # Per-store feature flag + store IDOR guard enforced in the handler.

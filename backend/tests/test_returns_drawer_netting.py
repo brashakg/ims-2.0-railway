@@ -674,8 +674,17 @@ def test_refund_tenders_balanced_split_is_accepted_and_flagged():
         [_tl("CASH", 2000.0), _tl("CARD", 6000.0)], 8000.0
     )
     assert auto is True
-    assert rows == [{"method": "CASH", "amount": 2000.0},
-                    {"method": "CARD", "amount": 6000.0}]
+    # The MONEY contract, unchanged. (A CASH leg additionally carries the
+    # notes-and-coins record; the caller here gave no breakdown, so it is an
+    # honest absence and NEVER a zero count -- asserted separately so this
+    # test keeps failing if a money field ever moves.)
+    assert [{"method": r["method"], "amount": r["amount"]} for r in rows] == [
+        {"method": "CASH", "amount": 2000.0},
+        {"method": "CARD", "amount": 6000.0},
+    ]
+    assert rows[0]["cash_count"]["state"] == "NOT_CAPTURED"
+    assert rows[0]["cash_count"]["matches_amount"] is None
+    assert "cash_count" not in rows[1]  # a CARD refund has no notes
 
 
 def test_refund_tenders_unbalanced_split_is_rejected():

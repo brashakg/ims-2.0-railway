@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.services import cash_register as cr  # noqa: E402
 from api.routers import finance  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 # CI's asyncio_mode=auto runs coroutine tests; the endpoint tests here use the
 # synchronous TestClient, but we mark the module so the convention is explicit.
@@ -69,7 +70,10 @@ class TestDenominationMath:
         faces_notes = [r["face"] for r in rows if r["kind"] == "note"]
         faces_coins = [r["face"] for r in rows if r["kind"] == "coin"]
         assert faces_notes == [500, 200, 100, 50, 20, 10]
-        assert faces_coins == [10, 5, 2, 1]
+        # The Rs 20 coin is in circulation and BOTH count sheets in the app
+        # already offer it; the backend's blank grid used to omit it, so a
+        # drawer holding Rs 20 coins had no row to enter them on.
+        assert faces_coins == [20, 10, 5, 2, 1]
         assert 2000 not in faces_notes  # RBI withdrew it
         assert all(r["pieces"] == 0 for r in rows)
 
@@ -304,7 +308,15 @@ class TestCashRegisterEndpoints:
                 "amount": 500,
                 "payment_mode": "CASH",
                 "status": "APPROVED",
-                "expense_date": opened_at[:10],
+                # BUG-104 TRAP: `opened_at` is `_iso_now()` ==
+                # datetime.utcnow().isoformat(), so opened_at[:10] is the UTC
+                # day. `expense_date` is filtered by `_ist_day_window`, an IST
+                # BUSINESS day. Between 00:00 and 05:30 IST the two are
+                # different days and the seeded expense drops out of the
+                # window. Shift by hand -- calling the production helper to
+                # build the fixture would let a broken helper agree with
+                # itself.
+                "expense_date": business_day(opened_at),
             }
         )
 
@@ -448,14 +460,24 @@ class TestCashRegisterEndpoints:
                 "drawer_auto_netted": True,
             }
         )
+        # `counted_override: 0` is a human saying "I counted it, it was
+        # empty". A drawer NOBODY counted has no variance to have a verdict
+        # about at all (that is NOT_COUNTED), so the negative-expected verdict
+        # can only be tested through a drawer that WAS counted.
         r = c.post(
             "/finance/cash-register/close",
-            json={"session_id": sid, "denominations": [], "tolerance": 0},
+            json={
+                "session_id": sid,
+                "denominations": [],
+                "counted_override": 0,
+                "tolerance": 0,
+            },
         )
         assert r.status_code == 200, r.text
         closed = r.json()
         assert closed["cash_refunds"] == 3900.0
         assert closed["expected"] == -3900.0          # the real number is shown
+        assert closed["counted"] == 0.0
         assert closed["variance"] == 3900.0
         # THE REGRESSION: the verdict must stay withheld, not become 'OVER'.
         assert closed["variance_status"] == "NEGATIVE_EXPECTED"

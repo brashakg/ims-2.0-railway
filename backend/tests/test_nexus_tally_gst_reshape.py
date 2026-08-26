@@ -28,9 +28,16 @@ from __future__ import annotations
 import os
 import sys
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
+
+# The IST business day the nightly export covers, frozen. IN_WINDOW is
+# 10:00 IST on that day expressed as the naive-UTC instant orders store
+# (04:30 UTC); EXPORT_DATE_ISO is the row key the orchestrator writes.
+EXPORT_DAY = date(2026, 5, 8)
+IN_WINDOW = datetime(2026, 5, 8, 4, 30)
+EXPORT_DATE_ISO = datetime(2026, 5, 8, tzinfo=timezone.utc).isoformat()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -78,10 +85,7 @@ def _raw_order(
         "order_id": order_id,
         "store_id": store_id,
         "status": "COMPLETED",
-        "created_at": created
-        or datetime.now(timezone.utc).replace(
-            hour=10, minute=0, second=0, microsecond=0, tzinfo=None
-        ),
+        "created_at": created or IN_WINDOW,
         "customer_name": "Walk-in Customer",
         "customer_id": None,
         "tax_rate": 18.0 if tax_amount else 0.0,
@@ -1032,6 +1036,12 @@ def _wire_nexus(monkeypatch, db):
         "get_store_repository",
         lambda: StoreRepository(db.get_collection("stores")),
     )
+    # FREEZE the clock (BUG-104). The nightly export covers the PREVIOUS
+    # complete IST day, so a real-clock test would plant orders in a window
+    # that drifts every midnight -- the calendar-rot class that broke main
+    # once already. ist_today() == the day AFTER the export day, exactly as
+    # it is when the 23:00-IST tick fires.
+    monkeypatch.setattr(nexus_module, "ist_today", lambda: EXPORT_DAY + timedelta(days=1))
     return agent, db
 
 
@@ -1130,11 +1140,7 @@ async def test_nightly_export_poisons_a_STALE_row_when_nothing_can_be_priced(
     the only way to see the defect; asserting `docs == []` from an empty
     collection structurally cannot."""
     agent, db = nexus_and_db
-    export_date = (
-        datetime.now(timezone.utc)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-        .isoformat()
-    )
+    export_date = EXPORT_DATE_ISO
     # A PRE-FIX row: the whole Rs 1,180 booked as Sales, Rs 0.00 GST, green.
     db.get_collection("tally_exports").insert_one(
         {
@@ -1232,11 +1238,7 @@ async def test_a_day_of_unverifiable_orders_is_flagged_not_blessed(nexus_and_db)
 
 def _seed_prior_row(db, sid="BV-GK1"):
     """A healthy-looking row from an earlier run of the SAME day."""
-    export_date = (
-        datetime.now(timezone.utc)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-        .isoformat()
-    )
+    export_date = EXPORT_DATE_ISO
     db.get_collection("tally_exports").insert_one(
         {
             "export_date": export_date,

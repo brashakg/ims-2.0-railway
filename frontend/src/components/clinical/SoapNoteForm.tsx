@@ -10,6 +10,7 @@ import { useState } from 'react';
 import { Plus, Trash2, AlertCircle, Stethoscope, Eye, FileText, ClipboardList } from 'lucide-react';
 import type { SoapNoteData, SoapDxCodeData } from './eyeTestTypes';
 import { COLOUR_VISION_OPTIONS } from './eyeTestTypes';
+import { VA_SET } from '../../constants/rxLimits';
 
 interface SoapNoteFormProps {
   data: SoapNoteData;
@@ -34,8 +35,6 @@ const COMMON_DX_CODES: { code: string; description: string }[] = [
   { code: 'H50.0', description: 'Esotropia' },
   { code: 'H50.1', description: 'Exotropia' },
 ];
-
-const VA_OPTIONS = ['6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60', 'CF', 'HM', 'PL', 'NPL'];
 
 function SectionHeader({ icon, label, note }: { icon: React.ReactNode; label: string; note?: string }) {
   return (
@@ -217,7 +216,7 @@ export function SoapNoteForm({ data, onChange }: SoapNoteFormProps) {
                 </tbody>
               </table>
               <datalist id="soap-va-options">
-                {VA_OPTIONS.map(o => <option key={o} value={o} />)}
+                {VA_SET.map(o => <option key={o} value={o} />)}
               </datalist>
             </div>
           </div>

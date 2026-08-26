@@ -35,12 +35,34 @@ export interface CashRegisterSession {
   cash_refunds?: number | null;
   cash_expenses?: number | null;
   bank_deposit?: number | null;
+  // NULL means NOBODY COUNTED. A drawer closed without a count has no counted
+  // figure and no variance, and its verdict is withheld (NOT_COUNTED) -- it is
+  // never a Rs 0.00 drawer with a full-day shortfall.
   counted?: number | null;
   expected?: number | null;
   variance?: number | null;
-  variance_status?: 'BALANCED' | 'OVER' | 'SHORT' | null;
+  variance_status?:
+    | 'BALANCED'
+    | 'OVER'
+    | 'SHORT'
+    | 'NEGATIVE_EXPECTED'
+    | 'NOT_COUNTED'
+    | null;
   tolerance?: number | null;
   closing_note?: string | null;
+  // TWO DOORS, ONE RECORD. The shared till session this drawer was counted on,
+  // and what happened when this screen linked to it. `counted_from_shared_record`
+  // means the day was ALREADY counted at POS Day-End: that count stands and is
+  // the `counted` figure above, so both screens show one answer for one drawer.
+  till_session_id?: string | null;
+  till_link_ok?: boolean;
+  till_link_error?: string | null;
+  till_already_counted?: boolean;
+  till_count_differs?: boolean;
+  counted_from_shared_record?: boolean;
+  till_opening_float_not_recorded?: boolean;
+  // The day already carried a declared opening float; that one stands.
+  till_float_already_declared?: boolean;
 }
 
 export interface ExpectedPreview {
@@ -77,10 +99,15 @@ export interface SessionsResponse {
   expected_preview: ExpectedPreview | null;
 }
 
+/** COUNTED | SUGGESTED | NOT_CAPTURED. Omitted = the grid was never touched,
+ *  which the server records as NOT_CAPTURED -- never as an empty drawer. */
+export type CountState = 'COUNTED' | 'SUGGESTED' | 'NOT_CAPTURED';
+
 export interface OpenPayload {
   store_id?: string;
   shift?: string;
   denominations: DenominationLine[];
+  opening_count_state?: CountState;
   opening_float?: number;
   note?: string;
 }
@@ -88,6 +115,7 @@ export interface OpenPayload {
 export interface ClosePayload {
   session_id: string;
   denominations: DenominationLine[];
+  closing_count_state?: CountState;
   bank_deposit?: number;
   counted_override?: number;
   tolerance?: number;

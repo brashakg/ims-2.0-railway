@@ -20,8 +20,6 @@ import {
   Unlock,
   AlertTriangle,
   CheckCircle2,
-  Banknote,
-  Coins,
   EyeOff,
   Globe,
 } from 'lucide-react';
@@ -32,31 +30,19 @@ import {
   tillApi,
   paisaToInr,
   type TillSession,
-  type DenomKind,
+  type ZRead,
   type VarianceStatus,
 } from '../../services/api/till';
 import { returnsApi } from '../../services/api/returns';
-
-const NOTE_FACES = [500, 200, 100, 50, 20, 10];
-const COIN_FACES = [20, 10, 5, 2, 1];
-
-interface DenomRow {
-  face: number;
-  kind: DenomKind;
-  pieces: number;
-}
-
-function blankDenoms(): DenomRow[] {
-  return [
-    ...NOTE_FACES.map((face) => ({ face, kind: 'note' as DenomKind, pieces: 0 })),
-    ...COIN_FACES.map((face) => ({ face, kind: 'coin' as DenomKind, pieces: 0 })),
-  ];
-}
-
-// Sum the grid in PAISA (face is rupees; *100 once at the boundary).
-function denomTotalPaisa(rows: DenomRow[]): number {
-  return rows.reduce((sum, r) => sum + r.face * 100 * (r.pieces || 0), 0);
-}
+import DenomGrid from '../../components/cash/DenominationGrid';
+import FaceTallyTable from '../../components/cash/FaceTallyTable';
+import {
+  blankDenoms,
+  denomTotalPaisa,
+  setPieces as setRowPieces,
+  hasCount,
+  type DenomRow,
+} from '../../utils/denominations';
 
 function fmtDateTime(iso?: string | null): string {
   if (!iso) return '—';
@@ -77,43 +63,6 @@ function varianceTone(status: VarianceStatus): string {
   return 'text-red-700';
 }
 
-function DenomGrid({
-  rows,
-  onChange,
-  disabled,
-}: {
-  rows: DenomRow[];
-  onChange: (i: number, pieces: number) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
-      {rows.map((r, i) => (
-        <div key={`${r.kind}-${r.face}`} className="flex items-center justify-between px-3 py-1.5 text-sm">
-          <span className="flex items-center gap-2 text-gray-700">
-            {r.kind === 'note' ? <Banknote className="w-4 h-4 text-gray-400" /> : <Coins className="w-4 h-4 text-gray-400" />}
-            <span className="tabular-nums">{`₹${r.face}`}</span>
-            <span className="text-gray-400 text-xs uppercase">{r.kind}</span>
-          </span>
-          <span className="flex items-center gap-3">
-            <input
-              type="number"
-              min={0}
-              value={r.pieces || ''}
-              disabled={disabled}
-              onChange={(e) => onChange(i, Math.max(0, parseInt(e.target.value, 10) || 0))}
-              className="w-20 px-2 py-1 border border-gray-300 rounded text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-bv disabled:bg-gray-50"
-            />
-            <span className="w-24 text-right text-gray-500 tabular-nums">
-              {paisaToInr(r.face * 100 * (r.pieces || 0))}
-            </span>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function BlindEodTallyPage() {
   const { user } = useAuth();
   const toast = useToast();
@@ -128,6 +77,9 @@ export default function BlindEodTallyPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState<TillSession[]>([]);
+  // Per-face tallies, fetched on demand per locked Z-Read. `null` means the
+  // fetch failed -- shown as such, never as a clean tally.
+  const [ledgers, setLedgers] = useState<Record<string, ZRead | null>>({});
 
   // Open-phase state
   const [openDenoms, setOpenDenoms] = useState<DenomRow[]>(blankDenoms());
@@ -209,9 +161,9 @@ export default function BlindEodTallyPage() {
   const blindTotalPaisa = denomTotalPaisa(blindDenoms);
 
   const setOpenPieces = (i: number, pieces: number) =>
-    setOpenDenoms((d) => d.map((r, idx) => (idx === i ? { ...r, pieces } : r)));
+    setOpenDenoms((d) => setRowPieces(d, i, pieces));
   const setBlindPieces = (i: number, pieces: number) =>
-    setBlindDenoms((d) => d.map((r, idx) => (idx === i ? { ...r, pieces } : r)));
+    setBlindDenoms((d) => setRowPieces(d, i, pieces));
 
   const onOpen = async () => {
     if (!storeId) {
@@ -226,6 +178,8 @@ export default function BlindEodTallyPage() {
         store_id: storeId,
         shift,
         opening_denominations: openDenoms.filter((r) => r.pieces > 0),
+        // An untouched grid is NOT a float of nothing. Say which it was.
+        opening_count_state: hasCount(openDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         opening_float_paisa: openTotalPaisa,
       });
       toast.success(res?.already_open ? "Today's drawer is already open — joined it" : 'Till opened');
@@ -244,6 +198,7 @@ export default function BlindEodTallyPage() {
     try {
       await tillApi.blindSubmit(activeSession.session_id, {
         blind_denominations: blindDenoms.filter((r) => r.pieces > 0),
+        closing_count_state: hasCount(blindDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         blind_count_paisa: blindTotalPaisa,
         cash_payouts_paisa: Math.round((parseFloat(payouts) || 0) * 100),
         idempotency_key: `${activeSession.session_id}:blind`,
@@ -324,6 +279,17 @@ export default function BlindEodTallyPage() {
   }
 
   const lockedToday = sessions.filter((s) => s.status === 'LOCKED');
+
+  const loadLedger = async (sessionId: string) => {
+    try {
+      const z = await tillApi.zread(sessionId);
+      setLedgers((m) => ({ ...m, [sessionId]: z }));
+    } catch {
+      // A failed read is reported as a failed read. A missing tally must never
+      // render as a drawer that tallied.
+      setLedgers((m) => ({ ...m, [sessionId]: null }));
+    }
+  };
   const awaitingReview = sessions.filter((s) => s.status === 'BLIND_SUBMITTED');
 
   return (
@@ -577,6 +543,37 @@ export default function BlindEodTallyPage() {
                     </span>
                   </div>
                 )}
+                {/* WHERE THE DIFFERENCE CAME FROM. A drawer can balance to
+                    the rupee and still hide two mistakes that cancelled out;
+                    this is the only view that shows them. */}
+                <div className="mt-3">
+                  {ledgers[s.session_id] === undefined ? (
+                    <button
+                      type="button"
+                      onClick={() => loadLedger(s.session_id)}
+                      className="text-sm font-medium text-bv hover:underline"
+                    >
+                      Show the note-by-note tally
+                    </button>
+                  ) : ledgers[s.session_id] === null ? (
+                    <p className="text-sm text-gray-500">
+                      Could not load the note-by-note tally.{' '}
+                      <button
+                        type="button"
+                        onClick={() => loadLedger(s.session_id)}
+                        className="font-medium text-bv hover:underline"
+                      >
+                        Try again
+                      </button>
+                    </p>
+                  ) : ledgers[s.session_id]?.face_ledger ? (
+                    <FaceTallyTable ledger={ledgers[s.session_id]!.face_ledger!} />
+                  ) : (
+                    <p className="text-sm text-gray-500">
+                      This day carries no note-by-note record.
+                    </p>
+                  )}
+                </div>
                 {canLock && (
                   <div className="flex items-center gap-2 mt-3">
                     <input

@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..dependencies import validate_store_access
+from ..services import cash_denominations as cash_denom
 from ..services import eod_tally as till
 from ..services.stores_util import is_online_store
 
@@ -113,23 +114,31 @@ def _raise(res: Dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
-class DenominationLine(BaseModel):
-    face: int = Field(..., description="Face value in rupees, e.g. 500")
-    pieces: int = Field(0, ge=0, description="Number of notes/coins of this face")
-    kind: str = Field("note", description="'note' or 'coin'")
+# The count-sheet line is defined ONCE, in services/cash_denominations.py.
+# This alias keeps the name this router has always used without holding a
+# second copy of the shape for the two to drift apart. The LIST is
+# ``cash_denom.CountSheet`` -- lenient rows inside a strict list still 422'd a
+# sheet sent as a bare string, which is a refusal one level up.
+DenominationLine = cash_denom.DenominationRow
 
 
 class OpenSession(BaseModel):
     store_id: Optional[str] = None
     session_date: Optional[str] = Field(None, description="IST day YYYY-MM-DD; defaults to today")
     shift: Optional[str] = None
-    opening_denominations: List[DenominationLine] = Field(default_factory=list)
+    opening_denominations: cash_denom.CountSheet = Field(default_factory=list)
+    opening_count_state: Optional[str] = Field(
+        None, description="COUNTED | SUGGESTED | NOT_CAPTURED (blank is not zero)"
+    )
     opening_float_paisa: Optional[int] = Field(None, description="Override of the denomination sum (paisa)")
     note: Optional[str] = None
 
 
 class BlindSubmit(BaseModel):
-    blind_denominations: List[DenominationLine] = Field(default_factory=list)
+    blind_denominations: cash_denom.CountSheet = Field(default_factory=list)
+    closing_count_state: Optional[str] = Field(
+        None, description="COUNTED | SUGGESTED | NOT_CAPTURED (blank is not zero)"
+    )
     blind_count_paisa: Optional[int] = Field(
         None, description="Optional explicit total (paisa); must equal the denomination sum"
     )
@@ -177,6 +186,7 @@ async def open_till_session(
         store_id=store_id,
         session_date=session_date,
         opening_denominations=[d.model_dump() for d in body.opening_denominations],
+        opening_count_state=body.opening_count_state,
         opening_float_paisa=body.opening_float_paisa,
         shift=body.shift,
         note=body.note,
@@ -216,6 +226,7 @@ async def submit_blind_count(
         db,
         session_id,
         blind_denominations=[d.model_dump() for d in body.blind_denominations],
+        closing_count_state=body.closing_count_state,
         blind_count_paisa=body.blind_count_paisa,
         cash_payouts_paisa=body.cash_payouts_paisa,
         idempotency_key=body.idempotency_key,

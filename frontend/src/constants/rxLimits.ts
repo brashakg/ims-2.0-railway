@@ -10,9 +10,18 @@
 //   CYL  :  -6.00 ..  +6.00, 0.25 step
 //   AXIS :      1 ..    180, whole degrees; MANDATORY when CYL is set (& v.v.)
 //   ADD  :  +0.75 ..  +4.00, 0.25 step, PLUS-ONLY (a near add is never minus)
-//   PD   :     40 ..     80 mm (binocular), 0.5 step (a measurement, no diopter grid)
+//   PD   :     40 ..     80 mm (binocular / IPD), 0.5 step (a measurement, no diopter grid)
+//   PD_MONO :  20 ..     45 mm (PER-EYE monocular PD, ~half the binocular)
+//   K    :     30 ..     60 D  (keratometry / corneal curvature, never signed)
 //   CL Base Curve : 8.0 .. 9.5 mm, 0.1 step
 //   CL Diameter   : 13.0 .. 15.0 mm, 0.1 step
+//
+// PD COMES IN TWO SHAPES and they are NOT interchangeable. A per-eye PD box is
+// MONOCULAR (about half the binocular value: 32.5mm is a perfectly ordinary
+// reading). Validating a per-eye box against the 40-80 binocular range refused
+// every correct monocular entry. The backend has always distinguished the two
+// (rx_validation._RX_LIMITS "pd" vs "pd_mono", and EyeData.validate_pd uses
+// pd_mono); the backend is the source of truth and this table now agrees.
 //
 // Cross-field rules: CYL<->AXIS are paired (one present requires the other);
 // ADD is plus-only; VA is restricted to the Snellen set below.
@@ -28,6 +37,8 @@ export type RxLimitField =
   | 'axis'
   | 'add'
   | 'pd'
+  | 'pd_mono'
+  | 'k'
   | 'base_curve'
   | 'diameter';
 
@@ -49,20 +60,55 @@ export const RX_LIMITS: Record<RxLimitField, RxLimit> = {
   axis: { min: 1, max: 180, step: 1, wholeNumber: true, label: 'AXIS' },
   add: { min: 0.75, max: 4.0, step: 0.25, plusOnly: true, label: 'ADD' },
   pd: { min: 40, max: 80, step: 0.5, label: 'PD' },
+  pd_mono: { min: 20, max: 45, step: 0.5, label: 'PD' },
+  // KERATOMETRY has NO step grid. The server says so in as many words
+  // (rx_validation _RX_LIMITS: "NOT on the 0.25 grid (devices report
+  // 0.05/0.125 steps)") and range-checks it alone. A 0.01 grid here refused
+  // 43.125 -- a reading an auto-refractometer genuinely produces and the
+  // server genuinely stores -- so a record written by a device or the API
+  // could not be re-saved from the Edit screen. `isOnStep` treats a step of
+  // 0 as "no grid".
+  k: { min: 30, max: 60, step: 0, label: 'K reading' },
   base_curve: { min: 8.0, max: 9.5, step: 0.1, label: 'Base Curve' },
   diameter: { min: 13.0, max: 15.0, step: 0.1, label: 'Diameter' },
 };
 
-/** Allowed visual-acuity (Snellen, 6m) values. Empty string = not recorded. */
-export const VA_SET = ['6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
+/**
+ * THE allowed visual-acuity values: the Snellen fractions at 6 metres PLUS the
+ * four standard low-vision notations. Empty string = not recorded.
+ *
+ * Counting Fingers / Hand Movement / Perception of Light / No Perception of
+ * Light are everyday findings in a dense cataract, an advanced glaucoma or a
+ * post-op eye. A gate that offers only Snellen does not make the finding go
+ * away -- it makes the optometrist pick the nearest fraction, and a CF eye
+ * lands in the record as 6/60. So this set is the SERVER's set, exactly:
+ * backend/api/services/rx_validation.py `_VA_SET`, pinned set-and-count by
+ * backend/tests/test_clinical_exam_rx_validation.py
+ * ::test_the_frontend_and_backend_visual_acuity_sets_are_identical, which
+ * reads this literal out of this file. The two can never drift again.
+ *
+ * There were SIX copies of this list and two of them drifted. There are now
+ * two -- this one and the server's -- and every VA dropdown in the app reads
+ * VA_OPTIONS below. Do not start a third.
+ */
+export const VA_SET = [
+  '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60',
+  'CF', 'HM', 'PL', 'NPL',
+] as const;
 export type VAValue = (typeof VA_SET)[number];
 
-/** True if `v` is an allowed VA string (blank passes as "not recorded"). */
+/** VA_SET with a leading blank, for a `<select>` where "not recorded" is a
+ *  legitimate choice. THE list every VA dropdown renders. */
+export const VA_OPTIONS = ['', ...VA_SET] as const;
+
+/** True if `v` is an allowed VA string (blank passes as "not recorded").
+ *  Case-insensitive on the letter notations, matching the server, so a typed
+ *  `cf` is not refused here and accepted there. */
 export function isValidVA(v: string | null | undefined): boolean {
   if (v === null || v === undefined) return true;
-  const s = String(v).trim();
+  const s = String(v).trim().toUpperCase();
   if (s === '') return true;
-  return (VA_SET as readonly string[]).includes(s);
+  return (VA_SET as readonly string[]).some((allowed) => allowed.toUpperCase() === s);
 }
 
 /**
@@ -128,7 +174,10 @@ export interface RxEyeValues {
   cyl?: string | number | null;
   axis?: string | number | null;
   add?: string | number | null;
+  /** BINOCULAR / total PD (IPD), 40-80mm. */
   pd?: string | number | null;
+  /** PER-EYE monocular PD, 20-45mm. Use THIS for an "OD PD" / "OS PD" box. */
+  pd_mono?: string | number | null;
   va?: string | null;
   base_curve?: string | number | null;
   diameter?: string | number | null;
@@ -175,7 +224,9 @@ export interface RxEyeError {
 export function validateEyeDetailed(eye: RxEyeValues, label = ''): RxEyeError | null {
   const prefix = label ? `${label} ` : '';
 
-  for (const f of ['sph', 'cyl', 'axis', 'add', 'pd', 'base_curve', 'diameter'] as const) {
+  for (const f of [
+    'sph', 'cyl', 'axis', 'add', 'pd', 'pd_mono', 'base_curve', 'diameter',
+  ] as const) {
     if (eye[f] === undefined) continue;
     const err = validateRxField(f, eye[f], prefix);
     if (err) return { code: 'FIELD_INVALID', field: f, message: err };

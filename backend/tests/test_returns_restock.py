@@ -574,31 +574,6 @@ def test_restock_idempotent_on_retry(ctx):
     assert len(ctx["stock_repo"].units) == units_before
 
 
-def test_exchange_restocks_returned_line(ctx):
-    tok = _staff_token(["SALES_CASHIER"])
-    payload = _payload(
-        return_type="EXCHANGE",
-        customer_id="CUST-1",
-        replacement_items=[
-            {
-                "product_id": "PRD-9",
-                "name": "Oakley",
-                "sku": "OK-9",
-                "quantity": 1,
-                "unit_price": 2500,
-            }
-        ],
-    )
-    r = ctx["client"].post(
-        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
-    )
-    assert r.status_code == 201
-    data = r.json()
-    # The RETURNED line (PRD-1) is restocked even though this is an EXCHANGE.
-    assert data["restock_applied"] is True
-    assert data["restock_stock_ids"] == ["STK-OLD-1"]
-
-
 def test_restock_fail_soft_when_stock_repo_down(ctx, monkeypatch):
     # Stock layer unavailable -> the return still records, applied=False so it
     # can be retried; no 500.

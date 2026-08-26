@@ -36,6 +36,8 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
+from ..services import cash_denominations as cash_denom
+from ..services import eod_tally as till_service
 
 logger = logging.getLogger(__name__)
 
@@ -5738,8 +5740,20 @@ class DayEndCloseBody(BaseModel):
     store_id: Optional[str] = Field(
         None, description="Store; defaults to the user's active store"
     )
-    closing_cash: float = Field(0.0, description="Physically counted cash in drawer")
-    system_cash: float = Field(0.0, description="System-expected cash (from POS)")
+    # BLANK IS NOT ZERO. This defaulted to 0.0, so a manager who closed without
+    # typing a count persisted "Rs 0.00 in the drawer" and a variance equal to
+    # the negative of the whole day's cash -- indistinguishable from a genuinely
+    # emptied till. An absent count is now recorded as absent, and no variance
+    # is invented for it.
+    closing_cash: Optional[float] = Field(
+        None, description="Physically counted cash in drawer; absent = not counted"
+    )
+    system_cash: Optional[float] = Field(
+        None, description="System-expected cash (from POS)"
+    )
+    # The notes and coins behind that count. Optional and skippable -- a close
+    # is never refused for want of a breakdown.
+    closing_count: Optional[cash_denom.CashCountInput] = None
     notes: Optional[str] = Field(None, max_length=2000)
 
 
@@ -5819,14 +5833,83 @@ async def create_day_end_close(
             },
         )
 
-    variance = round(float(body.closing_cash) - float(body.system_cash), 2)
+    # The notes-and-coins count, if one was entered. When the cashier counted
+    # the grid but typed no total, the count IS the total -- that is what is
+    # physically in the drawer.
+    closing_block = cash_denom.block_from_input(
+        body.closing_count, 0, actor=current_user
+    )
+    counted_from_grid = (
+        cash_denom.paisa_to_rupees(closing_block["total_paisa"])
+        if cash_denom.is_captured(closing_block)
+        else None
+    )
+    closing_cash = (
+        round(float(body.closing_cash), 2)
+        if body.closing_cash is not None
+        else counted_from_grid
+    )
+    if closing_cash is not None:
+        # For a DRAWER COUNT the count is the amount, so the block reconciles
+        # against the figure being stored rather than against a stale zero.
+        cash_denom.restate_amount(
+            closing_block, cash_denom.rupees_to_paisa(closing_cash)
+        )
+    system_cash = (
+        round(float(body.system_cash), 2) if body.system_cash is not None else None
+    )
+    # No count -> no variance. A fabricated variance against a fabricated zero
+    # is what made this record unreadable.
+    variance = (
+        round(closing_cash - system_cash, 2)
+        if (closing_cash is not None and system_cash is not None)
+        else None
+    )
+
+    # TWO DOORS, ONE RECORD: the count also lands on the day's single till
+    # session -- the same record Finance > Cash Register closes onto -- so the
+    # two screens can never hold two different answers. Fail-soft: linking must
+    # never stop a store closing its day, and a failure is reported, not hidden.
+    till_link = till_service.record_screen_close(
+        db,
+        store_id=sid,
+        session_date=body.date,
+        closing_rows=(
+            body.closing_count.rows if body.closing_count is not None else None
+        ),
+        closing_count_state=(
+            body.closing_count.state if body.closing_count is not None else None
+        ),
+        # The typed figure, so a close with a total but no breakdown still lands
+        # a real count on the shared record instead of nothing -- and a close
+        # with NEITHER lands no count at all rather than a fabricated zero.
+        counted_paisa=(
+            cash_denom.rupees_to_paisa(closing_cash) if closing_cash is not None else None
+        ),
+        actor=current_user,
+    )
+
     now = datetime.utcnow()
     doc = {
         "store_id": sid,
         "date": body.date,
-        "closing_cash": round(float(body.closing_cash), 2),
-        "system_cash": round(float(body.system_cash), 2),
+        "closing_cash": closing_cash,
+        "system_cash": system_cash,
         "variance": variance,
+        "closing_count": closing_block,
+        "cash_counted": cash_denom.is_captured(closing_block),
+        # The shared record this close is part of.
+        "till_session_id": till_link.get("session_id"),
+        "till_link_ok": bool(till_link.get("ok")),
+        "till_link_error": till_link.get("error"),
+        "till_already_counted": bool(till_link.get("already_counted")),
+        "till_counted": bool(till_link.get("counted")),
+        # Nobody declared an opening float for this day, so expected cash was
+        # computed from zero. The screen must say so rather than present the
+        # resulting variance as a real one.
+        "till_opening_float_not_recorded": bool(
+            till_link.get("opening_float_not_recorded")
+        ),
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": now.isoformat(),
@@ -5863,7 +5946,10 @@ async def create_day_end_close(
                     "entity_id": f"{sid}:{body.date}",
                     "store_id": sid,
                     "user_id": current_user.get("user_id"),
-                    "severity": "WARNING" if variance != 0 else "INFO",
+                    # A day nobody counted has NO variance, so it is not a
+                    # variance warning. (``None != 0`` is True in Python, which
+                    # would have stamped every uncounted close as a discrepancy.)
+                    "severity": "WARNING" if (variance is not None and variance != 0) else "INFO",
                     "details": {
                         "date": body.date,
                         "closing_cash": doc["closing_cash"],

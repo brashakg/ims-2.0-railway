@@ -94,13 +94,23 @@ class TestParseRxFloat:
     def test_valid_add(self):
         assert _parse_rx_float("1.50", "add") == pytest.approx(1.50)
 
+    # NOTE (2026-08-24): this router used to declare its OWN copy of the Rx
+    # limits, and the copy had gone stale at the pre-2026-06 bounds
+    # (sph -20..+20, add +0.75..+3.50). It now reads the canonical table in
+    # api/services/rx_validation.py (sph -25..+25, add +0.75..+4.00), so a
+    # genuine high-myope lensmeter reading is no longer refused by an endpoint
+    # whose own error message called its numbers "the valid IMS range".
     def test_sph_below_minimum(self):
         with pytest.raises(ValueError, match="SPH"):
-            _parse_rx_float("-21.00", "sph")
+            _parse_rx_float("-25.25", "sph")
 
     def test_sph_above_maximum(self):
         with pytest.raises(ValueError, match="SPH"):
-            _parse_rx_float("+20.25", "sph")
+            _parse_rx_float("+25.25", "sph")
+
+    def test_canonical_high_myope_reading_is_accepted(self):
+        # -22.00 is a real Rx and the stale local table rejected it.
+        assert _parse_rx_float("-22.00", "sph") == pytest.approx(-22.0)
 
     def test_cyl_out_of_range(self):
         with pytest.raises(ValueError, match="CYL"):
@@ -112,7 +122,10 @@ class TestParseRxFloat:
 
     def test_add_above_maximum(self):
         with pytest.raises(ValueError, match="ADD"):
-            _parse_rx_float("3.75", "add")
+            _parse_rx_float("4.25", "add")
+
+    def test_canonical_max_add_is_accepted(self):
+        assert _parse_rx_float("4.00", "add") == pytest.approx(4.0)
 
     def test_non_025_step_rejected(self):
         with pytest.raises(ValueError, match="0.25"):
@@ -159,6 +172,15 @@ class TestParseAxis:
         # Some devices export "90.0" -- should be accepted as int.
         assert _parse_axis("90.0") == 90
 
+    def test_a_fractional_axis_is_REFUSED_not_truncated(self):
+        # An axis is a MERIDIAN. int(float("90.5")) used to hand back 90 --
+        # a different meridian, silently. A device reporting half a degree is
+        # reporting a fault; the import must surface it, not round it away.
+        with pytest.raises(ValueError, match="whole number"):
+            _parse_axis("90.5")
+        with pytest.raises(ValueError, match="whole number"):
+            _parse_axis("179.9")
+
 
 # ---------------------------------------------------------------------------
 # parse_device_csv -- Format A (Topcon/Nidek)
@@ -200,7 +222,7 @@ class TestFormatA:
         assert result.right_eye.axis is None
 
     def test_out_of_range_sph_raises_422(self):
-        csv_bytes = _topcon_csv(("-25.00", "0", "90", "", "0", "0", "90", ""))
+        csv_bytes = _topcon_csv(("-25.25", "0", "90", "", "0", "0", "90", ""))
         with pytest.raises(HTTPException) as exc_info:
             parse_device_csv(csv_bytes)
         assert exc_info.value.status_code == 422
@@ -406,7 +428,7 @@ class TestEndpoint:
     def test_out_of_range_returns_422(self, client):
         token = _make_token(["OPTOMETRIST"])
         header = "R-SPH,R-CYL,R-AXIS,R-ADD,L-SPH,L-CYL,L-AXIS,L-ADD"
-        row = "-25.00,-0.50,90,,+0.75,0,,"
+        row = "-25.25,-0.50,90,,+0.75,0,,"
         csv_bytes = (header + "\n" + row).encode("utf-8")
         response = client.post(
             "/api/v1/clinical/device-import",

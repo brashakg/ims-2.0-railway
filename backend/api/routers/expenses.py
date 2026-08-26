@@ -15,6 +15,7 @@ import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_expense_repository, get_advance_repository, get_db
 from ..dependencies import validate_store_access
+from ..services import cash_denominations as cash_denom
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -541,6 +542,11 @@ class ExpenseCreate(BaseModel):
     advance_id: Optional[str] = None
     payment_mode: Optional[str] = None  # CASH / UPI / CARD / BANK_TRANSFER / CHEQUE
     store_id: Optional[str] = None
+    # Which notes and coins were taken OUT of the till for this payout.
+    # Optional, CASH-only, and an attached record: `amount` remains the money
+    # for the cap checks, the approval queue and every ledger row. Not sending
+    # it records NOT_CAPTURED, never a zero.
+    cash_count: Optional[cash_denom.CashCountInput] = None
 
     @field_validator("category")
     @classmethod
@@ -995,9 +1001,19 @@ async def create_expense(
 
     if expense_repo is not None:
         now = datetime.now().isoformat()
+        # Denominated payout record. CASH-only (a UPI payout has no notes) and
+        # additive -- the cap checks above ran on `amount` and are untouched.
+        cash_count_block = None
+        if str(expense.payment_mode or "").strip().upper() == "CASH":
+            cash_count_block = cash_denom.block_from_input(
+                expense.cash_count,
+                cash_denom.rupees_to_paisa(expense.amount),
+                actor=current_user,
+            )
         created = expense_repo.create(
             {
                 "expense_id": expense_id,
+                "cash_count": cash_count_block,
                 "employee_id": current_user.get("user_id"),
                 "employee_name": current_user.get("full_name"),
                 "store_id": expense.store_id or current_user.get("active_store_id"),

@@ -162,6 +162,57 @@ def ist_date_str(value: Any) -> str:
     return to_date_str(value)
 
 
+def ist_date_str_from_stored(value: Any) -> str:
+    """IST calendar day of a stored instant, WHICHEVER SHAPE it was stored in.
+
+    ``ist_date_str`` above passes strings through unshifted by deliberate
+    design -- a bare string carries no reliable frame, and guessing would
+    corrupt one that is already IST-local. Use THIS helper instead wherever
+    the frame IS known from the writer: a column that holds naive-UTC
+    instants, written by ``datetime.now().isoformat()`` on a UTC box, which
+    some rows carry as datetimes and older rows as ISO strings. Parse to the
+    instant first, then take the IST day -- the shape a row happens to be
+    stored in must never change the business day it is reported under.
+
+    Aware strings ('...+05:30' / '...Z') convert exactly. An unparseable
+    string falls back to its own first ten characters (the pre-BUG-104
+    behaviour), never raises.
+
+    Existing copies of this shape, to fold onto this definition rather than
+    growing a fourth: ``api/routers/reports.py::_credit_note_date_ist``
+    (credit_note_ledger.created_at) and, in ``api/routers/finance.py``'s
+    cash-reconciliation summary, the session-stamp day face -- an inline
+    ``_to_dt(closed_at)`` + ``ist_date_str(...)`` pair today, named
+    ``_ist_day_face`` once PR #999 lands. Grep for BOTH.
+
+    NOT the same rule as the GSTR-1 ``invoice_date`` in
+    ``reports.py::_compute_gstr1``, which deliberately keeps a stored STRING
+    unshifted -- see the comment at that site. For a string-stored order in
+    the 00:00-05:30 IST band the two GST-facing documents would name
+    different days (and on 1 April, different financial years). Production
+    holds zero string-typed ``orders.created_at`` rows (the #935 backfill),
+    so the two cannot disagree today; converging them is a money-reviewed
+    change of its own, not a drive-by here.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        return ist_date_str(value)
+    if not isinstance(value, str):
+        # A non-string, non-datetime (an int epoch, a stray list) has no ISO
+        # face to parse. Defer to ist_date_str, which returns '' -- an empty
+        # <DATE> fails a Tally import loudly, where a coerced '1746646200'
+        # would look like data.
+        return ist_date_str(value)
+    text = value.strip()
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return text[:10]
+    return ist_date_str(parsed)
+
+
 def ist_month_window_utc(year: int, month: int):
     """NAIVE-UTC (start, end_inclusive) bounds for the IST calendar month.
 

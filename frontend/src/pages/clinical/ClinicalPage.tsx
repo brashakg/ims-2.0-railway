@@ -26,7 +26,9 @@ import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
+import { apiDetailMessage } from '../../utils/errorHandler';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
+import { eyeTestWriteBody } from '../../components/clinical/eyeTestPayload';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
 import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
@@ -264,143 +266,23 @@ export function ClinicalPage() {
       // Final-Rx field set (VA / prism / base per eye + IPD + lens type + next
       // checkup) so the auto-created prescription carries the SAME data a
       // POS-created Rx does (field + DB parity).
-      const fr = data.finalRx;
-      const re = fr?.rightEye;
-      const le = fr?.leftEye;
-
-      // Convert string values to numbers, handling empty strings
-      const parseValue = (val: string): number | null => {
-        const num = parseFloat(val);
-        return isNaN(num) ? null : num;
-      };
-
-      await clinicalApi.completeTest(currentTestId, {
-        rightEye: {
-          sphere: parseValue(re?.sphere || ''),
-          cylinder: parseValue(re?.cylinder || ''),
-          axis: parseValue(re?.axis || ''),
-          // Near-vision ADD is captured in finalRx.rightAdd, not rightEye.add.
-          add: parseValue(fr?.rightAdd || re?.add || ''),
-          pd: parseValue(re?.pd || ''),
-          prism: re?.prism || null,
-          base: re?.base || null,
-          va: re?.va || null,
-        },
-        leftEye: {
-          sphere: parseValue(le?.sphere || ''),
-          cylinder: parseValue(le?.cylinder || ''),
-          axis: parseValue(le?.axis || ''),
-          add: parseValue(fr?.leftAdd || le?.add || ''),
-          pd: parseValue(le?.pd || ''),
-          prism: le?.prism || null,
-          base: le?.base || null,
-          va: le?.va || null,
-        },
-        pd: parseValue(re?.pd || le?.pd || '') ?? undefined,
-        ipd: fr?.ipd || undefined,
-        lensRecommendation: fr?.lensType || undefined,
-        nextCheckup: fr?.nextCheckup || undefined,
-        notes: data.chiefComplaint || '',
-        // C6-B: also persist the structured exam findings the form already
-        // collects (chief complaint + per-eye aided VA from the Final Rx) into
-        // the test record's `clinical_findings` block, so they're queryable
-        // (VA trend across visits, search by complaint) rather than only buried
-        // in `notes`/per-eye. Only sent when non-empty -> a refraction-only test
-        // is unchanged. Net-new inputs (IOP/diagnosis/...) land here once the
-        // EyeTestForm grows those fields (follow-up).
-        clinicalFindings: (() => {
-          const cf: Record<string, string | number> = {};
-          if (data.chiefComplaint) cf.chiefComplaint = data.chiefComplaint;
-          if (re?.va) cf.vaRightAided = re.va;
-          if (le?.va) cf.vaLeftAided = le.va;
-          // The new internal Clinical Findings card (IOP / diagnosis / colour
-          // vision / cover test / dominant eye). Only forward filled fields;
-          // IOP -> number so the backend's 0-80 mmHg bound applies.
-          const f = data.clinicalFindings;
-          if (f) {
-            if (f.iopRight) cf.iopRight = parseFloat(f.iopRight);
-            if (f.iopLeft) cf.iopLeft = parseFloat(f.iopLeft);
-            if (f.diagnosis) cf.diagnosis = f.diagnosis;
-            if (f.colourVision) cf.colourVision = f.colourVision;
-            if (f.coverTest) cf.coverTest = f.coverTest;
-            if (f.dominantEye) cf.dominantEye = f.dominantEye;
-          }
-          return Object.keys(cf).length > 0 ? cf : undefined;
-        })(),
-        // CLI-11: forward the structured SOAP note when the optometrist filled
-        // at least one field. An entirely empty SOAP note is omitted so the
-        // backend keeps the test as a refraction-only record (unchanged).
-        soapNote: (() => {
-          const sn = data.soapNote;
-          if (!sn) return undefined;
-          const hasText =
-            sn.chiefComplaint || sn.historyPresentIllness || sn.ocularHistory ||
-            sn.systemicHistory || sn.familyHistory || sn.medications || sn.allergies ||
-            sn.vduUsage || sn.vaRightUnaided || sn.vaLeftUnaided || sn.vaRightAided ||
-            sn.vaLeftAided || sn.vaBinocular || sn.iopRight || sn.iopLeft ||
-            sn.colourVision || sn.coverTest || sn.dominantEye || sn.pupils ||
-            sn.ocularMotility || sn.slitLampSummary || sn.fundusSummary ||
-            sn.assessment || (sn.dxCodes && sn.dxCodes.length > 0) ||
-            sn.plan || sn.planReferral || sn.planFollowUp || sn.patientInstructions;
-          if (!hasText) return undefined;
-          // Shape matches the backend SoapNote camelCase aliases.
-          return {
-            chiefComplaint: sn.chiefComplaint || undefined,
-            historyPresentIllness: sn.historyPresentIllness || undefined,
-            ocularHistory: sn.ocularHistory || undefined,
-            systemicHistory: sn.systemicHistory || undefined,
-            familyHistory: sn.familyHistory || undefined,
-            medications: sn.medications || undefined,
-            allergies: sn.allergies || undefined,
-            vduUsage: sn.vduUsage || undefined,
-            vaRightUnaided: sn.vaRightUnaided || undefined,
-            vaLeftUnaided: sn.vaLeftUnaided || undefined,
-            vaRightAided: sn.vaRightAided || undefined,
-            vaLeftAided: sn.vaLeftAided || undefined,
-            vaBinocular: sn.vaBinocular || undefined,
-            iopRight: sn.iopRight ? parseFloat(sn.iopRight) : undefined,
-            iopLeft: sn.iopLeft ? parseFloat(sn.iopLeft) : undefined,
-            colourVision: sn.colourVision || undefined,
-            coverTest: sn.coverTest || undefined,
-            dominantEye: sn.dominantEye || undefined,
-            pupils: sn.pupils || undefined,
-            ocularMotility: sn.ocularMotility || undefined,
-            slitLampSummary: sn.slitLampSummary || undefined,
-            fundusSummary: sn.fundusSummary || undefined,
-            assessment: sn.assessment || undefined,
-            dxCodes:
-              sn.dxCodes && sn.dxCodes.length > 0
-                ? sn.dxCodes.map(d => ({ code: d.code, description: d.description, system: d.system }))
-                : undefined,
-            plan: sn.plan || undefined,
-            planReferral: sn.planReferral || undefined,
-            planReferralTo: sn.planReferralTo || undefined,
-            planFollowUp: sn.planFollowUp || undefined,
-            planFollowUpWeeks: sn.planFollowUpWeeks || undefined,
-            patientInstructions: sn.patientInstructions || undefined,
-          };
-        })(),
-      });
+      //
+      // The mapping lives in eyeTestPayload.finalRxPayload rather than inline
+      // here. It used to run every power through parseFloat, which is exactly
+      // where a typed "+4.00" became the number 4 and the explicit plus was
+      // destroyed for good.
+      await clinicalApi.completeTest(currentTestId, eyeTestWriteBody(data));
 
       toast.success('Eye test saved successfully');
       setShowEyeTestForm(false);
       setSelectedPatient(null);
       setCurrentTestId(null);
       await loadData();
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Surface the backend's specific validation message (e.g. "Right eye CYL
       // value -50 is outside the valid range (-6 to 6)") instead of a generic
       // failure, so the optometrist knows which field to fix.
-      const detail = err?.response?.data?.detail;
-      let msg = 'Failed to save eye test';
-      if (typeof detail === 'string') {
-        msg = detail;
-      } else if (Array.isArray(detail) && detail.length > 0) {
-        const first = detail[0];
-        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : '';
-        msg = field ? `${field}: ${first?.msg || 'invalid value'}` : first?.msg || msg;
-      }
-      toast.error(msg);
+      toast.error(apiDetailMessage(err, 'Failed to save eye test'));
     }
   };
 

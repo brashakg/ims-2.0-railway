@@ -18,8 +18,6 @@ import {
   Unlock,
   AlertTriangle,
   CheckCircle2,
-  Banknote,
-  Coins,
   Globe,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -28,34 +26,20 @@ import { useToast } from '../../context/ToastContext';
 import {
   cashRegisterApi,
   type CashRegisterSession,
-  type DenomKind,
   type ExpectedPreview,
   type SessionsResponse,
 } from '../../services/api/cashRegister';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
+import DenominationGrid from '../../components/cash/DenominationGrid';
+import {
+  blankDenoms,
+  denomTotal,
+  setPieces as setRowPieces,
+  hasCount,
+  type DenomRow,
+} from '../../utils/denominations';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
-
-// Indian currency in circulation (no Rs 2000 -- RBI withdrew it).
-const NOTE_FACES = [500, 200, 100, 50, 20, 10];
-const COIN_FACES = [20, 10, 5, 2, 1];
-
-interface DenomRow {
-  face: number;
-  kind: DenomKind;
-  pieces: number;
-}
-
-function blankDenoms(): DenomRow[] {
-  return [
-    ...NOTE_FACES.map((face) => ({ face, kind: 'note' as DenomKind, pieces: 0 })),
-    ...COIN_FACES.map((face) => ({ face, kind: 'coin' as DenomKind, pieces: 0 })),
-  ];
-}
-
-function denomTotal(rows: DenomRow[]): number {
-  return rows.reduce((sum, r) => sum + r.face * (r.pieces || 0), 0);
-}
 
 function fmtDateTime(iso?: string | null): string {
   if (!iso) return '—';
@@ -124,14 +108,10 @@ export default function CashRegisterPage() {
   const liveStatus: 'BALANCED' | 'OVER' | 'SHORT' =
     Math.abs(liveVariance) <= tol ? 'BALANCED' : liveVariance > 0 ? 'OVER' : 'SHORT';
 
-  const setPieces = (
-    setter: React.Dispatch<React.SetStateAction<DenomRow[]>>,
-    idx: number,
-    value: string,
-  ) => {
-    const n = Math.max(0, parseInt(value, 10) || 0);
-    setter((rows) => rows.map((r, i) => (i === idx ? { ...r, pieces: n } : r)));
-  };
+  const setOpenPieces = (i: number, pieces: number) =>
+    setOpenDenoms((rows) => setRowPieces(rows, i, pieces));
+  const setClosePieces = (i: number, pieces: number) =>
+    setCloseDenoms((rows) => setRowPieces(rows, i, pieces));
 
   const handleOpen = async () => {
     setBusy(true);
@@ -140,6 +120,8 @@ export default function CashRegisterPage() {
         store_id: storeId || undefined,
         shift,
         denominations: openDenoms.filter((r) => r.pieces > 0),
+        // An untouched grid is NOT a float of nothing. Say which it was.
+        opening_count_state: hasCount(openDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
       });
       toast.success('Cash register opened');
       setOpenDenoms(blankDenoms());
@@ -161,11 +143,26 @@ export default function CashRegisterPage() {
       const closed = await cashRegisterApi.close({
         session_id: openSession.session_id,
         denominations: closeDenoms.filter((r) => r.pieces > 0),
+        closing_count_state: hasCount(closeDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         bank_deposit: parseFloat(bankDeposit) || 0,
         tolerance: tol,
       });
       const v = closed.variance ?? 0;
-      if (closed.variance_status === 'BALANCED') {
+      if (closed.variance_status === 'NOT_COUNTED') {
+        // Blank is not zero. Say what was recorded, so nobody goes looking for
+        // a shortfall that was never measured.
+        toast.warning(
+          'Closed without a count — recorded as NOT COUNTED, not as an empty drawer. No variance was calculated.',
+        );
+      } else if (closed.counted_from_shared_record) {
+        // The drawer was already counted at POS Day-End. That count stands --
+        // say so, because the figure now on this screen is not the one that was
+        // just typed into the grid, and a silently swapped number is how the
+        // two screens came to disagree in the first place.
+        toast.warning(
+          `This drawer was already counted at Day-End (${inr(closed.counted)}). That count stands — your grid has been kept alongside it.`,
+        );
+      } else if (closed.variance_status === 'BALANCED') {
         toast.success('Cash register closed — drawer balanced');
       } else {
         toast.warning(
@@ -219,8 +216,7 @@ export default function CashRegisterPage() {
               session={openSession}
               preview={preview}
               closeDenoms={closeDenoms}
-              setCloseDenoms={setCloseDenoms}
-              setPieces={setPieces}
+              onCountChange={setClosePieces}
               countedTotal={countedTotal}
               liveExpected={liveExpected}
               liveVariance={liveVariance}
@@ -237,8 +233,7 @@ export default function CashRegisterPage() {
               shift={shift}
               setShift={setShift}
               openDenoms={openDenoms}
-              setOpenDenoms={setOpenDenoms}
-              setPieces={setPieces}
+              onCountChange={setOpenPieces}
               openTotal={openTotal}
               onOpen={handleOpen}
               busy={busy}
@@ -280,7 +275,22 @@ export default function CashRegisterPage() {
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.closed_at)}</td>
                       <td className="px-4 py-2 text-right">{inr(s.opening_float)}</td>
                       <td className="px-4 py-2 text-right">
-                        {s.status === 'CLOSED' ? inr(s.counted) : '—'}
+                        {s.status !== 'CLOSED' ? (
+                          '—'
+                        ) : s.counted == null ? (
+                          <span className="text-gray-500 text-xs">Not counted</span>
+                        ) : (
+                          inr(s.counted)
+                        )}
+                        {s.counted_from_shared_record && (
+                          <span
+                            data-testid="counted-at-day-end"
+                            title="Counted at POS Day-End. One drawer, one count."
+                            className="ml-1 text-[10px] font-medium text-amber-700"
+                          >
+                            Day-End
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-right text-gray-500">
                         {s.status === 'CLOSED' ? inr(s.expected) : '—'}
@@ -310,8 +320,7 @@ function OpenView({
   shift,
   setShift,
   openDenoms,
-  setOpenDenoms,
-  setPieces,
+  onCountChange,
   openTotal,
   onOpen,
   busy,
@@ -319,12 +328,7 @@ function OpenView({
   shift: string;
   setShift: (s: string) => void;
   openDenoms: DenomRow[];
-  setOpenDenoms: React.Dispatch<React.SetStateAction<DenomRow[]>>;
-  setPieces: (
-    setter: React.Dispatch<React.SetStateAction<DenomRow[]>>,
-    idx: number,
-    value: string,
-  ) => void;
+  onCountChange: (index: number, pieces: number) => void;
   openTotal: number;
   onOpen: () => void;
   busy: boolean;
@@ -348,7 +352,7 @@ function OpenView({
           </select>
         </div>
       </div>
-      <DenominationGrid rows={openDenoms} setter={setOpenDenoms} setPieces={setPieces} />
+      <DenominationGrid rows={openDenoms} onChange={onCountChange} showHeader />
       <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
         <span className="text-sm text-gray-500">Opening float</span>
         <span className="text-2xl font-semibold text-gray-900 tabular-nums">
@@ -375,8 +379,7 @@ function ReconcileView({
   session,
   preview,
   closeDenoms,
-  setCloseDenoms,
-  setPieces,
+  onCountChange,
   countedTotal,
   liveExpected,
   liveVariance,
@@ -391,12 +394,7 @@ function ReconcileView({
   session: CashRegisterSession;
   preview: ExpectedPreview | null;
   closeDenoms: DenomRow[];
-  setCloseDenoms: React.Dispatch<React.SetStateAction<DenomRow[]>>;
-  setPieces: (
-    setter: React.Dispatch<React.SetStateAction<DenomRow[]>>,
-    idx: number,
-    value: string,
-  ) => void;
+  onCountChange: (index: number, pieces: number) => void;
   countedTotal: number;
   liveExpected: number;
   liveVariance: number;
@@ -428,7 +426,7 @@ function ReconcileView({
           <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5 mb-4">
             <Lock className="w-4 h-4 text-bv" /> Count the drawer
           </h2>
-          <DenominationGrid rows={closeDenoms} setter={setCloseDenoms} setPieces={setPieces} />
+          <DenominationGrid rows={closeDenoms} onChange={onCountChange} showHeader />
           <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
             <span className="text-sm text-gray-500">Counted cash</span>
             <span className="text-2xl font-semibold text-gray-900 tabular-nums">
@@ -555,57 +553,6 @@ function ReconcileView({
 // ----------------------------------------------------------------------------
 // Shared bits
 // ----------------------------------------------------------------------------
-function DenominationGrid({
-  rows,
-  setter,
-  setPieces,
-}: {
-  rows: DenomRow[];
-  setter: React.Dispatch<React.SetStateAction<DenomRow[]>>;
-  setPieces: (
-    setter: React.Dispatch<React.SetStateAction<DenomRow[]>>,
-    idx: number,
-    value: string,
-  ) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="grid grid-cols-[1fr_auto_auto] gap-3 text-xs text-gray-400 uppercase tracking-wide px-1">
-        <span>Denomination</span>
-        <span className="text-center w-24">Pieces</span>
-        <span className="text-right w-24">Amount</span>
-      </div>
-      {rows.map((r, idx) => (
-        <div
-          key={`${r.kind}-${r.face}`}
-          className="grid grid-cols-[1fr_auto_auto] gap-3 items-center px-1 py-1 rounded hover:bg-gray-50"
-        >
-          <span className="flex items-center gap-1.5 text-sm text-gray-700">
-            {r.kind === 'coin' ? (
-              <Coins className="w-3.5 h-3.5 text-gray-400" />
-            ) : (
-              <Banknote className="w-3.5 h-3.5 text-gray-400" />
-            )}
-            ₹{r.face}
-            <span className="text-xs text-gray-400">{r.kind}</span>
-          </span>
-          <input
-            type="number"
-            min={0}
-            value={r.pieces || ''}
-            onChange={(e) => setPieces(setter, idx, e.target.value)}
-            placeholder="0"
-            className="w-24 text-center border border-gray-300 rounded px-2 py-1 text-sm tabular-nums"
-          />
-          <span className="w-24 text-right text-sm text-gray-600 tabular-nums">
-            {inr(r.face * (r.pieces || 0))}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function Stat({
   label,
   value,
@@ -647,8 +594,20 @@ function Row({
 }
 
 function VarianceChip({ session }: { session: CashRegisterSession }) {
-  const v = session.variance ?? 0;
   const status = session.variance_status;
+  // A drawer nobody counted has no variance to show. Showing "−₹2,000" here
+  // was the whole day reported missing because the grid was left untouched.
+  if (status === 'NOT_COUNTED' || session.variance == null) {
+    return (
+      <span
+        title="Closed without a count. Not counted is not an empty drawer."
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Not counted
+      </span>
+    );
+  }
+  const v = session.variance;
   const cls =
     status === 'BALANCED'
       ? 'bg-green-50 text-green-700'
