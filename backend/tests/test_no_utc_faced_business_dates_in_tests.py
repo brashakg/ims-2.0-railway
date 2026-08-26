@@ -129,7 +129,7 @@ _REL = (
 _HEX = (
     "NOT A DATE. A uuid4 hex slice used to build a unique test id. The [:10] "
     "arm of the pattern exists for `stamp[:10]` day faces -- the exact line "
-    "that started this -- and cannot tell a hex slice apart. KEEP THESE THREE: "
+    "that started this -- and cannot tell a hex slice apart. KEEP THESE FOUR: "
     "they are the only f-string hits in the scan, so they double as the "
     "cross-version canary for the PEP 701 tokenizer split described in "
     "_code_only. If the scanner ever stops looking inside f-strings on some "
@@ -148,6 +148,10 @@ ALLOWED = {
         '"barcode": f"BC-{uuid.uuid4().hex[:10]}",',
     ): _HEX,
     ("test_inventory_quantity.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
+    # Same hex slice, bare-assignment form: the stock-count lifecycle suite
+    # mints a barcode per seeded unit. Arrived with the suite itself and was
+    # never allow-listed, so `test (3.10)` has been red on main since.
+    ("test_stock_count_lifecycle.py", 'bc = f"BC-{uuid.uuid4().hex[:10]}"'): _HEX,
     (
         "test_clinical_rx_list_range.py",
         'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
