@@ -433,3 +433,219 @@ class TestOrderAnUncataloguedItem:
                 vendors_mod.validate_store_access,
             ) = saved
         assert r.patched["status"] == "SENT"
+
+# =========================================================================== #
+# R14 -- the goods-receipt tally: tick + quantity, ordered vs received
+# =========================================================================== #
+
+
+class _GRNRepo:
+    def __init__(self):
+        self.created = []
+
+    def create(self, doc):
+        self.created.append(doc)
+        return doc
+
+    def find_by_id(self, gid):
+        for d in self.created:
+            if d.get("grn_id") == gid:
+                return dict(d)
+        return None
+
+
+class _FileStore:
+    def get(self, _fid, **_kw):
+        return {"data": b"x", "filename": "inv.pdf"}
+
+    def get_metadata(self, _fid):
+        return {"kind": "grn_document", "uploaded_by": "u1", "store_id": "BV-01"}
+
+
+_RECEIVE_PO = {
+    "po_id": "PO-1",
+    "po_number": "PO-BV-1",
+    "vendor_id": "V1",
+    "delivery_store_id": "BV-01",
+    "status": "SENT",
+    "items": [
+        {
+            "product_id": "P1",
+            "product_name": "Frame",
+            "sku": "S1",
+            "quantity": 20,
+            "unit_price": 3200,
+        }
+    ],
+}
+
+
+def _receive(lines, po=None, product_repo=None):
+    """Create a GRN through the real router with the module's deps stubbed."""
+    grn_repo = _GRNRepo()
+    po_repo = type(
+        "R",
+        (),
+        {
+            "find_by_id": lambda _s, _i: dict(po or _RECEIVE_PO),
+            "update": lambda _s, _i, _p: True,
+        },
+    )()
+    saved = {
+        k: getattr(vendors_mod, k)
+        for k in (
+            "get_grn_repository",
+            "get_purchase_order_repository",
+            "get_product_repository",
+            "get_file_store",
+            "generate_grn_number",
+            "can_access_store_scoped",
+            "is_online_store",
+            "_get_db",
+            "get_audit_repository",
+            "get_task_repository",
+        )
+        if hasattr(vendors_mod, k)
+    }
+    vendors_mod.get_grn_repository = lambda: grn_repo
+    vendors_mod.get_purchase_order_repository = lambda: po_repo
+    vendors_mod.get_product_repository = lambda: product_repo
+    vendors_mod.get_file_store = lambda: _FileStore()
+    vendors_mod.generate_grn_number = lambda _s: "GRN-BV-1"
+    vendors_mod.can_access_store_scoped = lambda *a, **k: True
+    vendors_mod.is_online_store = lambda *a, **k: False
+    vendors_mod._get_db = lambda: None
+    vendors_mod.get_audit_repository = lambda: None
+    if hasattr(vendors_mod, "get_task_repository"):
+        vendors_mod.get_task_repository = lambda: None
+    try:
+        body = vendors_mod.GRNCreate(
+            po_id="PO-1",
+            vendor_invoice_no="INV-1",
+            attachment_file_id="F1",
+            items=[vendors_mod.GRNItemCreate(**ln) for ln in lines],
+        )
+        out = asyncio.run(
+            vendors_mod.create_grn(
+                body,
+                {
+                    "user_id": "u1",
+                    "username": "receiver",
+                    "roles": ["STORE_MANAGER"],
+                    "active_store_id": "BV-01",
+                    "store_ids": ["BV-01"],
+                },
+            )
+        )
+        return out, grn_repo
+    finally:
+        for k, v in saved.items():
+            setattr(vendors_mod, k, v)
+
+
+class TestGoodsReceiptTally:
+    def test_a_receipt_cannot_post_itself_without_the_tick(self):
+        """The received quantity arrives pre-filled with the ordered quantity,
+        so an untouched line used to post a perfect receipt. Ruling 14."""
+        with pytest.raises(HTTPException) as exc:
+            _receive(
+                [
+                    {
+                        "product_id": "P1",
+                        "received_qty": 20,
+                        "accepted_qty": 20,
+                        "rejected_qty": 0,
+                    }
+                ]
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "LINES_NOT_TALLIED"
+        assert exc.value.detail["lines"] == [{"product_id": "P1", "received_qty": 20}]
+
+    def test_an_exact_receipt_records_ordered_against_received(self):
+        out, repo = _receive(
+            [
+                {
+                    "product_id": "P1",
+                    "received_qty": 20,
+                    "accepted_qty": 20,
+                    "rejected_qty": 0,
+                    "tallied": True,
+                }
+            ]
+        )
+        line = repo.created[0]["items"][0]
+        assert (line["ordered_qty"], line["received_qty"]) == (20, 20)
+        assert line["accepted_qty"] == 20
+        assert line["variance_status"] == "EXACT"
+        assert out["has_discrepancy"] is False
+
+    def test_a_short_receipt_is_flagged_short(self):
+        out, repo = _receive(
+            [
+                {
+                    "product_id": "P1",
+                    "received_qty": 18,
+                    "accepted_qty": 18,
+                    "rejected_qty": 0,
+                    "tallied": True,
+                }
+            ]
+        )
+        line = repo.created[0]["items"][0]
+        assert (line["ordered_qty"], line["received_qty"]) == (20, 18)
+        assert line["variance_status"] == "SHORT"
+        assert out["has_discrepancy"] is True
+
+    def test_an_over_receipt_is_flagged_over(self):
+        out, repo = _receive(
+            [
+                {
+                    "product_id": "P1",
+                    "received_qty": 22,
+                    "accepted_qty": 22,
+                    "rejected_qty": 0,
+                    "tallied": True,
+                }
+            ]
+        )
+        line = repo.created[0]["items"][0]
+        assert line["variance_status"] == "OVER"
+        assert out["has_discrepancy"] is True
+
+    def test_part_of_a_line_can_be_rejected(self):
+        """The owner's own case: 20 ordered, 20 arrive, 2 are damaged. The line
+        is no longer all-or-nothing -- 18 enter stock, 2 are rejected."""
+        out, repo = _receive(
+            [
+                {
+                    "product_id": "P1",
+                    "received_qty": 20,
+                    "accepted_qty": 18,
+                    "rejected_qty": 2,
+                    "rejection_reason": "Damaged in transit",
+                    "tallied": True,
+                }
+            ]
+        )
+        line = repo.created[0]["items"][0]
+        assert (line["received_qty"], line["accepted_qty"], line["rejected_qty"]) == (
+            20,
+            18,
+            2,
+        )
+        assert line["rejection_reason"] == "Damaged in transit"
+        # The full 20 arrived against the 20 ordered, so the QUANTITY tally is
+        # exact -- the rejection is a quality fact, and it is what holds the bill.
+        assert line["variance_status"] == "EXACT"
+        grn = repo.created[0]
+        assert grn["total_accepted"] == 18
+        assert grn["total_rejected"] == 2
+        assert out["total_received"] == 20
+
+    def test_the_arithmetic_of_a_line_must_hold(self):
+        with pytest.raises(Exception) as exc:
+            vendors_mod.GRNItemCreate(
+                product_id="P1", received_qty=20, accepted_qty=18, rejected_qty=0
+            )
+        assert "must equal" in str(exc.value)

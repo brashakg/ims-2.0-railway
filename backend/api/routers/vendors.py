@@ -249,6 +249,12 @@ class GRNItemCreate(BaseModel):
     accepted_qty: int = Field(..., ge=0)
     rejected_qty: int = Field(0, ge=0)
     rejection_reason: Optional[str] = None
+    # Ruling 14 -- THE TALLY TICK. The receiver ticks each line to say "I have
+    # counted this one against what was ordered". Defaults to False so the tick
+    # is a real act: a clerk who touches nothing can no longer post a perfect
+    # receipt off the pre-filled ordered quantity. Enforced for PO-backed
+    # STANDARD receipts only (a Delivery Challan has no order to tally against).
+    tallied: bool = False
     # Receiving location for the minted serialized units (optional; falls back
     # to "DEFAULT" on the stock unit). Lets the receiver bin goods at post time.
     location_code: Optional[str] = None
@@ -2412,6 +2418,31 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 raise
             except Exception:
                 pass
+
+    # Ruling 14 -- THE TALLY. Every line of a PO-backed receipt must be ticked
+    # before the receipt is written: the quantity that arrived has been counted
+    # against the quantity that was ordered, line by line, by a person. Without
+    # this the received quantity arrives pre-filled with the ordered quantity
+    # and a receipt posts itself.
+    if po is not None and not is_dc:
+        untallied = [
+            {"product_id": it.product_id, "received_qty": it.received_qty}
+            for it in grn.items
+            if not it.tallied
+        ]
+        if untallied:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "LINES_NOT_TALLIED",
+                    "message": (
+                        "Tick every line to confirm you have counted what "
+                        "arrived against what was ordered, then post the "
+                        "receipt."
+                    ),
+                    "lines": untallied,
+                },
+            )
 
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
