@@ -3948,7 +3948,14 @@ async def express_receive_grn(
             po_id=body.po_id,
             vendor_invoice_no=body.vendor_invoice_no,
             vendor_invoice_date=body.vendor_invoice_date,
-            items=[GRNItemCreate(**it.model_dump()) for it in body.items],
+            # Ruling 14: express receiving IS the tally, declared once at the
+            # header. The caller is asserting the whole delivery arrived exactly
+            # as ordered and clean (the EXPRESS_NOT_CLEAN rule below refuses
+            # anything else), so each line is ticked here rather than the
+            # clean-delivery chain being locked out of its own shortcut.
+            items=[
+                GRNItemCreate(**it.model_dump(), tallied=True) for it in body.items
+            ],
             notes=body.notes,
             grn_subtype=GRN_SUBTYPE_STANDARD,
             attachment_file_id=body.attachment_file_id,
