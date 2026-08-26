@@ -229,7 +229,9 @@ def test_build_summary_tolerance_bands_verdict_but_not_valuation():
         {"product_id": "P-A", "counted_qty": 8, "expected": 10, "cost_paise": 10000},
         {"product_id": "P-C", "counted_qty": 12, "expected": 10, "cost_paise": 5000},
     ]
-    _, summary = svc.build_summary(items, tolerance=2)
+    # within_tolerance now also means "the whole scope was walked", so the
+    # session's expected SET has to be handed over -- see the coverage suite.
+    _, summary = svc.build_summary(items, tolerance=2, expected_ids=["P-A", "P-C"])
     assert summary["matched"] == 2 and summary["over"] == 0 and summary["short"] == 0
     assert summary["within_tolerance"] is True
     # real money impact is unchanged: -20000 + 10000 = -10000
@@ -719,3 +721,228 @@ def test_a_session_with_one_submitted_line_still_locks(db):
                                  on_hand_resolver=_on_hand({"P-A": 10}), tolerance=0)
     assert locked["status"] == svc.STATUS_LOCKED
     assert locked["summary"]["total_skus"] == 1
+
+
+# ============================================================================
+# HOW MUCH OF THE SHELF WAS WALKED  (the blind count IS the day-end)
+# ============================================================================
+# Owner ruling 2026-08-25: the BLIND count is the day-end. Coverage was
+# measured over the SUBMITTED list, and nothing held the expected set at all,
+# so a store with 400 products and one line submitted locked as
+# "1 SKU, 1 matched, within tolerance" -- a clean day-end for a shelf nobody
+# walked. The session now snapshots WHICH products it is expected to walk when
+# it opens, and a partial count can never read as clean.
+
+
+def _expected(*product_ids):
+    """A controllable expected_resolver(store_id, scope) -> [product_id]."""
+    return lambda store_id, scope: list(product_ids)
+
+
+def _open_over(db, *expected_ids, store="BV-1"):
+    eng = svc.BlindStockTakeEngine(db)
+    sess = eng.open_session(store_id=store, actor=_counter(),
+                            expected_resolver=_expected(*expected_ids))
+    return eng, sess["session_id"]
+
+
+def test_open_snapshots_the_products_the_session_is_expected_to_walk(db):
+    eng, sid = _open_over(db, "P-D", "P-A", "P-C", "P-B")
+    stored = eng.get(sid)
+    assert stored.get("expected_product_ids") is not None, (
+        "the session recorded no scope, so nothing can ever tell whether the "
+        "count that follows walked the whole shelf or one peg of it"
+    )
+    assert set(stored["expected_product_ids"]) == {"P-A", "P-B", "P-C", "P-D"}, (
+        "the scope is a SET of products, and it must survive into storage"
+    )
+
+
+def test_one_line_out_of_four_is_not_a_clean_day_end(db):
+    """THE LIE: one honest, matching line, and the day-end reported clean."""
+    eng, sid = _open_over(db, "P-A", "P-B", "P-C", "P-D")
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2}],
+                     store_id="BV-1", actor=_counter())
+
+    locked = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                                 on_hand_resolver=_on_hand({"P-A": 2}), tolerance=0)
+    s = locked["summary"]
+
+    assert (s["matched"], s["over"], s["short"]) == (1, 0, 0), (
+        "the one line that was walked genuinely agreed -- that is the trap"
+    )
+    assert s["within_tolerance"] is False, (
+        "three products out of four were never looked at; this is not a "
+        "clean day-end"
+    )
+    assert s["full_count"] is False
+    assert s["products_expected"] == 4
+    assert s["products_counted"] == 1
+    assert s["products_not_counted"] == ["P-B", "P-C", "P-D"], (
+        "and the day-end must name WHICH products were missed"
+    )
+    assert s["products_missed"] == 3
+    assert s["coverage_percentage"] == 25.0
+
+
+def test_walking_every_expected_product_reads_as_a_full_count(db):
+    """The discriminator: a count that did walk the whole shelf must still be
+    allowed to read clean, or the flag means nothing."""
+    eng, sid = _open_over(db, "P-A", "P-B")
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2},
+                           {"product_id": "P-B", "counted_qty": 5}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 2, "P-B": 5}),
+                            tolerance=0)["summary"]
+
+    assert s["full_count"] is True
+    assert s["within_tolerance"] is True
+    assert s["products_not_counted"] == []
+    assert s["coverage_percentage"] == 100.0
+
+
+def test_a_counted_zero_is_a_walked_product_not_a_missed_one(db):
+    """An empty peg is a real answer, and the commonest one a count finds."""
+    eng, sid = _open_over(db, "P-A", "P-B")
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2},
+                           {"product_id": "P-B", "counted_qty": 0}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 2, "P-B": 0}),
+                            tolerance=0)["summary"]
+
+    assert s["products_counted"] == 2
+    assert s["products_not_counted"] == []
+    assert s["full_count"] is True
+
+
+def test_counting_something_the_session_never_expected_does_not_inflate_coverage(db):
+    """A product found on the shelf that the books never expected is an
+    overage, not coverage -- it cannot stand in for a product never walked."""
+    eng, sid = _open_over(db, "P-A", "P-B")
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2},
+                           {"product_id": "P-Z", "counted_qty": 1}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 2, "P-Z": 0}),
+                            tolerance=0)["summary"]
+
+    assert s["total_skus"] == 2
+    assert s["products_counted"] == 1
+    assert s["products_not_counted"] == ["P-B"]
+    assert s["full_count"] is False
+    assert s["within_tolerance"] is False
+
+
+def test_a_scope_that_could_not_be_read_records_no_scope_at_all(db):
+    """The resolver says "I could not look". Recording that as an empty scope
+    would hand the day-end a clean full count over a shelf nobody walked."""
+    eng = svc.BlindStockTakeEngine(db)
+    sid = eng.open_session(store_id="BV-1", actor=_counter(),
+                           expected_resolver=lambda store_id, scope: None)["session_id"]
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2}],
+                     store_id="BV-1", actor=_counter())
+
+    assert eng.get(sid)["expected_product_ids"] is None
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 2}), tolerance=0)["summary"]
+    assert s["full_count"] is False
+    assert s["within_tolerance"] is False
+
+
+def test_a_session_that_recorded_no_scope_is_never_reported_complete(db):
+    """Unknown coverage is not proof of a full count. A session opened with no
+    inventory store behind it must read incomplete, not clean."""
+    eng = svc.BlindStockTakeEngine(db)
+    sid = eng.open_session(store_id="BV-1", actor=_counter())["session_id"]
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 2}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 2}), tolerance=0)["summary"]
+
+    assert s["products_expected"] is None
+    assert s["full_count"] is False
+    assert s["within_tolerance"] is False
+
+
+def test_a_store_with_nothing_on_hand_can_still_be_a_full_count(db):
+    """The empty scope is genuinely empty, not unknown -- a session that
+    expected nothing cannot be a partial count."""
+    eng, sid = _open_over(db)
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 1}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 1}), tolerance=0)["summary"]
+
+    assert s["products_expected"] == 0
+    assert s["full_count"] is True
+    assert s["coverage_percentage"] == 100.0
+
+
+def test_a_short_line_is_still_short_when_the_whole_shelf_was_walked(db):
+    """The other discriminator: coverage must not become the only thing the
+    day-end looks at."""
+    eng, sid = _open_over(db, "P-A")
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 8}],
+                     store_id="BV-1", actor=_counter())
+
+    s = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                            on_hand_resolver=_on_hand({"P-A": 10}),
+                            cost_resolver=_costs({"P-A": 10000}), tolerance=0)["summary"]
+
+    assert s["full_count"] is True
+    assert s["short"] == 1
+    assert s["within_tolerance"] is False
+    assert s["net_variance_value_paise"] == -20000
+
+
+def test_the_expected_set_is_hidden_from_the_counter_until_the_lock(db):
+    """Blind means blind: naming the products the system believes have stock
+    tells the counter which pegs are supposed to be non-empty."""
+    eng, sid = _open_over(db, "P-A", "P-B")
+    stored = eng.get(sid)
+
+    assert "expected_product_ids" not in svc.redact_for_counter(stored, _counter())
+    assert set(svc.redact_for_counter(stored, _manager())["expected_product_ids"]) == {
+        "P-A", "P-B"}
+
+
+def test_the_open_route_does_not_turn_an_unreadable_shelf_into_an_empty_one(db, monkeypatch):
+    """The REAL scope resolver over a store it cannot read. The session must
+    record NO scope -- an empty one would lock as a clean full count."""
+    import asyncio
+    from api.routers import blind_stock_take as r
+
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+
+    out = asyncio.run(r.open_count(r.OpenBody(store_id="BV-1"), current_user=_manager()))
+
+    assert out["expected_product_ids"] is None, (
+        "a shelf the system could not read was recorded as an empty shelf, "
+        "which locks as a clean day-end"
+    )
+
+
+def test_the_open_route_records_the_scope_on_the_session(db, monkeypatch):
+    """End-to-end via the ROUTER: opening a count through the HTTP door must
+    snapshot the scope, not just the engine call a test makes by hand."""
+    import asyncio
+    from api.routers import blind_stock_take as r
+
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+    monkeypatch.setattr(r, "_expected_resolver", lambda store_id, scope: ["P-A", "P-B"])
+
+    out = asyncio.run(r.open_count(r.OpenBody(store_id="BV-1"), current_user=_manager()))
+
+    assert out.get("expected_product_ids") is not None, (
+        "the route opened a session that has no idea what it is meant to walk"
+    )
+    assert set(out["expected_product_ids"]) == {"P-A", "P-B"}

@@ -1345,3 +1345,255 @@ def test_a_write_off_with_no_override_is_not_stamped_as_overridden(
     row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
     assert row["override_applied"] is False
     assert row.get("overridden_by") is None
+
+
+# ============================================================================
+# 9. MOVEMENT THAT CANCELS OUT IS STILL MOVEMENT
+# ============================================================================
+# "Did this line move while the session was open?" used to be answered by
+# comparing two TOTALS. One frame sells at the till at 10:15 and one is
+# received into the stockroom at 11:00: the totals are identical, the line
+# reads as untouched, the counter's honest shelf count of 2 is banked as
+# shrinkage, and the write-off destroys a frame the shop still owns and could
+# still sell. The session now records WHICH units were on hand when it opened,
+# and a different SET of units is movement whatever the totals say.
+
+
+def _receive_one_into_the_stockroom(mongo_db, product_id: str) -> str:
+    """A GRN landing mid-count: one more unit of the same style, in the back
+    room, where the counter walking the shelf will never see it."""
+    return _seed_units(mongo_db, product_id, 1)[0]
+
+
+def _available_unit_ids(mongo_db, product_id: str, store_id: str = STORE) -> set:
+    """The SET of units on the shelf right now -- not how many, WHICH."""
+    return {
+        u["stock_id"]
+        for u in mongo_db["stock_units"].find(
+            {"product_id": product_id, "store_id": store_id, "status": "AVAILABLE"}
+        )
+    }
+
+
+def _start_in_category(client, category: str) -> str:
+    r = client.post("/inventory/stock-count/start", json={"category": category})
+    assert r.status_code == 200, r.text
+    return r.json()["count_id"]
+
+
+def test_a_sale_and_a_delivery_that_cancel_out_are_not_a_missing_frame(
+    admin_client, mongo_db
+):
+    """3 on the books. One sells at 10:15, one is received at 11:00, and at
+    12:00 the counter walks the shelf and honestly writes 2. The books say 3
+    both times -- and 2 frames on the shelf plus 1 in the stockroom is still
+    3 sellable frames. Nothing is missing."""
+    pid = _seed_product(mongo_db, cost=2000.0)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    count_id = _start(admin_client)
+
+    assert _sell_one_at_the_till(mongo_db, pid) is not None  # 10:15
+    _receive_one_into_the_stockroom(mongo_db, pid)  # 11:00
+
+    admin_client.post(  # 12:00 -- the shelf, honestly
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[2], "physical_count": 2, "count_id": count_id},
+    )
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+    line = body["variances"][0]
+
+    assert line["system_quantity"] == 3
+    assert line["system_quantity_now"] == 3, (
+        "the two TOTALS are identical -- that is the whole trap; if this is "
+        "not 3 the case being tested has not been set up"
+    )
+    assert line["units_changed_during_count"] is True, (
+        "a different set of frames is on hand than when the session opened"
+    )
+    assert line["moved_during_count"] is True, (
+        "equal-and-opposite movement cancelled out and the line read as "
+        "untouched, so an honest shelf count was banked as shrinkage"
+    )
+    assert body["shrinkage_units"] == 0, (
+        f"a real frame was reported missing: {body['shrinkage_units']} unit(s) "
+        f"worth Rs {body['shrinkage_value']}"
+    )
+    assert body["shrinkage_value"] == 0.0
+    assert body["lines_moved_during_count"] == 1
+
+
+def test_the_write_off_spares_the_shelf_when_movement_cancelled_out(
+    admin_client, mongo_db
+):
+    """The end of that same day: an ADMIN presses write-off anyway. Every
+    frame the shop still owns must still be there -- the SAME frames, not
+    merely the same number of them."""
+    pid = _seed_product(mongo_db, cost=2000.0)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    count_id = _start(admin_client)
+    _sell_one_at_the_till(mongo_db, pid)
+    _receive_one_into_the_stockroom(mongo_db, pid)
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[2], "physical_count": 2, "count_id": count_id},
+    )
+    admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
+
+    on_the_shelf_before = _available_unit_ids(mongo_db, pid)
+    assert len(on_the_shelf_before) == 3
+
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["units_voided"] == 0, "there was nothing missing to write off"
+    assert body["lines_skipped_moved"] == 1
+    assert _available_unit_ids(mongo_db, pid) == on_the_shelf_before, (
+        "a good frame was destroyed and can no longer be sold"
+    )
+    assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
+
+
+def test_a_shelf_whose_every_frame_was_replaced_is_not_an_untouched_shelf(
+    admin_client, mongo_db
+):
+    """The purest form of the bug: 3 frames go out on a transfer and 3 fresh
+    ones arrive while the session is open. The total never moved and not one
+    of the frames is the same, so this count is stale and must be flagged --
+    never settled against the opening snapshot."""
+    pid = _seed_product(mongo_db, cost=2000.0)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    count_id = _start(admin_client)
+
+    before = _available_unit_ids(mongo_db, pid)
+    mongo_db["stock_units"].update_many(
+        {"product_id": pid, "store_id": STORE, "status": "AVAILABLE"},
+        {"$set": {"status": "TRANSFERRED"}},
+    )
+    _seed_units(mongo_db, pid, 3)
+    after = _available_unit_ids(mongo_db, pid)
+    assert len(after) == 3 and not (before & after), "set up: every frame replaced"
+
+    admin_client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
+    )
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/complete", json={}
+    ).json()
+    line = body["variances"][0]
+
+    assert line["system_quantity"] == 3 and line["system_quantity_now"] == 3
+    assert line["variance"] == 0
+    assert line["units_changed_during_count"] is True
+    assert line["moved_during_count"] is True, (
+        "every frame on this shelf changed hands during the count; the "
+        "matching totals are a coincidence, not a clean line"
+    )
+
+
+def test_a_shelf_nobody_touched_is_still_not_flagged_as_moved(
+    admin_client, mongo_db
+):
+    """The discriminator: flagging on the SET must not flag every line, or a
+    genuine shortage would never be correctable again."""
+    pid, count_id, _ = _counted_short(admin_client, mongo_db, on_hand=5, counted=3)
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    line = doc["variances"][0]
+    assert line["units_changed_during_count"] is False
+    assert line["moved_during_count"] is False
+
+    body = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={}
+    ).json()
+    assert body["units_voided"] == 2, "a real shortage is still written off"
+    assert body["lines_skipped_moved"] == 0
+    assert len(_available_unit_ids(mongo_db, pid)) == 3
+
+
+def test_the_opening_snapshot_is_a_set_of_units_not_just_a_total(
+    admin_client, mongo_db
+):
+    """The mechanism itself, without reference to its internals: an untouched
+    shelf fingerprints the same twice, and swapping one frame for another
+    changes the fingerprint while leaving the total alone."""
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    pid = _seed_product(mongo_db, cost=2000.0, category=category)
+    _seed_units(mongo_db, pid, 3)
+
+    def _snapshot(count_id):
+        return mongo_db["stock_counts"].find_one({"count_id": count_id})
+
+    first = _snapshot(_start_in_category(admin_client, category))
+    second = _snapshot(_start_in_category(admin_client, category))
+    assert first["system_quantities"] == {pid: 3}
+    assert pid in (first.get("system_unit_fingerprints") or {}), (
+        "the session recorded how many units were on hand but not WHICH ones, "
+        "so movement that cancels out will read as an untouched shelf"
+    )
+    assert (
+        first["system_unit_fingerprints"][pid]
+        == second["system_unit_fingerprints"][pid]
+    ), "nothing moved between these two sessions, so the picture must match"
+
+    _sell_one_at_the_till(mongo_db, pid)
+    _receive_one_into_the_stockroom(mongo_db, pid)
+    third = _snapshot(_start_in_category(admin_client, category))
+
+    assert third["system_quantities"][pid] == 3, "the TOTAL is unchanged"
+    assert (
+        third["system_unit_fingerprints"][pid]
+        != first["system_unit_fingerprints"][pid]
+    ), "but they are not the same three frames, and the snapshot must say so"
+
+
+# ============================================================================
+# 10. WHICH PRODUCTS A COUNT IS EXPECTED TO WALK
+# ============================================================================
+# The same snapshot, used by the blind day-end count to know how much of the
+# shelf was walked. Tested here because it reads the real stock ledger.
+
+
+def test_the_scope_snapshot_lists_the_products_with_stock_at_this_store(
+    mongo_db,
+):
+    from api.routers.inventory import _scoped_product_ids
+
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    kept = _seed_product(mongo_db, category=category)
+    _seed_units(mongo_db, kept, 2)
+    also_kept = _seed_product(mongo_db, category=category)
+    _seed_units(mongo_db, also_kept, 1)
+    other_store = _seed_product(mongo_db, category=category)
+    _seed_units(mongo_db, other_store, 3, store_id="ST-ELSEWHERE")
+    no_stock = _seed_product(mongo_db, category=category)
+
+    scope = _scoped_product_ids(_DBProxy(mongo_db), STORE, category)
+
+    assert set(scope) == {kept, also_kept}, (
+        "the scope is the SET of products this store actually has on hand"
+    )
+    assert other_store not in scope and no_stock not in scope
+
+
+def test_a_category_with_no_products_expects_nothing_not_everything(mongo_db):
+    """The dangerous fallback: an empty category must not silently widen to
+    the whole store."""
+    from api.routers.inventory import _scoped_product_ids
+
+    pid = _seed_product(mongo_db, category="REAL-CATEGORY")
+    _seed_units(mongo_db, pid, 2)
+
+    assert _scoped_product_ids(_DBProxy(mongo_db), STORE, "NO-SUCH-CATEGORY") == []
+
+
+def test_a_scope_that_cannot_be_read_is_not_an_empty_shelf(mongo_db):
+    """"I could not look" must never be recorded as "there was nothing to
+    look at" -- an empty scope reads as a completed full count."""
+    from api.routers.inventory import _scoped_product_ids
+
+    assert _scoped_product_ids(None, STORE) is None
+    assert _scoped_product_ids(_DBProxy(mongo_db), "") is None

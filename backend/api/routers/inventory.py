@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Dict
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import uuid
 import logging
 
@@ -2229,6 +2230,10 @@ async def start_stock_count(
     # to it, then scope the stock aggregation to those ids. This ensures that
     # a category-limited count only snapshots the right products.
     system_quantities: Dict[str, int] = {}
+    # WHICH units were on hand per product when the session opened -- see the
+    # "ONE SNAPSHOT MECHANISM" note above. Without it, a sale and a receipt
+    # that cancel out leave the line looking untouched.
+    system_unit_fingerprints: Dict[str, str] = {}
     if stock_repo is not None:
         # Resolve category -> product_ids when filtering is requested.
         category_product_ids: Optional[List[str]] = None
@@ -2249,10 +2254,7 @@ async def start_stock_count(
                         "[INVENTORY] category product lookup failed: %s", _exc
                     )
 
-        match_clause: dict = {
-            "store_id": active_store,
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
-        }
+        match_clause: dict = _countable_match(active_store)
         if category_product_ids is not None:
             # Empty list means no products match -- yield no system quantities
             # rather than counting all products (which would be wrong).
@@ -2262,12 +2264,16 @@ async def start_stock_count(
                 match_clause["product_id"] = {"$in": category_product_ids}
 
         if category_product_ids is None or category_product_ids:
-            pipeline = [
-                {"$match": match_clause},
-                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
-            ]
+            pipeline = [{"$match": match_clause}, _COUNTABLE_GROUP]
             for r in stock_repo.aggregate(pipeline):
                 system_quantities[r["_id"]] = r["qty"]
+                # Absent only if the engine did not return the unit ids; the
+                # completion check then falls back to the quantity rather than
+                # flagging every line as moved.
+                if "units" in r:
+                    system_unit_fingerprints[str(r["_id"])] = _unit_fingerprint(
+                        r.get("units")
+                    )
 
     count_doc = {
         "count_id": count_id,
@@ -2284,6 +2290,7 @@ async def start_stock_count(
         ),
         "items": [],
         "system_quantities": system_quantities,
+        "system_unit_fingerprints": system_unit_fingerprints,
         "completed_at": None,
         "variances": [],
         "items_counted": 0,
@@ -2330,47 +2337,150 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
     return costs
 
 
-def _on_hand_now(db, store_id: str, product_ids: List[str]) -> Dict[str, int]:
-    """Live on-hand per product at this store, counted the SAME way the
-    session's opening snapshot was (one serialized row == one unit,
-    AVAILABLE + RESERVED).
+# ---------------------------------------------------------------------------
+# ONE SNAPSHOT MECHANISM for every physical count in the building.
+#
+# A count decides "did this line move while the session was open?" by
+# comparing the picture taken when the session opened against the picture
+# now. Both pictures must therefore be taken the SAME way -- one serialized
+# row == one unit, AVAILABLE + RESERVED -- and both must record not only HOW
+# MANY units were on hand but WHICH ONES.
+#
+# Why WHICH ones: quantities cancel. One frame sells at the till at 10:15 and
+# one is received into the stockroom at 11:00; the total is unchanged, the
+# line reads as untouched, the counter's honest shelf count of 2 is banked as
+# shrinkage, and the write-off destroys a frame the shop still owns. A set of
+# unit identities cannot cancel like that.
+#
+# Deliberately NO timestamps anywhere in this comparison: the till stamps
+# `sold_at` with a local-naive datetime.now() while the count stamps a UTC ISO
+# string, and netting those against each other is the mixed-clock trap
+# (BUG-104). Comparing sets answers the same question without reading a clock.
+# ---------------------------------------------------------------------------
 
-    Why this exists: the count compares what was counted against the snapshot
-    taken when the session OPENED. A frame sold at the till while the session
-    is open leaves the shelf one short of that snapshot, so an honest count
-    read as a shortage and the write-off then destroyed a real, sellable
-    frame -- which, under the block-the-oversell rule, goes on to refuse a
-    genuine sale. Comparing the snapshot with this live figure says whether a
-    line moved WITHOUT comparing any two clocks: the till stamps `sold_at`
-    with a local-naive datetime.now() and the count stamps a UTC ISO string,
-    and netting those against each other is the mixed-clock trap (BUG-104).
+# What "on hand for a count" means, in one place.
+_COUNTABLE_STATUSES = ["AVAILABLE", "RESERVED"]
+
+
+def _countable_match(
+    store_id: str, product_ids: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """The $match every count snapshot uses. product_ids=None means the store."""
+    match: Dict[str, Any] = {
+        "store_id": store_id,
+        "status": {"$in": list(_COUNTABLE_STATUSES)},
+    }
+    if product_ids is not None:
+        match["product_id"] = {"$in": list(product_ids)}
+    return match
+
+
+# HOW MANY units, and WHICH ones. Both call sites (the opening snapshot and
+# the re-read at completion) share this stage so the two pictures compare.
+# ponytail: the unit ids come back to Python and are hashed away immediately.
+# At six shops that is a few thousand ids once per count; if a store ever grows
+# past that, hash them inside the pipeline instead.
+_COUNTABLE_GROUP = {
+    "$group": {
+        "_id": "$product_id",
+        "qty": {"$sum": 1},
+        "units": {"$addToSet": "$_id"},
+    }
+}
+
+
+def _unit_fingerprint(unit_ids) -> str:
+    """A short, stable fingerprint of WHICH units were on hand.
+
+    Order-independent (it is a set) and cheap to store beside the quantity, so
+    the count document does not have to carry every unit id. Two different
+    sets of units effectively never share a fingerprint; two identical sets
+    always do.
     """
-    live: Dict[str, int] = {}
-    ids = [pid for pid in product_ids if pid]
-    if not ids or db is None:
-        return live
+    joined = "|".join(sorted(str(u) for u in (unit_ids or [])))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _scoped_product_ids(
+    db, store_id: str, category: Optional[str] = None
+) -> Optional[List[str]]:
+    """Every product this store is expected to have on hand right now
+    (optionally narrowed to one category) -- the SET a count is judged
+    complete against.
+
+    Snapshotting this when a session OPENS is what makes "how much of the
+    shelf was actually walked" answerable later. Without it, counting 1
+    product out of 400 reports a clean shelf.
+
+    Returns None when the question CANNOT be answered (no store behind it, a
+    failed read) -- which is not the same as an empty shelf. An empty list
+    would tell the count "nothing was expected, so you walked all of it",
+    which is the very lie this exists to stop.
+    """
+    if db is None or not store_id:
+        return None
+    product_ids: Optional[List[str]] = None
+    if category:
+        try:
+            product_ids = [
+                str(p.get("product_id") or p.get("_id") or "")
+                for p in db.get_collection("products").find(
+                    {"category": category, "is_active": True},
+                    {"_id": 1, "product_id": 1},
+                )
+                if p.get("product_id") or p.get("_id")
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[INVENTORY] scope product lookup failed: %s", exc)
+            return None
+        # A category with no products expects nothing -- it must NOT fall back
+        # to counting the whole store.
+        if not product_ids:
+            return []
     try:
         rows = db.get_collection("stock_units").aggregate(
             [
-                {
-                    "$match": {
-                        "store_id": store_id,
-                        "product_id": {"$in": ids},
-                        "status": {"$in": ["AVAILABLE", "RESERVED"]},
-                    }
-                },
-                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
+                {"$match": _countable_match(store_id, product_ids)},
+                {"$group": {"_id": "$product_id"}},
             ]
         )
+        return sorted({str(r["_id"]) for r in rows if r.get("_id")})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] scope snapshot failed: %s", exc)
+        return None
+
+
+def _on_hand_now(db, store_id: str, product_ids: List[str]):
+    """Live on-hand at this store: (quantities, unit fingerprints) per product,
+    taken exactly the way the session's opening snapshot was.
+
+    The quantity says how far off the count is; the fingerprint says whether
+    the line moved at all -- see the block comment above for why a quantity
+    cannot answer the second question.
+    """
+    live: Dict[str, int] = {}
+    prints: Dict[str, str] = {}
+    ids = [pid for pid in product_ids if pid]
+    if not ids or db is None:
+        return live, prints
+    try:
+        rows = db.get_collection("stock_units").aggregate(
+            [{"$match": _countable_match(store_id, ids)}, _COUNTABLE_GROUP]
+        )
         for r in rows:
-            live[str(r["_id"])] = int(r.get("qty", 0) or 0)
+            pid = str(r["_id"])
+            live[pid] = int(r.get("qty", 0) or 0)
+            prints[pid] = _unit_fingerprint(r.get("units"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INVENTORY] live on-hand check failed: %s", exc)
+        return live, prints
     # A product with every unit gone reports no group row at all -- that is a
-    # real zero, not "unknown", and it is exactly the movement worth catching.
+    # real zero (and an empty set), not "unknown", and it is exactly the
+    # movement worth catching.
     for pid in ids:
         live.setdefault(pid, 0)
-    return live
+        prints.setdefault(pid, _unit_fingerprint([]))
+    return live, prints
 
 
 def _expected_lines(db, count_doc: dict) -> List[dict]:
@@ -2588,9 +2698,10 @@ async def complete_stock_count(
         # opened with. Any line where the two differ has been sold,
         # transferred, received or returned since the counter started, so the
         # difference between snapshot and shelf is not a loss.
-        live_on_hand = _on_hand_now(
+        live_on_hand, live_fingerprints = _on_hand_now(
             db, count_doc.get("store_id", ""), [i.get("product_id", "") for i in items]
         )
+        opening_fingerprints = count_doc.get("system_unit_fingerprints") or {}
 
         variances = []
         total_system = 0
@@ -2612,7 +2723,18 @@ async def complete_stock_count(
             # a shortage out of a sale, and the write-off then destroys a
             # frame the shop still owns and could still sell. Report the line,
             # never bank it as a loss, and never let the write-off take it.
-            moved = system_now != system
+            #
+            # Compare the SET of units, not the total. One frame sold at the
+            # till and one received into the stockroom net to zero: the totals
+            # match, the line looks untouched, and an honest shelf count is
+            # written off as shrinkage. Different units on hand IS movement,
+            # whatever the totals say.
+            opening_print = opening_fingerprints.get(pid)
+            units_changed = (
+                opening_print is not None
+                and live_fingerprints.get(pid) != opening_print
+            )
+            moved = system_now != system or units_changed
             variance = counted - system
             var_pct = round((variance / max(system, 1)) * 100, 2)
             unit_cost = float(costs.get(pid, 0.0) or 0.0)
@@ -2640,6 +2762,7 @@ async def complete_stock_count(
                     "sku": item.get("sku", ""),
                     "system_quantity": system,
                     "system_quantity_now": system_now,
+                    "units_changed_during_count": units_changed,
                     "physical_quantity": counted,
                     "variance": variance,
                     "variance_percentage": var_pct,
