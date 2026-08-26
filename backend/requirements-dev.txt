@@ -9,6 +9,12 @@ pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 pytest-mock==3.15.1
+# Shifts the process clock so a date-frame bug can be REPRODUCED on demand
+# instead of by staying up: `IMS_TEST_IST_CLOCK=01:40 pytest ...` (the hook is
+# in tests/conftest.py). The backend suite was red every night 00:00-05:30 IST
+# because fixtures seeded a business date off the box's UTC clock; without this
+# the only way to verify such a fix was to wait until tomorrow.
+freezegun==1.5.1
 
 # Code Quality
 # 24.3.0 fixes GHSA-fj7x-q9j7-g6q6 / CVE-2024-21503 (ReDoS) while staying on
