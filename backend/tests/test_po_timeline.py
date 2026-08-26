@@ -57,11 +57,29 @@ class _Coll:
         return out
 
 
+class _UsersColl:
+    """Minimal stand-in for the users collection the name resolver reads."""
+
+    def __init__(self, users):
+        self.users = users
+
+    def find(self, flt, proj=None):
+        wanted = set()
+        for term in flt.get("$or", []):
+            for key in ("user_id", "id"):
+                if key in term:
+                    wanted.update(term[key].get("$in", []))
+        return [u for u in self.users if u.get("user_id") in wanted]
+
+
 class _DB:
-    def __init__(self, bills):
+    def __init__(self, bills, users=()):
         self._bills = bills
+        self._users = list(users)
 
     def get_collection(self, name):
+        if name == "users":
+            return _UsersColl(self._users)
         return _Coll(self._bills)
 
 
@@ -89,10 +107,10 @@ def _po(store="S1", status="PARTIAL"):
     }
 
 
-def _wire(monkeypatch, po, grns=(), bills=()):
+def _wire(monkeypatch, po, grns=(), bills=(), users=()):
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(po))
     monkeypatch.setattr(v, "get_grn_repository", lambda: _GRNRepo(list(grns)))
-    monkeypatch.setattr(v, "_get_db", lambda: _DB(list(bills)))
+    monkeypatch.setattr(v, "_get_db", lambda: _DB(list(bills), users))
 
 
 def _call(po_id="PO1", user=None):
@@ -182,6 +200,102 @@ def test_grn_lookup_failure_is_fail_soft(monkeypatch):
     # PO events still present; no crash.
     assert [e["kind"] for e in out["events"]] == ["ordered", "sent"]
     assert out["grns"] == [] and out["invoices"] == []
+
+
+# ---------------------------------------------------------------------------
+# WHO did it -- the drawer must name the PERSON, never the role and never the
+# raw stamped user id. Owner report: the timeline read "SUPERADMIN".
+# ---------------------------------------------------------------------------
+
+_USERS = [
+    {"user_id": "u9", "username": "dinesh", "full_name": "Dinesh Kumar Gupta"},
+    {"user_id": "u7", "username": "shyam", "full_name": "Shyam Sunder"},
+    {"user_id": "u5", "username": "sameer"},
+]
+
+
+def _by(out, kind):
+    return next(e for e in out["events"] if e["kind"] == kind).get("by")
+
+
+def test_every_event_names_the_person_who_did_it(monkeypatch):
+    """Each event resolves ITS OWN actor: the buyer who ordered, the person who
+    sent it, the clerk who logged the box, the manager who accepted it and the
+    accountant who booked the bill."""
+    po = _po()
+    po["sent_by"] = "u7"
+    grns = [
+        {
+            "po_id": "PO1",
+            "grn_id": "G1",
+            "grn_number": "RCPT-1",
+            "status": "ACCEPTED",
+            "created_at": "2026-06-05T11:00:00",
+            "accepted_at": "2026-06-05T12:00:00",
+            "created_by": "u5",
+            "accepted_by": "u7",
+            "total_received": 5,
+            "total_accepted": 5,
+        }
+    ]
+    bills = [
+        {
+            "doc_type": "PURCHASE_INVOICE",
+            "grn_id": "G1",
+            "po_id": "PO1",
+            "bill_id": "B1",
+            "invoice_number": "INV-9",
+            "status": "OUTSTANDING",
+            "created_by": "u9",
+            "created_at": "2026-06-06T10:00:00",
+        }
+    ]
+    _wire(monkeypatch, po, grns, bills, _USERS)
+    out = _call()
+    assert _by(out, "ordered") == "Dinesh Kumar Gupta"
+    assert _by(out, "sent") == "Shyam Sunder"
+    assert _by(out, "box_received") == "sameer"  # no full_name -> username
+    assert _by(out, "on_shelf") == "Shyam Sunder"
+    assert _by(out, "bill_settled") == "Dinesh Kumar Gupta"
+    # ...and no raw id leaks into the prose the drawer prints beside it.
+    for e in out["events"]:
+        assert "u9" not in (e.get("detail") or "")
+        assert "actor" not in e
+
+
+def test_unresolvable_actor_degrades_to_the_stored_id(monkeypatch):
+    """A user record that no longer exists must NOT be papered over with a role
+    or an invented name -- the stamped id stands, and stays traceable."""
+    _wire(monkeypatch, _po(), [], [], users=[])
+    out = _call()
+    assert _by(out, "ordered") == "u9"
+
+
+def test_event_with_no_actor_names_nobody(monkeypatch):
+    """A legacy row that never stamped anyone reports no person at all rather
+    than borrowing a role."""
+    po = _po()
+    po.pop("created_by")
+    _wire(monkeypatch, po, [], [], _USERS)
+    out = _call()
+    ordered = next(e for e in out["events"] if e["kind"] == "ordered")
+    assert "by" not in ordered
+    assert "actor" not in ordered
+
+
+def test_name_lookup_failure_is_fail_soft(monkeypatch):
+    """The names read is decoration: if it blows up the timeline still renders
+    (with ids), it never 500s."""
+
+    class _BoomDB:
+        def get_collection(self, name):
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(_po()))
+    monkeypatch.setattr(v, "get_grn_repository", lambda: _GRNRepo([]))
+    monkeypatch.setattr(v, "_get_db", lambda: _BoomDB())
+    out = _call()
+    assert _by(out, "ordered") == "u9"
 
 
 def test_rbac_row_catalogued():

@@ -378,3 +378,106 @@ describe('attestation note', () => {
     );
   });
 });
+// ---------------------------------------------------------------------------
+// Audit stamps name a PERSON, not a user id
+// ---------------------------------------------------------------------------
+// Owner complaint: these lines printed "user-superadmin" straight out. The
+// backend now returns the resolved display name beside every stamped id as
+// <field>_name; the console shows that, and falls back to the id only when the
+// account no longer names anyone (never a guess, never blank).
+
+describe('audit stamps name a person', () => {
+  const NAMED = inv({
+    purchase_invoice_id: 'pi-nm-1',
+    vendor_invoice_no: 'INV-NM-1',
+    po_id: 'po-9',
+    grn_id: 'grn-9',
+    match_status: 'MATCHED_OVERRIDE',
+    exception_override: {
+      approved_by: 'user-superadmin',
+      approved_by_name: 'Dinesh Kumar Gupta',
+      reason: 'vendor agreed the short-ship',
+    },
+    recon: {
+      reconciled: true,
+      entered_tally: false,
+      filed_gst: false,
+      payment_settled: false,
+      reconciled_by: 'acc-1',
+      reconciled_by_name: 'Priya Nair',
+      reconciled_at: '2026-08-02T09:00:00',
+      last_updated_by: 'acc-1',
+      last_updated_by_name: 'Priya Nair',
+      last_updated_at: '2026-08-02T09:00:00',
+    },
+  });
+
+  // Same row, but the stamped accounts resolve to nobody (deleted / QA login).
+  const UNRESOLVED = inv({
+    ...NAMED,
+    purchase_invoice_id: 'pi-nr-1',
+    vendor_invoice_no: 'INV-NR-1',
+    exception_override: { approved_by: 'qa-efe824be3bc8', reason: 'short-ship' },
+    recon: {
+      reconciled: true,
+      entered_tally: false,
+      filed_gst: false,
+      payment_settled: false,
+      reconciled_by: 'qa-efe824be3bc8',
+      reconciled_at: '2026-08-02T09:00:00',
+      last_updated_by: 'qa-efe824be3bc8',
+      last_updated_at: '2026-08-02T09:00:00',
+    },
+  });
+
+  async function only(row: PurchaseInvoice) {
+    listMock.mockResolvedValue({ purchase_invoices: [row], total: 1 });
+    renderConsole();
+    return (await screen.findByText(row.vendor_invoice_no as string)).closest('tr') as HTMLElement;
+  }
+
+  it('the tick tooltip names who ticked it, not their user id', async () => {
+    const row = await only(NAMED);
+    const tick = within(row).getByLabelText('Reconciled: ticked');
+    expect(tick.getAttribute('title')).toContain('By: Priya Nair');
+    expect(tick.getAttribute('title')).not.toContain('acc-1');
+  });
+
+  it('the override chip names the approver, not their user id', async () => {
+    const row = await only(NAMED);
+    const chip = within(row).getByText('OVERRIDE APPROVED');
+    expect(chip.getAttribute('title')).toBe(
+      'Variance exception approved by Dinesh Kumar Gupta',
+    );
+  });
+
+  it('the last-updated line names the accountant', async () => {
+    const row = await only(NAMED);
+    fireEvent.click(within(row).getByLabelText('Expand'));
+    expect(await screen.findByText(/Last updated:/)).toHaveTextContent('by Priya Nair');
+  });
+
+  it('an id that names nobody is printed as the id, never invented away', async () => {
+    const row = await only(UNRESOLVED);
+    expect(
+      within(row).getByLabelText('Reconciled: ticked').getAttribute('title'),
+    ).toContain('By: qa-efe824be3bc8');
+    expect(within(row).getByText('OVERRIDE APPROVED').getAttribute('title')).toBe(
+      'Variance exception approved by qa-efe824be3bc8',
+    );
+  });
+
+  it('an unstamped audit line names nobody rather than borrowing a role', async () => {
+    const row = await only(
+      inv({
+        purchase_invoice_id: 'pi-none-1',
+        vendor_invoice_no: 'INV-NONE-1',
+        po_id: 'po-8',
+        recon: { ...EMPTY_RECON, last_updated_at: '2026-08-02T09:00:00' },
+      }),
+    );
+    fireEvent.click(within(row).getByLabelText('Expand'));
+    const line = await screen.findByText(/Last updated:/);
+    expect(line.textContent).not.toContain('by');
+  });
+});
