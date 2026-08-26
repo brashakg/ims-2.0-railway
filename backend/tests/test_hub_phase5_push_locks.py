@@ -106,7 +106,15 @@ def test_push_product_unlocked_proceeds(monkeypatch):
     res = _run(
         sp.push_product(
             _EmptyDB(),
-            {"product_id": "P2", "brand": "Ray-Ban", "name": "RB Frame", "sku": "RB1"},
+            {
+                "product_id": "P2",
+                "brand": "Ray-Ban",
+                "name": "RB Frame",
+                "sku": "RB1",
+                # a photograph: push_product refuses a product without one
+                # (owner ruling 2026-08-25, "no photo, no publish").
+                "images": ["https://cdn.example.com/p.jpg"],
+            },
         )
     )
     assert res.mode != sp.MODE_BLOCKED
