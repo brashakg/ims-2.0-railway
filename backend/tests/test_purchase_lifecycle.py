@@ -702,6 +702,12 @@ _PROVISIONAL_PRODUCT = {
 }
 _PROVISIONAL_PRODUCT = {**_PROVISIONAL_PRODUCT, "provisional": True, "is_active": False}
 
+# The shape EVERY live product is actually in (prod, 2026-08-26): all 68 rows
+# carry exactly done_gaps ["cost_price"] and nothing else.
+_COST_MISSING_PRODUCT = {
+    k: v for k, v in _COMPLETE_PRODUCT.items() if k != "cost_price"
+}
+
 
 def _line(**over):
     ln = {"product_id": "P1", "qty": 18, "unit_price": 3400, "gst_rate": 5}
@@ -781,6 +787,28 @@ class TestTheInvoiceIsTheGate:
         """Services, freight and expense bills have no PO and no receipt."""
         out, _ = _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
         assert out["invoice_number"] == "INV-GATE-1"
+
+    def test_a_missing_cost_price_never_blocks_the_bill_that_carries_it(self):
+        """Rulings 11 + 12: the cost arrives LATE, and THIS bill is the
+        authority on it. Refusing the bill for the one figure the bill is
+        holding would refuse every vendor bill in the system -- all 68 live
+        products sit on exactly done_gaps ["cost_price"]."""
+        out, db = _book([_COST_MISSING_PRODUCT])
+        assert out["invoice_number"] == "INV-GATE-1"
+        # and the booked cost must actually land on the product
+        p = db.get_collection("products").find_one({"product_id": "P1"})
+        assert p["cost_price"] == 3400.0
+        assert p["cost_source"] == "PURCHASE_INVOICE"
+        assert p["cost_source_id"] == out["invoice_id"]
+
+    def test_subtracting_the_cost_does_not_disarm_the_rest_of_the_gate(self):
+        """The discriminator for the fix above: any OTHER gap still stops the
+        bill, and the cost gap is never named in the refusal."""
+        no_mrp = {k: v for k, v in _COST_MISSING_PRODUCT.items() if k != "mrp"}
+        with pytest.raises(HTTPException) as exc:
+            _book([no_mrp])
+        assert exc.value.status_code == 422
+        assert exc.value.detail["lines"][0]["missing"] == ["MRP"]
 
 
 class TestTheInvoiceIsTheAuthorityOnPrice:

@@ -595,7 +595,50 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
-def _assert_products_catalogued(db, lines) -> None:
+def _line_product_ids(lines) -> list:
+    """Distinct product ids named by the invoice lines, in line order.
+
+    ONE reader for the two ruling-15 gates below: what counts as "this bill is
+    for goods" and what gets checked for cataloguing must never drift apart.
+    """
+    pids = []
+    for ln in lines or []:
+        pid = getattr(ln, "product_id", None) or (
+            ln.get("product_id") if isinstance(ln, dict) else None
+        )
+        if pid and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _line_products(db, lines) -> Optional[dict]:
+    """product_id -> the products-spine doc, for every line that names one.
+
+    Three distinct answers, and the difference matters:
+      * ``None``  -- we could not READ (no DB, or the query blew up). Callers
+                     must not turn a lookup failure into a verdict.
+      * ``{}``    -- this bill names no goods we stock (services, freight,
+                     rent, an expense bill), or names ids we have never heard
+                     of.
+      * a mapping -- the stocked goods this bill is settling.
+    """
+    if db is None:
+        return None
+    pids = _line_product_ids(lines)
+    if not pids:
+        return {}
+    try:
+        return {
+            p.get("product_id"): p
+            for p in db.get_collection("products").find(
+                {"product_id": {"$in": pids}}, {"_id": 0}
+            )
+        }
+    except Exception:  # noqa: BLE001 - cannot read: do not invent a failure
+        return None
+
+
+def _assert_products_catalogued(lines, found) -> None:
     """Ruling 15: the INVOICE is the gate. It may only proceed for products that
     are properly catalogued -- and it must say WHICH detail is missing, by name.
 
@@ -607,33 +650,32 @@ def _assert_products_catalogued(db, lines) -> None:
     Fail-soft ONLY on a missing DB/product collection: a lookup failure must not
     invent an incomplete product, but a product we CAN read and that IS
     incomplete is a hard 422 before any write.
+
+    cost_price is DELIBERATELY not a gap here -- see the comment at the gap
+    line below. Do not "restore" it.
+
+    ``found`` comes from _line_products: None/{} means there is nothing we can
+    read and judge, so there is nothing to refuse.
     """
-    if db is None:
-        return
-    pids = []
-    for ln in lines or []:
-        pid = getattr(ln, "product_id", None) or (
-            ln.get("product_id") if isinstance(ln, dict) else None
-        )
-        if pid and pid not in pids:
-            pids.append(pid)
-    if not pids:
-        return
-    try:
-        found = {
-            p.get("product_id"): p
-            for p in db.get_collection("products").find(
-                {"product_id": {"$in": pids}}, {"_id": 0}
-            )
-        }
-    except Exception:  # noqa: BLE001 - cannot read: do not invent a failure
+    if not found:
         return
     blocked = []
-    for pid in pids:
+    for pid in _line_product_ids(lines):
         prod = found.get(pid)
         if prod is None:
             continue
-        gaps = _pm.compute_catalog_status(prod)[1]
+        # Rulings 11 + 12: the COST ARRIVES LATE, and THIS bill is the
+        # authority on it -- _apply_valuation_trueup writes this very line's
+        # unit_price into products.cost_price moments after this gate passes.
+        # Refusing the bill for the one figure the bill is holding would refuse
+        # essentially every vendor bill in the system: all 68 live products
+        # carry exactly done_gaps ["cost_price"] and nothing else. send_po
+        # subtracts the same field for the same reason (vendors.py,
+        # PO_LINES_INCOMPLETE). DO NOT put cost_price back into this gate --
+        # the product ends up WITH a cost precisely because the bill booked.
+        # (list comprehension, not a set: the refusal message must keep
+        # compute_catalog_status's field order.)
+        gaps = [g for g in _pm.compute_catalog_status(prod)[1] if g != "cost_price"]
         if gaps:
             blocked.append(
                 {
@@ -833,6 +875,7 @@ async def create_purchase_invoice(
     # whose quantities nobody has tallied; the 3-way match then has nothing to
     # compare the bill to and every rejected unit is billable. A non-PO invoice
     # (services, freight, an expense bill) is unaffected.
+    line_products = _line_products(db, body.lines)
     if body.po_id and not body.grn_id and not body.linked_dc_ids:
         raise HTTPException(
             status_code=422,
@@ -847,7 +890,7 @@ async def create_purchase_invoice(
         )
 
     # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
-    _assert_products_catalogued(db, body.lines)
+    _assert_products_catalogued(body.lines, line_products)
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
