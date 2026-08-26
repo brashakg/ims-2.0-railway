@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
 from .auth import get_current_user, require_roles
+from ..utils.ist import ist_today
 from ..dependencies import (
     can_access_store_scoped,
     resolve_store_scope,
@@ -125,7 +126,17 @@ class VoucherRedeem(BaseModel):
 
 
 def _today_iso() -> str:
-    return date.today().isoformat()
+    """The IST business day, as 'YYYY-MM-DD'.
+
+    THE COMPARISON BOUND, not a stamp. Railway runs UTC, so between 00:00 and
+    05:30 IST ``date.today()`` is YESTERDAY -- and because ``_is_expired`` asks
+    "expiry < today", a bound a day early made a card that expired YESTERDAY
+    read as still live: for the first five and a half hours of every Indian
+    business day a dead gift card could be spent, and the POS card-check screen
+    called it valid. The stored ``created_at`` / ``updated_at`` stamps stay in
+    the naive-UTC frame the rest of IMS reads them in; only this bound moves.
+    """
+    return ist_today().isoformat()
 
 
 def _generate_code() -> str:

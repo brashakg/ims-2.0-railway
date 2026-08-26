@@ -60,9 +60,10 @@ except Exception:  # noqa: BLE001
     _AFTER = True
 
 try:  # money/audit records are stamped India-time (IST), per project rule
-    from api.utils.ist import now_ist_naive as _ist_now
+    from api.utils.ist import now_ist_naive as _ist_now, ist_today as _ist_today
 except Exception:  # noqa: BLE001
     _ist_now = None
+    _ist_today = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +163,19 @@ def _now_iso() -> str:
 
 
 def _today_date_iso() -> str:
-    """Local calendar date as ISO (matches vouchers._today_iso). Spend-expiry uses
-    a lexicographic ISO-date compare; a card expiring TODAY is still redeemable."""
+    """The IST business day as ISO (matches vouchers._today_iso). Spend-expiry uses
+    a lexicographic ISO-date compare; a card expiring TODAY is still redeemable.
+
+    IST, not the box clock: this bound is BOTH halves of the real spend guard --
+    the ``expiry >= today`` clause inside the atomic debit filter AND the
+    'expired' classification. Railway runs UTC, so a ``date.today()`` bound is
+    YESTERDAY between 00:00 and 05:30 IST, and a gift card that expired
+    yesterday still matched the filter and spent."""
+    if _ist_today is not None:
+        try:
+            return _ist_today().isoformat()
+        except Exception:  # noqa: BLE001
+            pass
     return date.today().isoformat()
 
 
