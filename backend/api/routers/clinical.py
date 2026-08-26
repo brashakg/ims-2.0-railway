@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, date, timezone
 
-from ..utils.ist import ist_date_str
+from ..utils.ist import ist_date_str, ist_today
 from html import escape as _html_escape
 import uuid
 from .auth import get_current_user, require_roles
@@ -1077,7 +1077,13 @@ def _resolve_test_date_range(
         return (from_str or None, to_str or None)
 
     kw = (range_kw or "").strip().lower()
-    today = date.today()
+    # BUG-104: the IST BUSINESS day, not the box's calendar day. Railway runs
+    # UTC, so date.today() here is YESTERDAY between 00:00 and 05:30 IST --
+    # "Today" on Test History listed yesterday's completed eye tests and hid
+    # this morning's, for the first five and a half hours of every Indian
+    # working day. The stored exam dates are IST business days, so the window
+    # that selects them must be one too.
+    today = ist_today()
     if kw == "today":
         iso = today.isoformat()
         return (iso, iso)

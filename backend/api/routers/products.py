@@ -3415,6 +3415,18 @@ async def update_product(
                     _cat_patch["is_active"] = update_data["is_active"]
                 if "description" in update_data:
                     _cat_patch["description"] = update_data["description"]
+                # Queue the twin for the MANUAL Online Store push, but ONLY when
+                # a field the storefront actually shows moved. mrp / offer_price
+                # are the variant price fallbacks
+                # (shopify_push._resolve_variant_pricing) and description becomes
+                # descriptionHtml. cost_price / discount_category / hsn_code /
+                # gst_rate / is_active are in NO pushed payload -- flagging on
+                # those alone would queue a push that changes nothing on Shopify.
+                # Queuing is not publishing: a human still presses the button.
+                if any(
+                    _k in update_data for _k in ("mrp", "offer_price", "description")
+                ):
+                    _cat_patch["ecom.locally_modified"] = True
                 if _cat_patch:
                     from ..dependencies import get_db as _gdb
 
@@ -3422,6 +3434,18 @@ async def update_product(
                     if _conn is not None and getattr(_conn, "is_connected", False):
                         _cat = _conn.get_collection("catalog_products")
                         if _cat is not None:
+                            # A QUEUED ROW MUST BELONG TO A STATUS BUCKET. This
+                            # door sets the flag by dot-notation, so on a twin
+                            # with no `ecom` sub-doc Mongo creates
+                            # {ecom: {locally_modified: true}} -- pending on the
+                            # Online Store screen while the DRAFT and PUBLISHED
+                            # cards both count it as neither (the 6eede9b bug,
+                            # one door over). Defaulted only when ABSENT, so an
+                            # edit can never demote a live product back to DRAFT.
+                            if _cat_patch.get("ecom.locally_modified"):
+                                _twin = _cat.find_one({"id": product_id}) or {}
+                                if not (_twin.get("ecom") or {}).get("status"):
+                                    _cat_patch["ecom.status"] = "DRAFT"
                             _cat.update_one({"id": product_id}, {"$set": _cat_patch})
             except Exception:  # noqa: BLE001
                 logger.warning(

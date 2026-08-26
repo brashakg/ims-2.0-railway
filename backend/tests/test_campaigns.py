@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.routers import campaigns as camp_mod  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.services import campaign_segments as seg  # noqa: E402
+from tests.ist_business_day import business_now  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +224,11 @@ def _hdr(roles=("ADMIN",), store_id="BV-PUN-01"):
 
 
 def _seed_customers():
-    today = datetime.now().date()
+    # BUG-104 TRAP: `_resolve_birthday` windows on `now_ist_naive().date()`.
+    # Seeding the DOB off the box's UTC date lands a day early for the whole
+    # 00:00-05:30 IST band -- survivable only because the window is 7 days
+    # wide, which is luck, not meaning.
+    today = business_now().date()
     return _FakeColl(
         [
             {"customer_id": "C1", "name": "Alpha", "mobile": "9000000001", "home_store_id": "BV-PUN-01", "customer_type": "B2C", "dob": today.replace(year=1990).isoformat()},

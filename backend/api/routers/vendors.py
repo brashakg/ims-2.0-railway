@@ -1692,6 +1692,25 @@ async def get_last_purchase_cost(
     return {"costs": costs}
 
 
+def _stamp_event_actors(events: list) -> None:
+    """Replace each event's raw ``actor`` user id with a display name in ``by``.
+
+    In place, batched (one users read for the whole timeline), fail-soft: on
+    any lookup problem the ids still surface as ``by`` rather than vanishing.
+    """
+    names: dict = {}
+    try:
+        from ..services.name_resolver import user_name_map
+
+        names = user_name_map(_get_db(), [e.get("actor") for e in events])
+    except Exception:  # noqa: BLE001
+        names = {}
+    for e in events:
+        actor = e.pop("actor", None)
+        if actor:
+            e["by"] = names.get(str(actor)) or str(actor)
+
+
 @router.get("/purchase-orders/{po_id}/timeline")
 async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_user)):
     """The full life of a PO on one read (procurement Phase 3): ordered ->
@@ -1724,7 +1743,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
             "label": "Ordered",
             "at": po.get("created_at"),
             "ref": po.get("po_number"),
-            "detail": f"PO created by {po.get('created_by') or 'system'}",
+            "actor": po.get("created_by"),
         }
     )
     if po.get("sent_at"):
@@ -1734,6 +1753,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                 "label": "Sent",
                 "at": po.get("sent_at"),
                 "ref": po.get("po_number"),
+                "actor": po.get("sent_by"),
                 "detail": "PO sent to the vendor",
             }
         )
@@ -1744,6 +1764,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                 "label": "Cancelled",
                 "at": po.get("cancelled_at"),
                 "ref": po.get("po_number"),
+                "actor": po.get("cancelled_by"),
                 "detail": po.get("cancellation_reason") or "PO cancelled",
             }
         )
@@ -1777,6 +1798,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                         "label": "Box received",
                         "at": g.get("created_at"),
                         "ref": g.get("grn_number"),
+                        "actor": g.get("created_by"),
                         "detail": f"Goods receipt logged ({g.get('total_received') or 0} units)",
                     }
                 )
@@ -1787,6 +1809,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                             "label": "On shelf",
                             "at": g.get("accepted_at"),
                             "ref": g.get("grn_number"),
+                            "actor": g.get("accepted_by"),
                             "detail": f"{g.get('total_accepted') or 0} units accepted into stock",
                         }
                     )
@@ -1824,6 +1847,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                         "label": "Bill settled",
                         "at": r.get("created_at"),
                         "ref": r.get("invoice_number") or r.get("bill_number"),
+                        "actor": r.get("created_by"),
                         "detail": f"Purchase invoice booked ({r.get('status') or 'OUTSTANDING'})",
                     }
                 )
@@ -1832,6 +1856,14 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
 
     # Chronological (blank timestamps sort last, stable).
     events.sort(key=lambda e: (e.get("at") is None, e.get("at") or ""))
+
+    # WHO did it. Every writer stamps a user_id ("user-superadmin"), never a
+    # name, so the drawer used to print that id straight into the prose -- an
+    # audit trail that cannot name the person is not an audit trail. Resolve
+    # every stamped actor in ONE query (same helper + fail-soft shape as
+    # _enrich_grn_names). Unresolvable id -> keep the id verbatim (traceable,
+    # and never an invented name); nothing stamped -> no "by" at all.
+    _stamp_event_actors(events)
 
     return {
         "po_id": po_id,

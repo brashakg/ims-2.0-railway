@@ -97,13 +97,53 @@ describe('POLifecycleDrawer — timeline rendering', () => {
   });
 
   it('shows the PO number, vendor and ref/detail line', async () => {
-    getPOTimeline.mockResolvedValue(makeTimeline());
+    getPOTimeline.mockImplementation(() => new Promise((r) => setTimeout(() => r(makeTimeline()), 250)));
     renderDrawer();
 
-    expect(await screen.findByText('PO-2026-0042')).toBeInTheDocument();
-    expect(screen.getByText('Essilor India')).toBeInTheDocument();
+    // Anchor the await on something only the SERVER can supply. The PO number
+    // arrives as a PROP, so findByText('PO-2026-0042') is satisfied by the very
+    // first render -- before the timeline fetch settles -- and every synchronous
+    // assertion after it then races the loading skeleton. The vendor name and the
+    // ref/detail line both come from the fetch.
+    //
+    // The deferred mock above is deliberate: mockResolvedValue settles on a
+    // microtask, which hides this race locally while it still fails on a loaded
+    // CI box (it did -- the DOM dump showed the drawer still on its skeleton).
+    // Resolving past waitFor's first poll makes the wrong order fail every time.
+    expect(await screen.findByText('Essilor India')).toBeInTheDocument();
+    expect(screen.getByText('PO-2026-0042')).toBeInTheDocument();
     // ref + detail joined on one muted line
     expect(screen.getByText(/Emailed to vendor/)).toBeInTheDocument();
+  });
+
+  it('names the PERSON who did each event, not their role', async () => {
+    // Owner report: the timeline read "SUPERADMIN" where a name belongs. The
+    // server now sends `by` (a display name); the drawer must print it.
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [
+          { kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z', ref: 'PO-2026-0042', by: 'Dinesh Kumar Gupta' },
+          { kind: 'sent', label: 'Sent', at: '2026-06-02T11:00:00Z', ref: 'PO-2026-0042', detail: 'PO sent to the vendor', by: 'Shyam Sunder' },
+        ],
+      }),
+    );
+    renderDrawer();
+
+    expect(await screen.findByText(/by Dinesh Kumar Gupta/)).toBeInTheDocument();
+    expect(screen.getByText(/by Shyam Sunder/)).toBeInTheDocument();
+  });
+
+  it('names nobody when the event carries no person', async () => {
+    // Degrade honestly: an event with no stored actor must not borrow a name.
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [{ kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z', ref: 'PO-2026-0042' }],
+      }),
+    );
+    renderDrawer();
+
+    await screen.findByTestId('po-timeline-event');
+    expect(screen.queryByText(/\bby\b/)).not.toBeInTheDocument();
   });
 });
 

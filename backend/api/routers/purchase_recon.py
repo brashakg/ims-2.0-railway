@@ -53,6 +53,30 @@ _OPEN_RETURN_STATUSES = {"created", "shipped", "received_by_vendor"}
 # pending list (voided / cancelled bills have no actionable ITC balance).
 _REBATE_CN_APPLIED_STATUS = "APPLIED"
 
+# The 4 accountant tick flags, in display order.
+_RECON_FLAGS = ("reconciled", "entered_tally", "filed_gst", "payment_settled")
+
+# Every field in a recon block that holds a raw user id. Lives here, beside the
+# writer that stamps them (_build_recon_block), so the readers that turn those
+# ids into names cannot drift out of step with it. purchase_invoices.py imports
+# this for its list/detail rows, which embed the same recon sub-document.
+RECON_ACTOR_FIELDS = tuple(f"{f}_by" for f in _RECON_FLAGS) + (
+    "note_by",
+    "last_updated_by",
+)
+
+
+def stamp_recon_names(db, recon) -> None:
+    """Add ``<field>_name`` beside every raw user id in a recon block.
+
+    In place, batched, fail-soft (see services/name_resolver.stamp_user_names).
+    Call it only on the way OUT of an endpoint -- never before a write, or the
+    denormalised name would be persisted into the stored recon block.
+    """
+    from ..services.name_resolver import stamp_user_names
+
+    stamp_user_names(db, [recon], RECON_ACTOR_FIELDS)
+
 
 def _get_db():
     """Direct DB handle, identical to purchase_invoices.py._get_db()."""
@@ -104,7 +128,7 @@ def _build_recon_block(existing: dict, body: ReconUpdate, actor_id: str, now: st
     """Merge the incoming tick-update into the existing recon sub-document."""
     recon = dict(existing) if existing else {}
 
-    for flag in ("reconciled", "entered_tally", "filed_gst", "payment_settled"):
+    for flag in _RECON_FLAGS:
         value = getattr(body, flag)
         if value is None:
             continue  # not supplied -- leave existing unchanged
@@ -162,7 +186,10 @@ async def upsert_recon(
         logger.error("[RECON] DB error updating recon for %s: %s", invoice_id, exc)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
 
-    return {"invoice_id": invoice_id, "recon": new_recon}
+    # Names on a COPY, after the write: the stored block keeps raw ids.
+    echo = dict(new_recon)
+    stamp_recon_names(db, echo)
+    return {"invoice_id": invoice_id, "recon": echo}
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +209,11 @@ async def get_recon(
     """
     db = _get_db()
     doc = _fetch_bill(db, invoice_id)
-    recon = doc.get("recon") or {}
+    recon = dict(doc.get("recon") or {})
     # Ensure all 4 flag keys are present for a predictable frontend shape
-    for flag in ("reconciled", "entered_tally", "filed_gst", "payment_settled"):
+    for flag in _RECON_FLAGS:
         recon.setdefault(flag, False)
+    stamp_recon_names(db, recon)
     return {"invoice_id": invoice_id, "recon": recon}
 
 

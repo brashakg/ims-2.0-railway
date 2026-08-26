@@ -56,6 +56,50 @@ _PUSH_ROLES = ("ADMIN",)
 
 
 # ---------------------------------------------------------------------------
+# THE BATCH CAP (owner ruling 2026-08-25 -- "one press, goes live")
+# ---------------------------------------------------------------------------
+# Pressing publish now puts products in front of customers immediately, so ONE
+# wrong press must affect a BOUNDED number of products, not the whole catalogue.
+# 25 is the sane default: small enough that a mistake is 25 listings to take
+# down one by one (the /product/{id}/take-down route below), large enough that
+# the current ~59-item catalogue clears in three presses.
+#
+# This is a HARD SERVER-SIDE cap on the PRODUCT sweep, not a default the caller
+# can raise -- the frontend passes limit=100 explicitly, so a default nobody
+# reads would cap nothing. It deliberately does NOT clamp the other entities:
+# collections / menus / images / the variant-prices resync do not put a new
+# listing in front of a customer, and the resync PAGES through the whole mapped
+# set (OS-017) -- clamping it would just make that loop run out of pages.
+#
+# A capped sweep reports limit_reached=True, so the existing "run again to
+# continue" cue fires: a press that stopped early must never read as complete.
+PRODUCT_BATCH_CAP = 25
+
+
+def _queue_order(doc: Dict) -> tuple:
+    """Where one dirty product sits in the press queue: NEVER-PUSHED rows first,
+    then the longest-waiting.
+
+    The cap above is a hard 25 and a withheld publish BURNS a slot (it really
+    did reach Shopify) *and* is re-queued -- so in natural collection order 25
+    permanently-stuck rows (a broken image host, an unpriced tranche) sit at the
+    front of EVERY press forever and the photographed, priced products behind
+    them never go live, however often the owner presses. That is the "run again
+    to continue" lie one layer down: the sentence promises progress a repeat
+    press cannot make.
+
+    `ecom.last_pushed_at` is stamped by _writeback_product on every row that
+    reached Shopify, and the re-queue preserves it (read-merge-write of the
+    whole sub-doc), so ordering by it drifts a stuck row to the BACK after its
+    first attempt -- the cap keeps meaning 25 real write attempts and the queue
+    drains. Stringified so a legacy ISO-string stamp and a datetime can never
+    raise on comparison.
+    """
+    stamp = (doc.get("ecom") or {}).get("last_pushed_at")
+    return (0, "") if not stamp else (1, str(stamp))
+
+
+# ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_collections.py)
 # ---------------------------------------------------------------------------
 
@@ -162,6 +206,38 @@ async def push_product(
     return {"result": data}
 
 
+@router.post("/product/{product_id}/take-down")
+async def take_down_product(
+    product_id: str,
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Pull ONE product OFF the live storefront (Shopify status -> DRAFT).
+
+    THE REVERSIBILITY THAT MAKES ONE-PRESS PUBLISHING SURVIVABLE (owner ruling
+    2026-08-25). Pressing publish now puts products in front of customers
+    immediately, so there has to be a way to pull ONE bad listing straight back
+    -- the engine could already do it (push_product_delist, built for the
+    "block collection from online" cutover) but nothing could ask it to.
+
+    NOT a delete: the Shopify product is kept and so is its id, so putting the
+    product back is an ordinary push and can never mint a duplicate listing.
+    The engine also records the take-down in IMS (ecom.status DRAFT, dirty flag
+    cleared) so the screen agrees with the storefront and the next sweep does
+    not resurrect it seconds later.
+
+    DARK by default -> a SIMULATED plan. A product that was never on Shopify is
+    a clean no-op, not an error. Unknown product -> 404; writes the same chained
+    audit row as every other push."""
+    db = _require_db()
+    product = _get_catalog_product(db, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    result = await shopify_push.push_product_delist(db, product)
+    data = result.to_dict()
+    _write_audit(data, current_user)
+    return {"result": data}
+
+
 @router.post("/collection/{collection_id}")
 async def push_collection(
     collection_id: str,
@@ -243,7 +319,10 @@ async def push_status(
     with no Shopify id yet). Fail-soft: no DB -> zeros + db_connected False, never
     a 500."""
     db = _get_db()
-    mode = shopify_push.push_mode_status(db)
+    # RESOLVED, not merely remembered: this endpoint feeds the "Online Store
+    # channel" tile, and a per-process cache makes that tile red on a healthy
+    # shop after every deploy (see push_mode_status_resolved).
+    mode = await shopify_push.push_mode_status_resolved(db)
     if db is None:
         return {"mode": mode, "db_connected": False, "counts": _empty_counts()}
 
@@ -507,11 +586,33 @@ async def push_all_pending(
     mode = shopify_push.push_mode_status(db)
     results: List[Dict[str, Any]] = []
     summary: Dict[str, Dict[str, int]] = {}
+    cap_reached = False
 
     def _tally(entity: str, data: Dict[str, Any]) -> None:
         bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "noop": 0})
         bucket.setdefault("noop", 0)
-        if data.get("ok") and data.get("action") == "noop":
+        if data.get("reason") == "no_photo":
+            # THE PHOTO RULE (owner ruling 2026-08-25, "no photo, no publish").
+            # A refusal is neither a success nor a breakage: it gets its OWN
+            # line so the operator sees WHY a product did not go live and can
+            # fix it (add a photograph, press again). Filing it under `failed`
+            # would read as a Shopify error; folding it into `pushed` would be
+            # the silent lie this whole change exists to end.
+            bucket["refused_no_photo"] = bucket.get("refused_no_photo", 0) + 1
+        elif data.get("reason") == "publish_withheld":
+            # The product reached Shopify but is NOT visible (no publication,
+            # no photograph on Shopify, no provable price). Same treatment as a
+            # refusal and for the same reason: filing it under `pushed` is the
+            # green-toast-over-a-no-op this whole change exists to end, and
+            # filing it under `failed` would read as a Shopify breakage the
+            # operator cannot act on. Its own line, with its own count.
+            bucket["publish_withheld"] = bucket.get("publish_withheld", 0) + 1
+        elif data.get("reason") == "archived_not_listed":
+            # The write landed, but an ARCHIVED product is not on the
+            # storefront. Same treatment, same reason: `pushed` must mean a
+            # shopper can find it.
+            bucket["archived_not_listed"] = bucket.get("archived_not_listed", 0) + 1
+        elif data.get("ok") and data.get("action") == "noop":
             # A clean no-op (nothing mapped/priced to send) is NOT a success
             # push -- tallied separately so the UI renders it honestly (OS-017:
             # "N processed" must never imply an MRP revision reached Shopify
@@ -540,17 +641,38 @@ async def push_all_pending(
         #    anything -> FAIL CLOSED: pass blocked=None so push_product skips each
         #    (never ship a possibly-banned product on a DB blip -- finding #18).
         dirty_products: List[Dict] = []
+        # TAKEN DOWN BY HAND -> a bulk sweep NEVER puts it back. The take-down
+        # writes DRAFT and clears the flag, but any catalogue edit re-queues the
+        # row and the mapper sends everything except ARCHIVED as ACTIVE -- so
+        # without this the owner pulls a bad listing, someone edits it to fix
+        # it, and the next queue-drain re-lists it mid-fix. Only an explicit
+        # per-product press clears the marker (a successful publish does).
+        taken_down_skipped = 0
         for doc in _all_docs(db, "catalog_products"):
             ecom = doc.get("ecom")
-            if ecom and ecom.get("locally_modified"):
-                dirty_products.append(doc)
+            if not (ecom and ecom.get("locally_modified")):
+                continue
+            if ecom.get("taken_down_at"):
+                taken_down_skipped += 1
+                continue
+            dirty_products.append(doc)
+        # THE QUEUE MUST DRAIN. See _queue_order: without this the same first 25
+        # stuck rows are retried on every press and nothing behind them ever
+        # reaches bettervision.in.
+        dirty_products.sort(key=_queue_order)
         dirty_skus = [d.get("sku") for d in dirty_products if d.get("sku")]
         blocked_set, block_verifiable = online_block.classify_blocked_skus(
             db, dirty_skus
         )
         blocked_skipped = 0
+        # THE BATCH CAP: at most PRODUCT_BATCH_CAP products actually go out
+        # per press. A photo-less REFUSAL does not count against it -- it
+        # never reached Shopify and nothing went live, and spending the whole
+        # cap on refusals would publish nothing at all.
+        sent = 0
         for doc in dirty_products:
-            if len(results) >= limit:
+            if len(results) >= limit or sent >= PRODUCT_BATCH_CAP:
+                cap_reached = cap_reached or sent >= PRODUCT_BATCH_CAP
                 break
             if block_verifiable and doc.get("sku") in blocked_set:
                 blocked_skipped += 1
@@ -564,10 +686,16 @@ async def push_all_pending(
             ).to_dict()
             _write_audit(data, current_user)
             _tally("products", data)
+            if data.get("reason") != "no_photo":
+                sent += 1
         if blocked_skipped:
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "blocked_skipped"
             ] = blocked_skipped
+        if taken_down_skipped:
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
+                "taken_down_skipped"
+            ] = taken_down_skipped
 
     # OPT-IN price/barcode resync (never in the default set -- the product
     # sweep above already pushes prices as part of each product push). Targets
@@ -631,11 +759,33 @@ async def push_all_pending(
             _write_audit(data, current_user)
             _tally("images", data)
 
+    # "N processed" must mean N objects the press actually did the work on.
+    # A photo-less REFUSAL never reached Shopify, a WITHHELD publish left the
+    # product invisible, and an ARCHIVED row was retired on purpose -- folding
+    # any of them into the processed number turns the screen into the same lie
+    # as "pending: 0" over an empty queue. They are counted, and shown, on their
+    # own lines in `summary`.
+    not_done = sum(
+        (b.get("refused_no_photo") or 0)
+        + (b.get("publish_withheld") or 0)
+        + (b.get("archived_not_listed") or 0)
+        # A FAILED row reached nobody either -- a Shopify userError, a transport
+        # failure, or a fail-closed block check that made zero calls at all.
+        # Counting it as processed reads "3 processed" over zero visible, which
+        # is the same lie in the same place.
+        + (b.get("failed") or 0)
+        for b in summary.values()
+    )
     return {
         "mode": mode,
         "db_connected": True,
-        "pushed_count": len(results),
-        "limit_reached": len(results) >= limit,
+        "pushed_count": len(results) - not_done,
+        # A sweep the cap stopped early must NEVER read as complete -- the
+        # caller's "run again to continue" cue keys off this flag.
+        "limit_reached": len(results) >= limit or cap_reached,
+        # How many products one press may put live. Reported so the screen
+        # can say the real number instead of hard-coding one.
+        "batch_cap": PRODUCT_BATCH_CAP,
         # Paging block (variant-prices only; null otherwise). next_offset=null
         # means the whole eligible set was covered -- the caller may stop.
         "offset": offset,
