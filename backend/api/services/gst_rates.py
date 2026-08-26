@@ -435,3 +435,78 @@ def gst_pricing_mode() -> str:
 
     mode = (os.environ.get("GST_PRICING_MODE") or "inclusive").strip().lower()
     return "exclusive" if mode == "exclusive" else "inclusive"
+
+
+# ============================================================================
+# HSN-FIRST RESOLUTION + CGST/SGST vs IGST SPLIT
+# ============================================================================
+# Both live HERE, in the one GST engine, so no caller ever grows a second one.
+# resolve_gst_rate() above is the FORGIVING resolver used at the sales counter
+# (it must always return a number so a bill can be raised). The purchase side
+# needs the OPPOSITE guarantee -- a purchase order that quietly invents a rate
+# for an un-HSN'd product sends a wrong tax figure to a real vendor -- so
+# resolve_gst_rate_strict() refuses to guess and says what is missing instead.
+
+# Reverse view of the canonical table: HSN code -> the set of rates it carries.
+# 9004 is deliberately ambiguous (900490 corrective specs 5%, 900410 sunglasses
+# 18%), which is exactly why a 4-digit HSN alone cannot always settle a rate.
+_HSN_RATES: dict = {}
+for _hsn, _rate in GST_CATEGORY_TABLE.values():
+    if _hsn:
+        _HSN_RATES.setdefault(_hsn, set()).add(_rate)
+
+
+def resolve_gst_rate_strict(hsn_code=None):
+    """HSN-first GST resolution that REFUSES to guess.
+
+    Returns ``(rate, missing)``: ``(float, None)`` when the HSN settles a single
+    rate, or ``(None, "<plain-English reason>")`` when it does not. Never
+    raises. Lookup order: the owner-editable ``hsn_gst_master`` (exact code),
+    the canonical static table (exact code), then a PREFIX match so a 4-digit
+    HSN ("9003", the choice for turnover <= Rs 5 Cr) resolves through its
+    6-digit children -- but ONLY when every child agrees on one rate.
+    """
+    hc = str(hsn_code or "").strip()
+    if not hc:
+        return None, "no HSN on this product"
+
+    by_hsn = _load_lookup().get("by_hsn", {})
+    if hc in by_hsn:
+        return by_hsn[hc], None
+    exact = _HSN_RATES.get(hc)
+    if exact and len(exact) == 1:
+        return next(iter(exact)), None
+
+    rates = set()
+    for code, rate in by_hsn.items():
+        if code.startswith(hc):
+            rates.add(rate)
+    for code, rset in _HSN_RATES.items():
+        if code.startswith(hc):
+            rates |= rset
+    if len(rates) == 1:
+        return next(iter(rates)), None
+    if len(rates) > 1:
+        shown = " / ".join(f"{r:g}%" for r in sorted(rates))
+        return None, (
+            f"HSN {hc} covers more than one GST rate ({shown}) - "
+            "give the product its full HSN"
+        )
+    return None, f"HSN {hc} is not in the GST rate list"
+
+
+def split_gst(tax, interstate: bool) -> tuple:
+    """Split one rate-bucket's tax into ``(cgst, sgst, igst)``.
+
+    India: a supply INSIDE the state splits half-and-half into CGST + SGST;
+    a supply ACROSS states is a single IGST charge. The residual lands on SGST
+    so cgst + sgst == tax to the paisa. Never raises.
+    """
+    try:
+        tax_f = round(float(tax or 0.0), 2)
+    except (TypeError, ValueError):
+        tax_f = 0.0
+    if interstate:
+        return 0.0, 0.0, tax_f
+    cgst = round(tax_f / 2.0, 2)
+    return cgst, round(tax_f - cgst, 2), 0.0

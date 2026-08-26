@@ -24,6 +24,7 @@ from ..dependencies import (
     get_vendor_portal_token_repository,
     get_audit_repository,
     get_product_repository,
+    get_store_repository,
     validate_store_access,
     can_access_store_scoped,
     resolve_store_scope,
@@ -53,6 +54,129 @@ def _po_catalog_gate_on() -> bool:
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# How far along the purchase a cost figure came from. A LATER step may correct
+# an EARLIER one: the PO rate only provisionally agrees a price (owner addendum
+# 2026-08-26 -- it exists to unblock cataloguing), and the goods actually
+# received settle it ("goods receipt sets the real cost anyway"). A source that
+# is not ranked here -- a cost a person typed, an import, a legacy row with no
+# source at all -- is NEVER overwritten by this helper, only by an explicit
+# edit. The rule lives on the SOURCES, not on the caller, so there is no wiring
+# at a call site that could silently be passed the wrong thing.
+_PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
+_COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
+
+
+def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -> bool:
+    """Fill a product's missing cost_price from an agreed line rate.
+
+    ONE place for the two moments a purchase reveals a cost: the rate typed on
+    a purchase order (owner ruling 2026-08-26 -- "the PO rate IS the cost", so
+    raising the PO COMPLETES the cataloguing instead of being blocked by it) and
+    the rate on the goods receipt that follows.
+
+    Writes into an EMPTY cost, or over a cost whose source this one OUTRANKS
+    (see _COST_SOURCE_RANK). Cost feeds margin and stock valuation, so every
+    other existing figure is left exactly as it is. Restamps the catalogue
+    status atomically, so a product that was DRAFT for the single reason
+    "no cost" turns ACTIVE the moment a rate is agreed. Returns True when a cost
+    was written. Fail-soft: never raises.
+    """
+    if product_repo is None or not prod or not product_id:
+        return False
+    try:
+        cost = round(float(unit_cost or 0), 2)
+    except (TypeError, ValueError):
+        return False
+    if cost <= 0:
+        return False
+    if prod.get("cost_price"):
+        held = _COST_SOURCE_RANK.get(str(prod.get("cost_source") or ""))
+        mine = _COST_SOURCE_RANK.get(str(source or ""))
+        if held is None or mine is None or mine <= held:
+            return False
+    try:
+        product_repo.update(product_id, {"cost_price": cost, "cost_source": source})
+        _pm.apply_restamp_atomic(
+            product_id, prod, {"cost_price": cost}, product_repo=product_repo
+        )
+    except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
+        logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
+        return False
+    return True
+
+
+def _po_gst_parties(vendor, store) -> dict:
+    """Decide the PLACE OF SUPPLY for a purchase order: the vendor supplies, the
+    delivery store receives.
+
+    Same-state supply -> CGST + SGST. Different states -> IGST. This business
+    runs 3 legal entities across 4 GSTINs in 2 states, so "our state" is NOT a
+    constant: it is read off the DELIVERY STORE's own GSTIN (which stores.py
+    derives from its entity), never assumed.
+
+    Falls back to the party's declared state when a GSTIN is absent (an
+    unregistered vendor still has a state). When either side is unknown the
+    supply is treated as intra-state -- the same safe default the sales invoice
+    uses -- and flagged `assumed` so the screen can say so rather than pretend.
+    """
+    from ..services.org_validation import resolve_state_code
+
+    vendor = vendor if isinstance(vendor, dict) else {}
+    store = store if isinstance(store, dict) else {}
+    vendor_gstin = str(vendor.get("gstin") or "").strip()
+    store_gstin = str(store.get("gstin") or "").strip()
+    vendor_state = resolve_state_code(
+        vendor_gstin, vendor.get("state_code"), vendor.get("state")
+    )
+    store_state = resolve_state_code(
+        store_gstin, store.get("state_code"), store.get("state")
+    )
+    known = bool(vendor_state and store_state)
+    return {
+        "vendor_gstin": vendor_gstin,
+        "vendor_state_code": vendor_state,
+        "store_gstin": store_gstin,
+        "store_state_code": store_state,
+        "interstate": bool(known and vendor_state != store_state),
+        "place_of_supply": store_state or vendor_state,
+        "place_of_supply_assumed": not known,
+    }
+
+
+def _po_line_gst_rate(item, prod) -> tuple:
+    """Rate (percent) for ONE purchase-order line, HSN-first, and what is
+    missing when it cannot be settled.
+
+    Returns ``(rate, hsn, source, missing)``. ``rate`` is None ONLY when nothing
+    could settle it -- and then ``missing`` says why in plain English and the
+    line is stored UNRESOLVED with zero tax rather than taxed at a guessed rate.
+
+    Order: an explicit rate on the request wins; otherwise the line's / the
+    product's HSN is resolved against the owner-editable HSN table (so a GST
+    revision flows through without a code change); otherwise the rate stamped on
+    the product when it was catalogued; otherwise unresolved.
+    """
+    from ..services.gst_rates import resolve_gst_rate_strict
+
+    prod = prod if isinstance(prod, dict) else {}
+    hsn = item.hsn or prod.get("hsn_code")
+    if item.gst_rate is not None:
+        return item.gst_rate, hsn, "line", None
+    rate, missing = resolve_gst_rate_strict(hsn)
+    if rate is not None:
+        return rate, hsn, "hsn", None
+    catalogued = prod.get("gst_rate")
+    if catalogued is not None:
+        try:
+            # The rate settled when the product was catalogued. Not a guess --
+            # a person chose it -- so the line IS taxed. `missing` still travels
+            # with it so the screen can say why the HSN alone did not settle it.
+            return float(catalogued), hsn, "catalogue", missing
+        except (TypeError, ValueError):
+            pass
+    return None, hsn, "", missing
 
 # Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
@@ -184,6 +308,43 @@ class POCreate(BaseModel):
     items: List[POItemCreate] = Field(..., min_length=1)
     expected_date: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("expected_date")
+    @classmethod
+    def _expected_date_not_backdated(cls, v):
+        """Owner rule: a promised delivery is today or later, never the past.
+
+        Enforced HERE, on the server, not only by the date picker's `min` --
+        a picker minimum is a courtesy, not a rule, and any other caller
+        (Buy Desk, a script, a replayed request) bypasses it entirely.
+
+        "Today" is the IST calendar day: Railway runs in UTC, so between
+        00:00 and 05:30 IST a UTC "today" is still YESTERDAY in the shop and
+        would reject a perfectly valid same-day delivery date.
+
+        Applies to CREATE only -- POs already carrying an older date keep it
+        and still open, display and receive exactly as before.
+        """
+        if v is None:
+            return v
+        raw = str(v).strip()
+        if not raw:
+            return v
+        from datetime import date as _date
+        from ..utils.ist import ist_today
+
+        try:
+            parsed = _date.fromisoformat(raw[:10])
+        except ValueError:
+            raise ValueError(
+                "Expected delivery date must be a real date, like 2026-08-26"
+            )
+        if parsed < ist_today():
+            raise ValueError(
+                "Expected delivery date cannot be in the past - "
+                "choose today or a later date"
+            )
+        return raw[:10]
 
 
 class GRNItemCreate(BaseModel):
@@ -1285,48 +1446,92 @@ async def create_po(
                 },
             )
 
-    # Calculate totals with PER-LINE, server-resolved GST (was a flat 18% that
-    # both over-taxed the PO and -- because lines stored no tax_rate -- made the
-    # downstream invoice draft compute 0% tax). Each stored line carries its
-    # resolved tax_rate + hsn + ordered/received residual fields the receiving
-    # cockpit and reconciliation console read.
-    from ..services.gst_rates import resolve_gst_rate
+    # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
+    # calculated according to interstate or intrastate as per GST norms").
+    # Read the delivery store's own GSTIN -- with 3 entities over 4 GSTINs in 2
+    # states, "our state" is never a constant.
+    store_doc = None
+    try:
+        store_repo = get_store_repository()
+        if store_repo is not None:
+            store_doc = store_repo.find_by_id(po.delivery_store_id)
+    except Exception as _st_exc:  # noqa: BLE001 - GST falls back to "assumed"
+        logger.warning("[VENDOR] PO store lookup failed: %s", _st_exc)
+    parties = _po_gst_parties(vendor if vendor_repo is not None else None, store_doc)
+    interstate = parties["interstate"]
+
+    # Per-line GST, resolved from the line's HSN (captured at cataloguing), and
+    # split per GST norms. A line whose HSN cannot settle a rate is stored
+    # UNRESOLVED with zero tax and a plain-English reason -- never taxed at a
+    # guessed rate, because a PO goes to a real vendor.
+    from ..services.gst_rates import split_gst
 
     subtotal = 0.0
     tax = 0.0
     stored_items = []
+    unresolved_gst = []
+    cost_filled = []
     for item in po.items:
-        line_total = item.quantity * item.unit_price
+        line_total = round(item.quantity * item.unit_price, 2)
         prod = (
             product_repo.find_by_id(item.product_id)
-            if (product_repo is not None and item.gst_rate is None)
+            if product_repo is not None
             else None
-        ) or {}
-        rate = (
-            item.gst_rate
-            if item.gst_rate is not None
-            else resolve_gst_rate(
-                hsn_code=item.hsn or prod.get("hsn_code"),
-                category=item.category or prod.get("category"),
-            )
         )
-        line_tax = round(line_total * (rate / 100.0), 2)
+        rate, hsn, source, missing = _po_line_gst_rate(item, prod)
+        line_tax = round(line_total * ((rate or 0.0) / 100.0), 2)
+        cgst, sgst, igst = split_gst(line_tax, interstate)
         subtotal += line_total
         tax += line_tax
+        if rate is None:
+            unresolved_gst.append(
+                {
+                    "product_id": item.product_id,
+                    "product_name": item.product_name,
+                    "missing": missing,
+                }
+            )
         stored_items.append(
             {
                 **item.model_dump(),
-                "tax_rate": rate,
-                "hsn": item.hsn or prod.get("hsn_code"),
+                "tax_rate": rate if rate is not None else 0.0,
+                "gst_source": source,
+                "gst_unresolved": rate is None,
+                "gst_missing": missing,
+                "hsn": hsn,
                 "line_tax": line_tax,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
                 "ordered_qty": item.quantity,
                 "received_qty": 0,
                 "line_status": "OPEN",
             }
         )
+        # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so
+        # raising the PO finishes the cataloguing. Done on CREATE, not on send:
+        # the buyer has agreed the price the moment the line is saved, a draft
+        # PO may never be sent, and the next of 40 lines should already see the
+        # product as costed. Never overwrites an existing cost.
+        if _promote_cost_from_rate(
+            item.product_id,
+            prod,
+            item.unit_price,
+            _PO_PROVISIONAL_COST_SOURCE,
+            product_repo,
+        ):
+            cost_filled.append(
+                {"product_id": item.product_id, "cost_price": round(item.unit_price, 2)}
+            )
     subtotal = round(subtotal, 2)
     tax = round(tax, 2)
     total = round(subtotal + tax, 2)
+    gst_summary = {
+        "cgst": round(sum(i["cgst"] for i in stored_items), 2),
+        "sgst": round(sum(i["sgst"] for i in stored_items), 2),
+        "igst": round(sum(i["igst"] for i in stored_items), 2),
+        "tax": tax,
+    }
 
     if po_repo is not None:
         po_repo.create(
@@ -1347,15 +1552,40 @@ async def create_po(
                 "expected_date": po.expected_date,
                 "notes": po.notes,
                 "status": "DRAFT",
+                "gst_summary": gst_summary,
+                **parties,
                 "created_by": current_user.get("user_id"),
                 "created_at": datetime.now().isoformat(),
             }
         )
 
+    # Audit the cost figures this PO wrote onto the product spine -- cost feeds
+    # margin and valuation, so "who set this cost and from where" must be
+    # answerable. Fail-soft: an audit failure never un-creates the PO.
+    if cost_filled:
+        try:
+            audit = get_audit_repository()
+            if audit is not None:
+                audit.create(
+                    {
+                        "action": "purchase.cost_from_po_rate",
+                        "entity_type": "purchase_order",
+                        "entity_id": po_id,
+                        "user_id": current_user.get("user_id"),
+                        "detail": {"po_number": po_number, "products": cost_filled},
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "po_id": po_id,
         "po_number": po_number,
         "total_amount": total,
+        "interstate": interstate,
+        "gst_summary": gst_summary,
+        "gst_unresolved": unresolved_gst,
+        "cost_filled": cost_filled,
         "message": "Purchase order created",
     }
 
@@ -3403,36 +3633,13 @@ def _accept_grn_claimed(
                     "cost_price": round(line_cost, 2),
                     "cost_source": "GRN_PO",
                 }
-                # Hub Phase 2 hero: receiving the goods is where the cost becomes
-                # known. Backfill it onto the PRODUCT spine when the product had
-                # no cost, then atomically restamp -- a DRAFT whose only gap was
-                # cost_price auto-promotes to ACTIVE (purchasable) right here.
-                # Never-demote + fail-soft: a promote failure never blocks minting.
-                if (
-                    product_repo is not None
-                    and prod is not None
-                    and not prod.get("cost_price")
-                ):
-                    try:
-                        product_repo.update(
-                            product_id,
-                            {
-                                "cost_price": round(line_cost, 2),
-                                "cost_source": "GRN_PO",
-                            },
-                        )
-                        _pm.apply_restamp_atomic(
-                            product_id,
-                            prod,
-                            {"cost_price": round(line_cost, 2)},
-                            product_repo=product_repo,
-                        )
-                    except Exception as _cp_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[VENDOR] GRN cost-promote skipped for %s: %s",
-                            product_id,
-                            _cp_exc,
-                        )
+                # Hub Phase 2 hero: receiving the goods is where the real cost
+                # is confirmed. Same shared promote the PO create path uses --
+                # fills only a MISSING cost, then atomically restamps so a DRAFT
+                # whose only gap was cost_price becomes ACTIVE right here.
+                _promote_cost_from_rate(
+                    product_id, prod, line_cost, "GRN_PO", product_repo
+                )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
             # COMPLETE product. After the cost backfill above, a product still

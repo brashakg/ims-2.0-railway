@@ -266,3 +266,41 @@ def resolve_gstin_for_state(gstins, state_code: Optional[str]) -> Optional[dict]
         if isinstance(g, dict) and (g.get("state_code") or "").strip() == sc:
             return g
     return None
+
+
+def resolve_state_code(*candidates) -> str:
+    """Best-effort 2-digit GST state code from the FIRST usable candidate.
+
+    Accepts, in any order and in any mix: a 15-char GSTIN (state = first two
+    chars), a bare 2-digit code, a 2-letter abbreviation, or a full state name.
+    Returns "" when nothing resolves. ASCII-only; never raises.
+
+    THE single place this parsing lives. Both the sale side (orders.py
+    _invoice_state_code -> customer/store place of supply) and the purchase side
+    (vendors.py PO -> vendor vs delivery-store place of supply) call it, so
+    "which state is this?" can never answer two different ways in one invoice
+    chain.
+    """
+
+    def _valid_code(code) -> str:
+        c = str(code or "").strip()
+        if len(c) == 2 and c.isdigit() and c in INDIAN_STATE_CODES:
+            return c
+        return ""
+
+    for cand in candidates:
+        if cand is None:
+            continue
+        s = str(cand).strip()
+        if not s:
+            continue
+        # A full GSTIN -> first two chars are the state code.
+        if len(s) == 15 and s[:2].isdigit():
+            code = _valid_code(s[:2])
+            if code:
+                return code
+        # 2-digit code / 2-letter abbreviation / full state name.
+        code = _valid_code(normalize_state_code(s))
+        if code:
+            return code
+    return ""
