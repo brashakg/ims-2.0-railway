@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.services import reminder_rail as rail  # noqa: E402
 from api.services import campaign_segments as seg  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +396,11 @@ def test_segment_churn_risk():
 
 
 def test_segment_fu_due_today_cohort():
-    today = datetime.now().date().isoformat()
+    # BUG-104 TRAP: `_resolve_fu_due_today` reads `now_ist_naive().date()`,
+    # the IST business day. Seeding "due today" from the box's UTC date
+    # makes it yesterday for the whole 00:00-05:30 IST band -- the `<=`
+    # filter still matches, so this passes by luck rather than by meaning.
+    today = business_day()
     custs = _FakeColl([_cust("A"), _cust("B"), _cust("C")])
     follow_ups = _FakeColl(
         [
@@ -417,7 +422,11 @@ def test_segment_fu_due_today_cohort():
 
 
 def test_fu_due_today_routing(monkeypatch):
-    today = datetime.now().date().isoformat()
+    # BUG-104 TRAP: `_resolve_fu_due_today` reads `now_ist_naive().date()`,
+    # the IST business day. Seeding "due today" from the box's UTC date
+    # makes it yesterday for the whole 00:00-05:30 IST band -- the `<=`
+    # filter still matches, so this passes by luck rather than by meaning.
+    today = business_day()
     custs = _FakeColl([_cust("A"), _cust("B")])
     follow_ups = _FakeColl(
         [
