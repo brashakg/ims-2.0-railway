@@ -29,6 +29,7 @@ from ..dependencies import (
     resolve_store_scope,
 )
 from ..services import ap_engine
+from ..services import org_validation as ov
 from ..utils.ist import fy_start_year_ist, ist_date_str, now_ist
 from ..services import product_master as _pm
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
@@ -109,8 +110,68 @@ from ..services.stores_util import is_online_store  # noqa: E402
 # ============================================================================
 
 
-# Indian GSTIN format: 2-digit state code + 10-char PAN + 1 entity + Z + 1 check
+# Indian GSTIN format: 2-digit state code + 10-char PAN + 1 entity + Z + 1 check.
+# Shape only -- the state-code list and the check digit are enforced by
+# org_validation (the ONE GSTIN validator in this codebase; entities, stores and
+# the purchase GST engine all use it, so a vendor cannot be judged by a laxer
+# rule than the invoice it will appear on).
 _GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
+
+
+def validate_vendor_gstin(value: Optional[str]) -> Optional[str]:
+    """Normalise + fully validate a vendor GSTIN, or raise naming the problem.
+
+    Returns the uppercased GSTIN, or None when nothing was supplied (an
+    UNREGISTERED / COMPOSITION / OVERSEAS vendor legitimately has none).
+
+    A shape-only check is not enough here: a single mistyped character can turn
+    a Maharashtra GSTIN into a Jharkhand one, which silently flips a purchase
+    between IGST and CGST+SGST. The GSTN check digit catches exactly that, so
+    the number is refused with a message that says WHICH part is wrong.
+    """
+    if value is None or str(value).strip() == "":
+        return None
+    cleaned = str(value).strip().upper()
+    if not _GSTIN_RE.match(cleaned):
+        raise ValueError(
+            "GSTIN must be 15 characters in the format "
+            "NN-AAAAA-9999A-9Z9 (e.g. 27AAPFU0939F1ZV). "
+            f"This one is {len(cleaned)} character(s) and does not match."
+        )
+    if cleaned[:2] not in ov.INDIAN_STATE_CODES:
+        raise ValueError(
+            f"GSTIN starts with state code '{cleaned[:2]}', which is not an "
+            "Indian GST state code. The first two digits are the state."
+        )
+    if not ov.validate_gstin(cleaned):
+        raise ValueError(
+            "GSTIN check digit does not match the rest of the number - one of "
+            "the 15 characters is mistyped. Please re-read it off the vendor's "
+            "invoice."
+        )
+    return cleaned
+
+
+def derive_vendor_state(gstin: Optional[str], typed_state: Optional[str]):
+    """Return (state_code, state_name) for a vendor.
+
+    The GSTIN WINS whenever there is one: its first two digits are the state,
+    so asking the user to also pick a state only creates a way for the two to
+    disagree. With no GSTIN (unregistered vendor) the typed state is normalised
+    to the canonical GST code where it can be resolved ("MH" / "Maharashtra" ->
+    "27"); an unrecognised value is kept verbatim with no code, so the record
+    still says what the user meant instead of silently blanking.
+    """
+    code = ov.gstin_state_code(gstin) if gstin else None
+    if code and code in ov.INDIAN_STATE_CODES:
+        return code, ov.INDIAN_STATE_CODES[code]
+    typed = (typed_state or "").strip()
+    if not typed:
+        return None, typed
+    normalised = str(ov.normalize_state_code(typed) or "").strip()
+    if normalised in ov.INDIAN_STATE_CODES:
+        return normalised, ov.INDIAN_STATE_CODES[normalised]
+    return None, typed
 
 
 class VendorCreate(BaseModel):
@@ -126,6 +187,12 @@ class VendorCreate(BaseModel):
     state: str
     mobile: str
     email: Optional[str] = None
+    # The supplier's own code + the person you actually ring. Both are asked
+    # for on the Add-Supplier form; before this they were collected and thrown
+    # away (the router never wrote them), so they came back blank on reload.
+    vendor_code: Optional[str] = None
+    contact_person: Optional[str] = None
+    credit_limit: Optional[float] = Field(default=None, ge=0)
     # Credit terms must be non-negative. 0 = COD (immediate payment), which is
     # legitimate; negative days would produce a due date BEFORE the bill date
     # and poison the AP aging calculation.
@@ -134,15 +201,7 @@ class VendorCreate(BaseModel):
     @field_validator("gstin", mode="before")
     @classmethod
     def _validate_gstin(cls, v):
-        if v is None or v == "":
-            return None
-        cleaned = v.strip().upper()
-        if not _GSTIN_RE.match(cleaned):
-            raise ValueError(
-                "GSTIN must be 15 characters in the format "
-                "NN-AAAAA-9999A-9Z9 (e.g. 27ABCDE1234F1Z5)"
-            )
-        return cleaned
+        return validate_vendor_gstin(v)
 
 
 class VendorUpdate(BaseModel):
@@ -153,9 +212,23 @@ class VendorUpdate(BaseModel):
     state: Optional[str] = None
     mobile: Optional[str] = None
     email: Optional[str] = None
+    vendor_code: Optional[str] = None
+    contact_person: Optional[str] = None
+    credit_limit: Optional[float] = Field(default=None, ge=0)
+    # A wrong GSTIN was previously uncorrectable -- the field simply wasn't on
+    # the update model -- so a vendor typo'd at create time stayed mis-taxed
+    # forever. Validated by the same rule as create, and only looked at when
+    # actually supplied (editing a phone number never re-judges the GSTIN).
+    gstin: Optional[str] = None
+    gstin_status: Optional[str] = None
     # credit_days must be non-negative on update too.
     credit_days: Optional[int] = Field(default=None, ge=0)
     is_active: Optional[bool] = None
+
+    @field_validator("gstin", mode="before")
+    @classmethod
+    def _validate_gstin(cls, v):
+        return validate_vendor_gstin(v)
 
 
 class POItemCreate(BaseModel):
@@ -699,6 +772,7 @@ async def create_vendor(
                     status_code=400, detail="Vendor with this GSTIN already exists"
                 )
 
+        state_code, state_name = derive_vendor_state(vendor.gstin, vendor.state)
         vendor_repo.create(
             {
                 "vendor_id": vendor_id,
@@ -709,9 +783,15 @@ async def create_vendor(
                 "gstin": vendor.gstin,
                 "address": vendor.address,
                 "city": vendor.city,
-                "state": vendor.state,
+                # The GSTIN decides the state; state_code is the 2-digit GST
+                # form the purchase/ITC code compares against.
+                "state": state_name,
+                "state_code": state_code,
                 "mobile": vendor.mobile,
                 "email": vendor.email,
+                "vendor_code": (vendor.vendor_code or "").strip().upper() or None,
+                "contact_person": vendor.contact_person,
+                "credit_limit": vendor.credit_limit,
                 "credit_days": vendor.credit_days,
                 "is_active": True,
                 "created_by": current_user.get("user_id"),
@@ -758,6 +838,29 @@ async def update_vendor(
             raise HTTPException(status_code=404, detail="Vendor not found")
 
         update_data = updates.model_dump(exclude_unset=True)
+
+        # A GSTIN identifies exactly one taxpayer; two vendor rows sharing one
+        # would double-count ITC. Same guard create already had.
+        if update_data.get("gstin"):
+            clash = vendor_repo.find_one({"gstin": update_data["gstin"]})
+            if clash is not None and clash.get("vendor_id") != vendor_id:
+                raise HTTPException(
+                    status_code=400, detail="Vendor with this GSTIN already exists"
+                )
+
+        # Keep state / state_code in step with the GSTIN whenever either one is
+        # touched, so an edit can never leave a vendor whose typed state and
+        # GSTIN disagree about how its purchases are taxed.
+        if "gstin" in update_data or "state" in update_data:
+            gstin = update_data.get("gstin", existing.get("gstin"))
+            typed = update_data.get("state", existing.get("state"))
+            state_code, state_name = derive_vendor_state(gstin, typed)
+            update_data["state"] = state_name
+            update_data["state_code"] = state_code
+
+        if update_data.get("vendor_code"):
+            update_data["vendor_code"] = update_data["vendor_code"].strip().upper()
+
         update_data["updated_by"] = current_user.get("user_id")
         update_data["updated_at"] = datetime.now().isoformat()
 

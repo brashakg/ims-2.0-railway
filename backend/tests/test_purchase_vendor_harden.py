@@ -146,6 +146,11 @@ class TestVendorCreditDaysBounds:
 # ===========================================================================
 # BUG-2  VendorCreate: invalid GSTIN format
 # ===========================================================================
+# NOTE (2026-08-26): the "valid" fixture here used to be 27ABCDE1234F1Z5, an
+# invented number whose GSTN check digit is wrong. It only passed because the
+# router checked the SHAPE and nothing else. Vendor GSTINs are now validated by
+# org_validation (state code + check digit), so these use a real, published,
+# checksum-valid GSTIN instead.
 
 
 class TestVendorGSTINValidation:
@@ -183,9 +188,9 @@ class TestVendorGSTINValidation:
             city="b",
             state="c",
             mobile="9000000000",
-            gstin="27ABCDE1234F1Z5",
+            gstin="27AAPFU0939F1ZV",
         )
-        assert v.gstin == "27ABCDE1234F1Z5"
+        assert v.gstin == "27AAPFU0939F1ZV"
 
     def test_valid_gstin_is_uppercased(self):
         v = VendorCreate(
@@ -196,9 +201,9 @@ class TestVendorGSTINValidation:
             city="b",
             state="c",
             mobile="9000000000",
-            gstin="27abcde1234f1z5",
+            gstin="27aapfu0939f1zv",
         )
-        assert v.gstin == "27ABCDE1234F1Z5"
+        assert v.gstin == "27AAPFU0939F1ZV"
 
     def test_none_gstin_allowed_for_unregistered(self):
         v = VendorCreate(
@@ -218,7 +223,7 @@ class TestVendorGSTINValidation:
         assert r.status_code == 422, r.text
 
     def test_vendor_create_api_accepts_valid_gstin(self):
-        r = _cli.post("/api/v1/vendors", json=self._vendor(gstin="27ABCDE1234F1Z5"))
+        r = _cli.post("/api/v1/vendors", json=self._vendor(gstin="27AAPFU0939F1ZV"))
         assert r.status_code != 422, r.text
 
     def test_vendor_create_api_accepts_no_gstin_for_unregistered(self):
