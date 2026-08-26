@@ -28,7 +28,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -38,6 +38,12 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 from api.routers import vouchers as vouchers_module
+
+# Expiry is a BUSINESS date (the shop's day) and the box runs UTC, so
+# `date.today()` is the PREVIOUS day between 00:00 and 05:30 IST. The +05:30 is
+# spelled out independently in tests/ist_business_day.py -- asking
+# `api.utils.ist` would only agree with a broken helper and report green.
+from tests.ist_business_day import business_now  # noqa: E402
 
 
 # ============================================================================
@@ -339,7 +345,7 @@ class TestVoucherLifecycle:
     async def test_redeem_expired_rejected(self, fake_db):
         from fastapi import HTTPException
 
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = business_now().date() - timedelta(days=1)
         v = await _issue(amount=500.0, expiry_date=yesterday)
         with pytest.raises(HTTPException) as ei:
             await _redeem(v["code"], 100.0)
@@ -349,7 +355,7 @@ class TestVoucherLifecycle:
         assert doc["balance"] == 500.0  # untouched
 
     async def test_get_expired_is_invalid(self, fake_db):
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = business_now().date() - timedelta(days=1)
         v = await _issue(amount=500.0, expiry_date=yesterday)
         out = await vouchers_module.get_voucher(
             v["code"], current_user=_cashier_user()
@@ -359,7 +365,7 @@ class TestVoucherLifecycle:
 
     async def test_redeem_on_expiry_day_allowed(self, fake_db):
         # Expiry is end-of-day: a card expiring today is still redeemable.
-        v = await _issue(amount=500.0, expiry_date=date.today())
+        v = await _issue(amount=500.0, expiry_date=business_now().date())
         out = await _redeem(v["code"], 100.0)
         assert out["balance"] == 400.0
 
