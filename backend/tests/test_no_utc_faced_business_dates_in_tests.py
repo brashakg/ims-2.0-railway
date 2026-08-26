@@ -148,45 +148,6 @@ ALLOWED = {
         '"barcode": f"BC-{uuid.uuid4().hex[:10]}",',
     ): _HEX,
     ("test_inventory_quantity.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
-    # -- clinical Test-History range ----------------------------------------
-    ("test_clinical_rx_list_range.py", "today = date.today().isoformat()"): (
-        "SAME FRAME AS PRODUCTION: clinical.py:1080 `_resolve_test_date_range` "
-        "expands the today/week/month keywords from `date.today()` -- the UTC "
-        "day -- so the fake repo must key on the same day or this fixture "
-        "would be testing the frame instead of the range logic. It records a "
-        "LIVE BUG-104 residue: between 00:00 and 05:30 IST the Test-History "
-        "'Today' filter shows YESTERDAY's eye tests. Move the router to "
-        "`ist_today()` and these expectations move with it."
-    ),
-    ("test_clinical_rx_list_range.py", "iso = date.today().isoformat()"): (
-        "Same site as above, asserted directly on the pure helper "
-        "`_resolve_test_date_range('today')`. It mirrors what the router does "
-        "today, residue included."
-    ),
-    ("test_clinical_rx_list_range.py", "assert t == date.today().isoformat()"): (
-        "Upper bound of the week/month keyword windows -- same helper, same "
-        "frame as the router. Residue as above."
-    ),
-    (
-        "test_clinical_rx_list_range.py",
-        "assert f == (date.today() - timedelta(days=6)).isoformat()",
-    ): (
-        "Lower bound of the 7-day keyword window: a SPAN check (t - f == 6 "
-        "days) written as two absolute faces. Both come off the same clock "
-        "read as the helper's, so a frame shift moves both."
-    ),
-    (
-        "test_clinical_rx_list_range.py",
-        "assert f == (date.today() - timedelta(days=29)).isoformat()",
-    ): ("Lower bound of the 30-day keyword window; the same span check."),
-    (
-        "test_clinical_rx_list_range.py",
-        "old = (date.today() - timedelta(days=200)).isoformat()",
-    ): (
-        "A row deliberately 200 days old, used to assert it falls OUTSIDE the "
-        "default window. One day of frame drift cannot move a 200-day-old row "
-        "inside a 30-day window."
-    ),
     (
         "test_clinical_rx_list_range.py",
         'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
