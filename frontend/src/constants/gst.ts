@@ -108,8 +108,22 @@ export const HSN_CODES: Record<string, HSNCode> = {
 
 
 // ============================================================================
-// Category → GST Rate mapping (used by POS for quick rate lookup)
+// Category → GST Rate — THE ONE LOCAL GST TABLE, and the only one left
 // ============================================================================
+// Its single caller is gstRuntime.resolveGstRate(), as the LAST resort: a
+// category GET /products/gst-rates does not name, or any category at all before
+// that endpoint has answered. Everything else that used to be mirrored here
+// (the category → HSN map, the category → master-row hint, the canonical
+// category → rate table) is now read off the server — see gstRuntime.ts.
+//
+// It stays hand-written on purpose: it sits on the POS billing path, so what it
+// returns offline must keep matching what it returned yesterday. Every category
+// a product can be stored with is pinned, in BOTH states, by
+// __tests__/gstServerFed.test.ts.
+//
+// If you change a rate here, you are changing what a cashier sees before the
+// server answers. The rate the customer is actually billed comes from the
+// backend (services/gst_rates.py), which recomputes every order.
 export function getGSTRateByCategory(category: string): number {
   // Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
   // plural/alt forms (FRAMES, RX_LENSES, ...), AND the short UI codes used on
@@ -174,72 +188,32 @@ export function getGSTRateByCategory(category: string): number {
     case 'SERVICE':
     case 'SERVICES':
       return 18;
+    // Eye test / optometry consult -> EXEMPT health service, 0% (SAC 9993,
+    // Notification 12/2017-CT(R) Sr. 74). These are real, printable order
+    // lines (orders.py _NON_SERIALIZED_ITEM_TYPES). This table had no row for
+    // one until 2026-08-27, so an eye test quoted the unknown-category rate on
+    // a tax invoice while the customer was charged nothing.
+    case 'EYE_TEST':
+    case 'EYE_EXAM':
+    case 'EYE_CHECKUP':
+    case 'CONSULT':
+    case 'CONSULTATION':
+    case 'OPTOMETRY':
+      return 0;
     default:
-      return 18; // Conservative default
+      // An UNRECOGNISED category -- a legacy row, a typo, a blank. 5%, because
+      // that is what the server bills such a line (gst_rates.DEFAULT_GST_RATE,
+      // moved 18 -> 5 on 2026-05-28 after a QA finding that an uncategorised
+      // product was charged 18%). This side said 18 until 2026-08-27 and was
+      // simply never reached: the deleted getHSNByCategory handed every caller
+      // HSN 900490, whose master row answers 5, before this line could run.
+      // With that copy gone the branch went live, and a frontend default that
+      // contradicts the server on a BILLING DOCUMENT is a decision, not a
+      // shrug -- over-charging GST is a customer-trust and a compliance
+      // problem, so the unknown case biases to the dominant optical rate on
+      // both sides.
+      return 5;
   }
-}
-
-// Get HSN code by product category
-export function getHSNByCategory(category: string): HSNCode | null {
-  // Accepts canonical enum codes, seed plural forms, and the short UI codes
-  // (FR/LS/RG/CL/SG/WT/CK/HA/ACC/SMT*) used on AddProductPage.
-  // 6-digit codes only (owner 2026-07-05) — the 4-digit variant was removed.
-    switch (category.toUpperCase()) {
-      case 'CONTACT_LENS':
-      case 'CONTACT_LENSES':
-      case 'COLORED_CONTACT_LENS':
-      case 'COLOUR_CONTACTS':
-      case 'CL':
-        return HSN_CODES['900130'];
-      case 'LENS':
-      case 'RX_LENSES':
-      case 'OPTICAL_LENS':
-      case 'EYEGLASS_LENS':
-      case 'LS':
-        return HSN_CODES['900150'];
-      case 'FRAME':
-      case 'FRAMES':
-      case 'EYEGLASS_FRAME':
-      case 'FR':
-        return HSN_CODES['900311'];
-      case 'SPECTACLE':
-      case 'COMPLETE_SPECTACLE':
-      case 'READING_GLASSES':
-      case 'RG':
-        return HSN_CODES['900490'];
-      case 'SUNGLASSES':
-      case 'SUNGLASS':
-      case 'SG':
-        return HSN_CODES['900410'];
-      case 'WRIST_WATCHES':
-      case 'WATCH':
-      case 'WT':
-        return HSN_CODES['910111'];
-      case 'SMARTWATCHES':
-      case 'SMARTWATCH':
-      case 'SMTWT':
-        return HSN_CODES['910221'];
-      case 'WALL_CLOCK':
-      case 'WALL_CLOCKS':
-      case 'CK':
-        return HSN_CODES['910500'];
-      case 'HEARING_AID':
-      case 'HEARING_AIDS':
-      case 'HA':
-        return HSN_CODES['902140'];
-      case 'SMARTGLASSES':
-      case 'SMTSG':
-      case 'SMTFR':
-        return HSN_CODES['900410']; // GST-REVIEW: electronic eyewear, 18% placeholder
-      case 'ACCESSORIES':
-      case 'ACC':
-        return HSN_CODES['392690'];
-      case 'SERVICE':
-      case 'SERVICES':
-        return HSN_CODES['998599'];
-      default:
-        return HSN_CODES['900490']; // Default to corrective spectacles (5%)
-    }
 }
 
 // Calculate GST components
@@ -292,17 +266,6 @@ export function gstinStateCode(gstin?: string | null): string {
   return /^[0-9]{2}/.test(s) ? s.slice(0, 2) : '';
 }
 
-// Get all HSN codes as dropdown options. 6-digit only (owner 2026-07-05):
-// the 4-digit "turnover <= 5 Cr" simplification was removed app-wide.
-export function getHSNOptions(): Array<{ value: string; label: string; gstRate: number }> {
-  const codes = HSN_CODES;
-  return Object.values(codes).map((hsn) => ({
-    value: hsn.code,
-    label: `${hsn.code} - ${hsn.description} (GST: ${hsn.gstRate}%)`,
-    gstRate: hsn.gstRate,
-  }));
-}
-
 // GSTR-1 Report Categories
 export const GSTR1_SECTIONS = {
   B2B: 'B2B - Business to Business (Invoice-wise)',
@@ -325,11 +288,9 @@ export const GSTR3B_TABLES = {
 
 export default {
   HSN_CODES,
-  getHSNByCategory,
   calculateGST,
   calculateIGST,
   validateGSTNumber,
-  getHSNOptions,
   GSTR1_SECTIONS,
   GSTR3B_TABLES,
 };

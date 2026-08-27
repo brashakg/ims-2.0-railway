@@ -47,7 +47,6 @@ import { choosePrimaryPatient, toPosPatient, sortMembersPrimaryFirst } from '../
 import { AddCustomerModal } from '../customers/AddCustomerModal';
 import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
-import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 // PATIENT SAFETY: the axis is never fabricated at POS. See utils/rxAxisEntry.
 import {
@@ -2398,6 +2397,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         brand: p.brand,
         subbrand: p.subbrand || p.sub_brand,
         category: p.category || hit?.category,
+        hsn_code: p.hsn_code || hit?.hsn_code,
         mrp: p.mrp,
         offer_price: p.offer_price ?? p.offerPrice,
         image_url: p.image_url,
@@ -2449,6 +2449,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     setBlockMsg(null);
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
+        // The product's stored HSN, so the tax invoice prints the code this
+        // product is registered under rather than deriving one from its
+        // category (see CartLineItem.hsn_code).
+        hsn_code: product.hsn_code,
         unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
         is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
     });
@@ -2633,29 +2637,11 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
   const { user } = useAuth();
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
-  const taxBreakdown = useMemo(() => {
-    // GST_PRICING_MODE (runtime, /health): mirrors posStore.getTax / getGrandTotal.
-    //   INCLUSIVE (default): line_total is all-in; EXTRACT GST from within
-    //     (taxable = gross/(1+rate); tax = gross-taxable).
-    //   EXCLUSIVE (legacy): line_total is the pre-tax base; GST added on top
-    //     (taxable = gross; tax = gross*rate).
-    // Uses the DB-aware resolver (editable HSN/GST overrides). `rates` maps a
-    // rate -> its taxable base so the HSN breakdown reconciles to the grand
-    // total (which getGrandTotal also computes per-mode).
-    const inclusive = isInclusivePricing();
-    const cartFactor = 1 - (store.cart_discount_percent || 0) / 100;
-    let totalTax = 0;
-    const rates: Record<number, number> = {};
-    for (const item of (store.cart || [])) {
-      const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
-      const itemGross = Math.round((item.line_total || 0) * cartFactor * 100) / 100;
-      const itemTaxable = inclusive ? itemGross / (1 + rate / 100) : itemGross;
-      totalTax += inclusive ? itemGross - itemTaxable : itemGross * (rate / 100);
-      rates[rate] = (rates[rate] || 0) + itemTaxable;
-    }
-    Object.keys(rates).forEach((k) => { rates[+k] = Math.round(rates[+k] * 100) / 100; });
-    return { totalTax: Math.round(totalTax * 100) / 100, rates };
-  }, [store.cart, store.cart_discount_percent]);
+  // The store's numbers, not a second copy of the rule. `rates` maps a rate ->
+  // its taxable base, so the HSN summary below reconciles to getGrandTotal();
+  // `lineRates` gives the per-line GST% column the SAME rate the total used.
+  // This screen used to re-run that loop itself, and the two copies had drifted.
+  const taxBreakdown = store.getTaxBreakdown();
 
   const total = store.getGrandTotal();
 
@@ -2676,7 +2662,9 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           </thead>
           <tbody>
             {(store.cart || []).map(item => {
-              const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+              // The rate the cart total actually used -- see posStore
+              // getTaxBreakdown, which is the only place a rate is resolved.
+              const gstRate = taxBreakdown.lineRates[item.id];
               return (
               <tr key={item.id} className="border-t border-gray-200">
                 <td className="px-4 py-3">

@@ -56,6 +56,13 @@ export interface CartLineItem {
   brand?: string;
   subbrand?: string;
   category: string;
+  // The product's OWN HSN code, as stored on its master record. Carried so the
+  // tax invoice can print what the product is registered under instead of
+  // re-deriving a code from its category at print time (which printed the
+  // sunglasses HSN on every smartglasses sale). Absent on a manually-added
+  // line (a custom lens has no product record); the invoice then falls back to
+  // the server's canonical code for the category.
+  hsn_code?: string;
   unit_price: number;            // Selling price (Offer Price or MRP)
   mrp: number;                   // Maximum Retail Price
   offer_price?: number;          // Offer Price (if different from MRP)
@@ -235,9 +242,22 @@ export interface POSState {
   getTotalDiscount: () => number;
   getGrandTotal: () => number;
   getTax: () => number;
+  getTaxBreakdown: () => CartTaxBreakdown;
   getTaxableValue: () => number;
   getTotalPaid: () => number;
   getBalance: () => number;
+}
+
+/** The cart's GST, resolved ONCE. Every consumer -- the cart total, the Review
+ *  step's HSN summary, and the per-line GST% column -- reads this rather than
+ *  re-running the rate lookup, so no two screens can quote a sale differently. */
+export interface CartTaxBreakdown {
+  /** Total GST across the cart, rounded to paise. */
+  totalTax: number;
+  /** rate% -> taxable base at that rate (rounded). Sums the HSN summary. */
+  rates: Record<number, number>;
+  /** cart line id -> its GST rate%. */
+  lineRates: Record<string, number>;
 }
 
 // ============================================================================
@@ -617,11 +637,50 @@ export const usePOSStore = create<POSState>()(
         return Math.round((itemDiscount + (state.cart_discount_amount || 0)) * 100) / 100;
       },
 
+      getTaxBreakdown: () => {
+        // THE ONE PLACE the cart's GST is worked out. getTax, getGrandTotal and
+        // the Review step's HSN summary + per-line GST% column all read this;
+        // none of them resolves a rate itself. Until now the Review step ran its
+        // own copy of this loop, and the two copies had already drifted once.
+        //
+        // GST_PRICING_MODE (read at runtime from /health, see gstRuntime):
+        //   INCLUSIVE (default, owner decision / QA F3) -> GST is WITHIN the
+        //     counter price: taxable = gross/(1 + rate/100), tax = gross - taxable.
+        //   EXCLUSIVE (legacy rollback) -> GST is added on top: taxable = gross,
+        //     tax = gross * rate.
+        //
+        // CATEGORY ONLY. This used to read `(item as any).hsn_code` as well,
+        // which was dead -- CartLineItem had no such field. It has one now
+        // (the invoice prints it), and an exact-HSN hit BEATS the category
+        // inside resolveGstRate, so leaving that argument in would let a
+        // product's stored code move the GST shown in the cart -- and move it
+        // away from the invoice, which derives from the category.
+        const state = get();
+        const cart = state.cart || [];
+        const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;  // 1.0 when 0
+        const inclusive = isInclusivePricing();
+
+        let totalTax = 0;
+        const rates: Record<number, number> = {};
+        const lineRates: Record<string, number> = {};
+        for (const item of cart) {
+          const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
+          const rate = resolveGstRate(item.category);
+          const lineTaxable = inclusive ? lineGross / (1 + rate / 100) : lineGross;
+          totalTax += inclusive ? lineGross - lineTaxable : lineGross * (rate / 100);
+          rates[rate] = (rates[rate] || 0) + lineTaxable;
+          lineRates[item.id] = rate;
+        }
+        Object.keys(rates).forEach((k) => { rates[+k] = Math.round(rates[+k] * 100) / 100; });
+        // NOTE: never `set()` inside a getter (illegal during React render).
+        return { totalTax: Math.round(totalTax * 100) / 100, rates, lineRates };
+      },
+
       getGrandTotal: () => {
         // GST_PRICING_MODE (read at runtime from /health, see gstRuntime):
         //   INCLUSIVE (default, owner decision / QA F3): the counter price IS
         //     the all-in price; total = sum of inclusive line totals (GST is
-        //     WITHIN, see getTax). A Rs 999 frame rings up Rs 999.
+        //     WITHIN, see getTaxBreakdown). A Rs 999 frame rings up Rs 999.
         //   EXCLUSIVE (legacy): GST is added on top -> total = line + GST.
         // The backend recomputes authoritatively on order-create; this mirrors
         // the same mode for the live preview so FE+BE agree during a flag flip.
@@ -629,6 +688,9 @@ export const usePOSStore = create<POSState>()(
         const cart = state.cart || [];
         const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;  // 1.0 when 0
         const inclusive = isInclusivePricing();
+        // Rates come from the single resolver above; the per-line accumulation
+        // below stays as it was, so the total is unchanged to the paise.
+        const lineRates = inclusive ? null : get().getTaxBreakdown().lineRates;
 
         let total = 0;
         for (const item of cart) {
@@ -636,7 +698,7 @@ export const usePOSStore = create<POSState>()(
           if (inclusive) {
             total += lineGross;
           } else {
-            const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+            const rate = lineRates![item.id] ?? 0;
             total += lineGross + lineGross * (rate / 100);
           }
         }
@@ -644,25 +706,7 @@ export const usePOSStore = create<POSState>()(
         return Math.round(total * 100) / 100;
       },
 
-      getTax: () => {
-        // GST component, mode-aware (summed per line, rounded once):
-        //   INCLUSIVE -> extracted from WITHIN: gross - gross/(1 + rate/100).
-        //   EXCLUSIVE -> added on top: gross * rate.
-        const state = get();
-        const cart = state.cart || [];
-        const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;
-        const inclusive = isInclusivePricing();
-
-        let tax = 0;
-        for (const item of cart) {
-          const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
-          const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
-          tax += inclusive
-            ? lineGross - lineGross / (1 + gstRate / 100)
-            : lineGross * (gstRate / 100);
-        }
-        return Math.round(tax * 100) / 100;
-      },
+      getTax: () => get().getTaxBreakdown().totalTax,
 
       getTaxableValue: () => {
         // Pre-tax taxable base = grand - tax. Correct in BOTH modes:

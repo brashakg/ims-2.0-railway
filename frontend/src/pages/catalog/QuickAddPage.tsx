@@ -74,7 +74,7 @@ import {
   type CatalogProductDoc,
   type PromoteDryRunResult,
 } from '../../services/api/catalog';
-import { getHSNOptions } from '../../constants/gst';
+import { hsnOptions } from '../../constants/gstRuntime';
 import {
   CATEGORIES,
   getCategoryFields,
@@ -2760,7 +2760,7 @@ export function QuickAddPage() {
                             value={hsnCode}
                             onChange={(e) => {
                               setHsnCode(e.target.value);
-                              const option = getHSNOptions().find((o) => o.value === e.target.value);
+                              const option = hsnOptions().find((o) => o.value === e.target.value);
                               if (option) setGstRate(option.gstRate.toString());
                               clearFlag('hsn_code');
                               clearFlag('gst_rate');
@@ -2771,7 +2771,13 @@ export function QuickAddPage() {
                             )}
                           >
                             <option value="">Select HSN Code</option>
-                            {getHSNOptions().map((o) => (
+                            {/* Server-fed (gstRuntime.hsnOptions): the list has
+                                to contain every code the category autofill above
+                                can set, or this REQUIRED field renders blank on
+                                the categories that need it most -- 852580
+                                (smartglasses) and 9993 (eye tests) exist only in
+                                the server's canonical table. */}
+                            {hsnOptions().map((o) => (
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>

@@ -11,8 +11,8 @@
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
-import { calculateGST, calculateIGST, getHSNByCategory } from '../../constants/gst';
-import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
+import { calculateGST, calculateIGST } from '../../constants/gst';
+import { resolveGstRate, resolveHsn, isInclusivePricing } from '../../constants/gstRuntime';
 import { describeForReceipt } from '../../utils/receiptFormat';
 import {
   buildLegalHeader,
@@ -107,9 +107,28 @@ export function GSTInvoice({
   const lineItems: InvoiceLineItem[] = safeItems.map(item => {
     const grossLine = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
-    const hsnInfo = getHSNByCategory(category);
-    const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
-    const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
+    // A TAX INVOICE PRINTS THE HSN THE PRODUCT IS STORED WITH. The cart line
+    // carries the product's own hsn_code (POSInvoice -> posStore), and that is
+    // the code the customer's copy shows -- no derivation on the revenue path.
+    // Deriving it from the category is what put 900410, the SUNGLASSES code, on
+    // every smartglasses invoice while the product record said 852580.
+    //
+    // Only a line with NO stored HSN falls back to the server's canonical code
+    // for its category (a manually-added lens, a legacy order). And if that is
+    // unknown too -- no product record AND a browser that has never reached
+    // GET /products/gst-rates -- the cell stays EMPTY. A wrong HSN on a
+    // statutory document misfiles the supply and its rate bucket in GSTR-1, so
+    // a blank the accountant can see beats a plausible-looking invention
+    // nobody questions. Measured 2026-08-27, the deleted local copy printed a
+    // code the server contradicts on 25 of 62 category spellings: 900410 for
+    // smartglasses (server 852580), 900490 for every eye-test spelling (9993),
+    // and an invented 900490 for anything it did not recognise at all.
+    const hsnCode = (item as any).hsnCode || resolveHsn(category);
+    // THE RATE IS NOT DERIVED FROM THAT CODE. A stored HSN decides which column
+    // the supply is FILED under; it must not be able to move the percentage a
+    // customer is charged. The rate stays category-derived, exactly as before
+    // this change, and resolveGstRate() runs the server's own four steps.
+    const gstRate = (item as any).gstRate || resolveGstRate(category);
 
     // GST_PRICING_MODE (runtime, /health): inclusive (default) extracts GST
     // from WITHIN the line price (row total = price paid); exclusive (legacy)
@@ -308,7 +327,7 @@ export function GSTInvoice({
                 <tr key={index}>
                   <td style={tblCell}>{index + 1}</td>
                   <td style={{ ...tblCell, textAlign: 'left' }}>{item.productName}</td>
-                  <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{item.hsnCode}</td>
+                  <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{item.hsnCode || '-'}</td>
                   <td style={tblCell}>{item.quantity}</td>
                   <td style={tblNum}>{inr(item.unitPrice, { withPaise: true })}</td>
                   <td style={tblNum}>{inr(item.discount, { withPaise: true })}</td>

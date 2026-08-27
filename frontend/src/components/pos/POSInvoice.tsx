@@ -82,6 +82,9 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
       brand: item.brand,       // carried into GSTInvoice for customer-friendly description
       subbrand: item.subbrand,
       category: item.category,
+      // The product's OWN HSN. A statutory tax invoice prints what the product
+      // is stored with; GSTInvoice only derives a code when this is absent.
+      hsnCode: item.hsn_code,
       sku: item.sku || '',
       quantity: item.quantity,
       unitPrice: item.unit_price,

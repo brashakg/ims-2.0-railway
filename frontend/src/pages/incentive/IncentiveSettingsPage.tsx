@@ -962,7 +962,7 @@ export function IncentiveSettingsPage() {
 
           {settings.updated_at && (
             <div className="mt-4 text-xs text-gray-400 text-right">
-              Last updated {new Date(settings.updated_at).toLocaleString()} by {settings.updated_by || 'system'}
+              Last updated {new Date(settings.updated_at).toLocaleString()} by {settings.updated_by_name || settings.updated_by || 'system'}
             </div>
           )}
         </>

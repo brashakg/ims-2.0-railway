@@ -250,6 +250,36 @@ def to_camel_case(snake_str: str) -> str:
     return components[0] + "".join(x.title() for x in components[1:])
 
 
+def _stamp_status_actor_names(orders: list) -> None:
+    """Name the person on the order Status Timeline, not their user id.
+
+    Both writers stamp ``current_user["user_id"]`` into ``status_history``
+    (the DRAFT entry at create, later entries via update_status), and the
+    order itself stores ``created_by`` -- the timeline printed all of them
+    raw. Resolve names on the way OUT, on COPIES of the nested history
+    entries: the stored history is an audit trail and must keep the id and
+    nothing else (see purchase_invoices._stamp_bill_actor_names for the
+    house shape). Batched -- ONE users read for the whole page of orders.
+    An id that no longer resolves (e.g. a deleted QA login) gets NO
+    ``_name`` sibling and the screen prints the id verbatim -- never an
+    invented name. Fail-soft: a dead users read leaves the ids in place.
+    """
+    from ..services.name_resolver import stamp_user_names
+
+    rows = [o for o in orders if isinstance(o, dict)]
+    hist_entries = []
+    for o in rows:
+        hist = [
+            dict(e) for e in (o.get("status_history") or []) if isinstance(e, dict)
+        ]
+        if hist:
+            # Detach from the stored entries BEFORE stamping so the name can
+            # never leak into a document that is later written back.
+            o["status_history"] = hist
+            hist_entries.extend(hist)
+    stamp_user_names(_get_db(), rows + hist_entries, ("created_by", "changed_by"))
+
+
 def order_to_frontend(order: dict) -> dict:
     """Convert order dict from snake_case to camelCase for frontend"""
     if order is None:
@@ -283,6 +313,7 @@ def order_to_frontend(order: dict) -> dict:
         "invoice_number": "invoiceNumber",
         "invoice_date": "invoiceDate",
         "created_by": "createdBy",
+        "created_by_name": "createdByName",
     }
 
     # Status field needs special handling - backend uses 'status', frontend uses 'orderStatus'
@@ -315,6 +346,11 @@ def order_to_frontend(order: dict) -> dict:
                     "timestamp": entry.get("timestamp"),
                     "changedBy": entry.get("changed_by"),
                 }
+                # Present only when the id resolved to a person (see
+                # _stamp_status_actor_names) -- an unresolved id has no
+                # _name sibling and the timeline prints the id verbatim.
+                if entry.get("changed_by_name"):
+                    history_entry["changedByName"] = entry.get("changed_by_name")
                 result["statusHistory"].append(history_entry)
         elif key in key_map:
             result[key_map[key]] = value
@@ -916,6 +952,7 @@ async def list_orders(
         # Convert to frontend format (camelCase)
         from ..utils.pagination import paginate
 
+        _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(orders_formatted, page=page, page_size=limit)
@@ -942,6 +979,7 @@ async def get_pending_deliveries(
 
     if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
+        _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
 
@@ -959,6 +997,7 @@ async def get_unpaid_orders(
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
+        _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
 
@@ -976,6 +1015,7 @@ async def get_overdue_orders(
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
+        _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
 
@@ -994,6 +1034,7 @@ async def search_orders(
 
     if repo is not None:
         orders = repo.search_orders(q, active_store)
+        _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
 
@@ -2924,6 +2965,7 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
                     order["tracking_token"] = ensure_tracking_token(repo, order)
                 except Exception:  # noqa: BLE001
                     pass
+            _stamp_status_actor_names([order])
             return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 

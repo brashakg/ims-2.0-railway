@@ -1132,6 +1132,29 @@ def _verify_job_prescription(prescription_id, order, current_user) -> None:
             )
 
 
+def _stamp_job_actor_names(jobs: list) -> None:
+    """Name the technician, not their user id, everywhere a job is shown.
+
+    The workshop board's "Assigned:" line, the job drawer's "Assigned To" and
+    the PRINTED JOB CARD that goes to the bench all render assignedTo, which
+    job_to_frontend maps straight from the stored technician_id / assigned_to
+    -- a raw user id. Resolve the display name on the way OUT, in place on the
+    FETCHED docs (these read paths never write the job back; the stored job
+    keeps the id and nothing else). Batched -- one users read per response.
+    An id that no longer resolves gets NO ``_name`` sibling and the screen /
+    job card prints the id verbatim -- never an invented name. Fail-soft.
+    """
+    try:
+        from ..services.name_resolver import stamp_user_names
+
+        stamp_user_names(
+            get_db(), [j for j in jobs if isinstance(j, dict)],
+            ("technician_id", "assigned_to"),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def job_to_frontend(job: dict) -> dict:
     """Convert workshop job from snake_case to camelCase for frontend"""
     if job is None:
@@ -1156,6 +1179,10 @@ def job_to_frontend(job: dict) -> dict:
         "special_notes": "notes",
         "technician_id": "assignedTo",
         "assigned_to": "assignedTo",
+        # Stamped by _stamp_job_actor_names on the way out; absent when the
+        # id resolves to nobody (the screen then prints the id verbatim).
+        "technician_id_name": "assignedToName",
+        "assigned_to_name": "assignedToName",
         "expected_date": "expectedDate",
         "promised_date": "promisedDate",
         "created_at": "createdAt",
@@ -1212,6 +1239,7 @@ async def get_pending_jobs(
 
     if repo is not None:
         jobs = repo.find_pending(active_store)
+        _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
@@ -1229,6 +1257,7 @@ async def get_overdue_jobs(
 
     if repo is not None:
         jobs = repo.find_overdue(active_store)
+        _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
@@ -1246,6 +1275,7 @@ async def get_ready_jobs(
 
     if repo is not None:
         jobs = repo.find_ready(active_store)
+        _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
@@ -1515,6 +1545,7 @@ async def list_jobs_by_vendor(
         repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
         or []
     )
+    _stamp_job_actor_names(jobs)
 
     return {
         "vendor_id": vendor_id,
@@ -1548,6 +1579,7 @@ async def list_jobs(
         jobs = repo.find_many(
             filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
         )
+        _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
@@ -1807,6 +1839,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
             # PII leak). Admins / area-managers pass.
             if not can_access_store_scoped(job.get("store_id"), current_user):
                 raise HTTPException(status_code=404, detail="Workshop job not found")
+            _stamp_job_actor_names([job])
             return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
