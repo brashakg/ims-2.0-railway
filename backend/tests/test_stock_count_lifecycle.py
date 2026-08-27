@@ -1925,7 +1925,9 @@ def test_a_category_start_whose_lookup_fails_does_not_snapshot_the_whole_store(
     pid = _seed_product(mongo_db)
     _seed_units(mongo_db, pid, 3)
 
-    monkeypatch.setattr(inv_mod, "_category_product_ids", lambda db, c: None)
+    monkeypatch.setattr(
+        inv_mod, "_category_product_ids", lambda db, c, **kw: None
+    )
     r = client.post("/inventory/stock-count/start", json={"category": "SUNGLASS"})
     assert r.status_code == 200, r.text
     doc = mongo_db["stock_counts"].find_one({"count_id": r.json()["count_id"]})
@@ -1966,15 +1968,10 @@ def test_a_shelf_holding_an_unclassifiable_status_is_never_a_full_count(
     ghost = _seed_product(mongo_db)
     try:
         for _ in range(3):
-            mongo_db["stock_units"].insert_one(
-                {
-                    "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
-                    "product_id": ghost,
-                    "store_id": STORE,
-                    "barcode": f"BC-{uuid.uuid4().hex[:10]}",
-                    "status": "ON HAND",  # unknown to the vocabulary
-                    "quantity": 1,
-                }
+            # Reuse the shaped seeder (its barcode line is the one the BUG-104
+            # guard has already reasoned about -- do not re-inline it).
+            _seed_unit_shaped(
+                mongo_db, ghost, {"status": "ON HAND"}, store_id=STORE
             )
         count_id = _start(admin_client)
         # Walk EVERY product the session expects, honestly -- so plain

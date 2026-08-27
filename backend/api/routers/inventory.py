@@ -2288,15 +2288,20 @@ async def start_stock_count(
     category_scope: Optional[List[str]] = None
     scope_failed = False
     if request.category:
-        category_scope = _category_product_ids(db, request.category)
+        category_scope = _category_product_ids(
+            db, request.category, product_repo=get_product_repository()
+        )
         scope_failed = category_scope is None
     if stock_repo is None or scope_failed:
         # "I could not read the shelf" is NOT an EMPTY shelf. {} completes as
         # "nothing was expected -> full count, coverage 100%"; None completes
         # as coverage UNKNOWN and never a clean day-end (see `coverage`).
         system_quantities = None
+    elif category_scope is not None and not category_scope:
+        # A category with no products expects nothing -- a real, empty scope.
+        # Skip the aggregation rather than run it store-wide.
+        pass
     else:
-        # An empty category ($in []) matches nothing -- a real, empty scope.
         pipeline = [
             {"$match": _countable_match(active_store, category_scope)},
             _COUNTABLE_GROUP,
@@ -2442,24 +2447,37 @@ def _unit_fingerprint(unit_ids) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
-def _category_product_ids(db, category: str) -> Optional[List[str]]:
+def _category_product_ids(
+    db, category: str, product_repo=None
+) -> Optional[List[str]]:
     """Every active product_id in `category` -- the ONE resolver both count
     doors use (the cycle count's opening snapshot and the scope snapshot; it
     may not be re-typed in either).
+
+    The cycle-count door passes its injected product repository (the same
+    data door it uses for every other product read); db-only callers (the
+    blind scope snapshot) fall back to the raw collection. One rule, two
+    transports over the same collection.
 
     None = the lookup FAILED, which is "unanswerable", never "the whole
     store": a category count that cannot resolve its category must not
     silently widen to everything. [] is a real answer -- a category with no
     products expects nothing."""
-    if db is None:
-        return None
     try:
-        return [
-            str(p.get("product_id") or p.get("_id") or "")
-            for p in db.get_collection("products").find(
+        if product_repo is not None:
+            rows = product_repo.find_many(
+                {"category": category, "is_active": True}, limit=5000
+            )
+        elif db is not None:
+            rows = db.get_collection("products").find(
                 {"category": category, "is_active": True},
                 {"_id": 1, "product_id": 1},
             )
+        else:
+            return None
+        return [
+            str(p.get("product_id") or p.get("_id") or "")
+            for p in (rows or [])
             if p.get("product_id") or p.get("_id")
         ]
     except Exception as exc:  # noqa: BLE001
