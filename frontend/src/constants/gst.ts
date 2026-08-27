@@ -105,29 +105,22 @@ export const HSN_CODES: Record<string, HSNCode> = {
 
 
 // ============================================================================
-// Category -> (HSN code, GST rate)
+// Category -> (HSN code, GST rate): the picker REGISTRY and its tripwire
 // ============================================================================
-// ONE table. Until 2026-08-27 this was TWO switches -- one answering the rate,
-// one answering the HSN -- each carrying the same forty category spellings in a
-// different order. Two lists of the same thing drift, and this pair did: the
-// live picker code `CCL` (Colour Contact Lens) was in NEITHER, so the screen
-// fell through to both defaults, showed HSN 900490 at 18%, and the server then
-// stored 5% off that very HSN. Screen and stored contradicted each other on a
-// category this business bills every day.
-//
-// The rate here is only ever a PREVIEW. The stored rate is derived server-side
-// from the product's HSN (services/gst_rates.resolve_gst_rate_strict), so each
-// entry below is written so a category's rate IS the rate its own HSN carries.
-// __tests__/categoryTax.test.ts checks that, entry by entry, and checks that
-// every code the Add-Product picker offers is in here at all. The rate is also
-// checked against the SERVER's own resolver, across languages, by
-// backend/tests/test_category_tax_matches_server.py -- which reads this very
-// file, so there is no third hand-copied list to drift.
-//
-// Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
-// plural/alt forms (FRAMES, RX_LENSES, ...), and the short UI codes used by the
-// Add-Product picker (FR, LS, CL, CCL, RG, SG, WT, CK, HA, ACC, SMT*), so master
-// == billing regardless of which vocabulary a row was written in.
+// This table prices NOTHING at runtime. Rates shown or billed come from the
+// server (gstRuntime reads GET /products/gst-rates; the offline last resort is
+// getGSTRateByCategory below). It exists for two jobs the runtime path cannot
+// do:
+//   1. COMPILE-TIME completeness -- productAddShared.CATEGORIES is typed
+//      against TaxedCategory, so adding a picker category without declaring
+//      its HSN + rate here fails `tsc`, naming it, instead of silently
+//      falling through to a default (CCL did exactly that: 18% on screen,
+//      5% stored, on a category these shops bill every day).
+//   2. A DIFFERENTIAL TRIPWIRE -- backend/tests/test_category_tax_matches_server.py
+//      reads this very file and prices every entry through the server's own
+//      resolver, so this declaration cannot drift from what the server bills
+//      without a red test. It is compared against the server, never consulted
+//      instead of it.
 interface CategoryTax {
   /** 6-digit HSN, owner 2026-07-05 (the 4-digit variant was removed app-wide). */
   hsn: string;
@@ -135,7 +128,7 @@ interface CategoryTax {
   rate: number;
 }
 
-const CATEGORY_TAX = {
+export const CATEGORY_TAX = {
   // Frames -> 9003 -> 5%
   FRAME: { hsn: '900311', rate: 5 },
   FRAMES: { hsn: '900311', rate: 5 },
@@ -206,22 +199,112 @@ const CATEGORY_TAX = {
  *  promises the HSN settles it. */
 export type TaxedCategory = keyof typeof CATEGORY_TAX;
 
-function categoryTax(category?: string | null): CategoryTax | undefined {
-  const key = (category ?? '').toString().trim().toUpperCase();
-  return (CATEGORY_TAX as Record<string, CategoryTax | undefined>)[key];
-}
-
-// Category -> GST rate (used by POS for a quick preview; the server bills).
+// Category → GST Rate — THE ONE LOCAL GST TABLE, and the only one left
+// ============================================================================
+// Its single caller is gstRuntime.resolveGstRate(), as the LAST resort: a
+// category GET /products/gst-rates does not name, or any category at all before
+// that endpoint has answered. Everything else that used to be mirrored here
+// (the category → HSN map, the category → master-row hint, the canonical
+// category → rate table) is now read off the server — see gstRuntime.ts.
+//
+// It stays hand-written on purpose: it sits on the POS billing path, so what it
+// returns offline must keep matching what it returned yesterday. Every category
+// a product can be stored with is pinned, in BOTH states, by
+// __tests__/gstServerFed.test.ts.
+//
+// If you change a rate here, you are changing what a cashier sees before the
+// server answers. The rate the customer is actually billed comes from the
+// backend (services/gst_rates.py), which recomputes every order.
 export function getGSTRateByCategory(category: string): number {
-  return categoryTax(category)?.rate ?? 18; // Conservative default
-}
-
-// Category -> HSN code.
-export function getHSNByCategory(category: string): HSNCode | null {
-  const tax = categoryTax(category);
-  // Default to corrective spectacles for a spelling nothing recognises (legacy
-  // rows, free text). A PICKER category can never land here -- see TaxedCategory.
-  return HSN_CODES[tax ? tax.hsn : '900490'] ?? null;
+  // Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
+  // plural/alt forms (FRAMES, RX_LENSES, ...), AND the short UI codes used on
+  // AddProductPage (FR, LS, CL, RG, SG, WT, CK, HA, ACC, SMT*). All resolve
+  // to the same GST 2.0 rate so master == billing regardless of vocabulary.
+  switch (category?.toUpperCase()) {
+    // Frames -> HSN 9003 -> 5%
+    case 'FRAMES':
+    case 'FRAME':
+    case 'FR':
+    case 'EYEGLASS_FRAME':
+      return 5;
+    // Spectacle / optical lenses + readymade reading glasses -> HSN 9001/9004 -> 5%
+    case 'RX_LENSES':
+    case 'LENS':
+    case 'LS':
+    case 'EYEGLASS_LENS':
+    case 'OPTICAL_LENS':
+    case 'READING_GLASSES':
+    case 'RG':
+      return 5;
+    // Contact lenses (incl. coloured) -> HSN 9001 -> 5%
+    case 'CONTACT_LENSES':
+    case 'CONTACT_LENS':
+    case 'CL':
+    case 'COLOUR_CONTACTS':
+    case 'COLORED_CONTACT_LENS':
+      return 5;
+    // Corrective spectacles -> HSN 9004 -> 5%
+    case 'SPECTACLE':
+    case 'COMPLETE_SPECTACLE':
+      return 5;
+    // Non-corrective sunglasses -> HSN 9004 -> 18%
+    case 'SUNGLASSES':
+    case 'SUNGLASS':
+    case 'SG':
+      return 18;
+    // Watches / clocks / smartwatches -> HSN 9101/9102/9105 -> 18%
+    case 'WRIST_WATCHES':
+    case 'WATCH':
+    case 'WT':
+    case 'WALL_CLOCK':
+    case 'WALL_CLOCKS':
+    case 'CK':
+    case 'SMARTWATCHES':
+    case 'SMARTWATCH':
+    case 'SMTWT':
+      return 18;
+    // Smartglasses (electronic eyewear, HSN 8525.80) -> 18%.
+    // Owner-confirmed 2026-06-17 (Ch. 85 standard rate, not the 5% optical rate).
+    case 'SMARTGLASSES':
+    case 'SMTSG':
+    case 'SMTFR':
+      return 18;
+    // Hearing aids -> HSN 9021 -> NIL/exempt (complete devices). Parts are 18%.
+    case 'HEARING_AID':
+    case 'HEARING_AIDS':
+    case 'HA':
+      return 0;
+    case 'ACCESSORIES':
+    case 'ACC':
+    case 'SERVICE':
+    case 'SERVICES':
+      return 18;
+    // Eye test / optometry consult -> EXEMPT health service, 0% (SAC 9993,
+    // Notification 12/2017-CT(R) Sr. 74). These are real, printable order
+    // lines (orders.py _NON_SERIALIZED_ITEM_TYPES). This table had no row for
+    // one until 2026-08-27, so an eye test quoted the unknown-category rate on
+    // a tax invoice while the customer was charged nothing.
+    case 'EYE_TEST':
+    case 'EYE_EXAM':
+    case 'EYE_CHECKUP':
+    case 'CONSULT':
+    case 'CONSULTATION':
+    case 'OPTOMETRY':
+      return 0;
+    default:
+      // An UNRECOGNISED category -- a legacy row, a typo, a blank. 5%, because
+      // that is what the server bills such a line (gst_rates.DEFAULT_GST_RATE,
+      // moved 18 -> 5 on 2026-05-28 after a QA finding that an uncategorised
+      // product was charged 18%). This side said 18 until 2026-08-27 and was
+      // simply never reached: the deleted getHSNByCategory handed every caller
+      // HSN 900490, whose master row answers 5, before this line could run.
+      // With that copy gone the branch went live, and a frontend default that
+      // contradicts the server on a BILLING DOCUMENT is a decision, not a
+      // shrug -- over-charging GST is a customer-trust and a compliance
+      // problem, so the unknown case biases to the dominant optical rate on
+      // both sides.
+      return 5;
+  }
 }
 
 // Calculate GST components
@@ -306,11 +389,9 @@ export const GSTR3B_TABLES = {
 
 export default {
   HSN_CODES,
-  getHSNByCategory,
   calculateGST,
   calculateIGST,
   validateGSTNumber,
-  getHSNOptions,
   GSTR1_SECTIONS,
   GSTR3B_TABLES,
 };

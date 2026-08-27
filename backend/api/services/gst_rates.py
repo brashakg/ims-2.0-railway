@@ -7,9 +7,14 @@ ONE place that maps an optical-retail product/order category to its
 POS billing engine (orders.py _gst_rate_for_category) both read this table so
 the rate a product is created with ALWAYS equals what POS bills for it.
 
-This is the BACKEND mirror of the frontend's
-`frontend/src/constants/gst.ts` (getGSTRateByCategory / getHSNByCategory).
-Keep the two in sync: if a rate changes here, change it there too.
+THERE IS NO MIRROR OF THIS TABLE ANY MORE. The frontend used to hand-copy the
+category -> HSN map and _CATEGORY_HINT below into `frontend/src/constants/`,
+and the copies had drifted (smartglasses filed under the sunglasses HSN 900410
+instead of 852580). Both copies are deleted; the frontend reads them off
+GET /products/gst-rates. The ONE thing still written by hand over there is an
+offline RATE fallback for the window before that endpoint answers -- it is on
+the POS billing path, so it is deliberately left alone. Change a rate here and
+the running app follows without a frontend release.
 
 ------------------------------------------------------------------------------
 GST 2.0 rates (effective 22 September 2025; the 12% slab was eliminated).
@@ -114,6 +119,10 @@ GST_CATEGORY_TABLE: dict = {
     "CK": ("910500", 18.0),  # Clock
     "HA": ("902140", 0.0),  # Hearing Aid (NIL/exempt)
     "ACC": ("392690", 18.0),  # Accessories
+    "SVC": ("998599", 18.0),  # Services -- the SERVICES sku_prefix. Missing until
+    # 2026-08-27: without it the short code fell through to DEFAULT_GST_RATE, so
+    # a service priced off the raw prefix was rated 5% (the optical default)
+    # instead of 18%. Every other sku_prefix has had a row here all along.
     "SMTSG": ("852580", 18.0),  # Smartglasses (Sunglass) -> 18% (owner-confirmed 2026-06-17)
     "SMTFR": ("852580", 18.0),  # Smartglasses -> 18% (owner-confirmed 2026-06-17)
     "SMTWT": ("910221", 18.0),  # Smart Watch

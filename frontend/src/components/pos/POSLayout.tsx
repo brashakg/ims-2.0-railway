@@ -2398,6 +2398,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         brand: p.brand,
         subbrand: p.subbrand || p.sub_brand,
         category: p.category || hit?.category,
+        hsn_code: p.hsn_code || hit?.hsn_code,
         mrp: p.mrp,
         offer_price: p.offer_price ?? p.offerPrice,
         image_url: p.image_url,
@@ -2449,6 +2450,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     setBlockMsg(null);
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
+        // The product's stored HSN, so the tax invoice prints the code this
+        // product is registered under rather than deriving one from its
+        // category (see CartLineItem.hsn_code).
+        hsn_code: product.hsn_code,
         unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
         is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
     });
@@ -2647,7 +2652,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
     let totalTax = 0;
     const rates: Record<number, number> = {};
     for (const item of (store.cart || [])) {
-      const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+      const rate = resolveGstRate(item.category);
       const itemGross = Math.round((item.line_total || 0) * cartFactor * 100) / 100;
       const itemTaxable = inclusive ? itemGross / (1 + rate / 100) : itemGross;
       totalTax += inclusive ? itemGross - itemTaxable : itemGross * (rate / 100);
@@ -2676,7 +2681,9 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           </thead>
           <tbody>
             {(store.cart || []).map(item => {
-              const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+              // Category only -- see posStore.getTax: a stored hsn_code must
+              // not move a rate, and must not disagree with the invoice.
+              const gstRate = resolveGstRate(item.category);
               return (
               <tr key={item.id} className="border-t border-gray-200">
                 <td className="px-4 py-3">

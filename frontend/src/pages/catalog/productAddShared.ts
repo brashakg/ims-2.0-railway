@@ -21,7 +21,8 @@ import type {
 } from '../../services/api/catalog';
 import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
 import { mapSpecsToCategoryFields } from './autopilotSpecMap';
-import { getHSNByCategory, getGSTRateByCategory, type TaxedCategory } from '../../constants/gst';
+import type { TaxedCategory } from '../../constants/gst';
+import { resolveGstRate, resolveHsn } from '../../constants/gstRuntime';
 
 // Product categories with display names + emoji (used in the category picker).
 export const CATEGORIES = [
@@ -639,9 +640,16 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     model,
     attributes,
     description: values.description || undefined,
-    // India: contact lenses default to HSN 9001 (90013000) at 5% GST under
-    // GST 2.0 when an HSN is not explicitly chosen.
-    hsn_code: values.hsnCode || (isCL ? '90013000' : undefined),
+    // No HSN chosen -> send none, and the server fills in the canonical code
+    // for the category (routers/products._resolve_hsn_or_400 ->
+    // gst_rates.hsn_for_category). A contact lens used to get an 8-DIGIT
+    // '90013000' written in here instead; the rest of the app spells that same
+    // HSN '900130' (6-digit, owner 2026-07-05 -- the 4/8-digit variants were
+    // dropped app-wide), and two spellings of one product's HSN split it across
+    // two rows of the HSN-wise summary on the invoice and in GSTR-1. The branch
+    // was unreachable while values.hsnCode was always pre-filled locally; it
+    // became live the moment the HSN prefill started coming from the server.
+    hsn_code: values.hsnCode || undefined,
     // Flat fields. Offer price falls back to MRP when left blank. Stock qty is
     // intentionally omitted: inventory is created via GRN, not at create time.
     mrp,
@@ -668,16 +676,22 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
   };
 }
 
-// Resolve the auto HSN/GST for a category. Mirrors the wizard's useEffect:
-// HSN code comes from getHSNByCategory (always 6-digit, owner 2026-07-05),
-// the RATE from getGSTRateByCategory (so categories that share an HSN heading
-// at different rates still get the correct per-category rate).
+// The auto HSN/GST a category prefills at the cataloguing door.
+//
+// BOTH numbers now come from the server (GET /products/gst-rates): the HSN off
+// the canonical category -> HSN table, and then the rate off THAT HSN -- the
+// same order the save itself uses, where the HSN settles the rate
+// (product_master.normalise_payload). Before this, the HSN was read from a
+// hand-copied table on the frontend that had drifted: smartglasses prefilled
+// 900410, the SUNGLASSES code, and since a client-supplied hsn_code wins at the
+// create door, that wrong code is what got stored on the product and printed on
+// its documents.
+//
+// Before the endpoint has answered, hsnCode is '' -- the form then sends no
+// hsn_code and the server fills in its own, which is the correct one.
 export function resolveHsnGst(category: string): { hsnCode: string; gstRate: string } {
-  const hsnData = getHSNByCategory(category);
-  return {
-    hsnCode: hsnData ? hsnData.code : '',
-    gstRate: getGSTRateByCategory(category).toString(),
-  };
+  const hsnCode = resolveHsn(category);
+  return { hsnCode, gstRate: resolveGstRate(category, hsnCode).toString() };
 }
 
 // May the Add-Product form quote `resolveHsnGst(category).gstRate` as the rate
@@ -791,7 +805,13 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     attributes,
     description: str(product.description),
     hsnCode: str(product.hsn_code),
-    gstRate: str(product.gst_rate) || '18',
+    // A doc old enough to have no gst_rate is rated from its CATEGORY, not
+    // from a hand-written 18. The clone form's rate is saved as the new SKU's
+    // gst_rate (routers/products: an explicit rate wins over the server's own),
+    // and the category autofill that would have corrected it is deliberately
+    // SKIPPED when the clone brings an hsn_code with it (QuickAddPage), so an
+    // 18 here rides all the way onto a 5% frame.
+    gstRate: str(product.gst_rate) || resolveHsnGst(category).gstRate,
     weight: str(product.weight),
     mrp: str(product.mrp),
     offerPrice: str(product.offer_price),
