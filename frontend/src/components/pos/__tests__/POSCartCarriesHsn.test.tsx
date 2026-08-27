@@ -63,13 +63,18 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
   useStores: () => ({ data: [], isLoading: false }),
 }));
 
-vi.mock('../../../constants/gstRuntime', () => ({
-  resolveGstRate: () => 18,
-  resolveHsn: () => '900410',
-  isInclusivePricing: () => true,
-  loadHsnRates: vi.fn(),
-  loadPricingMode: vi.fn(),
-}));
+// The REAL rate resolver, fed the real endpoint shape. Stubbing it out would
+// make the Review-step assertion below meaningless -- the whole question is
+// which argument the resolver is called with.
+const { apiGet } = vi.hoisted(() => ({ apiGet: vi.fn() }));
+vi.mock('../../../services/api/client', () => ({ default: { get: apiGet } }));
+const GST = {
+  by_hsn: { '900410': 18, '900311': 5 },
+  by_cat: { SUNGLASSES: 18, FRAME: 5 },
+  category_hint: { SUNGLASS: 'SUNGLASSES', FRAME: 'FRAME' },
+  hsn_by_category: { SUNGLASS: '900410', FRAME: '900311' },
+  rate_by_category: { SUNGLASS: 18, SUNGLASSES: 18, FRAME: 5 },
+};
 
 // Capture the exact order payload the POS sends.
 const createOrderMock = vi.fn(() => Promise.resolve({}));
@@ -100,6 +105,7 @@ vi.mock('../../../services/api/settings', () => ({
 
 import { MemoryRouter } from 'react-router-dom';
 import { POSLayout } from '../POSLayout';
+import { loadHsnRates } from '../../../constants/gstRuntime';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 
@@ -124,10 +130,12 @@ function seedSale() {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
   createOrderMock.mockClear();
   scanMock.mockReset();
+  apiGet.mockResolvedValue({ data: GST });
+  await loadHsnRates();
   act(() => usePOSStore.getState().resetTransaction());
 });
 
@@ -191,5 +199,41 @@ describe('POS add-to-cart', () => {
     // and "changes what the customer pays".
     expect(Object.keys(body.items[0])).not.toContain('hsn_code');
     expect(body.items[0].category).toBe('SUNGLASS');
+  });
+});
+
+describe('the Review screen quotes the same rate as the invoice', () => {
+  it('shows the CATEGORY rate for a line whose record carries another code', async () => {
+    // Order Review recomputes the per-line GST% and the tax breakdown with its
+    // OWN two calls to the resolver -- a third and fourth copy of the same
+    // lookup, in the same component as the cart. A 5% frame whose record
+    // carries 900410 (a master row at 18%) is the fixture that can tell them
+    // apart, and neither is reached by the cart-total tests.
+    act(() => {
+      const st = usePOSStore.getState();
+      st.resetTransaction();
+      st.setStoreId('BV-BOK-01');
+      st.setSalesperson('sp1', 'Sales Person');
+      st.setSaleType('prescription_order');
+      usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as never });
+      st.addToCart({
+        product_id: 'p9', name: 'Titan Frame', sku: 'FR-9',
+        category: 'FRAME', hsn_code: '900410',
+        unit_price: 1050, mrp: 1050, quantity: 1, is_optical: true,
+      } as never);
+    });
+    act(() => usePOSStore.getState().setStep('payment'));   // merged Pay & Review
+    renderPOS();
+
+    // The Review step's per-line note box marks the screen as rendered.
+    await screen.findByPlaceholderText('Item notes (PD, fitting, tint, coating...)');
+    const row = screen.getAllByText('Titan Frame')
+      .map((n) => n.closest('tr'))
+      .find((r): r is HTMLTableRowElement => !!r)!;
+    expect(row.textContent).toContain('5%');
+    expect(row.textContent).not.toContain('18%');
+    // ...and the tax breakdown under it, which is the second copy.
+    expect(screen.getAllByText(/5%/).length).toBeGreaterThan(1);
+    expect(screen.queryAllByText(/18%/)).toHaveLength(0);
   });
 });

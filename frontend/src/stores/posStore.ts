@@ -643,7 +643,7 @@ export const usePOSStore = create<POSState>()(
           if (inclusive) {
             total += lineGross;
           } else {
-            const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+            const rate = resolveGstRate(item.category);
             total += lineGross + lineGross * (rate / 100);
           }
         }
@@ -663,7 +663,14 @@ export const usePOSStore = create<POSState>()(
         let tax = 0;
         for (const item of cart) {
           const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
-          const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+          // CATEGORY ONLY. This used to read `(item as any).hsn_code` as well,
+          // which was dead -- CartLineItem had no such field. It has one now
+          // (the invoice prints it), and an exact-HSN hit BEATS the category
+          // inside resolveGstRate, so leaving that argument in would let a
+          // product's stored code move the GST shown in the cart -- and move it
+          // away from the invoice, which derives from the category. Same number
+          // as before the field existed; now it cannot drift.
+          const gstRate = resolveGstRate(item.category);
           tax += inclusive
             ? lineGross - lineGross / (1 + gstRate / 100)
             : lineGross * (gstRate / 100);

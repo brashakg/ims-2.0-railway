@@ -49,14 +49,14 @@ vi.mock('../../print/storeIdentity', () => ({
 
 import StepComplete from '../POSInvoice';
 import { usePOSStore } from '../../../stores/posStore';
-import { loadHsnRates } from '../../../constants/gstRuntime';
+import { loadHsnRates, loadPricingMode } from '../../../constants/gstRuntime';
 
 const SERVER = {
   by_hsn: { '900410': 18 },
   by_cat: { SUNGLASSES: 18 },
   category_hint: { SUNGLASS: 'SUNGLASSES' },
-  hsn_by_category: { SUNGLASS: '900410' },
-  rate_by_category: { SUNGLASS: 18, SUNGLASSES: 18 },
+  hsn_by_category: { SUNGLASS: '900410', FRAME: '900311' },
+  rate_by_category: { SUNGLASS: 18, SUNGLASSES: 18, FRAME: 5 },
 };
 
 describe('POS -> tax invoice HSN', () => {
@@ -108,5 +108,59 @@ describe('POS -> tax invoice HSN', () => {
     fireEvent.click(btn);
 
     expect((await screen.findAllByText('900410')).length).toBeGreaterThan(0);
+  });
+});
+
+describe('the cart preview and the invoice quote the SAME rate', () => {
+  beforeEach(async () => {
+    apiGet.mockResolvedValue({ data: SERVER });
+    await loadHsnRates();
+    act(() => usePOSStore.getState().resetTransaction());
+  });
+
+  it('rates a cart line by its category, never by the HSN on its record', async () => {
+    // getTax()/getGrandTotal() read `(item as any).hsn_code` on main, where it
+    // was dead: CartLineItem had no such field. Giving the line an hsn_code --
+    // which is what lets the invoice print the right code -- would have woken
+    // that argument up, and an exact-HSN hit BEATS the category inside
+    // resolveGstRate. A 5% frame whose record carries 900410 (a master row at
+    // 18%) would then have shown 18% GST in the cart while the invoice printed
+    // 5%: two screens, one sale, two numbers.
+    act(() => {
+      usePOSStore.getState().addToCart({
+        product_id: 'p3', name: 'Titan Frame', sku: 'FR-1',
+        category: 'FRAME',           // 5%
+        hsn_code: '900410',          // ...but the record carries the 18% code
+        unit_price: 1050, mrp: 1050, quantity: 1, is_optical: true,
+      } as never);
+    });
+    const tax = usePOSStore.getState().getTax();
+    // GST-inclusive: 1050 - 1050/1.05 = 50.00 at 5%. At 18% it would be 160.17.
+    expect(tax).toBe(50);
+  });
+
+  it('and the same in EXCLUSIVE mode, the rollback the owner can flip live', async () => {
+    // GST_PRICING_MODE=exclusive is the no-redeploy rollback (gstRuntime reads
+    // it off /health). It runs a SECOND copy of the same rate lookup inside
+    // getGrandTotal, which the inclusive default never reaches -- so a stored
+    // HSN could still have moved a total there while every other test passed.
+    apiGet.mockImplementation((url: string) =>
+      Promise.resolve({ data: url === '/health' ? { pricing_mode: 'exclusive' } : SERVER }));
+    await loadPricingMode();
+    try {
+      act(() => {
+        usePOSStore.getState().addToCart({
+          product_id: 'p4', name: 'Titan Frame', sku: 'FR-2',
+          category: 'FRAME', hsn_code: '900410',
+          unit_price: 1000, mrp: 1000, quantity: 1, is_optical: true,
+        } as never);
+      });
+      // Exclusive: GST is added ON TOP. 1000 + 5% = 1050; at 18% it would be 1180.
+      expect(usePOSStore.getState().getGrandTotal()).toBe(1050);
+    } finally {
+      apiGet.mockImplementation((url: string) =>
+        Promise.resolve({ data: url === '/health' ? { pricing_mode: 'inclusive' } : SERVER }));
+      await loadPricingMode();
+    }
   });
 });
