@@ -362,6 +362,66 @@ def test_damaged_and_good_units_stay_disjoint_across_a_retried_pass(repo):
     assert _units_at(repo, "A") == set()
 
 
+def test_declared_damage_is_quarantined_when_the_pool_comes_from_the_db_fallback(repo):
+    """_transferred_pool falls back to querying units still marked TRANSFERRED
+    when a legacy line never recorded shipped_stock_ids -- and that pool SHRINKS
+    every pass, because re-homing clears a unit's status and transfer_id.
+
+    So the pool is NOT the full shipment on a repeat pass, and anything that
+    indexes into it by a position measured over the full shipment reads low.
+    What must hold regardless: exactly `quantity_damaged` units end up
+    QUARANTINED. Under-quarantining puts damaged frames on the sellable floor."""
+    ids = _seed(repo, "PRD-LEGACY", "A", 4, "U")
+    for sid in ids:
+        repo.units[sid].update(
+            {"status": transfers.STOCK_STATUS_TRANSFERRED, "transfer_id": "TRF-LEGACY"}
+        )
+    transfer = {
+        "id": "TRF-LEGACY",
+        "status": transfers.TransferStatus.IN_TRANSIT,
+        "from_location_id": "A",
+        "to_location_id": "B",
+        "stock_shipped": True,
+        # Legacy shape: ship never recorded the moved ids, so the pool has to be
+        # re-queried each pass.
+        "items": [{"id": "LINE-L", "product_id": "PRD-LEGACY", "quantity_requested": 4}],
+    }
+
+    _pass(transfer, 2, damaged=0)
+    assert _units_at(repo, "B", transfers.STOCK_STATUS_AVAILABLE) == {"U-0", "U-1"}
+
+    # The last two frames arrived cracked.
+    transfer = _pass(transfer, 4, damaged=2)
+
+    line = transfer["items"][0]
+    quarantined = _units_at(repo, "B", transfers.STOCK_STATUS_QUARANTINED)
+    assert len(quarantined) == 2, f"declared 2 damaged, quarantined {quarantined}"
+    assert set(line.get("damaged_stock_ids", [])) == quarantined
+    # And the good ones are exactly the rest -- no unit counted both ways.
+    assert set(line["received_stock_ids"]) == set(ids) - quarantined
+    assert transfer["stock_units_quarantined"] == 2
+
+
+def test_a_unit_already_rehomed_as_good_is_not_requarantined_next_pass(repo):
+    """The damaged count is declared per line and grows with `received`, so the
+    split must be computed from what the line has ALREADY recorded -- not
+    recomputed from the cumulative totals each pass. Otherwise pass 2 quarantines
+    a fresh unit on top of the one pass 1 already quarantined, and the line ends
+    with more damaged units than the receiver ever declared."""
+    transfer, ids = _rehome_transfer(repo, n=3)
+
+    _pass(transfer, 2, damaged=1)  # 2 arrived, 1 of them cracked
+    transfer = _pass(transfer, 3, damaged=1)  # the third arrived, still 1 cracked
+
+    line = transfer["items"][0]
+    damaged = set(line.get("damaged_stock_ids", []))
+    good = set(line["received_stock_ids"])
+    assert len(damaged) == 1, f"declared 1 damaged, quarantined {damaged}"
+    assert good & damaged == set()
+    assert good | damaged == set(ids)
+    assert _units_at(repo, "B", transfers.STOCK_STATUS_QUARANTINED) == damaged
+
+
 def test_partial_then_full_receive_rehomes_each_unit_exactly_once(repo):
     """Control: no flake, an honest 2-then-3 partial receive. Each unit moves
     exactly once and nothing is fabricated."""

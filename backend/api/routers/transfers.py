@@ -684,9 +684,12 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
     by a positional slice over a running count is what makes a retry safe: a unit
     whose earlier re-home failed is still outstanding and gets picked up next
     pass, instead of being stepped over while an already-moved unit is moved
-    again. The good/damaged split is likewise positional in the SHIPPED pool (the
-    last `damaged` of the line's `received` units are the damaged ones), so a
-    unit's disposition never changes just because it took two passes to move.
+    again. The good/damaged split is decided the same way - how many units are
+    still OWED as good and as damaged, each being the declared quantity minus
+    what the line already recorded going that way - so a unit already re-homed as
+    good is never re-classified, and the declared damaged count is honoured even
+    when the pool has shrunk (see the note on _transferred_pool's fallback
+    below).
 
     Fail-soft: no stock repo -> transfer returned unchanged (lifecycle still
     advances, as before).
@@ -718,8 +721,33 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
             damaged = 0
         if damaged > received:
             damaged = received
-        already = int(line.get("received_qty_committed", 0) or 0)
-        want = received - already
+        # What the line has ALREADY re-homed, by identity. De-duplicated: a doc
+        # written before this fix could carry the same id twice (the positional
+        # slice re-moved an already-moved unit), and a dupe would otherwise
+        # inflate the "already done" counts below. Rewriting the de-duped lists
+        # back onto the line repairs such a doc on its next receive.
+        received_ids: List[str] = list(
+            dict.fromkeys(str(s) for s in (line.get("received_stock_ids") or []) if s)
+        )
+        damaged_unit_ids: List[str] = list(
+            dict.fromkeys(str(s) for s in (line.get("damaged_stock_ids") or []) if s)
+        )
+
+        # How many units still have to move EACH WAY: the quantities the receiver
+        # declared, minus what the line already recorded going that way. Both
+        # sides derive from the recorded SETS.
+        #
+        # This is not the same as slicing a position out of `pool`. `pool` is only
+        # the full shipment when SHIP recorded shipped_stock_ids; for a legacy
+        # line _transferred_pool re-queries the units still marked TRANSFERRED,
+        # and that pool SHRINKS every pass (re-homing clears a unit's status and
+        # transfer_id). Anything indexing it by a position measured over the full
+        # shipment therefore reads low on a repeat pass and under-quarantines --
+        # putting damaged frames on the sellable floor. Counting what is still
+        # OWED each way is immune to how short the pool has become.
+        good_outstanding = max(0, (received - damaged) - len(received_ids))
+        damaged_outstanding = max(0, damaged - len(damaged_unit_ids))
+        want = good_outstanding + damaged_outstanding
         if not product_id or want <= 0:
             continue
 
@@ -729,31 +757,20 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
             stock_repo, transfer, product_id, line.get("shipped_stock_ids")
         )
 
-        received_ids: List[str] = list(line.get("received_stock_ids", []))
-        damaged_unit_ids: List[str] = list(line.get("damaged_stock_ids", []))
-
-        # Which units still have to move is a question of IDENTITY, not
-        # position. This used to slice `pool[already : already + want]`, where
-        # `already` is a COUNT -- which assumes the first `already` ids in the
-        # pool are exactly the ones already re-homed. If an earlier pass's
-        # _rehome failed on an EARLY unit and succeeded on a later one, the
-        # counter walked past the failed unit and the slice never came back to
-        # it: one frame stranded at the source store forever, while an
-        # already-re-homed unit was moved a second time. The line records the
-        # ids it re-homed, so the outstanding pool is the SET difference.
-        settled = {str(s) for s in received_ids} | {str(s) for s in damaged_unit_ids}
+        # Which units those are is a question of IDENTITY, not position. This
+        # used to slice `pool[already : already + want]`, where `already` is a
+        # COUNT -- which assumes the first `already` ids in the pool are exactly
+        # the ones already re-homed. If an earlier pass's _rehome failed on an
+        # EARLY unit and succeeded on a later one, the counter walked past the
+        # failed unit and the slice never came back to it: one frame stranded at
+        # the source store forever, while an already-re-homed unit was moved a
+        # second time. The line records the ids it re-homed, so the outstanding
+        # pool is the SET difference.
+        settled = set(received_ids) | set(damaged_unit_ids)
         movable = [p for p in pool if p not in settled][:want]
-
-        # Which of those are the damaged ones is likewise a property of the UNIT,
-        # not of how many passes it took to move it: the last `damaged` of the
-        # line's `received` units are the damaged ones, by position in the
-        # shipped pool. This used to be a sliding window over the same running
-        # count, so a good unit that needed a retry came back QUARANTINED -- the
-        # window had already walked past its slot.
-        position = {p: i for i, p in enumerate(pool)}
-        first_damaged = received - damaged
-        good_ids = [p for p in movable if position[p] < first_damaged]
-        damaged_ids = [p for p in movable if position[p] >= first_damaged]
+        # Good units are re-homed first; the damaged ones settle at the tail.
+        good_ids = movable[:good_outstanding]
+        damaged_ids = movable[good_outstanding:]
         moved_here = 0
 
         def _rehome(sid, new_status):
@@ -829,9 +846,11 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
         line["received_stock_ids"] = received_ids
         if damaged_unit_ids:
             line["damaged_stock_ids"] = damaged_unit_ids
-        # received_qty_committed counts ALL re-homed units (good + damaged) so a
-        # repeat/partial receive never re-moves the same physical unit.
-        line["received_qty_committed"] = already + moved_here
+        # received_qty_committed counts ALL re-homed units (good + damaged).
+        # Derived from the recorded sets rather than incremented, so it can never
+        # drift away from the ids that back it (a drifted counter is what let the
+        # positional slice step over a unit in the first place).
+        line["received_qty_committed"] = len(received_ids) + len(damaged_unit_ids)
 
     transfer["stock_units_moved_in"] = (
         int(transfer.get("stock_units_moved_in", 0) or 0) + moved_total
