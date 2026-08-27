@@ -194,3 +194,55 @@ def test_the_state_parsers_outside_the_invoice_chain_still_answer_differently(
         f"consolidated a state parser -- update the survivor list in "
         f"org_validation.resolve_state_code and this table together."
     )
+
+
+# ---------------------------------------------------------------------------
+# The other half of the same rule: who halves the tax
+# ---------------------------------------------------------------------------
+# "which state is this?" decides IGST vs CGST+SGST; the splitter decides how
+# CGST+SGST is halved. Same disease, so the same differential treatment. The
+# ONE thing that must hold everywhere is that the odd paisa is neither dropped
+# nor invented. Which HEAD it lands on is not guaranteed and is not asserted
+# here -- gst_rates.split_gst says so in its own docstring.
+
+
+def test_every_splitter_keeps_cgst_plus_sgst_equal_to_the_tax():
+    from api.routers.transfers import _tax_split
+    from api.services.gst_rates import split_gst
+    from api.services.rtv_debit_note import _split_line_tax
+
+    bad = []
+    for paise in range(1, 2001):
+        tax = paise / 100.0
+        c, sg, ig = split_gst(tax, False)
+        if round(c + sg, 2) != round(tax, 2) or ig != 0.0:
+            bad.append(("gst_rates.split_gst", tax, c, sg))
+        c, sg, ig = _tax_split(tax, False)
+        if round(c + sg, 2) != round(tax, 2) or ig != 0.0:
+            bad.append(("transfers._tax_split", tax, c, sg))
+        # rtv mints in integer paise: 100% of `paise` is `paise` of tax.
+        d = _split_line_tax(paise, 100.0, False)
+        if d["cgst_paise"] + d["sgst_paise"] != paise or d["igst_paise"]:
+            bad.append(("rtv._split_line_tax", tax, d["cgst_paise"], d["sgst_paise"]))
+    assert bad == [], bad[:5]
+
+    # The naive form the reporting screens still use, for contrast: halving
+    # BOTH heads loses the odd paisa. Not fixed here (it is a change to those
+    # documents), but measured, so nobody records it as equivalent.
+    naive_lost = [
+        t / 100.0
+        for t in range(1, 2001)
+        if round(round(t / 200.0, 2) * 2, 2) != round(t / 100.0, 2)
+    ]
+    assert len(naive_lost) == 1000, len(naive_lost)
+
+
+def test_inter_state_is_all_igst_in_every_splitter():
+    from api.routers.transfers import _tax_split
+    from api.services.gst_rates import split_gst
+    from api.services.rtv_debit_note import _split_line_tax
+
+    assert split_gst(224.85, True) == (0.0, 0.0, 224.85)
+    assert _tax_split(224.85, True) == (0.0, 0.0, 224.85)
+    d = _split_line_tax(22485, 100.0, True)
+    assert (d["cgst_paise"], d["sgst_paise"], d["igst_paise"]) == (0, 0, 22485)

@@ -440,7 +440,15 @@ def gst_pricing_mode() -> str:
 # ============================================================================
 # HSN-FIRST RESOLUTION + CGST/SGST vs IGST SPLIT
 # ============================================================================
-# Both live HERE, in the one GST engine, so no caller ever grows a second one.
+# Both live HERE so the SALE COUNTER, the PURCHASE ORDER and the PURCHASE BILL
+# ask one engine. That is a statement about those three, NOT about the whole
+# codebase: reports.py and finance.py still halve tax inline (and do it the
+# naive way -- `round(tax/2, 2)` for BOTH heads, which loses the odd paisa:
+# measured, cgst + sgst != tax on 5 of 6 probe amounts), routers/transfers.py
+# keeps its own `_tax_split`, and services/rtv_debit_note.py splits in integer
+# paise because its documents are minted in paise. Folding those in is a
+# behaviour change in each of those documents, so it is not done here. Do not
+# write "no caller has a second one" until that list is empty and re-measured.
 # resolve_gst_rate() above is the FORGIVING resolver used at the sales counter
 # (it must always return a number so a bill can be raised). The purchase side
 # needs the OPPOSITE guarantee -- a purchase order that quietly invents a rate
@@ -581,8 +589,20 @@ def split_gst(tax, interstate: bool) -> tuple:
     """Split one rate-bucket's tax into ``(cgst, sgst, igst)``.
 
     India: a supply INSIDE the state splits half-and-half into CGST + SGST;
-    a supply ACROSS states is a single IGST charge. The residual lands on SGST
-    so cgst + sgst == tax to the paisa. Never raises.
+    a supply ACROSS states is a single IGST charge.
+
+    THE INVARIANT: cgst + sgst == tax, exactly, at every amount -- the odd
+    paisa is never dropped and never invented. That is what the naive form
+    (`round(tax/2, 2)` for both heads) gets wrong.
+
+    Which HEAD the odd paisa lands on is USUALLY SGST but is not guaranteed:
+    at a float halfway point it can land on CGST instead (measured: tax=1.01
+    -> cgst 0.51, sgst 0.50, while tax=5.01 -> cgst 2.50, sgst 2.51). This is
+    byte-for-byte what orders.py and purchase_invoice_engine.py did before
+    they were folded into this function, so nothing moved; it is written down
+    because the previous wording promised a side it does not always pick, and
+    a GSTR-1 CGST/SGST column can differ by a paisa from a paise-minted
+    document (rtv_debit_note) on those amounts. Never raises.
     """
     try:
         tax_f = round(float(tax or 0.0), 2)

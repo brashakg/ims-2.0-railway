@@ -50,10 +50,12 @@ def state_code_of(value: Optional[str]) -> str:
     name. Returns "" when nothing usable can be derived (so a missing supplier
     or recipient GSTIN degrades to intra-state rather than mis-classifying).
 
-    THIN ALIAS over org_validation.resolve_state_code -- the ONE state parser
-    the sale side (orders.py), the purchase ORDER (vendors.py) and this
-    purchase BILL all share. Two parsers is how the same vendor/store pair came
-    to get opposite tax verdicts on the order and on the bill.
+    THIN ALIAS over org_validation.resolve_state_code, which the sale side
+    (orders.py), the purchase ORDER (vendors.py), this purchase BILL and the
+    RTV debit note all call. Two parsers is how the same vendor/store pair came
+    to get opposite tax verdicts on the order and on the bill. Those four are
+    the whole invoice chain; they are NOT every state parser in the codebase --
+    resolve_state_code's own docstring names the ones still outside it.
 
     One deliberate difference from the old local copy: a 2-digit prefix that is
     not a real GST state code ("99AAA...", a legacy "25"/"28" registration that
@@ -115,9 +117,11 @@ def split_line_gst(taxable, gst_rate, interstate: bool) -> dict:
     tax_base = _f(taxable)
     rate = _f(gst_rate)
     gst = round(tax_base * rate / 100.0, 2)
-    # ONE split for the whole app: the sales invoice, the purchase order and
-    # this purchase bill all call gst_rates.split_gst, so an inter-state supply
-    # can never be halved one way on a sale and another on a purchase.
+    # The sales invoice, the purchase order and this purchase bill all call
+    # gst_rates.split_gst, so an inter-state supply cannot be halved one way on
+    # a sale and another on a purchase. NOT "one split for the whole app":
+    # reports.py / finance.py still halve inline and transfers.py and
+    # rtv_debit_note.py keep their own. See the note above split_gst.
     cgst, sgst, igst = split_gst(gst, interstate)
     return {
         "taxable": tax_base,

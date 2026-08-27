@@ -5366,10 +5366,14 @@ def _invoice_state_code(*candidates) -> str:
     Accepts a 2-digit code, a 2-letter / full state name, or a 15-char GSTIN
     (state = first two chars). ASCII-only; never raises.
 
-    Thin alias over the ONE shared resolver in org_validation, which the
-    purchase side (a PO's vendor-vs-delivery-store place of supply) calls too,
-    so "which state is this?" cannot answer two ways in one invoice chain.
-    Fail-soft to "" if org_validation cannot be imported, exactly as before.
+    Thin alias over the shared resolver in org_validation, which the purchase
+    side (a PO's vendor-vs-delivery-store place of supply), the purchase bill
+    and the RTV debit note call too, so those four cannot answer two ways about
+    the same row. NOT a claim about every state parser: the PRINTED invoice's
+    HSN tax summary still decides IGST-vs-CGST/SGST with print_legal's own
+    parser, which answers differently on some inputs (see the list in
+    org_validation.resolve_state_code). Fail-soft to "" if org_validation
+    cannot be imported, exactly as before.
     """
     try:
         from ..services.org_validation import resolve_state_code
