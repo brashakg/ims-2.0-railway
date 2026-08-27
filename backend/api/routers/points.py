@@ -856,7 +856,19 @@ async def get_settings(
     settings_repo = _settings_repo()
     if settings_repo is None:
         return IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store)  # type: ignore
-    return _serialize(settings_repo.get_for_store(store))
+    out = _serialize(settings_repo.get_for_store(store))
+    # The page footer reads "Last updated ... by <updated_by>", and every
+    # writer stamps current_user["user_id"] -- so it printed a raw id.
+    # Resolved on the way OUT on the serialized COPY (_serialize builds new
+    # dicts; the stored doc keeps the id and nothing else). An id that no
+    # longer resolves gets no _name and prints verbatim. Fail-soft.
+    try:
+        from api.services.name_resolver import stamp_user_names
+
+        stamp_user_names(get_db(), [out], ("updated_by",))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 @router.get("/settings/effective")

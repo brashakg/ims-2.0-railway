@@ -56,7 +56,7 @@ export function WorkshopProductivityCard({ storeId }: { storeId?: string }) {
     if (!data || data.technicians.length === 0) return;
     exportToCSV(
       data.technicians.map((t) => ({
-        technician: t.technician_id || 'Unassigned',
+        technician: t.technician_id_name || t.technician_id || 'Unassigned',
         jobs_completed: t.jobs_completed,
         avg_turnaround_days: t.avg_turnaround_days ?? '',
         qc_fail_rate: t.qc_fail_rate === null ? '' : (t.qc_fail_rate * 100).toFixed(1) + '%',
@@ -174,7 +174,7 @@ export function WorkshopProductivityCard({ storeId }: { storeId?: string }) {
                 )}
                 {data.technicians.map((t) => (
                   <tr key={t.technician_id || 'unassigned'} className="border-b last:border-b-0">
-                    <td className="py-1.5 px-2 font-mono text-xs">{t.technician_id || 'Unassigned'}</td>
+                    <td className="py-1.5 px-2 font-mono text-xs">{t.technician_id_name || t.technician_id || 'Unassigned'}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums">{t.jobs_completed}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums">{num(t.avg_turnaround_days)}</td>
                     <td className={`py-1.5 px-2 text-right tabular-nums ${

@@ -354,6 +354,9 @@ export interface StatusHistory {
   status: OrderStatus;
   timestamp: string;
   changedBy: string;
+  /** Display name resolved server-side; absent when the id names nobody
+      (deleted account) — the timeline then prints the raw id verbatim. */
+  changedByName?: string;
 }
 
 export interface Order {
@@ -376,6 +379,8 @@ export interface Order {
   orderStatus: OrderStatus;
   paymentStatus: PaymentStatus;
   createdBy: string;
+  /** Display name resolved server-side; absent when the id names nobody. */
+  createdByName?: string;
   createdAt: string;
   deliveredAt?: string;
   statusHistory?: StatusHistory[];
@@ -905,6 +910,8 @@ export interface IncentiveSettings {
   supervisor_bonuses: SupervisorBonus[];
   updated_at: string | null;
   updated_by: string | null;
+  /** Display name resolved server-side; absent when the id names nobody. */
+  updated_by_name?: string | null;
 }
 
 // ============================================================================

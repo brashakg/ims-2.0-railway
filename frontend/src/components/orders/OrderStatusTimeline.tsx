@@ -70,7 +70,7 @@ export function OrderStatusTimeline({ statusHistory, createdAt, createdBy }: Ord
                   <p className={`font-medium ${config.color}`}>{entry.status}</p>
                   <p className="text-xs text-gray-500">{formatDateTime(entry.timestamp)}</p>
                 </div>
-                <p className="text-xs text-gray-600 mt-1">Changed by: {entry.changedBy}</p>
+                <p className="text-xs text-gray-600 mt-1">Changed by: {entry.changedByName || entry.changedBy}</p>
               </div>
             </div>
           );
