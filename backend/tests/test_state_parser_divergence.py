@@ -32,7 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-state-parser")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+from api.routers import finance as finance_router  # noqa: E402
 from api.routers import orders as orders_router  # noqa: E402
+from api.routers import stores as stores_router  # noqa: E402
 from api.services import gstn_export, itc_reconcile, print_legal  # noqa: E402
 from api.services import purchase_invoice_engine as pinv  # noqa: E402
 from api.services import rtv_debit_note as rtv  # noqa: E402
@@ -166,21 +168,31 @@ def test_an_unanswerable_state_takes_the_documented_intra_default():
 # gstn_export._state_code takes (state_name, gstin="") and its callers only
 # ever hand it a NAME, so the "" it returns for a GSTIN below is its signature,
 # not a bug. Its own 38-entry state-name table is the drift risk.
+#
+# stores._state_code_for is the door that STAMPS a store row's state_code at
+# birth: it reads names and bare codes but drops the GST portal display form
+# ("27-Maharashtra") and GSTINs entirely. finance._norm_state passes anything
+# it cannot resolve through UNCHANGED, so _order_is_interstate comparing '27'
+# against a raw '27-Maharashtra' reads INTER-state. Both measured 2026-08-27;
+# neither is in the purchase chain, so neither is fixed here -- declared and
+# pinned so the docstring's survivor list stays complete.
 
 SURVIVORS = {
     "print_legal._state_code_of": lambda v: print_legal._state_code_of(v),
     "itc_reconcile._state_code": lambda v: itc_reconcile._state_code(v),
     "gstn_export._state_code": lambda v: gstn_export._state_code(v),
+    "stores._state_code_for": lambda v: stores_router._state_code_for(v, None) or "",
+    "finance._norm_state": lambda v: finance_router._norm_state(v),
 }
 
 KNOWN_DIVERGENCE = {
-    #  input             (chain, print_legal, itc_reconcile, gstn_export)
-    "27-Maharashtra": ("27", "27", "27", ""),
-    "Maharashtra (27)": ("", "27", "27", ""),
-    "MH": ("27", "", "", ""),
-    "Maharashtra": ("27", "", "", "27"),
-    "27AAAAA0000A1Z5": ("27", "27", "27", ""),
-    "190001": ("", "19", "19", ""),
+    #  input             (chain, print_legal, itc, gstn, stores, finance)
+    "27-Maharashtra": ("27", "27", "27", "", "", "27-Maharashtra"),
+    "Maharashtra (27)": ("", "27", "27", "", "", "Maharashtra (27)"),
+    "MH": ("27", "", "", "", "27", "27"),
+    "Maharashtra": ("27", "", "", "27", "27", "27"),
+    "27AAAAA0000A1Z5": ("27", "27", "27", "", "", "27AAAAA0000A1Z5"),
+    "190001": ("", "19", "19", "", "", "190001"),
 }
 
 

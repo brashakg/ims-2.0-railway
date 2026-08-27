@@ -289,7 +289,7 @@ def resolve_state_code(*candidates) -> str:
 
     IT IS NOT "the single place a state code is parsed" IN THIS CODEBASE, and
     that sentence must not be written here until the list below is empty and
-    re-measured. Four modules outside that chain still parse one themselves and
+    re-measured. Six modules outside that chain still parse one themselves and
     DO answer differently (measured, same inputs; see
     tests/test_state_parser_divergence.py, which pins this table):
 
@@ -304,6 +304,15 @@ def resolve_state_code(*candidates) -> str:
       services/itc_reconcile._state_code   - ITC register IGST routing
       services/gstn_export._state_code     - GSTR export; own 38-name table
       routers/transfers._store_state_code  - inter-store transfer mirror bill
+      routers/stores._state_code_for       - stamps state_code onto a store
+                                             row at birth; reads names and
+                                             bare codes but drops the portal
+                                             form AND GSTINs (both -> None)
+      routers/finance._norm_state          - GST-summary inter-state check;
+                                             passes unresolvable values
+                                             through UNCHANGED, so '27' vs
+                                             '27-Maharashtra' compares as
+                                             inter-state
     plus two inline ``gstin[:2]`` sites, routers/reports.py:3587 and
     services/einvoice.py:178+276. None is touched by this change.
     """
