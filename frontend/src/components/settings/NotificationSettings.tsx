@@ -81,8 +81,14 @@ export function NotificationSettings() {
     isActive: false,
   });
   const [smsReady, setSmsReady] = useState(false);
-  // Server-side send switch (DISPATCH_MODE). Displayed, never editable here.
-  const [dispatchMode, setDispatchMode] = useState<string>('off');
+  // Server-side send switch (DISPATCH_MODE), exactly as the server reported it.
+  // `null` means it was NEVER READ (401 / 500 / timeout), and that is a state
+  // of its own on purpose: the caption printed under this value is an explicit
+  // promise to the owner that nothing is reaching customers, so defaulting a
+  // failed read to 'off' prints that promise over a server that may be LIVE.
+  // For the channel tiles below, "not connected" is the conservative guess;
+  // for the send gate the conservative answer is "I could not read it".
+  const [dispatchMode, setDispatchMode] = useState<string | null>(null);
 
   // Template states
   const [templates, setTemplates] = useState<NotificationTemplate[]>(
@@ -116,10 +122,17 @@ export function NotificationSettings() {
           isActive: Boolean(wa.enabled ?? false),
         }));
         setSmsReady(Boolean(sms.enabled ?? false));
-        setDispatchMode(String(data.dispatch_mode ?? 'off'));
+        // No `?? 'off'`: a missing key is not a dark server, it is an
+        // unanswered question, and the caption must not answer it for us.
+        setDispatchMode(
+          data.dispatch_mode == null ? null : String(data.dispatch_mode)
+        );
       }
     } catch {
-      // API unavailable — leave default state; no toast needed on initial load
+      // The send gate stays UNREAD. The channel tiles fall back to "not
+      // connected", which is only a display guess; the gate's caption is a
+      // promise, so it must not be guessed. No toast on initial load.
+      setDispatchMode(null);
     }
 
     // Load notification templates. The canonical set lives in the FE constants
@@ -316,17 +329,31 @@ export function NotificationSettings() {
 
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
               <p className="font-medium text-gray-900">
-                Sending mode: <span className="uppercase">{dispatchMode}</span>
+                Sending mode:{' '}
+                {dispatchMode === null ? (
+                  <span className="text-amber-700">
+                    couldn&rsquo;t be read &mdash; check with the server
+                  </span>
+                ) : (
+                  <span className="uppercase">{dispatchMode}</span>
+                )}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                {dispatchMode === 'live'
-                  ? 'Messages go to real customers.'
-                  : dispatchMode === 'test'
-                    ? 'Messages go only to the single test number set on the server.'
-                    : 'Nothing is sent to customers yet. Messages are logged only.'}{' '}
-                This switch is set on the server, on purpose, so it can never be
-                flipped by accident from a screen.
-              </p>
+              {dispatchMode === null ? (
+                <p className="text-sm text-gray-500 mt-1">
+                  This screen could not reach the server, so it cannot tell you
+                  whether messages are going out. Do not assume they are not.
+                </p>
+              ) : (
+                <p className="text-sm text-gray-500 mt-1">
+                  {dispatchMode === 'live'
+                    ? 'Messages go to real customers.'
+                    : dispatchMode === 'test'
+                      ? 'Messages go only to the single test number set on the server.'
+                      : 'Nothing is sent to customers yet. Messages are logged only.'}{' '}
+                  This switch is set on the server, on purpose, so it can never be
+                  flipped by accident from a screen.
+                </p>
+              )}
             </div>
           </div>
         </div>

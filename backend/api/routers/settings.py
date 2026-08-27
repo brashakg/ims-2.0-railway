@@ -1914,6 +1914,8 @@ async def test_integration(
     middleware start denying one layer earlier, which is the lockout direction,
     and 24 other rows are in the same state. That is one batched follow-up.
     """
+    from agents.providers import dispatch_mode
+
     collection = _get_settings_collection("integrations")
     doc = (
         collection.find_one({"type": integration_type.lower()})
@@ -1921,7 +1923,12 @@ async def test_integration(
         else None
     )
     configured = bool((doc or {}).get("config")) and bool((doc or {}).get("enabled"))
-    mode = (os.getenv("DISPATCH_MODE", "off") or "off").lower()
+    # The gate itself, not a second reading of the environment it was built
+    # from. This used to re-parse DISPATCH_MODE here, which answers a
+    # different question -- "what does the env say now" instead of "what will
+    # the send path actually do" -- and the two disagree on any value the
+    # gate's own parse rejects.
+    mode = dispatch_mode()
     return {
         "status": "configured" if configured else "not_configured",
         "integration": integration_type.lower(),

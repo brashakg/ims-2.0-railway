@@ -154,8 +154,17 @@ _REGISTRY: List[Dict[str, Any]] = [
 
 
 def _dispatch_mode() -> str:
-    """Current DISPATCH_MODE, read fresh. off | test | live (default off)."""
-    return (os.getenv("DISPATCH_MODE", "off") or "off").strip().lower()
+    """The send gate, as agents.providers resolved it -- off | test | live.
+
+    NOT a re-read of DISPATCH_MODE. This screen tells the owner whether live
+    messaging is armed, and the only thing that arms it is the value
+    agents.providers captured; re-parsing the env here answered a different
+    question and disagreed with the gate on every whitespace-padded value
+    (`DISPATCH_MODE=" live"` -> this said "live", the gate sent nothing).
+    """
+    from agents.providers import dispatch_mode
+
+    return dispatch_mode()
 
 
 def _env_key_report(keys: List[str]) -> List[Dict[str, Any]]:

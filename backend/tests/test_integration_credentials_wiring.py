@@ -283,12 +283,20 @@ class _SingletonColl:
         self.doc = dict(self.doc or {}, **update.get("$set", {}))
 
 
-def _arm_gate(monkeypatch, mode: str):
+def _arm_gate(monkeypatch, raw: str):
     """Arm the server's send gate the way a deploy does -- through the
-    environment. agents.providers snapshots DISPATCH_MODE at import, so an
-    armed server has BOTH, and that snapshot is what every send is gated on."""
-    monkeypatch.setenv("DISPATCH_MODE", mode)
-    monkeypatch.setattr(providers, "DISPATCH_MODE", mode)
+    environment -- and reproduce the snapshot agents.providers takes at import
+    from exactly that value.
+
+    The snapshot is `os.getenv("DISPATCH_MODE", "off").lower()`, so it is
+    derived here rather than copied: an armed server has BOTH, and a fixture
+    that hand-sets the snapshot to the raw string would be testing a state no
+    deploy can produce.
+    """
+    monkeypatch.setenv("DISPATCH_MODE", raw)
+    monkeypatch.setattr(
+        providers, "DISPATCH_MODE", os.getenv("DISPATCH_MODE", "off").lower()
+    )
 
 
 def _providers_readout(monkeypatch, stored):
@@ -340,9 +348,7 @@ def test_a_case_typo_in_the_env_var_is_reported_the_way_the_gate_read_it(monkeyp
     at import. A second, raw reading of the env var would print "LIVE", which
     the screen does not recognise as sending and captions "Nothing is sent to
     customers yet": the same lie, one case away."""
-    monkeypatch.setenv("DISPATCH_MODE", "LIVE")
-    # exactly what `DISPATCH_MODE = os.getenv(...).lower()` produced at import
-    monkeypatch.setattr(providers, "DISPATCH_MODE", os.environ["DISPATCH_MODE"].lower())
+    _arm_gate(monkeypatch, "LIVE")
 
     resp = _providers_readout(monkeypatch, None)
 
@@ -407,6 +413,101 @@ def test_the_send_gate_cannot_be_written_or_echoed_by_the_screen(monkeypatch):
     assert coll.doc["sender_id"] == "MARKSND", "a real preference was lost"
     # ...and the readout that follows still reports the server, not the write.
     assert _providers_readout(monkeypatch, coll.doc)["dispatch_mode"] == "off"
+
+
+def test_every_screen_reports_the_gate_the_send_path_actually_uses(monkeypatch):
+    """A DIFFERENTIAL probe, kept as a test.
+
+    "What is the send gate" is answered by three endpoints that reach a
+    screen. Feed all three the same environment and diff the answers against
+    the gate itself. `DISPATCH_MODE=" live"` -- a Railway variable pasted with
+    a leading space -- is the input that used to split them: agents.providers
+    rejected it and sent nothing, while the SUPERADMIN Integrations status
+    screen re-parsed the env with a .strip() of its own and reported "live".
+    Anything that reintroduces a second parse fails here.
+    """
+    from api.routers import settings as settings_router
+    from api.services.integration_status import build_integration_status
+
+    _no_db(monkeypatch)
+    coll = _SingletonColl(None)
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    # Every input on which two hand-written parses of this env var can split:
+    # padding (a .strip() one side has and the other does not) and an empty
+    # value (an `or "off"` default one side applies and the other does not).
+    for raw in ("off", "live", "LIVE", " live", "live ", "	live", "", "test", " test "):
+        _arm_gate(monkeypatch, raw)
+        gate = providers.dispatch_mode()
+        readouts = {
+            "GET /settings/notifications/providers": asyncio.run(
+                settings_router.get_notification_providers({"roles": ["ADMIN"]})
+            )["dispatch_mode"],
+            "POST /settings/integrations/{type}/test": asyncio.run(
+                settings_router.test_integration("whatsapp", {"roles": ["ADMIN"]})
+            )["dispatch_mode"],
+            "integration status report": build_integration_status(db=None)[
+                "dispatch_mode"
+            ],
+        }
+
+        assert set(readouts.values()) == {gate}, (raw, gate, readouts)
+        # ...and the answer they agree on matches what the send path DOES, so
+        # the caption every screen prints under it is true.
+        assert providers._should_dispatch("+919999999999")[0] is (gate == "live"), raw
+
+
+# ---------------------------------------------------------------------------
+# The credential-echo lock, on the READ side
+# ---------------------------------------------------------------------------
+# Both tests below plant the secret BEHIND the write path, which is the only
+# way a legacy row exists. The guard above them cannot do this: its fake
+# find_one hands back what the WRITE strip already cleaned, so the READ strip
+# is never asked a question and a mutant that deletes it survives. This is not
+# hypothetical -- origin/main's PUT has no strip at all, and the Notification
+# screen this branch deletes used to PUT its own `api_key` box into this
+# singleton in plain text, so a live row plausibly still holds one.
+
+
+def test_a_legacy_plaintext_key_in_the_stored_row_never_reaches_the_readout(
+    monkeypatch,
+):
+    """GET must strip what it found, not just what it would have stored."""
+    stored = {
+        "_id": "notification_providers",
+        "api_key": "MARKER-LEGACY",
+        "sender_id": "MARKSND",
+    }
+
+    resp = _providers_readout(monkeypatch, stored)
+
+    assert "api_key" not in resp
+    assert "MARKER-LEGACY" not in repr(resp), resp
+    # ...and the strip took the secret only, not the row.
+    assert resp["sender_id"] == "MARKSND", "a real preference was lost"
+
+
+def test_a_later_save_never_echoes_a_legacy_plaintext_key_back(monkeypatch):
+    """PUT returns the whole re-read document. An ADMIN saving an unrelated
+    preference on top of a legacy row must not get the old secret in the
+    response body."""
+    from api.routers import settings as settings_router
+
+    coll = _SingletonColl({"_id": "notification_providers", "api_key": "MARKER-LEGACY"})
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    resp = asyncio.run(
+        settings_router.update_notification_providers(
+            {"sender_id": "MARKSND"}, {"roles": ["ADMIN"]}
+        )
+    )
+
+    # The fixture must still be holding the secret, or this proves nothing:
+    # the row is what a legacy document looks like AFTER an unrelated save.
+    assert coll.doc["api_key"] == "MARKER-LEGACY", coll.doc
+    assert "api_key" not in resp
+    assert "MARKER-LEGACY" not in repr(resp), resp
+    assert resp["sender_id"] == "MARKSND", "a real preference was lost"
 
 
 # ---------------------------------------------------------------------------

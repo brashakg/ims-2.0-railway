@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from agents import providers as _providers  # noqa: E402
 from api.routers import settings as settings_router  # noqa: E402
 from api.routers.settings import (  # noqa: E402
     IntegrationConfig,
@@ -101,7 +102,10 @@ def test_get_reads_back_masked(monkeypatch):
 def test_test_endpoint_is_honest_not_placebo(monkeypatch):
     coll = _FakeColl()
     monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+    # The gate as a deploy sets it: env plus the snapshot agents.providers took
+    # from it. This endpoint reports that snapshot, not a re-read of the env.
     monkeypatch.setenv("DISPATCH_MODE", "off")
+    monkeypatch.setattr(_providers, "DISPATCH_MODE", "off")
 
     # Not configured yet -> honest not_configured (old code returned success)
     resp = asyncio.run(integration_test_endpoint("razorpay", SUPER))
