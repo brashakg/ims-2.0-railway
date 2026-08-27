@@ -228,14 +228,14 @@ PRODUCTS = [
     {"_id": "prod-cl-001", "product_id": "prod-cl-001", "name": "Bausch+Lomb SofLens Monthly",
      "sku": "CL-BAUL-SFLM-030", "category": "CONTACT_LENSES", "brand": "Bausch+Lomb",
      "model": "SofLens 59", "mrp": 650, "offer_price": 550,
-     "hsn_code": "90013000", "gst_rate": 5, "replacement_schedule": "Monthly",
+     "hsn_code": "900130", "gst_rate": 5, "replacement_schedule": "Monthly",
      "pack_size": 6, "is_active": True, "created_at": NOW},
 
     # --- COLOUR CONTACTS ---
     {"_id": "prod-cc-001", "product_id": "prod-cc-001", "name": "FreshLook ColorBlends Hazel",
      "sku": "CC-ALCO-FLCB-HZL", "category": "COLOUR_CONTACTS", "brand": "Alcon",
      "model": "FreshLook ColorBlends", "mrp": 1650, "offer_price": 1399,
-     "hsn_code": "90013000", "gst_rate": 5, "color": "Hazel",
+     "hsn_code": "900130", "gst_rate": 5, "color": "Hazel",
      "replacement_schedule": "Monthly", "pack_size": 2,
      "is_active": True, "created_at": NOW},
 

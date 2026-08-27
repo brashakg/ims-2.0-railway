@@ -203,13 +203,37 @@ def test_billing_uses_canonical_rate_in_compute():
 # ============================================================================
 
 
-def test_products_cl_default_constant_matches_billing():
-    """The CL default constant in products.py equals the billed CL rate."""
-    from api.routers.products import CL_GST_DEFAULT, CL_HSN_DEFAULT
-    from api.routers.orders import _gst_rate_for_category
+def test_contact_lens_hsn_has_one_spelling():
+    """The tree holds exactly ONE written spelling of the contact-lens HSN:
+    the 6-digit 900130 that gst_rates.py owns and the create door stores.
 
-    assert CL_GST_DEFAULT == _gst_rate_for_category("CONTACT_LENS") == 5.0
-    assert CL_HSN_DEFAULT == "90013000"
+    An 8-digit spelling used to survive as products.py CL_HSN_DEFAULT (dead
+    code, pinned only by this file). Two spellings of one product's HSN split
+    it across two rows of the invoice HSN-wise summary and of GSTR-1, so this
+    test fails on ANY .py file under backend/ that writes the 8-digit form.
+    The needle is assembled in parts so this file does not trip itself.
+    """
+    from api.services.gst_rates import hsn_for_category
+
+    assert hsn_for_category("CONTACT_LENS") == "900130"
+    assert hsn_for_category("COLORED_CONTACT_LENS") == "900130"
+
+    eight_digit = "900130" + "00"
+    backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for dirpath, dirnames, filenames in os.walk(backend_root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "__pycache__"]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                if eight_digit in fh.read():
+                    offenders.append(os.path.relpath(path, backend_root))
+    assert not offenders, (
+        f"8-digit contact-lens HSN {eight_digit} written in: {offenders}; "
+        "the one spelling is 900130 (api/services/gst_rates.py)"
+    )
 
 
 def test_products_default_helpers_match_billing_for_every_enum_category():
