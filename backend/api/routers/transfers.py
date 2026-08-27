@@ -747,7 +747,19 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
         # OWED each way is immune to how short the pool has become.
         good_outstanding = max(0, (received - damaged) - len(received_ids))
         damaged_outstanding = max(0, damaged - len(damaged_unit_ids))
-        want = good_outstanding + damaged_outstanding
+        # ...capped by what the line still owes IN TOTAL. Those two are floored
+        # at zero independently, so when one bucket SHRANK between passes -- the
+        # receiver re-classifying a frame from damaged to good or back -- its
+        # negative is discarded instead of offsetting the bucket that grew, and
+        # their sum overshoots. Uncapped, that overshoot re-homes a unit the
+        # receiver never said had arrived: a frame still in transit lands at the
+        # destination, sellable. (The pre-fix `received - already` counter
+        # supplied this cap implicitly; keeping it is what makes splitting the
+        # count into two buckets safe.)
+        want = min(
+            good_outstanding + damaged_outstanding,
+            max(0, received - (len(received_ids) + len(damaged_unit_ids))),
+        )
         if not product_id or want <= 0:
             continue
 

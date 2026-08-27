@@ -422,6 +422,50 @@ def test_a_unit_already_rehomed_as_good_is_not_requarantined_next_pass(repo):
     assert _units_at(repo, "B", transfers.STOCK_STATUS_QUARANTINED) == damaged
 
 
+def test_reclassifying_damage_does_not_pull_in_a_unit_still_in_transit(repo):
+    """The receiver corrects a line IN PLACE: "those 2 that arrived -- one of
+    them is cracked". quantity_received does not move, so the line owes NOTHING
+    more and no further unit may leave the source.
+
+    The good and damaged outstanding counts are each floored at zero, so a
+    bucket that SHRANK contributes 0 rather than a negative that would offset
+    the bucket that grew -- and their sum overshoots what the line still owes.
+    The overshoot lands a frame that is still in transit at the destination."""
+    transfer, ids = _rehome_transfer(repo, n=3)
+
+    _pass(transfer, 2, damaged=0)
+    assert _units_at(repo, "B") == {"R-0", "R-1"}
+
+    transfer = _pass(transfer, 2, damaged=1)  # same 2 received, one now cracked
+
+    # R-2 never arrived; it must still be sitting at the source, in transit.
+    assert _units_at(repo, "B") == {"R-0", "R-1"}, "a unit that never arrived was re-homed"
+    assert _units_at(repo, "A", transfers.STOCK_STATUS_TRANSFERRED) == {"R-2"}
+    line = transfer["items"][0]
+    assert set(line["received_stock_ids"]) | set(line.get("damaged_stock_ids", [])) == {
+        "R-0",
+        "R-1",
+    }
+    # The committed count can never exceed what the receiver declared arrived.
+    assert line["received_qty_committed"] <= 2
+
+
+def test_a_downward_correction_moves_nothing_further(repo):
+    """Pass 1 books 2 in as damaged; pass 2 corrects the total DOWN to 1. The
+    line already holds more units than the corrected total, so nothing is
+    outstanding and no further unit may move."""
+    transfer, ids = _rehome_transfer(repo, n=4)
+
+    _pass(transfer, 2, damaged=2)
+    before = _units_at(repo, "B")
+    assert before == {"R-0", "R-1"}
+
+    transfer = _pass(transfer, 1, damaged=0)
+
+    assert _units_at(repo, "B") == before, "a downward correction re-homed another unit"
+    assert _units_at(repo, "A", transfers.STOCK_STATUS_TRANSFERRED) == {"R-2", "R-3"}
+
+
 def test_partial_then_full_receive_rehomes_each_unit_exactly_once(repo):
     """Control: no flake, an honest 2-then-3 partial receive. Each unit moves
     exactly once and nothing is fabricated."""
