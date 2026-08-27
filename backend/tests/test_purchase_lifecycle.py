@@ -211,6 +211,51 @@ def _dc_pay_db(debit_notes=None, rejected=2):
     )
 
 
+def _two_dc_pay_db(debit_notes=None):
+    """ONE bill consolidating TWO delivery challans, rejections on BOTH."""
+    return _DB(
+        vendor_bills=[
+            {
+                "bill_id": "B1",
+                "bill_number": "INV-9",
+                "grn_id": None,
+                "linked_dc_ids": ["DC1", "DC2"],
+                "vendor_id": "V1",
+            }
+        ],
+        grns=[
+            {
+                "grn_id": "DC1",
+                "grn_number": "DC-4",
+                "grn_subtype": "DELIVERY_CHALLAN",
+                "items": [
+                    {
+                        "product_id": "P1",
+                        "received_qty": 20,
+                        "accepted_qty": 18,
+                        "rejected_qty": 2,
+                    }
+                ],
+            },
+            {
+                "grn_id": "DC2",
+                "grn_number": "DC-5",
+                "grn_subtype": "DELIVERY_CHALLAN",
+                "items": [
+                    {
+                        "product_id": "P2",
+                        "received_qty": 10,
+                        "accepted_qty": 7,
+                        "rejected_qty": 3,
+                    }
+                ],
+            },
+        ],
+        vendor_debit_notes=debit_notes or [],
+        vendor_payments=[],
+    )
+
+
 class _VendorRepo:
     def find_by_id(self, _vid):
         return {"vendor_id": "V1", "trade_name": "Acme Optics", "credit_days": 30}
@@ -279,6 +324,47 @@ class TestRejectedGoodsHoldTheBill:
         """The discriminator for the DC hold: cover the rejection and the same
         payment goes through."""
         db = _dc_pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "DC1"}])
+        out = _record_payment(db)
+        assert out["amount"] == 1000.0
+        assert len(db.get_collection("vendor_payments").rows) == 1
+
+    def test_every_linked_dc_is_walked_not_just_the_first(self):
+        """One bill consolidates TWO challans, both carrying rejections. A
+        debit note covering only the FIRST must not release the bill -- the
+        refusal must name the still-uncovered SECOND challan by number. A walk
+        that stops at linked_dc_ids[0] pays for DC-5's 3 rejected units
+        silently."""
+        db = _two_dc_pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "DC1"}])
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        detail = exc.value.detail
+        assert detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
+        assert "DC-5" in detail["message"]  # the UNCOVERED challan, by name
+        assert "DC-4" not in detail["message"]  # the covered one is not blamed
+        assert "3 unit(s)" in detail["message"]
+        assert db.get_collection("vendor_payments").rows == []
+        # cover the second challan too -> the same payment goes through
+        db.get_collection("vendor_debit_notes").insert_one(
+            {"debit_note_id": "DN2", "grn_id": "DC2"}
+        )
+        out = _record_payment(db)
+        assert out["amount"] == 1000.0
+        assert len(db.get_collection("vendor_payments").rows) == 1
+
+    def test_a_debit_note_allocated_to_the_bill_releases_the_hold(self):
+        """DebitNoteCreate.bill_id says "allocate to a bill", and the hold
+        promises to honour a note referencing either the receipt or the BILL
+        itself. A note allocated to B1 -- no grn_id at all -- must release the
+        payment."""
+        db = _pay_db()
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)  # rejections held while nothing covers them
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
+        db.get_collection("vendor_debit_notes").insert_one(
+            {"debit_note_id": "DN1", "bill_id": "B1"}
+        )
         out = _record_payment(db)
         assert out["amount"] == 1000.0
         assert len(db.get_collection("vendor_payments").rows) == 1
