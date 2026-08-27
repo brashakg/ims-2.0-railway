@@ -117,6 +117,56 @@ def test_build_row_preferred_vendor_passthrough():
     assert row_blank["preferred_vendor_id"] is None
 
 
+def test_build_row_carries_the_products_gst_identity():
+    """The Buy Desk's quick-draft PO opens each line at the product's OWN rate
+    instead of a flat 18% (frames, spectacle lenses and contact lenses are all
+    5%). It can only do that if the row it is handed carries the HSN and the
+    rate -- and the frontend test for that modal builds its own rows, so it
+    cannot see the server failing to send them. This is the only check that can.
+    """
+    readiness = {"complete": True, "missing": [], "blockers": [], "purchasable": True}
+    row = bd.build_row(
+        {
+            "product_id": "P4",
+            "category": "FRAME",
+            "hsn_code": "900311",
+            "gst_rate": 5.0,
+        },
+        readiness=readiness,
+        push_locked=False,
+        on_hand=0,
+        on_order=0,
+        velocity_per_day=None,
+    )
+    assert row["hsn_code"] == "900311"
+    assert row["gst_rate"] == 5.0
+
+    # NIL-rated goods (hearing aids) must survive as 0.0, not be flattened to
+    # None by a falsy test -- a zero rate is an answer, not a missing one.
+    nil = bd.build_row(
+        {"product_id": "P5", "hsn_code": "902140", "gst_rate": 0.0},
+        readiness=readiness,
+        push_locked=False,
+        on_hand=0,
+        on_order=0,
+        velocity_per_day=None,
+    )
+    assert nil["gst_rate"] == 0.0
+
+    # An un-catalogued product carries neither: the line then says its rate is
+    # not set rather than inventing one.
+    bare = bd.build_row(
+        {"product_id": "P6"},
+        readiness=readiness,
+        push_locked=False,
+        on_hand=0,
+        on_order=0,
+        velocity_per_day=None,
+    )
+    assert bare["hsn_code"] is None
+    assert bare["gst_rate"] is None
+
+
 # ---------------------------------------------------------------------------
 # router integration (fakes) -- shape + PUSH_LOCKED surfacing
 # ---------------------------------------------------------------------------

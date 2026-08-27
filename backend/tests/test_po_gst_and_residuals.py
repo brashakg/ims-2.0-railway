@@ -522,6 +522,100 @@ def test_po_rate_never_overwrites_a_cost_the_product_already_has(monkeypatch):
     assert repo.prods["P1"]["cost_price"] == 850
 
 
+class _RecordingAuditRepo:
+    def __init__(self):
+        self.rows = []
+
+    def create(self, doc):
+        self.rows.append(doc)
+        return doc
+
+
+def test_the_cost_this_po_wrote_is_named_in_the_audit_trail(monkeypatch):
+    """Cost feeds margin and stock valuation, so 'who set this cost, and from
+    where' has to be answerable. Only the PO create path writes one from an
+    agreed rate, and only it audits -- so this is the check that the promise
+    'every cost written this way is recorded' is true."""
+    po_repo = _FakePORepo()
+    repo = _CostRecordingProductRepo({"P1": _frame_product()})
+    audit = _RecordingAuditRepo()
+    _patch(monkeypatch, po_repo, repo)
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepoWith(_JH_VENDOR))
+    monkeypatch.setattr(v, "get_audit_repository", lambda: audit)
+    _patch_store(monkeypatch, _JH_STORE)
+
+    asyncio.run(create_po(_one_frame_po(), current_user=_user()))
+
+    assert len(audit.rows) == 1
+    row = audit.rows[0]
+    assert row["action"] == "purchase.cost_from_po_rate"
+    assert row["entity_type"] == "purchase_order"
+    assert row["user_id"] == "u1"
+    assert row["detail"]["po_number"] == "PO-TEST-1"
+    assert row["detail"]["products"] == [{"product_id": "P1", "cost_price": 1000.0}]
+
+
+def test_nothing_is_audited_when_this_po_wrote_no_cost(monkeypatch):
+    """A PO for an already-costed product must not leave a cost-change entry
+    behind -- an audit trail that logs non-events is one nobody reads."""
+    po_repo = _FakePORepo()
+    repo = _CostRecordingProductRepo(
+        {"P1": _frame_product(cost_price=850, cost_source="MANUAL")}
+    )
+    audit = _RecordingAuditRepo()
+    _patch(monkeypatch, po_repo, repo)
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepoWith(_JH_VENDOR))
+    monkeypatch.setattr(v, "get_audit_repository", lambda: audit)
+    _patch_store(monkeypatch, _JH_STORE)
+
+    asyncio.run(create_po(_one_frame_po(), current_user=_user()))
+    assert audit.rows == []
+
+
+def test_two_lines_of_one_po_for_the_same_product_do_not_re_price_its_cost(
+    monkeypatch,
+):
+    """A 40-line order can list the same product twice -- two colours ordered on
+    one row each, a corrected quantity added below. The FIRST agreed rate is the
+    cost; the second line must see the cost the first just wrote, or it
+    overwrites it at its own price and 'never overwrites an existing cost'
+    quietly stops being true within a single request."""
+    po_repo = _FakePORepo()
+    repo = _CostRecordingProductRepo({"P1": _frame_product()})
+    _patch(monkeypatch, po_repo, repo)
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepoWith(_JH_VENDOR))
+    _patch_store(monkeypatch, _JH_STORE)
+
+    two_lines = POCreate(
+        vendor_id="V1",
+        delivery_store_id="BV-TEST-01",
+        items=[
+            POItemCreate(
+                product_id="P1",
+                product_name="Ray-Ban Aviator",
+                sku="RB-AV",
+                quantity=2,
+                unit_price=1000,
+            ),
+            POItemCreate(
+                product_id="P1",
+                product_name="Ray-Ban Aviator",
+                sku="RB-AV",
+                quantity=1,
+                unit_price=1400,
+            ),
+        ],
+    )
+    out = asyncio.run(create_po(two_lines, current_user=_user()))
+
+    # Only the COST writes; the catalogue restamp that follows each one is a
+    # separate update on the same repo.
+    cost_writes = [(pid, f) for pid, f in repo.updates if "cost_price" in f]
+    assert cost_writes == [("P1", {"cost_price": 1000.0, "cost_source": "PO_RATE"})]
+    assert out["cost_filled"] == [{"product_id": "P1", "cost_price": 1000.0}]
+    assert repo.prods["P1"]["cost_price"] == 1000.0
+
+
 def test_goods_receipt_outranks_the_provisional_po_rate_but_not_a_typed_cost():
     """Owner: 'goods receipt sets the real cost anyway'. The PO rate only
     unblocks cataloguing; the receipt corrects it. Any OTHER cost stands, and a

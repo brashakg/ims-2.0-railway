@@ -105,138 +105,120 @@ export const HSN_CODES: Record<string, HSNCode> = {
 
 
 // ============================================================================
-// Category → GST Rate mapping (used by POS for quick rate lookup)
+// Category -> (HSN code, GST rate)
 // ============================================================================
-export function getGSTRateByCategory(category: string): number {
-  // Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
-  // plural/alt forms (FRAMES, RX_LENSES, ...), AND the short UI codes used on
-  // AddProductPage (FR, LS, CL, RG, SG, WT, CK, HA, ACC, SMT*). All resolve
-  // to the same GST 2.0 rate so master == billing regardless of vocabulary.
-  switch (category?.toUpperCase()) {
-    // Frames -> HSN 9003 -> 5%
-    case 'FRAMES':
-    case 'FRAME':
-    case 'FR':
-    case 'EYEGLASS_FRAME':
-      return 5;
-    // Spectacle / optical lenses + readymade reading glasses -> HSN 9001/9004 -> 5%
-    case 'RX_LENSES':
-    case 'LENS':
-    case 'LS':
-    case 'EYEGLASS_LENS':
-    case 'OPTICAL_LENS':
-    case 'READING_GLASSES':
-    case 'RG':
-      return 5;
-    // Contact lenses (incl. coloured) -> HSN 9001 -> 5%
-    case 'CONTACT_LENSES':
-    case 'CONTACT_LENS':
-    case 'CL':
-    case 'COLOUR_CONTACTS':
-    case 'COLORED_CONTACT_LENS':
-      return 5;
-    // Corrective spectacles -> HSN 9004 -> 5%
-    case 'SPECTACLE':
-    case 'COMPLETE_SPECTACLE':
-      return 5;
-    // Non-corrective sunglasses -> HSN 9004 -> 18%
-    case 'SUNGLASSES':
-    case 'SUNGLASS':
-    case 'SG':
-      return 18;
-    // Watches / clocks / smartwatches -> HSN 9101/9102/9105 -> 18%
-    case 'WRIST_WATCHES':
-    case 'WATCH':
-    case 'WT':
-    case 'WALL_CLOCK':
-    case 'WALL_CLOCKS':
-    case 'CK':
-    case 'SMARTWATCHES':
-    case 'SMARTWATCH':
-    case 'SMTWT':
-      return 18;
-    // Smartglasses (electronic eyewear, HSN 8525.80) -> 18%.
-    // Owner-confirmed 2026-06-17 (Ch. 85 standard rate, not the 5% optical rate).
-    case 'SMARTGLASSES':
-    case 'SMTSG':
-    case 'SMTFR':
-      return 18;
-    // Hearing aids -> HSN 9021 -> NIL/exempt (complete devices). Parts are 18%.
-    case 'HEARING_AID':
-    case 'HEARING_AIDS':
-    case 'HA':
-      return 0;
-    case 'ACCESSORIES':
-    case 'ACC':
-    case 'SERVICE':
-    case 'SERVICES':
-      return 18;
-    default:
-      return 18; // Conservative default
-  }
+// ONE table. Until 2026-08-27 this was TWO switches -- one answering the rate,
+// one answering the HSN -- each carrying the same forty category spellings in a
+// different order. Two lists of the same thing drift, and this pair did: the
+// live picker code `CCL` (Colour Contact Lens) was in NEITHER, so the screen
+// fell through to both defaults, showed HSN 900490 at 18%, and the server then
+// stored 5% off that very HSN. Screen and stored contradicted each other on a
+// category this business bills every day.
+//
+// The rate here is only ever a PREVIEW. The stored rate is derived server-side
+// from the product's HSN (services/gst_rates.resolve_gst_rate_strict), so each
+// entry below is written so a category's rate IS the rate its own HSN carries.
+// __tests__/gst.test.ts checks that, entry by entry, and checks that every code
+// the Add-Product picker offers is in here at all.
+//
+// Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
+// plural/alt forms (FRAMES, RX_LENSES, ...), and the short UI codes used by the
+// Add-Product picker (FR, LS, CL, CCL, RG, SG, WT, CK, HA, ACC, SMT*), so master
+// == billing regardless of which vocabulary a row was written in.
+interface CategoryTax {
+  /** 6-digit HSN, owner 2026-07-05 (the 4-digit variant was removed app-wide). */
+  hsn: string;
+  /** GST 2.0 percent -- must equal what `hsn` settles on the server. */
+  rate: number;
 }
 
-// Get HSN code by product category
+const CATEGORY_TAX = {
+  // Frames -> 9003 -> 5%
+  FRAME: { hsn: '900311', rate: 5 },
+  FRAMES: { hsn: '900311', rate: 5 },
+  EYEGLASS_FRAME: { hsn: '900311', rate: 5 },
+  FR: { hsn: '900311', rate: 5 },
+  // Spectacle / optical lenses -> 9001 -> 5%
+  LENS: { hsn: '900150', rate: 5 },
+  RX_LENSES: { hsn: '900150', rate: 5 },
+  OPTICAL_LENS: { hsn: '900150', rate: 5 },
+  EYEGLASS_LENS: { hsn: '900150', rate: 5 },
+  LS: { hsn: '900150', rate: 5 },
+  // Contact lenses, clear AND coloured -> 9001 -> 5%. CCL is the owner's
+  // 2026-07-05 split of colour/cosmetic lenses into their own picker code
+  // (canonical COLORED_CONTACT_LENS); the server prices it at 900130/5%
+  // (services/gst_rates.GST_CATEGORY_TABLE), and so does the screen.
+  CONTACT_LENS: { hsn: '900130', rate: 5 },
+  CONTACT_LENSES: { hsn: '900130', rate: 5 },
+  COLORED_CONTACT_LENS: { hsn: '900130', rate: 5 },
+  COLOUR_CONTACTS: { hsn: '900130', rate: 5 },
+  CL: { hsn: '900130', rate: 5 },
+  CCL: { hsn: '900130', rate: 5 },
+  // Corrective spectacles + readymade readers -> 9004 -> 5%
+  SPECTACLE: { hsn: '900490', rate: 5 },
+  COMPLETE_SPECTACLE: { hsn: '900490', rate: 5 },
+  READING_GLASSES: { hsn: '900490', rate: 5 },
+  RG: { hsn: '900490', rate: 5 },
+  // Non-corrective sunglasses -> 9004 -> 18% (NOT in the GST 2.0 reduction)
+  SUNGLASSES: { hsn: '900410', rate: 18 },
+  SUNGLASS: { hsn: '900410', rate: 18 },
+  SG: { hsn: '900410', rate: 18 },
+  // Watches / smart watches / clocks -> 9101 / 9102 / 9105 -> 18%
+  WRIST_WATCHES: { hsn: '910111', rate: 18 },
+  WATCH: { hsn: '910111', rate: 18 },
+  WT: { hsn: '910111', rate: 18 },
+  SMARTWATCHES: { hsn: '910221', rate: 18 },
+  SMARTWATCH: { hsn: '910221', rate: 18 },
+  SMTWT: { hsn: '910221', rate: 18 },
+  WALL_CLOCK: { hsn: '910500', rate: 18 },
+  WALL_CLOCKS: { hsn: '910500', rate: 18 },
+  CLOCK: { hsn: '910500', rate: 18 },
+  CK: { hsn: '910500', rate: 18 },
+  // Smartglasses (electronic eyewear) -> 18%, owner-confirmed 2026-06-17.
+  // GST-REVIEW (unchanged, pre-dates this table): the server's own category
+  // default for SMTSG/SMTFR is HSN 852580, not 900410. The RATE agrees at 18%
+  // either way, which is why the screen and the server do not contradict each
+  // other here; the CODE does not, and moving it is a data decision (35 live
+  // products already carry 852580) rather than a rename.
+  SMARTGLASSES: { hsn: '900410', rate: 18 },
+  SMTSG: { hsn: '900410', rate: 18 },
+  SMTFR: { hsn: '900410', rate: 18 },
+  // Hearing aids -> 9021 -> NIL/exempt for complete devices (parts are 18%)
+  HEARING_AID: { hsn: '902140', rate: 0 },
+  HEARING_AIDS: { hsn: '902140', rate: 0 },
+  HA: { hsn: '902140', rate: 0 },
+  // Accessories & services -> 18%
+  ACCESSORIES: { hsn: '392690', rate: 18 },
+  ACC: { hsn: '392690', rate: 18 },
+  SERVICE: { hsn: '998599', rate: 18 },
+  SERVICES: { hsn: '998599', rate: 18 },
+} as const satisfies Record<string, CategoryTax>;
+
+/** Every category spelling this table prices.
+ *
+ *  The Add-Product picker's list (`pages/catalog/productAddShared.CATEGORIES`)
+ *  is typed against this, so a category the screen can offer CANNOT fall
+ *  through to the unknown-category defaults below -- adding one without pricing
+ *  it here fails `tsc` instead of silently quoting 18% under helper text that
+ *  promises the HSN settles it. */
+export type TaxedCategory = keyof typeof CATEGORY_TAX;
+
+function categoryTax(category?: string | null): CategoryTax | undefined {
+  const key = (category ?? '').toString().trim().toUpperCase();
+  return (CATEGORY_TAX as Record<string, CategoryTax | undefined>)[key];
+}
+
+// Category -> GST rate (used by POS for a quick preview; the server bills).
+export function getGSTRateByCategory(category: string): number {
+  return categoryTax(category)?.rate ?? 18; // Conservative default
+}
+
+// Category -> HSN code.
 export function getHSNByCategory(category: string): HSNCode | null {
-  // Accepts canonical enum codes, seed plural forms, and the short UI codes
-  // (FR/LS/RG/CL/SG/WT/CK/HA/ACC/SMT*) used on AddProductPage.
-  // 6-digit codes only (owner 2026-07-05) — the 4-digit variant was removed.
-    switch (category.toUpperCase()) {
-      case 'CONTACT_LENS':
-      case 'CONTACT_LENSES':
-      case 'COLORED_CONTACT_LENS':
-      case 'COLOUR_CONTACTS':
-      case 'CL':
-        return HSN_CODES['900130'];
-      case 'LENS':
-      case 'RX_LENSES':
-      case 'OPTICAL_LENS':
-      case 'EYEGLASS_LENS':
-      case 'LS':
-        return HSN_CODES['900150'];
-      case 'FRAME':
-      case 'FRAMES':
-      case 'EYEGLASS_FRAME':
-      case 'FR':
-        return HSN_CODES['900311'];
-      case 'SPECTACLE':
-      case 'COMPLETE_SPECTACLE':
-      case 'READING_GLASSES':
-      case 'RG':
-        return HSN_CODES['900490'];
-      case 'SUNGLASSES':
-      case 'SUNGLASS':
-      case 'SG':
-        return HSN_CODES['900410'];
-      case 'WRIST_WATCHES':
-      case 'WATCH':
-      case 'WT':
-        return HSN_CODES['910111'];
-      case 'SMARTWATCHES':
-      case 'SMARTWATCH':
-      case 'SMTWT':
-        return HSN_CODES['910221'];
-      case 'WALL_CLOCK':
-      case 'WALL_CLOCKS':
-      case 'CK':
-        return HSN_CODES['910500'];
-      case 'HEARING_AID':
-      case 'HEARING_AIDS':
-      case 'HA':
-        return HSN_CODES['902140'];
-      case 'SMARTGLASSES':
-      case 'SMTSG':
-      case 'SMTFR':
-        return HSN_CODES['900410']; // GST-REVIEW: electronic eyewear, 18% placeholder
-      case 'ACCESSORIES':
-      case 'ACC':
-        return HSN_CODES['392690'];
-      case 'SERVICE':
-      case 'SERVICES':
-        return HSN_CODES['998599'];
-      default:
-        return HSN_CODES['900490']; // Default to corrective spectacles (5%)
-    }
+  const tax = categoryTax(category);
+  // Default to corrective spectacles for a spelling nothing recognises (legacy
+  // rows, free text). A PICKER category can never land here -- see TaxedCategory.
+  return HSN_CODES[tax ? tax.hsn : '900490'] ?? null;
 }
 
 // Calculate GST components

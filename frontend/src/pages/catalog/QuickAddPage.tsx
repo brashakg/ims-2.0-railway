@@ -84,6 +84,7 @@ import {
   validateReviewForm,
   buildProductPayload,
   resolveHsnGst,
+  hsnImpliesCategoryRate,
   productToFormValues,
   catalogDocToFormValues,
   formValuesToCatalogUpdate,
@@ -319,13 +320,11 @@ export function QuickAddPage() {
     }
   }, [selectedCategory, isReviewMode]);
 
-  // Does the HSN on the form still imply the rate the form is showing? The
-  // rate on screen comes from the CATEGORY; the rate that gets STORED comes
-  // from the HSN, server-side. They are the same number for the HSN a category
-  // auto-fills, and only then -- so the moment the cataloguer picks a different
-  // code the screen must stop quoting a rate and say the HSN settles it.
+  // Does the HSN on the form still imply the rate the form is showing?
+  // The rule itself lives in productAddShared.hsnImpliesCategoryRate, where it
+  // can be tested without standing this whole page up.
   const hsnMatchesCategory = useMemo(
-    () => !hsnCode || !selectedCategory || hsnCode === resolveHsnGst(selectedCategory).hsnCode,
+    () => hsnImpliesCategoryRate(selectedCategory, hsnCode),
     [hsnCode, selectedCategory],
   );
 
