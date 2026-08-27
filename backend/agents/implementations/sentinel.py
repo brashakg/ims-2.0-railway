@@ -483,7 +483,65 @@ class SentinelAgent(JarvisAgent):
             result["error"] = str(e)
             logger.error(f"[SENTINEL] Data integrity check failed: {e}")
 
+        # Stranded transfer units get their OWN try: an error counting them must
+        # not take out the orphan-orders result above (or vice versa).
+        try:
+            stranded = self._count_stranded_transfer_units()
+            if stranded:
+                result["issues"].append({
+                    "type": "STRANDED_TRANSFER_UNITS",
+                    "severity": "HIGH",
+                    "count": stranded,
+                    "message": (
+                        f"{stranded} stock unit(s) stuck at TRANSFERRED against a "
+                        f"closed/missing transfer - invisible to BOTH stores. "
+                        f"Run scripts/stranded_transfer_units.py"
+                    ),
+                })
+                result["status"] = "degraded"
+        except Exception as e:  # noqa: BLE001 - integrity probe is fail-soft
+            logger.warning(f"[SENTINEL] stranded-transfer-unit check skipped: {e}")
+
         return result
+
+    def _count_stranded_transfer_units(self) -> int:
+        """Units held at TRANSFERRED whose transfer can never move them again.
+
+        A unit goes TRANSFERRED when a transfer SHIPS and comes off it when the
+        destination RECEIVES. If the transfer is already closed (received /
+        completed / cancelled) or has vanished, no code path will ever re-home
+        that unit: `receive_transfer` is gated to in_transit/partially_received,
+        cancel is refused at received, and complete moves no stock. The frame is
+        then on-hand at NEITHER store - a real, unsellable, invisible unit. (The
+        cause was fixed in PR #1023; this is the watch that says whether any are
+        left, or a new one appears.)
+
+        Cheap by construction: the distinct set of transfer_ids on TRANSFERRED
+        units is the tiny in-flight set (partial index
+        `stock_units_transfer_in_transit` covers it), so this is a handful of
+        transfer look-ups, not a scan. Returns 0 when the DB is unreachable.
+        """
+        units = self.get_collection("stock_units")
+        transfers = self.get_collection("stock_transfers")
+        if units is None or transfers is None:
+            return 0
+
+        closed = {"received", "completed", "cancelled"}
+        in_flight = units.distinct("transfer_id", {"status": "TRANSFERRED"})
+        # A TRANSFERRED unit carrying NO transfer_id is stranded by definition -
+        # it is held in transit against nothing at all.
+        stranded_ids = [tid for tid in in_flight if not tid]
+        for tid in in_flight:
+            if not tid:
+                continue
+            doc = transfers.find_one({"id": tid}, {"_id": 0, "status": 1})
+            if doc is None or str(doc.get("status") or "").strip().lower() in closed:
+                stranded_ids.append(tid)
+        if not stranded_ids:
+            return 0
+        return units.count_documents(
+            {"status": "TRANSFERRED", "transfer_id": {"$in": stranded_ids}}
+        )
 
     # ===== Health Scoring =====
 
