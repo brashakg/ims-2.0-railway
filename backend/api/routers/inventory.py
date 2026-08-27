@@ -24,12 +24,13 @@ from ..services.stores_util import is_online_store
 
 # E3: the shared decision of "is this unit on hand?" -- see the block comment
 # further down for exactly which readers use it, which do not, and why it may
-# never be re-typed here as a status list. `canonical_state` / `StockState` are
+# never be re-typed here as a status list. `is_on_hand` / `canonical_state` are
 # the same rule for a unit already read into Python (the ledger groups BY
 # status, so it cannot use the $match form).
 from ..services.item_events import (
     on_hand_match as _on_hand_status_clause,
     canonical_state,
+    is_on_hand,
     StockState,
 )
 from ..utils.ist import ist_date_str
@@ -623,8 +624,7 @@ def _build_store_ledger(
                 # bare `== "RESERVED"` below) is what made a lowercase
                 # `reserved` unit fall into neither bucket and vanish from the
                 # ledger entirely.
-                state = canonical_state(status)
-                if status is None or state is StockState.AVAILABLE:
+                if is_on_hand(status):
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # Capture a sample barcode/location from any available unit
                     # for the Barcode + Location columns on the ledger row.
@@ -633,7 +633,7 @@ def _build_store_ledger(
                             "barcode": row.get("barcode") or "",
                             "location_code": row.get("location_code") or "",
                         }
-                elif state is StockState.RESERVED:
+                elif canonical_state(status) is StockState.RESERVED:
                     reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] stock aggregation failed: %s", exc)
