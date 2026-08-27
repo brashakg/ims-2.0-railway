@@ -1,6 +1,16 @@
 // ============================================================================
-// IMS 2.0 - Add Supplier Modal
+// IMS 2.0 - Add / Edit Supplier Modal
 // ============================================================================
+// One modal for both doors. `supplier` present => edit (PUT), absent => create
+// (POST). Before this the Suppliers tab had no editor at all: the pencil on
+// each card was a button with no handler, so a vendor was write-once.
+//
+// The State box is gone when a GSTIN is present. The first two digits of a
+// GSTIN ARE the state, and that state decides whether the vendor's bills are
+// CGST+SGST or IGST -- asking the user to also pick one only creates a way for
+// the two to disagree. The name shown back comes from the server's state-code
+// list (the same one org_validation taxes with), so a mistyped GSTIN is
+// visible as the wrong state before it is ever saved.
 
 import { useState } from 'react';
 import {
@@ -12,37 +22,74 @@ import {
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { vendorsApi } from '../../services/api';
+import { useGstStateCodes } from '../../hooks/useGstStateCodes';
+import { gstinStateCode, validateGSTNumber } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 
 interface SupplierFormModalProps {
   onClose: () => void;
-  onCreated: (supplier: Supplier) => void;
+  /** Create mode: the new supplier. */
+  onCreated?: (supplier: Supplier) => void;
+  /** Edit mode: the vendor being edited. */
+  supplier?: Supplier;
+  /** Edit mode: the saved supplier. */
+  onSaved?: (supplier: Supplier) => void;
 }
 
-export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps) {
+export function SupplierFormModal({
+  onClose,
+  onCreated,
+  supplier,
+  onSaved,
+}: SupplierFormModalProps) {
   const toast = useToast();
+  const isEdit = Boolean(supplier);
+  const stateNames = useGstStateCodes();
 
-  const [name, setName] = useState('');
-  const [code, setCode] = useState('');
-  const [contactPerson, setContactPerson] = useState('');
-  const [phone, setPhone] = useState('');
-  const [email, setEmail] = useState('');
-  const [address, setAddress] = useState('');
-  const [city, setCity] = useState('');
-  const [state, setState] = useState('');
-  const [gst, setGST] = useState('');
-  const [paymentTerms, setPaymentTerms] = useState(30);
-  const [creditLimit, setCreditLimit] = useState(0);
+  const [name, setName] = useState(supplier?.name ?? '');
+  const [code, setCode] = useState(supplier?.code ?? '');
+  const [contactPerson, setContactPerson] = useState(supplier?.contactPerson ?? '');
+  const [phone, setPhone] = useState(supplier?.phone ?? '');
+  const [email, setEmail] = useState(supplier?.email ?? '');
+  const [address, setAddress] = useState(supplier?.address ?? '');
+  const [city, setCity] = useState(supplier?.city ?? '');
+  // Only used when there is no GSTIN. Holds the 2-digit GST code.
+  //
+  // Seeded even for a vendor that HAS a GSTIN, from the registration first and
+  // the stored code second -- the same precedence as derive_vendor_state. The
+  // box is hidden while a GSTIN is present, so this is invisible right up to
+  // the moment the number is cleared; seeding it '' is what made clearing a
+  // GSTIN also throw the vendor's state away. Losing the registration does not
+  // move the vendor: an unregistered vendor is still in the same place.
+  const [stateCode, setStateCode] = useState(
+    gstinStateCode(supplier?.gstNumber) || supplier?.stateCode || '',
+  );
+  const [gst, setGST] = useState(supplier?.gstNumber ?? '');
+  const [paymentTerms, setPaymentTerms] = useState(supplier?.paymentTerms ?? 30);
+  const [creditLimit, setCreditLimit] = useState(supplier?.creditLimit ?? 0);
   const [gstError, setGSTError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
-  const validateGST = (gstValue: string): boolean => {
-    if (!gstValue) return true; // optional
-    const gstRegex = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/;
-    return gstRegex.test(gstValue.toUpperCase());
+  // The state the GSTIN itself declares. '' when there is no readable GSTIN.
+  const derivedStateCode = gstinStateCode(gst);
+  const derivedStateName = derivedStateCode ? stateNames[derivedStateCode] : '';
+  const effectiveStateCode = derivedStateCode || stateCode;
+
+  const gstProblem = (value: string): string => {
+    if (!value) return ''; // optional - unregistered vendors have none
+    if (value.length !== 15) {
+      return `A GSTIN is 15 characters; this one is ${value.length}.`;
+    }
+    if (!validateGSTNumber(value)) {
+      return 'Not a GSTIN: expected 2-digit state code + PAN + entity + Z + check digit (e.g. 27AAPFU0939F1ZV).';
+    }
+    if (derivedStateCode && !stateNames[derivedStateCode] && Object.keys(stateNames).length) {
+      return `"${derivedStateCode}" is not an Indian GST state code - check the first two digits.`;
+    }
+    return '';
   };
 
-  const handleAdd = async () => {
+  const handleSave = async () => {
     if (!name.trim()) {
       toast.error('Company name is required');
       return;
@@ -51,54 +98,115 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
       toast.error('Phone number is required');
       return;
     }
-    if (gst && !validateGST(gst)) {
-      setGSTError('Invalid GST format. Expected: 2-digit state code + PAN + alphanumeric (e.g., 07AAAAA1234A1Z5)');
+    const problem = gstProblem(gst.trim().toUpperCase());
+    if (problem) {
+      setGSTError(problem);
+      return;
+    }
+    // Ask, never invent. With no GSTIN to read the state off, the placeholder
+    // this used to post ('N/A') reached derive_vendor_state as an unrecognised
+    // state NAME: it was stored verbatim with state_code null, so the vendor
+    // looked like it had a state while no bill could be classified CGST+SGST
+    // vs IGST for it again. A sentinel that looks like data is worse than a
+    // refusal the user can act on.
+    //
+    // "A code the server's list does not know" counts as no state: a legacy row
+    // predating GSTIN validation can hold a number whose first two digits are
+    // not an Indian state, and the seed above would otherwise carry those two
+    // digits through the clear and post them as the state. Skipped when the
+    // list has not loaded -- then there is nothing to check against, and the
+    // server validates it again anyway.
+    const stateListLoaded = Object.keys(stateNames).length > 0;
+    if (!effectiveStateCode || (stateListLoaded && !stateNames[effectiveStateCode])) {
+      toast.error(
+        "Pick the vendor's state - it decides whether their bills are CGST + SGST or IGST.",
+      );
       return;
     }
 
+    // Empty box -> null, NOT undefined. JSON.stringify drops undefined keys,
+    // so an unregistered-from-now-on vendor sent nothing at all, the server's
+    // exclude_unset dropped it, the old GSTIN survived -- and the clear looked
+    // like it had worked. null is an explicit "no GSTIN".
+    const gstin = gst.trim().toUpperCase() || null;
     setIsSaving(true);
     try {
-      const resp = await vendorsApi.createVendor({
+      // Annotated, NOT inferred. An un-annotated object handed to the API as a
+      // variable is never excess-property-checked, so a field this form sends
+      // that no client contract knows about compiles happily and is then thrown
+      // away by the server -- exactly how contact_person / vendor_code were
+      // collected and lost. The annotation makes `tsc -b` refuse a field that
+      // is on NEITHER signature. (It cannot catch a field dropped from just one
+      // of the two: an intersection keeps the property from the other side.)
+      const shared: Parameters<typeof vendorsApi.updateVendor>[1] &
+        Parameters<typeof vendorsApi.createVendor>[0] = {
         legal_name: name.trim(),
         trade_name: name.trim(),
-        gstin_status: gst.trim() ? 'REGISTERED' : 'UNREGISTERED',
-        gstin: gst.trim().toUpperCase() || undefined,
+        gstin_status: gstin ? 'REGISTERED' : 'UNREGISTERED',
+        gstin,
         address: address.trim() || 'N/A',
         city: city.trim() || 'N/A',
-        state: state.trim() || 'N/A',
+        // Send the code we derived, not a typed name. The server re-derives
+        // from the GSTIN anyway; sending the same thing keeps the two honest.
+        // Never a placeholder: the guard above refuses the save instead.
+        state: effectiveStateCode,
         mobile: phone.trim(),
         email: email.trim() || undefined,
+        vendor_code: code.trim().toUpperCase() || undefined,
+        contact_person: contactPerson.trim() || undefined,
+        credit_limit: creditLimit,
         credit_days: paymentTerms,
-      });
+      };
 
-      const newSupplier: Supplier = {
-        id: resp.vendor_id ?? `sup-${Date.now()}`,
+      const saved: Supplier = {
+        id: supplier?.id ?? '',
         name: name.trim(),
-        code: code.trim().toUpperCase() || resp.vendor_id?.slice(0, 8).toUpperCase() || 'NEW',
+        code: code.trim().toUpperCase(),
         contactPerson: contactPerson.trim(),
         phone: phone.trim(),
         email: email.trim(),
         address: address.trim(),
         city: city.trim(),
-        state: state.trim(),
-        gstNumber: gst.trim().toUpperCase(),
+        state: derivedStateName || stateNames[effectiveStateCode] || supplier?.state || '',
+        stateCode: effectiveStateCode || undefined,
+        gstNumber: gstin ?? '',
         paymentTerms,
         creditLimit,
-        currentOutstanding: 0,
-        rating: 0,
-        totalPurchases: 0,
-        lastPurchaseDate: '',
-        performance: {
+        currentOutstanding: supplier?.currentOutstanding ?? 0,
+        rating: supplier?.rating ?? 0,
+        totalPurchases: supplier?.totalPurchases ?? 0,
+        lastPurchaseDate: supplier?.lastPurchaseDate ?? '',
+        performance: supplier?.performance ?? {
           onTimeDelivery: 0,
           qualityScore: 0,
           priceCompetitiveness: 0,
         },
       };
 
-      onCreated(newSupplier);
-      toast.success(`Supplier "${newSupplier.name}" added successfully`);
+      if (isEdit && supplier) {
+        await vendorsApi.updateVendor(supplier.id, shared);
+        onSaved?.(saved);
+        toast.success(`Supplier "${saved.name}" updated`);
+      } else {
+        const resp = await vendorsApi.createVendor(shared);
+        saved.id = resp.vendor_id ?? `sup-${Date.now()}`;
+        saved.code = saved.code || resp.vendor_id?.slice(0, 8).toUpperCase() || 'NEW';
+        onCreated?.(saved);
+        toast.success(`Supplier "${saved.name}" added successfully`);
+      }
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to create supplier';
+      // Prefer the server's own words - it names which part of the GSTIN is
+      // wrong, or that another vendor already holds it.
+      const detail = (error as { response?: { data?: { detail?: unknown } } })?.response
+        ?.data?.detail;
+      const msg =
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail) && detail[0] !== undefined
+            ? String((detail[0] as { msg?: string })?.msg ?? 'Could not save supplier')
+            : error instanceof Error
+              ? error.message
+              : 'Could not save supplier';
       toast.error(msg);
     } finally {
       setIsSaving(false);
@@ -112,10 +220,11 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <Truck className="w-5 h-5 text-blue-600" />
-            Add Supplier
+            {isEdit ? 'Edit Supplier' : 'Add Supplier'}
           </h2>
           <button
             onClick={onClose}
+            aria-label="Close"
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <XIcon className="w-5 h-5 text-gray-500" />
@@ -127,8 +236,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
           {/* Company & Code */}
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Company Name *</label>
+              <label htmlFor="sup-name" className="block text-sm font-medium text-gray-700 mb-1">Company Name *</label>
               <input
+                id="sup-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -137,8 +247,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier Code *</label>
+              <label htmlFor="sup-code" className="block text-sm font-medium text-gray-700 mb-1">Supplier Code</label>
               <input
+                id="sup-code"
                 type="text"
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
@@ -151,8 +262,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
           {/* Contact Person, Phone, Email */}
           <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Contact Person *</label>
+              <label htmlFor="sup-contact" className="block text-sm font-medium text-gray-700 mb-1">Contact Person</label>
               <input
+                id="sup-contact"
                 type="text"
                 value={contactPerson}
                 onChange={(e) => setContactPerson(e.target.value)}
@@ -161,8 +273,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+              <label htmlFor="sup-phone" className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
               <input
+                id="sup-phone"
                 type="text"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
@@ -171,8 +284,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <label htmlFor="sup-email" className="block text-sm font-medium text-gray-700 mb-1">Email</label>
               <input
+                id="sup-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -182,11 +296,12 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
             </div>
           </div>
 
-          {/* Address, City, State */}
-          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
+          {/* Address, City */}
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+              <label htmlFor="sup-address" className="block text-sm font-medium text-gray-700 mb-1">Address</label>
               <input
+                id="sup-address"
                 type="text"
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
@@ -195,8 +310,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
+              <label htmlFor="sup-city" className="block text-sm font-medium text-gray-700 mb-1">City</label>
               <input
+                id="sup-city"
                 type="text"
                 value={city}
                 onChange={(e) => setCity(e.target.value)}
@@ -204,45 +320,71 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
                 className="input-field"
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
-              <input
-                type="text"
-                value={state}
-                onChange={(e) => setState(e.target.value)}
-                placeholder="State"
-                className="input-field"
-              />
-            </div>
           </div>
 
-          {/* GST Number */}
+          {/* GST Number -> state */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">GST Number</label>
+            <label htmlFor="sup-gst" className="block text-sm font-medium text-gray-700 mb-1">GST Number</label>
             <input
+              id="sup-gst"
               type="text"
               value={gst}
               onChange={(e) => {
                 setGST(e.target.value.toUpperCase());
                 setGSTError('');
               }}
-              placeholder="e.g., 07AAAAA1234A1Z5"
+              placeholder="e.g., 27AAPFU0939F1ZV"
               maxLength={15}
               className={`input-field ${gstError ? 'border-red-500' : ''}`}
             />
-            {gstError && (
+            {gstError ? (
               <p className="mt-1 text-xs text-red-600 flex items-center gap-1">
                 <AlertTriangle className="w-3 h-3" />
                 {gstError}
               </p>
+            ) : derivedStateName ? (
+              <p className="mt-1 text-xs text-gray-600">
+                State (from the GSTIN):{' '}
+                <span className="font-medium text-gray-900">{derivedStateName}</span>
+                {' '}&mdash; purchases are taxed for this state.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-gray-500">
+                Leave blank for an unregistered vendor. The state is read from the number.
+              </p>
             )}
           </div>
+
+          {/* State - only asked for when there is no GSTIN to read it from */}
+          {!derivedStateCode && (
+            <div>
+              <label htmlFor="sup-state" className="block text-sm font-medium text-gray-700 mb-1">
+                State (unregistered vendor)
+              </label>
+              <select
+                id="sup-state"
+                value={stateCode}
+                onChange={(e) => setStateCode(e.target.value)}
+                className="input-field"
+              >
+                <option value="">Select a state</option>
+                {Object.entries(stateNames)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([codeValue, stateName]) => (
+                    <option key={codeValue} value={codeValue}>
+                      {codeValue} {stateName}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          )}
 
           {/* Payment Terms & Credit Limit */}
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Payment Terms (days)</label>
+              <label htmlFor="sup-terms" className="block text-sm font-medium text-gray-700 mb-1">Payment Terms (days)</label>
               <input
+                id="sup-terms"
                 type="number"
                 min="0"
                 value={paymentTerms}
@@ -251,8 +393,9 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit ({'\u20B9'})</label>
+              <label htmlFor="sup-credit" className="block text-sm font-medium text-gray-700 mb-1">Credit Limit ({'₹'})</label>
               <input
+                id="sup-credit"
                 type="number"
                 min="0"
                 step="10000"
@@ -273,7 +416,7 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
             Cancel
           </button>
           <button
-            onClick={handleAdd}
+            onClick={handleSave}
             disabled={isSaving}
             className="btn-primary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >

@@ -662,12 +662,20 @@ export const vendorsApi = {
     trade_name: string;
     vendor_type?: string;
     gstin_status: string;
-    gstin?: string;
+    // null (not undefined) when there is no GSTIN -- see updateVendor below.
+    gstin?: string | null;
     address: string;
     city: string;
     state: string;
     mobile: string;
     email?: string;
+    // The supplier's own code, the person you ring, and the credit ceiling.
+    // The Add-Supplier form has always collected these; leaving them off this
+    // type made the correct call a compile error (TS2353 on an inline object
+    // literal) and invited the next author to "fix" it by deleting the field.
+    vendor_code?: string;
+    contact_person?: string;
+    credit_limit?: number;
     credit_days?: number;
   }) => {
     const response = await api.post('/vendors', vendor);
@@ -682,6 +690,15 @@ export const vendorsApi = {
     state: string;
     mobile: string;
     email: string;
+    // Correcting a typo'd GSTIN is the whole point of the vendor editor; it
+    // must be expressible here or the correct call does not compile.
+    // `null` = clear it (this vendor is not registered after all). Omitting the
+    // key leaves the stored GSTIN alone -- the server drops unset fields.
+    gstin: string | null;
+    gstin_status: string;
+    vendor_code: string;
+    contact_person: string;
+    credit_limit: number;
     credit_days: number;
     is_active: boolean;
   }>) => {
@@ -849,17 +866,27 @@ export const vendorsApi = {
 
   // Vendor portal token (May 2026) — admin generates a signed URL the
   // lens lab opens directly without an IMS user account.
-  generatePortalToken: async (vendorId: string, expiresDays?: number) => {
+  // The backend answers with `portal_path` (a RELATIVE path) and the TTL field
+  // is `ttl_days` -- this client used to read `portal_url` and send
+  // `expires_days`, so the admin's "Portal URL" box rendered `undefined` (the
+  // owner's "portal link is just blank") and a custom validity was ignored.
+  // The absolute URL is built here from the origin the admin is already on,
+  // which is the same host the vendor will open.
+  generatePortalToken: async (vendorId: string, ttlDays?: number) => {
     const response = await api.post(
       `/vendors/${vendorId}/portal-token`,
-      expiresDays ? { expires_days: expiresDays } : {},
+      ttlDays ? { ttl_days: ttlDays } : {},
     );
-    return response.data as {
+    const data = response.data as {
       token_id: string;
-      portal_url: string;
+      portal_path: string;
       expires_at: string;
       vendor_id: string;
       vendor_name: string;
+    };
+    return {
+      ...data,
+      portal_url: `${window.location.origin}${data.portal_path}`,
     };
   },
 

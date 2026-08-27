@@ -20,6 +20,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { vendorsApi } from '../../services/api';
+import { gstinStateCode } from '../../constants/gst';
 import { VendorReturns } from './VendorReturns';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseInvoicesTab } from './PurchaseInvoicesTab';
@@ -46,6 +47,9 @@ function mapVendorToSupplier(v: any): Supplier {
     address: v.address ?? '',
     city: v.city ?? '',
     state: v.state ?? '',
+    // Vendors created before the state was derived from the GSTIN have no
+    // state_code stored; read it off the GSTIN so their cards still classify.
+    stateCode: v.state_code || gstinStateCode(v.gstin) || undefined,
     gstNumber: v.gstin ?? '',
     paymentTerms: v.credit_days ?? 30,
     creditLimit: v.credit_limit ?? 0,
@@ -145,6 +149,7 @@ export function PurchaseManagementPage() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [showCreatePO, setShowCreatePO] = useState(false);
   const [showSupplierModal, setShowSupplierModal] = useState(false);
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
 
   // Sync active tab from URL query params (e.g. /purchase?tab=suppliers)
@@ -431,7 +436,7 @@ export function PurchaseManagementPage() {
       ) : activeTab === 'variance' ? (
         <PurchaseVarianceTab />
       ) : activeTab === 'suppliers' ? (
-        <SupplierPanel suppliers={filteredSuppliers} />
+        <SupplierPanel suppliers={filteredSuppliers} onEdit={setEditingSupplier} />
       ) : activeTab === 'vendor-returns' ? (
         <VendorReturns />
       ) : (
@@ -458,6 +463,18 @@ export function PurchaseManagementPage() {
           onCreated={(newSupplier) => {
             setSuppliers(prev => [...prev, newSupplier]);
             setShowSupplierModal(false);
+          }}
+        />
+      )}
+
+      {/* Edit Supplier Modal */}
+      {editingSupplier && (
+        <SupplierFormModal
+          supplier={editingSupplier}
+          onClose={() => setEditingSupplier(null)}
+          onSaved={(saved) => {
+            setSuppliers(prev => prev.map(s => (s.id === saved.id ? saved : s)));
+            setEditingSupplier(null);
           }}
         />
       )}

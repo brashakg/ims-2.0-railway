@@ -10,6 +10,7 @@ import {
   Mail,
   MapPin,
   Truck,
+  Receipt,
   Link2,
   Copy,
   Check,
@@ -18,21 +19,87 @@ import {
 } from 'lucide-react';
 import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { useGstStateCodes } from '../../hooks/useGstStateCodes';
+import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+
+// How a purchase from this vendor is taxed. Local and NOT exported on purpose:
+// the canonical exported helper lands in the sibling PR claude/po-gst-and-ux as
+// `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
+// (two exports of that name in one module is a compile error on main).
+//
+// Both states are read from GSTINs and NOTHING else -- the same source
+// purchase_invoice_engine.determine_place_of_supply reads when it stamps the
+// bill. (That engine also accepts an explicit place-of-supply override, which
+// a card has no way to know about; with none passed it is the two GSTINs.)
+// An address is not a registration: stores.py sets a store's state_code
+// from its ADDRESS while its gstin is the entity's registration for that state,
+// falling back to the entity's PRIMARY GSTIN elsewhere (WizOpt's online store
+// bills under BV Opticals Pvt Ltd). Reading the address first made this card
+// print the OPPOSITE verdict to the bill for exactly those stores.
+//
+// The one place it departs from the engine, on purpose: the engine must return
+// a boolean for a bill, so an unknown pair falls back to intra-state. A card is
+// a statement to a human, and "Same state - CGST + SGST" over a pair nobody has
+// established is a wrong-tax claim, not a conservative default -- so unknown
+// reads as unknown, never as the engine's fallback.
+type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
+
+function taxSplit(vendorStateCode: string, buyerStateCode: string): TaxSplit {
+  if (!vendorStateCode || !buyerStateCode) return 'unknown';
+  return vendorStateCode === buyerStateCode ? 'cgst_sgst' : 'igst';
+}
+
+const TAX_SPLIT_LABEL: Record<TaxSplit, string> = {
+  igst: 'Other state - IGST',
+  cgst_sgst: 'Same state - CGST + SGST',
+  unknown: 'Tax split unknown',
+};
+
+const TAX_SPLIT_CLASS: Record<TaxSplit, string> = {
+  igst: 'bg-amber-50 text-amber-700',
+  cgst_sgst: 'bg-emerald-50 text-emerald-700',
+  unknown: 'bg-gray-100 text-gray-600',
+};
 
 interface SupplierPanelProps {
   suppliers: Supplier[];
+  /** Opens the supplier editor. Optional so the panel renders standalone. */
+  onEdit?: (supplier: Supplier) => void;
 }
 
-export function SupplierPanel({ suppliers }: SupplierPanelProps) {
+export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   // The "Generate vendor portal link" action used to live on the (now
   // retired) VendorManagement page. Re-homed here onto the real Suppliers
   // view so the feature isn't lost (PR #454 deleted the only UI for it).
   const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
+  // The buying store's own GST REGISTRATION decides how a purchase from each
+  // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
+  const storeInfo = useStorePrintInfo();
+  const stateNames = useGstStateCodes();
+  // A two-digit prefix the server's state list does not contain is not a
+  // state. The engine's parser (org_validation.validate_gstin, behind
+  // determine_place_of_supply) rejects such a GSTIN and reads NO state off it,
+  // so a card that keeps the raw digits prints a tax verdict ("Other state -
+  // IGST") over a pair the engine never established. Unknown code -> '' ->
+  // taxSplit says 'unknown'. Same stateListLoaded idiom as
+  // SupplierFormModal.handleSave: until the list arrives there is nothing to
+  // check against, so the raw read stands for that first paint.
+  const stateListLoaded = Object.keys(stateNames).length > 0;
+  const knownStateCode = (code: string): string =>
+    stateListLoaded && !stateNames[code] ? '' : code;
+  const buyerStateCode = knownStateCode(gstinStateCode(storeInfo?.gstin));
 
   return (
     <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
-      {suppliers.map((supplier) => (
+      {suppliers.map((supplier) => {
+        const vendorStateCode = knownStateCode(gstinStateCode(supplier.gstNumber));
+        // Display only -- an unregistered vendor still has an address to show.
+        const vendorState =
+          supplier.state || stateNames[supplier.stateCode || vendorStateCode] || '';
+        const split = taxSplit(vendorStateCode, buyerStateCode);
+        return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
             <div className="flex-1">
@@ -67,7 +134,13 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
                 <Link2 className="w-3.5 h-3.5" />
                 Portal link
               </button>
-              <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+              <button
+                type="button"
+                onClick={() => onEdit?.(supplier)}
+                aria-label={`Edit ${supplier.name}`}
+                title={`Edit ${supplier.name}`}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
                 <Edit className="w-5 h-5 text-gray-600" />
               </button>
             </div>
@@ -88,7 +161,28 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
             </div>
             <div className="flex items-center gap-2 text-sm">
               <MapPin className="w-4 h-4 text-gray-500" />
-              <span className="text-gray-700">{supplier.city}, {supplier.state}</span>
+              <span className="text-gray-700">
+                {[supplier.city, vendorState].filter(Boolean).join(', ') || 'No address'}
+              </span>
+            </div>
+            {/* GSTIN + what it means for tax. The state comes from the GSTIN
+                itself, so a wrong number is visible here instead of showing up
+                later as a wrongly-taxed purchase. */}
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <Receipt className="w-4 h-4 text-gray-500" />
+              {supplier.gstNumber ? (
+                <span className="font-mono text-gray-700">{supplier.gstNumber}</span>
+              ) : (
+                <span className="text-gray-500">Unregistered (no GSTIN)</span>
+              )}
+              {/* Only a REGISTERED vendor has a GST split to state. An
+                  unregistered one charges no GST at all, and the line above
+                  already says so. */}
+              {supplier.gstNumber && (
+                <span className={`px-2 py-0.5 text-xs rounded ${TAX_SPLIT_CLASS[split]}`}>
+                  {TAX_SPLIT_LABEL[split]}
+                </span>
+              )}
             </div>
           </div>
 
@@ -120,7 +214,8 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
 
       {suppliers.length === 0 && (
         <div className="col-span-2 text-center py-12">
