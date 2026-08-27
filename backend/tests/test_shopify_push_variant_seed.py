@@ -34,7 +34,7 @@ THE FIX (covered here):
     products are never silently re-priced); opt in with
     SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
   * Optional Online Store publish on create, default OFF
-    (SHOPIFY_PUBLISH_ON_CREATE), never for a DRAFT.
+    on every product push, but never for an ARCHIVED product.
   * The three DARK gates and the SIMULATED dry-run are untouched.
 
 ***** SAFETY-CRITICAL: every Shopify call is MOCKED. ***** The network boundary
@@ -89,7 +89,13 @@ class _RouterSpy:
 
     async def __call__(self, db, query, variables):
         self.calls.append({"query": query, "variables": variables})
-        for marker, body in self._responses.items():
+        # LONGEST marker first: "productCreate" is a SUBSTRING of
+        # "productCreateMedia", so first-match-wins would answer the
+        # photograph mutation with the productCreate body and the engine
+        # would read zero attached media (and correctly withhold publish).
+        for marker, body in sorted(
+            self._responses.items(), key=lambda kv: -len(kv[0])
+        ):
             if marker in query:
                 return body
         return {"data": {}}
@@ -118,6 +124,27 @@ def _force_live(monkeypatch, responses):
             "source": "vault",
         },
     )
+    # THE PHOTOGRAPH rides the same press as the product (owner ruling
+    # 2026-08-25), and the publish is withheld unless it lands. Every LIVE
+    # fixture therefore needs the media mutation answered; a test that wants
+    # to prove a media FAILURE overrides this key explicitly.
+    responses = dict(responses)
+    responses.setdefault(
+        "productCreateMedia",
+        {
+            "data": {
+                "productCreateMedia": {
+                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "mediaUserErrors": [],
+                }
+            }
+        },
+    )
+    # The press PUBLISHES now, and a press that could not publish leaves the
+    # row queued on purpose (_requeue_unpublished). Pin the Online Store
+    # publication so these fixtures exercise a press that actually went live;
+    # the withholding cases pin their own conditions.
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _RouterSpy(responses)
     monkeypatch.setattr(shopify_push, "_graphql", spy)
     return spy
@@ -179,6 +206,11 @@ def _product(**over):
         "barcode": "2000000000017",
         "mrp": 12990,
         "offer_price": 10990,
+        # THE PHOTO RULE (owner ruling 2026-08-25): push_product refuses a
+        # product with no photograph outright, so every fixture that expects
+        # to REACH Shopify must carry one. The refusal itself is covered in
+        # test_online_push_publishes.py.
+        "images": ["https://cdn.example.com/rb-aviator.jpg"],
         "ecom": {"status": "PUBLISHED"},
     }
     doc.update(over)
@@ -561,7 +593,10 @@ def test_live_create_harvests_partially_successful_bulk_create(monkeypatch):
     ]
 
     res = _run(shopify_push.push_product(db, product, variants))
-    assert res.ok is True  # the product push stays fail-soft either way
+    # The seeding error is a SIDE CHANNEL and never becomes the verdict; this
+    # unpriced press is not ok for the OTHER reason -- it published nothing
+    # (one press, goes live: an invisible product is not a success).
+    assert res.ok is False and res.reason == "publish_withheld"
 
     # The partial error IS reported...
     assert any("SKU has already been taken" in e for e in res.variants_seeded["errors"])
@@ -664,7 +699,10 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
         db["catalog_variants"].find_one({"sku": "S-SLV"}),
     ]
     res1 = _run(shopify_push.push_product(db, product, variants))
-    assert res1.ok is True and res1.action == "create"
+    # Unpriced -> the publish was withheld, so the press honestly reports not-ok
+    # while still harvesting the gids this test is about.
+    assert res1.ok is False and res1.reason == "publish_withheld"
+    assert res1.action == "create"
 
     black = db["catalog_variants"].find_one({"sku": "S-BLK"})
     gold = db["catalog_variants"].find_one({"sku": "S-GLD"})
@@ -791,7 +829,11 @@ def test_live_create_seed_failure_never_fails_the_product_push(monkeypatch):
     product = db["catalog_products"].find_one({"id": "P1"})
 
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True and res.mode == "LIVE"
+    assert res.mode == "LIVE"
+    # A SEEDING failure never becomes the push's verdict: the only reason this
+    # press is not ok is the withheld publish (nothing went in front of a
+    # customer), and the seeding error rides the side channel below.
+    assert res.reason == "publish_withheld"
     assert res.variants_seeded["updated"] == 0
     assert any("boom" in e for e in res.variants_seeded["errors"])
 
@@ -802,13 +844,20 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
         monkeypatch, {"productCreate": _create_response([_DEFAULT_VARIANT_NODE])}
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one({"id": "P2", "title": "X", "ecom": {}})
+    db["catalog_products"].insert_one(
+        {"id": "P2", "title": "X", "images": ["https://cdn.example.com/x.jpg"], "ecom": {}}
+    )
     product = db["catalog_products"].find_one({"id": "P2"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True
+    # No price and no SKU anywhere -> nothing to seed AND nothing publishable.
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.variants_seeded is None
     assert spy.count_for("productVariantsBulkUpdate") == 0
-    assert len(spy.calls) == 1
+    # productCreate + the photograph. Nothing else: no seeding call, and
+    # no publish (the product is unpriced -- publish stays withheld).
+    assert spy.count_for("productCreateMedia") == 1
+    assert spy.count_for("publishablePublish") == 0
+    assert len(spy.calls) == 2
 
 
 # ===========================================================================
@@ -969,17 +1018,24 @@ def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):
 
 
 # ===========================================================================
-# 5. Sales-channel publish -- default OFF
+# 5. Sales-channel publish -- unconditional (owner ruling 2026-08-25)
 # ===========================================================================
+# "One press, goes live." Publish used to sit behind SHOPIFY_PUBLISH_ON_CREATE
+# (default OFF); the flag is gone. What survives from the old contract is the
+# WITHHOLDING: an unpriced product still never goes visible (a 0.00 listing is
+# worse than no listing), and ARCHIVED is still never resurrected.
 
 
-def test_publish_is_off_by_default(monkeypatch):
+def test_publish_needs_no_flag(monkeypatch):
+    """The press publishes on its own. No env flag is set here."""
     monkeypatch.delenv("SHOPIFY_PUBLISH_ON_CREATE", raising=False)
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
         {
             "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
             "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+            "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
         },
     )
     db = _EngineDB()
@@ -988,16 +1044,17 @@ def test_publish_is_off_by_default(monkeypatch):
     db["catalog_products"].insert_one(_product(id="P3"))
     product = db["catalog_products"].find_one({"id": "P3"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.publication is None
-    assert spy.count_for("publishablePublish") == 0
-    assert shopify_push.publish_on_create_enabled() is False
+    assert res.publication == {
+        "published": True,
+        "publication_id": "gid://shopify/Publication/77",
+    }
+    assert spy.count_for("publishablePublish") == 1
 
 
-def test_publish_on_create_when_flag_on_and_product_is_priced_and_active(monkeypatch):
+def test_publish_on_create_when_product_is_priced_and_active(monkeypatch):
     """Publish fires ONLY on the happy path: ACTIVE + seeding succeeded with a
     PRICED row. (The old fixture was priceless and asserted published:True --
     it proved the 0.00 hole instead of guarding it; panel must-fix 1.)"""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1024,10 +1081,11 @@ def test_publish_on_create_when_flag_on_and_product_is_priced_and_active(monkeyp
     ]
 
 
-def test_a_draft_is_never_published_even_with_the_flag_on(monkeypatch):
-    """The owner's publish gate: the 2,032 staged DRAFTs must stay invisible --
-    even a fully PRICED draft (priced fixture per panel must-fix 1)."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
+def test_an_archived_product_is_never_published(monkeypatch):
+    """What replaced the old DRAFT gate. Owner ruling 2026-08-25: ecom.status
+    DRAFT is the un-advanced create-time default that shut the door in the first
+    place, so a press now publishes it. ARCHIVED is a DELIBERATE retirement and
+    is still never resurrected -- even a fully PRICED one."""
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1037,10 +1095,10 @@ def test_a_draft_is_never_published_even_with_the_flag_on(monkeypatch):
         },
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one(_product(id="P5", ecom={"status": "DRAFT"}))
+    db["catalog_products"].insert_one(_product(id="P5", ecom={"status": "ARCHIVED"}))
     product = db["catalog_products"].find_one({"id": "P5"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.payload["status"] == "DRAFT"
+    assert res.payload["status"] == "ARCHIVED"
     assert res.publication is None
     assert spy.count_for("publishablePublish") == 0
 
@@ -1049,7 +1107,6 @@ def test_publish_withheld_when_seeding_failed(monkeypatch):
     """Panel must-fix 1(a): seeding is fail-soft, so a bulk-update userError at
     go-live would previously still publish -- an ACTIVE product LIVE at 0.00.
     The precondition now withholds publish and reports why."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1070,7 +1127,9 @@ def test_publish_withheld_when_seeding_failed(monkeypatch):
     db["catalog_products"].insert_one(_product(id="P6"))
     product = db["catalog_products"].find_one({"id": "P6"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True  # the product push itself stays fail-soft
+    # ok=False is the POINT: the product exists on Shopify but no customer can
+    # see it, and a press that published nothing must never report success.
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.publication == {
         "published": False,
         "error": "publish withheld: variant unpriced or seeding failed",
@@ -1083,7 +1142,6 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     never go visible -- Shopify's auto-created variant sits at 0.00. Covers
     BOTH unpriced shapes: SKU-only seeding (priced_rows == 0) and
     nothing-to-seed at all (seed_summary is None)."""
-    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1100,7 +1158,13 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     }
     # Shape 1: SKU-only (seeding ran, but zero priced rows).
     db["catalog_products"].insert_one(
-        {"id": "P7", "title": "X", "sku": "BV-NOPRICE", "ecom": {"status": "PUBLISHED"}}
+        {
+            "id": "P7",
+            "title": "X",
+            "sku": "BV-NOPRICE",
+            "images": ["https://cdn.example.com/x.jpg"],
+            "ecom": {"status": "PUBLISHED"},
+        }
     )
     res = _run(
         shopify_push.push_product(
@@ -1111,7 +1175,7 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
     assert res.publication == withheld
     # Shape 2: no price AND no SKU (nothing to seed at all).
     db["catalog_products"].insert_one(
-        {"id": "P8", "title": "Y", "ecom": {"status": "PUBLISHED"}}
+        {"id": "P8", "title": "Y", "images": ["https://cdn.example.com/x.jpg"], "ecom": {"status": "PUBLISHED"}}
     )
     res2 = _run(
         shopify_push.push_product(
@@ -1125,13 +1189,13 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
 
 def test_push_mode_status_reports_the_new_flags(monkeypatch):
     monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
-    monkeypatch.delenv("SHOPIFY_PUBLISH_ON_CREATE", raising=False)
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
     status = shopify_push.push_mode_status(None)
     assert status["mode"] == "SIMULATED"
     assert status["price_on_update"] is False
-    assert status["publish_on_create"] is False
+    # publish_on_create is GONE -- publish is no longer optional.
+    assert "publish_on_create" not in status
 
 
 # ===========================================================================
@@ -1443,6 +1507,7 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
             "sku": "BV-RB-0002",
             "mrp": 9990,
             "offer_price": 7990,
+            "images": ["https://cdn.example.com/wayfarer.jpg"],
             "ecom": {"status": "PUBLISHED"},
         }
     )

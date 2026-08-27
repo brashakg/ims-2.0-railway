@@ -26,6 +26,7 @@ observable outcome (what ended up stored / what the endpoint returned).
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -65,6 +66,45 @@ def _get_path(doc: Dict[str, Any], key: str):
         else:
             return _MISSING
     return cur
+
+
+def _set_path(doc: Dict[str, Any], key: str, value) -> None:
+    """Dotted-path WRITE, the mirror of :func:`_get_path`.
+
+    Mongo's ``$set``/``$inc`` on ``"a.b"`` creates the nested subdocument
+    ``{"a": {"b": ...}}``. This fake used to store the literal key ``"a.b"``
+    instead, so a dotted write followed by a dotted query silently never
+    matched -- a test written against it would prove nothing about Mongo.
+    """
+    parts = key.split(".")
+    cur: Any = doc
+    for part in parts[:-1]:
+        if part.isdigit():
+            raise UnsupportedMongoFeature(
+                "positional/array dotted paths (%r) are not implemented" % key
+            )
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    if parts[-1].isdigit():
+        raise UnsupportedMongoFeature(
+            "positional/array dotted paths (%r) are not implemented" % key
+        )
+    cur[parts[-1]] = value
+
+
+def _del_path(doc: Dict[str, Any], key: str) -> None:
+    """Dotted-path delete ($unset), the mirror of :func:`_set_path`."""
+    parts = key.split(".")
+    cur: Any = doc
+    for part in parts[:-1]:
+        cur = cur.get(part) if isinstance(cur, dict) else None
+        if not isinstance(cur, dict):
+            return
+    if isinstance(cur, dict):
+        cur.pop(parts[-1], None)
 
 
 def _cmp_ok(actual, op: str, expected) -> bool:
@@ -277,31 +317,37 @@ class StrictCollection:
             raise UnsupportedMongoFeature(
                 f"update operator(s) {sorted(unknown)} not implemented by StrictCollection"
             )
+        # Every operator goes through _get_path/_set_path so a DOTTED key
+        # writes the nested subdocument Mongo would write (and is therefore
+        # visible to a dotted query), not a flat literal "a.b" key.
         for k, v in (update.get("$set") or {}).items():
-            doc[k] = v
+            _set_path(doc, k, v)
         for k in (update.get("$unset") or {}):
-            doc.pop(k, None)
+            _del_path(doc, k)
         for k, v in (update.get("$inc") or {}).items():
-            doc[k] = (doc.get(k) or 0) + v
+            cur = _get_path(doc, k)
+            _set_path(doc, k, (0 if cur is _MISSING or cur is None else cur) + v)
         for k, v in (update.get("$push") or {}).items():
             if isinstance(v, dict) and any(kk.startswith("$") for kk in v):
                 raise UnsupportedMongoFeature("$push modifiers ($each/$slice) not implemented")
-            arr = doc.get(k)
+            arr = _get_path(doc, k)
             if not isinstance(arr, list):
                 arr = []
             arr.append(v)
-            doc[k] = arr
+            _set_path(doc, k, arr)
         for k, v in (update.get("$addToSet") or {}).items():
-            arr = doc.get(k)
+            arr = _get_path(doc, k)
             if not isinstance(arr, list):
                 arr = []
             if v not in arr:
                 arr.append(v)
-            doc[k] = arr
+            _set_path(doc, k, arr)
         for k, v in (update.get("$pull") or {}).items():
-            arr = doc.get(k)
+            arr = _get_path(doc, k)
             if isinstance(arr, list):
-                doc[k] = [x for x in arr if not matches({k: x}, {k: v})]
+                # Match each element under a plain key: a DOTTED k would send
+                # _get_path hunting for a subdocument that isn't there.
+                _set_path(doc, k, [x for x in arr if not matches({"_v": x}, {"_v": v})])
 
     def update_one(self, filter, update, upsert=False, **kwargs):
         for d in self.docs:
@@ -319,6 +365,41 @@ class StrictCollection:
                 "R", (), {"matched_count": 0, "modified_count": 0, "upserted_id": seed.get("_id")}
             )()
         return type("R", (), {"matched_count": 0, "modified_count": 0, "upserted_id": None})()
+
+    def find_one_and_update(
+        self,
+        filter=None,
+        update=None,
+        projection=None,
+        sort=None,
+        upsert=False,
+        return_document=False,
+        **kwargs,
+    ):
+        """Guarded single-document read-modify-write -- the atomic claim shape
+        this codebase uses (PROTOCOL P0-1: one document, one collection, never
+        a cross-collection transaction).
+
+        Returns None when the filter matches nothing, which is exactly how a
+        caller detects that it LOST a race. ``return_document`` follows pymongo:
+        False/ReturnDocument.BEFORE (the default) returns the pre-update doc,
+        True/ReturnDocument.AFTER the post-update one.
+        """
+        if sort is not None:
+            raise UnsupportedMongoFeature(
+                "find_one_and_update(sort=...) is not implemented -- the fake "
+                "has no stable ordering to sort by"
+            )
+        if upsert:
+            raise UnsupportedMongoFeature(
+                "find_one_and_update(upsert=True) is not implemented"
+            )
+        for d in self.docs:
+            if matches(d, filter):
+                before = copy.deepcopy(d)
+                self._apply(d, update or {})
+                return _project(d if return_document else before, projection)
+        return None
 
     def update_many(self, filter, update, **kwargs):
         n = 0

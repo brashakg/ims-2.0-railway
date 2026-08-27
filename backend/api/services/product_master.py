@@ -1543,7 +1543,9 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     lands `ecom.status = DRAFT` (never live) with an SEO title + handle so the
     Online Store push (shopify_push.build_product_input reads ecom.status /
     ecom.handle / ecom.seo.{title,description,tags} + top-level name) has a
-    complete, reviewable-but-not-sellable object the moment it is created.
+    complete, reviewable-but-not-sellable object the moment it is created. It
+    also lands `ecom.locally_modified = True` so the row is QUEUED for the
+    manual Online Store push (see the comment on that field below).
     """
     attrs = dict(spine.get("attributes") or {})
     name = spine.get("name") or build_product_name(spine)
@@ -1582,6 +1584,19 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         "status": "DRAFT",
         "ecom": {
             "status": "DRAFT",
+            # BORN DIRTY -- the same convention ecom_collection_repository.create
+            # and ecom_menu_repository.create use for a new collection / menu: a
+            # row that has never reached Shopify belongs in the MANUAL push queue
+            # from the moment it is catalogued. Without it a freshly catalogued
+            # product was invisible to BOTH readers of this flag -- the operator's
+            # "push all pending" sweep (online_store_push.py, the dirty_products
+            # loop) and the `pending` count on the Online Store screen
+            # (online_store_push._product_counts) -- so the screen reported
+            # "pending: 0" while nothing had been queued: a SILENT miss, not an
+            # error. Queuing is NOT publishing: a human still presses the push
+            # button, and the flag is cleared only by a SUCCESSFUL Shopify write
+            # (shopify_push._writeback_product).
+            "locally_modified": True,
             "handle": handle or None,
             "seo": {
                 "title": seo_title or name or None,
@@ -2333,6 +2348,30 @@ def update_product(
                 if k in clean
             }
             if pim_patch:
+                # QUEUE THE TWIN. mrp / offer_price are the variant price
+                # fallbacks the Shopify push sends, so a price changed HERE has
+                # to reach the storefront -- and the push selects rows by exactly
+                # one flag. Without this the mirror moved the price in IMS and
+                # the website kept the old one, silently, forever. Same rule as
+                # the products.py door: only fields the storefront actually shows
+                # queue a push (hsn_code / gst_rate are in no pushed payload).
+                # Queuing is not publishing: a human still presses the button.
+                if any(k in pim_patch for k in ("mrp", "offer_price")):
+                    pim_patch["ecom.locally_modified"] = True
+                    # ...and a queued row must belong to a status bucket, or the
+                    # Online Store screen counts it as pending while both status
+                    # cards ignore it. Defaulted only when ABSENT, so this can
+                    # never demote a live product back to DRAFT.
+                    twin = None
+                    if db is not None:
+                        try:
+                            twin = db.get_collection("catalog_products").find_one(
+                                {"id": updated["pim_product_id"]}
+                            )
+                        except Exception:  # noqa: BLE001 -- best-effort read
+                            twin = None
+                    if not ((twin or {}).get("ecom") or {}).get("status"):
+                        pim_patch["ecom.status"] = "DRAFT"
                 if catalog_repo is not None:
                     catalog_repo.upsert({"id": updated["pim_product_id"], **pim_patch})
                 elif db is not None:

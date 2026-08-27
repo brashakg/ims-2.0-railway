@@ -321,16 +321,39 @@ export default function OnlineShopifySyncPage() {
         setSweeps((prev) => ({ ...prev, [ent.key]: res }));
         const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
         const s = res.summary?.[ent.token] ?? {};
-        toast.success(
+        // WHAT DID NOT GO. A refusal (no photograph) and a withheld publish (the
+        // product reached Shopify but no customer can see it) are neither
+        // successes nor Shopify breakages — and a press that reports only its
+        // successes is the "pending: 0 over an empty queue" lie one screen over.
+        const refused = Number(s?.refused_no_photo ?? 0);
+        const withheld = Number(s?.publish_withheld ?? 0);
+        const heldDown = Number(s?.taken_down_skipped ?? 0);
+        const archived = Number(s?.archived_not_listed ?? 0);
+        const msg =
           `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
-            (s?.failed ? ` (${s.failed} failed)` : '') +
-            (s?.noop ? ` (${s.noop} no-op)` : ''),
-        );
-        // OS-046: never let a capped sweep read as complete.
+          (s?.failed ? ` · ${s.failed} failed` : '') +
+          (s?.noop ? ` · ${s.noop} no-op` : '') +
+          (refused ? ` · ${refused} refused (no photograph)` : '') +
+          (withheld ? ` · ${withheld} NOT made visible` : '') +
+          (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
+          (archived ? ` · ${archived} archived (not listed)` : '');
+        if (refused || withheld || s?.failed) toast.warning(msg);
+        else toast.success(msg);
+        // OS-046: never let a capped sweep read as complete. The batch cap is a
+        // PRODUCTS number; collections/menus/images stop at the request limit.
         if (res.limit_reached) {
+          const capText =
+            ent.token === 'products' ? `the safety cap of ${res.batch_cap ?? 25} products` : 'the page safety cap';
+          // "Run again to continue" promises progress a repeat press can only
+          // make if THIS press made some. When nothing went live, say so
+          // instead — the reasons above are what has to change, not the count
+          // of presses.
           toast.info(
-            `${ent.label}: stopped at the 100-object safety cap — run again to continue ` +
-              '(the pending count below shows the remainder).',
+            Number(res.pushed_count ?? 0) > 0
+              ? `${ent.label}: stopped at ${capText} — run again to continue (the pending count ` +
+                  'below shows the remainder).'
+              : `${ent.label}: stopped at ${capText}, but NOTHING went live this press — ` +
+                  'the lines above say why. Press again to try the products behind these.',
           );
         }
       }
@@ -364,11 +387,17 @@ export default function OnlineShopifySyncPage() {
       const res = await pushApi.pushAllPending(undefined, 500);
       const where = res.mode?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
       toast.success(`Cutover push (${where}): ${res.pushed_count ?? 0} objects processed`);
-      // OS-046: the 500-object safety cap must never read as "cutover done".
+      // OS-046: a capped run must never read as "cutover done". Products stop at
+      // the backend's hard batch cap (one press = a bounded number of listings in
+      // front of customers); everything else at the 500-object valve.
       if (res.limit_reached) {
         toast.info(
-          'Stopped at the 500-object safety cap — NOT everything was pushed. ' +
-            'Click again to continue; the pending counts below show the remainder.',
+          `Stopped at a safety cap (${res.batch_cap ?? 25} PRODUCTS per press; other objects ` +
+            'stop at 500) — NOT everything was pushed. ' +
+            (Number(res.pushed_count ?? 0) > 0
+              ? 'Click again to continue; the pending counts below show the remainder.'
+              : 'NOTHING went live this press — the lines below say why. Click again to try ' +
+                'the objects behind these.'),
         );
       }
       loadStatus();
@@ -457,7 +486,31 @@ export default function OnlineShopifySyncPage() {
             on={mode?.creds_present}
             detail={mode?.creds_present ? 'shop_url + token set' : 'not configured'}
           />
+          {/* THE THIRD DOOR, shown BEFORE the press. The three gates above say
+              nothing about it: with no resolvable Online Store publication every
+              press honestly withholds and NOTHING goes live, however green the
+              other three are. */}
+          <GateChip
+            label="Online Store channel"
+            on={!!mode?.online_store_publication_id}
+            detail={
+              mode?.online_store_publication_id
+                ? `publication ${mode.online_store_publication_source ?? 'resolved'}`
+                : 'NOT resolved — presses will publish nothing'
+            }
+          />
         </div>
+        {mode?.is_live && !mode?.online_store_publication_id && (
+          <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              No Online Store sales channel is resolved, so a press can create the product but
+              cannot make it visible on bettervision.in. Set
+              SHOPIFY_ONLINE_STORE_PUBLICATION_ID (or grant the app the read_publications and
+              write_publications scopes) before pressing.
+            </span>
+          </p>
+        )}
         {mode?.single_writer_note && (
           <p className="mt-3 text-[11px] text-gray-500">{mode.single_writer_note}</p>
         )}
@@ -561,6 +614,62 @@ export default function OnlineShopifySyncPage() {
                           </span>
                         ) : null;
                       })()}
+                      {/* THE REFUSALS AND THE WITHHOLDINGS. The backend counts
+                          them honestly; a screen that renders only the successes
+                          turns that honesty back into "35 processed" over 25 that
+                          went and 10 that never did. */}
+                      {(() => {
+                        const refused = Number(
+                          (sweep.summary?.[ent.token]?.refused_no_photo ?? 0) as number,
+                        );
+                        return refused > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Refused: these products have no photograph. A listing with an empty grey box is never published — add a photo and press again."
+                          >
+                            · {fmt(refused)} refused (no photograph)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const withheld = Number(
+                          (sweep.summary?.[ent.token]?.publish_withheld ?? 0) as number,
+                        );
+                        return withheld > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="These reached Shopify but were NOT made visible (no Online Store channel, the photograph did not attach, or the price could not be proved). They are still queued — fix the cause and press again."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(withheld)} NOT made visible
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const held = Number(
+                          (sweep.summary?.[ent.token]?.taken_down_skipped ?? 0) as number,
+                        );
+                        return held > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Taken off the website by hand. A bulk sweep never puts one back — open the product and press Send to website when it is ready."
+                          >
+                            · {fmt(held)} skipped (taken down)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const archived = Number(
+                          (sweep.summary?.[ent.token]?.archived_not_listed ?? 0) as number,
+                        );
+                        return archived > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Retired products: the update reached Shopify, but an archived product is not on the storefront — nobody can find it."
+                          >
+                            · {fmt(archived)} archived (not listed)
+                          </span>
+                        ) : null;
+                      })()}
                       {/* Push-locked SKUs the sweep excluded (from summary.products). */}
                       {(() => {
                         const blocked = Number(
@@ -579,8 +688,10 @@ export default function OnlineShopifySyncPage() {
                     {/* OS-046: a capped sweep must not read as complete. */}
                     {sweep.limit_reached && (
                       <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700">
-                        <AlertTriangle className="w-3 h-3" /> Stopped at the safety cap — run again to
-                        continue.
+                        <AlertTriangle className="w-3 h-3" />{' '}
+                        {Number(sweep.pushed_count ?? 0) > 0
+                          ? 'Stopped at the safety cap — run again to continue.'
+                          : 'Stopped at the safety cap, but NOTHING went live this press — the lines above say why. Press again to try the products behind these.'}
                       </p>
                     )}
                     {Array.isArray(sweep.results) && sweep.results.length > 0 ? (

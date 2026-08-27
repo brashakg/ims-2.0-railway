@@ -38,6 +38,7 @@ import {
 import { purchaseReconApi, type ReconBlock, type ReconWorklists } from '../../services/api/purchaseRecon';
 import { purchaseInvoicesApi, type PurchaseInvoice, type MatchStatus, type ExceptionOverride } from '../../services/api/vendorAp';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
+import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
@@ -166,7 +167,10 @@ interface ReconCheckboxProps {
 
 function ReconCheckbox({ flag, recon, saving, onToggle }: ReconCheckboxProps) {
   const checked = !!recon[flag];
-  const by = recon[`${flag}_by` as keyof ReconBlock] as string | undefined;
+  // Who ticked it: the resolved name, falling back to the raw id when the
+  // backend could not resolve it (an audit stamp must stay traceable).
+  const by = (recon[`${flag}_by_name` as keyof ReconBlock]
+    || recon[`${flag}_by` as keyof ReconBlock]) as string | undefined;
   const at = recon[`${flag}_at` as keyof ReconBlock] as string | undefined;
 
   const tooltip = checked && (by || at)
@@ -486,7 +490,10 @@ function QueueRow({
             {invoice.match_status === 'MATCHED_OVERRIDE' && (
               <span
                 className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600 border border-gray-200"
-                title={`Variance exception approved${invoice.exception_override?.approved_by ? ` by ${invoice.exception_override.approved_by}` : ''}`}
+                title={`Variance exception approved${byPerson(
+                  invoice.exception_override?.approved_by_name,
+                  invoice.exception_override?.approved_by,
+                )}`}
               >
                 OVERRIDE APPROVED
               </span>
@@ -625,7 +632,7 @@ function QueueRow({
             {recon.last_updated_at && (
               <div className="mt-1.5 text-gray-400">
                 Last updated: {fmtDateTime(recon.last_updated_at)}
-                {recon.last_updated_by ? ` by ${recon.last_updated_by}` : ''}
+                {byPerson(recon.last_updated_by_name, recon.last_updated_by)}
               </div>
             )}
           </td>

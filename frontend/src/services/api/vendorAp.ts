@@ -179,6 +179,10 @@ export interface PurchaseInvoiceMatch {
 // a control bypass). Stored on the invoice doc + echoed by approve-exception.
 export interface ExceptionOverride {
   approved_by?: string;
+  /** The approver's display name, resolved server-side from approved_by.
+   *  Absent when that id no longer resolves to a user -- render approved_by
+   *  itself then, so the audit line stays traceable. */
+  approved_by_name?: string;
   reason?: string;
   approved_at?: string;
   prior_status?: string;
