@@ -1218,6 +1218,11 @@ async def get_notification_providers(
     lie. The stored singleton only ever contributes keys the server does not
     work out for itself.
 
+    That is not asserted, it is probed: every endpoint that reports this gate
+    is fed the same environment and diffed against what the send path actually
+    does, in tests/test_integration_credentials_wiring.py ::
+    test_every_screen_reports_the_gate_the_send_path_actually_uses.
+
     Never returns a credential value.
     """
     from agents.providers import dispatch_mode, provider_ready

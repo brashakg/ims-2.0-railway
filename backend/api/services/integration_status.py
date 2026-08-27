@@ -11,12 +11,20 @@ value. For env vars it reports the KEY name plus a boolean. For the
 populated (e.g. "key_id"), never their contents. No secret ever leaves
 the process through this surface.
 
-It deliberately reads `os.getenv` fresh each call so the report reflects
-the current process environment, and reads the `integrations` collection
-fresh for the same reason. The messaging/alerting providers (MSG91, Slack,
-PageSpeed) resolve their credentials per call in the same order this report
-declares - collection first, then env - so the report and the providers
-cannot disagree.
+It reads env vars and the `integrations` collection fresh each call so the
+report reflects the current process environment. ONE deliberate exception:
+`_dispatch_mode()` below returns agents.providers.dispatch_mode() instead of
+re-reading DISPATCH_MODE, because the gate's snapshot - not the env - is what
+a send is gated on. Re-reading it here made this screen report "live" for
+padded values the gate refused, e.g. DISPATCH_MODE=" live" sent nothing.
+
+The credential-resolution ORDER declared here (collection first, then env) is
+the order api.services.integration_config uses, and that correspondence is
+asserted in tests/test_integration_credentials_wiring.py. It is NOT enforced
+by construction: the table below is a hand-kept copy of each provider's env
+keys and config field names, so a provider that renames a field can drift
+from this report without anything failing. Do not read this paragraph as a
+guarantee that the two cannot disagree - only the send gate is single-sourced.
 
 ASCII only (Windows cp1252).
 """
