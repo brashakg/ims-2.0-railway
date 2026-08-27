@@ -750,7 +750,7 @@ export function OrdersPage() {
                 <OrderStatusTimeline
                   statusHistory={selectedOrder.statusHistory}
                   createdAt={selectedOrder.createdAt}
-                  createdBy={selectedOrder.createdBy}
+                  createdBy={selectedOrder.createdByName || selectedOrder.createdBy}
                 />
 
                 {/* Order Status Timeline & Notifications */}

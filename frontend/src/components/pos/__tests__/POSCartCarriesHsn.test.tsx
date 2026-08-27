@@ -17,7 +17,7 @@
 //    CHARGED -- not just what the invoice files the supply under. The payload
 //    is an explicit field list today and hsn_code is not in it; this pins that.
 
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Complete Map-backed localStorage for the posStore persist middleware.
@@ -207,13 +207,16 @@ describe('POS add-to-cart', () => {
   });
 });
 
+/** Strip POSLayout's `fc` formatting (Rs + en-IN grouping) back to a number. */
+const money = (text: string | null) => Number((text || '').replace(/[^0-9.]/g, ''));
+
 describe('the Review screen quotes the same rate as the invoice', () => {
   it('shows the CATEGORY rate for a line whose record carries another code', async () => {
-    // Order Review recomputes the per-line GST% and the tax breakdown with its
-    // OWN two calls to the resolver -- a third and fourth copy of the same
-    // lookup, in the same component as the cart. A 5% frame whose record
-    // carries 900410 (a master row at 18%) is the fixture that can tell them
-    // apart, and neither is reached by the cart-total tests.
+    // Order Review used to recompute the per-line GST% and the tax breakdown
+    // with its OWN two calls to the resolver -- a third and fourth copy of the
+    // same lookup, in the same component as the cart. It reads
+    // posStore.getTaxBreakdown now; a 5% frame whose record carries 900410 (a
+    // master row at 18%) is still the fixture that would catch a re-fork.
     act(() => {
       const st = usePOSStore.getState();
       st.resetTransaction();
@@ -237,8 +240,69 @@ describe('the Review screen quotes the same rate as the invoice', () => {
       .find((r): r is HTMLTableRowElement => !!r)!;
     expect(row.textContent).toContain('5%');
     expect(row.textContent).not.toContain('18%');
-    // ...and the tax breakdown under it, which is the second copy.
+    // ...and the tax breakdown under it, which was the second copy.
     expect(screen.getAllByText(/5%/).length).toBeGreaterThan(1);
     expect(screen.queryAllByText(/18%/)).toHaveLength(0);
+  });
+
+  it('prints the STORE\'s tax figures -- CGST+SGST sum to getTax, and the total ties out', async () => {
+    // The rate alone is only half of it: the Review step also owned the
+    // inclusive/exclusive branch and its own per-rate taxable bases. It reads
+    // getTaxBreakdown now, so what is on the screen must reconcile to the
+    // store's own selectors -- which is the property a future re-fork breaks.
+    // A MIXED cart (5% frame + 18% sunglass) is what makes the per-rate bases
+    // load-bearing; a single-rate cart passes even if they are wrong.
+    act(() => {
+      const st = usePOSStore.getState();
+      st.resetTransaction();
+      st.setStoreId('BV-BOK-01');
+      st.setSalesperson('sp1', 'Sales Person');
+      // Rx orders are the only flow with a Review panel -- a quick sale's final
+      // group is payment-only (buildCondensedGroups).
+      st.setSaleType('prescription_order');
+      usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as never });
+      st.addToCart({
+        product_id: 'p9', name: 'Titan Frame', sku: 'FR-9',
+        category: 'FRAME', hsn_code: '900410',   // 5%, record carries the 18% code
+        unit_price: 1050, mrp: 1050, quantity: 1, is_optical: true,
+      } as never);
+      st.addToCart({
+        product_id: 'p10', name: 'Ray-Ban Meta Wayfarer', sku: 'SMTSG-1',
+        category: 'SUNGLASS', hsn_code: '852580',   // 18%
+        unit_price: 29900, mrp: 29900, quantity: 1, is_optical: false,
+      } as never);
+    });
+    act(() => usePOSStore.getState().setStep('payment'));   // merged Pay & Review
+    renderPOS();
+    // findBy's own timeout is 1s regardless of testTimeout, and a whole POS
+    // screen this far into the file does not always settle inside it.
+    await screen.findByText('Order Review', {}, { timeout: 10000 });
+
+    const s = usePOSStore.getState();
+    const bd = s.getTaxBreakdown();
+
+    // Both bands are on the screen: 5% -> CGST/SGST 2.5%, 18% -> 9%.
+    const card = screen.getByText(/^CGST \(2\.5%\)$/).closest('div.rounded-xl') as HTMLElement;
+    expect(card).toBeTruthy();
+    expect(within(card).getByText(/^CGST \(9%\)$/)).toBeTruthy();
+
+    // Every half-tax line printed, summed, is the store's total tax.
+    const halves = within(card).getAllByText(/^(CGST|SGST) \(/)
+      .map((el) => money(el.nextElementSibling?.textContent ?? null));
+    expect(halves).toHaveLength(4);
+    expect(Math.round(halves.reduce((a, b) => a + b, 0) * 100) / 100).toBe(s.getTax());
+    expect(s.getTax()).toBe(bd.totalTax);
+
+    // ...and the Grand Total on the same card is the store's grand total.
+    const grand = within(card).getByText('Grand Total').nextElementSibling;
+    expect(money(grand?.textContent ?? null)).toBe(s.getGrandTotal());
+
+    // Each per-line GST% cell quotes the rate that total was built from.
+    for (const item of s.cart) {
+      const row = screen.getAllByText(item.name)
+        .map((n) => n.closest('tr'))
+        .find((r): r is HTMLTableRowElement => !!r)!;
+      expect(row.textContent).toContain(`${bd.lineRates[item.id]}%`);
+    }
   });
 });

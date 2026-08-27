@@ -926,7 +926,7 @@ export default function ExpenseTracker() {
                             {s.variance >= 0 ? '+' : '−'}{fc(Math.abs(s.variance))}
                           </td>
                           <td className="px-4 py-2"><VarianceBadge status={s.variance_status} /></td>
-                          <td className="px-4 py-2 text-gray-500">{s.settled_by || '—'}</td>
+                          <td className="px-4 py-2 text-gray-500">{s.settled_by_name || s.settled_by || '—'}</td>
                         </tr>
                       ))}
                     </tbody>

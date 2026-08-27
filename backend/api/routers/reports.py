@@ -2244,6 +2244,17 @@ async def workshop_productivity(
 
     technicians.sort(key=lambda r: r["jobs_completed"], reverse=True)
 
+    # The scorecard's first column is a PERSON -- resolve technician_id to a
+    # display name on the way out (these rows are constructed here, nothing is
+    # stored). An id that no longer resolves gets no _name sibling and the
+    # table prints the id verbatim -- never an invented name. Fail-soft.
+    try:
+        from ..services.name_resolver import stamp_user_names
+
+        stamp_user_names(db, technicians, ("technician_id",))
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "from_date": start_str,
         "to_date": end_str,

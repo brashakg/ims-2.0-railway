@@ -2011,6 +2011,17 @@ async def list_petty_cash_settlements(
     rows = pcss.list_settlements(
         db, scoped, limit=limit, from_date=from_date, to_date=to_date
     )
+    # The "Settled by" column names the PERSON: settle_day stamps
+    # current_user["user_id"] into settled_by and nothing ever resolved it, so
+    # the history table printed the raw id. Resolved on the way OUT on the
+    # fetched rows (never written back); an id that no longer resolves gets no
+    # _name and prints verbatim. Batched, fail-soft (see name_resolver).
+    try:
+        from ..services.name_resolver import stamp_user_names
+
+        stamp_user_names(db, rows, ("settled_by",))
+    except Exception:  # noqa: BLE001
+        pass
     return {"settlements": rows, "total": len(rows)}
 
 
