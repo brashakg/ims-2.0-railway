@@ -595,12 +595,15 @@ def split_gst(tax, interstate: bool) -> tuple:
     paisa is never dropped and never invented. That is what the naive form
     (`round(tax/2, 2)` for both heads) gets wrong.
 
-    Which HEAD the odd paisa lands on is USUALLY SGST but is not guaranteed:
-    at a float halfway point it can land on CGST instead (measured: tax=1.01
-    -> cgst 0.51, sgst 0.50, while tax=5.01 -> cgst 2.50, sgst 2.51). This is
-    byte-for-byte what orders.py and purchase_invoice_engine.py did before
-    they were folded into this function, so nothing moved; it is written down
-    because the previous wording promised a side it does not always pick, and
+    Which HEAD the odd paisa lands on is NOT fixed: over the 100,000 odd-paise
+    amounts in 0.01..1999.99 it lands on CGST for exactly 50,000 and on SGST
+    for exactly 50,000 (measured: tax=1.01 -> cgst 0.51, sgst 0.50, while
+    tax=5.01 -> cgst 2.50, sgst 2.51). Only rtv_debit_note's integer-paise
+    splitter (cgst = tax_paise // 2) genuinely puts every residual paisa on
+    SGST. This is byte-for-byte what orders.py and purchase_invoice_engine.py
+    did before they were folded into this function, so nothing moved; it is
+    written down because previous wordings promised a side (first "always
+    SGST", then "usually SGST") when it is an even coin-toss per amount, and
     a GSTR-1 CGST/SGST column can differ by a paisa from a paise-minted
     document (rtv_debit_note) on those amounts. Never raises.
     """

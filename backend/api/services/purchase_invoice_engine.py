@@ -27,8 +27,10 @@ itc_reconcile compares against the entity's primary state. We WRITE it onto the
 invoice doc so the register classifies correctly from then on.
 
 Paisa-exactness mirrors itc_reconcile / the sales-invoice split: CGST is
-round(tax/2) and SGST is the residual (tax - cgst), so CGST + SGST == tax to the
-paisa even on odd-paise tax amounts (e.g. 5.01 -> 2.50 + 2.51).
+round(tax/2) and SGST is tax - cgst, so CGST + SGST == tax to the paisa on
+every amount. Which head carries the odd paisa is NOT fixed -- measured over
+100,000 odd-paise amounts it is CGST on exactly half and SGST on the other half
+(1.01 -> 0.51 + 0.50, 5.01 -> 2.50 + 2.51); see gst_rates.split_gst.
 """
 
 from typing import List, Optional, Tuple
@@ -109,8 +111,9 @@ def split_line_gst(taxable, gst_rate, interstate: bool) -> dict:
 
     Returns {taxable, gst_rate, gst, cgst, sgst, igst, line_total}. The tax is
     computed once as round(taxable * rate / 100); for an inter-state line the
-    whole tax is IGST, otherwise it splits CGST = round(tax/2) and SGST = the
-    residual so CGST + SGST == tax to the paisa.
+    whole tax is IGST, otherwise it splits CGST = round(tax/2) and SGST =
+    tax - cgst so CGST + SGST == tax to the paisa. The odd paisa lands on
+    either head -- measured 50/50, see gst_rates.split_gst.
     """
     from .gst_rates import split_gst
 

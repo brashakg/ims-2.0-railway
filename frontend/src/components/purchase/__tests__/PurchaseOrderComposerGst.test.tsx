@@ -219,12 +219,14 @@ describe('PurchaseOrderComposer — the rate comes from the product', () => {
 
   it('keeps NO HSN → rate table of its own', () => {
     // The disease this whole round is about: one business rule with two
-    // implementations. The frontend used to hold 13 HSN codes WITH rates and
-    // the backend a different 13. Measured over the fifteen codes they held
-    // between them: eleven held by both, all agreeing on the rate, and FOUR
-    // held by one side only — 900140/900319 priced by the screen and unknown
-    // to the server (it stated 5% on 900319 where the server states nothing),
-    // 852580/9993 priced by the server and unknown to the screen.
+    // implementations. BEFORE this branch the frontend held 13 HSN codes WITH
+    // rates and the backend a different 13. Measured over the fifteen codes
+    // they held between them: eleven held by both, all agreeing on the rate,
+    // and FOUR listed by one side only — 900140/900319 in the screen's table
+    // but not the server's, 852580/9993 in the server's but not the screen's.
+    // (The server now PRICES 900140/900319 anyway, at 5% off settled heading
+    // 9003 — this branch's fallback — so listed-by-one-side no longer means
+    // priced-by-one-side.)
     // Deleting the rate column is what makes that impossible; a test that
     // asserted the two tables matched would have kept the bug and added a
     // tripwire. If a `gstRate` reappears on an HSN entry, this fails.

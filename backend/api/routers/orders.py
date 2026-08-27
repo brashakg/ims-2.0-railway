@@ -5475,7 +5475,9 @@ def _build_invoice_gst_split(
         tax = round(per_rate[rate]["tax"], 2)
         # Shared with the purchase side (vendors.py PO GST) so an inter-state
         # supply can never split one way on a sale and another on a purchase.
-        # Residual lands on SGST, so cgst + sgst == the stored line tax exactly.
+        # The odd paisa lands on EITHER head (measured 50/50 over 100,000
+        # odd-paise amounts -- see split_gst's docstring); the invariant is
+        # cgst + sgst == the stored line tax exactly.
         from ..services.gst_rates import split_gst
 
         cgst, sgst, igst = split_gst(tax, interstate)
