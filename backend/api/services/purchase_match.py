@@ -655,3 +655,137 @@ def valuation_trueup_for_invoice(
             }
         )
     return updates
+
+
+# ---------------------------------------------------------------------------
+# CUMULATIVE OVER-BILL GUARD (a receipt may be billed in parts, never twice)
+# ---------------------------------------------------------------------------
+
+# A quantity is "over" only beyond this epsilon -- float noise from a derived
+# unit price (taxable / qty) must not manufacture a 0.0000001-unit exception.
+_QTY_EPS = 0.001
+
+
+def over_billed_products(
+    grn: Optional[dict],
+    prior_bill_lines: Optional[List[dict]],
+    proposed_lines: Optional[List[dict]],
+) -> List[dict]:
+    """Products whose CUMULATIVE billed quantity would exceed what the goods
+    receipt actually accepted.
+
+    This is the quantity side of "you cannot pay for goods you never received":
+    accepted (GRN) vs already-billed (every vendor bill already linked to that
+    GRN) vs about-to-be-billed (this invoice's computed lines).
+
+    WHY CUMULATIVE AND NOT "ALREADY INVOICED":  a vendor may legitimately bill
+    one delivery across two invoices (a part bill now, the balance -- or a rate
+    difference -- later), and the 3-way match already BOOKS such a part bill
+    (flagging it against the PO) rather than refusing it. An outright
+    "this GRN is already invoiced" refusal would newly break that. The error the
+    rest of the purchase flow models is over-billing, not re-billing: see
+    vendors.dismiss_po_variance, which computes exactly
+    ``invoiced_qty - accepted_qty > 0`` and prompts a debit note for it.
+
+    Args:
+      grn:              the goods-receipt doc ({items: [{product_id,
+                        accepted_qty, ...}]}).
+      prior_bill_lines: the lines of EVERY vendor bill already linked to that
+                        GRN (flattened; may be empty).
+      proposed_lines:   the computed lines of the invoice being booked.
+
+    Returns:
+      [] when nothing over-bills, else one dict per offending product:
+      {product_id, accepted_qty, already_billed_qty, this_bill_qty,
+       cumulative_qty, over_by}.
+
+    Lines with no product_id (freight / service / rounding lines) are ignored --
+    they carry no receivable quantity. A GRN whose items carry no product_id at
+    all yields NO accepted index, and the check returns [] rather than flagging
+    every line: we cannot prove an over-bill against a receipt we cannot key.
+    """
+    accepted = _grn_accepted_by_product(grn)
+    if not accepted:
+        return []
+    prior = _invoice_by_product(prior_bill_lines)
+    proposed = _invoice_by_product(proposed_lines)
+
+    out: List[dict] = []
+    for pid, line in proposed.items():
+        this_qty = _f(line.get("invoiced_qty"))
+        if this_qty <= 0:
+            continue
+        accepted_qty = _f(accepted.get(pid, 0))
+        already = _f((prior.get(pid) or {}).get("invoiced_qty"))
+        cumulative = round(already + this_qty, 2)
+        over_by = round(cumulative - accepted_qty, 2)
+        if over_by > _QTY_EPS:
+            out.append(
+                {
+                    "product_id": pid,
+                    "accepted_qty": accepted_qty,
+                    "already_billed_qty": already,
+                    "this_bill_qty": this_qty,
+                    "cumulative_qty": cumulative,
+                    "over_by": over_by,
+                }
+            )
+    return out
+
+
+def billing_claim_thresholds(
+    grn: Optional[dict],
+    proposed_lines: Optional[List[dict]],
+) -> Optional[Dict[str, dict]]:
+    """Per-product ceilings for an ATOMIC claim of a receipt's billable units.
+
+    :func:`over_billed_products` is a read-then-decide check: two bookings of
+    the same receipt in the same instant both read the same prior-bill set,
+    both pass, and both insert. This turns the same rule into a value a guarded
+    single-document update can test, so only one of them can win.
+
+    For each product the invoice bills, returns:
+      {product_id: {"qty": <units this bill takes>,
+                    "max_prior": <largest already-claimed qty that still fits>}}
+
+    ``max_prior`` is ``accepted_qty - qty`` widened by the same float-noise
+    epsilon the cap uses, so an exact-balance part bill (12 then 8 of 20) is
+    never refused by rounding. The caller turns each entry into a filter clause
+    -- "the counter is missing, or no greater than max_prior" -- and $incs by
+    ``qty`` in the same update.
+
+    Returns None when the bill overshoots the receipt on its OWN (a negative
+    ceiling): there is no prior quantity that would make it fit, so the claim
+    must be refused outright rather than expressed as a filter. Returns {} when
+    there is nothing to claim (no keyed products, or a receipt we cannot key --
+    same fail-open-on-unknowable rule as over_billed_products).
+    """
+    accepted = _grn_accepted_by_product(grn)
+    if not accepted:
+        return {}
+    proposed = _invoice_by_product(proposed_lines)
+
+    out: Dict[str, dict] = {}
+    for pid, line in proposed.items():
+        qty = _f(line.get("invoiced_qty"))
+        if qty <= 0:
+            continue
+        max_prior = round(_f(accepted.get(pid, 0)) - qty + _QTY_EPS, 6)
+        if max_prior < 0:
+            return None
+        out[pid] = {"qty": qty, "max_prior": max_prior}
+    return out
+
+
+def billed_qty_by_product(bill_lines: Optional[List[dict]]) -> Dict[str, float]:
+    """{product_id: units} rolled up from bill lines -- the quantity a set of
+    already-booked bills has consumed from a receipt.
+
+    Same keying and coercion as the cap itself (lines with no product_id carry
+    no receivable quantity and are skipped), so the atomic claim can baseline
+    its counter from exactly the totals the cap measured.
+    """
+    return {
+        pid: _f(line.get("invoiced_qty"))
+        for pid, line in _invoice_by_product(bill_lines).items()
+    }

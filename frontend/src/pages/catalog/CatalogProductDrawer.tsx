@@ -237,15 +237,23 @@ export function CatalogProductDrawer({
   const ecom = (doc.ecom || null) as Record<string, unknown> | null;
 
   // Wire the single-product push (previously orphaned pushApi.pushProduct).
-  // DARK by default: a SIMULATED dry-run unless the owner has armed the triple
-  // gate on the server -- formatPushResult stamps SIMULATED vs LIVE on the toast.
+  // ONE PRESS, GOES LIVE (owner ruling 2026-08-25). The second push door has to
+  // say the same thing as the first (OnlineProductsPage): with the gates armed
+  // this PUBLISHES -- the product is in front of customers immediately -- a
+  // product with no photograph is REFUSED, and taking one back off the website
+  // is done from the Online Store screen. DARK by default: a SIMULATED dry-run
+  // unless the owner has armed the triple gate on the server, and
+  // formatPushResult stamps SIMULATED vs LIVE on the toast.
   const [pushingEcom, setPushingEcom] = useState(false);
   const pushToWebsite = async () => {
     if (!canPush || pushingEcom || !id) return;
     const ok = window.confirm(
-      `Send "${name}" to the website?\n\n` +
+      `Publish "${name}" to the website?\n\n` +
+        'When the live gates are armed this puts the product IN FRONT OF CUSTOMERS on ' +
+        'bettervision.in immediately. A product with no photograph is refused. To pull it ' +
+        'back afterwards, use "Take off website" on Online Store > Products.\n\n' +
         'If the live gates are off this runs as a dry-run (SIMULATED) and nothing reaches ' +
-        'the storefront. When the gates are armed this writes to the live website.',
+        'the storefront.',
     );
     if (!ok) return;
     setPushingEcom(true);
@@ -708,7 +716,7 @@ export function CatalogProductDrawer({
                   onClick={pushToWebsite}
                   disabled={pushingEcom}
                   className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-                  title="Send this product to the website (a dry-run unless the live gates are armed)"
+                  title="Publish this product to the website — with the live gates armed it goes in front of customers immediately (a dry-run when they are off). No photograph, no publish."
                 >
                   {pushingEcom ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

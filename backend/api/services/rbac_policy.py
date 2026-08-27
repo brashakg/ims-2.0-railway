@@ -3653,13 +3653,18 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/inventory/stock-count/{count_id}/reconcile",
-        "allowed": [
-            "ADMIN",
-            "AREA_MANAGER",
-            "CATALOG_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        # OWNER RULING 2026-08-25 (#8): writing off missing stock is ADMIN /
+        # SUPERADMIN ONLY, at every value. Counting stays open to the manager
+        # ladder; destroying it off the books does not.
+        "allowed": ["ADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/inventory/stock-count/{count_id}/reconcile/finish",
+        # Closes a write-off that destroyed the stock but lost its audit
+        # write. It destroys nothing itself, but it is a door onto a stock
+        # write-off, so it carries the same ADMIN-only gate.
+        "allowed": ["ADMIN"],
     },
     {
         "method": "POST",
@@ -4790,6 +4795,17 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/online-store/push/product/{product_id}",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # TAKE-DOWN (owner ruling 2026-08-25): pull ONE product off the live
+    # storefront. Same {ADMIN, SUPERADMIN} set as every other row in this push
+    # family, so the module grant-union is UNCHANGED (no capability broadening
+    # -- see the rbac capability-union gotcha). The literal /take-down suffix
+    # is more specific than the /product/{product_id} POST above and resolves
+    # on its own.
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/push/product/{product_id}/take-down",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {

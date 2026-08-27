@@ -139,3 +139,32 @@ def vendor_name_map(db, vendor_ids: Iterable) -> Dict[str, str]:
     except Exception:  # noqa: BLE001
         return out
     return out
+
+
+def stamp_user_names(db, docs: Iterable, fields: Iterable[str]) -> None:
+    """Add a ``<field>_name`` sibling beside each raw user id, in place.
+
+    The house contract (see the module docstring) is that a router ADDS the
+    human name beside the id it already returns, instead of leaving screens to
+    print "user-superadmin" at the reader. This is the batched, generic form of
+    that: pass the sub-documents that hold the ids and the id field names.
+
+    ONE users read for the whole batch (never N+1). Fail-soft in both
+    directions: a None/absent doc is skipped, and an id that no longer resolves
+    simply gets NO ``_name`` sibling -- the caller then falls back to printing
+    the id, which stays traceable and is never an invented name.
+    """
+    rows = [d for d in docs if isinstance(d, dict)]
+    flds = [f for f in fields]
+    if not rows or not flds:
+        return
+    names = user_name_map(db, [d.get(f) for d in rows for f in flds])
+    if not names:
+        return
+    for d in rows:
+        for f in flds:
+            raw = d.get(f)
+            if raw and not d.get(f + "_name"):
+                resolved = names.get(str(raw))
+                if resolved:
+                    d[f + "_name"] = resolved

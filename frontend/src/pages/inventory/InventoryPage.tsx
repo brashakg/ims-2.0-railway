@@ -70,7 +70,7 @@ import { SerialNumberTracker } from '../../components/inventory/SerialNumberTrac
 import { StockAgingReport } from '../../components/inventory/StockAgingReport';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
-import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
+import { StockAudit } from './StockAudit';
 import { ContactLensInventoryWidget, ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
 import { QuarantineQueue } from '../../components/inventory/QuarantineQueue';
 import { BrandInsightsWidget } from '../../components/inventory/BrandInsightsWidget';
@@ -1620,9 +1620,11 @@ export function InventoryPage() {
         <NonMovingStockWidget />
       )}
 
-      {/* Stock Count Scanning Tab */}
+      {/* Stock Count Tab -- the real count screen (sessions + count sheet).
+          This tab used to render the scanner ALONE, with no session behind it,
+          so every quantity typed here was calculated and discarded. */}
       {activeTab === 'stock-count' && (
-        <StockCountScanningInterface />
+        <StockAudit />
       )}
 
       {/* Contact Lens Inventory + Expiry Tab */}
