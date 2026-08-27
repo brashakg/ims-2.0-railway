@@ -854,6 +854,242 @@ _REGISTRY_LIST: List[PolicySpec] = [
         help="Check-in after this 24h time is auto-marked HALF_DAY (only when "
         "'Auto-mark half-day' is ON). Blank disables the late-arrival trigger.",
     ),
+    # ------------------------------------------------------------------
+    # Previously-unreachable keys (registered 2026-08-27). Each of these was
+    # already read in code via get_policy(...) but MISSING from this registry,
+    # so get_policy returned the caller's `default` before ever consulting the
+    # DB scopes / env / Settings -- i.e. the setting could never be changed.
+    # Every default below MIRRORS the code fallback at its call site, so a
+    # fresh DB (and every existing deploy) behaves byte-identically; the keys
+    # merely become genuinely tunable. Guarded by
+    # tests/test_policy_registry_guard.py.
+    # ------------------------------------------------------------------
+    # --- Bank / cash / POS reconciliation (#16, routers/bank_reconciliation.py) ---
+    _spec(
+        key="reconciliation.variance_tolerance_paise",
+        type="money_paisa",
+        default=100,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN", "ACCOUNTANT"),
+        group="Finance",
+        label="Bank reconciliation match tolerance",
+        help="Absolute gap (paisa) within which a bank line matches a book "
+        "figure during bank/cash/POS reconciliation. Default Rs 1.",
+        minimum=0,
+    ),
+    _spec(
+        key="reconciliation.mdr_bps",
+        type="int",
+        default=0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN", "ACCOUNTANT"),
+        group="Finance",
+        label="Digital MDR (basis points)",
+        help="Merchant-discount-rate fee in basis points deducted from "
+        "card/UPI/wallet takings before they hit the bank -- used to net "
+        "expected digital deposits in reconciliation. 100 bps = 1%.",
+        minimum=0,
+        maximum=2000,
+    ),
+    # --- F26 leave fast-path (routers/hr.py) ---
+    _spec(
+        key="approval.leave_fastpath_days",
+        type="days",
+        default=2,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="HR",
+        label="Leave fast-path window (days)",
+        help="A CASUAL/SICK leave starting in fewer than this many days is "
+        "routed through the urgent (PIN) approval fast path instead of the "
+        "standard flow.",
+        minimum=0,
+        maximum=30,
+    ),
+    # --- Roster coverage (services/roster_engine.py; also read by TASKMASTER) ---
+    _spec(
+        key="hr.roster_required_optometrists",
+        type="int",
+        default=1,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="HR",
+        label="Required optometrists per day",
+        help="Minimum optometrists a published roster must cover per store per "
+        "day; a shortfall surfaces as a coverage breach.",
+        minimum=0,
+        maximum=10,
+    ),
+    # --- Vendor RMA / RTV credit approval (services/vendor_rma.py) ---
+    _spec(
+        key="rtv.credit.approval_above",
+        type="money_paisa",
+        default=5_000_000,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Refunds & Returns",
+        label="Vendor credit needs approval above",
+        help="A return-to-vendor credit (or credit variance) at/above this "
+        "amount requires a maker-checker approval before it is recorded. "
+        "Default Rs 50,000.",
+        minimum=0,
+    ),
+    # --- E3 experimental POS sell flag (routers/item_events.py). DARK by
+    # default and SUPERADMIN-only: flipping it ON only opens the manual
+    # /items/{id}/sell CAS endpoint -- the main POS order flow does NOT emit
+    # E3 SELL events yet (E3w deferred, owner-gated), so this has no effect on
+    # billing. Registered so the designed per-store gate is actually flippable.
+    _spec(
+        key="FF_E3_POS_SELL",
+        type="bool",
+        default=False,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN",),
+        group="Feature Flags",
+        label="E3 unit-sell endpoint (experimental)",
+        help="Enables the concurrency-safe AVAILABLE->SOLD item-event endpoint. "
+        "EXPERIMENTAL: nothing in the app calls it yet; POS billing is "
+        "unaffected either way. Leave OFF unless instructed.",
+    ),
+    # --- Blind stock take (services/blind_stock_take.py) ---
+    _spec(
+        key="inventory.blind_count_tolerance_units",
+        type="int",
+        default=0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Blind count variance tolerance (units)",
+        help="Per-SKU counted-vs-expected gap (units) treated as MATCHED in a "
+        "blind stock take. 0 = exact match required.",
+        minimum=0,
+        maximum=100,
+    ),
+    _spec(
+        key="inventory.blind_count_reopen_roles",
+        type="json",
+        default=["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Blind count reopen roles",
+        help="Roles permitted to reopen a locked blind stock take (ADMIN and "
+        "SUPERADMIN are always permitted regardless of this list).",
+    ),
+    # --- Inventory balancing (services/inventory_balancing.py) ---
+    _spec(
+        key="inventory.balancing_window_days",
+        type="days",
+        default=90,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Balancing sales window (days)",
+        help="Sales lookback window used to compute per-store run rates for "
+        "cross-store rebalancing proposals.",
+        minimum=7,
+        maximum=365,
+    ),
+    _spec(
+        key="inventory.overstock_days_cover",
+        type="days",
+        default=120,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Overstock threshold (days of cover)",
+        help="A SKU with more days-of-cover than this is classed OVERSTOCK "
+        "(a rebalancing donor).",
+        minimum=1,
+        maximum=730,
+    ),
+    _spec(
+        key="inventory.understock_days_cover",
+        type="days",
+        default=21,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Understock threshold (days of cover)",
+        help="A SKU with fewer days-of-cover than this is classed UNDERSTOCK "
+        "(a rebalancing recipient).",
+        minimum=1,
+        maximum=365,
+    ),
+    _spec(
+        key="inventory.target_days_cover",
+        type="days",
+        default=45,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Operations",
+        label="Rebalancing target (days of cover)",
+        help="Days-of-cover a rebalancing move tops the recipient store up to.",
+        minimum=1,
+        maximum=730,
+    ),
+    # --- Petty cash (services/petty_cash_service.py + settlement). Rupee
+    # floats, matching the service math (NOT paisa -- the service operates in
+    # rupees end to end). ---
+    _spec(
+        key="petty_cash.float_limit",
+        type="float",
+        default=5000.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Petty Cash",
+        label="Float limit (rupees)",
+        help="Maximum petty-cash float a store may hold.",
+        minimum=0,
+    ),
+    _spec(
+        key="petty_cash.low_balance_threshold",
+        type="float",
+        default=500.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Petty Cash",
+        label="Low-balance alert threshold (rupees)",
+        help="A payout dropping the float below this fires the low-balance "
+        "alert to the manager.",
+        minimum=0,
+    ),
+    _spec(
+        key="petty_cash.auto_approval_threshold",
+        type="float",
+        default=500.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Petty Cash",
+        label="Auto-approval threshold (rupees)",
+        help="A petty-cash payout strictly above this requires a PIN-gated "
+        "approval before the float is debited.",
+        minimum=0,
+    ),
+    _spec(
+        key="petty_cash.receipt_required_above",
+        type="float",
+        default=200.0,
+        scopes=("global",),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Petty Cash",
+        label="Receipt mandatory above (rupees)",
+        help="Any petty-cash claim strictly above this must carry a receipt. "
+        "Read at global scope only.",
+        minimum=0,
+    ),
+    _spec(
+        key="petty_cash.settlement_tolerance",
+        type="float",
+        default=0.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Petty Cash",
+        label="Settlement variance tolerance (rupees)",
+        help="Counted-vs-expected gap within which an EOD petty-cash "
+        "settlement closes BALANCED. 0 = exact match required.",
+        minimum=0,
+    ),
 ]
 
 REGISTRY = {s.key: s for s in _REGISTRY_LIST}

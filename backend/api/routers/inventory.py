@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Dict
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import uuid
 import logging
 
@@ -20,6 +21,18 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from
 # the POS / PO / GRN / till guards -- do NOT add a second detector here.
 from ..services.stores_util import is_online_store
+
+# E3: the shared decision of "is this unit on hand?" -- see the block comment
+# further down for exactly which readers use it, which do not, and why it may
+# never be re-typed here as a status list. `is_on_hand` / `canonical_state` are
+# the same rule for a unit already read into Python (the ledger groups BY
+# status, so it cannot use the $match form).
+from ..services.item_events import (
+    on_hand_match as _on_hand_status_clause,
+    canonical_state,
+    is_on_hand,
+    StockState,
+)
 from ..utils.ist import ist_date_str
 from ..dependencies import (
     get_stock_repository,
@@ -183,31 +196,59 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
         )
 
 
+# "This unit is physically here" is decided by item_events.on_hand_match.
+#
+# WHAT READS IT (measured, and differentially probed over 18 storage shapes by
+# backend/tests/test_on_hand_is_one_rule.py): the count's coverage snapshot and
+# its variance, the stock-count scan screen, /non-moving, /aging,
+# /overstock-analysis, the CL drawer listing, the CL power grid's near-expiry
+# flag (via is_on_hand -- it must agree with the grid's own on_hand column),
+# the Stock Ledger (via canonical_state, because it groups BY status) and
+# _on_hand_by_product.
+#
+# WHAT DOES NOT, and is NOT claimed to: `transfer_recommendations` below still
+# matches a bare "AVAILABLE", because its other half is
+# StockRepository.find_low_stock and the two must move together (POS-owned
+# repository -- owner sign-off). Every ALLOCATION door in this router
+# (find_one_and_update on status=="AVAILABLE") is a different question -- "may
+# I take THIS unit" -- and is deliberately strict.
+#
+# It used to be written out separately in each place and the copies drifted, on
+# CASE. The count's coverage listed ["AVAILABLE", "RESERVED"]; the aging,
+# overstock, non-moving and CL readers listed their own variants; the ledger
+# bucketed on `status == "RESERVED"`. A unit in the legacy lowercase
+# "available" / "reserved" / "IN_STOCK" shape, or with no `status` field at
+# all, was on hand to one reader and gone to the next -- so skipping that
+# product cost the counter nothing and a half-walked shelf locked as a clean
+# day-end. The owner ruled the blind count IS the day-end (2026-08-25), which
+# is exactly the lie that must not be possible.
+#
+# The one deliberate difference between the two questions is RESERVED, and it
+# is the `include_reserved` flag, not a second list:
+#   * NOT on hand for a SALE. The unit is committed to somebody else's order,
+#     so catalog availability / endless aisle / valuation must not offer it.
+#   * IS on hand for a COUNT. It is still standing in this shop, so the
+#     counter walking the shelf will find it and must be expected to.
+#
+# `_on_hand_status_clause` is item_events.on_hand_match, imported at the top of
+# this module. Do not re-implement it here.
+
+
 def _on_hand_by_product(
     db, product_ids: List[str], store_id: Optional[str] = None
 ) -> Dict[str, int]:
     """Count on-hand units per product from the serialized `stock` collection
     (one row per unit). A unit is on-hand when its status is an available one
     (or absent) and quantity > 0. Optionally scoped to a store. Fail-soft -> {}.
+
+    This is the SELLABLE question -- RESERVED is excluded. The count asks the
+    PHYSICAL one; see `_on_hand_status_clause`.
     """
     if db is None or not product_ids:
         return {}
-    # E3: reuse the canonical on-hand allowlist + the explicit non-sellable
-    # exclusion list (QUARANTINED / UNDER_AUDIT / BLIND_COUNT / TRANSFERRED /
-    # SOLD / VOID / DAMAGED / RTV) from the item-event ledger service so every
-    # rollup shares one definition. The $nin makes the exclusion intent-explicit
-    # even for a unit whose status was set outside the allowlist.
-    from ..services.item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
-
-    avail = list(ON_HAND_STATUSES)
     match: dict = {
         "product_id": {"$in": list(product_ids)},
-        "status": {"$nin": list(EXCLUDED_STATUSES)},
-        "$or": [
-            {"status": {"$in": avail}},
-            {"status": {"$exists": False}},
-            {"status": None},
-        ],
+        **_on_hand_status_clause(),
     }
     if store_id:
         match["store_id"] = store_id
@@ -528,9 +569,10 @@ def _build_store_ledger(
 
     Aggregates `stock_units` by (product_id, status) so a single product
     with multiple serialized units rolls into ONE row carrying:
-      - on-hand count (AVAILABLE + IN_STOCK + status-absent, sums `quantity`
-        but defaults to 1 when missing because units are typically qty=1)
-      - reserved count (RESERVED)
+      - on-hand count (anything canonicalising to AVAILABLE, plus a unit with
+        no status at all; sums `quantity` but defaults to 1 when missing
+        because units are typically qty=1)
+      - reserved count (anything canonicalising to RESERVED)
       - product master fields (sku, name, brand, category, mrp, offer_price)
       - a representative barcode + location_code from any AVAILABLE unit
         (so the row's Barcode + Location columns are populated)
@@ -548,7 +590,6 @@ def _build_store_ledger(
 
     # ---- 1. Roll up stock_units per product at this store -------------
     if store_id:
-        avail_statuses = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
         try:
             pipeline = [
                 {"$match": {"store_id": store_id}},
@@ -580,7 +621,12 @@ def _build_store_ledger(
                 qty = int(row.get("qty") or 0)
                 if not pid:
                     continue
-                if status in avail_statuses or status is None:
+                # Same rule as the $match readers, answered in Python because
+                # the pipeline groups BY status: a copied allowlist here (and a
+                # bare `== "RESERVED"` below) is what made a lowercase
+                # `reserved` unit fall into neither bucket and vanish from the
+                # ledger entirely.
+                if is_on_hand(status):
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # Capture a sample barcode/location from any available unit
                     # for the Barcode + Location columns on the ledger row.
@@ -589,7 +635,7 @@ def _build_store_ledger(
                             "barcode": row.get("barcode") or "",
                             "location_code": row.get("location_code") or "",
                         }
-                elif status == "RESERVED":
+                elif canonical_state(status) is StockState.RESERVED:
                     reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] stock aggregation failed: %s", exc)
@@ -1994,12 +2040,14 @@ async def get_stock_aging_report(
     thirty_days_ago = now - timedelta(days=30)
     ninety_days_ago = now - timedelta(days=90)
 
-    # 1. Get all available stock grouped by product
+    # 1. Get all on-hand stock grouped by product. Aging is the PHYSICAL
+    # question (a reserved frame is still ageing on this shelf), so it reads
+    # the shared clause with RESERVED on -- never its own status list.
     stock_pipeline = [
         {
             "$match": {
                 "store_id": active_store,
-                "status": {"$in": ["AVAILABLE", "RESERVED"]},
+                **_on_hand_status_clause(include_reserved=True),
             }
         },
         {
@@ -2228,46 +2276,45 @@ async def start_stock_count(
     # When a category is requested, first resolve the product_ids that belong
     # to it, then scope the stock aggregation to those ids. This ensures that
     # a category-limited count only snapshots the right products.
-    system_quantities: Dict[str, int] = {}
-    if stock_repo is not None:
-        # Resolve category -> product_ids when filtering is requested.
-        category_product_ids: Optional[List[str]] = None
-        if request.category:
-            product_repo = get_product_repository()
-            if product_repo is not None:
-                try:
-                    cat_products = product_repo.find_many(
-                        {"category": request.category, "is_active": True}, limit=5000
-                    )
-                    category_product_ids = [
-                        str(p.get("product_id") or p.get("_id") or "")
-                        for p in (cat_products or [])
-                        if p.get("product_id") or p.get("_id")
-                    ]
-                except Exception as _exc:
-                    logger.warning(
-                        "[INVENTORY] category product lookup failed: %s", _exc
-                    )
-
-        match_clause: dict = {
-            "store_id": active_store,
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
-        }
-        if category_product_ids is not None:
-            # Empty list means no products match -- yield no system quantities
-            # rather than counting all products (which would be wrong).
-            if not category_product_ids:
-                pass  # system_quantities stays empty; skip the aggregation
-            else:
-                match_clause["product_id"] = {"$in": category_product_ids}
-
-        if category_product_ids is None or category_product_ids:
-            pipeline = [
-                {"$match": match_clause},
-                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
-            ]
-            for r in stock_repo.aggregate(pipeline):
-                system_quantities[r["_id"]] = r["qty"]
+    system_quantities: Optional[Dict[str, int]] = {}
+    # WHICH units were on hand per product when the session opened -- see the
+    # "ONE SNAPSHOT MECHANISM" note above. Without it, a sale and a receipt
+    # that cancel out leave the line looking untouched.
+    system_unit_fingerprints: Dict[str, str] = {}
+    # Resolve category -> product_ids when filtering is requested, with the
+    # SAME resolver the scope snapshot uses. None = the category could not be
+    # resolved; the old fallback silently snapshotted the WHOLE STORE instead,
+    # handing a category count a scope it never asked for.
+    category_scope: Optional[List[str]] = None
+    scope_failed = False
+    if request.category:
+        category_scope = _category_product_ids(
+            db, request.category, product_repo=get_product_repository()
+        )
+        scope_failed = category_scope is None
+    if stock_repo is None or scope_failed:
+        # "I could not read the shelf" is NOT an EMPTY shelf. {} completes as
+        # "nothing was expected -> full count, coverage 100%"; None completes
+        # as coverage UNKNOWN and never a clean day-end (see `coverage`).
+        system_quantities = None
+    elif category_scope is not None and not category_scope:
+        # A category with no products expects nothing -- a real, empty scope.
+        # Skip the aggregation rather than run it store-wide.
+        pass
+    else:
+        pipeline = [
+            {"$match": _countable_match(active_store, category_scope)},
+            _COUNTABLE_GROUP,
+        ]
+        for r in stock_repo.aggregate(pipeline):
+            system_quantities[r["_id"]] = r["qty"]
+            # Absent only if the engine did not return the unit ids; the
+            # completion check then falls back to the quantity rather than
+            # flagging every line as moved.
+            if "units" in r:
+                system_unit_fingerprints[str(r["_id"])] = _unit_fingerprint(
+                    r.get("units")
+                )
 
     count_doc = {
         "count_id": count_id,
@@ -2284,6 +2331,7 @@ async def start_stock_count(
         ),
         "items": [],
         "system_quantities": system_quantities,
+        "system_unit_fingerprints": system_unit_fingerprints,
         "completed_at": None,
         "variances": [],
         "items_counted": 0,
@@ -2330,47 +2378,184 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
     return costs
 
 
-def _on_hand_now(db, store_id: str, product_ids: List[str]) -> Dict[str, int]:
-    """Live on-hand per product at this store, counted the SAME way the
-    session's opening snapshot was (one serialized row == one unit,
-    AVAILABLE + RESERVED).
+# ---------------------------------------------------------------------------
+# ONE SNAPSHOT MECHANISM for every physical count in the building.
+#
+# A count decides "did this line move while the session was open?" by
+# comparing the picture taken when the session opened against the picture
+# now. Both pictures must therefore be taken the SAME way -- one serialized
+# row == one unit, on hand per `_countable_match` -- and both must record
+# not only HOW MANY units were on hand but WHICH ONES.
+#
+# Why WHICH ones: quantities cancel. One frame sells at the till at 10:15 and
+# one is received into the stockroom at 11:00; the total is unchanged, the
+# line reads as untouched, the counter's honest shelf count of 2 is banked as
+# shrinkage, and the write-off destroys a frame the shop still owns. A set of
+# unit identities cannot cancel like that.
+#
+# Deliberately NO timestamps anywhere in this comparison: the till stamps
+# `sold_at` with a local-naive datetime.now() while the count stamps a UTC ISO
+# string, and netting those against each other is the mixed-clock trap
+# (BUG-104). Comparing sets answers the same question without reading a clock.
+# ---------------------------------------------------------------------------
 
-    Why this exists: the count compares what was counted against the snapshot
-    taken when the session OPENED. A frame sold at the till while the session
-    is open leaves the shelf one short of that snapshot, so an honest count
-    read as a shortage and the write-off then destroyed a real, sellable
-    frame -- which, under the block-the-oversell rule, goes on to refuse a
-    genuine sale. Comparing the snapshot with this live figure says whether a
-    line moved WITHOUT comparing any two clocks: the till stamps `sold_at`
-    with a local-naive datetime.now() and the count stamps a UTC ISO string,
-    and netting those against each other is the mixed-clock trap (BUG-104).
+
+def _countable_match(
+    store_id: str, product_ids: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """The $match EVERY count snapshot uses -- the opening snapshot, the
+    coverage scope, the live re-read at completion, and the blind count's
+    expected on-hand. product_ids=None means the whole store.
+
+    "On hand for a count" is not a second list of statuses: it is the shared
+    `_on_hand_status_clause` with RESERVED switched on (a reserved unit is not
+    sellable but it IS standing on this shop's shelf). One definition, one
+    named difference -- see the block comment above `_on_hand_status_clause`.
     """
-    live: Dict[str, int] = {}
-    ids = [pid for pid in product_ids if pid]
-    if not ids or db is None:
-        return live
+    match: Dict[str, Any] = {
+        "store_id": store_id,
+        **_on_hand_status_clause(include_reserved=True),
+    }
+    if product_ids is not None:
+        match["product_id"] = {"$in": list(product_ids)}
+    return match
+
+
+# HOW MANY units, and WHICH ones. Both call sites (the opening snapshot and
+# the re-read at completion) share this stage so the two pictures compare.
+# ponytail: the unit ids come back to Python and are hashed away immediately.
+# At six shops that is a few thousand ids once per count; if a store ever grows
+# past that, hash them inside the pipeline instead.
+_COUNTABLE_GROUP = {
+    "$group": {
+        "_id": "$product_id",
+        "qty": {"$sum": 1},
+        "units": {"$addToSet": "$_id"},
+    }
+}
+
+
+def _unit_fingerprint(unit_ids) -> str:
+    """A short, stable fingerprint of WHICH units were on hand.
+
+    Order-independent (it is a set) and cheap to store beside the quantity, so
+    the count document does not have to carry every unit id. Two different
+    sets of units effectively never share a fingerprint; two identical sets
+    always do.
+    """
+    joined = "|".join(sorted(str(u) for u in (unit_ids or [])))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _category_product_ids(
+    db, category: str, product_repo=None
+) -> Optional[List[str]]:
+    """Every active product_id in `category` -- the ONE resolver both count
+    doors use (the cycle count's opening snapshot and the scope snapshot; it
+    may not be re-typed in either).
+
+    The cycle-count door passes its injected product repository (the same
+    data door it uses for every other product read); db-only callers (the
+    blind scope snapshot) fall back to the raw collection. One rule, two
+    transports over the same collection.
+
+    None = the lookup FAILED, which is "unanswerable", never "the whole
+    store": a category count that cannot resolve its category must not
+    silently widen to everything. [] is a real answer -- a category with no
+    products expects nothing."""
+    try:
+        if product_repo is not None:
+            rows = product_repo.find_many(
+                {"category": category, "is_active": True}, limit=5000
+            )
+        elif db is not None:
+            rows = db.get_collection("products").find(
+                {"category": category, "is_active": True},
+                {"_id": 1, "product_id": 1},
+            )
+        else:
+            return None
+        return [
+            str(p.get("product_id") or p.get("_id") or "")
+            for p in (rows or [])
+            if p.get("product_id") or p.get("_id")
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] category product lookup failed: %s", exc)
+        return None
+
+
+def _scoped_product_ids(
+    db, store_id: str, category: Optional[str] = None
+) -> Optional[List[str]]:
+    """Every product this store is expected to have on hand right now
+    (optionally narrowed to one category) -- the SET a count is judged
+    complete against.
+
+    Snapshotting this when a session OPENS is what makes "how much of the
+    shelf was actually walked" answerable later. Without it, counting 1
+    product out of 400 reports a clean shelf.
+
+    Returns None when the question CANNOT be answered (no store behind it, a
+    failed read) -- which is not the same as an empty shelf. An empty list
+    would tell the count "nothing was expected, so you walked all of it",
+    which is the very lie this exists to stop.
+    """
+    if db is None or not store_id:
+        return None
+    product_ids: Optional[List[str]] = None
+    if category:
+        product_ids = _category_product_ids(db, category)
+        if product_ids is None:
+            return None
+        # A category with no products expects nothing -- it must NOT fall back
+        # to counting the whole store.
+        if not product_ids:
+            return []
     try:
         rows = db.get_collection("stock_units").aggregate(
             [
-                {
-                    "$match": {
-                        "store_id": store_id,
-                        "product_id": {"$in": ids},
-                        "status": {"$in": ["AVAILABLE", "RESERVED"]},
-                    }
-                },
-                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
+                {"$match": _countable_match(store_id, product_ids)},
+                {"$group": {"_id": "$product_id"}},
             ]
         )
+        return sorted({str(r["_id"]) for r in rows if r.get("_id")})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] scope snapshot failed: %s", exc)
+        return None
+
+
+def _on_hand_now(db, store_id: str, product_ids: List[str]):
+    """Live on-hand at this store: (quantities, unit fingerprints) per product,
+    taken exactly the way the session's opening snapshot was.
+
+    The quantity says how far off the count is; the fingerprint says whether
+    the line moved at all -- see the block comment above for why a quantity
+    cannot answer the second question.
+    """
+    live: Dict[str, int] = {}
+    prints: Dict[str, str] = {}
+    ids = [pid for pid in product_ids if pid]
+    if not ids or db is None:
+        return live, prints
+    try:
+        rows = db.get_collection("stock_units").aggregate(
+            [{"$match": _countable_match(store_id, ids)}, _COUNTABLE_GROUP]
+        )
         for r in rows:
-            live[str(r["_id"])] = int(r.get("qty", 0) or 0)
+            pid = str(r["_id"])
+            live[pid] = int(r.get("qty", 0) or 0)
+            prints[pid] = _unit_fingerprint(r.get("units"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INVENTORY] live on-hand check failed: %s", exc)
+        return live, prints
     # A product with every unit gone reports no group row at all -- that is a
-    # real zero, not "unknown", and it is exactly the movement worth catching.
+    # real zero (and an empty set), not "unknown", and it is exactly the
+    # movement worth catching.
     for pid in ids:
         live.setdefault(pid, 0)
-    return live
+        prints.setdefault(pid, _unit_fingerprint([]))
+    return live, prints
 
 
 def _expected_lines(db, count_doc: dict) -> List[dict]:
@@ -2564,7 +2749,11 @@ async def complete_stock_count(
                 status_code=400, detail="Stock count is not in progress"
             )
 
-        system_quantities = count_doc.get("system_quantities", {})
+        # None = the opening snapshot could not be taken (scope unreadable).
+        # NOT the same as {} (a shelf with nothing on hand): coverage below
+        # must report UNKNOWN for the first and a clean 100% for the second.
+        snapshot = count_doc.get("system_quantities", {})
+        system_quantities = snapshot or {}
         items = count_doc.get("items", [])
 
         # A count with no lines is NOT a count. Completing an empty session used
@@ -2588,9 +2777,10 @@ async def complete_stock_count(
         # opened with. Any line where the two differ has been sold,
         # transferred, received or returned since the counter started, so the
         # difference between snapshot and shelf is not a loss.
-        live_on_hand = _on_hand_now(
+        live_on_hand, live_fingerprints = _on_hand_now(
             db, count_doc.get("store_id", ""), [i.get("product_id", "") for i in items]
         )
+        opening_fingerprints = count_doc.get("system_unit_fingerprints") or {}
 
         variances = []
         total_system = 0
@@ -2612,7 +2802,18 @@ async def complete_stock_count(
             # a shortage out of a sale, and the write-off then destroys a
             # frame the shop still owns and could still sell. Report the line,
             # never bank it as a loss, and never let the write-off take it.
-            moved = system_now != system
+            #
+            # Compare the SET of units, not the total. One frame sold at the
+            # till and one received into the stockroom net to zero: the totals
+            # match, the line looks untouched, and an honest shelf count is
+            # written off as shrinkage. Different units on hand IS movement,
+            # whatever the totals say.
+            opening_print = opening_fingerprints.get(pid)
+            units_changed = (
+                opening_print is not None
+                and live_fingerprints.get(pid) != opening_print
+            )
+            moved = system_now != system or units_changed
             variance = counted - system
             var_pct = round((variance / max(system, 1)) * 100, 2)
             unit_cost = float(costs.get(pid, 0.0) or 0.0)
@@ -2640,6 +2841,7 @@ async def complete_stock_count(
                     "sku": item.get("sku", ""),
                     "system_quantity": system,
                     "system_quantity_now": system_now,
+                    "units_changed_during_count": units_changed,
                     "physical_quantity": counted,
                     "variance": variance,
                     "variance_percentage": var_pct,
@@ -2656,18 +2858,26 @@ async def complete_stock_count(
         # counter gets interrupted -- that is the lie that actually happens.
         # Coverage is measured against the EXPECTED set only: a line for a
         # product the session never expected is an overage, not coverage.
-        expected_ids = set(system_quantities.keys())
-        counted_ids = {i.get("product_id", "") for i in items}
-        products_expected = len(expected_ids)
-        products_not_counted = sorted(expected_ids - counted_ids)
-        products_counted = products_expected - len(products_not_counted)
-        coverage_pct = (
-            round((products_counted / products_expected) * 100, 2)
-            if products_expected
-            else 100.0
+        # The set comparison itself is blind_stock_take.coverage -- the ONE
+        # implementation both counts share (an unreadable snapshot reports
+        # coverage UNKNOWN, never a clean 100%).
+        from ..services.blind_stock_take import coverage as _coverage
+        from ..services.item_events import unknown_status_tokens
+
+        cov = _coverage(
+            None if snapshot is None else system_quantities.keys(),
+            (i.get("product_id", "") for i in items),
         )
-        # A session that expected nothing on hand cannot be a partial count.
-        full_count = not products_not_counted
+        # The vocabulary tripwire (same as the blind lock): a unit whose
+        # status token canonicalises to NOTHING is invisible to the expected
+        # set, so the shelf cannot be certified fully counted while any exist.
+        unknown_tokens = unknown_status_tokens(db, count_doc.get("store_id", ""))
+        if unknown_tokens:
+            cov["full_count"] = False
+        products_expected = cov["products_expected"]
+        products_counted = cov["products_counted"]
+        coverage_pct = cov["coverage_percentage"]
+        full_count = cov["full_count"]
 
         # Overall metrics
         overall_var_pct = round(
@@ -2692,12 +2902,8 @@ async def complete_stock_count(
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
             "lines_moved_during_count": lines_moved,
-            "products_expected": products_expected,
-            "products_counted": products_counted,
-            "products_missed": len(products_not_counted),
-            "products_not_counted": products_not_counted,
-            "coverage_percentage": coverage_pct,
-            "full_count": full_count,
+            **cov,
+            "unknown_status_tokens": unknown_tokens or [],
             "notes": request.notes if request else None,
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
@@ -2720,9 +2926,14 @@ async def complete_stock_count(
                         f"{total_overage} units over (Rs {overage_value:,.2f}) "
                         f"across {len(items)} counted lines. "
                         f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}%. "
-                        f"{products_counted} of {products_expected} expected "
-                        f"products were counted ({coverage_pct}%). "
-                        "Investigate and reconcile."
+                        + (
+                            f"{products_counted} of {products_expected} expected "
+                            f"products were counted ({coverage_pct}%). "
+                            if products_expected is not None
+                            else "How much of the shelf this covered is "
+                            "unknown (the opening scope could not be read). "
+                        )
+                        + "Investigate and reconcile."
                     ),
                     priority=pri,
                     category="Inventory",
@@ -2748,9 +2959,10 @@ async def complete_stock_count(
             "lines_moved_during_count": lines_moved,
             "products_expected": products_expected,
             "products_counted": products_counted,
-            "products_missed": len(products_not_counted),
+            "products_missed": cov["products_missed"],
             "coverage_percentage": coverage_pct,
             "full_count": full_count,
+            "unknown_status_tokens": unknown_tokens or [],
             "variances": variances,
         }
 
@@ -3716,15 +3928,15 @@ async def get_non_moving_stock(
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # BUG FIX: count ONLY on-hand (AVAILABLE/RESERVED) units.
-                # Previously, ALL stock_units rows were counted regardless of
-                # status, so SOLD units inflated current_stock and a product
-                # with 10 sold and 0 available showed current_stock=10.
+                # Count ONLY on-hand units -- counting ALL stock_units rows
+                # let SOLD units inflate current_stock (10 sold, 0 available
+                # showed 10). The PHYSICAL question, through the shared clause:
+                # this reader used to carry its own four-spelling list, which
+                # is how a lowercase `reserved` unit was stock here and gone to
+                # the count.
                 stock_filter = {
                     "product_id": product_id,
-                    "status": {
-                        "$in": ["AVAILABLE", "RESERVED", "available", "reserved"]
-                    },
+                    **_on_hand_status_clause(include_reserved=True),
                 }
                 if active_store:
                     stock_filter["store_id"] = active_store
@@ -3850,7 +4062,7 @@ async def scan_barcode_for_count(
         # returned 0 and produced a false +physical_count variance.
         count_match = {
             "product_id": product_id,
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+            **_on_hand_status_clause(include_reserved=True),
         }
         unit_store = stock.get("store_id")
         if unit_store:
@@ -3965,10 +4177,12 @@ def _load_cl_stock_rows(db, store_id: Optional[str]) -> List[dict]:
 
         cl_product_ids = list(prod_by_id.keys())
 
-        # 2. Pull AVAILABLE stock for those products (store-scoped).
+        # 2. Pull on-hand stock for those products (store-scoped). Physical
+        # question -- a reserved lens box is still in the drawer and still
+        # expiring -- so the shared clause with RESERVED on.
         stock_filter: Dict[str, object] = {
             "product_id": {"$in": cl_product_ids},
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+            **_on_hand_status_clause(include_reserved=True),
         }
         if store_id:
             stock_filter["store_id"] = store_id
@@ -4261,7 +4475,6 @@ async def get_cl_power_grid(
         # window. Fail-soft.
         near: Dict[str, bool] = {}
         if pids:
-            avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
             match: dict = {
                 "product_id": {"$in": pids},
                 "expiry_date": {"$exists": True},
@@ -4272,8 +4485,11 @@ async def get_cl_power_grid(
                 for row in db.get_collection("stock_units").find(
                     match, {"_id": 0, "product_id": 1, "expiry_date": 1, "status": 1}
                 ):
-                    st = row.get("status")
-                    if st is not None and st not in avail:
+                    # The SAME sellable question as the grid's own on_hand
+                    # column (_on_hand_by_product) -- one rule, one answer. A
+                    # Title-case / padded legacy unit must never be counted as
+                    # stock in the cell yet skipped by its expiry warning.
+                    if not is_on_hand(row.get("status")):
                         continue
                     days = compute_days_until_expiry(row.get("expiry_date"))
                     if days is not None and days <= near_expiry_days:
@@ -4581,7 +4797,7 @@ async def get_overstock_analysis(
         # one-by-one compared a single unit against the threshold (which never
         # flags) and emitted a duplicate entry per unit. $ifNull counts legacy
         # rows that predate the `quantity` field as one unit each.
-        stock_match = {"status": {"$in": ["AVAILABLE", "RESERVED"]}}
+        stock_match = dict(_on_hand_status_clause(include_reserved=True))
         if active_store:
             stock_match["store_id"] = active_store
         stock_rows = list(

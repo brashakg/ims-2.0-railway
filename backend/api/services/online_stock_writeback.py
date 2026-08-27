@@ -178,7 +178,7 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     aggregate exceptions internally ('except: pass' -> {}/PARTIAL without
     raising), which would let a Mongo blip default every spine-resolved SKU to
     0 and write absolute 0 live -- so the SAME canonical pipeline (identical
-    match/group, ON_HAND_STATUSES + EXCLUDED_STATUSES from item_events) is run
+    match/group, its status half from item_events.on_hand_match) is run
     INLINE here: ANY exception, including one raised MID-ITERATION after some
     rows were yielded, discards the partial result and returns {}. A pid absent
     from a SUCCESSFULLY completed aggregate legitimately means zero on-hand and
@@ -207,24 +207,21 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     if not sku_to_pid:
         return {}
 
-    # Canonical on-hand pipeline, inlined STRICT (mirrors
-    # inventory._on_hand_by_product's match/group exactly, without its
-    # exception swallow). The cursor is consumed INSIDE the try so a
-    # mid-iteration failure also discards the partial dict.
+    # Canonical on-hand pipeline, STRICT (same match as
+    # inventory._on_hand_by_product, without its exception swallow). The status
+    # half is item_events.on_hand_match -- it used to be copied out here, and a
+    # copy is how the same unit came to be on hand to one reader and gone to
+    # the next. The cursor is consumed INSIDE the try so a mid-iteration
+    # failure also discards the partial dict.
     try:
-        from .item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
+        from .item_events import on_hand_match
 
         stock_coll = db.get_collection("stock_units")
         if stock_coll is None:
             return {}
         match: Dict[str, Any] = {
             "product_id": {"$in": list(sku_to_pid.values())},
-            "status": {"$nin": list(EXCLUDED_STATUSES)},
-            "$or": [
-                {"status": {"$in": list(ON_HAND_STATUSES)}},
-                {"status": {"$exists": False}},
-                {"status": None},
-            ],
+            **on_hand_match(),
         }
         if store_id:
             match["store_id"] = store_id

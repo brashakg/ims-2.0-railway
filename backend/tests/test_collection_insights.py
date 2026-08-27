@@ -309,7 +309,13 @@ def test_stock_rollup_filters_available_and_store():
     db = _FakeDB({"stock_units": coll})
     ci.stock_summary(db, _MEMBERS_2, store_id="BV-01")
     match = coll.pipelines[0][0]["$match"]
-    assert match["status"] == "AVAILABLE"
+    # The status half is THE shared on-hand decision, not a literal typed here:
+    # a bare status == "AVAILABLE" made this reader disagree with every other
+    # on-hand reader about a legacy lowercase / IN_STOCK / status-absent unit.
+    from api.services.item_events import on_hand_match
+
+    assert match["$or"] == on_hand_match()["$or"]
+    assert "status" not in match
     assert match["store_id"] == "BV-01"
     assert set(match["product_id"]["$in"]) == {"P1", "P2"}
     # quantity coalesces to 1 when absent

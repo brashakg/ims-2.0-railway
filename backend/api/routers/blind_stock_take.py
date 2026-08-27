@@ -92,12 +92,44 @@ def _reopen_roles(store_id):
 
 
 def _on_hand_resolver(store_id, product_ids):
-    """System on-hand per product (reused from inventory). Read-only."""
+    """System on-hand per product, read the SAME way this session's expected
+    SET was read (inventory._countable_match, via _on_hand_now). Read-only.
+
+    ONE definition, not two. Coverage used to list ["AVAILABLE", "RESERVED"]
+    while this resolver used the sellable allowlist, so a unit in the legacy
+    "IN_STOCK" / lowercase / no-status shape never entered
+    ``expected_product_ids`` yet still produced a variance -- skipping that
+    product cost the counter nothing and the partial count locked as a clean
+    day-end. Both halves of the verdict now ask the same question.
+    """
     try:
-        from .inventory import _on_hand_by_product
-        return _on_hand_by_product(_get_db(), list(product_ids), store_id) or {}
+        from .inventory import _on_hand_now
+
+        return _on_hand_now(_get_db(), store_id, list(product_ids))[0] or {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _expected_resolver(store_id, scope):
+    """WHICH products this count session is expected to walk.
+
+    The same opening snapshot the cycle count takes (inventory._scoped_product_ids
+    -- one mechanism, not a second one): every product with stock on hand at
+    this store, optionally narrowed by ``scope["category"]``. Read-only.
+
+    None means the scope could NOT be read, and must never be flattened to an
+    empty list: an empty scope reads as "you walked the whole shelf".
+    """
+    try:
+        from .inventory import _scoped_product_ids
+
+        return _scoped_product_ids(
+            _get_db(), store_id, (scope or {}).get("category")
+        )
+    except Exception:  # noqa: BLE001
+        # No scope recorded -> the lock reports the count as incomplete rather
+        # than as a clean day-end. Fail-soft here is fail-honest there.
+        return None
 
 
 def _cost_resolver(product_ids):
@@ -180,7 +212,9 @@ async def open_count(body: OpenBody, current_user: Dict[str, Any] = Depends(get_
     _require(current_user, _COUNT_ROLES, "open a stock count")
     validate_store_access(body.store_id, current_user)
     try:
-        sess = _engine().open_session(store_id=body.store_id, actor=current_user, scope=body.scope)
+        sess = _engine().open_session(store_id=body.store_id, actor=current_user,
+                                      scope=body.scope,
+                                      expected_resolver=_expected_resolver)
     except svc.BlindStockTakeError as exc:
         _raise(exc)
     _audit("blind_count.open", entity_id=sess["session_id"], actor=current_user, store_id=body.store_id, detail={})
