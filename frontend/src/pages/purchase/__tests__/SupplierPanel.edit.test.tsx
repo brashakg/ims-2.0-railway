@@ -94,23 +94,25 @@ describe('SupplierPanel edit button', () => {
 });
 
 describe('SupplierPanel GST treatment chip', () => {
-  it('shows CGST+SGST for a vendor in the same state as the buying store', () => {
+  it('shows CGST+SGST for a vendor in the same state as the buying store', async () => {
+    // FAIL-CLOSED: the chip reads "unknown" until the server's state list
+    // lands, so every verdict below is awaited, never read off the first paint.
     render(<SupplierPanel suppliers={[base]} />);
-    expect(screen.getByText(/CGST \+ SGST/i)).toBeInTheDocument();
+    expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it('shows IGST for a vendor in another state', () => {
+  it('shows IGST for a vendor in another state', async () => {
     const mh: Supplier = { ...base, state: 'Maharashtra', stateCode: '27', gstNumber: '27AAPFU0939F1ZV' };
     render(<SupplierPanel suppliers={[mh]} />);
-    expect(screen.getByText(/\bIGST\b/i)).toBeInTheDocument();
+    expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
   });
 
   it('derives the state code from the GSTIN when the vendor row has none stored', async () => {
     // Legacy vendors created before state_code was persisted.
     const legacy: Supplier = { ...base, stateCode: undefined, gstNumber: '27AAPFU0939F1ZV', state: '' };
     render(<SupplierPanel suppliers={[legacy]} />);
-    expect(screen.getByText(/\bIGST\b/i)).toBeInTheDocument();
+    expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
     // The name is looked up from the server's state-code list, not a second
     // hardcoded copy in the browser.
     expect(await screen.findByText(/Maharashtra/)).toBeInTheDocument();
@@ -129,7 +131,7 @@ describe('SupplierPanel GST treatment chip', () => {
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it("uses the store's REGISTRATION, never its address, to decide the split", () => {
+  it("uses the store's REGISTRATION, never its address, to decide the split", async () => {
     // The configuration this business actually has: a store whose address is in
     // one state while it bills under an entity registered in another (WizOpt's
     // online store bills under BV Opticals Pvt Ltd). stores.py derives
@@ -144,17 +146,17 @@ describe('SupplierPanel GST treatment chip', () => {
       pincode: '', stateCode: '27', gstin: '20AABCU9603R1Z1',
     };
     render(<SupplierPanel suppliers={[base]} />);
-    expect(screen.getByText(/CGST \+ SGST/i)).toBeInTheDocument();
+    expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it("uses the vendor's GSTIN, never a stale stored state code, for the split", () => {
+  it("uses the vendor's GSTIN, never a stale stored state code, for the split", async () => {
     // Same rule on the other side. A vendor row can carry a state_code written
     // before its GSTIN was corrected; the bill will be taxed off the GSTIN, so
     // the card must be too.
     const moved: Supplier = { ...base, stateCode: '20', state: 'Jharkhand', gstNumber: '27AAPFU0939F1ZV' };
     render(<SupplierPanel suppliers={[moved]} />);
-    expect(screen.getByText(/\bIGST\b/i)).toBeInTheDocument();
+    expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
   });
 

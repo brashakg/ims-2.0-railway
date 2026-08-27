@@ -15,6 +15,7 @@ import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
 import { isInterStateSupply } from '../../constants/gst';
+import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type { ComposerVendorOption } from '../../components/purchase/PurchaseOrderComposer';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
@@ -363,11 +364,16 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
   }, [storeId]);
 
   const vendor = suppliers.find((s) => s.id === vendorId);
+  // Server-fed state list: a GSTIN prefix it does not contain ("88...") is not
+  // a state, so the composer says "cannot tell" instead of quoting IGST off a
+  // registration the engine reads no state from. Fail-closed until it loads.
+  const stateNames = useGstStateCodes();
   const interstate =
     vendor && store
       ? isInterStateSupply(
           { gstin: vendor.gstNumber, state: vendor.state },
           { gstin: store.gstin, state: store.state },
+          stateNames,
         )
       : null;
 

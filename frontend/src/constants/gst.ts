@@ -330,8 +330,11 @@ export default {
 // SCREEN previews: the server recomputes the split from the GST numbers on file
 // and its answer is the one that is stored.
 
-/** The 2-digit GST state code out of the first usable candidate (a 15-char
- *  GSTIN, or an already-bare 2-digit code). '' when none resolves. */
+/** The 2-digit DIGIT PREFIX out of the first usable candidate (a 15-char
+ *  GSTIN, or an already-bare 2-digit code). '' when none resolves. This is a
+ *  raw read, NOT a verdict that the prefix names a real Indian state -- "88"
+ *  comes back "88". Only the server's state list can settle that, which is
+ *  why isInterStateSupply demands one. */
 export function gstStateCode(...candidates: Array<string | null | undefined>): string {
   for (const candidate of candidates) {
     const s = (candidate ?? '').toString().trim();
@@ -356,13 +359,25 @@ export function gstStateCode(...candidates: Array<string | null | undefined>): s
  *  declared `state` is accepted (callers hand over the whole vendor/shop) but
  *  does NOT decide: an address is not a registration, and the tax turns on the
  *  registration. With no GSTIN the answer is "cannot tell", and the totals box
- *  says which assumption it is showing. */
+ *  says which assumption it is showing.
+ *
+ *  `knownStates` is the server-fed code list (useGstStateCodes). A two-digit
+ *  prefix the server does not list is not a state: the engine's parser
+ *  (org_validation, behind determine_place_of_supply) reads NO state off such
+ *  a GSTIN, so a screen that kept the raw digits would answer "IGST" (88 !=
+ *  20) on a purchase the engine books intra-state. FAIL-CLOSED on purpose:
+ *  until the list arrives -- and for the whole session if the meta endpoint is
+ *  down -- the answer is null ("cannot tell"), never a tax verdict off an
+ *  unverified prefix. */
 export function isInterStateSupply(
   a: { gstin?: string | null; state?: string | null },
   b: { gstin?: string | null; state?: string | null },
+  knownStates: Record<string, string>,
 ): boolean | null {
   const codeA = gstStateCode(a.gstin);
   const codeB = gstStateCode(b.gstin);
-  if (codeA && codeB) return codeA !== codeB;
+  if (codeA && codeB && knownStates[codeA] && knownStates[codeB]) {
+    return codeA !== codeB;
+  }
   return null;
 }

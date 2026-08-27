@@ -21,35 +21,33 @@ import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
-import { gstinStateCode } from '../../constants/gst';
+import { gstinStateCode, isInterStateSupply } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 
-// How a purchase from this vendor is taxed. Local and NOT exported on purpose:
-// the canonical exported helper lands in the sibling PR claude/po-gst-and-ux as
-// `isInterStateSupply` in constants/gst.ts -- fold this into it when that merges
-// (two exports of that name in one module is a compile error on main).
+// How a purchase from this vendor is taxed. The decision this card and the PO
+// composer share lives in constants/gst.ts isInterStateSupply -- this card
+// only maps its three answers onto a chip. The local copy this file used to
+// hold (its own taxSplit + a "stateListLoaded &&" grace clause that kept a
+// raw, unverified GSTIN prefix for the first paint, and for the whole session
+// when the meta endpoint failed) is DELETED, not synced: the grace clause was
+// fail-open, so a junk "88..." GSTIN printed "Other state - IGST" whenever
+// the state list had not arrived. NOT the only inter/intra decider in the
+// frontend: print/legalPrimitives.hsnTaxSummary (printed invoice) and
+// PurchaseInvoicesTab.isInterstate (bill preview, mirrors itc_reconcile's
+// intra fallback) still answer with their own parsers, outside this chain.
 //
 // Both states are read from GSTINs and NOTHING else -- the same source
 // purchase_invoice_engine.determine_place_of_supply reads when it stamps the
-// bill. (That engine also accepts an explicit place-of-supply override, which
-// a card has no way to know about; with none passed it is the two GSTINs.)
-// An address is not a registration: stores.py sets a store's state_code
-// from its ADDRESS while its gstin is the entity's registration for that state,
-// falling back to the entity's PRIMARY GSTIN elsewhere (WizOpt's online store
-// bills under BV Opticals Pvt Ltd). Reading the address first made this card
-// print the OPPOSITE verdict to the bill for exactly those stores.
+// bill. An address is not a registration: stores.py sets a store's state_code
+// from its ADDRESS while its gstin is the entity's registration for that state
+// (WizOpt's online store bills under BV Opticals Pvt Ltd). Reading the address
+// first made this card print the OPPOSITE verdict to the bill for those stores.
 //
-// The one place it departs from the engine, on purpose: the engine must return
-// a boolean for a bill, so an unknown pair falls back to intra-state. A card is
-// a statement to a human, and "Same state - CGST + SGST" over a pair nobody has
-// established is a wrong-tax claim, not a conservative default -- so unknown
-// reads as unknown, never as the engine's fallback.
+// Where it departs from the engine, on purpose: the engine must return a
+// boolean for a bill, so an unknown pair falls back to intra-state. A card is
+// a statement to a human, and "Same state - CGST + SGST" over a pair nobody
+// has established is a wrong-tax claim -- so unknown reads as unknown.
 type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
-
-function taxSplit(vendorStateCode: string, buyerStateCode: string): TaxSplit {
-  if (!vendorStateCode || !buyerStateCode) return 'unknown';
-  return vendorStateCode === buyerStateCode ? 'cgst_sgst' : 'igst';
-}
 
 const TAX_SPLIT_LABEL: Record<TaxSplit, string> = {
   igst: 'Other state - IGST',
@@ -78,27 +76,26 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
   const storeInfo = useStorePrintInfo();
   const stateNames = useGstStateCodes();
-  // A two-digit prefix the server's state list does not contain is not a
-  // state. The engine's parser (org_validation.validate_gstin, behind
-  // determine_place_of_supply) rejects such a GSTIN and reads NO state off it,
-  // so a card that keeps the raw digits prints a tax verdict ("Other state -
-  // IGST") over a pair the engine never established. Unknown code -> '' ->
-  // taxSplit says 'unknown'. Same stateListLoaded idiom as
-  // SupplierFormModal.handleSave: until the list arrives there is nothing to
-  // check against, so the raw read stands for that first paint.
-  const stateListLoaded = Object.keys(stateNames).length > 0;
-  const knownStateCode = (code: string): string =>
-    stateListLoaded && !stateNames[code] ? '' : code;
-  const buyerStateCode = knownStateCode(gstinStateCode(storeInfo?.gstin));
 
   return (
     <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
       {suppliers.map((supplier) => {
-        const vendorStateCode = knownStateCode(gstinStateCode(supplier.gstNumber));
         // Display only -- an unregistered vendor still has an address to show.
         const vendorState =
-          supplier.state || stateNames[supplier.stateCode || vendorStateCode] || '';
-        const split = taxSplit(vendorStateCode, buyerStateCode);
+          supplier.state ||
+          stateNames[supplier.stateCode || gstinStateCode(supplier.gstNumber)] ||
+          '';
+        // FAIL-CLOSED: isInterStateSupply answers null (-> the grey "unknown"
+        // chip) until the server's state list is in hand AND lists both
+        // prefixes. No verdict off a raw prefix, ever -- not on first paint,
+        // not when the meta endpoint is down.
+        const inter = isInterStateSupply(
+          { gstin: supplier.gstNumber },
+          { gstin: storeInfo?.gstin },
+          stateNames,
+        );
+        const split: TaxSplit =
+          inter === null ? 'unknown' : inter ? 'igst' : 'cgst_sgst';
         return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
