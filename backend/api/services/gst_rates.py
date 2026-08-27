@@ -114,6 +114,10 @@ GST_CATEGORY_TABLE: dict = {
     "CK": ("910500", 18.0),  # Clock
     "HA": ("902140", 0.0),  # Hearing Aid (NIL/exempt)
     "ACC": ("392690", 18.0),  # Accessories
+    "SVC": ("998599", 18.0),  # Services -- the SERVICES sku_prefix. Missing until
+    # 2026-08-27: without it the short code fell through to DEFAULT_GST_RATE, so
+    # a service priced off the raw prefix was rated 5% (the optical default)
+    # instead of 18%. Every other sku_prefix has had a row here all along.
     "SMTSG": ("852580", 18.0),  # Smartglasses (Sunglass) -> 18% (owner-confirmed 2026-06-17)
     "SMTFR": ("852580", 18.0),  # Smartglasses -> 18% (owner-confirmed 2026-06-17)
     "SMTWT": ("910221", 18.0),  # Smart Watch

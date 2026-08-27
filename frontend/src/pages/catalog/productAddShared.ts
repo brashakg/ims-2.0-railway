@@ -21,7 +21,7 @@ import type {
 } from '../../services/api/catalog';
 import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
 import { mapSpecsToCategoryFields } from './autopilotSpecMap';
-import { getHSNByCategory, getGSTRateByCategory } from '../../constants/gst';
+import { resolveGstRate, resolveHsn } from '../../constants/gstRuntime';
 
 // Product categories with display names + emoji (used in the category picker).
 export const CATEGORIES = [
@@ -662,16 +662,22 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
   };
 }
 
-// Resolve the auto HSN/GST for a category. Mirrors the wizard's useEffect:
-// HSN code comes from getHSNByCategory (always 6-digit, owner 2026-07-05),
-// the RATE from getGSTRateByCategory (so categories that share an HSN heading
-// at different rates still get the correct per-category rate).
+// The auto HSN/GST a category prefills at the cataloguing door.
+//
+// BOTH numbers now come from the server (GET /products/gst-rates): the HSN off
+// the canonical category -> HSN table, and then the rate off THAT HSN -- the
+// same order the save itself uses, where the HSN settles the rate
+// (product_master.normalise_payload). Before this, the HSN was read from a
+// hand-copied table on the frontend that had drifted: smartglasses prefilled
+// 900410, the SUNGLASSES code, and since a client-supplied hsn_code wins at the
+// create door, that wrong code is what got stored on the product and printed on
+// its documents.
+//
+// Before the endpoint has answered, hsnCode is '' -- the form then sends no
+// hsn_code and the server fills in its own, which is the correct one.
 export function resolveHsnGst(category: string): { hsnCode: string; gstRate: string } {
-  const hsnData = getHSNByCategory(category);
-  return {
-    hsnCode: hsnData ? hsnData.code : '',
-    gstRate: getGSTRateByCategory(category).toString(),
-  };
+  const hsnCode = resolveHsn(category);
+  return { hsnCode, gstRate: resolveGstRate(category, hsnCode).toString() };
 }
 
 // ============================================================================

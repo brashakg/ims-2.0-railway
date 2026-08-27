@@ -11,8 +11,8 @@
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
-import { calculateGST, calculateIGST, getHSNByCategory } from '../../constants/gst';
-import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
+import { calculateGST, calculateIGST } from '../../constants/gst';
+import { resolveGstRate, resolveHsn, isInclusivePricing } from '../../constants/gstRuntime';
 import { describeForReceipt } from '../../utils/receiptFormat';
 import {
   buildLegalHeader,
@@ -107,9 +107,13 @@ export function GSTInvoice({
   const lineItems: InvoiceLineItem[] = safeItems.map(item => {
     const grossLine = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
-    const hsnInfo = getHSNByCategory(category);
-    const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
-    const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
+    // The HSN printed in this column is the SERVER's canonical code for the
+    // category (GET /products/gst-rates), not a frontend copy of it -- the copy
+    // had smartglasses down as 900410, the sunglasses code, so that is what a
+    // statutory tax invoice printed for them.
+    const hsnInfo = resolveHsn(category);
+    const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo);
+    const hsnCode = (item as any).hsnCode || hsnInfo || '9004';
 
     // GST_PRICING_MODE (runtime, /health): inclusive (default) extracts GST
     // from WITHIN the line price (row total = price paid); exclusive (legacy)

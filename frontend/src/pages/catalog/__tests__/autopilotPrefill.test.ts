@@ -7,7 +7,8 @@
 // run as soon as vitest is added. The functions under test are intentionally
 // side-effect-free so this file needs no DOM / network mocking.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { loadHsnRates } from '../../../constants/gstRuntime';
 import {
   inferCategoryCode,
   inferCategoryFromText,
@@ -20,6 +21,17 @@ import {
   AUTOPILOT_REFERENCE_ATTR,
 } from '../productAddShared';
 import type { AutopilotCandidate } from '../../../services/api/catalogAutopilot';
+
+// The category -> HSN table is served by GET /products/gst-rates, not kept on
+// the frontend, so the prefill needs the endpoint's answer in hand.
+const { apiGet } = vi.hoisted(() => ({ apiGet: vi.fn() }));
+vi.mock('../../../services/api/client', () => ({ default: { get: apiGet } }));
+const GST_RATES = {
+  by_hsn: { '900311': 5, '900410': 18 },
+  by_cat: { FRAME: 5, SUNGLASSES: 18 },
+  category_hint: { FRAME: 'FRAME', FR: 'FRAME', SUNGLASS: 'SUNGLASSES', SG: 'SUNGLASSES' },
+  hsn_by_category: { FRAME: '900311', FR: '900311', SUNGLASS: '900410', SG: '900410' },
+};
 
 // Minimal candidate factory — only the fields the mapper reads.
 function candidate(partial: Partial<AutopilotCandidate>): AutopilotCandidate {
@@ -104,8 +116,10 @@ describe('autopilotCandidateToFormValues', () => {
     expect(v.gstRate).toBe('18');
   });
 
-  it('falls back to the category HSN/GST when no suggestion is present', () => {
-    // Frame -> 6-digit HSN 900311 @ 5% (getHSNByCategory is 6-digit only, owner 2026-07-05).
+  it('falls back to the category HSN/GST when no suggestion is present', async () => {
+    // Frame -> 6-digit HSN 900311 @ 5%, straight off GET /products/gst-rates.
+    apiGet.mockResolvedValue({ data: GST_RATES });
+    await loadHsnRates();
     const v = autopilotCandidateToFormValues(
       candidate({ brand: 'Ray-Ban', model: 'RX5154', category: 'Frame' })
     );

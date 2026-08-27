@@ -1848,19 +1848,54 @@ async def bulk_offer_update(
 
 @router.get("/gst-rates")
 async def get_gst_rates(current_user: dict = Depends(get_current_user)):
-    """Read-only HSN->GST lookup for any authenticated user (POS cashiers
-    included) so the cart preview + invoice show the SAME rates the backend
-    bills from (the SUPERADMIN-editable master overrides the static table).
-    Edits live at /api/v1/admin/hsn. Fail-soft: empty maps when DB is offline
-    (frontend then uses its static GST 2.0 constants)."""
+    """THE canonical GST lookup -- both layers the backend itself bills from.
+
+    Returns:
+      * ``by_hsn`` / ``by_cat`` -- the SUPERADMIN-editable ``hsn_gst_master``
+        (Settings -> HSN & GST Rates), which OVERRIDES the static table.
+      * ``category_hint`` -- ``gst_rates._CATEGORY_HINT``: how a category
+        spelling (FRAME / FRAMES / FR / ...) maps onto the ``category_hint``
+        stored on a master row, so a category resolves to the SAME master row
+        here and on the frontend.
+      * ``hsn_by_category`` -- the canonical category -> HSN code out of
+        ``gst_rates.GST_CATEGORY_TABLE``.
+
+    There is NO second copy of the category -> HSN rule, and no second copy of
+    the category -> master-row rule, on the frontend: both derive from this
+    endpoint (the same principle GET /products/categories states for the
+    required-ness rule). The frontend keeps exactly ONE local GST table -- the
+    offline rate fallback in ``constants/gst.ts`` -- for the window before this
+    endpoint has answered, and that fallback is deliberately untouched because
+    it sits on the POS billing path.
+
+    Read-only, available to any authenticated user (POS cashiers included) so
+    the cart preview + the printed tax invoice show the same rates AND the same
+    HSN codes the backend bills from. Edits live at /api/v1/admin/hsn.
+
+    Fail-soft in two independent steps: the STATIC half is built from module
+    constants and is served even when Mongo is down; only the editable-master
+    half degrades to empty maps.
+    """
+    from ..services.gst_rates import GST_CATEGORY_TABLE, _CATEGORY_HINT
+
+    static = {
+        "category_hint": dict(_CATEGORY_HINT),
+        "hsn_by_category": {
+            cat: hsn for cat, (hsn, _rate) in GST_CATEGORY_TABLE.items() if hsn
+        },
+    }
     try:
         from ..services.gst_rates import _load_lookup, seed_hsn_gst_master
 
         seed_hsn_gst_master()
         lk = _load_lookup()
-        return {"by_hsn": lk.get("by_hsn", {}), "by_cat": lk.get("by_cat", {})}
+        return {
+            "by_hsn": lk.get("by_hsn", {}),
+            "by_cat": lk.get("by_cat", {}),
+            **static,
+        }
     except Exception:
-        return {"by_hsn": {}, "by_cat": {}}
+        return {"by_hsn": {}, "by_cat": {}, **static}
 
 
 # NOTE: Specific routes MUST come before /{product_id}
