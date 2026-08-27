@@ -72,6 +72,7 @@ from ..services import ap_engine
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
+from ..services import product_master as _pm
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -105,6 +106,11 @@ class PurchaseInvoiceLine(BaseModel):
     unit_price: float = Field(0, ge=0)
     taxable: Optional[float] = Field(default=None, ge=0)
     gst_rate: float = Field(0, ge=0, le=100)
+    # Ruling 12: the prices on the INVOICE are the actual ones. unit_price is
+    # the actual cost (the true-up already treats it as authoritative); `mrp` is
+    # the actual retail price printed on the vendor's bill. Optional -- an
+    # invoice that does not restate the MRP leaves the product's alone.
+    mrp: Optional[float] = Field(default=None, gt=0)
 
 
 class PurchaseInvoiceCreate(BaseModel):
@@ -804,13 +810,23 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
         return None
 
 
-def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
+def _product_state_for_valuation(
+    db, product_ids, store_id=None, exclude_grn_id=None
+) -> dict:
     """Build {product_id: {on_hand_qty, cost_price}} for the moving-average
     true-up: the CURRENT on-hand quantity (count of AVAILABLE serialized
     stock_units) and current cost (product cost_price / landed_cost) per
     product. Fail-soft: any error yields an empty/partial map (the true-up then
     treats missing products as zero on-hand at zero cost -> takes the invoice
-    cost, which is the correct first-receipt behaviour)."""
+    cost, which is the correct first-receipt behaviour).
+
+    S9: `exclude_grn_id` subtracts the units THIS delivery minted. The blend
+    adds the invoiced quantity as the incoming layer, so counting the same
+    delivery again in the "existing" on-hand made every delivery appear twice in
+    its own average and dragged the new cost back toward the old one (receive 10
+    @100, be billed @120 -> 110 instead of 120). Subtracting only the units
+    still AVAILABLE from this GRN is exactly right: a unit from this delivery
+    that has already sold is no longer AVAILABLE, so it was never in the count."""
     state: dict = {}
     if db is None or not product_ids:
         return state
@@ -846,8 +862,19 @@ def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
             except Exception:
                 # very old pymongo / fake: fall back to count()
                 cnt = coll.count(flt) if hasattr(coll, "count") else 0
+            # S9: take this delivery's own units back out of the "existing"
+            # on-hand. Counted as a second equality query rather than a $ne so
+            # the arithmetic is identical on Mongo and on the test doubles.
+            own = 0
+            if exclude_grn_id:
+                own_flt = dict(flt)
+                own_flt["source_id"] = exclude_grn_id
+                try:
+                    own = int(coll.count_documents(own_flt) or 0)
+                except Exception:
+                    own = 0
             state.setdefault(pid, {"cost_price": None, "on_hand_qty": 0})
-            state[pid]["on_hand_qty"] = int(cnt or 0)
+            state[pid]["on_hand_qty"] = max(0, int(cnt or 0) - own)
     except Exception:
         pass
     return state
@@ -874,7 +901,9 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
-        product_state = _product_state_for_valuation(db, pids, store_id)
+        product_state = _product_state_for_valuation(
+            db, pids, store_id, exclude_grn_id=grn_id
+        )
         updates = pmatch.valuation_trueup_for_invoice(
             lines, product_state, config.get("valuation_method")
         )
@@ -999,6 +1028,250 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+def _line_product_ids(lines) -> list:
+    """Distinct product ids named by the invoice lines, in line order.
+
+    ONE reader for the two ruling-15 gates below: what counts as "this bill is
+    for goods" and what gets checked for cataloguing must never drift apart.
+    """
+    pids = []
+    for ln in lines or []:
+        pid = getattr(ln, "product_id", None) or (
+            ln.get("product_id") if isinstance(ln, dict) else None
+        )
+        if pid and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _line_products(db, lines) -> Optional[dict]:
+    """product_id -> the products-spine doc, for every line that names one.
+
+    Three distinct answers, and the difference matters:
+      * ``None``  -- we could not READ (no DB, or the query blew up). Callers
+                     must not turn a lookup failure into a verdict.
+      * ``{}``    -- this bill names no goods we stock (services, freight,
+                     rent, an expense bill), or names ids we have never heard
+                     of.
+      * a mapping -- the stocked goods this bill is settling.
+    """
+    if db is None:
+        return None
+    pids = _line_product_ids(lines)
+    if not pids:
+        return {}
+    try:
+        return {
+            p.get("product_id"): p
+            for p in db.get_collection("products").find(
+                {"product_id": {"$in": pids}}, {"_id": 0}
+            )
+        }
+    except Exception:  # noqa: BLE001 - cannot read: do not invent a failure
+        return None
+
+
+def _assert_products_catalogued(lines, found) -> None:
+    """Ruling 15: the INVOICE is the gate. It may only proceed for products that
+    are properly catalogued -- and it must say WHICH detail is missing, by name.
+
+    The permissive front (a PO line typed in for an item nobody had catalogued)
+    is only safe because the purchase cannot be FINALISED until someone has
+    finished the product. Reads the same chokepoint everything else does,
+    product_master.compute_catalog_status, so there is no second done-rule.
+
+    Fail-soft ONLY on a missing DB/product collection: a lookup failure must not
+    invent an incomplete product, but a product we CAN read and that IS
+    incomplete is a hard 422 before any write.
+
+    cost_price is DELIBERATELY not a gap here -- see the comment at the gap
+    line below. Do not "restore" it.
+
+    ``found`` comes from _line_products: None/{} means there is nothing we can
+    read and judge, so there is nothing to refuse.
+    """
+    if not found:
+        return
+    blocked = []
+    for pid in _line_product_ids(lines):
+        prod = found.get(pid)
+        if prod is None:
+            continue
+        # Rulings 11 + 12: the COST ARRIVES LATE, and THIS bill is the
+        # authority on it -- _apply_valuation_trueup writes this very line's
+        # unit_price into products.cost_price moments after this gate passes.
+        # Refusing the bill for the one figure the bill is holding would refuse
+        # essentially every vendor bill in the system: all 68 live products
+        # carry exactly done_gaps ["cost_price"] and nothing else. send_po
+        # subtracts the same field for the same reason (vendors.py,
+        # PO_LINES_INCOMPLETE). DO NOT put cost_price back into this gate --
+        # the product ends up WITH a cost precisely because the bill booked.
+        # (list comprehension, not a set: the refusal message must keep
+        # compute_catalog_status's field order.)
+        gaps = [g for g in _pm.compute_catalog_status(prod)[1] if g != "cost_price"]
+        if gaps:
+            blocked.append(
+                {
+                    "product_id": pid,
+                    "product": prod.get("name")
+                    or " ".join(
+                        str(prod.get(k) or "") for k in ("brand", "model")
+                    ).strip()
+                    or prod.get("sku"),
+                    "missing": [_pm.field_label(g) for g in gaps],
+                }
+            )
+    if blocked:
+        first = blocked[0]
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PRODUCT_NOT_CATALOGUED",
+                "message": (
+                    f"{first['product']} is still missing "
+                    f"{', '.join(first['missing'])}"
+                    + (
+                        f" (and {len(blocked) - 1} other item(s) on this bill)"
+                        if len(blocked) > 1
+                        else ""
+                    )
+                    + ". Finish cataloguing it, then book the bill."
+                ),
+                "lines": blocked,
+            },
+        )
+
+
+def _apply_invoice_mrp(db, lines, invoice_id) -> Optional[list]:
+    """Ruling 12: the MRP on the vendor's invoice is the actual retail price.
+
+    Writes it onto the product and returns {product_id, old_mrp, new_mrp} for
+    the audit row, so a change of retail price is never silent. Only lines that
+    actually carry an MRP are touched, and an unchanged value is a no-op.
+    STRICTLY fail-soft, like the cost true-up: this runs AFTER the booking and
+    must never roll it back.
+    """
+    try:
+        if db is None:
+            return None
+        products = db.get_collection("products")
+        applied = []
+        seen = set()
+        for ln in lines or []:
+            pid = ln.get("product_id")
+            new_mrp = ln.get("mrp")
+            if not pid or new_mrp is None or pid in seen:
+                continue
+            seen.add(pid)
+            cur = products.find_one({"product_id": pid}, {"_id": 0, "mrp": 1}) or {}
+            old = cur.get("mrp")
+            try:
+                if old is not None and round(float(old), 2) == round(
+                    float(new_mrp), 2
+                ):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            products.update_one(
+                {"product_id": pid},
+                {
+                    "$set": {
+                        "mrp": round(float(new_mrp), 2),
+                        "mrp_source": "PURCHASE_INVOICE",
+                        "mrp_source_id": invoice_id,
+                        "mrp_updated_at": datetime.now().isoformat(),
+                    }
+                },
+            )
+            applied.append(
+                {
+                    "product_id": pid,
+                    "old_mrp": old,
+                    "new_mrp": round(float(new_mrp), 2),
+                }
+            )
+        return applied or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class CataloguingRequest(BaseModel):
+    """Ask a cataloguer to finish the products blocking a bill."""
+
+    product_ids: List[str] = Field(..., min_length=1)
+    note: Optional[str] = None
+
+
+@router.post("/request-cataloguing", status_code=201)
+async def request_cataloguing(
+    body: CataloguingRequest,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """The way past the gate for the person who is stopped by it.
+
+    An accountant holds no `products:write` -- deliberately: whoever settles the
+    money does not also define the product. So when the invoice refuses an
+    incomplete product, the accountant's only move would otherwise be to find a
+    developer. This raises the P2 task for the cataloguer instead, naming the
+    products and exactly what each one is missing.
+
+    A gate you can clear by asking a named colleague is a gate. A gate whose
+    only exit is a developer is a wall.
+    """
+    db = _get_db()
+    items = []
+    for pid in dict.fromkeys(body.product_ids):
+        prod = None
+        if db is not None:
+            try:
+                prod = db.get_collection("products").find_one(
+                    {"product_id": pid}, {"_id": 0}
+                )
+            except Exception:  # noqa: BLE001
+                prod = None
+        gaps = _pm.compute_catalog_status(prod)[1] if prod else []
+        items.append(
+            {
+                "product_id": pid,
+                "product": (prod or {}).get("name")
+                or " ".join(
+                    str((prod or {}).get(k) or "") for k in ("brand", "model")
+                ).strip()
+                or pid,
+                "missing": [_pm.field_label(g) for g in gaps],
+            }
+        )
+
+    lines = [
+        f"- {i['product']}: needs "
+        + (", ".join(i["missing"]) if i["missing"] else "review")
+        for i in items
+    ]
+    try:
+        from ..services.task_triggers import create_system_task
+        from ..dependencies import get_task_repository
+
+        create_system_task(
+            get_task_repository(),
+            title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+            description=(
+                "A purchase invoice cannot be booked until these products are "
+                "catalogue-complete:\n"
+                + "\n".join(lines)
+                + (f"\n\nNote: {body.note}" if body.note else "")
+            ),
+            priority="P2",
+            category="Catalog",
+            store_id=current_user.get("active_store_id"),
+            dedupe_ref="catalogue-for-bill:"
+            + ",".join(sorted(i["product_id"] for i in items)),
+        )
+    except Exception:  # noqa: BLE001 - asking must never 500 the screen
+        logger.warning("[PI] could not raise the cataloguing task", exc_info=True)
+
+    return {"requested": items, "message": "Cataloguing requested"}
+
+
 # ---------------------------------------------------------------------------
 # Create (book AP + ITC from lines, with IGST classification)
 # ---------------------------------------------------------------------------
@@ -1032,6 +1305,54 @@ async def create_purchase_invoice(
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
         grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
+
+    # Ruling 15 -- the bill must be LINKED to the goods-received record. A bill
+    # for goods nobody counted in settles a purchase whose quantities were
+    # never tallied: the 3-way match has nothing to compare the bill to, and
+    # the rejected-goods hold (ruling 7) cannot fire either, because it is
+    # reached through the GRN.
+    #
+    # THE TRIGGER IS THE GOODS, NOT THE PAPERWORK. Gating on po_id alone made
+    # the whole of ruling 15 optional -- leaving the purchase-order box blank
+    # booked a bill for 20 stocked frames with no receipt at all. Any line that
+    # NAMES a product is a goods line. A bill that names no product (services,
+    # freight, rent, an expense bill) has no receipt to link and is untouched.
+    #
+    # Naming the id is the trigger, not finding it: whether the products spine
+    # can be read must not decide whether a bill needs a receipt, or an
+    # unreadable DB (or a typo'd id) would be the bypass instead.
+    #
+    # A genuine no-order purchase (goods bought over the counter, no PO) still
+    # has a way out, and the message must name one the UI can actually WALK.
+    # GRNCreate accepts a Delivery Challan with no po_id, but the receiving
+    # screen (GoodsReceiptNote.handleSubmit) refuses to submit without a PO
+    # selected even in DC mode -- so until that screen learns no-PO receiving,
+    # the reachable route is: log a PO for the delivery, receive it, bill
+    # against the receipt. An accountant who cannot see a way out will find
+    # the bypass instead -- and a message pointing at a door the screen keeps
+    # shut is the same thing with extra steps.
+    if (
+        not body.grn_id
+        and not body.linked_dc_ids
+        and (body.po_id or _line_product_ids(body.lines))
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "GRN_LINK_REQUIRED",
+                "message": (
+                    "Link the goods receipt for this bill before booking it - "
+                    "the quantities have to be tallied before the purchase is "
+                    "final. If these goods arrived without a purchase order, "
+                    "log a purchase order for the delivery and receive it on "
+                    "the Goods Receipt screen first, then book the bill "
+                    "against that receipt."
+                ),
+            },
+        )
+
+    # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
+    _assert_products_catalogued(body.lines, _line_products(db, body.lines))
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
@@ -1363,6 +1684,12 @@ async def create_purchase_invoice(
     # write can never roll back or block the recorded payable.
     valuation_updates = _apply_valuation_trueup(db, doc, computed, config)
 
+    # Ruling 12 -- the MRP on the bill is the actual retail price. Same
+    # fail-soft discipline as the cost true-up, and audited below.
+    mrp_updates = _apply_invoice_mrp(
+        db, [ln.model_dump() for ln in body.lines], invoice_id
+    )
+
     # Audit the booking (fail-soft -- never blocks the save).
     try:
         audit = get_audit_repository()
@@ -1389,6 +1716,7 @@ async def create_purchase_invoice(
                         "match_exceptions": (match or {}).get("exceptions"),
                         "valuation_method": config.get("valuation_method"),
                         "valuation_updates": valuation_updates,
+                        "mrp_updates": mrp_updates,
                         # F9 -- DC bulk-tally audit trail.
                         "linked_dc_ids": body.linked_dc_ids,
                         "dc_matched_ids": stamped_dc_ids,

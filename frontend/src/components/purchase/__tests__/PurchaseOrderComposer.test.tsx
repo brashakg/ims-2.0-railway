@@ -114,6 +114,84 @@ describe('PurchaseOrderComposer — validation gate', () => {
   });
 });
 
+// Owner ruling 13: a line may name an item that is not in the catalogue yet.
+// The composer must let it through and hand the typed identity to the server.
+describe('PurchaseOrderComposer — an item that is not catalogued yet', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getLastCostMock.mockResolvedValue({ costs: {} });
+  });
+
+  const NEW_ITEM = {
+    category: 'FR',
+    brand: 'Ray-Ban',
+    model: 'RB3025',
+    colour: 'G-15',
+    size: '58',
+    mrp: 7990,
+  };
+
+  it('submits the typed identity instead of a product id', async () => {
+    const { onSubmit } = renderComposer({
+      initialLines: [
+        LINE({
+          productId: '',
+          sku: '',
+          productName: 'Ray-Ban RB3025',
+          newProduct: NEW_ITEM,
+          unitCost: 3200,
+          costTouched: true,
+        }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /create as draft/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0].new_product).toEqual(NEW_ITEM);
+    expect(payload.items[0].product_id).toBeUndefined();
+    expect(payload.items[0].quantity).toBe(2);
+    expect(payload.items[0].unit_price).toBe(3200);
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a line that names nothing at all', async () => {
+    const { onSubmit } = renderComposer({
+      initialLines: [
+        LINE({ productId: '', sku: '', productName: '', newProduct: null, unitCost: 3200 }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /create as draft/i }));
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(
+        expect.stringContaining('Not in the catalogue?'),
+      ),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('still requires a cost on a typed-in line — it is the provisional cost price', async () => {
+    const { onSubmit } = renderComposer({
+      initialLines: [
+        LINE({ productId: '', sku: '', newProduct: NEW_ITEM, unitCost: 0 }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /create as draft/i }));
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(
+        expect.stringContaining('unit cost above 0'),
+      ),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
 describe('PurchaseOrderComposer — cost prefill', () => {
   beforeEach(() => {
     vi.clearAllMocks();
