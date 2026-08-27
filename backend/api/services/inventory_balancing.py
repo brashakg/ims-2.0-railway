@@ -268,11 +268,9 @@ def _on_hand_by_product_store(db, product_ids: List[str]) -> Dict[Tuple[str, str
     if db is None or not product_ids:
         return out
     try:
-        from .item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
-        avail = set(ON_HAND_STATUSES)
-        excl = set(EXCLUDED_STATUSES)
+        from .item_events import is_on_hand
     except Exception:  # noqa: BLE001
-        avail, excl = set(), set()
+        return {}
     try:
         cur = db.get_collection("stock_units").find(
             {"product_id": {"$in": list(product_ids)}},
@@ -281,10 +279,9 @@ def _on_hand_by_product_store(db, product_ids: List[str]) -> Dict[Tuple[str, str
     except Exception:  # noqa: BLE001
         return {}
     for row in rows:
-        st = row.get("status")
-        if st in excl:
-            continue
-        if avail and not (st in avail or st is None):
+        # Same rule as the $match readers: item_events decides, this loop does
+        # not keep its own copy of the status list.
+        if not is_on_hand(row.get("status")):
             continue
         pid = row.get("product_id")
         store = row.get("store_id")

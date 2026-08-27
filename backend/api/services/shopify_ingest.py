@@ -413,6 +413,7 @@ def _available_stores_for_product(db, product_id: str) -> List[str]:
     IMS from CONSUMING a phantom, converting a silent misroute into a loud miss.
     """
     from .stores_util import is_online_store
+    from .item_events import on_hand_match
 
     try:
         coll = (
@@ -423,7 +424,7 @@ def _available_stores_for_product(db, product_id: str) -> List[str]:
         rows = list(
             coll.aggregate(
                 [
-                    {"$match": {"product_id": product_id, "status": "AVAILABLE"}},
+                    {"$match": {"product_id": product_id, **on_hand_match()}},
                     {"$group": {"_id": "$store_id", "n": {"$sum": 1}}},
                     {"$sort": {"n": -1, "_id": 1}},
                 ]

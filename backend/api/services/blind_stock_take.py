@@ -59,7 +59,11 @@ ADJUSTMENT_COLLECTION = "stock_adjustment_proposals"
 TOLERANCE_KEY = "inventory.blind_count_tolerance_units"
 REOPEN_ROLES_KEY = "inventory.blind_count_reopen_roles"
 # Fields revealed only AFTER a manager lock -- redacted from a counter pre-lock.
-_REVEAL_FIELDS = ("items_revealed", "summary", "expected_on_hand")
+# ``expected_product_ids`` is in here too: telling a counter which products
+# the system believes have stock is itself an anchor (it leaks "this one is
+# expected to be non-zero"), and blind means blind until the manager locks.
+_REVEAL_FIELDS = ("items_revealed", "summary", "expected_on_hand",
+                  "expected_product_ids")
 
 
 class BlindStockTakeError(Exception):
@@ -82,8 +86,59 @@ def _is_manager(user, reopen_roles=None):
     return bool(roles & mgr)
 
 
-def build_summary(items, tolerance=0):
-    """Per-SKU variance rollup. ``items`` carry counted_qty + expected. Pure."""
+def coverage(expected_ids, counted_ids):
+    """HOW MUCH OF THE SHELF WAS WALKED -- the ONE set comparison every
+    physical count reports (the blind count's summary AND the cycle count's
+    completion both call this; it may not be re-typed in either).
+
+    ``expected_ids=None`` means the scope was never recorded / could not be
+    read. That is NOT "everything was counted": it reads as an incomplete
+    count (``full_count`` False, every figure None), never a clean one. ``[]``
+    is different -- a scope with nothing on hand cannot be partial. Pure."""
+    counted = {str(c) for c in (counted_ids or ()) if c}
+    if expected_ids is None:
+        return {
+            "products_expected": None,
+            "products_counted": None,
+            "products_missed": None,
+            "products_not_counted": None,
+            "coverage_percentage": None,
+            "full_count": False,
+        }
+    expected = {str(e) for e in expected_ids if e}
+    not_counted = sorted(expected - counted)
+    products_expected = len(expected)
+    products_counted = products_expected - len(not_counted)
+    return {
+        "products_expected": products_expected,
+        "products_counted": products_counted,
+        "products_missed": len(not_counted),
+        "products_not_counted": not_counted,
+        "coverage_percentage": (
+            round((products_counted / products_expected) * 100, 2)
+            if products_expected
+            else 100.0
+        ),
+        "full_count": not not_counted,
+    }
+
+
+def build_summary(items, tolerance=0, expected_ids=None):
+    """Per-SKU variance rollup. ``items`` carry counted_qty + expected. Pure.
+
+    ``expected_ids`` is the SET of products the session was opened over,
+    snapshotted at open the same way the cycle count snapshots its own scope.
+    HOW MUCH OF THE SHELF WAS WALKED is a comparison of SETS, and nothing used
+    to hold the expected set at all: a store with 400 products, one line
+    submitted, and the day-end read "1 SKU, 1 matched, within tolerance". The
+    owner ruled the blind count IS the day-end, so a partial count must never
+    present as a clean one.
+
+    ``expected_ids=None`` means this session never recorded a scope (opened
+    before this existed, or with no inventory store behind it). That is NOT
+    "everything was counted": it reads as an incomplete count, never a clean
+    one.
+    """
     matched = over = short = 0
     net_units = 0
     net_value_paise = 0
@@ -104,12 +159,19 @@ def build_summary(items, tolerance=0):
             short += 1
         rows.append({**it, "variance_units": v, "verdict": verd,
                      "variance_value_paise": v * cost_paise})
+    cov = coverage(
+        expected_ids,
+        (it.get("product_id") for it in (items or [])),
+    )
     return rows, {
         "total_skus": len(items or []),
         "matched": matched, "over": over, "short": short,
         "net_variance_units": net_units,
         "net_variance_value_paise": net_value_paise,
-        "within_tolerance": over == 0 and short == 0,
+        **cov,
+        # A count that did not walk the whole scope is NOT a clean day-end,
+        # however well the lines it did walk agreed.
+        "within_tolerance": over == 0 and short == 0 and cov["full_count"],
     }
 
 
@@ -142,7 +204,16 @@ class BlindStockTakeEngine:
     def _coll(self):
         return None if self.db is None else self.db.get_collection(COLLECTION)
 
-    def open_session(self, *, store_id, actor, scope=None):
+    def open_session(self, *, store_id, actor, scope=None, expected_resolver=None):
+        """Open a blind count.
+
+        ``expected_resolver(store_id, scope) -> [product_id] | None`` snapshots WHICH
+        products this session is expected to walk, the way the cycle count
+        snapshots its scope at start. Held (redacted from the counter) until
+        the lock, where it turns "1 line submitted" into an honest partial
+        count instead of a clean day-end. No resolver -> no scope recorded,
+        and the lock then refuses to call the count complete.
+        """
         coll = self._coll()
         if coll is None:
             raise BlindStockTakeError("inventory store unavailable", status=503, code="no_db")
@@ -150,10 +221,18 @@ class BlindStockTakeEngine:
             raise BlindStockTakeError("store_id is required", status=400)
         sid = "BST-" + uuid.uuid4().hex[:10].upper()
         now = _now_iso()
+        expected_ids = None
+        if expected_resolver is not None:
+            resolved = expected_resolver(store_id, scope or {})
+            # None = the scope could not be read. Recording [] instead would
+            # tell the lock "nothing was expected", i.e. a clean full count.
+            if resolved is not None:
+                expected_ids = sorted({str(pid) for pid in resolved if pid})
         doc = {
             "_id": sid, "session_id": sid, "store_id": store_id,
             "scope": scope or {}, "status": STATUS_OPEN,
             "items": [],  # [{product_id, sku, counted_qty}] -- NO expected while open
+            "expected_product_ids": expected_ids,
             "opened_by": actor.get("user_id"), "opened_at": now, "updated_at": now,
         }
         coll.insert_one(dict(doc))
@@ -210,7 +289,22 @@ class BlindStockTakeEngine:
         costs = (cost_resolver(pids) if cost_resolver else {}) or {}
         enriched = [{**it, "expected": int(on_hand.get(it.get("product_id"), 0)),
                      "cost_paise": int(costs.get(it.get("product_id"), 0))} for it in items]
-        rows, summary = build_summary(enriched, tolerance)
+        rows, summary = build_summary(
+            enriched, tolerance, expected_ids=sess.get("expected_product_ids"))
+        # THE VOCABULARY TRIPWIRE. The expected set is an anchored allowlist,
+        # so a unit whose status token canonicalises to NOTHING (a migration /
+        # import writing "ON HAND") is invisible to it -- and to every other
+        # reader -- and twelve unwalked units would lock as a clean day-end.
+        # While any such token exists at this store the count cannot be
+        # certified clean or full. Fail-soft: None (could not read) changes
+        # nothing.
+        from .item_events import unknown_status_tokens
+
+        unknown = unknown_status_tokens(self.db, store_id)
+        if unknown:
+            summary["unknown_status_tokens"] = unknown
+            summary["full_count"] = False
+            summary["within_tolerance"] = False
         now = _now_iso()
         from pymongo import ReturnDocument
         updated = coll.find_one_and_update(

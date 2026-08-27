@@ -9,8 +9,8 @@ here -- the router (GET /inventory/brand-insights) supplies:
                       brand/price entry because order items and stock_units
                       have historically stamped either one.
   * on_hand_by_pid -- {product_id: units} from the stock_units rollup
-                      (inventory._on_hand_by_product: ON_HAND allowlist +
-                      EXCLUDED_STATUSES from the item-event ledger).
+                      (inventory._on_hand_by_product, which asks the shared
+                      item_events.on_hand_match "sellable" question).
   * sales_by_pid   -- {product_id: {"units": int, "revenue": float}} from ONE
                       orders aggregation over the window (same qty/item_total
                       field conventions as collection_insights._movement_pipeline).

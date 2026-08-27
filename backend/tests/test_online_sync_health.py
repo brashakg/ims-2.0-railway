@@ -17,6 +17,7 @@ Two layers:
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
@@ -200,7 +201,26 @@ def test_pending_reconcile_failsoft_with_no_products():
 class _StockUnitsColl(_FakeColl):
     """A fake stock_units collection that supports the on-hand / reserved
     aggregation the tally reader uses: {$match:{product_id:{$in},status...}},
-    {$group:{_id:'$product_id', n:{$sum:{$ifNull:['$quantity',1]}}}}."""
+    {$group:{_id:'$product_id', n:{$sum:{$ifNull:['$quantity',1]}}}}.
+
+    It EVALUATES the status predicate the service actually builds, including
+    the case-insensitive `$regex` form. A double that understood only `$in`
+    silently matched every row once the real query moved to a regex -- it would
+    have reported the whole shelf as on hand and proved nothing."""
+
+    @staticmethod
+    def _status_pred(cond):
+        """(callable) for a `status` condition, or None if not understood."""
+        if isinstance(cond, dict) and "$regex" in cond:
+            flags = re.I if "i" in (cond.get("$options") or "") else 0
+            rx = re.compile(cond["$regex"], flags)
+            return lambda st: isinstance(st, str) and bool(rx.match(st))
+        if isinstance(cond, dict) and "$in" in cond:
+            allowed = set(cond["$in"])
+            return lambda st: st in allowed
+        if isinstance(cond, dict) and "$exists" in cond:
+            return lambda st: (st is not None) is bool(cond["$exists"])
+        return lambda st: st == cond
 
     def aggregate(self, pipeline):
         match = {}
@@ -208,30 +228,22 @@ class _StockUnitsColl(_FakeColl):
             if "$match" in stage:
                 match = stage["$match"]
         pid_in = ((match.get("product_id") or {}).get("$in")) or []
-        # on-hand uses an $or over AVAILABLE-ish / absent status; reserved uses a
-        # flat status == "RESERVED". Detect which predicate this call carries.
-        avail_statuses = None
+        # on-hand is an $or (AVAILABLE-ish / absent / null); reserved is a flat
+        # status predicate. Build whichever this call carries.
         or_clause = match.get("$or")
+        preds = None
         if isinstance(or_clause, list):
-            for clause in or_clause:
-                cond = (clause or {}).get("status")
-                if isinstance(cond, dict) and "$in" in cond:
-                    avail_statuses = set(cond["$in"])
-        status_eq = match.get("status")
+            preds = [self._status_pred((c or {}).get("status")) for c in or_clause]
+        elif "status" in match:
+            preds = [self._status_pred(match["status"])]
         counts: Dict[str, int] = {}
         for r in self._rows:
             pid = r.get("product_id")
             if pid_in and pid not in pid_in:
                 continue
-            st = r.get("status")
-            if avail_statuses is not None:
-                # on-hand: AVAILABLE-ish OR status absent/None
-                if not (st in avail_statuses or st is None):
-                    continue
-            elif status_eq is not None:
-                # reserved: exact status match
-                if st != status_eq:
-                    continue
+            st = r.get("status", None) if "status" in r else None
+            if preds is not None and not any(p(st) for p in preds):
+                continue
             counts[pid] = counts.get(pid, 0) + int(r.get("quantity", 1) or 1)
         return iter([{"_id": pid, "n": n} for pid, n in counts.items()])
 
@@ -298,7 +310,7 @@ def test_stock_tally_populated_with_oversell_risk(monkeypatch):
         },
     )
     db = _tally_db()
-    # listed 3 <= sellable 4 -> OK; listed 9 > sellable 2 -> OVERSELL RISK.
+    # listed 3 <= sellable 5 -> OK; listed 9 > sellable 2 -> OVERSELL RISK.
     out = sh.stock_tally_summary(db, online_qty={"SKU-OK": 3, "SKU-RISK": 9})
 
     # Only the two ONLINE skus are assessed; the offline one is skipped.
@@ -311,7 +323,11 @@ def test_stock_tally_populated_with_oversell_risk(monkeypatch):
 
     by_sku = {i["sku"]: i for i in out["items"]}
     ok = by_sku["SKU-OK"]
-    assert ok["on_hand"] == 5 and ok["reserved"] == 1 and ok["sellable"] == 4
+    # sellable is on_hand, NOT on_hand - reserved: `on_hand` is the SELLABLE
+    # reader (AVAILABLE-ish only) and RESERVED is a different status, so the
+    # reserved unit was never inside the 5. Subtracting it counted the same
+    # reservation twice and under-stated what the storefront may list.
+    assert ok["on_hand"] == 5 and ok["reserved"] == 1 and ok["sellable"] == 5
     assert ok["oversell_risk"] is False
     assert ok["recommended_buffer"] == 1  # max(1, ceil(5% of 5))
 
@@ -323,11 +339,28 @@ def test_stock_tally_populated_with_oversell_risk(monkeypatch):
     # Summary totals only cover the online SKUs (P1 + P2), not the offline P3.
     assert out["summary"]["total_on_hand"] == 7      # 5 + 2
     assert out["summary"]["total_reserved"] == 1
-    assert out["summary"]["total_sellable"] == 6     # 4 + 2
+    assert out["summary"]["total_sellable"] == 7     # 5 + 2
     assert out["summary"]["total_online_listed"] == 12  # 3 + 9
 
     # READ-ONLY: the fake stock rows are unchanged (nothing reserved/minted).
     assert len(db["stock_units"]._rows) == 11
+
+
+def test_a_lowercase_reserved_unit_is_still_a_reservation(monkeypatch):
+    """`canonical_state` upper-cases before it maps, so a legacy lowercase
+    `reserved` row IS a reserved unit. A bare == "RESERVED" here dropped it
+    from the reserved count entirely -- the same case split that let a
+    half-walked shelf lock as a clean day-end on the count side."""
+    _patch_online(monkeypatch, {"SKU-OK": {"online": True, "online_stock": None}})
+    db = _tally_db()
+    db["stock_units"]._rows.append(
+        {"product_id": "P1", "status": "reserved", "quantity": 1}
+    )
+    out = sh.stock_tally_summary(db)
+    row = {i["sku"]: i for i in out["items"]}["SKU-OK"]
+    assert row["reserved"] == 2, "a lowercase `reserved` unit is a reservation"
+    # ...and it is NOT also counted as sellable stock.
+    assert row["on_hand"] == 5 and row["sellable"] == 5
 
 
 def test_stock_tally_no_mapped_products_is_empty(monkeypatch):

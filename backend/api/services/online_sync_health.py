@@ -41,14 +41,16 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# "On hand" is decided by item_events.on_hand_match (its docstring says which
+# readers share it and which do not). This service used to keep its own copy of
+# the status list, "kept in sync with inventory._on_hand_by_product" by hand.
+from .item_events import StockState, on_hand_match, status_match
+
 logger = logging.getLogger(__name__)
 
 # Cap how many products we scan for the reconcile diff so the status tile stays
 # cheap even on a large catalog. Matches the catalog endpoint's default ceiling.
 _RECONCILE_SCAN_LIMIT = 1000
-
-# On-hand availability statuses (kept in sync with inventory._on_hand_by_product).
-_AVAILABLE_STATUSES = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
 
 
 def _coll(db, name: str):
@@ -113,18 +115,14 @@ def _on_hand_by_product(
     db, product_ids: List[str], store_id: Optional[str] = None
 ) -> Dict[str, int]:
     """Count on-hand units per product from the serialized `stock_units`
-    collection (one row per unit). Self-contained mirror of
-    inventory._on_hand_by_product so this service has no router dependency.
+    collection (one row per unit). Same shape as inventory._on_hand_by_product,
+    reading the SAME on-hand decision, without a router dependency.
     Fail-soft -> {}."""
     if db is None or not product_ids:
         return {}
     match: Dict[str, Any] = {
         "product_id": {"$in": list(product_ids)},
-        "$or": [
-            {"status": {"$in": _AVAILABLE_STATUSES}},
-            {"status": {"$exists": False}},
-            {"status": None},
-        ],
+        **on_hand_match(),
     }
     if store_id:
         match["store_id"] = store_id
@@ -245,7 +243,10 @@ def _reserved_by_product(
         return {}
     match: Dict[str, Any] = {
         "product_id": {"$in": list(product_ids)},
-        "status": "RESERVED",
+        # Same canonical rule as the on-hand reader -- a bare == "RESERVED"
+        # here would miss a legacy lowercase `reserved` unit, which is the
+        # exact split this codebase already paid for once.
+        **status_match(StockState.RESERVED),
     }
     if store_id:
         match["store_id"] = store_id
@@ -402,7 +403,11 @@ def stock_tally_summary(
         # A blocked-collection product is never sellable online regardless of
         # physical stock (a brand ban); force its sellable to 0 so it can never
         # show as available online.
-        sellable = 0 if sku in blocked else max(0, oh - rv)
+        # `on_hand` is the SELLABLE reader (AVAILABLE-ish only) and RESERVED
+        # is a different status, so the two counts are DISJOINT -- the reserved
+        # units were never inside `oh`. Subtracting them counted every
+        # reservation twice and under-stated what the storefront may list.
+        sellable = 0 if sku in blocked else oh
         # Listed qty: only from a live Shopify read (online_qty). Unknown ->
         # None, and an unknown quantity can never flag (or hide) a risk row.
         listed: Optional[int] = None
@@ -632,7 +637,7 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
         coll = _coll(db, "stock_units")
         if coll is not None:
             count = int(
-                coll.count_documents({"store_id": store_id, "status": "AVAILABLE"})
+                coll.count_documents({"store_id": store_id, **on_hand_match()})
             )
             out["available_units"] = count
             out["checked"] = True

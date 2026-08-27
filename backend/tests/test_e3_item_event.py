@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 
 import pytest
@@ -127,6 +128,18 @@ def _cas_matches(doc, filter):
         actual = doc.get(k)
         if isinstance(expected, dict):
             for op, op_val in expected.items():
+                if op == "$regex":
+                    # The CAS guard matches from_state with the SAME
+                    # case-insensitive anchored regex every reader uses
+                    # (item_events.status_match); a fake that ignored $regex
+                    # would match every status and hide a lost CAS.
+                    flags = re.I if "i" in str(expected.get("$options", "")) else 0
+                    if not isinstance(actual, str) or re.search(
+                        op_val, actual, flags
+                    ) is None:
+                        return False
+                if op == "$options":
+                    continue  # handled with $regex
                 if op == "$in" and actual not in op_val:
                     return False
                 if op == "$nin" and actual in op_val:
@@ -513,6 +526,86 @@ def test_lowercase_legacy_status_canonicalises_and_quarantines(env):
     assert row["to_state"] == "QUARANTINED"
     assert row["from_state"] == "AVAILABLE"  # canonicalised; no raw lowercase in the ledger
     assert row["from_state"] not in ("available", "in_stock", "IN_STOCK")
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["Available", " AVAILABLE ", "In_Stock", "AVAILABLE\n", None, "<missing>"],
+    ids=["title case", "padded", "In_Stock", "trailing newline", "null status",
+         "no status field"],
+)
+def test_a_unit_every_reader_counts_as_on_hand_can_be_transitioned(env, shape):
+    """Round-3 item J: the CAS guard was a hand-typed variant list 250 lines
+    below `status_spellings` in the file that OWNS the spelling rule, so a
+    Title-case / padded / status-less unit was on hand to every reader yet
+    could never be transitioned by the ledger at all. The guard now asks
+    the shared rule (status_match / on_hand_match)."""
+    from api.services import item_events as ie
+
+    sid = "UJ-1"
+    if shape == "<missing>":
+        env["db"].get_collection("stock_units").insert_one(
+            {"stock_id": sid, "product_id": "P-J", "store_id": "S-A",
+             "barcode": f"BC-{sid}", "quantity": 1}  # deliberately NO status
+        )
+    else:
+        env["add_unit"](sid, product_id="P-J", status=shape)
+    assert ie.is_on_hand(None if shape in (None, "<missing>") else shape), (
+        "test precondition: every reader calls this unit on hand"
+    )
+
+    ev = ie.record_event(
+        env["db"],
+        event_type=ie.ItemEventType.SELL,
+        actor_id="u-test",
+        stock_id=sid,
+        from_state=ie.StockState.AVAILABLE,
+        to_state=ie.StockState.SOLD,
+        source_type="order",
+        source_id="ORD-J",
+    )
+    assert ev is not None, (
+        f"a unit stored as {shape!r} is on hand to every reader, so the "
+        "ledger must be able to transition it -- the CAS refused"
+    )
+    assert env["stock_repo"].find_by_id(sid)["status"] == "SOLD"
+
+
+def test_a_lowercase_reserved_unit_can_be_released(env):
+    """The same rule for the non-AVAILABLE guard: a RESERVED unit stored in
+    the legacy lowercase shape must still release."""
+    from api.services import item_events as ie
+
+    env["add_unit"]("UJ-2", product_id="P-J", status="reserved")
+    ev = ie.record_event(
+        env["db"],
+        event_type=ie.ItemEventType.RELEASE,
+        actor_id="u-test",
+        stock_id="UJ-2",
+        from_state=ie.StockState.RESERVED,
+        to_state=ie.StockState.AVAILABLE,
+    )
+    assert ev is not None
+    assert env["stock_repo"].find_by_id("UJ-2")["status"] == "AVAILABLE"
+
+
+def test_the_cas_still_loses_to_a_racing_writer_under_the_shared_rule(env):
+    """Widening the guard to the shared spellings must NOT widen it past the
+    from_state: a unit already SOLD stays untransitionable, so exactly one of
+    two concurrent sells can ever win."""
+    from api.services import item_events as ie
+
+    env["add_unit"]("UJ-3", product_id="P-J", status="SOLD")
+    ev = ie.record_event(
+        env["db"],
+        event_type=ie.ItemEventType.SELL,
+        actor_id="u-test",
+        stock_id="UJ-3",
+        from_state=ie.StockState.AVAILABLE,
+        to_state=ie.StockState.SOLD,
+        enforce_transition=False,  # reach the CAS itself, not the legal gate
+    )
+    assert ev is None, "the CAS matched a unit that was not in from_state"
 
 
 # ===========================================================================
