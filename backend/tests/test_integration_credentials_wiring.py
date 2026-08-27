@@ -18,6 +18,7 @@ database or a screen.
 """
 
 import asyncio
+import importlib
 import os
 import sys
 
@@ -285,18 +286,20 @@ class _SingletonColl:
 
 def _arm_gate(monkeypatch, raw: str):
     """Arm the server's send gate the way a deploy does -- through the
-    environment -- and reproduce the snapshot agents.providers takes at import
-    from exactly that value.
+    environment -- then RE-IMPORT agents.providers so the module-level
+    snapshot is produced by whatever parse the module itself performs.
 
-    The snapshot is `os.getenv("DISPATCH_MODE", "off").lower()`, so it is
-    derived here rather than copied: an armed server has BOTH, and a fixture
-    that hand-sets the snapshot to the raw string would be testing a state no
-    deploy can produce.
+    Nothing here restates that parse. An earlier version hand-copied the
+    line-one expression into this fixture, which meant no test using it could
+    ever observe a change to the real line -- the fixture was itself a second
+    implementation of the gate.
     """
+    # Register the pre-test snapshot for teardown FIRST: reload() mutates the
+    # module in place, so a setattr recorded after it would "restore" the
+    # armed value and leak the gate into later tests.
+    monkeypatch.setattr(providers, "DISPATCH_MODE", providers.DISPATCH_MODE)
     monkeypatch.setenv("DISPATCH_MODE", raw)
-    monkeypatch.setattr(
-        providers, "DISPATCH_MODE", os.getenv("DISPATCH_MODE", "off").lower()
-    )
+    importlib.reload(providers)
 
 
 def _providers_readout(monkeypatch, stored):
@@ -354,6 +357,70 @@ def test_a_case_typo_in_the_env_var_is_reported_the_way_the_gate_read_it(monkeyp
 
     assert resp["dispatch_mode"] == "live"
     assert providers._should_dispatch("+919999999999")[0] is True
+
+
+def test_a_padded_live_from_the_environment_still_arms_the_gate(monkeypatch):
+    """ABSOLUTE probe of the padding policy -- not relative to the gate.
+
+    `DISPATCH_MODE=" live"` is a Railway variable pasted with a leading space.
+    Policy: every dispatch gate STRIPS. A stray space must not silently disarm
+    all messaging -- and before this was pinned, the identically-padded
+    SHOPIFY_DISPATCH_MODE (which already stripped) fired a REAL Shopify write
+    while the global gate armed nothing: same rule, two padding policies,
+    opposite answers. This test reloads agents.providers with the padded env
+    var and asserts the resulting behaviour outright, so it dies if line one
+    ever becomes more permissive OR more strict than "strip then lower".
+    """
+    _arm_gate(monkeypatch, " live")
+    assert providers.DISPATCH_MODE == "live"
+    assert providers.dispatch_mode() == "live"
+    assert providers._should_dispatch("+919999999999")[0] is True
+
+    # Padding never launders garbage into a mode: strip, then the unknown
+    # value still defaults to off.
+    _arm_gate(monkeypatch, " banana ")
+    assert providers._should_dispatch("+919999999999")[0] is False
+
+
+def test_both_send_gates_share_one_padding_policy(monkeypatch):
+    """The identically-padded value must give the identical answer on the
+    global gate and the Shopify override gate."""
+    from agents import nexus_providers
+
+    _arm_gate(monkeypatch, " live")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", " live")
+
+    assert providers.dispatch_mode() == "live"
+    assert nexus_providers.shopify_dispatch_mode() == "live"
+    assert providers._should_dispatch("+919999999999")[0] is True
+    assert nexus_providers._is_shopify_write_allowed() is True
+
+
+def test_the_fallback_parses_match_the_gate_when_the_import_actually_fails(monkeypatch):
+    """notification_service and shiprocket each carry an `except Exception`
+    fallback that re-parses DISPATCH_MODE from the environment. Those are the
+    last two independent parses of this env var in the app, and until now no
+    test ever forced the import to fail -- so they could drift from the gate
+    (one padding policy away) with every suite green."""
+    import api.services.notification_service as notification_service
+    import api.services.shiprocket as shiprocket
+
+    monkeypatch.setenv("DISPATCH_MODE", " live")
+    real_providers = sys.modules["agents.providers"]
+
+    # notification_service: the import happens inside _dispatch_mode(), so
+    # poisoning sys.modules flips it onto the fallback for this call only.
+    monkeypatch.setitem(sys.modules, "agents.providers", None)
+    assert notification_service._dispatch_mode() == "live"
+
+    # shiprocket: its fallback is chosen at module import, so reload it with
+    # the import broken, assert, then reload it back onto the real gate.
+    try:
+        importlib.reload(shiprocket)
+        assert shiprocket.dispatch_mode() == "live"
+    finally:
+        sys.modules["agents.providers"] = real_providers
+        importlib.reload(shiprocket)
 
 
 def test_the_stored_row_still_loses_if_the_key_ever_survives_the_strip(monkeypatch):
@@ -621,6 +688,78 @@ def test_notifications_endpoint_refuses_to_store_a_credential(monkeypatch):
     assert "api_key" not in stored and "webhook_url" not in stored
     assert stored["sender_id"] == "MARKSND"
     assert "MARKER-SHOULD-NOT-PERSIST" not in repr(resp)
+
+
+def test_no_spelling_of_a_secret_or_the_gate_survives_the_strip(monkeypatch):
+    """The strip must be spelling-insensitive, not a snake_case string match.
+
+    The frontend's response aliasing (client.ts addCamelAliases) makes
+    camelCase the canonical client-side spelling of every snake_case field --
+    and a planted `dispatchMode` WINS over the alias of the true one, because
+    the aliaser never overwrites an existing key. So `apiKey` used to land, in
+    plain text, in the unencrypted notification_providers singleton and be
+    echoed back by PUT and GET; `dispatchMode: "live"` rode the same hole into
+    the client-side readout. PUT every spelling a client can produce and
+    assert none is stored, none is echoed, and none wins the readout.
+    """
+    from api.routers import settings as settings_router
+
+    _no_db(monkeypatch)
+    coll = _SingletonColl({})
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+    _arm_gate(monkeypatch, "off")
+
+    put_echo = asyncio.run(
+        settings_router.update_notification_providers(
+            {
+                "apiKey": "MARKER-CAMEL-SECRET",
+                "API_KEY": "MARKER-UPPER-SECRET",
+                "api_key": "MARKER-SNAKE-SECRET",
+                "webhookUrl": "https://x.invalid/MARKER-CAMEL-HOOK",
+                "dispatchMode": "live",
+                "DISPATCH_MODE": "live",
+                "dispatch_mode": "live",
+                "dispatch_mode ": "live",
+                "sender_id": "MARKSND",
+            },
+            {"roles": ["ADMIN"]},
+        )
+    )
+    get_resp = asyncio.run(
+        settings_router.get_notification_providers({"roles": ["ADMIN"]})
+    )
+
+    forbidden_canon = {"apikey", "webhookurl", "dispatchmode"}
+    for name, keys in (
+        ("stored", coll.doc.keys()),
+        ("PUT echo", put_echo.keys()),
+    ):
+        hit = {k for k in keys if cred_crypto.canon_field(k) in forbidden_canon}
+        assert not hit, f"{name} carries a forbidden spelling: {sorted(hit)}"
+    # GET may (and must) carry exactly ONE dispatch key: the server-computed
+    # snake_case one, reporting the gate -- never the planted "live".
+    gate_keys = {k for k in get_resp if cred_crypto.canon_field(k) == "dispatchmode"}
+    assert gate_keys == {"dispatch_mode"}, gate_keys
+    assert get_resp["dispatch_mode"] == "off", "a planted spelling won the readout"
+    assert not {
+        k for k in get_resp if cred_crypto.canon_field(k) in {"apikey", "webhookurl"}
+    }
+    # No secret VALUE leaks under any key either.
+    assert "MARKER-CAMEL-SECRET" not in repr(get_resp) + repr(put_echo) + repr(coll.doc)
+    # The real preference still lands.
+    assert coll.doc["sender_id"] == "MARKSND"
+
+
+def test_a_camel_spelled_secret_is_encrypted_and_masked_at_rest():
+    """Same spelling hole, one collection over: cred_crypto keys the at-rest
+    encryption and the response mask off the field NAME, so `apiKey` on
+    PUT /settings/integrations/{type} used to be stored unencrypted and
+    returned unmasked. Membership must be spelling-insensitive there too."""
+    for spelling in ("apiKey", "API_KEY", "api_key "):
+        enc = cred_crypto.encrypt_config({spelling: "MARKER-SECRET-VALUE"})
+        assert enc[spelling].startswith("fernet:"), spelling
+        masked = cred_crypto.mask_config({spelling: "MARKER-SECRET-VALUE"})
+        assert "MARKER-SECRET-VALUE" not in repr(masked), spelling
 
 
 # ---------------------------------------------------------------------------

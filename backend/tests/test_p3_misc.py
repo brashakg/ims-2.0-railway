@@ -75,6 +75,21 @@ def test_razorpay_config_rejects_camel_case():
 # test_integration_credentials_wiring.py.
 
 
+def test_the_credential_wiping_admin_routes_stay_deleted():
+    """A re-add of any of these restores the save that silently wiped the
+    MSG91 credentials -- with CI green, because deleting their model tests
+    left nothing asserting the endpoints are gone."""
+    from api.main import app
+
+    gone = {
+        "/api/v1/admin/integrations/whatsapp",
+        "/api/v1/admin/integrations/whatsapp/test",
+        "/api/v1/admin/integrations/sms",
+    }
+    live = {getattr(r, "path", "") for r in app.routes}
+    assert not gone & live, f"deleted credential routes are back: {sorted(gone & live)}"
+
+
 def test_tally_config_accepts_snake_case():
     from api.routers.admin import TallyConfig
 
