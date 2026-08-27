@@ -129,11 +129,19 @@ def _grn_doc(vendor_id="V-RV1", status="ACCEPTED", accepted=RECEIVED):
 
 
 def _wire(db, grn):
-    """Point the purchase-invoice router at the strict DB + a GRN/PO repo."""
+    """Point the purchase-invoice router at the strict DB + a GRN/PO repo.
+
+    The GRN is SEEDED INTO db.grns and the repo reads it back from there, which
+    is production's actual relationship (GrnRepository is backed by the same
+    Mongo `grns` collection the router's own handle reaches). A repo that
+    answered from a private snapshot instead would hide the atomic unit claim
+    entirely -- it writes a counter onto that row.
+    """
+    db.seed("grns", [grn])
 
     class _GrnRepo:
         def find_by_id(self, grn_id):
-            return dict(grn) if grn_id == grn["grn_id"] else None
+            return db.get_collection("grns").find_one({"grn_id": grn_id})
 
     class _PoRepo:
         def find_by_id(self, po_id):
@@ -548,4 +556,476 @@ class TestOverBilledProductsMath:
                 grn, [], [{"product_id": "P1", "qty": 99, "unit_price": UNIT}]
             )
             == []
+        )
+
+
+# ===========================================================================
+# THE RACE -- two bookings of one receipt in the same instant
+# ===========================================================================
+
+
+def _grn_row(db):
+    return db.get_collection("grns").find_one({"grn_id": "G-RV1"})
+
+
+def _claimed(db, pid="P1"):
+    """Units the receipt currently has claimed for a product (0 when unclaimed).
+
+    Read through the NESTED path, the way Mongo stores a dotted $inc -- if the
+    counter were being written as a flat "billed_qty.P1" key this returns 0 and
+    the assertions below fail, which is the point.
+    """
+    return float(((_grn_row(db) or {}).get("billed_qty") or {}).get(pid) or 0)
+
+
+class TestConcurrentBookingsCannotBothTakeTheSameUnits:
+    """REQUIREMENT: the cap survives two bookings that overlap in time.
+
+    `_assert_grn_not_over_billed` reads the prior bills, decides, and only then
+    inserts. Two requests interleaved so that BOTH read before EITHER writes
+    each see an unbilled receipt and both pass. The atomic claim
+    (`_claim_grn_units`) is what stops the second one landing.
+
+    The interleaving is forced deterministically at the prior-bill READ -- a
+    point BOTH the guarded and unguarded code paths reach -- so removing the
+    claim leaves the race intact and the test fails on the over-billing itself,
+    not on a hook that never fired.
+    """
+
+    def _race(self, db, cli, in_flight_qty=RECEIVED, rival_qty=RECEIVED):
+        """Run INV-RIVAL to completion inside INV-INFLIGHT's prior-bill read, so
+        the in-flight booking decides on a snapshot that is already stale."""
+        bills = db.get_collection("vendor_bills")
+        real_find = bills.find
+        state = {"fired": False, "rival": None}
+
+        def racing_find(*args, **kwargs):
+            snapshot = list(real_find(*args, **kwargs))  # taken BEFORE the rival
+            if not state["fired"]:
+                state["fired"] = True
+                state["rival"] = cli.post(
+                    "/api/v1/vendors/purchase-invoices",
+                    json=_invoice(invoice_number="INV-RIVAL", qty=rival_qty),
+                )
+            return iter(snapshot)
+
+        bills.find = racing_find
+        try:
+            in_flight = cli.post(
+                "/api/v1/vendors/purchase-invoices",
+                json=_invoice(invoice_number="INV-INFLIGHT", qty=in_flight_qty),
+            )
+        finally:
+            bills.find = real_find
+        assert state["fired"], "the race never interleaved -- the test proves nothing"
+        return state["rival"], in_flight
+
+    def test_only_one_of_two_simultaneous_bookings_takes_the_receipt(self):
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+
+        rival, in_flight = self._race(db, cli)
+
+        assert rival.status_code == 201, rival.text
+        assert (
+            in_flight.status_code == 409
+        ), "both bookings took the same 20 units: %s %s" % (
+            in_flight.status_code,
+            in_flight.text,
+        )
+        assert in_flight.json()["detail"]["code"] == "grn_over_billed"
+
+        # The ledger, not the status line.
+        assert len(_bills(db)) == 1, f"only the winner may be stored: {_bills(db)!r}"
+        assert _bills(db)[0]["bill_number"] == "INV-RIVAL"
+        assert _billed_units(db) == RECEIVED
+        assert (
+            _payable(db) == RECEIPT_TOTAL
+        ), "payable must be the one receipt (Rs %s), got Rs %s" % (
+            f"{RECEIPT_TOTAL:,.2f}",
+            f"{_payable(db):,.2f}",
+        )
+        # The winner's claim is on the receipt.
+        assert _claimed(db) == RECEIVED
+        assert len(_grn_row(db).get("billed_claim_ids") or []) == 1
+
+    def test_two_simultaneous_part_bills_that_fit_both_book(self):
+        """The claim caps the TOTAL, it does not serialise billing: 12 + 8
+        against a 20-unit receipt must both land even when they overlap."""
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+
+        rival, in_flight = self._race(db, cli, in_flight_qty=8, rival_qty=12)
+
+        assert rival.status_code == 201, rival.text
+        assert in_flight.status_code == 201, in_flight.text
+        assert len(_bills(db)) == 2
+        assert _billed_units(db) == RECEIVED
+        assert _payable(db) == RECEIPT_TOTAL
+        assert _claimed(db) == RECEIVED
+
+    def test_two_simultaneous_part_bills_that_overflow_lose_the_second(self):
+        """12 + 10 against 20 is 2 units over: the second must be refused even
+        though its own pre-check saw an unbilled receipt."""
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+
+        rival, in_flight = self._race(db, cli, in_flight_qty=10, rival_qty=12)
+
+        assert rival.status_code == 201, rival.text
+        assert in_flight.status_code == 409, in_flight.text
+        assert len(_bills(db)) == 1
+        assert _billed_units(db) == 12
+        assert _claimed(db) == 12  # the loser's units were never taken
+        assert _payable(db) == 45360.0
+
+
+class TestClaimedUnitsAreReleasedWhenTheBookingFails:
+    """REQUIREMENT: the counter may never drift ABOVE reality by more than a
+    crash window -- a booking that claims units and then fails to store its bill
+    must give them back, or the receipt is stuck looking fully billed.
+
+    (Drift in the other direction is harmless: the read-based cap still sees the
+    real bills. That asymmetry is why the release is fail-soft-and-loud rather
+    than a hard error.)
+    """
+
+    def _breaking_client(self, db, exc):
+        """Wire a client whose vendor_bills insert always raises `exc`."""
+        _wire(db, _grn_doc())
+        bills = db.get_collection("vendor_bills")
+
+        def _boom(_doc):
+            raise exc
+
+        bills.insert_one = _boom
+        return _client(pi.router, "/api/v1/vendors/purchase-invoices")
+
+    def test_a_failed_insert_gives_the_units_back(self):
+        db = _db()
+        cli = self._breaking_client(db, RuntimeError("disk on fire"))
+
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice())
+        assert r.status_code == 500, r.text
+        assert _bills(db) == []
+        assert _claimed(db) == 0, (
+            "the receipt is stuck at %s claimed units with no bill to show for "
+            "it -- the next legitimate invoice would be refused" % _claimed(db)
+        )
+        assert (_grn_row(db).get("billed_claim_ids") or []) == []
+
+    def test_a_duplicate_invoice_number_gives_the_units_back(self):
+        """The DuplicateKeyError branch returns 409, not 500 -- it must release
+        too, or a mistyped invoice number would burn the receipt's units."""
+
+        class _DupErr(Exception):
+            pass
+
+        _DupErr.__name__ = "DuplicateKeyError"  # matched by class name
+
+        db = _db()
+        cli = self._breaking_client(db, _DupErr("E11000 duplicate key"))
+
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice())
+        assert r.status_code == 409, r.text
+        assert "already" in r.text.lower()
+        assert _claimed(db) == 0
+        assert _bills(db) == []
+
+    def test_after_a_release_the_receipt_can_still_be_billed_in_full(self):
+        """The end the release exists for: a failed attempt must not cost the
+        vendor their invoice."""
+        db = _db()
+        cli = self._breaking_client(db, RuntimeError("transient"))
+        assert (
+            cli.post("/api/v1/vendors/purchase-invoices", json=_invoice()).status_code
+            == 500
+        )
+
+        # Repair the collection and bill it properly.
+        bills = db.get_collection("vendor_bills")
+        del bills.insert_one  # fall back to the class implementation
+        ok = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice(invoice_number="INV-RETRY"),
+        )
+        assert ok.status_code == 201, ok.text
+        assert _payable(db) == RECEIPT_TOTAL
+        assert _claimed(db) == RECEIVED
+
+
+class TestTheClaimCounterItself:
+    def test_a_first_booking_stamps_the_counter_on_the_receipt(self):
+        """If this is 0 the claim silently did nothing and every race test above
+        would be passing for the wrong reason."""
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice(qty=12))
+        assert r.status_code == 201, r.text
+        assert _claimed(db) == 12
+        assert _grn_row(db)["billed_claim_ids"] == [r.json()["invoice_id"]]
+
+    def test_part_bills_accumulate_on_the_counter(self):
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+        cli.post("/api/v1/vendors/purchase-invoices", json=_invoice("V-RV1", "A", 12))
+        cli.post("/api/v1/vendors/purchase-invoices", json=_invoice("V-RV1", "B", 8))
+        assert _claimed(db) == RECEIVED
+        assert len(_grn_row(db)["billed_claim_ids"]) == 2
+
+    def test_a_handle_that_cannot_do_a_guarded_update_still_books(self):
+        """A collection with no find_one_and_update is a MISSING CAPABILITY (a
+        stub/mock handle), not a failed operation -- it must fall back to the
+        read-based cap, not 503 the booking.
+
+        Regression: catching that AttributeError as a DB error turned every
+        ordinary booking into `503 Could not reserve this goods receipt's units`
+        on any harness whose double lacks the method -- 7 tests in
+        test_purchase_match.py, and the app's mock mode with it.
+        """
+        db = _db()
+        _wire(db, _grn_doc())
+        grns = db.get_collection("grns")
+
+        class _NoClaim:
+            """Everything the router needs EXCEPT the guarded update."""
+
+            def find_one(self, *a, **k):
+                return grns.find_one(*a, **k)
+
+            def update_one(self, *a, **k):
+                return grns.update_one(*a, **k)
+
+        real_get = db.get_collection
+        db.get_collection = lambda n: _NoClaim() if n == "grns" else real_get(n)
+        try:
+            cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+            r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice())
+        finally:
+            db.get_collection = real_get
+
+        assert r.status_code == 201, r.text
+        assert _payable(db) == RECEIPT_TOTAL
+        # No counter was written -- the read-based cap carried this booking.
+        assert _claimed(db) == 0
+
+    def test_a_receipt_row_the_claim_cannot_reach_still_books(self):
+        """Fail-open-on-unknowable: when the GRN reaches us from a repository
+        with no matching grns row, the booking proceeds on the read-based cap
+        alone rather than being refused forever."""
+        db = _db()
+        _wire(db, _grn_doc())
+        db.get_collection("grns").delete_one({"grn_id": "G-RV1"})
+
+        class _DetachedRepo:
+            def find_by_id(self, _id):
+                return _grn_doc() if _id == "G-RV1" else None
+
+        pi.get_grn_repository = lambda: _DetachedRepo()
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice())
+        assert r.status_code == 201, r.text
+        assert _payable(db) == RECEIPT_TOTAL
+
+
+class TestLeaksFoundByAdversarialReview:
+    """Three defects an adversarial panel raised against the FIRST cut of the
+    atomic claim, each reproduced before it was fixed."""
+
+    def _vendor_client(self, db):
+        class _VR:
+            def find_by_id(self, vid):
+                return db.get_collection("vendors").find_one({"vendor_id": vid})
+
+        vend._get_db = lambda: db
+        vend.get_vendor_repository = lambda: _VR()
+        return _client(vend.router, "/api/v1/vendors")
+
+    def test_a_header_only_bill_on_the_receipt_blocks_a_line_level_invoice(self):
+        """A bill with NO LINES declares no quantity, so it contributed 0 to the
+        cap and the receipt read as unbilled: one 20-unit receipt took a
+        header-only bill for the full value AND a full invoice on top.
+        Reproduced at Rs 151,200 booked against Rs 75,600 of goods."""
+        db = _db()
+        _wire(db, _grn_doc())
+        vcli = self._vendor_client(db)
+        pcli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+
+        hdr = vcli.post(
+            "/api/v1/vendors/V-RV1/bills",
+            json={
+                "bill_number": "HDR-1",
+                "bill_date": "2026-08-01",
+                "taxable_amount": RECEIPT_TAXABLE,
+                "tax_amount": 3600.0,
+                "total_amount": RECEIPT_TOTAL,
+                "grn_id": "G-RV1",
+            },
+        )
+        assert hdr.status_code == 201, hdr.text
+
+        second = pcli.post(
+            "/api/v1/vendors/purchase-invoices", json=_invoice(invoice_number="PI-1")
+        )
+        assert (
+            second.status_code == 409
+        ), "a full invoice stacked on a header-only bill: %s %s" % (
+            second.status_code,
+            second.text,
+        )
+        assert second.json()["detail"]["code"] == "grn_billed_without_lines"
+        assert second.json()["detail"]["billed_by"] == ["HDR-1"]
+        assert len(_bills(db)) == 1
+        assert _payable(db) == RECEIPT_TOTAL, (
+            "payable must stay at the one receipt, got Rs %s" % f"{_payable(db):,.2f}"
+        )
+
+    def test_a_receipt_billed_before_the_counter_existed_races_correctly(self):
+        """The counter starts ABSENT on every receipt booked before it existed,
+        so its ceiling was measured from a false zero and two concurrent
+        bookings both fitted under it. Reproduced: a 20-unit receipt already
+        carrying a 12-unit bill took two more 8-unit invoices -- 28 units."""
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+        db.get_collection("vendor_bills").insert_one(
+            {
+                "bill_id": "OLD",
+                "bill_number": "OLD-12",
+                "vendor_id": "V-RV1",
+                "grn_id": "G-RV1",
+                "outstanding": 45360.0,
+                "total_amount": 45360.0,
+                "lines": [
+                    {
+                        "product_id": "P1",
+                        "qty": 12,
+                        "unit_price": UNIT,
+                        "taxable": 43200.0,
+                    }
+                ],
+            }
+        )
+        assert _claimed(db) == 0, "precondition: this receipt has no counter yet"
+
+        rival, in_flight = TestConcurrentBookingsCannotBothTakeTheSameUnits()._race(
+            db, cli, in_flight_qty=8, rival_qty=8
+        )
+        assert rival.status_code == 201, rival.text
+        assert in_flight.status_code == 409, (
+            "12 + 8 + 8 = 28 units booked against a 20-unit receipt: %s"
+            % in_flight.text
+        )
+        assert _billed_units(db) == RECEIVED
+        assert _payable(db) == RECEIPT_TOTAL
+
+    def test_the_counter_is_baselined_from_bills_that_predate_it(self):
+        """The mechanism behind the test above: prior bills are folded into the
+        counter before the claim, so it starts from reality, not zero."""
+        db = _db()
+        _wire(db, _grn_doc())
+        cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+        db.get_collection("vendor_bills").insert_one(
+            {
+                "bill_id": "OLD",
+                "bill_number": "OLD-12",
+                "vendor_id": "V-RV1",
+                "grn_id": "G-RV1",
+                "outstanding": 45360.0,
+                "lines": [{"product_id": "P1", "qty": 12, "unit_price": UNIT}],
+            }
+        )
+        r = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice(invoice_number="BAL-8", qty=8),
+        )
+        assert r.status_code == 201, r.text
+        assert (
+            _claimed(db) == RECEIVED
+        ), "counter must read 12 (baselined) + 8 (claimed) = 20, got %s" % _claimed(db)
+
+    def test_a_read_failure_confirming_a_lost_race_refuses_rather_than_books(self):
+        """After a lost claim the code re-reads to tell 'rival took it' from 'no
+        such row'. That read used to fail OPEN on error, booking the loser of a
+        real race -- and in a real race the read-based cap has already passed on
+        a stale view, so the counter is the only control left. UNKNOWN is not
+        ABSENT: refuse."""
+        db = _db()
+        _wire(db, _grn_doc())
+        grns = db.get_collection("grns")
+
+        state = {"claim_attempted": False}
+
+        class _LostThenBlind:
+            """Loses the claim, then fails the read that would confirm why.
+
+            The read fails ONLY after the claim, so the GRN still loads
+            normally -- otherwise the request would die before reaching the
+            branch under test and the test would pass for the wrong reason.
+            """
+
+            def find_one_and_update(self, *_a, **_k):
+                state["claim_attempted"] = True
+                return None
+
+            def find_one(self, *a, **k):
+                if state["claim_attempted"]:
+                    raise RuntimeError("transient read failure")
+                return grns.find_one(*a, **k)
+
+            def update_one(self, *a, **k):
+                return grns.update_one(*a, **k)
+
+        real_get = db.get_collection
+        db.get_collection = lambda n: _LostThenBlind() if n == "grns" else real_get(n)
+        try:
+            cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
+            r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice())
+        finally:
+            db.get_collection = real_get
+
+        assert r.status_code == 503, "a read blip booked the loser of a race: %s %s" % (
+            r.status_code,
+            r.text,
+        )
+        assert state[
+            "claim_attempted"
+        ], "the claim was never attempted -- test proves nothing"
+        assert _bills(db) == [], "nothing may be booked when the outcome is unknown"
+
+
+class TestClaimThresholdMath:
+    def test_an_unbilled_receipt_allows_a_full_bill(self):
+        t = pmatch.billing_claim_thresholds(
+            _grn_doc(), [{"product_id": "P1", "qty": 20, "unit_price": UNIT}]
+        )
+        assert t["P1"]["qty"] == 20.0
+        assert t["P1"]["max_prior"] >= 0  # a fresh receipt fits
+
+    def test_a_part_bill_leaves_room_for_the_balance(self):
+        t = pmatch.billing_claim_thresholds(
+            _grn_doc(), [{"product_id": "P1", "qty": 12, "unit_price": UNIT}]
+        )
+        assert round(t["P1"]["max_prior"]) == 8
+
+    def test_a_bill_bigger_than_the_receipt_has_no_workable_ceiling(self):
+        assert (
+            pmatch.billing_claim_thresholds(
+                _grn_doc(), [{"product_id": "P1", "qty": 21, "unit_price": UNIT}]
+            )
+            is None
+        )
+
+    def test_a_receipt_that_cannot_be_keyed_claims_nothing(self):
+        grn = {"grn_id": "G-X", "items": [{"accepted_qty": 5}]}
+        assert (
+            pmatch.billing_claim_thresholds(
+                grn, [{"product_id": "P1", "qty": 99, "unit_price": UNIT}]
+            )
+            == {}
         )
