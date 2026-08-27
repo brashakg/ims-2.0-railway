@@ -265,6 +265,27 @@ def is_on_hand(raw, *, include_reserved: bool = False) -> bool:
     )
 
 
+def unknown_status_tokens(db, store_id) -> Optional[List[str]]:
+    """Status tokens stored at this store that `canonical_state` maps to
+    NOTHING. Such a unit is invisible to EVERY reader of the rule -- it is in
+    no allowlist, no snapshot and no expected set -- so a physical count over
+    the store must never be certified clean while any exist (a migration or
+    import writing one token would otherwise make whole shelves invisible AND
+    the day-end clean). None = the question could not be asked (no DB / read
+    failed); callers stay fail-soft on None."""
+    if db is None:
+        return None
+    try:
+        toks = db.get_collection("stock_units").distinct(
+            "status", {"store_id": store_id} if store_id else {}
+        )
+        return sorted(
+            {str(t) for t in toks if t is not None and canonical_state(t) is None}
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_legal_transition(frm, to) -> bool:
     """True iff `frm -> to` is a legal edge. Accepts StockState or raw strings.
 
@@ -405,12 +426,22 @@ def record_event(
 
             cas_filter: dict = {"stock_id": stock_id}
             if frm is not None:
-                # Accept the canonical value OR its legacy lowercase/IN_STOCK
-                # variants so a unit minted under an old path still transitions.
-                variants = {frm}
-                if frm == "AVAILABLE":
-                    variants |= {"available", "IN_STOCK", "in_stock"}
-                cas_filter["status"] = {"$in": list(variants)}
+                # "Is this unit in from_state?" is the SAME spelling rule as
+                # every reader (status_match / canonical_state), not a
+                # hand-typed variant list: a unit minted under an old path
+                # (lowercase / IN_STOCK / Title-case / padded) that every
+                # reader counts must also be transitionable by the ledger.
+                # AVAILABLE additionally accepts a missing/null status --
+                # that is how legacy minted rows look, and is_on_hand calls
+                # them on hand. An unknown token stays an exact match
+                # (fail-closed; the transition gate refuses it anyway).
+                frm_state = canonical_state(frm)
+                if frm_state is StockState.AVAILABLE:
+                    cas_filter.update(on_hand_match())
+                elif frm_state is not None:
+                    cas_filter.update(status_match(frm_state))
+                else:
+                    cas_filter["status"] = frm
             set_block: dict = {"status": to, "last_event_seq": seq}
             if serial is not None:
                 set_block["serial"] = serial

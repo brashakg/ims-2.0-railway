@@ -86,6 +86,43 @@ def _is_manager(user, reopen_roles=None):
     return bool(roles & mgr)
 
 
+def coverage(expected_ids, counted_ids):
+    """HOW MUCH OF THE SHELF WAS WALKED -- the ONE set comparison every
+    physical count reports (the blind count's summary AND the cycle count's
+    completion both call this; it may not be re-typed in either).
+
+    ``expected_ids=None`` means the scope was never recorded / could not be
+    read. That is NOT "everything was counted": it reads as an incomplete
+    count (``full_count`` False, every figure None), never a clean one. ``[]``
+    is different -- a scope with nothing on hand cannot be partial. Pure."""
+    counted = {str(c) for c in (counted_ids or ()) if c}
+    if expected_ids is None:
+        return {
+            "products_expected": None,
+            "products_counted": None,
+            "products_missed": None,
+            "products_not_counted": None,
+            "coverage_percentage": None,
+            "full_count": False,
+        }
+    expected = {str(e) for e in expected_ids if e}
+    not_counted = sorted(expected - counted)
+    products_expected = len(expected)
+    products_counted = products_expected - len(not_counted)
+    return {
+        "products_expected": products_expected,
+        "products_counted": products_counted,
+        "products_missed": len(not_counted),
+        "products_not_counted": not_counted,
+        "coverage_percentage": (
+            round((products_counted / products_expected) * 100, 2)
+            if products_expected
+            else 100.0
+        ),
+        "full_count": not not_counted,
+    }
+
+
 def build_summary(items, tolerance=0, expected_ids=None):
     """Per-SKU variance rollup. ``items`` carry counted_qty + expected. Pure.
 
@@ -122,34 +159,19 @@ def build_summary(items, tolerance=0, expected_ids=None):
             short += 1
         rows.append({**it, "variance_units": v, "verdict": verd,
                      "variance_value_paise": v * cost_paise})
-    counted_ids = {it.get("product_id") for it in (items or []) if it.get("product_id")}
-    if expected_ids is None:
-        products_expected = products_counted = coverage_pct = None
-        not_counted = None
-        full_count = False
-    else:
-        expected = {str(e) for e in expected_ids if e}
-        not_counted = sorted(expected - counted_ids)
-        products_expected = len(expected)
-        products_counted = products_expected - len(not_counted)
-        coverage_pct = (round((products_counted / products_expected) * 100, 2)
-                        if products_expected else 100.0)
-        # A session opened over a store with nothing on hand cannot be partial.
-        full_count = not not_counted
+    cov = coverage(
+        expected_ids,
+        (it.get("product_id") for it in (items or [])),
+    )
     return rows, {
         "total_skus": len(items or []),
         "matched": matched, "over": over, "short": short,
         "net_variance_units": net_units,
         "net_variance_value_paise": net_value_paise,
-        "products_expected": products_expected,
-        "products_counted": products_counted,
-        "products_missed": None if not_counted is None else len(not_counted),
-        "products_not_counted": not_counted,
-        "coverage_percentage": coverage_pct,
-        "full_count": full_count,
+        **cov,
         # A count that did not walk the whole scope is NOT a clean day-end,
         # however well the lines it did walk agreed.
-        "within_tolerance": over == 0 and short == 0 and full_count,
+        "within_tolerance": over == 0 and short == 0 and cov["full_count"],
     }
 
 
@@ -269,6 +291,20 @@ class BlindStockTakeEngine:
                      "cost_paise": int(costs.get(it.get("product_id"), 0))} for it in items]
         rows, summary = build_summary(
             enriched, tolerance, expected_ids=sess.get("expected_product_ids"))
+        # THE VOCABULARY TRIPWIRE. The expected set is an anchored allowlist,
+        # so a unit whose status token canonicalises to NOTHING (a migration /
+        # import writing "ON HAND") is invisible to it -- and to every other
+        # reader -- and twelve unwalked units would lock as a clean day-end.
+        # While any such token exists at this store the count cannot be
+        # certified clean or full. Fail-soft: None (could not read) changes
+        # nothing.
+        from .item_events import unknown_status_tokens
+
+        unknown = unknown_status_tokens(self.db, store_id)
+        if unknown:
+            summary["unknown_status_tokens"] = unknown
+            summary["full_count"] = False
+            summary["within_tolerance"] = False
         now = _now_iso()
         from pymongo import ReturnDocument
         updated = coll.find_one_and_update(

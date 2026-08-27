@@ -201,8 +201,10 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
 # WHAT READS IT (measured, and differentially probed over 18 storage shapes by
 # backend/tests/test_on_hand_is_one_rule.py): the count's coverage snapshot and
 # its variance, the stock-count scan screen, /non-moving, /aging,
-# /overstock-analysis, the CL drawer listing, the Stock Ledger (via
-# canonical_state, because it groups BY status) and _on_hand_by_product.
+# /overstock-analysis, the CL drawer listing, the CL power grid's near-expiry
+# flag (via is_on_hand -- it must agree with the grid's own on_hand column),
+# the Stock Ledger (via canonical_state, because it groups BY status) and
+# _on_hand_by_product.
 #
 # WHAT DOES NOT, and is NOT claimed to: `transfer_recommendations` below still
 # matches a bare "AVAILABLE", because its other half is
@@ -2274,51 +2276,40 @@ async def start_stock_count(
     # When a category is requested, first resolve the product_ids that belong
     # to it, then scope the stock aggregation to those ids. This ensures that
     # a category-limited count only snapshots the right products.
-    system_quantities: Dict[str, int] = {}
+    system_quantities: Optional[Dict[str, int]] = {}
     # WHICH units were on hand per product when the session opened -- see the
     # "ONE SNAPSHOT MECHANISM" note above. Without it, a sale and a receipt
     # that cancel out leave the line looking untouched.
     system_unit_fingerprints: Dict[str, str] = {}
-    if stock_repo is not None:
-        # Resolve category -> product_ids when filtering is requested.
-        category_product_ids: Optional[List[str]] = None
-        if request.category:
-            product_repo = get_product_repository()
-            if product_repo is not None:
-                try:
-                    cat_products = product_repo.find_many(
-                        {"category": request.category, "is_active": True}, limit=5000
-                    )
-                    category_product_ids = [
-                        str(p.get("product_id") or p.get("_id") or "")
-                        for p in (cat_products or [])
-                        if p.get("product_id") or p.get("_id")
-                    ]
-                except Exception as _exc:
-                    logger.warning(
-                        "[INVENTORY] category product lookup failed: %s", _exc
-                    )
-
-        match_clause: dict = _countable_match(active_store)
-        if category_product_ids is not None:
-            # Empty list means no products match -- yield no system quantities
-            # rather than counting all products (which would be wrong).
-            if not category_product_ids:
-                pass  # system_quantities stays empty; skip the aggregation
-            else:
-                match_clause["product_id"] = {"$in": category_product_ids}
-
-        if category_product_ids is None or category_product_ids:
-            pipeline = [{"$match": match_clause}, _COUNTABLE_GROUP]
-            for r in stock_repo.aggregate(pipeline):
-                system_quantities[r["_id"]] = r["qty"]
-                # Absent only if the engine did not return the unit ids; the
-                # completion check then falls back to the quantity rather than
-                # flagging every line as moved.
-                if "units" in r:
-                    system_unit_fingerprints[str(r["_id"])] = _unit_fingerprint(
-                        r.get("units")
-                    )
+    # Resolve category -> product_ids when filtering is requested, with the
+    # SAME resolver the scope snapshot uses. None = the category could not be
+    # resolved; the old fallback silently snapshotted the WHOLE STORE instead,
+    # handing a category count a scope it never asked for.
+    category_scope: Optional[List[str]] = None
+    scope_failed = False
+    if request.category:
+        category_scope = _category_product_ids(db, request.category)
+        scope_failed = category_scope is None
+    if stock_repo is None or scope_failed:
+        # "I could not read the shelf" is NOT an EMPTY shelf. {} completes as
+        # "nothing was expected -> full count, coverage 100%"; None completes
+        # as coverage UNKNOWN and never a clean day-end (see `coverage`).
+        system_quantities = None
+    else:
+        # An empty category ($in []) matches nothing -- a real, empty scope.
+        pipeline = [
+            {"$match": _countable_match(active_store, category_scope)},
+            _COUNTABLE_GROUP,
+        ]
+        for r in stock_repo.aggregate(pipeline):
+            system_quantities[r["_id"]] = r["qty"]
+            # Absent only if the engine did not return the unit ids; the
+            # completion check then falls back to the quantity rather than
+            # flagging every line as moved.
+            if "units" in r:
+                system_unit_fingerprints[str(r["_id"])] = _unit_fingerprint(
+                    r.get("units")
+                )
 
     count_doc = {
         "count_id": count_id,
@@ -2451,6 +2442,31 @@ def _unit_fingerprint(unit_ids) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
+def _category_product_ids(db, category: str) -> Optional[List[str]]:
+    """Every active product_id in `category` -- the ONE resolver both count
+    doors use (the cycle count's opening snapshot and the scope snapshot; it
+    may not be re-typed in either).
+
+    None = the lookup FAILED, which is "unanswerable", never "the whole
+    store": a category count that cannot resolve its category must not
+    silently widen to everything. [] is a real answer -- a category with no
+    products expects nothing."""
+    if db is None:
+        return None
+    try:
+        return [
+            str(p.get("product_id") or p.get("_id") or "")
+            for p in db.get_collection("products").find(
+                {"category": category, "is_active": True},
+                {"_id": 1, "product_id": 1},
+            )
+            if p.get("product_id") or p.get("_id")
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] category product lookup failed: %s", exc)
+        return None
+
+
 def _scoped_product_ids(
     db, store_id: str, category: Optional[str] = None
 ) -> Optional[List[str]]:
@@ -2471,17 +2487,8 @@ def _scoped_product_ids(
         return None
     product_ids: Optional[List[str]] = None
     if category:
-        try:
-            product_ids = [
-                str(p.get("product_id") or p.get("_id") or "")
-                for p in db.get_collection("products").find(
-                    {"category": category, "is_active": True},
-                    {"_id": 1, "product_id": 1},
-                )
-                if p.get("product_id") or p.get("_id")
-            ]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[INVENTORY] scope product lookup failed: %s", exc)
+        product_ids = _category_product_ids(db, category)
+        if product_ids is None:
             return None
         # A category with no products expects nothing -- it must NOT fall back
         # to counting the whole store.
@@ -2724,7 +2731,11 @@ async def complete_stock_count(
                 status_code=400, detail="Stock count is not in progress"
             )
 
-        system_quantities = count_doc.get("system_quantities", {})
+        # None = the opening snapshot could not be taken (scope unreadable).
+        # NOT the same as {} (a shelf with nothing on hand): coverage below
+        # must report UNKNOWN for the first and a clean 100% for the second.
+        snapshot = count_doc.get("system_quantities", {})
+        system_quantities = snapshot or {}
         items = count_doc.get("items", [])
 
         # A count with no lines is NOT a count. Completing an empty session used
@@ -2829,18 +2840,26 @@ async def complete_stock_count(
         # counter gets interrupted -- that is the lie that actually happens.
         # Coverage is measured against the EXPECTED set only: a line for a
         # product the session never expected is an overage, not coverage.
-        expected_ids = set(system_quantities.keys())
-        counted_ids = {i.get("product_id", "") for i in items}
-        products_expected = len(expected_ids)
-        products_not_counted = sorted(expected_ids - counted_ids)
-        products_counted = products_expected - len(products_not_counted)
-        coverage_pct = (
-            round((products_counted / products_expected) * 100, 2)
-            if products_expected
-            else 100.0
+        # The set comparison itself is blind_stock_take.coverage -- the ONE
+        # implementation both counts share (an unreadable snapshot reports
+        # coverage UNKNOWN, never a clean 100%).
+        from ..services.blind_stock_take import coverage as _coverage
+        from ..services.item_events import unknown_status_tokens
+
+        cov = _coverage(
+            None if snapshot is None else system_quantities.keys(),
+            (i.get("product_id", "") for i in items),
         )
-        # A session that expected nothing on hand cannot be a partial count.
-        full_count = not products_not_counted
+        # The vocabulary tripwire (same as the blind lock): a unit whose
+        # status token canonicalises to NOTHING is invisible to the expected
+        # set, so the shelf cannot be certified fully counted while any exist.
+        unknown_tokens = unknown_status_tokens(db, count_doc.get("store_id", ""))
+        if unknown_tokens:
+            cov["full_count"] = False
+        products_expected = cov["products_expected"]
+        products_counted = cov["products_counted"]
+        coverage_pct = cov["coverage_percentage"]
+        full_count = cov["full_count"]
 
         # Overall metrics
         overall_var_pct = round(
@@ -2865,12 +2884,8 @@ async def complete_stock_count(
             "overage_value": overage_value,
             "lines_without_cost": lines_without_cost,
             "lines_moved_during_count": lines_moved,
-            "products_expected": products_expected,
-            "products_counted": products_counted,
-            "products_missed": len(products_not_counted),
-            "products_not_counted": products_not_counted,
-            "coverage_percentage": coverage_pct,
-            "full_count": full_count,
+            **cov,
+            "unknown_status_tokens": unknown_tokens or [],
             "notes": request.notes if request else None,
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
@@ -2893,9 +2908,14 @@ async def complete_stock_count(
                         f"{total_overage} units over (Rs {overage_value:,.2f}) "
                         f"across {len(items)} counted lines. "
                         f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}%. "
-                        f"{products_counted} of {products_expected} expected "
-                        f"products were counted ({coverage_pct}%). "
-                        "Investigate and reconcile."
+                        + (
+                            f"{products_counted} of {products_expected} expected "
+                            f"products were counted ({coverage_pct}%). "
+                            if products_expected is not None
+                            else "How much of the shelf this covered is "
+                            "unknown (the opening scope could not be read). "
+                        )
+                        + "Investigate and reconcile."
                     ),
                     priority=pri,
                     category="Inventory",
@@ -2921,9 +2941,10 @@ async def complete_stock_count(
             "lines_moved_during_count": lines_moved,
             "products_expected": products_expected,
             "products_counted": products_counted,
-            "products_missed": len(products_not_counted),
+            "products_missed": cov["products_missed"],
             "coverage_percentage": coverage_pct,
             "full_count": full_count,
+            "unknown_status_tokens": unknown_tokens or [],
             "variances": variances,
         }
 
@@ -4436,7 +4457,6 @@ async def get_cl_power_grid(
         # window. Fail-soft.
         near: Dict[str, bool] = {}
         if pids:
-            avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
             match: dict = {
                 "product_id": {"$in": pids},
                 "expiry_date": {"$exists": True},
@@ -4447,8 +4467,11 @@ async def get_cl_power_grid(
                 for row in db.get_collection("stock_units").find(
                     match, {"_id": 0, "product_id": 1, "expiry_date": 1, "status": 1}
                 ):
-                    st = row.get("status")
-                    if st is not None and st not in avail:
+                    # The SAME sellable question as the grid's own on_hand
+                    # column (_on_hand_by_product) -- one rule, one answer. A
+                    # Title-case / padded legacy unit must never be counted as
+                    # stock in the cell yet skipped by its expiry warning.
+                    if not is_on_hand(row.get("status")):
                         continue
                     days = compute_days_until_expiry(row.get("expiry_date"))
                     if days is not None and days <= near_expiry_days:

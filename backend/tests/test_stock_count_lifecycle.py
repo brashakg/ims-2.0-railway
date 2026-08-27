@@ -1864,3 +1864,184 @@ def test_a_reserved_unit_is_on_the_shelf_to_count_but_not_on_the_shelf_to_sell(
     assert sellable.get(pid, 0) == 0, (
         "a frame held for somebody's order was offered as sellable stock"
     )
+
+
+# ============================================================================
+# 12. ROUND 3: an unreadable scope, an unclassifiable status, a stable print
+# ============================================================================
+
+
+def test_an_unreadable_opening_scope_is_never_a_clean_full_count(
+    mongo_db, monkeypatch
+):
+    """Round-3 coverage twin, cycle side (mirrors the blind count's M4): a
+    session whose opening snapshot could NOT be taken must complete as
+    coverage UNKNOWN -- never as `coverage 100%, full_count true` (which is
+    what an empty {} snapshot reads as)."""
+    from database.repositories.product_repository import StockRepository
+
+    client = _client(mongo_db, monkeypatch, ["ADMIN"])
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+
+    # The stock collection could not be read when the session opened.
+    monkeypatch.setattr(inv_mod, "get_stock_repository", lambda: None)
+    count_id = _start(client)
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["system_quantities"] is None, (
+        '"I could not read the shelf" must never be recorded as "there was '
+        'nothing on the shelf" -- {} completes as a clean full count'
+    )
+
+    # The shelf is readable again by the time the counter scans and completes.
+    monkeypatch.setattr(
+        inv_mod,
+        "get_stock_repository",
+        lambda: StockRepository(mongo_db["stock_units"]),
+    )
+    r = client.post(
+        "/inventory/stock-count-scan",
+        json={"barcode": barcodes[0], "physical_count": 2, "count_id": count_id},
+    )
+    assert r.status_code == 200, r.text
+    r = client.post(f"/inventory/stock-count/{count_id}/complete")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["products_expected"] is None
+    assert body["coverage_percentage"] is None
+    assert body["full_count"] is False, (
+        "an unreadable scope certified itself as a fully-walked shelf"
+    )
+
+
+def test_a_category_start_whose_lookup_fails_does_not_snapshot_the_whole_store(
+    mongo_db, monkeypatch
+):
+    """The old fallback: when the category -> product_ids lookup failed, the
+    opening snapshot silently widened to the WHOLE STORE -- a category count
+    was then judged (and its counter blamed) against shelves it never asked
+    to walk. A failed lookup must record an unreadable scope instead."""
+    client = _client(mongo_db, monkeypatch, ["ADMIN"])
+    pid = _seed_product(mongo_db)
+    _seed_units(mongo_db, pid, 3)
+
+    monkeypatch.setattr(inv_mod, "_category_product_ids", lambda db, c: None)
+    r = client.post("/inventory/stock-count/start", json={"category": "SUNGLASS"})
+    assert r.status_code == 200, r.text
+    doc = mongo_db["stock_counts"].find_one({"count_id": r.json()["count_id"]})
+    assert doc["system_quantities"] is None, (
+        "a failed category lookup snapshotted the whole store"
+    )
+
+
+def test_the_category_resolver_reports_failure_as_none_not_as_nothing(mongo_db):
+    """`_category_product_ids` is the ONE category resolver both count doors
+    share: a failed read is None (unanswerable), an empty category is [] (a
+    real answer), and neither may ever mean the other."""
+    from api.routers.inventory import _category_product_ids
+
+    class _Exploding:
+        def get_collection(self, name):
+            class _C:
+                def find(self, *a, **k):
+                    raise RuntimeError("products collection is down")
+
+            return _C()
+
+    assert _category_product_ids(_Exploding(), "SUNGLASS") is None
+    assert _category_product_ids(None, "SUNGLASS") is None
+    assert _category_product_ids(_DBProxy(mongo_db), "NO-SUCH-CAT") == []
+
+
+def test_a_shelf_holding_an_unclassifiable_status_is_never_a_full_count(
+    admin_client, mongo_db
+):
+    """Round-3 residual 4, cycle side: a unit whose status token
+    canonicalises to NOTHING (a migration writing "ON HAND") is invisible to
+    the expected set AND to every reader -- so twelve such units nobody
+    walked used to certify as a clean, fully-covered day-end. While any such
+    token exists at the store, the count must refuse to call itself full."""
+    pid = _seed_product(mongo_db)
+    _seed_units(mongo_db, pid, 2)
+    ghost = _seed_product(mongo_db)
+    try:
+        for _ in range(3):
+            mongo_db["stock_units"].insert_one(
+                {
+                    "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
+                    "product_id": ghost,
+                    "store_id": STORE,
+                    "barcode": f"BC-{uuid.uuid4().hex[:10]}",
+                    "status": "ON HAND",  # unknown to the vocabulary
+                    "quantity": 1,
+                }
+            )
+        count_id = _start(admin_client)
+        # Walk EVERY product the session expects, honestly -- so plain
+        # coverage is a full 100% and ONLY the tripwire can deny full_count
+        # (the module-shared store holds other tests' products too; skipping
+        # them would fail coverage anyway and hand this test its answer).
+        doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+        for p, q in (doc["system_quantities"] or {}).items():
+            r = admin_client.post(
+                f"/inventory/stock-count/{count_id}/items",
+                json={"product_id": p, "counted_quantity": int(q)},
+            )
+            assert r.status_code == 200, r.text
+        r = admin_client.post(f"/inventory/stock-count/{count_id}/complete")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["products_missed"] == 0, (
+            "test precondition: every expected product was walked"
+        )
+        assert "ON HAND" in body["unknown_status_tokens"]
+        assert body["full_count"] is False, (
+            "three unclassifiable units nobody walked certified as a clean "
+            "full count"
+        )
+    finally:
+        # module-scoped engine: never leak the poison token into later tests
+        mongo_db["stock_units"].delete_many({"status": "ON HAND"})
+
+
+def test_the_blind_day_end_is_never_clean_over_an_unclassifiable_status(
+    mongo_db, blind_client
+):
+    """The same tripwire on the blind path, end to end over the real
+    /blind/open -> /submit -> /lock routes."""
+    store = f"ST-GHOST-{uuid.uuid4().hex[:6]}"
+    pid = _seed_product(mongo_db)
+    _seed_units(mongo_db, pid, 2, store_id=store)
+    ghost = _seed_product(mongo_db)
+    _seed_unit_shaped(mongo_db, ghost, {"status": "ON HAND"}, store_id=store)
+
+    sid = blind_client.post("/blind/open", json={"store_id": store}).json()[
+        "session_id"
+    ]
+    r = blind_client.post(
+        f"/blind/{sid}/submit",
+        json={"counts": [{"product_id": pid, "counted_qty": 2}]},
+    )
+    assert r.status_code == 200, r.text
+    s = blind_client.post(f"/blind/{sid}/lock").json()["summary"]
+    assert s["unknown_status_tokens"] == ["ON HAND"]
+    assert s["within_tolerance"] is False, (
+        "a store holding units the status vocabulary cannot classify locked "
+        "as a clean day-end"
+    )
+    assert s["full_count"] is False
+
+
+def test_the_unit_fingerprint_ignores_the_order_mongo_returns_units():
+    """The docstring's load-bearing claim ("order-independent") pinned: real
+    MongoDB's $addToSet ordering is unspecified (mongomock's happens to be
+    stable), so two reads of the SAME shelf must fingerprint identically
+    whatever order the units come back in -- otherwise every untouched line
+    would flag as moved and no shortage could ever be written off."""
+    from api.routers.inventory import _unit_fingerprint
+
+    assert _unit_fingerprint(["u-b", "u-a", "u-c"]) == _unit_fingerprint(
+        ["u-c", "u-b", "u-a"]
+    )
+    assert _unit_fingerprint(["u-a", "u-b"]) != _unit_fingerprint(["u-a", "u-z"])
+    assert _unit_fingerprint([]) == _unit_fingerprint(None)

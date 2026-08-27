@@ -210,12 +210,19 @@ export function StockAudit() {
       // over 1 product out of 400 is the lie a partial count tells.
       const expected = result.products_expected ?? 0;
       const walked = result.products_counted ?? 0;
+      // products_expected of null means the session never got an opening
+      // scope — coverage is UNKNOWN, which is not "0 of 0".
+      const scopeUnknown = result.products_expected == null;
       const coverage = result.full_count
         ? ''
-        : ` Only ${walked} of ${expected} products on this shelf were counted (${result.coverage_percentage ?? 0}%) — the figures cover just those.`;
+        : scopeUnknown
+          ? ' How much of the shelf this covered is unknown (the expected set could not be read when the session opened) — treat it as a partial count.'
+          : ` Only ${walked} of ${expected} products on this shelf were counted (${result.coverage_percentage ?? 0}%) — the figures cover just those.`;
       const headline = result.full_count
         ? `Count complete — all ${expected} products counted`
-        : `Count part-done — ${walked} of ${expected} products counted`;
+        : scopeUnknown
+          ? 'Count recorded — coverage unknown'
+          : `Count part-done — ${walked} of ${expected} products counted`;
       if (!short && !over) {
         toast.success(
           result.full_count
@@ -478,7 +485,7 @@ export function StockAudit() {
                       <div>
                         <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Items counted</p>
                         <p className="font-medium" style={{ color: 'var(--ink)' }}>{audit.items_counted}</p>
-                        {audit.products_expected !== undefined && audit.status !== 'in_progress' && (
+                        {audit.products_expected != null && audit.status !== 'in_progress' && (
                           <p
                             className="text-xs"
                             style={{ color: audit.full_count ? 'var(--ok)' : 'var(--warn)' }}
@@ -520,10 +527,20 @@ export function StockAudit() {
                             className="rounded-lg p-3 text-sm"
                             style={{ background: 'var(--bg-sunk)', color: 'var(--warn)' }}
                           >
-                            Part-counted: {audit.products_counted} of {audit.products_expected} products
-                            were counted ({audit.coverage_percentage}%). The {audit.products_missed} product
-                            {audit.products_missed === 1 ? '' : 's'} nobody walked are not in these figures —
-                            they are neither checked nor clear.
+                            {audit.products_expected == null ? (
+                              <>
+                                Coverage unknown: the expected set could not be read when this
+                                session opened, so nobody can say how much of the shelf these
+                                figures cover. Treat it as a partial count.
+                              </>
+                            ) : (
+                              <>
+                                Part-counted: {audit.products_counted} of {audit.products_expected} products
+                                were counted ({audit.coverage_percentage}%). The {audit.products_missed} product
+                                {audit.products_missed === 1 ? '' : 's'} nobody walked are not in these figures —
+                                they are neither checked nor clear.
+                              </>
+                            )}
                           </div>
                         )}
 

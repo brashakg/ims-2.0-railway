@@ -415,3 +415,63 @@ def test_a_lowercase_reserved_unit_is_not_invisible_to_the_count(mongo_db):
         "entered the count's expected set -- skipping it costs the counter "
         "nothing and the day-end locks as a clean count"
     )
+
+
+def test_the_cl_power_grid_never_counts_a_box_it_will_not_expiry_flag(
+    mongo_db, http
+):
+    """Round-3 MF-A, pinned on the real route: the grid's on_hand column
+    (`_on_hand_by_product`) and its near-expiry flag must ask the SAME
+    sellable question. The flag was a hand-typed 4-item list, so a
+    contact-lens box in a Title-case or padded legacy status was COUNTED as
+    stock in the cell yet NEVER flagged as expiring -- an expiring box shown
+    as clean stock, in the patient-safety expiry domain. One rule, one
+    answer: counted AND flagged, or neither."""
+    from datetime import datetime, timedelta
+
+    soon = (datetime.utcnow() + timedelta(days=10)).isoformat()
+    bad: List[str] = []
+    for i, (label, shape, sellable, _physical) in enumerate(_SHAPES):
+        pid = f"CLP-{uuid.uuid4().hex[:12]}"
+        curve = f"{3.0 + i * 0.1:.1f}"  # one cell per shape, no bleed-over
+        mongo_db["products"].insert_one(
+            {
+                "_id": pid,
+                "product_id": pid,
+                "sku": f"SKU-{pid[-8:]}",
+                "category": "CONTACT_LENS",
+                "cl_power": -3.0,
+                "base_curve": float(curve),
+                "brand": "Acuvue",
+                "is_active": True,
+            }
+        )
+        mongo_db["stock_units"].insert_one(
+            {
+                "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
+                "product_id": pid,
+                "store_id": STORE,
+                "quantity": 1,
+                "expiry_date": soon,
+                **shape,
+            }
+        )
+        resp = http.get(
+            "/inventory/contact-lenses/power-grid",
+            params={"store_id": STORE, "near_expiry_days": 90},
+        )
+        assert resp.status_code == 200, resp.text
+        cell = resp.json()["grid"].get("-3.00", {}).get(curve, {})
+        counted = int(cell.get("count", 0) or 0)
+        flagged = bool(cell.get("near_expiry", False))
+        want = 1 if sellable else 0
+        if counted != want or flagged is not sellable:
+            bad.append(
+                f"      {label}: count={counted} near_expiry={flagged} "
+                f"(want count={want}, near_expiry={sellable})"
+            )
+    assert not bad, (
+        "the CL power grid contradicts itself -- a box counted as stock must "
+        "carry its expiry warning (and an excluded box neither):\n"
+        + "\n".join(bad)
+    )
