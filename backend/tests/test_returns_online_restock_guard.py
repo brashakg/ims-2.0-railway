@@ -45,7 +45,9 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from strict_fakes import matches as _mongo_matches  # noqa: E402
 from api.routers import returns as returns_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.services import online_stock_writeback as wb  # noqa: E402
@@ -2023,9 +2025,11 @@ class _FakeClaimStock:
         match = pipeline[0]["$match"]
         counts: dict = {}
         for u in self.units:
-            if u.get("product_id") != match.get("product_id"):
-                continue
-            if u.get("status") != match.get("status"):
+            # EVALUATE the real filter -- the hand-rolled version here compared
+            # `u["status"] != match["status"]`, so the day the service asked a
+            # real on-hand question ($or over the canonical spellings) every
+            # unit fell out and the fake reported no candidate anywhere.
+            if not _mongo_matches(u, match):
                 continue
             counts[u["store_id"]] = counts.get(u["store_id"], 0) + 1
         rows = [{"_id": s, "n": n} for s, n in counts.items()]

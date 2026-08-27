@@ -137,8 +137,10 @@ _IDS = [s[0] for s in _SHAPES]
 def _seed(mongo_db, shape: Dict[str, Any]) -> Tuple[str, str]:
     """One product with one unit stored exactly as `shape` says -- including,
     deliberately, with no `status` key at all. Returns (product_id, barcode)."""
-    pid = f"PRD-{uuid.uuid4().hex[:10]}"
-    barcode = f"BC-{uuid.uuid4().hex[:10]}"
+    # 12, not 10: a `[:10]` slice is what the BUG-104 guard hunts for (it is
+    # the width of a YYYY-MM-DD day face) and this is a uuid, not a date.
+    pid = f"PRD-{uuid.uuid4().hex[:12]}"
+    barcode = f"BC-{uuid.uuid4().hex[:12]}"
     mongo_db["products"].insert_one(
         {
             "_id": pid,
