@@ -70,7 +70,7 @@ def test_frame_emits_prefixed_attribute_tags():
     tags = generate_attribute_tags("FRAME", attrs)
     # The exact tokens the storefront filters on (matches live Shopify vocab).
     for expected in [
-        "brand_ray-ban",
+        "brand_rayban",
         "modelno_rb3025",
         "gender_men",
         "shape_round",
@@ -109,7 +109,7 @@ def test_sunglass_emits_lens_tags():
     }
     tags = generate_attribute_tags("SUNGLASS", attrs)
     for expected in [
-        "brand_ray-ban",
+        "brand_rayban",
         "shape_aviator",
         "lenscolour_green",
         "tint_gradient",
@@ -180,7 +180,11 @@ def test_empty_and_unknown_are_safe():
 def test_extras_override_fills_top_level_brand():
     # No brand_name in attributes; extras injects the top-level product.brand.
     tags = generate_attribute_tags("FRAME", {}, {"brand_name": "Ray-Ban"})
-    assert tags == ["brand_ray-ban"]
+    # BRAND is the one value the live store does NOT dash-slug: the
+    # "RAY - BAN" smart collection on bettervision.in rules on
+    # TAG = brand_rayban, and all 36 live smart glasses carry it.
+    assert tags == ["brand_rayban"]
+    assert "brand_ray-ban" not in tags
     # blank extras are ignored (never override a real value with "")
     tags2 = generate_attribute_tags("FRAME", {"brand_name": "Titan"}, {"brand_name": "   "})
     assert tags2 == ["brand_titan"]
@@ -191,9 +195,9 @@ def test_extras_override_fills_top_level_brand():
 # ===========================================================================
 
 def test_merge_tag_lists_dedupes_and_lowercases():
-    merged = merge_tag_lists(["New", "shape_round"], ["brand_ray-ban", "shape_round"])
+    merged = merge_tag_lists(["New", "shape_round"], ["brand_rayban", "shape_round"])
     # existing first (lower-cased), then generated not already present; no dup.
-    assert merged == ["new", "shape_round", "brand_ray-ban"]
+    assert merged == ["new", "shape_round", "brand_rayban"]
     # blanks / None dropped
     assert merge_tag_lists(["", None, "  "], ["gender_men"]) == ["gender_men"]
 
@@ -213,7 +217,7 @@ def test_build_product_input_merges_seo_and_generated_tags():
     inp = shopify_push.build_product_input(product, [])
     tags = inp["tags"]
     # generated attribute tags are present...
-    assert "brand_ray-ban" in tags          # from top-level brand via extras
+    assert "brand_rayban" in tags          # from top-level brand via extras
     assert "shape_round" in tags
     assert "framecolor_havana" in tags
     # ...the manual browse tag survives (lower-cased)...

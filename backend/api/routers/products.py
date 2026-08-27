@@ -304,6 +304,14 @@ _OPTIONAL_PRODUCT_FIELDS = (
     # DROPPED it and every product saved without its images (masked until
     # the GridFS store fix made uploads work at all).
     "images",
+    # SAME CLASS OF BUG as `images` above: the Add-Product form has always sent
+    # `description` (typed, or written by the "Auto-fill with AI" button), and
+    # ProductCreate never modelled it -- so pydantic dropped it and the product
+    # saved with no description. shopify_push.build_product_input reads exactly
+    # this field for the storefront body, which is why an IMS-catalogued product
+    # reached Shopify with an EMPTY description and every listing had to be
+    # hand-written. Modelled + persisted now (see ProductCreate.description).
+    "description",
 )
 
 
@@ -558,6 +566,11 @@ class ProductCreate(BaseModel):
     # read. Was previously `tax_rate`, which no reader looked at.
     gst_rate: Optional[float] = None
     attributes: Optional[dict] = None
+    # The storefront body copy the Add-Product form collects (typed, or drafted
+    # by the "Auto-fill with AI" button). Was NEVER modelled here, so pydantic
+    # silently dropped it on every create and no IMS-born product ever carried a
+    # description to Shopify. Optional + additive.
+    description: Optional[str] = None
     # Governed product tags (step-12). Accepts a list or a comma-separated
     # string; normalised (lowercase/trim/dedupe) server-side via the canonical
     # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
@@ -2116,7 +2129,23 @@ async def generate_product_description(
             paragraph[: body.max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
         )
 
-    html = build_shopify_description_html(category_name, filled, paragraph)
+    # SMART GLASSES are assembled differently, because the live store says so:
+    # the 36 Ray-Ban Meta pages are a headline + a paragraph + a <ul> of spec
+    # bullets, not the eyewear spec tables. TECH_SPEC_ROWS/GENERAL_INFO_ROWS
+    # have no row for a single electronics field (camera, audio, assistant,
+    # battery, connectivity, storage, prescription-ready), so the generic
+    # builder silently DROPPED every spec the cataloguer had just typed -- and
+    # since ProductCreate now models `description`, that is the storefront
+    # body. Same AI paragraph either way; only the assembly differs. Falls
+    # back to the generic format if there is not enough filled in to build a
+    # smart-glass listing at all.
+    html = ""
+    if _pm.resolve_category(body.category) == "SMARTGLASSES":
+        from ..services.smartglass_listing import build_description_html
+
+        html = build_description_html(filled, paragraph)
+    if not html:
+        html = build_shopify_description_html(category_name, filled, paragraph)
     return {
         "description": html,
         "paragraph": paragraph,

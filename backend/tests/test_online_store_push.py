@@ -437,11 +437,13 @@ def test_build_product_input_maps_status_and_options():
     # (test_online_push_publishes.py covers both).
     assert inp["status"] == "ACTIVE"
     assert inp["vendor"] == "Ray-Ban"
-    assert inp["productType"] == "SUNGLASS"
+    # The STOREFRONT's vocabulary, not the IMS enum: 12 live smart collections
+    # on bettervision.in rule on TYPE = "Sunglass" (ecom_category_map).
+    assert inp["productType"] == "Sunglass"
     assert inp["seo"]["title"] == "RB SEO"
     # Tags = manual seo.tags UNION the BVI attribute->tag tokens (here a SUNGLASS
-    # with top-level brand Ray-Ban -> brand_ray-ban), lower-cased + de-duped.
-    assert inp["tags"] == ["new", "summer", "brand_ray-ban"]
+    # with top-level brand Ray-Ban -> brand_rayban), lower-cased + de-duped.
+    assert inp["tags"] == ["new", "summer", "brand_rayban"]
     # Options derived + de-duped (Color: Black, Gold ; Size: M).
     opts = {o["name"]: [v["name"] for v in o["values"]] for o in inp["productOptions"]}
     assert opts["Color"] == ["Black", "Gold"]

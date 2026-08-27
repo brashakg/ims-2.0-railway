@@ -117,6 +117,60 @@ class CategorySpec:
     )
 
 
+# The SUNGLASS optional tail, hoisted so SMARTGLASSES can REUSE it instead of
+# growing a second copy of the eyewear vocabulary (a smart glass IS a sunglass
+# with electronics -- same shape/size/colour/material/lens questions). Order is
+# the owner-locked Add-Product form order; SUNGLASS below is byte-identical to
+# what it was before the hoist (its head ("subbrand","label","model_name") is
+# spelled out at the call site because SMARTGLASSES keys identity on model_name
+# as REQUIRED and carries model_no as the optional one instead).
+_EYEWEAR_SUN_TAIL: tuple = (
+    "lens_size",
+    "bridge_width",
+    "temple_length",
+    "gender",
+    "shape",
+    "frame_type",
+    "lens_colour",
+    "tint",
+    "polarization",
+    "uv_protection",
+    "frame_color",
+    "temple_color",
+    "lens_material",
+    "frame_material",
+    "temple_material",
+    "usp_1",
+    "usp_2",
+    "country_of_origin",
+    "warranty",
+    "upc",
+    "gtin",
+)
+
+# The electronics half of a smart glass. EVERY one of these is grounded in a
+# spec bullet that appears on the LIVE Ray-Ban Meta listings on bettervision.in
+# -- today that detail exists only as prose somebody typed by hand, so a new
+# model cannot be catalogued and listed without re-writing HTML. Capturing them
+# as fields is what lets services/smartglass_listing.py generate the bullets.
+# All OPTIONAL: an older smart glass that has no camera simply omits the row.
+_SMARTGLASS_TECH: tuple = (
+    "generation",  # "Gen 2" -- named in the listing H2
+    "camera_mp",  # 12  -> "12MP ... camera"
+    "camera_type",  # "Ultra-wide"
+    "video_resolution",  # "1080p"
+    "audio_type",  # "Open-ear speakers"
+    "microphone_count",  # 5  -> "5-microphone array"
+    "voice_assistant",  # "Meta AI"
+    "controls",  # "Capacitive touch controls on the temple"
+    "battery_life_hours",  # 4
+    "charging_case",  # Yes/No -> "plus a portable charging case"
+    "connectivity",  # "Wi-Fi 6 and Bluetooth 5.2"
+    "storage_gb",  # 32
+    "prescription_ready",  # Yes/No
+    "year_of_launch",
+)
+
 # canonical -> CategorySpec. `required` folds the Excel/CATEGORY_FIELDS rules.
 # HEARING_AID adds serial_no as REQUIRED (the catalog CATEGORY_FIELDS had it
 # optional) per the PM packet, and is forced NON_DISCOUNTABLE.
@@ -169,32 +223,7 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         # barcodes; our internal barcode is minted at GRN.
         # REMOVED from the registry (legacy attribute values persist):
         # full_model_no, lens_usp, product_usp, usp, gender_label.
-        optional=(
-            "subbrand",
-            "label",
-            "model_name",
-            "lens_size",
-            "bridge_width",
-            "temple_length",
-            "gender",
-            "shape",
-            "frame_type",
-            "lens_colour",
-            "tint",
-            "polarization",
-            "uv_protection",
-            "frame_color",
-            "temple_color",
-            "lens_material",
-            "frame_material",
-            "temple_material",
-            "usp_1",
-            "usp_2",
-            "country_of_origin",
-            "warranty",
-            "upc",
-            "gtin",
-        ),
+        optional=("subbrand", "label", "model_name") + _EYEWEAR_SUN_TAIL,
     ),
     "OPTICAL_LENS": CategorySpec(
         "OPTICAL_LENS",
@@ -248,8 +277,15 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         "SMARTGLASSES",
         "SMTFR",
         "Smart Glasses",
+        # required UNCHANGED (additive rework 2026-08-25): a smart glass that
+        # was catalogueable yesterday is still catalogueable today.
         required=("brand_name", "model_name", "colour_code"),
-        optional=("subbrand",),
+        # The eyewear half is REUSED from SUNGLASS (same tail tuple, no second
+        # copy) + the electronics half. `model_no` sits in the optional head
+        # here because model_name is this category's REQUIRED identity key.
+        optional=("subbrand", "label", "model_no")
+        + _EYEWEAR_SUN_TAIL
+        + _SMARTGLASS_TECH,
     ),
     "WALL_CLOCK": CategorySpec(
         "WALL_CLOCK",
@@ -391,6 +427,22 @@ _FIELD_LABELS: Dict[str, str] = {
     # full_model_no / lens_usp / product_usp / usp / gender_label left the
     # FRAME+SUNGLASS registry (2026-07-04 form rework) but keep their labels
     # here so LEGACY attribute values on existing docs still render nicely.
+    # Smart-glass electronics (_SMARTGLASS_TECH). Labels are what a shop person
+    # would say out loud, with the unit in the label so the number is unambiguous.
+    "generation": "Generation",
+    "camera_mp": "Camera (megapixels)",
+    "camera_type": "Camera Type",
+    "video_resolution": "Video Recording",
+    "audio_type": "Speakers",
+    "microphone_count": "Number of Microphones",
+    "voice_assistant": "Voice Assistant",
+    "controls": "Controls",
+    "battery_life_hours": "Battery Life (hours)",
+    "charging_case": "Charging Case Included",
+    "connectivity": "Connectivity",
+    "storage_gb": "On-board Storage (GB)",
+    "prescription_ready": "Prescription Lenses Possible",
+    "year_of_launch": "Year of Launch",
     "label": "Label",
     "full_model_no": "Full Model No",
     "shape": "Shape",
@@ -1522,6 +1574,34 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     seo_title = build_seo_title(spine)
     handle = build_handle(spine)
     seo_description = build_seo_description(spine)
+    description = spine.get("description")
+    tags = list(spine.get("tags") or [])
+
+    # Owner 2026-08-25 -- SMART GLASSES LIST THEMSELVES. A smart glass's spec
+    # sheet (camera / audio / assistant / battery / connectivity / storage /
+    # prescription-ready) is now CAPTURED as fields at cataloguing, so the
+    # storefront listing is DERIVED from them instead of being hand-written
+    # HTML. Only fills what the cataloguer did not supply: a typed/AI-written
+    # description always wins, and generated tags are UNIONED onto the product's
+    # own. Runs at CREATE ONLY (both _build_pim_doc callers are create_product),
+    # so no existing live listing is ever re-derived.
+    if resolve_category(spine.get("category")) == "SMARTGLASSES":
+        try:
+            from .smartglass_listing import build_listing
+
+            listing = build_listing(attrs, paragraph=None)
+            if not str(description or "").strip():
+                description = listing["description"] or None
+            if listing["seo_title"]:
+                seo_title = listing["seo_title"]
+            if listing["seo_description"]:
+                seo_description = listing["seo_description"]
+            for tag in listing["tags"]:
+                if tag not in tags:
+                    tags.append(tag)
+        except Exception:  # noqa: BLE001 - listing copy must never fail a create
+            logger.warning("[PM] smartglass listing build failed", exc_info=True)
+
     return {
         "id": spine.get("pim_product_id"),
         # ROOT FIX: the PIM row IS the parent and carries its OWN `sku`. Every
@@ -1549,6 +1629,10 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         # Display identity the storefront + push read (top-level name/title).
         "name": name or None,
         "title": name or None,
+        # The storefront body. shopify_push.build_product_input reads
+        # `ecom.seo.html or description` -- this key was simply never projected,
+        # so an IMS-born product reached Shopify with NO description at all.
+        "description": description or None,
         # Legacy top-level status kept for existing readers; ecom.status is the
         # one the Shopify push honours.
         "status": "DRAFT",
@@ -1571,7 +1655,7 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
             "seo": {
                 "title": seo_title or name or None,
                 "description": seo_description or None,
-                "tags": list(spine.get("tags") or []),
+                "tags": tags,
             },
             "category_specific": attrs,
         },
