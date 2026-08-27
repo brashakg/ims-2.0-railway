@@ -69,19 +69,38 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
   // Per-product header fallback for POs created before the per-line
   // received_qty field (S1) existed.
   const headerReceived: Record<string, number> = po.received_qty_by_product ?? {};
+  // A line with no stored rate: where does its displayed rate come from?
+  //
+  // NOT a flat 18 (over-taxes every 5% frame, lens and contact lens on the
+  // page) and NOT a flat 0 either -- 0 prints a line total that does not add up
+  // to the header Tax and Total on the same screen. Rate-less lines were only
+  // ever written by the two automatic PO doors, and those wrote EVERY line of
+  // an order rate-less under a header tax of exactly subtotal x one rate. When
+  // that is the shape in front of us, the rate is read off the order's own
+  // arithmetic -- not guessed. Any other shape (a modern order, or a mixed one
+  // no door writes) leaves the rate-less line at 0 rather than handing it a
+  // blended number that is nobody's actual rate.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const items = (po.items ?? []).map((item: any) => ({
+  const rawItems: any[] = po.items ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const noneRated = rawItems.length > 0 && rawItems.every((i: any) => i.tax_rate == null);
+  const impliedRate =
+    noneRated && (po.subtotal ?? 0) > 0
+      ? Math.round(((po.tax_amount ?? 0) / po.subtotal) * 1000) / 10
+      : 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const items = rawItems.map((item: any) => ({
     productId: item.product_id ?? '',
     productName: item.product_name ?? '',
     sku: item.sku ?? '',
     quantity: item.ordered_qty ?? item.quantity ?? 0,
     unitCost: item.unit_price ?? item.unit_cost ?? 0,
-    // NOT 18. A line with no stored rate has NO rate -- the two automatic PO
-    // doors used to write lines without one, and defaulting to 18 here
-    // inflated every displayed line total by 18% of money that was never
-    // charged. Show what is actually on the order.
-    taxRate: item.tax_rate ?? 0,
-    total: item.total ?? (item.quantity ?? 0) * (item.unit_price ?? item.unit_cost ?? 0) * (1 + (item.tax_rate ?? 0) / 100),
+    taxRate: item.tax_rate ?? impliedRate,
+    total:
+      item.total ??
+      (item.quantity ?? 0) *
+        (item.unit_price ?? item.unit_cost ?? 0) *
+        (1 + (item.tax_rate ?? impliedRate) / 100),
     receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
   }));
 

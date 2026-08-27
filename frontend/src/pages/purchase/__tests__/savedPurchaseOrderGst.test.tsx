@@ -2,9 +2,16 @@
 // IMS 2.0 - a SAVED purchase order shows the tax that is actually on it
 // ============================================================================
 // Two things the create modal got right and the saved order did not:
-//   - the stored per-line rate is shown as stored. Defaulting a rate-less line
-//     to 18% inflated its displayed total by 18% of money nobody charged --
-//     and rate-less lines are exactly what the two automatic PO doors wrote.
+//   - the stored per-line rate is shown AS STORED, and a line with no stored
+//     rate is not handed a house rate. A flat 18% default over-taxed the 5%
+//     goods that are most of this catalogue; a flat 0% default (which an
+//     earlier version of this branch shipped, under a comment claiming the 18
+//     was "money nobody charged") was equally wrong in the other direction --
+//     the orders that actually HAVE rate-less lines came from the two automatic
+//     PO doors, which charged a header tax of exactly subtotal x one rate, so
+//     0% printed a line total that did not add up to the header beside it.
+//     What is shown now is the rate the order's own header arithmetic implies,
+//     and the pair of tests below can tell those three answers apart.
 //   - the CGST/SGST vs IGST split the SERVER decided is read back off the
 //     order, instead of one opaque "Tax" line. Same money either way; which
 //     one it is decides the GST return it lands in.
@@ -48,14 +55,47 @@ function show(po: PurchaseOrder) {
 }
 
 describe('reading a saved purchase order back', () => {
-  it('shows a line with no stored rate as 0%, not a flat 18%', () => {
+  // The discriminating pair. A flat 18 default answers 18 to both; a flat 0
+  // default answers 0 to both; only reading the order's own header tells them
+  // apart. A fixture with one rate would prove nothing.
+  const RATELESS_LINE = [
+    { product_id: 'p1', product_name: 'Lens', sku: 'L1', quantity: 2, unit_price: 1000 },
+  ];
+
+  it('reads a rate-less line off an 18% order header', () => {
+    // The real legacy population: the two automatic PO doors wrote every line
+    // rate-less under tax_amount === subtotal * 0.18.
     const mapped = mapPOtoPurchaseOrder({
       ...SERVER_PO,
-      items: [{ product_id: 'p1', product_name: 'Lens', sku: 'L1', quantity: 2, unit_price: 1000 }],
+      subtotal: 2000,
+      tax_amount: 360,
+      total_amount: 2360,
+      items: RATELESS_LINE,
     });
-    expect(mapped.items[0].taxRate).toBe(0);
-    // ... and the line total is the money actually on the order, not +18%.
-    expect(mapped.items[0].total).toBe(2000);
+    expect(mapped.items[0].taxRate).toBe(18);
+    // ... and the line reconciles with the header printed beside it.
+    expect(mapped.items[0].total).toBe(2360);
+    expect(mapped.total).toBe(2360);
+  });
+
+  it('reads a rate-less line off a 5% order header', () => {
+    const mapped = mapPOtoPurchaseOrder({ ...SERVER_PO, items: RATELESS_LINE });
+    expect(mapped.items[0].taxRate).toBe(5);
+    expect(mapped.items[0].total).toBe(2100);
+  });
+
+  it('will not hand a blended rate to a rate-less line on a mixed order', () => {
+    // No door writes this shape. If one ever does, a header-implied rate would
+    // be nobody's actual rate, so the unknown line stays visibly at 0.
+    const mapped = mapPOtoPurchaseOrder({
+      ...SERVER_PO,
+      items: [
+        ...SERVER_PO.items,
+        { product_id: 'p2', product_name: 'Frame', sku: 'F1', quantity: 1, unit_price: 500 },
+      ],
+    });
+    expect(mapped.items[0].taxRate).toBe(5);
+    expect(mapped.items[1].taxRate).toBe(0);
   });
 
   it('keeps a stored rate exactly as stored', () => {
