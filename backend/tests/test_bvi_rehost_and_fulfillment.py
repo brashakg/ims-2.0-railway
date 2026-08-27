@@ -19,8 +19,16 @@ os.environ.setdefault("MONGODB_URI", "")
 os.environ.setdefault("ECOMMERCE_DATABASE_URL", "")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from api.services import online_sync_health as sh  # noqa: E402
+
+# The filter evaluator that RAISES on an operator it does not implement, rather
+# than silently matching nothing. The hand-rolled one this file used to carry
+# understood only equality and `$in`, so the moment the service asked a real
+# question ($or / $regex / $exists) every row fell out and the fake reported an
+# empty shelf -- a double weaker than production, proving nothing.
+from strict_fakes import matches as _matches  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -38,17 +46,6 @@ class _FakeCursor:
 
     def __iter__(self):
         return iter(self._rows)
-
-
-def _matches(row, query) -> bool:
-    for key, cond in (query or {}).items():
-        val = row.get(key)
-        if isinstance(cond, dict):
-            if "$in" in cond and val not in cond["$in"]:
-                return False
-        elif val != cond:
-            return False
-    return True
 
 
 class _FakeColl:
