@@ -184,31 +184,70 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
         )
 
 
+# ---------------------------------------------------------------------------
+# ONE definition of "this unit is physically here". Every on-hand rollup AND
+# every physical count reads it from here.
+#
+# It used to be written out separately in each place and the copies drifted:
+# the stock count's COVERAGE check listed ["AVAILABLE", "RESERVED"] while the
+# same count's VARIANCE used the canonical allowlist below. A unit sitting in
+# the legacy lowercase "available" / "IN_STOCK" shape, or with no `status`
+# field at all, was therefore invisible to coverage and visible to the
+# variance -- so skipping that product cost the counter nothing, and a partial
+# count presented as a clean day-end. The owner ruled the blind count IS the
+# day-end (2026-08-25), which is exactly the lie that must not be possible.
+#
+# There is ONE deliberate difference between the two questions, and it is
+# expressed here once instead of as two constants in two files -- RESERVED:
+#   * NOT on hand for a SALE. The unit is committed to somebody else's order,
+#     so catalog availability / endless aisle / valuation must not offer it.
+#   * IS on hand for a COUNT. It is still standing in this shop, so the
+#     counter walking the shelf will find it and must be expected to.
+# ---------------------------------------------------------------------------
+
+
+def _on_hand_status_clause(*, include_reserved: bool = False) -> Dict[str, Any]:
+    """The status half of the on-hand $match, for both questions.
+
+    `include_reserved=False` -> "sellable now"; True -> "physically here to be
+    counted". That flag is the ONLY difference there is allowed to be.
+
+    E3: the canonical on-hand allowlist (which tolerates the legacy lowercase /
+    IN_STOCK shapes) and the explicit non-sellable exclusion list (QUARANTINED /
+    UNDER_AUDIT / BLIND_COUNT / TRANSFERRED / SOLD / VOID / DAMAGED / RTV) both
+    come from the item-event ledger service. The $nin keeps the exclusion
+    intent-explicit even for a unit whose status was set outside the allowlist.
+    """
+    from ..services.item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
+
+    allowed = list(ON_HAND_STATUSES)
+    if include_reserved:
+        allowed.append("RESERVED")
+    return {
+        "status": {"$nin": list(EXCLUDED_STATUSES)},
+        "$or": [
+            {"status": {"$in": allowed}},
+            {"status": {"$exists": False}},
+            {"status": None},
+        ],
+    }
+
+
 def _on_hand_by_product(
     db, product_ids: List[str], store_id: Optional[str] = None
 ) -> Dict[str, int]:
     """Count on-hand units per product from the serialized `stock` collection
     (one row per unit). A unit is on-hand when its status is an available one
     (or absent) and quantity > 0. Optionally scoped to a store. Fail-soft -> {}.
+
+    This is the SELLABLE question -- RESERVED is excluded. The count asks the
+    PHYSICAL one; see `_on_hand_status_clause`.
     """
     if db is None or not product_ids:
         return {}
-    # E3: reuse the canonical on-hand allowlist + the explicit non-sellable
-    # exclusion list (QUARANTINED / UNDER_AUDIT / BLIND_COUNT / TRANSFERRED /
-    # SOLD / VOID / DAMAGED / RTV) from the item-event ledger service so every
-    # rollup shares one definition. The $nin makes the exclusion intent-explicit
-    # even for a unit whose status was set outside the allowlist.
-    from ..services.item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
-
-    avail = list(ON_HAND_STATUSES)
     match: dict = {
         "product_id": {"$in": list(product_ids)},
-        "status": {"$nin": list(EXCLUDED_STATUSES)},
-        "$or": [
-            {"status": {"$in": avail}},
-            {"status": {"$exists": False}},
-            {"status": None},
-        ],
+        **_on_hand_status_clause(),
     }
     if store_id:
         match["store_id"] = store_id
@@ -2343,8 +2382,8 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
 # A count decides "did this line move while the session was open?" by
 # comparing the picture taken when the session opened against the picture
 # now. Both pictures must therefore be taken the SAME way -- one serialized
-# row == one unit, AVAILABLE + RESERVED -- and both must record not only HOW
-# MANY units were on hand but WHICH ONES.
+# row == one unit, on hand per `_countable_match` -- and both must record
+# not only HOW MANY units were on hand but WHICH ONES.
 #
 # Why WHICH ones: quantities cancel. One frame sells at the till at 10:15 and
 # one is received into the stockroom at 11:00; the total is unchanged, the
@@ -2358,17 +2397,22 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
 # (BUG-104). Comparing sets answers the same question without reading a clock.
 # ---------------------------------------------------------------------------
 
-# What "on hand for a count" means, in one place.
-_COUNTABLE_STATUSES = ["AVAILABLE", "RESERVED"]
-
 
 def _countable_match(
     store_id: str, product_ids: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """The $match every count snapshot uses. product_ids=None means the store."""
+    """The $match EVERY count snapshot uses -- the opening snapshot, the
+    coverage scope, the live re-read at completion, and the blind count's
+    expected on-hand. product_ids=None means the whole store.
+
+    "On hand for a count" is not a second list of statuses: it is the shared
+    `_on_hand_status_clause` with RESERVED switched on (a reserved unit is not
+    sellable but it IS standing on this shop's shelf). One definition, one
+    named difference -- see the block comment above `_on_hand_status_clause`.
+    """
     match: Dict[str, Any] = {
         "store_id": store_id,
-        "status": {"$in": list(_COUNTABLE_STATUSES)},
+        **_on_hand_status_clause(include_reserved=True),
     }
     if product_ids is not None:
         match["product_id"] = {"$in": list(product_ids)}

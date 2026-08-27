@@ -1597,3 +1597,253 @@ def test_a_scope_that_cannot_be_read_is_not_an_empty_shelf(mongo_db):
 
     assert _scoped_product_ids(None, STORE) is None
     assert _scoped_product_ids(_DBProxy(mongo_db), "") is None
+
+
+# ============================================================================
+# 11. ONE DEFINITION OF "ON HAND" INSIDE ONE VERDICT
+# ============================================================================
+# The count's verdict has two halves and they used to read the shelf two
+# different ways:
+#   * COVERAGE  (which products the session is expected to walk) listed
+#     ["AVAILABLE", "RESERVED"];
+#   * VARIANCE  (what the system thinks is on hand per line) used the canonical
+#     allowlist, which also tolerates the legacy lowercase "available" /
+#     "IN_STOCK" shapes and a unit with no `status` field at all.
+# A unit in one of those legacy shapes was therefore INVISIBLE to coverage and
+# VISIBLE to the variance: its product never entered the expected SET, so
+# skipping it cost the counter nothing and a half-walked shelf locked as a
+# clean day-end. The owner ruled (2026-08-25) that the blind count IS the
+# day-end, so that is the exact lie this must not permit.
+#
+# These probe BOTH implementations over the SAME unit and require them to
+# agree -- a differential check, so re-splitting the definition fails here
+# whichever copy is edited.
+
+# Every shape a physically-present unit is stored in, live or legacy.
+_ON_HAND_SHAPES = {
+    "AVAILABLE": {"status": "AVAILABLE"},
+    "RESERVED (held for an order, still on this shelf)": {"status": "RESERVED"},
+    "IN_STOCK (legacy)": {"status": "IN_STOCK"},
+    "available (legacy lowercase)": {"status": "available"},
+    "no status field at all": {},
+}
+
+# ...and shapes that are NOT on this shelf, which both halves must also agree on.
+_GONE_SHAPES = {
+    "SOLD": {"status": "SOLD"},
+    "TRANSFERRED": {"status": "TRANSFERRED"},
+    "VOID": {"status": "VOID"},
+}
+
+
+def _seed_unit_shaped(mongo_db, product_id: str, shape: Dict[str, Any],
+                      store_id: str = STORE):
+    """ONE unit stored exactly as `shape` says -- including, deliberately, with
+    no `status` key at all."""
+    # Same bare-assignment barcode shape the AVAILABLE seeder above uses --
+    # already reasoned about in the BUG-104 allow-list, so do not re-inline it.
+    bc = f"BC-{uuid.uuid4().hex[:10]}"
+    doc: Dict[str, Any] = {
+        "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
+        "product_id": product_id,
+        "store_id": store_id,
+        "barcode": bc,
+        "quantity": 1,
+        "location_code": "DEFAULT",
+    }
+    doc.update(shape)
+    mongo_db["stock_units"].insert_one(doc)
+
+
+def _both_halves(mongo_db, monkeypatch, store, category, pid):
+    """(is this product in the coverage SET, what does the variance expect) --
+    read from the two REAL helpers the lock actually calls, not from stubs."""
+    from api.routers import blind_stock_take as bst
+    from api.routers.inventory import _scoped_product_ids
+
+    monkeypatch.setattr(bst, "_get_db", lambda: _DBProxy(mongo_db))
+    scope = _scoped_product_ids(_DBProxy(mongo_db), store, category) or []
+    expected = bst._on_hand_resolver(store, [pid])
+    return pid in scope, int(expected.get(pid, 0) or 0)
+
+
+@pytest.mark.parametrize("label", sorted(_ON_HAND_SHAPES))
+def test_coverage_and_variance_agree_that_this_unit_is_on_hand(
+    mongo_db, monkeypatch, label
+):
+    store = f"ST-SHAPE-{uuid.uuid4().hex[:6]}"
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    pid = _seed_product(mongo_db, category=category)
+    _seed_unit_shaped(mongo_db, pid, _ON_HAND_SHAPES[label], store_id=store)
+
+    in_scope, expected = _both_halves(mongo_db, monkeypatch, store, category, pid)
+
+    assert expected == 1, f"the variance cannot see a unit stored as {label}"
+    assert in_scope, (
+        f"a unit stored as {label} counts against the variance but never "
+        "enters the expected SET, so skipping this product costs the counter "
+        "nothing and a partial count locks as a clean day-end"
+    )
+    assert in_scope == (expected > 0), "the two halves must answer as one"
+
+
+@pytest.mark.parametrize("label", sorted(_GONE_SHAPES))
+def test_coverage_and_variance_agree_that_this_unit_is_gone(
+    mongo_db, monkeypatch, label
+):
+    """The other direction: a unit that has left the shelf must be expected by
+    neither half, or every count opens with phantom products to walk."""
+    store = f"ST-GONE-{uuid.uuid4().hex[:6]}"
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    pid = _seed_product(mongo_db, category=category)
+    _seed_unit_shaped(mongo_db, pid, _GONE_SHAPES[label], store_id=store)
+
+    in_scope, expected = _both_halves(mongo_db, monkeypatch, store, category, pid)
+
+    assert expected == 0, f"a {label} unit is not on hand"
+    assert not in_scope, f"a {label} unit must not be expected on the shelf"
+
+
+@pytest.fixture
+def blind_client(mongo_db, monkeypatch):
+    """A TestClient over the REAL blind-count router (open / submit / lock),
+    with only the DB handle and the store-access check redirected."""
+    from api.routers import blind_stock_take as bst
+
+    proxy = _DBProxy(mongo_db)
+    monkeypatch.setattr(bst, "_get_db", lambda: proxy)
+    monkeypatch.setattr(
+        bst, "validate_store_access", lambda sid, u: sid or u.get("active_store_id")
+    )
+
+    app = FastAPI()
+    app.include_router(bst.router, prefix="/blind")
+
+    async def _user():
+        return {
+            "user_id": "u-blind",
+            "username": "manager",
+            "roles": ["ADMIN"],
+            "store_ids": [STORE],
+            "active_store_id": STORE,
+        }
+
+    app.dependency_overrides[get_current_user] = _user
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("label", sorted(_ON_HAND_SHAPES))
+def test_a_skipped_product_is_never_free_whatever_shape_its_units_are_in(
+    mongo_db, blind_client, label
+):
+    """End to end over the real /blind/open -> /submit -> /lock routes: two
+    products on hand, only one counted. The uncounted one must show up as a
+    hole in the day-end no matter which storage shape its unit is in."""
+    store = f"ST-BLIND-{uuid.uuid4().hex[:6]}"
+    counted = _seed_product(mongo_db)
+    _seed_units(mongo_db, counted, 1, store_id=store)
+    skipped = _seed_product(mongo_db)
+    _seed_unit_shaped(mongo_db, skipped, _ON_HAND_SHAPES[label], store_id=store)
+
+    sid = blind_client.post("/blind/open", json={"store_id": store}).json()["session_id"]
+    r = blind_client.post(
+        f"/blind/{sid}/submit",
+        json={"counts": [{"product_id": counted, "counted_qty": 1}]},
+    )
+    assert r.status_code == 200, r.text
+    locked = blind_client.post(f"/blind/{sid}/lock")
+    assert locked.status_code == 200, locked.text
+    s = locked.json()["summary"]
+
+    assert s["matched"] == 1, "the one line that WAS walked agrees -- the trap"
+    assert s["products_expected"] == 2, (
+        f"a unit stored as {label} is on this shelf, so the day-end must "
+        "expect the counter to walk it"
+    )
+    assert skipped in s["products_not_counted"]
+    assert s["coverage_percentage"] == 50.0
+    assert s["full_count"] is False
+    assert s["within_tolerance"] is False, (
+        "half the shelf was never looked at; this is not a clean day-end"
+    )
+
+
+def test_a_real_shortage_is_still_short_when_the_whole_shelf_was_walked(
+    mongo_db, blind_client
+):
+    """The discriminator. Coverage must not become the only thing the day-end
+    looks at, and a full count must still be allowed to read clean."""
+    store = f"ST-BLIND-{uuid.uuid4().hex[:6]}"
+    short = _seed_product(mongo_db, cost=2000.0)
+    _seed_units(mongo_db, short, 5, store_id=store)
+    fine = _seed_product(mongo_db, cost=1000.0)
+    _seed_unit_shaped(mongo_db, fine, {"status": "IN_STOCK"}, store_id=store)
+
+    sid = blind_client.post("/blind/open", json={"store_id": store}).json()["session_id"]
+    blind_client.post(
+        f"/blind/{sid}/submit",
+        json={
+            "counts": [
+                {"product_id": short, "counted_qty": 3},
+                {"product_id": fine, "counted_qty": 1},
+            ]
+        },
+    )
+    s = blind_client.post(f"/blind/{sid}/lock").json()["summary"]
+
+    assert s["full_count"] is True and s["coverage_percentage"] == 100.0
+    assert s["short"] == 1, "two frames are genuinely missing"
+    assert s["net_variance_units"] == -2
+    assert s["net_variance_value_paise"] == -400000, "2 x Rs 2000, in paise"
+    assert s["within_tolerance"] is False
+
+
+def test_a_unit_held_for_an_order_is_counted_not_reported_as_an_overage(
+    mongo_db, blind_client
+):
+    """A RESERVED unit is committed to somebody's order but it is still
+    standing in this shop, so the counter walking the shelf finds it. If the
+    coverage half expects it and the variance half does not, an honest count
+    of it reads as stock that appeared from nowhere."""
+    store = f"ST-BLIND-{uuid.uuid4().hex[:6]}"
+    pid = _seed_product(mongo_db, cost=2000.0)
+    _seed_unit_shaped(mongo_db, pid, {"status": "RESERVED"}, store_id=store)
+
+    sid = blind_client.post("/blind/open", json={"store_id": store}).json()["session_id"]
+    blind_client.post(
+        f"/blind/{sid}/submit",
+        json={"counts": [{"product_id": pid, "counted_qty": 1}]},
+    )
+    s = blind_client.post(f"/blind/{sid}/lock").json()["summary"]
+
+    assert s["products_expected"] == 1, "the reserved unit is on this shelf"
+    assert s["over"] == 0, (
+        "the counter found the reserved frame the books say is here; that is "
+        "not an overage"
+    )
+    assert s["matched"] == 1
+    assert s["full_count"] is True and s["within_tolerance"] is True
+
+
+def test_a_reserved_unit_is_on_the_shelf_to_count_but_not_on_the_shelf_to_sell(
+    mongo_db, monkeypatch
+):
+    """The ONE deliberate difference between the two questions, pinned from
+    both sides. A reserved frame is standing in this shop, so the COUNT must
+    expect the counter to find it -- and it is committed to somebody else's
+    order, so nothing may offer it as sellable stock. Collapsing the two into
+    one answer breaks whichever half it is collapsed towards."""
+    from api.routers.inventory import _on_hand_by_product
+
+    store = f"ST-RSVD-{uuid.uuid4().hex[:6]}"
+    category = f"CAT-{uuid.uuid4().hex[:8]}"
+    pid = _seed_product(mongo_db, category=category)
+    _seed_unit_shaped(mongo_db, pid, {"status": "RESERVED"}, store_id=store)
+
+    in_scope, count_expects = _both_halves(mongo_db, monkeypatch, store, category, pid)
+    assert in_scope and count_expects == 1, "the counter will find this frame"
+
+    sellable = _on_hand_by_product(_DBProxy(mongo_db), [pid], store)
+    assert sellable.get(pid, 0) == 0, (
+        "a frame held for somebody's order was offered as sellable stock"
+    )

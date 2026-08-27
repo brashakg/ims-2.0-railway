@@ -92,10 +92,20 @@ def _reopen_roles(store_id):
 
 
 def _on_hand_resolver(store_id, product_ids):
-    """System on-hand per product (reused from inventory). Read-only."""
+    """System on-hand per product, read the SAME way this session's expected
+    SET was read (inventory._countable_match, via _on_hand_now). Read-only.
+
+    ONE definition, not two. Coverage used to list ["AVAILABLE", "RESERVED"]
+    while this resolver used the sellable allowlist, so a unit in the legacy
+    "IN_STOCK" / lowercase / no-status shape never entered
+    ``expected_product_ids`` yet still produced a variance -- skipping that
+    product cost the counter nothing and the partial count locked as a clean
+    day-end. Both halves of the verdict now ask the same question.
+    """
     try:
-        from .inventory import _on_hand_by_product
-        return _on_hand_by_product(_get_db(), list(product_ids), store_id) or {}
+        from .inventory import _on_hand_now
+
+        return _on_hand_now(_get_db(), store_id, list(product_ids))[0] or {}
     except Exception:  # noqa: BLE001
         return {}
 

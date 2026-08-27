@@ -148,10 +148,6 @@ ALLOWED = {
         '"barcode": f"BC-{uuid.uuid4().hex[:10]}",',
     ): _HEX,
     ("test_inventory_quantity.py", '"barcode": f"BC-{uuid.uuid4().hex[:10]}",'): _HEX,
-    # Same hex slice, bare-assignment form: the stock-count lifecycle suite
-    # mints a barcode per seeded unit. Arrived with the suite itself and was
-    # never allow-listed, so `test (3.10)` has been red on main since.
-    ("test_stock_count_lifecycle.py", 'bc = f"BC-{uuid.uuid4().hex[:10]}"'): _HEX,
     (
         "test_stock_count_lifecycle.py",
         'bc = f"BC-{uuid.uuid4().hex[:10]}"',
