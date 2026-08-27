@@ -291,10 +291,12 @@ def _stock_rollup(
     coll = _coll(db, "stock_units")
     if coll is None:
         return out
+    from .item_events import on_hand_match
+
     for chunk in _chunks(product_ids):
         match: Dict[str, Any] = {
             "product_id": {"$in": chunk},
-            "status": "AVAILABLE",
+            **on_hand_match(),
         }
         if store_id:
             match["store_id"] = store_id

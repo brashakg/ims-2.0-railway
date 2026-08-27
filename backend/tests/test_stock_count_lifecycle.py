@@ -1619,20 +1619,37 @@ def test_a_scope_that_cannot_be_read_is_not_an_empty_shelf(mongo_db):
 # agree -- a differential check, so re-splitting the definition fails here
 # whichever copy is edited.
 
-# Every shape a physically-present unit is stored in, live or legacy.
+# Every shape a physically-present unit is stored in, live or legacy. The CASE
+# variants are round-2 finding MF1: `canonical_state` upper-cases before it
+# maps, so by this codebase's own rule `reserved` IS a RESERVED unit -- but the
+# coverage clause hand-appended the literal "RESERVED" onto an allowlist that
+# carried both cases of every other word, so a lowercase `reserved` unit stayed
+# out of the expected set and bought a clean day-end over a half-walked shelf.
 _ON_HAND_SHAPES = {
     "AVAILABLE": {"status": "AVAILABLE"},
     "RESERVED (held for an order, still on this shelf)": {"status": "RESERVED"},
+    "reserved (MF1: legacy lowercase)": {"status": "reserved"},
+    "Reserved (title case)": {"status": "Reserved"},
     "IN_STOCK (legacy)": {"status": "IN_STOCK"},
+    "in_stock (legacy lowercase)": {"status": "in_stock"},
     "available (legacy lowercase)": {"status": "available"},
+    "Available (title case)": {"status": "Available"},
+    "padded ' available ' import": {"status": " available "},
     "no status field at all": {},
+    "status stored as null": {"status": None},
 }
 
-# ...and shapes that are NOT on this shelf, which both halves must also agree on.
+# ...and shapes that are NOT on this shelf, which both halves must also agree
+# on -- in their case variants too, or the same split reappears inverted and a
+# phantom product is added to every count sheet.
 _GONE_SHAPES = {
     "SOLD": {"status": "SOLD"},
+    "sold (legacy lowercase)": {"status": "sold"},
     "TRANSFERRED": {"status": "TRANSFERRED"},
+    "transferred (legacy lowercase)": {"status": "transferred"},
     "VOID": {"status": "VOID"},
+    "QUARANTINED": {"status": "QUARANTINED"},
+    "unknown junk status": {"status": "FOO"},
 }
 
 

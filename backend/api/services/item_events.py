@@ -44,7 +44,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +144,15 @@ ALLOWED_TRANSITIONS: Dict[StockState, set] = {
 }
 
 
-# Status values that mean "physically on hand and sellable now". Includes the
-# legacy lowercase / IN_STOCK variants seen in dirty/migrated data so a unit
-# minted under an old code path still counts.
-ON_HAND_STATUSES: List[str] = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
+# Legacy spellings that are NOT StockState members but mean one. The ONE table
+# `canonical_state` folds aliases with -- and the same table the Mongo-side
+# matcher below is generated from, so a spelling can never be canonical to one
+# and invisible to the other.
+_STATUS_ALIASES: Dict[str, StockState] = {"IN_STOCK": StockState.AVAILABLE}
 
-# Statuses that are explicitly NOT on hand / NOT sellable. Every rollup excludes
-# these. RESERVED is on hold for an order so it is NOT in either list (a reserved
-# unit is committed stock, neither freely sellable nor excluded from valuation).
+# Statuses that are explicitly NOT on hand / NOT sellable. RESERVED is on hold
+# for an order so it is NOT in either list (a reserved unit is committed stock,
+# neither freely sellable nor excluded from valuation).
 EXCLUDED_STATUSES: List[str] = [
     "QUARANTINED",
     "UNDER_AUDIT",
@@ -170,12 +171,98 @@ def canonical_state(raw) -> Optional[StockState]:
     if raw is None:
         return None
     s = str(raw).strip().upper()
-    if s in ("AVAILABLE", "IN_STOCK"):
-        return StockState.AVAILABLE
+    if s in _STATUS_ALIASES:
+        return _STATUS_ALIASES[s]
     try:
         return StockState(s)
     except ValueError:
         return None
+
+
+def status_spellings(*states: StockState) -> List[str]:
+    """Every canonical token that `canonical_state` maps onto `states`."""
+    wanted = set(states)
+    return sorted(
+        [s.value for s in StockState if s in wanted]
+        + [alias for alias, st in _STATUS_ALIASES.items() if st in wanted]
+    )
+
+
+# Status values that mean "physically on hand and sellable now", in the case
+# variants dirty/migrated rows carry. DERIVED, not typed out: every entry is a
+# spelling `canonical_state` maps to AVAILABLE.
+ON_HAND_STATUSES: List[str] = sorted(
+    {v for t in status_spellings(StockState.AVAILABLE) for v in (t, t.lower())}
+)
+
+
+def status_match(*states: StockState) -> Dict[str, Any]:
+    """Mongo `$match` fragment for "this unit's status canonicalises to one of
+    `states`" -- a case-insensitive, whitespace-tolerant regex over the tokens
+    `status_spellings` derives, which IS `canonical_state`'s own rule
+    (`str(raw).strip().upper()`) expressed as a query.
+
+    A hand-written `$in` list is not that rule and cannot be kept to it: the
+    on-hand allowlist split on case twice already, and a lowercase `reserved`
+    unit was countable to one reader and invisible to another -- which bought a
+    half-walked shelf a clean day-end.
+    """
+    pattern = r"^\s*(" + "|".join(status_spellings(*states)) + r")\s*$"
+    return {"status": {"$regex": pattern, "$options": "i"}}
+
+
+def on_hand_match(*, include_reserved: bool = False) -> Dict[str, Any]:
+    """The shared Mongo `$match` fragment for "is this unit on hand?".
+
+    Shared, NOT universal: the readers that use it are enumerated and
+    differentially probed in backend/tests/test_on_hand_is_one_rule.py. The POS
+    repository (`database/repositories/product_repository.py`) still answers the
+    sellable question with its own literals, and the ALLOCATION doors that claim
+    ONE specific unit (`find_one_and_update` on status=="AVAILABLE") ask a
+    different, deliberately strict question. Neither is claimed here.
+
+    `include_reserved=False` -> "sellable now"; True -> "physically here to be
+    counted". A RESERVED unit is committed to somebody's order (so not
+    sellable) but it is still standing on the shop's shelf (so countable) --
+    that flag is the only difference the two questions are allowed to have.
+
+    The status half is `status_match` -- see there for why it is a regex and
+    not a list.
+
+    A unit with no `status` field (or a null one) is on hand: that is how
+    legacy minted rows look and they are physically present.
+
+    No `$nin EXCLUDED_STATUSES` companion: the regex is an ANCHORED allowlist,
+    so an excluded status can never reach it and a second list would only be
+    something to drift.
+
+    ponytail: a case-insensitive regex cannot use an index on `status`; every
+    caller pairs it with a selective `product_id`/`store_id` predicate and
+    stock_units is small (prod: single digits). Index the canonical status and
+    match `$in` on it if that ever stops being true.
+    """
+    states = [StockState.AVAILABLE]
+    if include_reserved:
+        states.append(StockState.RESERVED)
+    return {
+        "$or": [
+            status_match(*states),
+            {"status": {"$exists": False}},
+            {"status": None},
+        ]
+    }
+
+
+def is_on_hand(raw, *, include_reserved: bool = False) -> bool:
+    """`on_hand_match` answered in Python, for a unit already in hand.
+
+    Same rule, same tokens -- the two are pinned to each other by test."""
+    if raw is None:
+        return True
+    state = canonical_state(raw)
+    return state is StockState.AVAILABLE or (
+        include_reserved and state is StockState.RESERVED
+    )
 
 
 def is_legal_transition(frm, to) -> bool:

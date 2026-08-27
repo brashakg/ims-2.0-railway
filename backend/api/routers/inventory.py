@@ -21,6 +21,17 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from
 # the POS / PO / GRN / till guards -- do NOT add a second detector here.
 from ..services.stores_util import is_online_store
+
+# E3: the shared decision of "is this unit on hand?" -- see the block comment
+# further down for exactly which readers use it, which do not, and why it may
+# never be re-typed here as a status list. `canonical_state` / `StockState` are
+# the same rule for a unit already read into Python (the ledger groups BY
+# status, so it cannot use the $match form).
+from ..services.item_events import (
+    on_hand_match as _on_hand_status_clause,
+    canonical_state,
+    StockState,
+)
 from ..utils.ist import ist_date_str
 from ..dependencies import (
     get_stock_repository,
@@ -184,53 +195,40 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
         )
 
 
-# ---------------------------------------------------------------------------
-# ONE definition of "this unit is physically here". Every on-hand rollup AND
-# every physical count reads it from here.
+# "This unit is physically here" is decided by item_events.on_hand_match.
 #
-# It used to be written out separately in each place and the copies drifted:
-# the stock count's COVERAGE check listed ["AVAILABLE", "RESERVED"] while the
-# same count's VARIANCE used the canonical allowlist below. A unit sitting in
-# the legacy lowercase "available" / "IN_STOCK" shape, or with no `status`
-# field at all, was therefore invisible to coverage and visible to the
-# variance -- so skipping that product cost the counter nothing, and a partial
-# count presented as a clean day-end. The owner ruled the blind count IS the
-# day-end (2026-08-25), which is exactly the lie that must not be possible.
+# WHAT READS IT (measured, and differentially probed over 18 storage shapes by
+# backend/tests/test_on_hand_is_one_rule.py): the count's coverage snapshot and
+# its variance, the stock-count scan screen, /non-moving, /aging,
+# /overstock-analysis, the CL drawer listing, the Stock Ledger (via
+# canonical_state, because it groups BY status) and _on_hand_by_product.
 #
-# There is ONE deliberate difference between the two questions, and it is
-# expressed here once instead of as two constants in two files -- RESERVED:
+# WHAT DOES NOT, and is NOT claimed to: `transfer_recommendations` below still
+# matches a bare "AVAILABLE", because its other half is
+# StockRepository.find_low_stock and the two must move together (POS-owned
+# repository -- owner sign-off). Every ALLOCATION door in this router
+# (find_one_and_update on status=="AVAILABLE") is a different question -- "may
+# I take THIS unit" -- and is deliberately strict.
+#
+# It used to be written out separately in each place and the copies drifted, on
+# CASE. The count's coverage listed ["AVAILABLE", "RESERVED"]; the aging,
+# overstock, non-moving and CL readers listed their own variants; the ledger
+# bucketed on `status == "RESERVED"`. A unit in the legacy lowercase
+# "available" / "reserved" / "IN_STOCK" shape, or with no `status` field at
+# all, was on hand to one reader and gone to the next -- so skipping that
+# product cost the counter nothing and a half-walked shelf locked as a clean
+# day-end. The owner ruled the blind count IS the day-end (2026-08-25), which
+# is exactly the lie that must not be possible.
+#
+# The one deliberate difference between the two questions is RESERVED, and it
+# is the `include_reserved` flag, not a second list:
 #   * NOT on hand for a SALE. The unit is committed to somebody else's order,
 #     so catalog availability / endless aisle / valuation must not offer it.
 #   * IS on hand for a COUNT. It is still standing in this shop, so the
 #     counter walking the shelf will find it and must be expected to.
-# ---------------------------------------------------------------------------
-
-
-def _on_hand_status_clause(*, include_reserved: bool = False) -> Dict[str, Any]:
-    """The status half of the on-hand $match, for both questions.
-
-    `include_reserved=False` -> "sellable now"; True -> "physically here to be
-    counted". That flag is the ONLY difference there is allowed to be.
-
-    E3: the canonical on-hand allowlist (which tolerates the legacy lowercase /
-    IN_STOCK shapes) and the explicit non-sellable exclusion list (QUARANTINED /
-    UNDER_AUDIT / BLIND_COUNT / TRANSFERRED / SOLD / VOID / DAMAGED / RTV) both
-    come from the item-event ledger service. The $nin keeps the exclusion
-    intent-explicit even for a unit whose status was set outside the allowlist.
-    """
-    from ..services.item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
-
-    allowed = list(ON_HAND_STATUSES)
-    if include_reserved:
-        allowed.append("RESERVED")
-    return {
-        "status": {"$nin": list(EXCLUDED_STATUSES)},
-        "$or": [
-            {"status": {"$in": allowed}},
-            {"status": {"$exists": False}},
-            {"status": None},
-        ],
-    }
+#
+# `_on_hand_status_clause` is item_events.on_hand_match, imported at the top of
+# this module. Do not re-implement it here.
 
 
 def _on_hand_by_product(
@@ -568,9 +566,10 @@ def _build_store_ledger(
 
     Aggregates `stock_units` by (product_id, status) so a single product
     with multiple serialized units rolls into ONE row carrying:
-      - on-hand count (AVAILABLE + IN_STOCK + status-absent, sums `quantity`
-        but defaults to 1 when missing because units are typically qty=1)
-      - reserved count (RESERVED)
+      - on-hand count (anything canonicalising to AVAILABLE, plus a unit with
+        no status at all; sums `quantity` but defaults to 1 when missing
+        because units are typically qty=1)
+      - reserved count (anything canonicalising to RESERVED)
       - product master fields (sku, name, brand, category, mrp, offer_price)
       - a representative barcode + location_code from any AVAILABLE unit
         (so the row's Barcode + Location columns are populated)
@@ -588,7 +587,6 @@ def _build_store_ledger(
 
     # ---- 1. Roll up stock_units per product at this store -------------
     if store_id:
-        avail_statuses = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
         try:
             pipeline = [
                 {"$match": {"store_id": store_id}},
@@ -620,7 +618,13 @@ def _build_store_ledger(
                 qty = int(row.get("qty") or 0)
                 if not pid:
                     continue
-                if status in avail_statuses or status is None:
+                # Same rule as the $match readers, answered in Python because
+                # the pipeline groups BY status: a copied allowlist here (and a
+                # bare `== "RESERVED"` below) is what made a lowercase
+                # `reserved` unit fall into neither bucket and vanish from the
+                # ledger entirely.
+                state = canonical_state(status)
+                if status is None or state is StockState.AVAILABLE:
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # Capture a sample barcode/location from any available unit
                     # for the Barcode + Location columns on the ledger row.
@@ -629,7 +633,7 @@ def _build_store_ledger(
                             "barcode": row.get("barcode") or "",
                             "location_code": row.get("location_code") or "",
                         }
-                elif status == "RESERVED":
+                elif state is StockState.RESERVED:
                     reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] stock aggregation failed: %s", exc)
@@ -2034,12 +2038,14 @@ async def get_stock_aging_report(
     thirty_days_ago = now - timedelta(days=30)
     ninety_days_ago = now - timedelta(days=90)
 
-    # 1. Get all available stock grouped by product
+    # 1. Get all on-hand stock grouped by product. Aging is the PHYSICAL
+    # question (a reserved frame is still ageing on this shelf), so it reads
+    # the shared clause with RESERVED on -- never its own status list.
     stock_pipeline = [
         {
             "$match": {
                 "store_id": active_store,
-                "status": {"$in": ["AVAILABLE", "RESERVED"]},
+                **_on_hand_status_clause(include_reserved=True),
             }
         },
         {
@@ -3883,15 +3889,15 @@ async def get_non_moving_stock(
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # BUG FIX: count ONLY on-hand (AVAILABLE/RESERVED) units.
-                # Previously, ALL stock_units rows were counted regardless of
-                # status, so SOLD units inflated current_stock and a product
-                # with 10 sold and 0 available showed current_stock=10.
+                # Count ONLY on-hand units -- counting ALL stock_units rows
+                # let SOLD units inflate current_stock (10 sold, 0 available
+                # showed 10). The PHYSICAL question, through the shared clause:
+                # this reader used to carry its own four-spelling list, which
+                # is how a lowercase `reserved` unit was stock here and gone to
+                # the count.
                 stock_filter = {
                     "product_id": product_id,
-                    "status": {
-                        "$in": ["AVAILABLE", "RESERVED", "available", "reserved"]
-                    },
+                    **_on_hand_status_clause(include_reserved=True),
                 }
                 if active_store:
                     stock_filter["store_id"] = active_store
@@ -4017,7 +4023,7 @@ async def scan_barcode_for_count(
         # returned 0 and produced a false +physical_count variance.
         count_match = {
             "product_id": product_id,
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+            **_on_hand_status_clause(include_reserved=True),
         }
         unit_store = stock.get("store_id")
         if unit_store:
@@ -4132,10 +4138,12 @@ def _load_cl_stock_rows(db, store_id: Optional[str]) -> List[dict]:
 
         cl_product_ids = list(prod_by_id.keys())
 
-        # 2. Pull AVAILABLE stock for those products (store-scoped).
+        # 2. Pull on-hand stock for those products (store-scoped). Physical
+        # question -- a reserved lens box is still in the drawer and still
+        # expiring -- so the shared clause with RESERVED on.
         stock_filter: Dict[str, object] = {
             "product_id": {"$in": cl_product_ids},
-            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+            **_on_hand_status_clause(include_reserved=True),
         }
         if store_id:
             stock_filter["store_id"] = store_id
@@ -4748,7 +4756,7 @@ async def get_overstock_analysis(
         # one-by-one compared a single unit against the threshold (which never
         # flags) and emitted a duplicate entry per unit. $ifNull counts legacy
         # rows that predate the `quantity` field as one unit each.
-        stock_match = {"status": {"$in": ["AVAILABLE", "RESERVED"]}}
+        stock_match = dict(_on_hand_status_clause(include_reserved=True))
         if active_store:
             stock_match["store_id"] = active_store
         stock_rows = list(
