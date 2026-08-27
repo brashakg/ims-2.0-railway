@@ -97,7 +97,16 @@ def _user(store="BV-TEST-01", roles=("ADMIN",)):
 
 
 def _std_items():
-    return [GRNItemCreate(product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0)]
+    # tallied=True: ruling 14 requires every PO-backed line to be ticked.
+    return [
+        GRNItemCreate(
+            product_id="P1",
+            received_qty=5,
+            accepted_qty=5,
+            rejected_qty=0,
+            tallied=True,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -32,12 +32,25 @@ export interface ComposerVendorOption {
   code?: string;
 }
 
-// One editable PO line. `productId` is the REAL catalogued product_id; the PO
-// catalog gate (ON) rejects any line without one.
+// The identity a buyer types for an item that is not in the catalogue yet
+// (owner ruling 13). The server turns this into a real, provisional, unsellable
+// product row and puts its id on the PO line.
+export interface ComposerNewProduct {
+  category: string;
+  brand: string;
+  model: string;
+  colour: string;
+  size: string;
+  mrp: number;
+}
+
+// One editable PO line. It carries EITHER a real catalogued `productId` OR the
+// typed-in identity of an item that does not exist yet -- never both.
 export interface ComposerLine {
   productId: string;
   productName: string;
   sku: string;
+  newProduct?: ComposerNewProduct | null;
   quantity: number;
   unitCost: number;
   taxRate: number;
@@ -57,9 +70,10 @@ export interface ComposerSubmitPayload {
   expectedDate: string;
   notes: string;
   items: Array<{
-    product_id: string;
-    product_name: string;
-    sku: string;
+    product_id?: string;
+    product_name?: string;
+    sku?: string;
+    new_product?: ComposerNewProduct;
     quantity: number;
     unit_price: number;
     taxRate: number;
@@ -89,6 +103,9 @@ export interface PurchaseOrderComposerProps {
     index: number;
     pickProduct: (p: { productId: string; productName: string; sku: string; costPrice?: number }) => void;
     clearProduct: () => void;
+    /** Attach (or clear, with null) the typed-in identity of an item that is
+     *  not catalogued yet. */
+    setNewProduct: (np: ComposerNewProduct | null) => void;
   }) => ReactNode;
   /** Show the "Add Item" affordance so the buyer can append blank lines (manual
    *  form). Omit/false to lock the line set to what was passed (Buy Desk). */
@@ -136,6 +153,7 @@ const blankLine = (): ComposerLine => ({
   productId: '',
   productName: '',
   sku: '',
+  newProduct: null,
   quantity: 1,
   unitCost: 0,
   taxRate: 18,
@@ -282,20 +300,23 @@ export function PurchaseOrderComposer({
       toast.error('Please select a vendor');
       return;
     }
-    // A valid line references a REAL catalogued product + positive qty + cost.
-    const valid = lines.filter((l) => l.productId && l.quantity >= 1 && l.unitCost > 0);
-    // A line with a product/qty/cost but NO picked product would be rejected by
-    // the catalog gate -- surface it here instead of a raw 422.
-    const unpicked = lines.filter((l) => !l.productId && (l.quantity > 0 || l.unitCost > 0));
+    // A line is valid when it names a product -- picked from the catalogue OR
+    // typed in for something we do not stock yet (ruling 13) -- with a positive
+    // qty and cost.
+    const named = (l: ComposerLine) => !!l.productId || !!l.newProduct;
+    const valid = lines.filter((l) => named(l) && l.quantity >= 1 && l.unitCost > 0);
+    const unpicked = lines.filter((l) => !named(l) && (l.quantity > 0 || l.unitCost > 0));
     if (unpicked.length > 0) {
-      toast.error('Pick a catalogued product for every line (or remove the empty line)');
+      toast.error(
+        'Every line needs a product — pick one, or use "Not in the catalogue?" to type it in',
+      );
       return;
     }
     // Cost is required up front (it can't be backfilled at receiving) -- mirrors
     // both the manual form and the Buy Desk fix. Checked BEFORE the generic
     // "add a line" guard so a lone zero-cost line gets the precise, actionable
     // message rather than a vague one.
-    const zeroCost = lines.filter((l) => l.productId && l.quantity >= 1 && !(l.unitCost > 0));
+    const zeroCost = lines.filter((l) => named(l) && l.quantity >= 1 && !(l.unitCost > 0));
     if (zeroCost.length > 0) {
       toast.error('Every line needs a unit cost above 0 — cost cannot be added later at receiving.');
       return;
@@ -316,9 +337,9 @@ export function PurchaseOrderComposer({
         expectedDate,
         notes,
         items: valid.map((l) => ({
-          product_id: l.productId,
-          product_name: l.productName,
-          sku: l.sku || 'N/A',
+          ...(l.newProduct
+            ? { new_product: l.newProduct }
+            : { product_id: l.productId, product_name: l.productName, sku: l.sku || 'N/A' }),
           quantity: l.quantity,
           unit_price: l.unitCost,
           taxRate: l.taxRate,
@@ -404,7 +425,21 @@ export function PurchaseOrderComposer({
                       pickProduct: (p) =>
                         setLines((prev) => prev.map((l, i) => (i === index ? applyPickedProduct(l, p) : l))),
                       clearProduct: () =>
-                        updateLine(index, { productId: '', productName: '', sku: '', lastPaid: null }),
+                        updateLine(index, {
+                          productId: '',
+                          productName: '',
+                          sku: '',
+                          newProduct: null,
+                          lastPaid: null,
+                        }),
+                      setNewProduct: (np) =>
+                        updateLine(index, {
+                          newProduct: np,
+                          productId: '',
+                          productName: np ? `${np.brand} ${np.model}`.trim() : '',
+                          sku: '',
+                          lastPaid: null,
+                        }),
                     })}
                   </div>
                   <div className="col-span-4 tablet:col-span-1">

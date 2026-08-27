@@ -466,6 +466,17 @@ _FIELD_LABELS: Dict[str, str] = {
     "blue_cut_lens": "Blue-Cut Lens",
     "lens_colour": "Lens Colour",
     "lens_material": "Lens Material",
+    # The money + server-derived sentinels compute_catalog_status reports as
+    # done_gaps. They are not per-category attributes, but they surface in the
+    # SAME "what is missing" lists (the purchase-invoice gate reads them), so
+    # they belong in the one label registry rather than a second local map.
+    "category": "Category",
+    "mrp": "MRP",
+    "offer_price": "Selling Price",
+    "cost_price": "Cost Price",
+    "hsn_code": "HSN Code",
+    "gst_rate": "GST Rate",
+    "MRP_BELOW_OFFER": "Selling price is above MRP",
 }
 
 
@@ -1203,6 +1214,7 @@ def normalise_payload(
     created_by_name: Optional[str] = None,
     as_draft: bool = False,
     force_draft: bool = False,
+    provisional: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     db=None,
@@ -1216,8 +1228,19 @@ def normalise_payload(
     key, and only for non-None values -- so a door's persisted shape is preserved
     while the canonical validation + GST/HSN/discount derivation stays unified.
 
+    `provisional` (owner ruling 13, the buy-first-catalogue-later PO line): the
+    row is created so a purchase order can reference a REAL product_id for an
+    item nobody has catalogued yet. It is born `is_active=False` and, crucially,
+    with NO offer_price -- the selling price is FORCED to None here rather than
+    merely omitted by the caller, so compute_catalog_status below can only ever
+    stamp DRAFT with `offer_price` among the gaps. That is what makes it
+    structurally impossible for this door to emit a sellable row: it is an
+    invariant of the door, not a convention its callers are trusted to keep.
+
     Raises ProductMasterError on any invariant breach.
     """
+    if provisional:
+        offer_price = None
     canonical = resolve_category(category)
     if canonical is None:
         raise ProductMasterError(
@@ -1413,6 +1436,13 @@ def normalise_payload(
         status = CATALOG_STATUS_DRAFT
     doc["catalog_status"] = status
     doc["done_gaps"] = gaps
+    # provisional (ruling 13): ordered before it was catalogued. Marked
+    # explicitly so it is never confused with a product someone deliberately
+    # deactivated (discontinued), and inactive so it cannot surface in the
+    # active-only /products search POS sells from.
+    if provisional:
+        doc["provisional"] = True
+        doc["is_active"] = False
     return doc
 
 
@@ -1929,6 +1959,7 @@ def build_canonical_product(
         created_by=p.get("created_by") or p.get("actor"),
         created_by_name=p.get("created_by_name") or p.get("actor_name"),
         as_draft=bool(p.get("as_draft", False)),
+        provisional=bool(p.get("provisional", False)),
         extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
@@ -2011,6 +2042,7 @@ def create_via_door(
         tags=p.get("tags"),
         as_draft=bool(p.get("as_draft", False)),
         force_draft=force_draft,
+        provisional=bool(p.get("provisional", False)),
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -2154,6 +2186,7 @@ def create_product(
     tags: Any = None,
     as_draft: bool = False,
     force_draft: bool = False,
+    provisional: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -2198,6 +2231,7 @@ def create_product(
         created_by_name=actor_name or resolve_actor_name(actor, db=db),
         as_draft=as_draft,
         force_draft=force_draft,
+        provisional=provisional,
         extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,

@@ -422,6 +422,18 @@ export const purchaseInvoicesApi = {
       vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
     } as PurchaseInvoiceDraft;
   },
+  // Ruling 15: the invoice gate refuses an incomplete product, and an
+  // accountant holds no products:write. This raises the P2 task for the
+  // cataloguer, naming each product and exactly what it is missing.
+  requestCataloguing: async (productIds: string[], note?: string) => {
+    const res = await api.post('/vendors/purchase-invoices/request-cataloguing', {
+      product_ids: productIds,
+      note,
+    });
+    return res.data as {
+      requested: Array<{ product_id: string; product: string; missing: string[] }>;
+    };
+  },
   // F9 — open (unmatched, ACCEPTED) Delivery Challans for a vendor/date range,
   // for the "Match DCs to Invoice" picker. Fail-soft -> [] so the tab renders.
   getOpenDcs: async (params: {

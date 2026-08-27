@@ -366,17 +366,41 @@ class TestOneReceiptCannotBeBilledBeyondWhatItReceived:
         assert r.json()["detail"]["products"][0]["over_by"] == 2.0
         assert _bills(db) == []
 
-    def test_a_bill_with_no_receipt_link_is_untouched(self):
-        """No grn_id -> nothing to cap against; the guard must not fire."""
+    def test_a_bill_with_no_receipt_link_never_reaches_the_cap(self):
+        """No grn_id -> nothing to cap against; the guard must not fire.
+
+        Ruling 15 (purchase-lifecycle branch) answers FIRST for goods: a bill
+        whose lines name a product may not book at all without a receipt, so
+        the only no-receipt bill that still books -- and must stay untouched
+        by this cap -- is a services one, which names no product."""
         db = _db()
         _wire(db, _grn_doc())
         cli = _client(pi.router, "/api/v1/vendors/purchase-invoices")
-        body = _invoice(invoice_number="INV-FREE")
-        body.pop("grn_id")
-        body.pop("po_id")
-        r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
-        assert r.status_code == 201, r.text
-        assert _payable(db) == RECEIPT_TOTAL
+
+        goods = _invoice(invoice_number="INV-FREE")
+        goods.pop("grn_id")
+        goods.pop("po_id")
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=goods)
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "GRN_LINK_REQUIRED"
+        assert _bills(db) == [], "a goods bill with no receipt must book nothing"
+
+        services = _invoice(invoice_number="INV-FREIGHT")
+        services.pop("grn_id")
+        services.pop("po_id")
+        services["lines"] = [
+            {
+                "description": "Freight",
+                "hsn": "9965",
+                "qty": 1,
+                "unit_price": 910.0,
+                "gst_rate": 5,
+            }
+        ]
+        r2 = cli.post("/api/v1/vendors/purchase-invoices", json=services)
+        assert r2.status_code == 201, r2.text
+        # 910 taxable + 5% GST -- and no receipt-cap 409/422 anywhere near it.
+        assert _payable(db) == 955.5
 
 
 # ===========================================================================
