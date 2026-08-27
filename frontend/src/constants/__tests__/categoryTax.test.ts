@@ -11,8 +11,11 @@
 //
 // Three checks, all of which fail on the pre-fix table:
 //   1. a picker code resolves to a REAL entry, not the unknown-category default;
-//   2. the rate a category quotes is the rate its own HSN carries;
-//   3. the rate matches what the server's own category table says.
+//   2. the rate a category quotes is the rate its own HSN carries.
+// (3) -- "and the server agrees" -- is NOT done here. Doing it here needs a
+// transcription of the server's table, which is a third copy that drifts; it
+// is done against the live resolver in
+// backend/tests/test_category_tax_matches_server.py instead.
 // (2) needs no second copy of the rates: an HSN entry names its own canonical
 // category, so the table is asked to price the same goods twice, under two
 // different names, and must answer the same both times.
@@ -21,41 +24,22 @@ import { describe, it, expect } from 'vitest';
 import { HSN_CODES, getHSNByCategory, getGSTRateByCategory } from '../gst';
 import { CATEGORIES } from '../../pages/catalog/productAddShared';
 
-// The server's category defaults, read off
-// backend/api/services/gst_rates.py::GST_CATEGORY_TABLE (the short-UI-code
-// block). Written out because this is the other half of a cross-language
-// contract: when these two part company, the screen and the database disagree
-// about tax, which is the whole bug.
-const SERVER_CATEGORY_DEFAULT: Record<string, { hsn: string; rate: number }> = {
-  SG: { hsn: '900410', rate: 18 },
-  FR: { hsn: '900311', rate: 5 },
-  CL: { hsn: '900130', rate: 5 },
-  CCL: { hsn: '900130', rate: 5 },
-  LS: { hsn: '900150', rate: 5 },
-  RG: { hsn: '900490', rate: 5 },
-  WT: { hsn: '910111', rate: 18 },
-  CK: { hsn: '910500', rate: 18 },
-  HA: { hsn: '902140', rate: 0 },
-  ACC: { hsn: '392690', rate: 18 },
-  SMTWT: { hsn: '910221', rate: 18 },
-  // GST-REVIEW, and OLDER than this table: the server's default code for
-  // electronic eyewear is 852580, the screen's is 900410. Both are 18%, so the
-  // screen and the stored rate still agree -- and the screen sends its HSN
-  // explicitly, so 900410 is what gets stored either way. Only the CODE
-  // differs, and moving it is a data decision (35 live products already carry
-  // 852580), not a rename. Listed so it stays visible instead of being an
-  // omission from this table.
-  SMTSG: { hsn: '852580', rate: 18 },
-  SMTFR: { hsn: '852580', rate: 18 },
-};
+// NO hand-transcribed copy of the server's table lives here any more. One did,
+// and it was the same bug class one file over: change a rate in gst_rates.py
+// and the stored rate moves (it feeds _HSN_RATES -> resolve_gst_rate_strict)
+// while the preview and the transcription both stay green. The cross-language
+// check is done for real, against the running resolver, by
+// backend/tests/test_category_tax_matches_server.py -- which parses THIS
+// module's CATEGORY_TAX out of the .ts source, so there is nothing to keep in
+// step. What is left here is TS-vs-TS: the picker cannot offer a category the
+// table has not priced, and a category's rate is its own HSN's rate.
 
 const PICKER = CATEGORIES.map((c) => [c.code, c.name] as const);
 
 describe('the Add-Product picker cannot offer a category the tax table has not priced', () => {
   it('prices every code the picker offers', () => {
-    expect(Object.keys(SERVER_CATEGORY_DEFAULT).sort()).toEqual(
-      CATEGORIES.map((c) => c.code as string).sort(),
-    );
+    const unpriced = CATEGORIES.filter((c) => getHSNByCategory(c.code) === null);
+    expect(unpriced.map((c) => c.code)).toEqual([]);
   });
 
   it.each(PICKER)('%s (%s) resolves to a real HSN, not the unknown-category default', (code) => {
@@ -75,10 +59,6 @@ describe('the Add-Product picker cannot offer a category the tax table has not p
     expect(getGSTRateByCategory(code)).toBe(
       getGSTRateByCategory(HSN_CODES[hsn.code].category),
     );
-  });
-
-  it.each(PICKER)('%s (%s) charges what the server charges', (code) => {
-    expect(getGSTRateByCategory(code)).toBe(SERVER_CATEGORY_DEFAULT[code].rate);
   });
 
   it('prices colour contact lenses as contact lenses, at 5% on HSN 900130', () => {

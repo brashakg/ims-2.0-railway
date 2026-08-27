@@ -177,11 +177,54 @@ describe('PurchaseOrderComposer — the rate comes from the product', () => {
     expect(picked.gstMissing).toBeNull();
   });
 
+  it('treats a NIL-rated product as priced, not as a missing rate', () => {
+    // Hearing Aid, HSN 902140, is 0% -- a settled, correct GST rate, and one of
+    // the thirteen categories the Add-Product picker offers. `>= 0`, not `> 0`,
+    // is what separates "the rate is nil" from "there is no rate": under `> 0`
+    // this line shows "Rate not set" and is named in the amber "GST needs an
+    // HSN" notice on a purchase order that is perfectly correct. Nothing else
+    // in the 993-test frontend suite pinned that character.
+    const picked = applyPickedProduct(LINE({ taxRate: 5, hsn: '900311', gstResolved: true }), {
+      productId: 'p-ha',
+      productName: 'Signia Hearing Aid',
+      sku: 'HA1',
+      gstRate: 0,
+      hsn: '902140',
+    });
+    expect(picked.taxRate).toBe(0);
+    expect(picked.gstResolved).toBe(true);
+    expect(picked.gstMissing).toBeNull();
+  });
+
+  it('does not flag a NIL-rated line on the order itself', () => {
+    // The same rule at the door the buyer actually looks at -- and the line is
+    // built by the PICKER, not hand-written with gstResolved already true, so
+    // this dies on the same `>= 0` mutation the assertion above does. A fixture
+    // that supplies the answer under test proves nothing.
+    renderComposer({
+      initialLines: [
+        applyPickedProduct(LINE({ taxRate: 5, hsn: '900311', gstResolved: true }), {
+          productId: 'p-ha',
+          productName: 'Signia Hearing Aid',
+          sku: 'HA1',
+          gstRate: 0,
+          hsn: '902140',
+        }),
+      ],
+    });
+    expect(screen.getByText(/HSN 902140/)).toBeTruthy();
+    expect(screen.queryByText(/Rate not set/i)).toBeNull();
+    expect(screen.queryByText(/GST needs an HSN/i)).toBeNull();
+  });
+
   it('keeps NO HSN → rate table of its own', () => {
     // The disease this whole round is about: one business rule with two
-    // implementations. The frontend used to hold 13 HSN codes WITH rates, the
-    // backend a different 13, and 10 of 16 measured codes disagreed — the
-    // screen stated 5% on HSN 900319 where the server would state nothing.
+    // implementations. The frontend used to hold 13 HSN codes WITH rates and
+    // the backend a different 13. Measured over the fifteen codes they held
+    // between them: eleven held by both, all agreeing on the rate, and FOUR
+    // held by one side only — 900140/900319 priced by the screen and unknown
+    // to the server (it stated 5% on 900319 where the server states nothing),
+    // 852580/9993 priced by the server and unknown to the screen.
     // Deleting the rate column is what makes that impossible; a test that
     // asserted the two tables matched would have kept the bug and added a
     // tripwire. If a `gstRate` reappears on an HSN entry, this fails.

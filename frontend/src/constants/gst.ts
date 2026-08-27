@@ -118,8 +118,11 @@ export const HSN_CODES: Record<string, HSNCode> = {
 // The rate here is only ever a PREVIEW. The stored rate is derived server-side
 // from the product's HSN (services/gst_rates.resolve_gst_rate_strict), so each
 // entry below is written so a category's rate IS the rate its own HSN carries.
-// __tests__/gst.test.ts checks that, entry by entry, and checks that every code
-// the Add-Product picker offers is in here at all.
+// __tests__/categoryTax.test.ts checks that, entry by entry, and checks that
+// every code the Add-Product picker offers is in here at all. The rate is also
+// checked against the SERVER's own resolver, across languages, by
+// backend/tests/test_category_tax_matches_server.py -- which reads this very
+// file, so there is no third hand-copied list to drift.
 //
 // Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
 // plural/alt forms (FRAMES, RX_LENSES, ...), and the short UI codes used by the

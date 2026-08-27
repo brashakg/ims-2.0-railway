@@ -10,8 +10,14 @@ WHY THIS IS THE FIX AND NOT A SYNCED TABLE
 A GST rate is a legal consequence of an HSN. Before this, three places worked
 one out independently -- the cataloguing screen (a category -> rate switch), the
 frontend's HSN_CODES table (an HSN -> rate map) and the server -- and they
-drifted: measured, 10 of 16 codes disagreed. The screen asserted 5% on HSN
-900319 while the server refused to state any rate for it at all.
+drifted. Measured over the fifteen HSN codes the two sides held between them
+(13 each): eleven were held by both and agreed on the rate -- ZERO rate
+disagreements -- and FOUR were held by one side only, so one side could price
+the goods and the other could not. 900140 and 900319 were priced by the screen
+and unknown to the server (the screen asserted 5% on 900319 where the server
+would state nothing); 852580 -- the Ray-Ban Meta range, 35 of the 68 catalogued
+products -- and 9993 were priced by the server and unknown to the screen. Two
+tables that answer for different goods are still two tables.
 
 The cure is not a fourth table kept in step with the other three. It is that
 ONE resolver answers, at the door, and everything downstream reads the answer
