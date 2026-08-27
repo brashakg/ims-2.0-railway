@@ -15,6 +15,7 @@ Covers the defects the adversarial verifier filed on `claude/po-gst-and-ux`:
 
 Everything is driven through the real functions -- no stubbed subjects.
 """
+
 from __future__ import annotations
 
 import os
@@ -194,7 +195,9 @@ def test_the_bill_drafted_off_an_auto_po_is_not_tax_free(monkeypatch):
     grn = {"items": [{"product_id": "LL1", "accepted_qty": 30, "product_name": "A"}]}
     lines = pinv.lines_from_grn(grn, po)
     assert [ln["gst_rate"] for ln in lines] == [5.0]
-    computed = pinv.compute_invoice(lines, _JH_VENDOR["gstin"], _JH_STORE["gstin"], None)
+    computed = pinv.compute_invoice(
+        lines, _JH_VENDOR["gstin"], _JH_STORE["gstin"], None
+    )
     assert computed["taxable_total"] == 12000.0
     assert computed["tax_total"] == 600.0
     assert computed["total"] == 12600.0
@@ -263,11 +266,19 @@ def test_invoice_state_code_reads_the_gst_portal_display_form(raw, code):
 
 
 def test_a_bare_two_digit_code_must_still_be_a_real_state():
-    # The fallback is not "take any two digits": 1900 -> 19 is West Bengal,
-    # but nothing maps to a state that does not exist.
-    assert o._invoice_state_code("1900") == "19"
+    # The fallback is not "take any two digits". Two conditions, both real:
+    #   1. the code must be in INDIAN_STATE_CODES ("88-Nowhere" is nothing);
+    #   2. the two digits must BE the value or be followed by a non-digit --
+    #      a longer digit run is some other number, not a labelled state.
+    #      "190001" is a Srinagar PIN and used to resolve to 19, West Bengal.
+    assert o._invoice_state_code("1900") == ""
+    assert o._invoice_state_code("190001") == ""
+    assert o._invoice_state_code("88-Nowhere") == ""
     assert o._invoice_state_code("xyz") == ""
     assert o._invoice_state_code("0") == ""
+    # "99" IS a real entry (Centre Jurisdiction), so it resolves. The guard is
+    # about digit runs, not about which codes exist.
+    assert o._invoice_state_code("99-Nowhere") == "99"
 
 
 @pytest.mark.parametrize("raw,code", _PORTAL_FORMS)
@@ -518,8 +529,7 @@ def test_no_purchase_invoice_setting_is_read_through_an_unregistered_key():
     unreachable = [k for k in keys if k not in reg.REGISTRY]
     assert unreachable == [], (
         "purchase_invoices.py reads policy keys that policy_registry.REGISTRY "
-        "does not define, so nothing can ever switch them on: "
-        + ", ".join(unreachable)
+        "does not define, so nothing can ever switch them on: " + ", ".join(unreachable)
     )
 
 
