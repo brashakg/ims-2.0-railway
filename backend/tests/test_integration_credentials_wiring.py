@@ -395,6 +395,17 @@ def test_both_send_gates_share_one_padding_policy(monkeypatch):
     assert providers._should_dispatch("+919999999999")[0] is True
     assert nexus_providers._is_shopify_write_allowed() is True
 
+    # The discriminating half: global gate OFF, override padded. If the
+    # override's own strip is removed, " live" becomes unrecognised and
+    # shopify_dispatch_mode() falls back to the (stripped) GLOBAL gate --
+    # which is off -- so this assertion dies. The symmetric case above
+    # cannot see that: both gates armed the same launders the fallback.
+    _arm_gate(monkeypatch, "off")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", " live")
+    assert providers.dispatch_mode() == "off"
+    assert nexus_providers.shopify_dispatch_mode() == "live"
+    assert nexus_providers._is_shopify_write_allowed() is True
+
 
 def test_the_fallback_parses_match_the_gate_when_the_import_actually_fails(monkeypatch):
     """notification_service and shiprocket each carry an `except Exception`
