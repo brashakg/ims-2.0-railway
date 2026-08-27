@@ -223,20 +223,30 @@ def _load_linked_dcs(db, dc_ids):
     return docs
 
 
-def _load_standard_grn(grn_id):
-    """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED before it can be
-    billed -- the mirror of the DC guard in `_load_linked_dcs`.
+def _load_standard_grn(grn_id, expected_vendor_id=None):
+    """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED -- and that it
+    belongs to the vendor being billed -- before it can be billed. The mirror of
+    the DC guards in `_load_linked_dcs` + `_assert_dcs_single_vendor_store`.
 
     A GRN only mints stock at accept time, so booking a purchase invoice against
     a PENDING / PARTIALLY_ACCEPTED GRN would record a payable (and its ITC) for
     goods not yet accepted into stock. The frontend already filters to ACCEPTED
     GRNs; this is the server-side enforcement.
 
+    ``expected_vendor_id`` (the vendor the bill is being booked against) is
+    cross-checked against the GRN's own vendor_id -- WITHOUT it, a receipt from
+    vendor B could be billed under vendor A: A's payable rises, A's GSTIN claims
+    the ITC, and B's goods stay unbilled. The DC path has blocked exactly this
+    since F9 P3 (`_assert_dcs_single_vendor_store` -> 409 mixed_vendors); the
+    single-GRN branch had drifted without it. Same verdict, same 409 shape. A
+    GRN with no vendor_id (legacy row) is not checked, matching the DC guard.
+
     Loads via the GRN repository (the same path draft/match already use), so a
-    caller need not hold the doc. Raises HTTPException (404 / 400) if the GRN is
-    missing or its status is not ACCEPTED. A Delivery Challan is out of scope here
-    (it is billed via the /from-dcs consolidated path) -> 400. Fail-soft only when
-    there is no GRN repository / no DB (returns None).
+    caller need not hold the doc. Raises HTTPException (404 / 400 / 409) if the
+    GRN is missing, its status is not ACCEPTED, or it belongs to another vendor.
+    A Delivery Challan is out of scope here (it is billed via the /from-dcs
+    consolidated path) -> 400. Fail-soft only when there is no GRN repository /
+    no DB (returns None).
     """
     if not grn_id:
         return None
@@ -263,7 +273,430 @@ def _load_standard_grn(grn_id):
                 f"goods receipt first, then raise the purchase invoice."
             ),
         )
+    grn_vendor_id = doc.get("vendor_id")
+    if expected_vendor_id and grn_vendor_id and grn_vendor_id != expected_vendor_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_vendor_mismatch",
+                "message": (
+                    f"GRN {grn_id} was received from vendor {grn_vendor_id}, but "
+                    f"this invoice is being booked against vendor "
+                    f"{expected_vendor_id}. A goods receipt can only be billed "
+                    f"by the vendor that supplied it."
+                ),
+                "grn_vendor_id": grn_vendor_id,
+                "invoice_vendor_id": expected_vendor_id,
+            },
+        )
     return doc
+
+
+def _assert_grn_not_over_billed(db, grn, proposed_lines):
+    """LEAK GUARD: a goods receipt may be billed in PARTS, but never for more
+    units than it actually accepted.
+
+    Without this, the single-GRN branch had no "already invoiced" control at all
+    -- one 20-unit receipt could be billed three times over (three 201s, all
+    match_status MATCHED, exceptions []) and the AP payable simply tripled. The
+    DC branch has been safe since F9 (a DC carries dc_matched and 409s on the
+    second attempt); this branch had drifted without an equivalent.
+
+    Deliberately NOT a binary "this GRN is already invoiced" refusal: see
+    purchase_match.over_billed_products for why part-billing must keep working.
+    The rule enforced is the one the rest of the purchase flow already models --
+    cumulative billed qty must not EXCEED accepted qty, per product.
+
+    Reads every bill already linked to this grn_id and adds this invoice's
+    computed lines on top. Raises 409 (grn_over_billed) naming each offending
+    product. A DB read failure is a LOUD 503, not a silent pass: unlike the
+    duplicate-invoice-number guard there is no unique index behind this one, so
+    failing soft here would simply re-open the leak.
+
+    RESIDUAL RACE (accepted): two bookings of the same GRN in the same instant
+    both pass this pre-check and both insert. Closing that needs a claimed
+    counter on the GRN (the DC path's guarded find_one_and_update shape); AP
+    booking is a deliberate, low-frequency single-accountant action, so the
+    pre-check is proportionate. The over-bill still surfaces in the PO-variance
+    report, which prompts a debit note for exactly this overage.
+    """
+    if db is None or not grn:
+        return
+    grn_id = grn.get("grn_id")
+    if not grn_id:
+        return
+    try:
+        prior_bills = list(
+            db.get_collection("vendor_bills").find(
+                {"grn_id": grn_id},
+                {"_id": 0, "bill_id": 1, "bill_number": 1, "lines": 1},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[AP] over-bill guard could not read prior bills for GRN %s: %s",
+            grn_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify how much of this goods receipt has already "
+                "been billed. The invoice was NOT booked -- retry shortly."
+            ),
+        ) from exc
+
+    # A prior bill on this receipt that carries NO LINES declares no quantity,
+    # so it contributes 0 to the cap and the receipt reads as unbilled -- one
+    # 20-unit receipt then takes a header-only bill for the full value AND a
+    # full line-level invoice on top (reproduced: Rs 151,200 booked against
+    # Rs 75,600 of goods). vendors.create_vendor_bill is the door that mints
+    # such a bill: it accepts a grn_id but stores only header amounts. We cannot
+    # apportion what it never declared, so refuse -- the same conservative
+    # stance assert_grn_billable_header_only already takes from the other side.
+    blind = [b for b in prior_bills if not (b.get("lines") or [])]
+    if blind:
+        blind_by = [b.get("bill_number") or b.get("bill_id") for b in blind]
+        logger.error(
+            "[AP] blind-bill BLOCKED on GRN %s: prior bill(s) %s carry no line "
+            "detail, so the units they consumed cannot be determined",
+            grn_id,
+            ",".join(str(b) for b in blind_by),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_billed_without_lines",
+                "message": (
+                    f"Goods receipt {grn_id} already carries bill(s) "
+                    f"{', '.join(str(b) for b in blind_by)} recorded WITHOUT "
+                    f"line detail, so how many units they already covered "
+                    f"cannot be determined. Void that bill and re-raise it as a "
+                    f"purchase invoice with lines, then bill the balance."
+                ),
+                "grn_id": grn_id,
+                "billed_by": blind_by,
+            },
+        )
+
+    prior_lines = []
+    for bill in prior_bills:
+        prior_lines.extend(bill.get("lines") or [])
+    over = pmatch.over_billed_products(grn, prior_lines, proposed_lines)
+    if not over:
+        # The per-product totals the cap just derived from REAL bills. The
+        # atomic claim baselines its counter from these, so a receipt whose
+        # bills predate the counter cannot start from a false zero.
+        return pmatch.billed_qty_by_product(prior_lines)
+
+    already_billed_by = [b.get("bill_number") or b.get("bill_id") for b in prior_bills]
+    detail_lines = "; ".join(
+        f"{o['product_id']}: receipt accepted {o['accepted_qty']:g}, already "
+        f"billed {o['already_billed_qty']:g}, this invoice {o['this_bill_qty']:g} "
+        f"(over by {o['over_by']:g})"
+        for o in over
+    )
+    logger.error(
+        "[AP] over-bill BLOCKED on GRN %s (already billed by %s): %s",
+        grn_id,
+        ",".join(str(b) for b in already_billed_by) or "-",
+        detail_lines,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "grn_over_billed",
+            "message": (
+                f"This invoice would bill more units than goods receipt "
+                f"{grn_id} accepted -- {detail_lines}. Bill only the balance "
+                f"still unbilled on this receipt, or raise a fresh receipt for "
+                f"the extra goods."
+            ),
+            "grn_id": grn_id,
+            "already_billed_by": already_billed_by,
+            "products": over,
+        },
+    )
+
+
+def _baseline_grn_counter(grns, grn_id, priors):
+    """Seed billed_qty from the bills that ALREADY exist, where it is absent.
+
+    Without this the counter starts at zero on every receipt booked before it
+    existed, so its ceiling (accepted - this_qty) is measured from a false
+    floor and two concurrent bookings both fit under it. Reproduced on a
+    20-unit receipt already carrying a 12-unit bill: two concurrent 8-unit
+    invoices BOTH booked, 28 units against 20 accepted.
+
+    One guarded update per product, filtered on the counter being ABSENT, so it
+    is idempotent and race-safe: a rival that seeds first simply makes ours a
+    no-op, and both then claim against the same true baseline. Seeding is never
+    destructive -- it only ever writes a value the real bills already prove.
+    Fail-soft: a seed that does not land leaves the counter low, which the
+    guarded claim below still measures honestly (it just keeps the race window
+    open for that product), and the read-based cap remains in force.
+    """
+    for pid, qty in (priors or {}).items():
+        if not qty or qty <= 0:
+            continue
+        try:
+            grns.update_one(
+                {"grn_id": grn_id, "billed_qty.%s" % pid: {"$exists": False}},
+                {"$set": {"billed_qty.%s" % pid: float(qty)}},
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "[AP] could not baseline billed_qty.%s on GRN %s from prior "
+                "bills (%s units) -- the atomic claim will measure from a low "
+                "floor for this product",
+                pid,
+                grn_id,
+                qty,
+            )
+
+
+def _claim_grn_units(db, grn, proposed_lines, invoice_id, priors=None):
+    """ATOMICALLY reserve this invoice's units against the goods receipt, so a
+    concurrent booking of the same receipt cannot slip past the cap.
+
+    ``_assert_grn_not_over_billed`` above is a read-then-decide check: two
+    bookings in the same instant both read the same prior-bill set, both pass,
+    and both insert. This closes that window with the DC path's proven shape --
+    ONE guarded find_one_and_update on ONE document (PROTOCOL P0-1, exactly as
+    _stamp_dcs_matched claims a DC) -- carrying a per-product counter on the GRN:
+
+        grns.billed_qty       {product_id: units claimed}
+        grns.billed_claim_ids [invoice_id, ...]
+
+    The filter says, for every product this bill touches, "the counter is
+    missing, or no greater than accepted_qty - this_qty". Losing that race
+    returns None, and the caller refuses the booking. `$not: {$gt: n}` is the
+    idiom that also matches a MISSING counter (a `$lte` would not), which is
+    what makes the first claim on a receipt work.
+
+    BOTH CHECKS STAY, and neither is redundant:
+      * the read-based cap is truth-from-reality -- it sees bills booked before
+        this counter existed (every historical GRN has no billed_qty), so it,
+        not the counter, is what protects legacy data;
+      * the counter closes the race window the read cannot.
+    That pairing also fixes the direction of any counter drift: a counter
+    LOWER than reality cannot leak money (the read-based cap already refused),
+    while a counter HIGHER than reality can only cause a false refusal --
+    loud and visible, never a silent over-payment. billed_claim_ids is what
+    makes such a drift diagnosable (a claim whose invoice_id has no bill).
+
+    A multi-product bill claims every product in ONE update, and Mongo applies
+    it all-or-nothing: if any single product is already full the whole claim is
+    refused and NO counter moves (verified against MongoDB 8.3.2, along with the
+    $not/$gt-vs-missing behaviour this filter depends on). The one shape that
+    errors rather than refusing is a billed_qty that exists as a NON-object --
+    only reachable by hand-editing the row, and it surfaces as the loud 503
+    below, never as a miscount.
+
+    Returns the {product_id: {qty, max_prior}} claim on success, None when the
+    race was lost, and {} when there was nothing claimable (no keyed products,
+    or a receipt whose items carry no product_id -- the same fail-open-on-
+    unknowable rule the cap uses). A DB error is a LOUD 503: a silent pass here
+    would re-open the very window this exists to close.
+    """
+    if db is None or not grn:
+        return {}
+    grn_id = grn.get("grn_id")
+    if not grn_id:
+        return {}
+    claim = pmatch.billing_claim_thresholds(grn, proposed_lines)
+    if claim is None:
+        # The bill overshoots the receipt ON ITS OWN -- no prior quantity would
+        # make it fit, so no rival is involved. Raise the accurate refusal here
+        # rather than returning None, whose caller-side wording blames a race.
+        # (The read-based cap 409s first in practice; this must not depend on
+        # that, and it must not lie if it is ever reached.)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_over_billed",
+                "message": (
+                    f"This invoice bills more units than goods receipt "
+                    f"{grn_id} ever accepted. Bill only what the receipt "
+                    f"covers, or raise a fresh receipt for the extra goods."
+                ),
+                "grn_id": grn_id,
+            },
+        )
+    if not claim:
+        return {}
+
+    # product_id becomes a Mongo FIELD NAME here, so it must carry no dot and no
+    # leading '$'. Every product_id in production is a plain uuid4 (143 of 143
+    # checked 2026-08-27); one that broke the rule would surface as the loud 503
+    # below, never as a silent miscount.
+    flt = {"grn_id": grn_id}
+    inc = {}
+    for pid, spec in claim.items():
+        flt["billed_qty.%s" % pid] = {"$not": {"$gt": spec["max_prior"]}}
+        inc["billed_qty.%s" % pid] = spec["qty"]
+    grns = db.get_collection("grns")
+    if not hasattr(grns, "find_one_and_update"):
+        # The handle cannot do a guarded claim at all -- a stub/mock collection,
+        # never a real Mongo one. That is a MISSING CAPABILITY, not a failed
+        # operation, so it must not masquerade as a transient 503: fall back to
+        # the read-based cap (which has already vetted this bill) and say so.
+        logger.warning(
+            "[AP] collection handle has no find_one_and_update -- booking "
+            "invoice %s against GRN %s without an atomic unit claim; the "
+            "read-based over-bill cap is the only control on this booking",
+            invoice_id,
+            grn_id,
+        )
+        return {}
+    _baseline_grn_counter(grns, grn_id, priors)
+    try:
+        won = grns.find_one_and_update(
+            flt,
+            {
+                "$inc": inc,
+                "$addToSet": {"billed_claim_ids": invoice_id},
+                "$set": {"billed_claim_at": datetime.now().isoformat()},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[AP] could not claim billable units on GRN %s for invoice %s: %s",
+            grn_id,
+            invoice_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not reserve this goods receipt's units. The invoice was "
+                "NOT booked -- retry shortly. If it keeps failing, this receipt's "
+                "billed_qty counter needs attention (see the server log)."
+            ),
+        ) from exc
+    if won is not None:
+        return claim
+
+    # No match can mean two very different things, and refusing on both would
+    # turn an absent row into a permanent false refusal. Re-read WITHOUT the
+    # counter conditions to tell them apart: a row that exists means a rival
+    # really did take the units; no row at all means there is nothing here to
+    # claim against (the GRN reached us through the repository, which need not
+    # be backed by this handle). Fail OPEN in the second case -- the read-based
+    # cap has already vetted this bill against the receipt, so the money stays
+    # protected; only the race window is left open, and it is logged.
+    try:
+        exists = grns.find_one({"grn_id": grn_id}, {"_id": 1})
+    except Exception as exc:  # noqa: BLE001
+        # UNKNOWN is not ABSENT. Mapping a read blip onto "no row" would book
+        # the loser of a real race -- and in a real race the read-based cap has
+        # already passed on a stale view, so this counter is the ONLY control
+        # left. The guarded update proved the row reachable a microsecond ago,
+        # so refuse loudly instead of guessing. (503, not the caller's race 409:
+        # we no longer know that a rival is what happened.)
+        logger.error(
+            "[AP] could not re-read GRN %s after a lost unit claim on invoice "
+            "%s -- refusing rather than booking: %s",
+            grn_id,
+            invoice_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not confirm this goods receipt's remaining units. The "
+                "invoice was NOT booked -- retry shortly."
+            ),
+        ) from exc
+    if exists is None:
+        logger.warning(
+            "[AP] no grns row for %s -- booking invoice %s without an atomic "
+            "unit claim; the read-based over-bill cap is the only control on "
+            "this booking",
+            grn_id,
+            invoice_id,
+        )
+        return {}
+    return None
+
+
+def _release_grn_units(db, grn, claim, invoice_id):
+    """Give back units claimed by a booking that did not survive.
+
+    Called when the bill insert fails after a successful claim. Without it a
+    crashed booking would leave the receipt looking fully billed and block the
+    legitimate invoice -- a false refusal, which is the safe direction but still
+    an operational stall. Fail-soft with a LOUD log: the units are recoverable
+    from billed_claim_ids, and the read-based cap still governs correctness.
+    """
+    if db is None or not grn or not claim:
+        return
+    grn_id = grn.get("grn_id")
+    if not grn_id:
+        return
+    dec = {"billed_qty.%s" % pid: -spec["qty"] for pid, spec in claim.items()}
+    try:
+        db.get_collection("grns").update_one(
+            {"grn_id": grn_id},
+            {"$inc": dec, "$pull": {"billed_claim_ids": invoice_id}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "[AP] CRITICAL: could not release claimed units on GRN %s for "
+            "rolled-back invoice %s (claim: %s) -- the receipt will look more "
+            "billed than it is until reconciled",
+            grn_id,
+            invoice_id,
+            claim,
+        )
+
+
+def assert_grn_billable_header_only(db, grn_id, vendor_id):
+    """The same two guards for the HEADER-ONLY vendor-bill door
+    (vendors.create_vendor_bill), which accepts a grn_id but carries no lines.
+
+    With no lines there is no per-product quantity to apportion, so the
+    cumulative test above cannot run -- the conservative equivalent is that a
+    receipt already carrying a bill may not take a second, blind one. (Split
+    billing stays available through the first-class purchase-invoice door, which
+    does carry lines and is quantity-checked.)
+    """
+    grn = _load_standard_grn(grn_id, expected_vendor_id=vendor_id)
+    if grn is None or db is None:
+        return
+    try:
+        existing = db.get_collection("vendor_bills").find_one(
+            {"grn_id": grn_id}, {"_id": 0, "bill_id": 1, "bill_number": 1}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[AP] header-bill GRN guard could not read prior bills for %s: %s",
+            grn_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify whether this goods receipt has already been "
+                "billed. The bill was NOT recorded -- retry shortly."
+            ),
+        ) from exc
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_already_billed",
+                "message": (
+                    f"Goods receipt {grn_id} is already billed by "
+                    f"{existing.get('bill_number') or existing.get('bill_id')}. "
+                    f"To bill the balance of a part-delivered receipt, use the "
+                    f"purchase-invoice screen (it checks quantities line by "
+                    f"line); a header-only bill cannot prove what is left."
+                ),
+                "grn_id": grn_id,
+                "billed_by": existing.get("bill_number") or existing.get("bill_id"),
+            },
+        )
 
 
 def _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=None):
@@ -592,10 +1025,13 @@ async def create_purchase_invoice(
     # F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed -- a
     # GRN mints stock only at accept time, so booking against a PENDING /
     # PARTIALLY_ACCEPTED GRN records a payable + ITC for goods not yet received
-    # into stock. DC-consolidated invoices validate each linked DC separately
-    # below (via _load_linked_dcs), so the single-GRN guard skips them.
+    # into stock. It must also belong to THIS vendor (expected_vendor_id), the
+    # single-GRN mirror of the DC path's mixed_vendors 409. DC-consolidated
+    # invoices validate each linked DC separately below (via _load_linked_dcs),
+    # so the single-GRN guard skips them.
+    grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
-        _load_standard_grn(body.grn_id)
+        grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
@@ -641,6 +1077,16 @@ async def create_purchase_invoice(
                 f"computed taxable+tax {computed['total']}."
             ),
         )
+
+    # A goods receipt may be billed in PARTS, never for more units than it
+    # accepted. Runs on the computed lines (so it sees exactly what is about to
+    # be booked) and BEFORE any write. Skipped when there is no resolvable GRN.
+    # Hands back the per-product units the EXISTING bills already consumed, so
+    # the atomic claim below can baseline its counter from reality instead of
+    # from a false zero on any receipt whose bills predate the counter.
+    grn_priors = None
+    if grn_doc is not None:
+        grn_priors = _assert_grn_not_over_billed(db, grn_doc, computed["lines"])
 
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(body.invoice_date, credit_days)
@@ -761,6 +1207,39 @@ async def create_purchase_invoice(
         "created_at": datetime.now().isoformat(),
     }
 
+    # ATOMIC CLAIM of the receipt's units, BEFORE the payable exists. Claiming
+    # first (rather than inserting first and compensating, as the DC branch
+    # does) means a payable exceeding the receipt is never written even
+    # transiently; the cost is a claim to release if the insert then fails,
+    # which the except-block below does. grn_doc is only set on the single-GRN
+    # branch, so this can never interleave with the DC stamping further down.
+    grn_claim = None
+    if grn_doc is not None:
+        grn_claim = _claim_grn_units(
+            db, grn_doc, computed["lines"], invoice_id, priors=grn_priors
+        )
+        if grn_claim is None:
+            logger.error(
+                "[AP] concurrent over-bill rejected: invoice %s (vendor %s) lost "
+                "the unit-claim race on GRN %s",
+                body.invoice_number,
+                body.vendor_id,
+                body.grn_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "grn_over_billed",
+                    "message": (
+                        f"Another invoice claimed goods receipt {body.grn_id}'s "
+                        f"remaining units while this booking was in flight. "
+                        f"Nothing was booked -- re-draft from the receipt to see "
+                        f"the balance that is actually left."
+                    ),
+                    "grn_id": body.grn_id,
+                },
+            )
+
     if db is not None:
         try:
             db.get_collection("vendor_bills").insert_one(dict(doc))
@@ -772,6 +1251,8 @@ async def create_purchase_invoice(
             # is closed by the UNIQUE partial index -- the insert LOSER surfaces
             # here as a DuplicateKeyError -> 409 (not a 500). Matched by class name
             # so no hard pymongo import (MockCollection never raises it).
+            # Either way the units this booking claimed go back to the receipt.
+            _release_grn_units(db, grn_doc, grn_claim, invoice_id)
             if exc.__class__.__name__ == "DuplicateKeyError":
                 raise HTTPException(
                     status_code=409,

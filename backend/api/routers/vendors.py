@@ -4755,6 +4755,17 @@ async def create_vendor_bill(
 
         check_period_locked(db_early, bill.bill_date)
 
+    # This door accepts a grn_id but validated NOTHING about it -- so the same
+    # two money leaks the first-class purchase-invoice door had were reachable
+    # here too: bill another vendor's receipt, or bill one receipt again and
+    # again. Reuse the purchase-invoice guards (imported at call time, like
+    # check_period_locked above, so no cross-router import cycle). No grn_id ->
+    # a plain header bill, unchanged.
+    if bill.grn_id:
+        from .purchase_invoices import assert_grn_billable_header_only
+
+        assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+
     # Duplicate bill guard: the same vendor invoice number must not be recorded
     # twice for the same vendor. A double-entry would double the outstanding
     # payable and produce a duplicate payment row in the ledger.
