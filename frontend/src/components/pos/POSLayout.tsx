@@ -2398,6 +2398,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         brand: p.brand,
         subbrand: p.subbrand || p.sub_brand,
         category: p.category || hit?.category,
+        hsn_code: p.hsn_code || hit?.hsn_code,
         mrp: p.mrp,
         offer_price: p.offer_price ?? p.offerPrice,
         image_url: p.image_url,
@@ -2449,6 +2450,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     setBlockMsg(null);
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
+        // The product's stored HSN, so the tax invoice prints the code this
+        // product is registered under rather than deriving one from its
+        // category (see CartLineItem.hsn_code).
+        hsn_code: product.hsn_code,
         unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
         is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
     });

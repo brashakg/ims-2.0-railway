@@ -1857,16 +1857,21 @@ async def get_gst_rates(current_user: dict = Depends(get_current_user)):
         spelling (FRAME / FRAMES / FR / ...) maps onto the ``category_hint``
         stored on a master row, so a category resolves to the SAME master row
         here and on the frontend.
-      * ``hsn_by_category`` -- the canonical category -> HSN code out of
-        ``gst_rates.GST_CATEGORY_TABLE``.
+      * ``hsn_by_category`` / ``rate_by_category`` -- the canonical category ->
+        (HSN code, GST rate) out of ``gst_rates.GST_CATEGORY_TABLE``, served as
+        two maps. ``rate_by_category`` is the SAME last step the backend itself
+        takes (``gst_rate_for_category``), so the frontend can read the server's
+        answer for a category instead of asserting its own. That is how an eye
+        test reaches the screen at the 0% it is billed at (SAC 9993, an exempt
+        health service): the frontend has no row for one at all.
 
-    There is NO second copy of the category -> HSN rule, and no second copy of
-    the category -> master-row rule, on the frontend: both derive from this
-    endpoint (the same principle GET /products/categories states for the
-    required-ness rule). The frontend keeps exactly ONE local GST table -- the
-    offline rate fallback in ``constants/gst.ts`` -- for the window before this
-    endpoint has answered, and that fallback is deliberately untouched because
-    it sits on the POS billing path.
+    There is NO second copy of the category -> HSN rule, of the category ->
+    master-row rule, or of the canonical category -> rate table on the frontend:
+    all three derive from this endpoint (the same principle GET
+    /products/categories states for the required-ness rule). What survives over
+    there is ONE hand-written table -- an OFFLINE rate fallback in
+    ``constants/gst.ts``, reached only for a category this endpoint does not
+    name, or before it has answered at all.
 
     Read-only, available to any authenticated user (POS cashiers included) so
     the cart preview + the printed tax invoice show the same rates AND the same
@@ -1882,6 +1887,9 @@ async def get_gst_rates(current_user: dict = Depends(get_current_user)):
         "category_hint": dict(_CATEGORY_HINT),
         "hsn_by_category": {
             cat: hsn for cat, (hsn, _rate) in GST_CATEGORY_TABLE.items() if hsn
+        },
+        "rate_by_category": {
+            cat: rate for cat, (_hsn, rate) in GST_CATEGORY_TABLE.items()
         },
     }
     try:

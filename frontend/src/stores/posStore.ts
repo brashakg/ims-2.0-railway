@@ -56,6 +56,13 @@ export interface CartLineItem {
   brand?: string;
   subbrand?: string;
   category: string;
+  // The product's OWN HSN code, as stored on its master record. Carried so the
+  // tax invoice can print what the product is registered under instead of
+  // re-deriving a code from its category at print time (which printed the
+  // sunglasses HSN on every smartglasses sale). Absent on a manually-added
+  // line (a custom lens has no product record); the invoice then falls back to
+  // the server's canonical code for the category.
+  hsn_code?: string;
   unit_price: number;            // Selling price (Offer Price or MRP)
   mrp: number;                   // Maximum Retail Price
   offer_price?: number;          // Offer Price (if different from MRP)

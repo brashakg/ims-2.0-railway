@@ -633,9 +633,16 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     model,
     attributes,
     description: values.description || undefined,
-    // India: contact lenses default to HSN 9001 (90013000) at 5% GST under
-    // GST 2.0 when an HSN is not explicitly chosen.
-    hsn_code: values.hsnCode || (isCL ? '90013000' : undefined),
+    // No HSN chosen -> send none, and the server fills in the canonical code
+    // for the category (routers/products._resolve_hsn_or_400 ->
+    // gst_rates.hsn_for_category). A contact lens used to get an 8-DIGIT
+    // '90013000' written in here instead; the rest of the app spells that same
+    // HSN '900130' (6-digit, owner 2026-07-05 -- the 4/8-digit variants were
+    // dropped app-wide), and two spellings of one product's HSN split it across
+    // two rows of the HSN-wise summary on the invoice and in GSTR-1. The branch
+    // was unreachable while values.hsnCode was always pre-filled locally; it
+    // became live the moment the HSN prefill started coming from the server.
+    hsn_code: values.hsnCode || undefined,
     // Flat fields. Offer price falls back to MRP when left blank. Stock qty is
     // intentionally omitted: inventory is created via GRN, not at create time.
     mrp,
@@ -777,7 +784,13 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     attributes,
     description: str(product.description),
     hsnCode: str(product.hsn_code),
-    gstRate: str(product.gst_rate) || '18',
+    // A doc old enough to have no gst_rate is rated from its CATEGORY, not
+    // from a hand-written 18. The clone form's rate is saved as the new SKU's
+    // gst_rate (routers/products: an explicit rate wins over the server's own),
+    // and the category autofill that would have corrected it is deliberately
+    // SKIPPED when the clone brings an hsn_code with it (QuickAddPage), so an
+    // 18 here rides all the way onto a 5% frame.
+    gstRate: str(product.gst_rate) || resolveHsnGst(category).gstRate,
     weight: str(product.weight),
     mrp: str(product.mrp),
     offerPrice: str(product.offer_price),

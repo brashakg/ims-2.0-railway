@@ -11,65 +11,90 @@
 // per session (see AppLayout) + after an edit in Settings -> HSN & GST Rates.
 //
 // EVERY table below arrives from GET /products/gst-rates. The category -> HSN
-// map and the category -> master-row hint used to be hand-copied here from
-// backend api/services/gst_rates.py, and the copies had drifted (smartglasses
-// were pointed at the sunglasses HSN 900410 instead of 852580). They are now
-// read off the server, which is the only place that can be right.
+// map, the category -> master-row hint and the canonical category -> rate table
+// used to be hand-copied here from backend api/services/gst_rates.py, and the
+// copies had drifted (smartglasses were pointed at the sunglasses HSN 900410
+// instead of 852580; an eye test, billed at 0% as an exempt health service, had
+// no row at all). They are now read off the server, which is the only place
+// that can be right.
 
 import api from '../services/api/client';
-import { getGSTRateByCategory } from './gst';
+import { getGSTRateByCategory, HSN_CODES } from './gst';
+import { canonicalCategory } from '../utils/categoryNormalize';
 
 let _byHsn: Record<string, number> = {};
 let _byCat: Record<string, number> = {};
-// Server-fed: category spelling -> the category_hint on a master row, and
-// category -> canonical HSN code. Empty until the endpoint answers.
+// Server-fed: category spelling -> the category_hint on a master row, the
+// canonical category -> HSN code, and the canonical category -> rate the
+// backend's own last step uses. Empty until the endpoint answers.
 let _hint: Record<string, string> = {};
 let _hsnByCat: Record<string, string> = {};
+let _rateByCat: Record<string, number> = {};
 let _loaded = false;
 
 const LS_KEY = 'ims_hsn_gst_rates';
 
+// ONE category normaliser for the whole app: utils/categoryNormalize. This file
+// used to inline its own upper-snake regex, which is the same rule MINUS the
+// trim -- so a legacy row written '  FRAME  ' normalised to '__FRAME__', matched
+// nothing, and printed a blank HSN on the tax invoice. The server trims
+// (gst_rates._normalize_category begins with .strip()).
 function _normalizeCat(category?: string | null): string {
-  if (!category) return '';
-  const raw = String(category).toUpperCase().replace(/[-\s]+/g, '_');
-  return _hint[raw] || raw;
+  const canon = canonicalCategory(category);
+  return _hint[canon] || canon;
+}
+
+/** Last session's tables, so a page load is never colder than the one before
+ *  it. Silent on a parse error / private mode: the static fallback stands. */
+function _applyCache(): void {
+  try {
+    const p = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (!p) return;
+    _byHsn = p.byHsn || {};
+    _byCat = p.byCat || {};
+    _hint = p.hint || {};
+    _hsnByCat = p.hsnByCat || {};
+    _rateByCat = p.rateByCat || {};
+    _loaded = true;
+  } catch {
+    /* keep the static fallback */
+  }
 }
 
 /** Fetch the HSN->GST master into the in-memory cache. Safe to call repeatedly;
- *  never throws. Falls back to a localStorage snapshot if the network fails. */
+ *  never throws. Warm-starts from the localStorage snapshot, and keeps any
+ *  table the response does not carry.
+ *
+ *  THE DEPLOY ORDER IS WHY. The frontend ships on Vercel and the backend on
+ *  Railway, in that order, so for the minutes between them every browser gets a
+ *  200 from the OLD endpoint -- which has no hsn_by_category / rate_by_category
+ *  key at all. Overwriting with `|| {}` there would blank the maps this file
+ *  depends on, on a live POS, and then persist that blank over the good
+ *  snapshot. `?? _x` leaves an absent table alone; a present one still wins. */
 export async function loadHsnRates(): Promise<void> {
+  if (!_loaded) _applyCache();
   try {
     const res = await api.get('/products/gst-rates');
     const data = res.data || {};
-    _byHsn = data.by_hsn || {};
-    _byCat = data.by_cat || {};
-    _hint = data.category_hint || {};
-    _hsnByCat = data.hsn_by_category || {};
+    _byHsn = data.by_hsn ?? _byHsn;
+    _byCat = data.by_cat ?? _byCat;
+    _hint = data.category_hint ?? _hint;
+    _hsnByCat = data.hsn_by_category ?? _hsnByCat;
+    _rateByCat = data.rate_by_category ?? _rateByCat;
     _loaded = true;
     try {
       localStorage.setItem(
         LS_KEY,
-        JSON.stringify({ byHsn: _byHsn, byCat: _byCat, hint: _hint, hsnByCat: _hsnByCat }),
+        JSON.stringify({
+          byHsn: _byHsn, byCat: _byCat, hint: _hint,
+          hsnByCat: _hsnByCat, rateByCat: _rateByCat,
+        }),
       );
     } catch {
       /* ignore quota / private-mode errors */
     }
   } catch {
-    if (!_loaded) {
-      try {
-        const cached = localStorage.getItem(LS_KEY);
-        if (cached) {
-          const p = JSON.parse(cached);
-          _byHsn = p.byHsn || {};
-          _byCat = p.byCat || {};
-          _hint = p.hint || {};
-          _hsnByCat = p.hsnByCat || {};
-          _loaded = true;
-        }
-      } catch {
-        /* keep static fallback */
-      }
-    }
+    if (!_loaded) _applyCache();
   }
 }
 
@@ -77,18 +102,24 @@ export async function loadHsnRates(): Promise<void> {
  *  GST_CATEGORY_TABLE. '' until the endpoint has answered (callers then omit
  *  the HSN, and the server fills in its own -- which is the right one). */
 export function resolveHsn(category?: string | null): string {
-  if (!category) return '';
-  return _hsnByCat[String(category).toUpperCase().replace(/[-\s]+/g, '_')] || '';
+  return _hsnByCat[canonicalCategory(category)] || '';
 }
 
-/** Resolve the GST rate (%) for a line: exact HSN -> category hint -> static
- *  GST 2.0 fallback (constants/gst.ts). Synchronous + always returns a number.
+/** Resolve the GST rate (%) for a line, in the SAME four steps the server
+ *  takes: editable master by exact HSN -> editable master by category hint ->
+ *  the server's canonical category table -> the offline table in
+ *  constants/gst.ts. Synchronous + always returns a number.
  *
- *  THE ORDER OF PRECEDENCE AND THE LAST STEP ARE DELIBERATELY UNCHANGED. This
- *  function is on the POS billing path, so the number it returns before the
- *  server has answered must stay exactly the number it returned yesterday --
- *  which is why getGSTRateByCategory() survives as the one local GST table,
- *  while the category -> HSN and category -> hint tables became server-fed. */
+ *  Step 3 is the one that used to be a hand-written copy over here. The copy
+ *  disagreed with the server: an EYE_TEST / CONSULTATION line is an exempt
+ *  health service billed at 0% (SAC 9993), and the copy had no row for it, so
+ *  the screen and the printed invoice quoted the unknown-category default while
+ *  the customer was charged nothing. Reading the server's own table removes the
+ *  whole class -- nothing over here has to be told when a rate changes.
+ *
+ *  Step 4 is reached only for a category the server does not name (a legacy or
+ *  free-text spelling) or before the endpoint has answered. It is a rate on the
+ *  POS billing path, so it stays hand-written and deliberately dull. */
 export function resolveGstRate(category?: string | null, hsnCode?: string | null): number {
   if (hsnCode) {
     const hc = String(hsnCode).trim();
@@ -102,7 +133,43 @@ export function resolveGstRate(category?: string | null, hsnCode?: string | null
   // which sent COLORED_CONTACT_LENSES to the CONTACT_LENS master row; the real
   // hint sends it to COLORED_CONTACT_LENS, which has no master row, so the raw
   // plural would have fallen through to the 18% default while the server bills 5%.
+  if (norm && _rateByCat[norm] != null) return _rateByCat[norm];
   return getGSTRateByCategory(norm);
+}
+
+/** The HSN codes the cataloguing screen may offer, server-first.
+ *
+ *  Every code the category resolver can produce is in here, because the list
+ *  IS the server's canonical category -> HSN table (plus the locally described
+ *  codes, which are extra choices a cataloguer may still pick by hand). The
+ *  hand-written list alone could not represent 852580 (smartglasses -- 35 of
+ *  the 68 live products) or 9993 (eye tests): the resolver set a value the
+ *  dropdown had no option for, so a REQUIRED field rendered blank.
+ *
+ *  A code the local list describes keeps its description; one that only the
+ *  server names is labelled by the code itself. The rate on each option is
+ *  resolveGstRate()'s answer, so the option cannot quote a rate the server
+ *  contradicts. */
+export function hsnOptions(): Array<{ value: string; label: string; gstRate: number }> {
+  const opts = new Map<string, { value: string; label: string; gstRate: number }>();
+  // The codes the local list describes, at the rate it states -- unless the
+  // owner-editable master has that code, in which case the master wins.
+  for (const hsn of Object.values(HSN_CODES)) {
+    const gstRate = _byHsn[hsn.code] ?? hsn.gstRate;
+    opts.set(hsn.code, {
+      value: hsn.code,
+      label: `${hsn.code} - ${hsn.description} (GST: ${gstRate}%)`,
+      gstRate,
+    });
+  }
+  // Then every code the server's canonical table can hand a category, priced
+  // through that category so the option cannot quote a rate the server denies.
+  for (const [category, code] of Object.entries(_hsnByCat)) {
+    if (opts.has(code)) continue;
+    const gstRate = resolveGstRate(category, code);
+    opts.set(code, { value: code, label: `${code} (GST: ${gstRate}%)`, gstRate });
+  }
+  return [...opts.values()].sort((a, b) => a.value.localeCompare(b.value));
 }
 
 // ============================================================================

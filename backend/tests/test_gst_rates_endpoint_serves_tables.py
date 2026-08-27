@@ -43,6 +43,36 @@ def test_endpoint_serves_the_canonical_category_to_hsn_map():
     }
 
 
+def test_endpoint_serves_the_canonical_category_to_rate_map():
+    """The rate half of the same table. The frontend used to hand-write its own
+    category -> rate switch and consult it INSTEAD of this one, so the two could
+    disagree without anything noticing -- and they did: an eye test is an exempt
+    health service billed at 0% (SAC 9993) and the frontend had no row for one
+    at all, so it quoted its unknown-category default on the tax invoice."""
+    rates = _call()["rate_by_category"]
+    assert rates == {
+        cat: rate for cat, (_h, rate) in gst_rates.GST_CATEGORY_TABLE.items()
+    }
+    # The two the frontend contradicted, named explicitly so a table edit that
+    # loses them fails here rather than silently on a printed invoice.
+    assert rates["EYE_TEST"] == 0.0
+    assert rates["CONSULTATION"] == 0.0
+    # ...while a taxable line on the same bill is unchanged.
+    assert rates["SUNGLASS"] == 18.0
+    assert rates["FRAME"] == 5.0
+
+
+def test_hsn_and_rate_halves_describe_the_same_categories():
+    """The two maps are one table served as two. A category present in one and
+    missing from the other means the frontend can resolve an HSN it cannot
+    price, or price something it cannot file -- the exact shape of the drift
+    this endpoint exists to end. (hsn_by_category drops rows with no code; no
+    row in the table has one today, and this says so.)"""
+    body = _call()
+    assert set(body["rate_by_category"]) == set(gst_rates.GST_CATEGORY_TABLE)
+    assert set(body["hsn_by_category"]) == set(body["rate_by_category"])
+
+
 def test_endpoint_serves_the_category_hint_map():
     body = _call()
     assert body["category_hint"] == gst_rates._CATEGORY_HINT
@@ -77,4 +107,5 @@ def test_static_half_survives_the_master_lookup_blowing_up():
         gst_rates._load_lookup = orig
     assert body["by_hsn"] == {} and body["by_cat"] == {}
     assert body["hsn_by_category"]["SMARTGLASSES"] == "852580"
+    assert body["rate_by_category"]["EYE_TEST"] == 0.0
     assert body["category_hint"]["CCL"] == "COLORED_CONTACT_LENS"
