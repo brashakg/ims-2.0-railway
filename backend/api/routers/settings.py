@@ -70,31 +70,10 @@ if not _CRED_SECRET:
         "Generate one with: openssl rand -hex 32"
     )
 
-# Sensitive config field names that must be encrypted at rest & masked on read
-_SENSITIVE_FIELDS = {
-    "api_key",
-    "api_secret",
-    "secret_key",
-    "key_secret",
-    "secret",
-    "password",
-    "token",
-    "access_token",
-    "refresh_token",
-    "private_key",
-    "signing_key",
-    "webhook_secret",
-    "webhook_url",
-    "app_secret",
-    "verify_token",
-    "developer_token",
-    "client_secret",
-    "razorpay_key_secret",
-    "shopify_api_secret",
-    "whatsapp_api_key",
-    "tally_password",
-    "shiprocket_password",
-}
+# Sensitive config field names that must be encrypted at rest & masked on read.
+# ONE set, owned by cred_crypto -- this module used to carry a byte-identical
+# copy, which is the drift class that keeps biting this repo. Alias, not copy.
+_SENSITIVE_FIELDS = cred_crypto.SENSITIVE_FIELDS
 
 
 def _mask_value(val: str) -> str:
@@ -1189,11 +1168,20 @@ def _strip_unstorable_fields(doc: dict) -> dict:
     `dispatch_mode` is dropped for a different reason: it is not a preference
     at all, it is the server's send gate, and is reported straight from
     agents.providers.dispatch_mode().
+
+    Membership is spelling-insensitive (cred_crypto.canon_field): `apiKey`,
+    `API_KEY` and `dispatch_mode ` are the same key as `api_key` /
+    `dispatch_mode`. The frontend's response aliasing (client.ts
+    addCamelAliases) makes camelCase the canonical client-side spelling, so a
+    snake_case-only comparison let `apiKey` land in this unencrypted singleton
+    and a planted `dispatchMode` win the client-side readout.
     """
+    server_owned = {cred_crypto.canon_field(f) for f in _SERVER_OWNED_FIELDS}
     return {
         k: v
         for k, v in doc.items()
-        if k.lower() not in _SENSITIVE_FIELDS and k.lower() not in _SERVER_OWNED_FIELDS
+        if not cred_crypto.is_sensitive_field(k)
+        and cred_crypto.canon_field(k) not in server_owned
     }
 
 
