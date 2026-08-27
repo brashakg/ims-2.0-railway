@@ -1322,11 +1322,15 @@ async def create_purchase_invoice(
     # can be read must not decide whether a bill needs a receipt, or an
     # unreadable DB (or a typo'd id) would be the bypass instead.
     #
-    # A genuine no-order purchase (goods bought over the counter, no PO) is NOT
-    # left without a route: it has a named, visible path already -- record a
-    # Delivery Challan goods receipt for it (GRNCreate allows a DC with no
-    # po_id) and book the bill against that. The message says so, because an
-    # accountant who cannot see the way out will find the bypass instead.
+    # A genuine no-order purchase (goods bought over the counter, no PO) still
+    # has a way out, and the message must name one the UI can actually WALK.
+    # GRNCreate accepts a Delivery Challan with no po_id, but the receiving
+    # screen (GoodsReceiptNote.handleSubmit) refuses to submit without a PO
+    # selected even in DC mode -- so until that screen learns no-PO receiving,
+    # the reachable route is: log a PO for the delivery, receive it, bill
+    # against the receipt. An accountant who cannot see a way out will find
+    # the bypass instead -- and a message pointing at a door the screen keeps
+    # shut is the same thing with extra steps.
     if (
         not body.grn_id
         and not body.linked_dc_ids
@@ -1340,8 +1344,9 @@ async def create_purchase_invoice(
                     "Link the goods receipt for this bill before booking it - "
                     "the quantities have to be tallied before the purchase is "
                     "final. If these goods arrived without a purchase order, "
-                    "record a Delivery Challan goods receipt for them first, "
-                    "then book the bill against it."
+                    "log a purchase order for the delivery and receive it on "
+                    "the Goods Receipt screen first, then book the bill "
+                    "against that receipt."
                 ),
             },
         )

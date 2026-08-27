@@ -100,6 +100,13 @@ class _Coll:
     def find_one(self, flt, projection=None):
         for d in self.rows:
             if all(d.get(k) == v for k, v in flt.items()):
+                # Honour an INCLUSION projection like real Mongo does: a fake
+                # that hands back the whole doc cannot tell a field the code
+                # projected from one it forgot to (feedback_hollow_tests --
+                # doubles weaker than prod hide exactly that bug).
+                keep = [k for k, v in (projection or {}).items() if v and k != "_id"]
+                if keep:
+                    return {k: d[k] for k in keep if k in d}
                 return dict(d)
         return None
 
@@ -171,6 +178,39 @@ def _pay_db(debit_notes=None, rejected=2):
     )
 
 
+def _dc_pay_db(debit_notes=None, rejected=2):
+    """The SAME delivery billed the Delivery-Challan way: the bill stores
+    grn_id None and carries its receipts in linked_dc_ids instead."""
+    return _DB(
+        vendor_bills=[
+            {
+                "bill_id": "B1",
+                "bill_number": "INV-9",
+                "grn_id": None,
+                "linked_dc_ids": ["DC1"],
+                "vendor_id": "V1",
+            }
+        ],
+        grns=[
+            {
+                "grn_id": "DC1",
+                "grn_number": "DC-4",
+                "grn_subtype": "DELIVERY_CHALLAN",
+                "items": [
+                    {
+                        "product_id": "P1",
+                        "received_qty": 20,
+                        "accepted_qty": 20 - rejected,
+                        "rejected_qty": rejected,
+                    }
+                ],
+            }
+        ],
+        vendor_debit_notes=debit_notes or [],
+        vendor_payments=[],
+    )
+
+
 class _VendorRepo:
     def find_by_id(self, _vid):
         return {"vendor_id": "V1", "trade_name": "Acme Optics", "credit_days": 30}
@@ -215,6 +255,30 @@ class TestRejectedGoodsHoldTheBill:
 
     def test_a_clean_receipt_is_never_held(self):
         db = _pay_db(rejected=0)
+        out = _record_payment(db)
+        assert out["amount"] == 1000.0
+        assert len(db.get_collection("vendor_payments").rows) == 1
+
+    def test_a_dc_consolidated_bill_with_rejections_is_held_the_same_way(self):
+        """Ruling 7 must follow the Delivery-Challan path too. A DC-consolidated
+        bill stores grn_id None and its receipts in linked_dc_ids; reading
+        bill["grn_id"] alone paid the very delivery a GRN-linked bill would
+        have held -- same 2 rejected units, no debit note, payment PAID."""
+        db = _dc_pay_db()
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        detail = exc.value.detail
+        assert detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
+        assert "2 unit(s)" in detail["message"]
+        assert "DC-4" in detail["message"]
+        # and nothing was written
+        assert db.get_collection("vendor_payments").rows == []
+
+    def test_a_debit_note_against_the_dc_releases_the_payment(self):
+        """The discriminator for the DC hold: cover the rejection and the same
+        payment goes through."""
+        db = _dc_pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "DC1"}])
         out = _record_payment(db)
         assert out["amount"] == 1000.0
         assert len(db.get_collection("vendor_payments").rows) == 1
@@ -792,8 +856,12 @@ class TestTheInvoiceIsTheGate:
             _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
         assert exc.value.status_code == 422
         assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
-        # ...and it must name the way out, or a real counter purchase is stuck.
-        assert "Delivery Challan" in exc.value.detail["message"]
+        # ...and it must name a way out the UI can actually walk (the receiving
+        # screen still requires a PO even in DC mode, so the message must not
+        # send anyone down the Delivery-Challan route it cannot reach).
+        msg = exc.value.detail["message"]
+        assert "log a purchase order for the delivery" in msg
+        assert "Delivery Challan" not in msg
 
     def test_a_product_id_we_cannot_find_still_needs_the_receipt(self):
         """Naming the id is the trigger, not finding it. The catalogue gate
@@ -806,6 +874,50 @@ class TestTheInvoiceIsTheGate:
                 po_id=None,
                 grn_id=None,
                 lines=[_line(product_id="GHOST")],
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+
+    def test_a_goods_line_below_a_service_line_still_needs_the_receipt(self):
+        """A vendor invoice ordinarily LEADS with a freight/service line and
+        puts the goods below it. The gate must read every line, not the first:
+        a first-line-only reader waves this bill's 20 frames through with no
+        receipt at all."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [_COMPLETE_PRODUCT],
+                po_id=None,
+                grn_id=None,
+                lines=[
+                    _line(
+                        product_id=None,
+                        description="Freight",
+                        qty=1,
+                        unit_price=910,
+                    ),
+                    _line(product_id="P1", qty=20, unit_price=3900),
+                ],
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+
+    def test_naming_a_po_alone_still_needs_the_receipt(self):
+        """The OTHER half of the trigger: naming a purchase order is itself the
+        claim that goods were ordered, even when no typed line names a product.
+        po_id alone must demand the receipt."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [_COMPLETE_PRODUCT],
+                po_id="PO1",
+                grn_id=None,
+                lines=[
+                    _line(
+                        product_id=None,
+                        description="Freight",
+                        qty=1,
+                        unit_price=910,
+                    )
+                ],
             )
         assert exc.value.status_code == 422
         assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"

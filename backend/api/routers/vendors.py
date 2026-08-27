@@ -4861,45 +4861,60 @@ def _rejected_goods_hold(db, bill_id: Optional[str]) -> Optional[str]:
     on its goods receipt were REJECTED and no debit note has been raised.
 
     Returns a plain-English reason to refuse the payment, or None when the bill
-    is clear. Reads the bill -> its GRN -> the rejected quantities, then looks
-    for a debit note that references either that GRN or the bill itself (the
-    DebitNoteCreate schema has carried `grn_id` -- "link to the rejected-goods
-    GRN" -- since it was written; nothing had ever read it). Fail-soft: any
-    error returns None, because a lookup failure must not block a legitimate
-    payment.
+    is clear. Reads the bill -> its receipts -> the rejected quantities, then
+    looks for a debit note that references either that receipt or the bill
+    itself (the DebitNoteCreate schema has carried `grn_id` -- "link to the
+    rejected-goods GRN" -- since it was written; nothing had ever read it).
+
+    A DC-consolidated bill stores grn_id None and carries its receipts in
+    linked_dc_ids (they live in the same `grns` collection). Reading grn_id
+    alone paid the very delivery a GRN-linked bill would have held, so BOTH
+    fields are walked here -- every payment routes through this one helper.
+
+    Fail-soft: any error returns None, because a lookup failure must not block
+    a legitimate payment.
     """
     if db is None or not bill_id:
         return None
     try:
         bill = db.get_collection("vendor_bills").find_one(
-            {"bill_id": bill_id}, {"_id": 0, "grn_id": 1, "bill_number": 1}
+            {"bill_id": bill_id},
+            {"_id": 0, "grn_id": 1, "linked_dc_ids": 1, "bill_number": 1},
         )
-        if not bill or not bill.get("grn_id"):
+        if not bill:
             return None
-        grn_id = bill["grn_id"]
-        grn = db.get_collection("grns").find_one(
-            {"grn_id": grn_id}, {"_id": 0, "items": 1, "grn_number": 1}
-        )
-        if not grn:
+        receipt_ids = [g for g in [bill.get("grn_id")] if g]
+        receipt_ids += [d for d in (bill.get("linked_dc_ids") or []) if d]
+        if not receipt_ids:
             return None
-        rejected = 0
-        for it in grn.get("items") or []:
-            try:
-                rejected += int(it.get("rejected_qty") or 0)
-            except (TypeError, ValueError):
-                continue
-        if rejected <= 0:
-            return None
+        grns = db.get_collection("grns")
         notes = db.get_collection("vendor_debit_notes")
-        for flt in ({"grn_id": grn_id}, {"bill_id": bill_id}):
-            if notes.find_one(flt, {"_id": 0, "debit_note_id": 1}):
-                return None
-        return (
-            f"{rejected} unit(s) on goods receipt "
-            f"{grn.get('grn_number') or grn_id} were rejected and no debit note "
-            f"has been raised against the vendor. Raise the debit note for the "
-            f"rejected goods first - then this bill can be paid."
-        )
+        for grn_id in receipt_ids:
+            grn = grns.find_one(
+                {"grn_id": grn_id}, {"_id": 0, "items": 1, "grn_number": 1}
+            )
+            if not grn:
+                continue
+            rejected = 0
+            for it in grn.get("items") or []:
+                try:
+                    rejected += int(it.get("rejected_qty") or 0)
+                except (TypeError, ValueError):
+                    continue
+            if rejected <= 0:
+                continue
+            if any(
+                notes.find_one(flt, {"_id": 0, "debit_note_id": 1})
+                for flt in ({"grn_id": grn_id}, {"bill_id": bill_id})
+            ):
+                continue
+            return (
+                f"{rejected} unit(s) on goods receipt "
+                f"{grn.get('grn_number') or grn_id} were rejected and no debit "
+                f"note has been raised against the vendor. Raise the debit note "
+                f"for the rejected goods first - then this bill can be paid."
+            )
+        return None
     except Exception:  # noqa: BLE001 - a lookup failure must not block payment
         return None
 
