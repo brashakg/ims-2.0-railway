@@ -82,13 +82,14 @@ export function NotificationSettings() {
   });
   const [smsReady, setSmsReady] = useState(false);
   // Server-side send switch (DISPATCH_MODE), exactly as the server reported it.
-  // `null` means it was NEVER READ (401 / 500 / timeout), and that is a state
-  // of its own on purpose: the caption printed under this value is an explicit
-  // promise to the owner that nothing is reaching customers, so defaulting a
-  // failed read to 'off' prints that promise over a server that may be LIVE.
-  // For the channel tiles below, "not connected" is the conservative guess;
-  // for the send gate the conservative answer is "I could not read it".
-  const [dispatchMode, setDispatchMode] = useState<string | null>(null);
+  // `undefined` means the request is still IN FLIGHT; `null` means it was
+  // NEVER READ (401 / 500 / timeout), and that is a state of its own on
+  // purpose: the caption printed under this value is an explicit promise to
+  // the owner that nothing is reaching customers, so defaulting a failed read
+  // to 'off' prints that promise over a server that may be LIVE. For the
+  // channel tiles below, "not connected" is the conservative guess; for the
+  // send gate the conservative answer is "I could not read it".
+  const [dispatchMode, setDispatchMode] = useState<string | null | undefined>(undefined);
 
   // Template states
   const [templates, setTemplates] = useState<NotificationTemplate[]>(
@@ -98,6 +99,11 @@ export function NotificationSettings() {
   const [testPhone, setTestPhone] = useState('');
 
   const canManageSettings = hasRole(['SUPERADMIN', 'ADMIN']);
+
+  // The only three values the server's gate can report. Anything else is
+  // rendered as "unrecognised", never verbatim with the assurance under it.
+  const modeIsKnown =
+    dispatchMode === 'off' || dispatchMode === 'test' || dispatchMode === 'live';
 
   useEffect(() => {
     loadSettings();
@@ -127,6 +133,9 @@ export function NotificationSettings() {
         setDispatchMode(
           data.dispatch_mode == null ? null : String(data.dispatch_mode)
         );
+      } else {
+        // An empty body answered nothing: the gate stays UNREAD.
+        setDispatchMode(null);
       }
     } catch {
       // The send gate stays UNREAD. The channel tiles fall back to "not
@@ -327,23 +336,32 @@ export function NotificationSettings() {
               />
             </div>
 
+            {/* The mode is rendered VERBATIM only when it is one of the three
+                values the server can legitimately report. Anything else --
+                a padded " live" (invisible in HTML), an empty string, a
+                malformed body stringified to "[object Object]" -- gets the
+                honest unknown state: this screen must never print the
+                "nothing is sent" assurance off a value it does not
+                understand, because whether that value sends is decided by a
+                Python default this file cannot see. */}
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
               <p className="font-medium text-gray-900">
                 Sending mode:{' '}
-                {dispatchMode === null ? (
+                {dispatchMode === undefined ? (
+                  <span className="text-gray-500">reading&hellip;</span>
+                ) : modeIsKnown ? (
+                  <span className="uppercase">{dispatchMode}</span>
+                ) : dispatchMode === null ? (
                   <span className="text-amber-700">
                     couldn&rsquo;t be read &mdash; check with the server
                   </span>
                 ) : (
-                  <span className="uppercase">{dispatchMode}</span>
+                  <span className="text-amber-700">
+                    unrecognised &mdash; check with the server
+                  </span>
                 )}
               </p>
-              {dispatchMode === null ? (
-                <p className="text-sm text-gray-500 mt-1">
-                  This screen could not reach the server, so it cannot tell you
-                  whether messages are going out. Do not assume they are not.
-                </p>
-              ) : (
+              {dispatchMode === undefined ? null : modeIsKnown ? (
                 <p className="text-sm text-gray-500 mt-1">
                   {dispatchMode === 'live'
                     ? 'Messages go to real customers.'
@@ -352,6 +370,17 @@ export function NotificationSettings() {
                       : 'Nothing is sent to customers yet. Messages are logged only.'}{' '}
                   This switch is set on the server, on purpose, so it can never be
                   flipped by accident from a screen.
+                </p>
+              ) : dispatchMode === null ? (
+                <p className="text-sm text-gray-500 mt-1">
+                  This screen could not reach the server, so it cannot tell you
+                  whether messages are going out. Do not assume they are not.
+                </p>
+              ) : (
+                <p className="text-sm text-gray-500 mt-1">
+                  The server reported a sending mode this screen does not
+                  recognise, so it cannot tell you whether messages are going
+                  out. Do not assume they are not.
                 </p>
               )}
             </div>

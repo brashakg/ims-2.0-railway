@@ -96,6 +96,71 @@ describe('Sending-mode card', () => {
     expect(screen.queryByText(ASSURANCE)).toBeNull();
   });
 
+  it('renders a value it does not recognise as UNKNOWN, never verbatim with the assurance', async () => {
+    // " live" is DISPATCH_MODE pasted into Railway with a leading space. The
+    // space is invisible in HTML, so rendering it verbatim shows
+    // "Sending mode: live" -- while whether it actually sends is decided by a
+    // Python default this screen cannot see. Never print a promise under a
+    // value the screen does not understand.
+    getNotificationProviders.mockResolvedValue({
+      whatsapp: { provider: 'MSG91', enabled: false, sender: '' },
+      sms: { provider: 'MSG91', enabled: false, sender: '' },
+      dispatch_mode: ' live',
+    });
+
+    renderCard();
+
+    expect(await screen.findByText(/unrecognised/i)).toBeInTheDocument();
+    expect(screen.queryByText('live')).toBeNull();
+    expect(screen.queryByText(/Messages go to real customers/i)).toBeNull();
+    expect(screen.queryByText(ASSURANCE)).toBeNull();
+    expect(screen.queryByText(NEVER_FLIPPED)).toBeNull();
+    expect(screen.getByText(/Do not assume they are not/i)).toBeInTheDocument();
+  });
+
+  it('renders an empty-string mode as UNKNOWN, not as a blank with a promise under it', async () => {
+    // DISPATCH_MODE="" (the variable exists but is empty) used to render
+    // "Sending mode:" followed by nothing, with the full assurance beneath.
+    getNotificationProviders.mockResolvedValue({
+      whatsapp: { provider: 'MSG91', enabled: false, sender: '' },
+      sms: { provider: 'MSG91', enabled: false, sender: '' },
+      dispatch_mode: '',
+    });
+
+    renderCard();
+
+    expect(await screen.findByText(/unrecognised/i)).toBeInTheDocument();
+    expect(screen.queryByText(ASSURANCE)).toBeNull();
+    expect(screen.queryByText(NEVER_FLIPPED)).toBeNull();
+  });
+
+  it('renders a malformed (non-string) mode as UNKNOWN, never "[object Object]"', async () => {
+    getNotificationProviders.mockResolvedValue({
+      whatsapp: { provider: 'MSG91', enabled: false, sender: '' },
+      sms: { provider: 'MSG91', enabled: false, sender: '' },
+      dispatch_mode: { nested: 'garbage' },
+    });
+
+    renderCard();
+
+    expect(await screen.findByText(/unrecognised/i)).toBeInTheDocument();
+    expect(screen.queryByText(/object Object/i)).toBeNull();
+    expect(screen.queryByText(ASSURANCE)).toBeNull();
+  });
+
+  it('says "reading" while the request is still in flight, not that the server was unreachable', () => {
+    // The failed-read caption states a failure. Before the request settles,
+    // no failure has happened -- the card must not claim one.
+    getNotificationProviders.mockReturnValue(new Promise(() => {}));
+
+    renderCard();
+
+    expect(screen.getByText(/reading/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not reach the server/i)).toBeNull();
+    expect(screen.queryByText(/couldn.t be read/i)).toBeNull();
+    expect(screen.queryByText(ASSURANCE)).toBeNull();
+  });
+
   it('treats a missing dispatch_mode key as unread, not as off', async () => {
     // A trimmed/older server response. `?? 'off'` would have printed the
     // assurance here too, from a body that never mentioned the gate.
