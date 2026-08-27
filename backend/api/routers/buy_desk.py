@@ -44,13 +44,20 @@ def _get_db():
 
 
 def _on_hand_map(db, product_ids: List[str], store_id: Optional[str]) -> Dict[str, int]:
-    """AVAILABLE stock_units count per product (optionally scoped to a store)."""
+    """On-hand stock_units count per product (optionally scoped to a store).
+
+    Reads THE shared on-hand decision -- a bare status == "AVAILABLE" here made
+    the buy desk disagree with every other on-hand reader about a legacy
+    lowercase / IN_STOCK / status-absent unit, and buy MORE of stock it
+    already has."""
     if db is None or not product_ids:
         return {}
     try:
+        from ..services.item_events import on_hand_match
+
         match: Dict[str, Any] = {
             "product_id": {"$in": product_ids},
-            "status": "AVAILABLE",
+            **on_hand_match(),
         }
         if store_id:
             match["store_id"] = store_id

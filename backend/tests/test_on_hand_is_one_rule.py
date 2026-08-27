@@ -297,6 +297,7 @@ def _physical_readers(mongo_db, http, pid, barcode) -> Dict[str, int]:
 
 
 def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
+    from api.routers.buy_desk import _on_hand_map
     from api.routers.inventory import _on_hand_by_product
     from api.services import collection_insights, inventory_balancing
     from api.services import online_stock_writeback, online_sync_health, shopify_ingest
@@ -306,6 +307,7 @@ def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
     out["inventory._on_hand_by_product"] = int(
         _on_hand_by_product(db, [pid], STORE).get(pid, 0) or 0
     )
+    out["buy_desk._on_hand_map"] = int(_on_hand_map(db, [pid], STORE).get(pid, 0) or 0)
     out["collection_insights._stock_rollup"] = int(
         collection_insights._stock_rollup(db, [pid], STORE).get(pid, 0) or 0
     )
