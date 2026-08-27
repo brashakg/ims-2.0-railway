@@ -40,7 +40,8 @@ def _dispatch_mode() -> str:
 
         return _dm()
     except Exception:
-        return os.getenv("DISPATCH_MODE", "off").lower()
+        # Same parse as agents.providers line-one: strip THEN lower.
+        return os.getenv("DISPATCH_MODE", "off").strip().lower()
 
 
 def _get_db():

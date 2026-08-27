@@ -9,9 +9,9 @@ Pattern (identical for every service):
   2. Fall back to env vars when the DB doc is absent/disabled.
   3. Return {} when neither source is usable.
 
-This wires up "Settings -> Integrations" for photoroom, s3, and anthropic so
-the owner never has to touch Railway env vars for day-to-day credential
-rotation.
+This wires up "Settings -> Integrations" for photoroom, s3, anthropic and the
+messaging/alerting providers (MSG91, Slack, PageSpeed) so the owner never has
+to touch Railway env vars for day-to-day credential rotation.
 
 NO secrets are logged here.  The decrypt helper in routers.settings is
 re-used so the encryption scheme stays in one place.
@@ -249,3 +249,58 @@ def get_gemini_config() -> Dict[str, Any]:
     if api_key:
         return {"api_key": api_key, "model": model}
     return {}
+
+
+def get_msg91_config() -> Dict[str, Any]:
+    """Return MSG91 messaging credentials (WhatsApp Business + transactional SMS).
+
+    DB key  : type="whatsapp" -> config.api_key, config.whatsapp_number,
+              config.sms_template_id, config.sender
+              (Settings -> Integrations -> "WhatsApp Business (MSG91)")
+    Env vars: MSG91_API_KEY, MSG91_WHATSAPP_INTEGRATED_NUMBER,
+              MSG91_SMS_TEMPLATE_ID, MSG91_SENDER
+
+    Read FRESH per send so a Save in the hub takes effect without a redeploy.
+    Fail-soft: DB absent/disabled -> env-only, exactly as before.
+
+    BOUNDARY: this resolves CREDENTIALS only. Whether IMS is allowed to send
+    at all stays with DISPATCH_MODE, which is env-only by design and is NEVER
+    read from the database. Do not add a dispatch/enable switch here.
+    """
+    cfg = _load_db_config("whatsapp")
+    return {
+        "api_key": cfg.get("api_key") or os.getenv("MSG91_API_KEY", ""),
+        "whatsapp_number": cfg.get("whatsapp_number")
+        or os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", ""),
+        "sms_template_id": cfg.get("sms_template_id")
+        or os.getenv("MSG91_SMS_TEMPLATE_ID", ""),
+        # DLT-registered sender ID; BVOPTL is the owner's registered header.
+        "sender": cfg.get("sender") or os.getenv("MSG91_SENDER", "") or "BVOPTL",
+    }
+
+
+def get_slack_config() -> Dict[str, Any]:
+    """Return the Slack incoming-webhook URL used for ORACLE anomaly alerts.
+
+    DB key  : type="slack" -> config.webhook_url
+    Env vars: SLACK_WEBHOOK_URL
+
+    Returns {"webhook_url": ""} when nothing is configured, which keeps
+    notify_slack a silent no-op. NO secrets logged.
+    """
+    cfg = _load_db_config("slack")
+    url = cfg.get("webhook_url") or os.getenv("SLACK_WEBHOOK_URL", "")
+    return {"webhook_url": str(url or "").strip()}
+
+
+def get_pagespeed_config() -> Dict[str, Any]:
+    """Return the Google PageSpeed API key used by the PIXEL agent.
+
+    DB key  : type="pagespeed" -> config.api_key
+    Env vars: PAGESPEED_API_KEY
+
+    Returns {"api_key": ""} when unconfigured; PIXEL then stays on its
+    heartbeat-only path instead of calling PageSpeed.
+    """
+    cfg = _load_db_config("pagespeed")
+    return {"api_key": cfg.get("api_key") or os.getenv("PAGESPEED_API_KEY", "")}

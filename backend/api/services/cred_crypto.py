@@ -23,6 +23,7 @@ import os
 import base64
 import hashlib
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,27 @@ SENSITIVE_FIELDS = {
 }
 
 
+def canon_field(name: str) -> str:
+    """Spelling-insensitive form of a config field name.
+
+    ``apiKey``, ``API_KEY``, ``api_key `` and ``api_key`` all canonicalise to
+    ``apikey``. Every membership test against SENSITIVE_FIELDS must go through
+    is_sensitive_field() -- a raw ``k.lower() in SENSITIVE_FIELDS`` only
+    catches the exact snake_case spelling, while the frontend's response
+    aliasing (client.ts addCamelAliases) makes camelCase the canonical
+    client-side spelling of every one of these fields.
+    """
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+_SENSITIVE_CANON = frozenset(canon_field(f) for f in SENSITIVE_FIELDS)
+
+
+def is_sensitive_field(name: str) -> bool:
+    """True if ``name`` is a credential-shaped field under ANY spelling."""
+    return canon_field(name) in _SENSITIVE_CANON
+
+
 def mask_value(val: str) -> str:
     """Mask a credential: show first 4 and last 2 chars only."""
     if not val or len(val) < 8:
@@ -94,7 +116,7 @@ def mask_config(config: dict) -> dict:
     for k, v in config.items():
         if isinstance(v, dict):
             masked[k] = mask_config(v)
-        elif isinstance(v, str) and k.lower() in SENSITIVE_FIELDS:
+        elif isinstance(v, str) and is_sensitive_field(k):
             masked[k] = mask_value(v)
         else:
             masked[k] = v
@@ -148,7 +170,7 @@ def encrypt_config(config: dict) -> dict:
             encrypted[k] = encrypt_config(v)
         elif (
             isinstance(v, str)
-            and k.lower() in SENSITIVE_FIELDS
+            and is_sensitive_field(k)
             and not v.startswith("enc:")
             and not v.startswith("fernet:")
         ):

@@ -155,24 +155,10 @@ class RazorpayConfig(BaseModel):
     enabled: bool = True
 
 
-class WhatsappConfig(BaseModel):
-    api_key: str = Field(..., description="WhatsApp Business API key")
-    phone_number_id: str = Field(..., description="Phone number ID")
-    business_id: str = Field(..., description="Business account ID")
-    enabled: bool = True
-
-
 class TallyConfig(BaseModel):
     server_url: str = Field(..., description="Tally server URL")
     company_name: str = Field(..., description="Company name in Tally")
     sync_interval: int = Field(default=60, description="Sync interval in minutes")
-    enabled: bool = True
-
-
-class SmsConfig(BaseModel):
-    provider: str = Field(..., description="SMS provider (MSG91, Twilio, etc.)")
-    api_key: str = Field(..., description="API key")
-    sender_id: str = Field(..., description="Sender ID")
     enabled: bool = True
 
 
@@ -464,49 +450,15 @@ async def test_razorpay_connection(current_user: dict = Depends(get_current_user
 # ============================================================================
 
 
-@router.get("/integrations/whatsapp")
-async def get_whatsapp_config(current_user: dict = Depends(get_current_user)):
-    """Get WhatsApp Business integration configuration"""
-    config = _get_integration_config("whatsapp")
-    return {
-        "type": "WHATSAPP",
-        "name": "WhatsApp Business",
-        "description": "Customer communication via WhatsApp",
-        "is_configured": bool(config.get("config")),
-        "is_enabled": config.get("enabled", False),
-        "config": {
-            "phone_number_id": config.get("config", {}).get("phone_number_id", ""),
-            "business_id": config.get("config", {}).get("business_id", ""),
-        },
-    }
-
-
-@router.post("/integrations/whatsapp")
-async def set_whatsapp_config(
-    config: WhatsappConfig, current_user: dict = Depends(get_current_user)
-):
-    """Configure WhatsApp Business integration"""
-    if not any(
-        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    _save_integration_config(
-        "whatsapp", {"enabled": config.enabled, "config": config.model_dump()}
-    )
-
-    return {"message": "WhatsApp configuration saved", "enabled": config.enabled}
-
-
-@router.post("/integrations/whatsapp/test")
-async def test_whatsapp_connection(current_user: dict = Depends(get_current_user)):
-    """Test WhatsApp Business API connection"""
-    config = _get_integration_config("whatsapp").get("config", {})
-
-    if not config.get("api_key"):
-        raise HTTPException(status_code=400, detail="WhatsApp not configured")
-
-    return _simulated_integration_response("WhatsApp Business", "connection test")
+# NOTE (2026-08): the WhatsApp endpoints that used to live here were REMOVED.
+# They wrote a SECOND, differently-named set of fields (phone_number_id /
+# business_id) into the SAME integrations document as the Settings ->
+# Integrations hub (type="whatsapp"), and because the save replaces the whole
+# config sub-document, one save here wiped the MSG91 credentials the message
+# sender reads -- silently turning outbound WhatsApp/SMS off. There is now ONE
+# WhatsApp credential surface: Settings -> Integrations -> "WhatsApp Business
+# (MSG91)" (GET/PUT /api/v1/settings/integrations/whatsapp). The old SMS
+# endpoints went with them: they wrote type="sms", which nothing ever read.
 
 
 # ============================================================================
@@ -748,45 +700,6 @@ async def regenerate_tally_export(
         "date": payload.date,
         "store_id": payload.store_id,
     }
-
-
-# ============================================================================
-# SMS GATEWAY ENDPOINTS
-# ============================================================================
-
-
-@router.get("/integrations/sms")
-async def get_sms_config(current_user: dict = Depends(get_current_user)):
-    """Get SMS Gateway configuration"""
-    config = _get_integration_config("sms")
-    return {
-        "type": "SMS",
-        "name": "SMS Gateway",
-        "description": "Transactional SMS service",
-        "is_configured": bool(config.get("config")),
-        "is_enabled": config.get("enabled", False),
-        "config": {
-            "provider": config.get("config", {}).get("provider", ""),
-            "sender_id": config.get("config", {}).get("sender_id", ""),
-        },
-    }
-
-
-@router.post("/integrations/sms")
-async def set_sms_config(
-    config: SmsConfig, current_user: dict = Depends(get_current_user)
-):
-    """Configure SMS Gateway"""
-    if not any(
-        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    _save_integration_config(
-        "sms", {"enabled": config.enabled, "config": config.model_dump()}
-    )
-
-    return {"message": "SMS Gateway configuration saved", "enabled": config.enabled}
 
 
 # ============================================================================

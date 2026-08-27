@@ -32,8 +32,10 @@ Per-run summary:
 
 ## Activation
 
-Requires PAGESPEED_API_KEY env var (get free at Google Cloud Console).
-Without it, PIXEL falls back to heartbeat-only behavior (pre-Phase 4).
+Requires a Google PageSpeed API key (free at Google Cloud Console), saved
+either in Settings -> Integrations -> Google PageSpeed or as the
+PAGESPEED_API_KEY env var. Without one, PIXEL falls back to heartbeat-only
+behavior (pre-Phase 4).
 """
 
 from typing import Dict, Any, List, Optional
@@ -48,8 +50,10 @@ from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 logger = logging.getLogger(__name__)
 
 
-# Env config
-PAGESPEED_API_KEY = os.getenv("PAGESPEED_API_KEY", "")
+# Env config. The API KEY is deliberately NOT captured here: it is resolved
+# per audit by _pagespeed_key() -- Settings -> Integrations -> Google PageSpeed
+# first, then PAGESPEED_API_KEY -- so a key saved on the screen works without
+# a redeploy.
 PAGESPEED_URL = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 FRONTEND_BASE_URL = os.getenv(
     "FRONTEND_BASE_URL",
@@ -78,8 +82,15 @@ AUDIT_ROUTES = [
 REGRESSION_THRESHOLD = 0.10
 
 
+def _pagespeed_key() -> str:
+    """PageSpeed API key, resolved fresh (screen first, then env)."""
+    from api.services.integration_config import get_pagespeed_config
+
+    return get_pagespeed_config().get("api_key", "")
+
+
 def _is_pagespeed_available() -> bool:
-    return bool(PAGESPEED_API_KEY)
+    return bool(_pagespeed_key())
 
 
 async def _audit_url(url: str) -> Optional[Dict[str, Any]]:
@@ -87,7 +98,8 @@ async def _audit_url(url: str) -> Optional[Dict[str, Any]]:
     Call PageSpeed Insights for one URL. Returns the parsed result or None
     on any failure. Fails soft so a single bad URL doesn't kill the run.
     """
-    if not _is_pagespeed_available():
+    api_key = _pagespeed_key()
+    if not api_key:
         return None
     try:
         async with httpx.AsyncClient(timeout=AUDIT_TIMEOUT) as client:
@@ -95,7 +107,7 @@ async def _audit_url(url: str) -> Optional[Dict[str, Any]]:
                 PAGESPEED_URL,
                 params=[
                     ("url", url),
-                    ("key", PAGESPEED_API_KEY),
+                    ("key", api_key),
                     # Request all 4 categories Lighthouse supports
                     ("category", "performance"),
                     ("category", "accessibility"),
@@ -195,13 +207,14 @@ class PixelAgent(JarvisAgent):
             # Fall back to heartbeat behavior — record that the agent ticked
             # but didn't have credentials to do real work. This lets the
             # operator see that PIXEL is scheduled correctly even before
-            # PAGESPEED_API_KEY is provisioned.
+            # a PageSpeed key is provisioned.
             try:
                 coll.insert_one({
                     "ran_at": datetime.now(timezone.utc).isoformat(),
                     "agent_id": self.agent_id,
                     "kind": "heartbeat",
-                    "notes": "PAGESPEED_API_KEY unset — heartbeat only",
+                    "notes": "No PageSpeed API key (Settings -> Integrations -> "
+                             "Google PageSpeed, or PAGESPEED_API_KEY) - heartbeat only",
                 })
             except Exception as e:
                 logger.warning(f"[PIXEL] Heartbeat write failed: {e}")

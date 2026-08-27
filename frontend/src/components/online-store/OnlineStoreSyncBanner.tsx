@@ -49,7 +49,15 @@ function darkReasons(status: PushStatus | null): string[] {
   if (!m) return [];
   const out: string[] = [];
   if (m.writes_enabled === false) out.push('IMS_SHOPIFY_WRITES is off');
-  if (m.dispatch_mode && m.dispatch_mode !== 'live') out.push(`dispatch mode is "${m.dispatch_mode}" (needs "live")`);
+  // No truthiness guard: dispatch_mode "" (env var set to nothing) is NOT
+  // live, and dropping the blocker for it was a false all-clear.
+  if (m.dispatch_mode !== 'live') {
+    const shown =
+      typeof m.dispatch_mode === 'string' && m.dispatch_mode !== ''
+        ? `"${m.dispatch_mode}"`
+        : 'not reported';
+    out.push(`dispatch mode is ${shown} (needs "live")`);
+  }
   if (m.creds_present === false) out.push('Shopify credentials are not set');
   return out;
 }

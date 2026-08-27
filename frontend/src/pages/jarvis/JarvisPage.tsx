@@ -1986,7 +1986,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         <span>PIXEL · UI/UX audits</span>
         {pixelAudits && (
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-4)' }}>
-            {pixelAudits.audits_total} audit{pixelAudits.audits_total === 1 ? '' : 's'} on record · {pixelAudits.pagespeed_ready ? 'PageSpeed ready' : 'PAGESPEED_API_KEY not set'}
+            {pixelAudits.audits_total} audit{pixelAudits.audits_total === 1 ? '' : 's'} on record · {pixelAudits.pagespeed_ready ? 'PageSpeed ready' : 'PageSpeed key not set'}
           </span>
         )}
         <button
@@ -2027,7 +2027,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
             <div style={{ marginBottom: 8 }}>No audits on record yet.</div>
             {pixelAudits && !pixelAudits.pagespeed_ready && (
               <div style={{ fontSize: 11, color: 'var(--warn)' }}>
-                PIXEL needs <code style={{ fontFamily: 'var(--font-mono)' }}>PAGESPEED_API_KEY</code> set on Railway to run real Lighthouse audits.
+                PIXEL needs a Google PageSpeed API key - add it under Settings &rarr; Integrations &rarr; Google PageSpeed - to run real Lighthouse audits.
                 Once set, hit "Run audit now" or wait for the daily 2 AM cron.
               </div>
             )}

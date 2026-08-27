@@ -3387,9 +3387,13 @@ async def pixel_audit_history(
     """Return PIXEL audit history + readiness signal."""
     import os as _os
 
+    from agents.implementations.pixel import _is_pagespeed_available
+
     limit = max(1, min(int(limit), 50))
     col = get_db_collection("ui_audits")
-    pagespeed_ready = bool(_os.getenv("PAGESPEED_API_KEY"))
+    # Resolved the same way PIXEL resolves it (Settings -> Integrations first,
+    # then PAGESPEED_API_KEY) so this readout cannot disagree with the agent.
+    pagespeed_ready = _is_pagespeed_available()
     frontend_url = _os.getenv("FRONTEND_BASE_URL", "https://ims-2-0-railway.vercel.app")
 
     if col is None:

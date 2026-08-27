@@ -70,31 +70,10 @@ if not _CRED_SECRET:
         "Generate one with: openssl rand -hex 32"
     )
 
-# Sensitive config field names that must be encrypted at rest & masked on read
-_SENSITIVE_FIELDS = {
-    "api_key",
-    "api_secret",
-    "secret_key",
-    "key_secret",
-    "secret",
-    "password",
-    "token",
-    "access_token",
-    "refresh_token",
-    "private_key",
-    "signing_key",
-    "webhook_secret",
-    "webhook_url",
-    "app_secret",
-    "verify_token",
-    "developer_token",
-    "client_secret",
-    "razorpay_key_secret",
-    "shopify_api_secret",
-    "whatsapp_api_key",
-    "tally_password",
-    "shiprocket_password",
-}
+# Sensitive config field names that must be encrypted at rest & masked on read.
+# ONE set, owned by cred_crypto -- this module used to carry a byte-identical
+# copy, which is the drift class that keeps biting this repo. Alias, not copy.
+_SENSITIVE_FIELDS = cred_crypto.SENSITIVE_FIELDS
 
 
 def _mask_value(val: str) -> str:
@@ -1171,37 +1150,103 @@ async def update_invoice_settings(
 # ============================================================================
 
 
+# Keys this singleton is never allowed to carry, in either direction. The send
+# gate is owned by the server (agents.providers reads DISPATCH_MODE from the
+# environment); a stored copy could only ever contradict it on a screen.
+_SERVER_OWNED_FIELDS = {"dispatch_mode"}
+
+
+def _strip_unstorable_fields(doc: dict) -> dict:
+    """Drop credential-shaped and server-owned keys from a
+    notification_providers document.
+
+    Credentials belong in the `integrations` collection, encrypted at rest and
+    resolved by api.services.integration_config. This singleton is for
+    non-secret channel preferences only, so a secret must never enter it and
+    must never leave it. Uses the same field-name set as the at-rest crypto.
+
+    `dispatch_mode` is dropped for a different reason: it is not a preference
+    at all, it is the server's send gate, and is reported straight from
+    agents.providers.dispatch_mode().
+
+    Membership is spelling-insensitive (cred_crypto.canon_field): `apiKey`,
+    `API_KEY` and `dispatch_mode ` are the same key as `api_key` /
+    `dispatch_mode`. The frontend's response aliasing (client.ts
+    addCamelAliases) makes camelCase the canonical client-side spelling, so a
+    snake_case-only comparison let `apiKey` land in this unencrypted singleton
+    and a planted `dispatchMode` win the client-side readout.
+    """
+    server_owned = {cred_crypto.canon_field(f) for f in _SERVER_OWNED_FIELDS}
+    return {
+        k: v
+        for k, v in doc.items()
+        if not cred_crypto.is_sensitive_field(k)
+        and cred_crypto.canon_field(k) not in server_owned
+    }
+
+
 @router.get("/notifications/providers")
 async def get_notification_providers(
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Channel provider config (SMS / WhatsApp / Email). Frontend
-    settingsApi.getNotificationProviders was 404'ing. Reads the
-    `notification_providers` singleton; falls back to env-driven
-    defaults so the Settings → Notifications tab always renders."""
-    import os
+    """Channel provider config (SMS / WhatsApp / Email).
 
-    coll = _get_settings_collection("notification_providers")
-    defaults = {
+    `enabled` answers "would a send actually work right now": it comes from
+    the SAME resolution the sender uses (Settings -> Integrations first, then
+    the MSG91_* env vars), not from whether an env var happened to be set at
+    boot. Anything else would make this readout lie once a credential is
+    saved on the screen.
+
+    `dispatch_mode` is the server-side safety gate for outbound messaging. It
+    is reported by calling the SAME agents.providers.dispatch_mode() the send
+    path gates on -- so this readout cannot say "off" while the server would
+    really send -- and it is never settable from a screen: the stored document
+    cannot carry the key (_strip_unstorable_fields), and every worked-out value
+    is applied AFTER that document, so no ordering change can resurrect the
+    lie. The stored singleton only ever contributes keys the server does not
+    work out for itself.
+
+    That is not asserted, it is probed: every endpoint that reports this gate
+    is fed the same environment and diffed against what the send path actually
+    does, in tests/test_integration_credentials_wiring.py ::
+    test_every_screen_reports_the_gate_the_send_path_actually_uses.
+
+    Never returns a credential value.
+    """
+    from agents.providers import dispatch_mode, provider_ready
+    from api.services.integration_config import get_msg91_config
+
+    msg91 = get_msg91_config()
+    computed = {
         "whatsapp": {
             "provider": "MSG91",
-            "enabled": bool(os.getenv("MSG91_API_KEY")),
-            "sender": os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", ""),
+            "enabled": provider_ready("whatsapp"),
+            "sender": msg91.get("whatsapp_number", ""),
         },
         "sms": {
             "provider": "MSG91",
-            "enabled": bool(os.getenv("MSG91_API_KEY")),
-            "sender": os.getenv("MSG91_SENDER", "BVOPTL"),
+            "enabled": provider_ready("sms"),
+            "sender": msg91.get("sender", ""),
         },
         "email": {"provider": "SMTP", "enabled": False, "sender": ""},
-        "dispatch_mode": os.getenv("DISPATCH_MODE", "off"),
+        # The send gate itself, not a second reading of the environment.
+        "dispatch_mode": dispatch_mode(),
     }
+    out: dict = {}
+    coll = _get_settings_collection("notification_providers")
     if coll is not None:
         doc = coll.find_one({"_id": "notification_providers"})
         if doc:
             doc.pop("_id", None)
-            defaults.update(doc)
-    return defaults
+            # Legacy rows may still hold a plaintext api_key from before this
+            # endpoint refused secrets, or a dispatch_mode from before it
+            # refused the send gate. Never hand either back out.
+            out.update(_strip_unstorable_fields(doc))
+    # Everything the server WORKED OUT wins over anything the singleton holds,
+    # and is applied last so no stored row can dress a dead channel up as
+    # Connected, or a live server as dark.
+    out.update(computed)
+    return out
 
 
 @router.put("/notifications/providers")
@@ -1209,16 +1254,27 @@ async def update_notification_providers(
     providers: dict,
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
+    """Store non-secret channel preferences.
+
+    Credential-shaped fields are DROPPED, not stored: this collection is not
+    encrypted at rest and nothing reads a credential from it. The MSG91 auth
+    key lives in Settings -> Integrations -> WhatsApp Business (MSG91), which
+    is the config the sender actually reads.
+
+    `dispatch_mode` is dropped the same way -- the send gate is env-only, so a
+    screen must not be able to plant a value that any readout could repeat.
+    """
     coll = _get_settings_collection("notification_providers")
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
     providers = {k: v for k, v in providers.items() if k != "_id"}
+    providers = _strip_unstorable_fields(providers)
     providers["updated_at"] = datetime.now().isoformat()
     coll.update_one({"_id": "notification_providers"}, {"$set": providers}, upsert=True)
     doc = coll.find_one({"_id": "notification_providers"})
     if doc:
         doc.pop("_id", None)
-    return doc or {}
+    return _strip_unstorable_fields(doc) if doc else {}
 
 
 @router.get("/notifications/logs")
@@ -1851,6 +1907,8 @@ async def test_integration(
     middleware start denying one layer earlier, which is the lockout direction,
     and 24 other rows are in the same state. That is one batched follow-up.
     """
+    from agents.providers import dispatch_mode
+
     collection = _get_settings_collection("integrations")
     doc = (
         collection.find_one({"type": integration_type.lower()})
@@ -1858,7 +1916,12 @@ async def test_integration(
         else None
     )
     configured = bool((doc or {}).get("config")) and bool((doc or {}).get("enabled"))
-    mode = (os.getenv("DISPATCH_MODE", "off") or "off").lower()
+    # The gate itself, not a second reading of the environment it was built
+    # from. This used to re-parse DISPATCH_MODE here, which answers a
+    # different question -- "what does the env say now" instead of "what will
+    # the send path actually do" -- and the two disagree on any value the
+    # gate's own parse rejects.
+    mode = dispatch_mode()
     return {
         "status": "configured" if configured else "not_configured",
         "integration": integration_type.lower(),

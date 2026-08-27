@@ -66,15 +66,28 @@ def test_razorpay_config_rejects_camel_case():
         RazorpayConfig(**{"keyId": "rzp_live_abc", "keySecret": "secret", "enabled": True})
 
 
-def test_whatsapp_config_accepts_snake_case():
-    from api.routers.admin import WhatsappConfig
+# WhatsappConfig / SmsConfig had tests here. Both models are GONE: their
+# endpoints (/admin/integrations/whatsapp, /admin/integrations/sms) wrote a
+# rival set of field names into the SAME integrations record as the Settings
+# hub and replaced the whole config on save, which wiped the MSG91 credentials
+# the message sender reads. WhatsApp/SMS credentials now have exactly one home,
+# Settings -> Integrations -> "WhatsApp Business (MSG91)", covered by
+# test_integration_credentials_wiring.py.
 
-    cfg = WhatsappConfig(
-        api_key="wapi_key", phone_number_id="1234", business_id="biz1", enabled=True
-    )
-    assert cfg.api_key == "wapi_key"
-    assert cfg.phone_number_id == "1234"
-    assert cfg.business_id == "biz1"
+
+def test_the_credential_wiping_admin_routes_stay_deleted():
+    """A re-add of any of these restores the save that silently wiped the
+    MSG91 credentials -- with CI green, because deleting their model tests
+    left nothing asserting the endpoints are gone."""
+    from api.main import app
+
+    gone = {
+        "/api/v1/admin/integrations/whatsapp",
+        "/api/v1/admin/integrations/whatsapp/test",
+        "/api/v1/admin/integrations/sms",
+    }
+    live = {getattr(r, "path", "") for r in app.routes}
+    assert not gone & live, f"deleted credential routes are back: {sorted(gone & live)}"
 
 
 def test_tally_config_accepts_snake_case():
@@ -100,9 +113,4 @@ def test_shopify_config_accepts_snake_case():
     assert cfg.access_token == "token"
 
 
-def test_sms_config_accepts_snake_case():
-    from api.routers.admin import SmsConfig
 
-    cfg = SmsConfig(provider="MSG91", api_key="sms_key", sender_id="BVOPTL", enabled=True)
-    assert cfg.api_key == "sms_key"
-    assert cfg.sender_id == "BVOPTL"

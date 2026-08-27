@@ -14,7 +14,21 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from agents import providers as _providers  # noqa: E402
 from api.services.integration_status import build_integration_status  # noqa: E402
+
+
+def _arm_gate(monkeypatch, mode: str):
+    """Arm the send gate the way a deploy does: through the environment, which
+    agents.providers snapshots at import.
+
+    This screen reports THAT snapshot -- the value the send path is actually
+    gated on -- and not a fresh read of the env, so a bare setenv (which no
+    send would ever see) must not move it. Before that, `DISPATCH_MODE=" live"`
+    made this screen say "live" while the gate sent nothing.
+    """
+    monkeypatch.setenv("DISPATCH_MODE", mode)
+    monkeypatch.setattr(_providers, "DISPATCH_MODE", mode)
 
 
 # ---------------------------------------------------------------------------
@@ -74,16 +88,16 @@ def test_msg91_whatsapp_dispatch_states(monkeypatch):
     monkeypatch.setenv("MSG91_API_KEY", "key")
     monkeypatch.setenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", "12345")
 
-    monkeypatch.setenv("DISPATCH_MODE", "off")
+    _arm_gate(monkeypatch, "off")
     wa = _by_id(build_integration_status(db=None), "msg91_whatsapp")
     assert wa["configured"] is True
     assert wa["state"] == "simulated"
 
-    monkeypatch.setenv("DISPATCH_MODE", "test")
+    _arm_gate(monkeypatch, "test")
     wa = _by_id(build_integration_status(db=None), "msg91_whatsapp")
     assert wa["state"] == "test_only"
 
-    monkeypatch.setenv("DISPATCH_MODE", "live")
+    _arm_gate(monkeypatch, "live")
     wa = _by_id(build_integration_status(db=None), "msg91_whatsapp")
     assert wa["state"] == "live"
 
@@ -91,7 +105,7 @@ def test_msg91_whatsapp_dispatch_states(monkeypatch):
 def test_shiprocket_env_or_collection(monkeypatch):
     monkeypatch.delenv("SHIPROCKET_EMAIL", raising=False)
     monkeypatch.delenv("SHIPROCKET_PASSWORD", raising=False)
-    monkeypatch.setenv("DISPATCH_MODE", "live")
+    _arm_gate(monkeypatch, "live")
 
     # neither env nor collection -> dormant
     report = build_integration_status(db=None)
@@ -198,7 +212,7 @@ def test_no_secret_values_leak(monkeypatch):
 
 
 def test_top_level_summary_shape(monkeypatch):
-    monkeypatch.setenv("DISPATCH_MODE", "test")
+    _arm_gate(monkeypatch, "test")
     report = build_integration_status(db=None)
     assert report["dispatch_mode"] == "test"
     assert "generated_at" in report

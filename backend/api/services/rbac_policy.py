@@ -360,16 +360,6 @@ POLICY: List[Dict[str, object]] = [
     },
     {
         "method": "GET",
-        "path": "/api/v1/admin/integrations/sms",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/admin/integrations/sms",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
         "path": "/api/v1/admin/integrations/tally",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
@@ -396,21 +386,6 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/admin/integrations/tally/voucher.xml",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/admin/integrations/whatsapp",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/admin/integrations/whatsapp",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/admin/integrations/whatsapp/test",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {

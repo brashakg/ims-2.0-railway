@@ -11,11 +11,20 @@ value. For env vars it reports the KEY name plus a boolean. For the
 populated (e.g. "key_id"), never their contents. No secret ever leaves
 the process through this surface.
 
-It deliberately reads `os.getenv` fresh each call so the report reflects
-the current process environment. Note that the providers themselves read
-several of these vars at module-import time, so a Railway variable change
-takes effect for them on the next redeploy (Railway restarts on a
-variable change, so the report and the providers converge after deploy).
+It reads env vars and the `integrations` collection fresh each call so the
+report reflects the current process environment. ONE deliberate exception:
+`_dispatch_mode()` below returns agents.providers.dispatch_mode() instead of
+re-reading DISPATCH_MODE, because the gate's snapshot - not the env - is what
+a send is gated on. Re-reading it here made this screen report "live" for
+padded values the gate refused, e.g. DISPATCH_MODE=" live" sent nothing.
+
+The credential-resolution ORDER declared here (collection first, then env) is
+the order api.services.integration_config uses, and that correspondence is
+asserted in tests/test_integration_credentials_wiring.py. It is NOT enforced
+by construction: the table below is a hand-kept copy of each provider's env
+keys and config field names, so a provider that renames a field can drift
+from this report without anything failing. Do not read this paragraph as a
+guarantee that the two cannot disagree - only the send gate is single-sourced.
 
 ASCII only (Windows cp1252).
 """
@@ -61,18 +70,24 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "msg91_whatsapp",
         "label": "MSG91 WhatsApp",
         "powers": "Rx-expiry / birthday / follow-up / order / task WhatsApp alerts (MEGAPHONE)",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["MSG91_API_KEY", "MSG91_WHATSAPP_INTEGRATED_NUMBER"],
         "env_optional": ["MSG91_WHATSAPP_NAMESPACE"],
+        "collection_type": "whatsapp",
+        "collection_required": ["api_key", "whatsapp_number"],
+        "collection_optional": ["sms_template_id", "sender"],
         "dispatch_gated": True,
     },
     {
         "id": "msg91_sms",
         "label": "MSG91 SMS",
         "powers": "DLT transactional SMS fallback (MEGAPHONE)",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["MSG91_API_KEY", "MSG91_SMS_TEMPLATE_ID"],
         "env_optional": ["MSG91_SENDER"],
+        "collection_type": "whatsapp",
+        "collection_required": ["api_key", "sms_template_id"],
+        "collection_optional": ["sender"],
         "dispatch_gated": True,
     },
     {
@@ -90,9 +105,22 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "pagespeed",
         "label": "Google PageSpeed (PIXEL)",
         "powers": "PIXEL Lighthouse / accessibility audits",
-        "source": "env",
+        "source": "env_or_collection",
         "env_required": ["PAGESPEED_API_KEY"],
         "env_optional": ["FRONTEND_BASE_URL"],
+        "collection_type": "pagespeed",
+        "collection_required": ["api_key"],
+        "dispatch_gated": False,
+    },
+    {
+        "id": "slack",
+        "label": "Slack",
+        "powers": "CRITICAL / HIGH anomaly alerts raised by ORACLE",
+        "source": "env_or_collection",
+        "env_required": ["SLACK_WEBHOOK_URL"],
+        "env_optional": ["SLACK_ALERT_SEVERITY"],
+        "collection_type": "slack",
+        "collection_required": ["webhook_url"],
         "dispatch_gated": False,
     },
     {
@@ -134,8 +162,17 @@ _REGISTRY: List[Dict[str, Any]] = [
 
 
 def _dispatch_mode() -> str:
-    """Current DISPATCH_MODE, read fresh. off | test | live (default off)."""
-    return (os.getenv("DISPATCH_MODE", "off") or "off").strip().lower()
+    """The send gate, as agents.providers resolved it -- off | test | live.
+
+    NOT a re-read of DISPATCH_MODE. This screen tells the owner whether live
+    messaging is armed, and the only thing that arms it is the value
+    agents.providers captured; re-parsing the env here answered a different
+    question and disagreed with the gate on every whitespace-padded value
+    (`DISPATCH_MODE=" live"` -> this said "live", the gate sent nothing).
+    """
+    from agents.providers import dispatch_mode
+
+    return dispatch_mode()
 
 
 def _env_key_report(keys: List[str]) -> List[Dict[str, Any]]:

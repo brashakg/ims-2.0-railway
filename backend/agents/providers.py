@@ -7,6 +7,12 @@ Thin async clients for the Indian messaging providers IMS 2.0 uses:
   single API key, DLT-compliant for Indian telecom regulations.
 - Twilio (optional): international SMS fallback. Not wired in Phase 4.2.
 
+Credentials: resolved per send from Settings -> Integrations -> "WhatsApp
+Business (MSG91)" first, falling back to the MSG91_* env vars. Saving on the
+screen therefore takes effect immediately, with no redeploy. Note that this
+covers credentials ONLY -- DISPATCH_MODE below is env-only and is the sole
+switch that decides whether anything is actually sent.
+
 Design mirrors claude_client.py:
 - Fail soft — missing API keys / timeouts / non-200s return a failure tuple,
   they never raise. MEGAPHONE's drain loop must not die on one bad message.
@@ -41,14 +47,19 @@ logger = logging.getLogger(__name__)
 # Env config
 # ============================================================================
 
-DISPATCH_MODE = os.getenv("DISPATCH_MODE", "off").lower()  # off | test | live
+# off | test | live. ONE padding policy for every dispatch gate in the app:
+# STRIP. A Railway variable pasted with a stray space must not silently disarm
+# all messaging -- and SHOPIFY_DISPATCH_MODE (nexus_providers) already
+# stripped, so `" live"` used to fire a real Shopify write while arming
+# nothing here. Pinned by tests/test_integration_credentials_wiring.py ::
+# test_a_padded_live_from_the_environment_still_arms_the_gate.
+DISPATCH_MODE = os.getenv("DISPATCH_MODE", "off").strip().lower()
 TEST_PHONE = os.getenv("TEST_PHONE", "")
 
-# MSG91 config
-MSG91_API_KEY = os.getenv("MSG91_API_KEY", "")
-MSG91_SENDER = os.getenv("MSG91_SENDER", "BVOPTL")  # DLT-registered sender ID
-MSG91_WHATSAPP_INTEGRATED_NUMBER = os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", "")
-MSG91_SMS_TEMPLATE_ID = os.getenv("MSG91_SMS_TEMPLATE_ID", "")
+# MSG91 credentials are NOT read here. They are resolved per send by
+# _msg91() below -- Settings -> Integrations -> "WhatsApp Business (MSG91)"
+# first, then the MSG91_* env vars -- so a credential saved on the screen
+# takes effect without a redeploy. See api/services/integration_config.py.
 _MSG91_DEFAULT_HOST = "api.msg91.com"  # MSG91 doc-canonical hostname (2026).
 # `control.msg91.com` is the legacy alias and still serves the same endpoints;
 # we accept either via env override so an environment with an older MSG91
@@ -59,6 +70,22 @@ MSG91_BASE_URL = (
 ).rstrip("/")
 
 PROVIDER_TIMEOUT = float(os.getenv("PROVIDER_TIMEOUT", "15.0"))
+
+
+def _msg91() -> dict:
+    """MSG91 credentials, resolved FRESH on every call.
+
+    Returns {api_key, whatsapp_number, sms_template_id, sender}. The screen
+    (Settings -> Integrations) wins; the MSG91_* env vars remain the fallback
+    for a deployment that never touches the database.
+
+    These are CREDENTIALS only. DISPATCH_MODE -- the switch that decides
+    whether IMS is allowed to send at all -- stays env-only and is read
+    above; nothing here can turn sending on.
+    """
+    from api.services.integration_config import get_msg91_config
+
+    return get_msg91_config()
 
 
 # ============================================================================
@@ -145,26 +172,33 @@ async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] 
             channel="whatsapp",
         )
 
-    if not MSG91_API_KEY:
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    integrated_number = creds.get("whatsapp_number") or ""
+
+    if not api_key:
         return DispatchResult(
             ok=False,
             status="FAILED",
-            error="MSG91_API_KEY unset",
+            error="MSG91 auth key not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or MSG91_API_KEY)",
             channel="whatsapp",
         )
 
-    if not MSG91_WHATSAPP_INTEGRATED_NUMBER:
+    if not integrated_number:
         return DispatchResult(
             ok=False,
             status="FAILED",
-            error="MSG91_WHATSAPP_INTEGRATED_NUMBER unset",
+            error="MSG91 WhatsApp integrated number not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or "
+                  "MSG91_WHATSAPP_INTEGRATED_NUMBER)",
             channel="whatsapp",
         )
 
     # MSG91 WhatsApp API — "send-template-message" endpoint shape.
     # https://docs.msg91.com/whatsapp/send-message
     payload = {
-        "integrated_number": MSG91_WHATSAPP_INTEGRATED_NUMBER,
+        "integrated_number": integrated_number,
         "content_type": "template",
         "payload": {
             "messaging_product": "whatsapp",
@@ -184,7 +218,7 @@ async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] 
             },
         },
     }
-    headers = {"authkey": MSG91_API_KEY, "content-type": "application/json"}
+    headers = {"authkey": api_key, "content-type": "application/json"}
 
     try:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
@@ -243,18 +277,26 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
             channel="sms",
         )
 
-    if not MSG91_API_KEY:
-        return DispatchResult(ok=False, status="FAILED", error="MSG91_API_KEY unset", channel="sms")
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 auth key not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or MSG91_API_KEY)",
+            channel="sms",
+        )
 
     # MSG91 SMS Flow API. Requires DLT-approved template + sender ID.
     # https://docs.msg91.com/sms/send-sms
     payload = {
-        "template_id": MSG91_SMS_TEMPLATE_ID,
-        "sender": MSG91_SENDER,
+        "template_id": creds.get("sms_template_id") or "",
+        "sender": creds.get("sender") or "",
         "short_url": "0",
         "recipients": [{"mobiles": phone_norm, "BODY": message}],
     }
-    headers = {"authkey": MSG91_API_KEY, "content-type": "application/json"}
+    headers = {"authkey": api_key, "content-type": "application/json"}
 
     try:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
@@ -292,11 +334,16 @@ def dispatch_mode() -> str:
 
 
 def provider_ready(channel: str) -> bool:
-    """True if we have enough env config to actually hit the provider."""
-    if not MSG91_API_KEY:
+    """True if we have enough config to actually hit the provider.
+
+    Resolved fresh (screen first, then env) so this answers "would a send
+    work RIGHT NOW", not "was an env var set when the process booted".
+    """
+    creds = _msg91()
+    if not creds.get("api_key"):
         return False
     if channel == "whatsapp":
-        return bool(MSG91_WHATSAPP_INTEGRATED_NUMBER)
+        return bool(creds.get("whatsapp_number"))
     if channel == "sms":
-        return bool(MSG91_SMS_TEMPLATE_ID)
+        return bool(creds.get("sms_template_id"))
     return False

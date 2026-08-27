@@ -51,7 +51,8 @@ try:
 except Exception:  # noqa: BLE001 - never let an import break the module
 
     def dispatch_mode() -> str:
-        return os.getenv("DISPATCH_MODE", "off").lower()
+        # Same parse as agents.providers line-one: strip THEN lower.
+        return os.getenv("DISPATCH_MODE", "off").strip().lower()
 
 
 logger = logging.getLogger(__name__)
