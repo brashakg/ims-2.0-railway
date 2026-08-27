@@ -433,14 +433,19 @@ export function gstStateCode(...candidates: Array<string | null | undefined>): s
  *  "Same state - CGST + SGST" on every vendor whose GST number is missing,
  *  which is a wrong TAX LABEL stated with confidence, not a blank.
  *
- *  Only the two GST NUMBERS decide. This mirrors the server exactly --
- *  purchase_invoice_engine.determine_place_of_supply reads the supplier and
- *  recipient GSTINs and nothing else -- so the preview on screen and the split
- *  that actually gets stored can never contradict each other. A party's
- *  declared `state` is accepted (callers hand over the whole vendor/shop) but
- *  does NOT decide: an address is not a registration, and the tax turns on the
- *  registration. With no GSTIN the answer is "cannot tell", and the totals box
- *  says which assumption it is showing.
+ *  Only the two GST NUMBERS decide HERE. The server is close but NOT
+ *  identical: purchase_invoice_engine.determine_place_of_supply takes a THIRD
+ *  input -- the receiving shop's declared state (vendors._po_gst_parties
+ *  passes it) -- which it weighs alongside the GSTINs. So a shop whose
+ *  registration state and declared state DIFFER can make this preview and the
+ *  stored split disagree. No live store is in that shape today (every store's
+ *  declared state matches its GSTIN prefix), and which side should win --
+ *  the registration or the shop the goods land in -- is an owner decision on
+ *  file (bill-follows-store); until it lands, this preview reads
+ *  registrations only. A party's declared `state` is accepted (callers hand
+ *  over the whole vendor/shop) but does NOT decide on screen: an address is
+ *  not a registration. With no GSTIN the answer is "cannot tell", and the
+ *  totals box says which assumption it is showing.
  *
  *  `knownStates` is the server-fed code list (useGstStateCodes). A two-digit
  *  prefix the server does not list is not a state: the engine's parser
