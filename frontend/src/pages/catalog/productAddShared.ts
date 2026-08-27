@@ -37,8 +37,13 @@ export const CATEGORIES = [
   { code: 'CK', name: 'Clock', icon: '🕐' },
   { code: 'HA', name: 'Hearing Aid', icon: '🦻' },
   { code: 'ACC', name: 'Accessories', icon: '🎒' },
-  { code: 'SMTSG', name: 'Smartglasses (Sunglass)', icon: '🥽' },
-  { code: 'SMTFR', name: 'Smartglasses', icon: '🤓' },
+  // ONE smartglasses tile (2026-08-25). There used to be two -- "Smartglasses
+  // (Sunglass)" (SMTSG) and "Smartglasses" (SMTFR) -- but BOTH resolve to the
+  // same canonical registry entry (SMARTGLASSES, see FE_CODE_TO_CANONICAL) and
+  // anything catalogued under either re-opens as SMTFR (CANONICAL_TO_PICKER).
+  // So the second tile only ever offered a shorter version of the same form.
+  // SMTSG survives as a FIELD-LIST alias below for legacy/stored codes.
+  { code: 'SMTFR', name: 'Smartglasses', icon: '🥽' },
   { code: 'SMTWT', name: 'Smart Watch', icon: '⌚' },
 ] as const;
 
@@ -222,24 +227,60 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
     { name: 'pack', label: 'Pack Size', type: 'number', required: false },
     { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: false },
   ],
-  SMTSG: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Bose', 'Amazon', 'Meta'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-    { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
-  ],
+  // SMARTGLASSES (owner 2026-08-25). A smart glass IS a sunglass with
+  // electronics, so this list = the SG eyewear questions (identity, sizes,
+  // shape, colours, materials, lens, provenance) + the electronics half.
+  // EVERY electronics field below is grounded in a spec bullet that appears on
+  // the live Ray-Ban Meta listings on bettervision.in -- until now that detail
+  // only existed as prose somebody typed, which is why a new model could not be
+  // catalogued and listed normally. Filling them GENERATES the listing
+  // (backend services/smartglass_listing.py); leaving one blank just omits its
+  // bullet. Keep this field-for-field with the backend SMARTGLASSES registry
+  // (product_master._EYEWEAR_SUN_TAIL + _SMARTGLASS_TECH) -- the pin test
+  // backend/tests/test_smartglass_listing.py, which parses THIS file, fails if
+  // the two drift (test_frontend_list_and_backend_registry_agree_field_for_field).
   SMTFR: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Meta', 'Amazon', 'Google'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
+    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Meta', 'Amazon', 'Google', 'Bose'] },
+    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false, placeholder: 'e.g. Meta' },
+    { name: 'label', label: 'Label', type: 'text', required: false },
+    { name: 'model_name', label: 'Model Name', type: 'text', required: true, placeholder: 'e.g. Wayfarer' },
+    { name: 'model_no', label: 'Model No', type: 'text', required: false, placeholder: 'e.g. RW4006' },
+    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true, placeholder: 'e.g. 601/7150' },
     { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
+    { name: 'bridge_width', label: 'Bridge Size', type: 'number', required: false },
     { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
+    { name: 'gender', label: 'Gender', type: 'select', required: false, options: ['Men', 'Women', 'Unisex', 'Kids'] },
+    { name: 'shape', label: 'Shape', type: 'select', required: false, options: ['Wayfarer', 'Skyler', 'Headliner', 'Round', 'Square', 'Rectangle', 'Cat-Eye', 'Aviator', 'Clubmaster', 'Oversized', 'Wrap'] },
+    { name: 'frame_type', label: 'Frame Type', type: 'select', required: false, options: ['Full Rim', 'Half Rim', 'Rimless'] },
+    { name: 'lens_colour', label: 'Lens Colour', type: 'text', required: false },
+    { name: 'tint', label: 'Tint', type: 'text', required: false },
+    { name: 'polarization', label: 'Polarization', type: 'select', required: false, options: ['Yes', 'No'] },
+    { name: 'uv_protection', label: 'UV Protection', type: 'select', required: false, options: ['UV400', 'UV380', 'Polarized', 'None'] },
+    { name: 'frame_color', label: 'Frame Colour', type: 'text', required: false },
+    { name: 'temple_color', label: 'Temple Colour', type: 'text', required: false },
+    { name: 'lens_material', label: 'Lens Material', type: 'select', required: false, options: ['CR-39', 'Polycarbonate', 'Glass', 'Trivex', 'Nylon'] },
+    { name: 'frame_material', label: 'Frame Front Material', type: 'text', required: false, placeholder: 'e.g. Acetate' },
+    { name: 'temple_material', label: 'Temple Material', type: 'text', required: false },
+    { name: 'usp_1', label: 'Product USP 1', type: 'text', required: false },
+    { name: 'usp_2', label: 'Product USP 2', type: 'text', required: false },
+    { name: 'country_of_origin', label: 'Country of Origin', type: 'text', required: false },
+    { name: 'warranty', label: 'Warranty', type: 'text', required: false },
+    { name: 'upc', label: 'UPC (mfr)', type: 'text', required: false },
+    { name: 'gtin', label: 'GTIN (mfr)', type: 'text', required: false },
+    // ---- The electronics. Each one becomes a spec bullet on the website. ----
+    { name: 'generation', label: 'Generation', type: 'text', required: false, placeholder: 'e.g. Gen 2' },
+    { name: 'camera_mp', label: 'Camera (megapixels)', type: 'number', required: false, placeholder: '12' },
+    { name: 'camera_type', label: 'Camera Type', type: 'text', required: false, placeholder: 'e.g. Ultra-wide' },
+    { name: 'video_resolution', label: 'Video Recording', type: 'select', required: false, options: ['1080p', '1440p', '3K', '4K'] },
+    { name: 'audio_type', label: 'Speakers', type: 'text', required: false, placeholder: 'e.g. Open-ear speakers' },
+    { name: 'microphone_count', label: 'Number of Microphones', type: 'number', required: false, placeholder: '5' },
+    { name: 'voice_assistant', label: 'Voice Assistant', type: 'text', required: false, placeholder: 'e.g. Meta AI' },
+    { name: 'controls', label: 'Controls', type: 'text', required: false, placeholder: 'e.g. Capacitive touch controls on the temple' },
+    { name: 'battery_life_hours', label: 'Battery Life (hours)', type: 'number', required: false, placeholder: '4' },
+    { name: 'charging_case', label: 'Charging Case Included', type: 'select', required: false, options: ['Yes', 'No'] },
+    { name: 'connectivity', label: 'Connectivity', type: 'text', required: false, placeholder: 'e.g. Wi-Fi 6 and Bluetooth 5.2' },
+    { name: 'storage_gb', label: 'On-board Storage (GB)', type: 'number', required: false, placeholder: '32' },
+    { name: 'prescription_ready', label: 'Prescription Lenses Possible', type: 'select', required: false, options: ['Yes', 'No'] },
     { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
   ],
   SMTWT: [
@@ -254,6 +295,12 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
     { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
   ],
 };
+
+// Legacy alias: SMTSG was the retired "Smartglasses (Sunglass)" picker tile.
+// It is the SAME canonical category as SMTFR (FE_CODE_TO_CANONICAL maps both to
+// SMARTGLASSES), so a stored/legacy SMTSG code now renders the ONE smartglasses
+// field list instead of the stale short copy that used to live here.
+CATEGORY_FIELDS.SMTSG = CATEGORY_FIELDS.SMTFR;
 
 export const categoryName = (code: string | null | undefined): string =>
   CATEGORIES.find((c) => c.code === code)?.name ?? '';
@@ -1364,7 +1411,11 @@ const CATEGORY_CODE_SYNONYMS: Record<string, string> = {
   // Accessories
   ACCESSORY: 'ACC', ACCESSORIES: 'ACC', ACC: 'ACC',
   // Smart eyewear / watches
-  SMARTSUNGLASS: 'SMTSG', SMARTSUNGLASSES: 'SMTSG', SMTSG: 'SMTSG',
+  // ONE tile: the retired "Smartglasses (Sunglass)" spellings resolve to SMTFR
+  // like every other one. Resolving them to SMTSG left the picker with nothing
+  // to highlight and categoryName('SMTSG') === '', so the review row showed a
+  // dash. SMTSG survives only as a FIELD-LIST alias (CATEGORY_FIELDS.SMTSG).
+  SMARTSUNGLASS: 'SMTFR', SMARTSUNGLASSES: 'SMTFR', SMTSG: 'SMTFR',
   SMARTGLASSES: 'SMTFR', SMARTGLASS: 'SMTFR', SMTFR: 'SMTFR',
   SMARTWATCH: 'SMTWT', SMARTWATCHES: 'SMTWT', SMTWT: 'SMTWT',
 };
@@ -1386,7 +1437,7 @@ export function inferCategoryCode(raw: unknown): string {
 // space-normalised lower-case string.
 const TITLE_KEYWORD_RULES: Array<[string, string]> = [
   // Smart eyewear / watches (before their non-smart bases).
-  ['smart sunglass', 'SMTSG'],
+  ['smart sunglass', 'SMTFR'],
   ['smart glass', 'SMTFR'], ['smartglass', 'SMTFR'],
   ['smart watch', 'SMTWT'], ['smartwatch', 'SMTWT'],
   // Reading glasses (before generic "glasses" -> frame).

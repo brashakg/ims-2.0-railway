@@ -704,10 +704,20 @@ export const vendorsApi = {
   createPurchaseOrder: async (po: {
     vendor_id: string;
     delivery_store_id: string;
+    // Ruling 13: a line names an existing product OR carries `new_product`,
+    // the typed-in identity of an item that is not catalogued yet.
     items: Array<{
-      product_id: string;
-      product_name: string;
-      sku: string;
+      product_id?: string;
+      product_name?: string;
+      sku?: string;
+      new_product?: {
+        category: string;
+        brand: string;
+        model: string;
+        colour: string;
+        size: string;
+        mrp: number;
+      };
       quantity: number;
       unit_price: number;
     }>;
@@ -784,6 +794,9 @@ export const vendorsApi = {
       accepted_qty: number;
       rejected_qty?: number;
       rejection_reason?: string;
+      // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
+      // refused (422 LINES_NOT_TALLIED) until every line carries it.
+      tallied?: boolean;
     }>;
     notes?: string;
   }) => {

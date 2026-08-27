@@ -59,6 +59,12 @@ interface ReceiveLine {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason: string;
+  // Ruling 14: the receiver ticks each line to say "I counted this one against
+  // what was ordered". Starts UNticked -- the server refuses a PO-backed
+  // receipt with an unticked line (422 LINES_NOT_TALLIED). Express receiving
+  // declares the tally once at the header; this two-step form is the fallback
+  // for exactly the deliveries that were NOT clean, so it ticks line by line.
+  tallied: boolean;
   // P2: supplier batch + expiry for contact lenses (optional; dates the minted
   // units for FEFO). Left blank for frames / undated spectacle lenses.
   batch_code: string;
@@ -267,18 +273,34 @@ export function GoodsReceiptCockpit() {
   // stays receivable, which used to read as "nothing happened". These rows
   // surface that state with one-click Accept (mint stock) / Void (duplicate).
   const [pendingGrns, setPendingGrns] = useState<
-    Array<{ grn_id: string; grn_number: string; vendor_invoice_no?: string; created_at?: string; items?: unknown[] }>
+    Array<{
+      grn_id: string;
+      grn_number: string;
+      vendor_invoice_no?: string;
+      created_at?: string;
+      items?: unknown[];
+      // A PARTIALLY_ACCEPTED receipt is one whose uncatalogued lines were HELD:
+      // real stock was minted for the rest, and the held lines are waiting for
+      // someone to finish the product. It belongs in this panel too -- it was
+      // the one state the panel did not query, while the accept-time toast
+      // sent people here to find it.
+      status?: string;
+      heldLines?: number;
+    }>
   >([]);
   const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
 
   const loadPendingGrns = useCallback(
     async (vid: string) => {
       try {
-        const res = await vendorsApi.getGRNs({
-          store_id: storeId || undefined,
-          status: 'PENDING',
-        });
-        const rows = (res.grns || res.items || res || []) as Array<Record<string, unknown>>;
+        const scope = { store_id: storeId || undefined };
+        const [pend, part] = await Promise.all([
+          vendorsApi.getGRNs({ ...scope, status: 'PENDING' }),
+          vendorsApi.getGRNs({ ...scope, status: 'PARTIALLY_ACCEPTED' }),
+        ]);
+        const collect = (res: Record<string, unknown>) =>
+          ((res.grns || res.items || res || []) as Array<Record<string, unknown>>) || [];
+        const rows = [...collect(pend), ...collect(part)];
         setPendingGrns(
           (Array.isArray(rows) ? rows : [])
             .filter((g) => !vid || g.vendor_id === vid || !g.vendor_id)
@@ -288,6 +310,8 @@ export function GoodsReceiptCockpit() {
               vendor_invoice_no: g.vendor_invoice_no ? String(g.vendor_invoice_no) : undefined,
               created_at: g.created_at ? String(g.created_at) : undefined,
               items: Array.isArray(g.items) ? g.items : [],
+              status: String(g.status || 'PENDING'),
+              heldLines: Array.isArray(g.unresolved_lines) ? g.unresolved_lines.length : 0,
             }))
         );
       } catch {
@@ -539,6 +563,7 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: '',
+        tallied: false,
         batch_code: l.batch_code,
         expiry_date: l.expiry_date,
         unit_price: l.unit_price,
@@ -644,6 +669,15 @@ export function GoodsReceiptCockpit() {
       toast.error('Upload the vendor invoice/challan before submitting');
       return;
     }
+    // Ruling 14 -- the tally. Mirrored server-side (422 LINES_NOT_TALLIED);
+    // this is the friendly version so the receiver is not sent a raw 422.
+    const untallied = receiveLines.filter((l) => !l.tallied);
+    if (untallied.length > 0) {
+      toast.error(
+        `Tick every line to confirm what arrived (${untallied.length} still unchecked)`,
+      );
+      return;
+    }
 
     const items: GRNItemInput[] = receiveLines
       .filter((l) => l.received_qty > 0)
@@ -653,6 +687,7 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: l.rejection_reason || undefined,
+        tallied: l.tallied,
         batch_code: l.batch_code.trim() || undefined,
         expiry_date: l.expiry_date.trim() || undefined,
       }));
@@ -685,7 +720,7 @@ export function GoodsReceiptCockpit() {
         );
         if (acc.grn_status === 'PARTIALLY_ACCEPTED') {
           toast.warning(
-            'Some lines were held because their product is not catalogued yet — catalogue them, then accept the GRN from the Pending receipts panel.',
+            'Some lines were held because their product is not catalogued yet — finish those products, then press "Add to stock" again on this receipt in the "Receipts still waiting" panel below.',
           );
         }
       } catch (acceptErr) {
@@ -1060,13 +1095,14 @@ export function GoodsReceiptCockpit() {
                   <div className="card-head">
                     <h3>
                       Line items &middot;{' '}
-                      {receiveLines.filter((l) => l.received_qty > 0).length}/
-                      {receiveLines.length} with receipt
+                      {receiveLines.filter((l) => l.tallied).length}/
+                      {receiveLines.length} tallied
                     </h3>
                   </div>
                   <table className="tbl">
                     <thead>
                       <tr>
+                        <th>Tally</th>
                         <th>Item</th>
                         <th className="right">Ordered</th>
                         <th className="right">Received</th>
@@ -1078,6 +1114,23 @@ export function GoodsReceiptCockpit() {
                     <tbody>
                       {receiveLines.map((line, idx) => (
                         <tr key={idx}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={line.tallied}
+                              aria-label={`Tally line ${idx + 1}: ${line.product_name}`}
+                              onChange={(e) => {
+                                const v = e.target.checked;
+                                startTransition(() =>
+                                  setReceiveLines((prev) =>
+                                    prev.map((l, i) =>
+                                      i === idx ? { ...l, tallied: v } : l,
+                                    ),
+                                  ),
+                                );
+                              }}
+                            />
+                          </td>
                           <td>
                             <div
                               className="font-medium"
@@ -1337,13 +1390,16 @@ export function GoodsReceiptCockpit() {
                     <div className="flex items-center gap-2 mb-2">
                       <AlertCircle className="w-4 h-4 text-amber-600" />
                       <h3 className="font-semibold text-gray-900">
-                        Pending receipts — not yet added to stock ({pendingGrns.length})
+                        Receipts still waiting ({pendingGrns.length})
                       </h3>
                     </div>
                     <p className="text-xs text-gray-600 mb-3">
-                      These GRNs were created but never accepted, so their units are NOT in
-                      stock and their POs still show as receivable. Accept the correct one;
-                      void duplicates (voiding is safe — a pending GRN has added nothing).
+                      A <strong>pending</strong> receipt was created but never accepted, so its
+                      units are NOT in stock and its PO still shows as receivable — accept the
+                      correct one, and void duplicates (safe: a pending GRN has added nothing).
+                      A <strong>partly accepted</strong> one put most of its goods into stock but
+                      held the lines whose product is not catalogued yet; finish those products,
+                      then press "Add to stock" again to release them.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1358,7 +1414,12 @@ export function GoodsReceiptCockpit() {
                         >
                           <div className="min-w-0 text-sm">
                             <span className="font-medium text-gray-900">{g.grn_number}</span>{' '}
-                            <PurchaseStatusChip status="PENDING" kind="grn" />
+                            <PurchaseStatusChip status={g.status || 'PENDING'} kind="grn" />
+                            {g.status === 'PARTIALLY_ACCEPTED' && (
+                              <span className="text-amber-700">
+                                {' '}· {g.heldLines || 'some'} line(s) waiting to be catalogued
+                              </span>
+                            )}
                             {g.vendor_invoice_no && (
                               <span className="text-gray-500"> · Inv {g.vendor_invoice_no}</span>
                             )}
@@ -1381,15 +1442,17 @@ export function GoodsReceiptCockpit() {
                               )}
                               Add to stock
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                              disabled={grnActionBusy === g.grn_id}
-                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                              Void (duplicate)
-                            </button>
+                            {g.status === 'PARTIALLY_ACCEPTED' ? null : (
+                              <button
+                                type="button"
+                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                                disabled={grnActionBusy === g.grn_id}
+                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                Void (duplicate)
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}

@@ -25,7 +25,13 @@ interface GRNLineItem {
   hsn_code?: string;
   po_qty: number;
   received_qty: number;
-  inspection_status: 'pending' | 'passed' | 'failed';
+  // Ruling 14: the receiver ticks each line to say "counted this one against
+  // what was ordered". Starts UNticked -- an untouched line must not post.
+  tallied: boolean;
+  // Part of a line can now be rejected (20 arrive, 2 damaged) instead of the
+  // old all-or-nothing quality verdict.
+  rejected_qty: number;
+  rejection_reason?: string;
 }
 
 interface GRNDiscrepancyItem {
@@ -235,7 +241,8 @@ export function GoodsReceiptNote() {
         hsn_code: it.hsn_code,
         po_qty: qty,
         received_qty: qty,
-        inspection_status: 'pending' as const,
+        tallied: false,
+        rejected_qty: 0,
       };
     });
     setReceivedItems(lines);
@@ -265,14 +272,23 @@ export function GoodsReceiptNote() {
   const steps = useMemo(() => {
     const hasPO = !!poNumber;
     const hasLines = receivedItems.length > 0;
-    const inspected = allChecksComplete || !!discrepancies;
+    const allTallied =
+      receivedItems.length > 0 && receivedItems.every((i) => i.tallied);
+    const inspected = allTallied && (allChecksComplete || !!discrepancies);
     return [
       { done: hasPO, active: !hasPO, t: 'Match PO & vendor invoice', s: poNumber ? poNumber : 'Pick the order being received' },
-      { done: hasPO && hasLines, active: hasPO && !hasLines, t: 'Verify boxes & lines', s: hasLines ? `${receivedItems.length} lines` : 'No lines on this PO' },
+      {
+        done: hasPO && hasLines && allTallied,
+        active: hasPO && hasLines && !allTallied,
+        t: 'Tally what arrived',
+        s: hasLines
+          ? `${receivedItems.filter((i) => i.tallied).length} / ${receivedItems.length} lines ticked`
+          : 'No lines on this PO',
+      },
       { done: inspected, active: hasLines && !inspected, t: 'Quality inspection', s: `${checksComplete}/${INSPECTION_CHECKLIST.length} checks` },
       { done: false, active: inspected && hasLines, t: 'Post & close', s: 'Stock ledger updated' },
     ];
-  }, [poNumber, receivedItems.length, allChecksComplete, discrepancies, checksComplete]);
+  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete]);
 
   const handleSubmit = async () => {
     if (!poNumber) {
@@ -281,6 +297,27 @@ export function GoodsReceiptNote() {
     }
     if (receivedItems.length === 0) {
       toast.error('No line items to receive on this PO');
+      return;
+    }
+    // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED); this is
+    // the friendly version so the receiver is not sent a raw 422.
+    const untallied = receivedItems.filter((i) => !i.tallied);
+    if (!isDcMode && untallied.length > 0) {
+      toast.error(
+        `Tick every line to confirm what arrived (${untallied.length} still unchecked)`,
+      );
+      return;
+    }
+    const badSplit = receivedItems.filter((i) => i.rejected_qty > i.received_qty);
+    if (badSplit.length > 0) {
+      toast.error('A line cannot reject more units than arrived');
+      return;
+    }
+    const noReason = receivedItems.filter(
+      (i) => i.rejected_qty > 0 && !(i.rejection_reason || '').trim(),
+    );
+    if (noReason.length > 0) {
+      toast.error('Say why the units were rejected — the debit note needs the reason');
       return;
     }
     if (isDcMode && !dcNumber.trim()) {
@@ -304,9 +341,10 @@ export function GoodsReceiptNote() {
           po_item_id: item.po_item_id,
           product_id: item.product_id,
           received_qty: item.received_qty,
-          accepted_qty: item.inspection_status === 'failed' ? 0 : item.received_qty,
-          rejected_qty: item.inspection_status === 'failed' ? item.received_qty : 0,
-          rejection_reason: item.inspection_status === 'failed' ? 'Quality inspection failed' : undefined,
+          accepted_qty: item.received_qty - item.rejected_qty,
+          rejected_qty: item.rejected_qty,
+          rejection_reason: item.rejected_qty > 0 ? item.rejection_reason : undefined,
+          tallied: item.tallied,
         })),
         notes: qualityNotes || undefined,
       });
@@ -607,12 +645,12 @@ export function GoodsReceiptNote() {
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th>#</th>
+                    <th>Tally</th>
                     <th>Item</th>
                     <th className="right">Ordered</th>
                     <th className="right">Received</th>
                     <th className="right">Δ</th>
-                    <th>QA</th>
+                    <th className="right">Rejected</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -620,7 +658,21 @@ export function GoodsReceiptNote() {
                     const variance = item.received_qty - item.po_qty;
                     return (
                       <tr key={item.po_item_id || idx}>
-                        <td className="mono" style={{ color: 'var(--ink-4)' }}>{idx + 1}</td>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={item.tallied}
+                            aria-label={`Tally line ${idx + 1}: ${item.product_name}`}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              startTransition(() => {
+                                setReceivedItems((arr) =>
+                                  arr.map((r, j) => (j === idx ? { ...r, tallied: v } : r)),
+                                );
+                              });
+                            }}
+                          />
+                        </td>
                         <td>
                           <div className="font-medium" style={{ color: 'var(--ink)' }}>{item.product_name}</div>
                           <div className="mono text-xs" style={{ color: 'var(--ink-4)' }}>
@@ -655,24 +707,44 @@ export function GoodsReceiptNote() {
                             </span>
                           )}
                         </td>
-                        <td>
-                          <select
-                            value={item.inspection_status}
+                        <td className="right">
+                          <input
+                            type="number"
+                            min={0}
+                            max={item.received_qty}
+                            value={item.rejected_qty}
+                            aria-label={`Rejected units on line ${idx + 1}`}
                             onChange={(e) =>
                               startTransition(() => {
-                                const v = e.target.value as GRNLineItem['inspection_status'];
+                                const v = Math.max(0, parseInt(e.target.value) || 0);
                                 setReceivedItems((arr) =>
-                                  arr.map((r, j) => (j === idx ? { ...r, inspection_status: v } : r)),
+                                  arr.map((r, j) => (j === idx ? { ...r, rejected_qty: v } : r)),
                                 );
                               })
                             }
                             className="input"
-                            style={{ height: 30, padding: '0 6px', maxWidth: 130 }}
-                          >
-                            <option value="pending">Pending</option>
-                            <option value="passed">Passed</option>
-                            <option value="failed">Failed</option>
-                          </select>
+                            style={{ width: 64, textAlign: 'right', height: 30, padding: '0 6px' }}
+                          />
+                          {item.rejected_qty > 0 ? (
+                            <input
+                              type="text"
+                              value={item.rejection_reason || ''}
+                              placeholder="Why? *"
+                              aria-label={`Rejection reason on line ${idx + 1}`}
+                              onChange={(e) =>
+                                startTransition(() => {
+                                  const v = e.target.value;
+                                  setReceivedItems((arr) =>
+                                    arr.map((r, j) =>
+                                      j === idx ? { ...r, rejection_reason: v } : r,
+                                    ),
+                                  );
+                                })
+                              }
+                              className="input"
+                              style={{ marginTop: 4, height: 28, padding: '0 6px', maxWidth: 150 }}
+                            />
+                          ) : null}
                         </td>
                       </tr>
                     );

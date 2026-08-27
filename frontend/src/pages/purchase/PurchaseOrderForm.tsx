@@ -14,7 +14,11 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
-import type { ComposerVendorOption } from '../../components/purchase/PurchaseOrderComposer';
+import type {
+  ComposerVendorOption,
+  ComposerNewProduct,
+} from '../../components/purchase/PurchaseOrderComposer';
+import { CATEGORIES } from '../catalog/productAddShared';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 
 interface PickedProduct {
@@ -48,6 +52,109 @@ function hitToPicked(hit: ProductHit): PickedProduct {
 }
 
 // ---------------------------------------------------------------------------
+// Owner ruling 13 -- "not in the catalogue?". The buyer orders off the vendor's
+// list before the item exists in IMS, so these are the fields he named: brand,
+// model no, colour code, size and MRP. The line's unit cost is the cost price.
+// There is deliberately no SELLING price here: the server creates the product
+// provisional (inactive, no offer price) so it cannot be sold until a
+// cataloguer finishes it.
+// ---------------------------------------------------------------------------
+const blankNewProduct = (): ComposerNewProduct => ({
+  category: 'FR',
+  brand: '',
+  model: '',
+  colour: '',
+  size: '',
+  mrp: 0,
+});
+
+function NewProductFields({
+  value,
+  onChange,
+  onCancel,
+}: {
+  value: ComposerNewProduct;
+  onChange: (np: ComposerNewProduct) => void;
+  onCancel: () => void;
+}) {
+  const set = (patch: Partial<ComposerNewProduct>) => onChange({ ...value, ...patch });
+  return (
+    <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-amber-800">New item — not catalogued yet</span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="p-1 text-amber-700 hover:text-red-600"
+          title="Search the catalogue instead"
+        >
+          <XIcon className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      <select
+        value={value.category}
+        onChange={(e) => set({ category: e.target.value })}
+        className="input-field text-sm"
+        aria-label="New item category"
+      >
+        {CATEGORIES.map((c) => (
+          <option key={c.code} value={c.code}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          type="text"
+          value={value.brand}
+          onChange={(e) => set({ brand: e.target.value })}
+          placeholder="Brand *"
+          aria-label="New item brand"
+          className="input-field text-sm"
+        />
+        <input
+          type="text"
+          value={value.model}
+          onChange={(e) => set({ model: e.target.value })}
+          placeholder="Model no *"
+          aria-label="New item model number"
+          className="input-field text-sm"
+        />
+        <input
+          type="text"
+          value={value.colour}
+          onChange={(e) => set({ colour: e.target.value })}
+          placeholder="Colour code"
+          aria-label="New item colour code"
+          className="input-field text-sm"
+        />
+        <input
+          type="text"
+          value={value.size}
+          onChange={(e) => set({ size: e.target.value })}
+          placeholder="Size"
+          aria-label="New item size"
+          className="input-field text-sm"
+        />
+      </div>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        value={value.mrp || ''}
+        onChange={(e) => set({ mrp: parseFloat(e.target.value) || 0 })}
+        placeholder="MRP *"
+        aria-label="New item MRP"
+        className="input-field text-sm"
+      />
+      <p className="text-[11px] text-amber-700">
+        It will be ordered now and finished in the catalogue later. It cannot be sold until then.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Product search-select. Debounced typeahead against GET /products?search=.
 // Once a product is picked it shows as a locked chip (real product_id behind
 // it); "change" clears the pick and re-opens the search. This is what lets the
@@ -55,12 +162,16 @@ function hitToPicked(hit: ProductHit): PickedProduct {
 // ---------------------------------------------------------------------------
 function ProductSearchSelect({
   picked,
+  newProduct,
   onPick,
   onClear,
+  onSetNew,
 }: {
   picked: { productId: string; productName: string; sku: string };
+  newProduct?: ComposerNewProduct | null;
   onPick: (p: PickedProduct) => void;
   onClear: () => void;
+  onSetNew: (np: ComposerNewProduct | null) => void;
 }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ProductHit[]>([]);
@@ -109,6 +220,12 @@ function ProductSearchSelect({
     return () => document.removeEventListener('mousedown', onDocClick);
   }, []);
 
+  if (newProduct) {
+    return (
+      <NewProductFields value={newProduct} onChange={onSetNew} onCancel={() => onSetNew(null)} />
+    );
+  }
+
   if (picked.productId) {
     return (
       <div className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm">
@@ -146,6 +263,16 @@ function ProductSearchSelect({
           <Loader2 className="w-4 h-4 text-gray-400 animate-spin absolute right-2.5 top-1/2 -translate-y-1/2" />
         )}
       </div>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false);
+          onSetNew({ ...blankNewProduct(), brand: query.trim() });
+        }}
+        className="mt-1 text-xs text-blue-600 hover:text-blue-700 font-medium"
+      >
+        Not in the catalogue? Enter the item&apos;s details
+      </button>
       {open && (
         <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
           {results.length === 0 ? (
@@ -231,9 +358,10 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             vendors={vendorOptions}
             allowAddLine
             allowRemoveLine
-            renderProductCell={({ line, pickProduct, clearProduct }) => (
+            renderProductCell={({ line, pickProduct, clearProduct, setNewProduct }) => (
               <ProductSearchSelect
                 picked={{ productId: line.productId, productName: line.productName, sku: line.sku }}
+                newProduct={line.newProduct}
                 onPick={(p) =>
                   pickProduct({
                     productId: p.productId,
@@ -243,6 +371,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                   })
                 }
                 onClear={clearProduct}
+                onSetNew={setNewProduct}
               />
             )}
             submitLabel="Create as Draft"
@@ -259,15 +388,18 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                   product_id: it.product_id,
                   product_name: it.product_name,
                   sku: it.sku,
+                  new_product: it.new_product,
                   quantity: it.quantity,
                   unit_price: it.unit_price,
                 })),
               });
 
               const poItems: POItem[] = payload.items.map((it) => ({
-                productId: it.product_id,
-                productName: it.product_name,
-                sku: it.sku,
+                productId: it.product_id ?? '',
+                productName:
+                  it.product_name ??
+                  `${it.new_product?.brand ?? ''} ${it.new_product?.model ?? ''}`.trim(),
+                sku: it.sku ?? '',
                 quantity: it.quantity,
                 unitCost: it.unit_price,
                 taxRate: it.taxRate,

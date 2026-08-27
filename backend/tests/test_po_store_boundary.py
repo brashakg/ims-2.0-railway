@@ -173,7 +173,12 @@ def _grn_body():
         vendor_invoice_date="2026-05-02",
         items=[
             vendors_mod.GRNItemCreate(
-                product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0
+                product_id="P1",
+                received_qty=5,
+                accepted_qty=5,
+                rejected_qty=0,
+                # ruling 14: every PO-backed receipt line must be ticked.
+                tallied=True,
             )
         ],
         attachment_file_id="FILE-1",

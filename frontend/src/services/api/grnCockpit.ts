@@ -59,6 +59,9 @@ export interface GRNItemInput {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason?: string;
+  // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
+  // refused (422 LINES_NOT_TALLIED) until every line carries it.
+  tallied?: boolean;
   // P2: supplier batch + expiry (contact lenses) -> dates the minted units for
   // FEFO. Optional; omitted for frames / undated spectacle lenses.
   batch_code?: string;
