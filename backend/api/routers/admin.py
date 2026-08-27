@@ -155,13 +155,11 @@ class RazorpayConfig(BaseModel):
     enabled: bool = True
 
 
-
 class TallyConfig(BaseModel):
     server_url: str = Field(..., description="Tally server URL")
     company_name: str = Field(..., description="Company name in Tally")
     sync_interval: int = Field(default=60, description="Sync interval in minutes")
     enabled: bool = True
-
 
 
 class ShipmentRequest(BaseModel):
@@ -702,11 +700,6 @@ async def regenerate_tally_export(
         "date": payload.date,
         "store_id": payload.store_id,
     }
-
-
-# ============================================================================
-# SMS GATEWAY ENDPOINTS
-# ============================================================================
 
 
 # ============================================================================

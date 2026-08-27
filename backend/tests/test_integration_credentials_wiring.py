@@ -270,6 +270,145 @@ def test_dispatch_mode_can_never_come_from_the_database(monkeypatch, rec):
     }
 
 
+class _SingletonColl:
+    """The notification_providers singleton, holding whatever row we plant."""
+
+    def __init__(self, doc=None):
+        self.doc = doc
+
+    def find_one(self, flt):
+        return dict(self.doc) if self.doc is not None else None
+
+    def update_one(self, flt, update, upsert=False):
+        self.doc = dict(self.doc or {}, **update.get("$set", {}))
+
+
+def _arm_gate(monkeypatch, mode: str):
+    """Arm the server's send gate the way a deploy does -- through the
+    environment. agents.providers snapshots DISPATCH_MODE at import, so an
+    armed server has BOTH, and that snapshot is what every send is gated on."""
+    monkeypatch.setenv("DISPATCH_MODE", mode)
+    monkeypatch.setattr(providers, "DISPATCH_MODE", mode)
+
+
+def _providers_readout(monkeypatch, stored):
+    """GET /settings/notifications/providers with `stored` as the saved row."""
+    from api.routers import settings as settings_router
+
+    _no_db(monkeypatch)
+    coll = _SingletonColl(stored)
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+    return asyncio.run(settings_router.get_notification_providers({"roles": ["ADMIN"]}))
+
+
+def test_sending_mode_shown_is_the_servers_gate_not_the_stored_row(monkeypatch):
+    """The Sending-mode card must never say OFF while the server is LIVE.
+
+    The screen prints this value beside "this switch is set on the server, on
+    purpose, so it can never be flipped by accident from a screen" -- so a
+    stored row winning here tells the owner nothing is reaching customers at
+    the exact moment everything is.
+    """
+    _arm_gate(monkeypatch, "live")
+
+    resp = _providers_readout(
+        monkeypatch, {"_id": "notification_providers", "dispatch_mode": "off"}
+    )
+
+    assert (
+        resp["dispatch_mode"] == "live"
+    ), "the screen was told the server is dark while it was live"
+    # The same value the send path gates on -- not a second reading of it.
+    assert resp["dispatch_mode"] == providers.dispatch_mode()
+    assert providers._should_dispatch("+919999999999")[0] is True
+
+
+def test_sending_mode_shown_is_the_gate_in_the_other_direction_too(monkeypatch):
+    """And a stored `live` must not promise sends from a dark server."""
+    _arm_gate(monkeypatch, "off")
+
+    resp = _providers_readout(
+        monkeypatch, {"_id": "notification_providers", "dispatch_mode": "live"}
+    )
+
+    assert resp["dispatch_mode"] == "off"
+    assert providers._should_dispatch("+919999999999")[0] is False
+
+
+def test_a_case_typo_in_the_env_var_is_reported_the_way_the_gate_read_it(monkeypatch):
+    """DISPATCH_MODE="LIVE" DOES arm the gate -- agents.providers lowercases it
+    at import. A second, raw reading of the env var would print "LIVE", which
+    the screen does not recognise as sending and captions "Nothing is sent to
+    customers yet": the same lie, one case away."""
+    monkeypatch.setenv("DISPATCH_MODE", "LIVE")
+    # exactly what `DISPATCH_MODE = os.getenv(...).lower()` produced at import
+    monkeypatch.setattr(providers, "DISPATCH_MODE", os.environ["DISPATCH_MODE"].lower())
+
+    resp = _providers_readout(monkeypatch, None)
+
+    assert resp["dispatch_mode"] == "live"
+    assert providers._should_dispatch("+919999999999")[0] is True
+
+
+def test_the_stored_row_still_loses_if_the_key_ever_survives_the_strip(monkeypatch):
+    """Second lock, tested alone: the gate is assigned AFTER the stored
+    document is merged in. With the strip disarmed -- a future key spelling it
+    misses, or someone shrinking the set -- the merge sees `dispatch_mode` and
+    must still not win. Fails the moment the assignment moves back above the
+    merge."""
+    from api.routers import settings as settings_router
+
+    monkeypatch.setattr(settings_router, "_SERVER_OWNED_FIELDS", set())
+    _arm_gate(monkeypatch, "live")
+
+    resp = _providers_readout(
+        monkeypatch, {"_id": "notification_providers", "dispatch_mode": "off"}
+    )
+
+    assert resp["dispatch_mode"] == "live"
+
+
+def test_a_stored_row_cannot_dress_a_dead_channel_up_as_connected(monkeypatch):
+    """Same class, one field over: `enabled` is the answer to "would a send
+    work right now", so the singleton must not be able to overwrite it either.
+    Nothing is configured here -- the row claims everything is."""
+    _arm_gate(monkeypatch, "live")
+
+    resp = _providers_readout(
+        monkeypatch,
+        {
+            "_id": "notification_providers",
+            "whatsapp": {"provider": "MSG91", "enabled": True, "sender": "9999999999"},
+            "sms": {"provider": "MSG91", "enabled": True, "sender": "MARKSND"},
+        },
+    )
+
+    assert resp["whatsapp"]["enabled"] is False, "a saved row faked a live channel"
+    assert resp["sms"]["enabled"] is False
+    assert providers.provider_ready("whatsapp") is False
+
+
+def test_the_send_gate_cannot_be_written_or_echoed_by_the_screen(monkeypatch):
+    """ADMIN can PUT anything; the send switch must not be part of it."""
+    from api.routers import settings as settings_router
+
+    coll = _SingletonColl({})
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+    _arm_gate(monkeypatch, "off")
+
+    resp = asyncio.run(
+        settings_router.update_notification_providers(
+            {"dispatch_mode": "live", "sender_id": "MARKSND"}, {"roles": ["ADMIN"]}
+        )
+    )
+
+    assert "dispatch_mode" not in coll.doc, "a screen stored the send gate"
+    assert "dispatch_mode" not in resp
+    assert coll.doc["sender_id"] == "MARKSND", "a real preference was lost"
+    # ...and the readout that follows still reports the server, not the write.
+    assert _providers_readout(monkeypatch, coll.doc)["dispatch_mode"] == "off"
+
+
 # ---------------------------------------------------------------------------
 # Slack + PageSpeed
 # ---------------------------------------------------------------------------

@@ -1171,15 +1171,30 @@ async def update_invoice_settings(
 # ============================================================================
 
 
-def _strip_provider_secrets(doc: dict) -> dict:
-    """Drop any credential-shaped key from a notification_providers document.
+# Keys this singleton is never allowed to carry, in either direction. The send
+# gate is owned by the server (agents.providers reads DISPATCH_MODE from the
+# environment); a stored copy could only ever contradict it on a screen.
+_SERVER_OWNED_FIELDS = {"dispatch_mode"}
+
+
+def _strip_unstorable_fields(doc: dict) -> dict:
+    """Drop credential-shaped and server-owned keys from a
+    notification_providers document.
 
     Credentials belong in the `integrations` collection, encrypted at rest and
     resolved by api.services.integration_config. This singleton is for
     non-secret channel preferences only, so a secret must never enter it and
     must never leave it. Uses the same field-name set as the at-rest crypto.
+
+    `dispatch_mode` is dropped for a different reason: it is not a preference
+    at all, it is the server's send gate, and is reported straight from
+    agents.providers.dispatch_mode().
     """
-    return {k: v for k, v in doc.items() if k.lower() not in _SENSITIVE_FIELDS}
+    return {
+        k: v
+        for k, v in doc.items()
+        if k.lower() not in _SENSITIVE_FIELDS and k.lower() not in _SERVER_OWNED_FIELDS
+    }
 
 
 @router.get("/notifications/providers")
@@ -1194,20 +1209,22 @@ async def get_notification_providers(
     boot. Anything else would make this readout lie once a credential is
     saved on the screen.
 
-    `dispatch_mode` is reported from the environment and is READ-ONLY here --
-    it is the server-side safety gate for outbound messaging and is never
-    settable from a screen.
+    `dispatch_mode` is the server-side safety gate for outbound messaging. It
+    is reported by calling the SAME agents.providers.dispatch_mode() the send
+    path gates on -- so this readout cannot say "off" while the server would
+    really send -- and it is never settable from a screen: the stored document
+    cannot carry the key (_strip_unstorable_fields), and every worked-out value
+    is applied AFTER that document, so no ordering change can resurrect the
+    lie. The stored singleton only ever contributes keys the server does not
+    work out for itself.
 
     Never returns a credential value.
     """
-    import os
-
-    from agents.providers import provider_ready
+    from agents.providers import dispatch_mode, provider_ready
     from api.services.integration_config import get_msg91_config
 
     msg91 = get_msg91_config()
-    coll = _get_settings_collection("notification_providers")
-    defaults = {
+    computed = {
         "whatsapp": {
             "provider": "MSG91",
             "enabled": provider_ready("whatsapp"),
@@ -1219,16 +1236,24 @@ async def get_notification_providers(
             "sender": msg91.get("sender", ""),
         },
         "email": {"provider": "SMTP", "enabled": False, "sender": ""},
-        "dispatch_mode": os.getenv("DISPATCH_MODE", "off"),
+        # The send gate itself, not a second reading of the environment.
+        "dispatch_mode": dispatch_mode(),
     }
+    out: dict = {}
+    coll = _get_settings_collection("notification_providers")
     if coll is not None:
         doc = coll.find_one({"_id": "notification_providers"})
         if doc:
             doc.pop("_id", None)
             # Legacy rows may still hold a plaintext api_key from before this
-            # endpoint refused secrets. Never hand one back out.
-            defaults.update(_strip_provider_secrets(doc))
-    return defaults
+            # endpoint refused secrets, or a dispatch_mode from before it
+            # refused the send gate. Never hand either back out.
+            out.update(_strip_unstorable_fields(doc))
+    # Everything the server WORKED OUT wins over anything the singleton holds,
+    # and is applied last so no stored row can dress a dead channel up as
+    # Connected, or a live server as dark.
+    out.update(computed)
+    return out
 
 
 @router.put("/notifications/providers")
@@ -1242,18 +1267,21 @@ async def update_notification_providers(
     encrypted at rest and nothing reads a credential from it. The MSG91 auth
     key lives in Settings -> Integrations -> WhatsApp Business (MSG91), which
     is the config the sender actually reads.
+
+    `dispatch_mode` is dropped the same way -- the send gate is env-only, so a
+    screen must not be able to plant a value that any readout could repeat.
     """
     coll = _get_settings_collection("notification_providers")
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
     providers = {k: v for k, v in providers.items() if k != "_id"}
-    providers = _strip_provider_secrets(providers)
+    providers = _strip_unstorable_fields(providers)
     providers["updated_at"] = datetime.now().isoformat()
     coll.update_one({"_id": "notification_providers"}, {"$set": providers}, upsert=True)
     doc = coll.find_one({"_id": "notification_providers"})
     if doc:
         doc.pop("_id", None)
-    return _strip_provider_secrets(doc) if doc else {}
+    return _strip_unstorable_fields(doc) if doc else {}
 
 
 @router.get("/notifications/logs")
