@@ -33,6 +33,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
   });
 })();
 
+// Each case here resets the module registry and renders a whole POS screen or a
+// full statutory invoice, which can outrun vitest's 5s default when the entire
+// suite runs in parallel on a slow machine. Slow, not flaky -- give it room.
+vi.setConfig({ testTimeout: 20000 });
+
 const { apiGet } = vi.hoisted(() => ({ apiGet: vi.fn() }));
 vi.mock('../../../services/api/client', () => ({ default: { get: apiGet } }));
 

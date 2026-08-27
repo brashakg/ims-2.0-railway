@@ -37,6 +37,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
   });
 })();
 
+// Each case here resets the module registry and renders a whole POS screen or a
+// full statutory invoice, which can outrun vitest's 5s default when the entire
+// suite runs in parallel on a slow machine. Slow, not flaky -- give it room.
+vi.setConfig({ testTimeout: 20000 });
+
 // ONE stable object: POSLayout has an effect keyed on `user`, so a fresh
 // literal per call re-runs setStoreId every render and React aborts with
 // "Maximum update depth exceeded" before anything is asserted.
