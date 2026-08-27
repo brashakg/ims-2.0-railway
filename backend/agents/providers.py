@@ -47,7 +47,13 @@ logger = logging.getLogger(__name__)
 # Env config
 # ============================================================================
 
-DISPATCH_MODE = os.getenv("DISPATCH_MODE", "off").lower()  # off | test | live
+# off | test | live. ONE padding policy for every dispatch gate in the app:
+# STRIP. A Railway variable pasted with a stray space must not silently disarm
+# all messaging -- and SHOPIFY_DISPATCH_MODE (nexus_providers) already
+# stripped, so `" live"` used to fire a real Shopify write while arming
+# nothing here. Pinned by tests/test_integration_credentials_wiring.py ::
+# test_a_padded_live_from_the_environment_still_arms_the_gate.
+DISPATCH_MODE = os.getenv("DISPATCH_MODE", "off").strip().lower()
 TEST_PHONE = os.getenv("TEST_PHONE", "")
 
 # MSG91 credentials are NOT read here. They are resolved per send by
