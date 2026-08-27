@@ -144,11 +144,49 @@ describe('the cart preview and the invoice quote the SAME rate', () => {
     expect(tax).toBe(50);
   });
 
+  it('and the Review screen is quoting THAT number, not one of its own', async () => {
+    // The Review step used to run its own copy of the rate lookup + the
+    // inclusive/exclusive branch. It now reads getTaxBreakdown, and getTax is
+    // defined as that breakdown's total -- so a mixed-rate cart must reconcile
+    // three ways at once: the per-rate bases sum to the taxable value, the
+    // per-line rates agree with them, and base + tax lands on the grand total.
+    act(() => {
+      const s = usePOSStore.getState();
+      s.addToCart({
+        product_id: 'p5', name: 'Titan Frame', sku: 'FR-3',
+        category: 'FRAME', hsn_code: '900410',   // 5%, record carries the 18% code
+        unit_price: 1050, mrp: 1050, quantity: 2, is_optical: true,
+      } as never);
+      s.addToCart({
+        product_id: 'p6', name: 'Ray-Ban Meta', sku: 'SMTSG-2',
+        category: 'SUNGLASS',                    // 18%
+        unit_price: 29900, mrp: 29900, quantity: 1, is_optical: false,
+      } as never);
+    });
+    const s = usePOSStore.getState();
+    const bd = s.getTaxBreakdown();
+
+    // Inclusive: 2100 at 5% -> base 2000, tax 100. 29900 at 18% -> base
+    // 25338.98, tax 4561.02. The frame is rated 5% despite its stored 900410.
+    expect(Object.keys(bd.rates).map(Number).sort((a, b) => a - b)).toEqual([5, 18]);
+    expect(bd.rates[5]).toBe(2000);
+    expect(bd.lineRates[s.cart[0].id]).toBe(5);
+    expect(bd.lineRates[s.cart[1].id]).toBe(18);
+    // getTax is the breakdown, by construction -- and the bases + the tax
+    // reconcile to the grand total, which is what the screen prints.
+    expect(s.getTax()).toBe(bd.totalTax);
+    expect(s.getTaxableValue()).toBe(bd.rates[5] + bd.rates[18]);
+    const summed = Object.entries(bd.rates)
+      .reduce((t, [r, base]) => t + base * (Number(r) / 100), 0);
+    expect(Math.round(summed * 100) / 100).toBe(bd.totalTax);
+    expect(Math.round((s.getTaxableValue() + bd.totalTax) * 100) / 100).toBe(s.getGrandTotal());
+  });
+
   it('and the same in EXCLUSIVE mode, the rollback the owner can flip live', async () => {
     // GST_PRICING_MODE=exclusive is the no-redeploy rollback (gstRuntime reads
-    // it off /health). It runs a SECOND copy of the same rate lookup inside
-    // getGrandTotal, which the inclusive default never reaches -- so a stored
-    // HSN could still have moved a total there while every other test passed.
+    // it off /health). getGrandTotal keeps its own per-line accumulation here
+    // (GST added on top, not extracted), so it is the one consumer that could
+    // still disagree with the breakdown the Review screen prints.
     apiGet.mockImplementation((url: string) =>
       Promise.resolve({ data: url === '/health' ? { pricing_mode: 'exclusive' } : SERVER }));
     await loadPricingMode();
@@ -161,7 +199,17 @@ describe('the cart preview and the invoice quote the SAME rate', () => {
         } as never);
       });
       // Exclusive: GST is added ON TOP. 1000 + 5% = 1050; at 18% it would be 1180.
-      expect(usePOSStore.getState().getGrandTotal()).toBe(1050);
+      const s = usePOSStore.getState();
+      expect(s.getGrandTotal()).toBe(1050);
+      // ...and the same three-way reconciliation as inclusive. Here the taxable
+      // base IS the line total (1000), not an extraction from within it.
+      const bd = s.getTaxBreakdown();
+      expect(bd.rates[5]).toBe(1000);
+      expect(bd.totalTax).toBe(50);
+      expect(s.getTax()).toBe(bd.totalTax);
+      expect(s.getTaxableValue()).toBe(bd.rates[5]);
+      expect(bd.lineRates[s.cart[0].id]).toBe(5);
+      expect(Math.round((s.getTaxableValue() + bd.totalTax) * 100) / 100).toBe(s.getGrandTotal());
     } finally {
       apiGet.mockImplementation((url: string) =>
         Promise.resolve({ data: url === '/health' ? { pricing_mode: 'inclusive' } : SERVER }));
