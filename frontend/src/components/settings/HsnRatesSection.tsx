@@ -11,20 +11,17 @@ import { Plus, Trash2, Save, Pencil, X, RefreshCw, AlertCircle, Info } from 'luc
 import { useToast } from '../../context/ToastContext';
 // Direct import (barrel re-export gotcha for newly-added services).
 import { hsnApi, type HsnRate } from '../../services/api/hsn';
-import { loadHsnRates } from '../../constants/gstRuntime';
+import { categoryHintOptions, loadHsnRates } from '../../constants/gstRuntime';
 
-// NOTE: these are the backend's REPORTING-HINT buckets (gst_rates.py
-// _CATEGORY_HINT normalized spellings), NOT the browse vocabulary in
-// utils/categoryNormalize.ts — resolve_gst_rate matches the stored hint
-// against THIS vocabulary, so swapping in CATEGORY_BROWSE_OPTIONS values
-// (OPTICAL_LENS / SUNGLASS / ...) would make master overrides silently no-op.
-const CATEGORY_HINTS = [
-  'CONTACT_LENS',
-  // Owner 2026-07-05 CL split: colour/cosmetic lenses are their own bucket.
-  'COLORED_CONTACT_LENS',
-  'LENS', 'FRAME', 'SPECTACLE', 'SUNGLASSES',
-  'WATCH', 'SMARTWATCH', 'ACCESSORIES', 'SERVICE', 'HEARING_AID',
-];
+// The Category selects offer the backend's REPORTING-HINT vocabulary
+// (gst_rates.py _CATEGORY_HINT distinct values), SERVER-FED via
+// categoryHintOptions() -- the hand-typed list that used to sit here was one
+// hint-rename away from making master overrides silently no-op. A row's
+// current hint stays selectable even if the server no longer offers it.
+const hintOpts = (current?: string): string[] => {
+  const opts = categoryHintOptions();
+  return current && !opts.includes(current) ? [current, ...opts] : opts;
+};
 
 interface DraftRow {
   description: string;
@@ -59,7 +56,13 @@ export function HsnRatesSection() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  // Second state bump: the Category select options arrive with the server's
+  // hint map (categoryHintOptions), so re-render once loadHsnRates settles.
+  const [, setHintsLoaded] = useState(0);
+  useEffect(() => {
+    load();
+    loadHsnRates().then(() => setHintsLoaded((n) => n + 1));
+  }, []);
 
   const startEdit = (row: HsnRate) => {
     setEditingId(row.hsn_id);
@@ -187,7 +190,7 @@ export function HsnRatesSection() {
               <select className="input-field" value={newRow.category_hint}
                 onChange={(e) => setNewRow({ ...newRow, category_hint: e.target.value })}>
                 <option value="">—</option>
-                {CATEGORY_HINTS.map((c) => <option key={c} value={c}>{c}</option>)}
+                {hintOpts(newRow.category_hint).map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
             <div>
@@ -238,7 +241,7 @@ export function HsnRatesSection() {
                           <select className="input-field" value={draft.category_hint}
                             onChange={(e) => setDraft({ ...draft, category_hint: e.target.value })}>
                             <option value="">—</option>
-                            {CATEGORY_HINTS.map((c) => <option key={c} value={c}>{c}</option>)}
+                            {hintOpts(draft.category_hint).map((c) => <option key={c} value={c}>{c}</option>)}
                           </select>
                         ) : (row.category_hint || '—')}
                       </td>

@@ -72,12 +72,14 @@ export interface UserData {
   permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
 }
 
+// NO hsnCode/gstRate here: HSN + GST are SERVER-FED (constants/gstRuntime reads
+// GET /products/gst-rates). This table used to carry hand-typed copies that
+// contradicted the server on 7 of 13 rows and were rendered as fact on the
+// Settings screen.
 export interface Category {
   code: string;
   name: string;
   shortName: string;
-  hsnCode: string;
-  gstRate: number;
   attributes: string[];
   isActive: boolean;
 }
@@ -179,19 +181,20 @@ export const getHighestRoleLevel = (roles: string[]): number => {
   return Math.max(...roles.map(r => ROLE_HIERARCHY[r] || 0));
 };
 
-// Category definitions
+// Category definitions (codes, names, attributes ONLY -- HSN/GST come off the
+// server per the interface note above).
 export const CATEGORY_DEFINITIONS: Category[] = [
-  { code: 'FR', name: 'Frame', shortName: 'Spectacles', hsnCode: '900311', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
-  { code: 'SG', name: 'Sunglass', shortName: 'Sunglasses', hsnCode: '900410', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
-  { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', hsnCode: '90013000', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
-  { code: 'LS', name: 'Optical Lens', shortName: 'Lens', hsnCode: '900150', gstRate: 5, attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
-  { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', hsnCode: '900490', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
-  { code: 'WT', name: 'Wrist Watch', shortName: 'Watch', hsnCode: '9101', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'beltColour', 'dialSize', 'beltSize', 'watchCategory'], isActive: true },
-  { code: 'CK', name: 'Clock', shortName: 'Clock', hsnCode: '9105', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'bodyColour', 'dialSize', 'batterySize', 'clockCategory'], isActive: true },
-  { code: 'HA', name: 'Hearing Aid', shortName: 'Hearing Aid', hsnCode: '9021', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'serialNo', 'machineCapacity', 'machineType'], isActive: true },
-  { code: 'SMTSG', name: 'Smart Sunglass', shortName: 'Smart Sunglasses', hsnCode: '900490', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
-  { code: 'SMTFR', name: 'Smart Glasses', shortName: 'Smart Glasses', hsnCode: '900490', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
-  { code: 'SMTWT', name: 'Smart Watch', shortName: 'Smart Watch', hsnCode: '8517', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'bodyColour', 'beltColour', 'dialSize', 'beltSize', 'yearOfLaunch'], isActive: true },
-  { code: 'ACC', name: 'Accessories', shortName: 'Accessories', hsnCode: '9004', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'size', 'pack', 'expiryDate', 'addOn1'], isActive: true },
-  { code: 'SVC', name: 'Service', shortName: 'Repair/Service', hsnCode: '9987', gstRate: 18, attributes: ['serviceName', 'serviceType', 'estimatedTime'], isActive: true },
+  { code: 'FR', name: 'Frame', shortName: 'Spectacles', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
+  { code: 'SG', name: 'Sunglass', shortName: 'Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
+  { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
+  { code: 'LS', name: 'Optical Lens', shortName: 'Lens', attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
+  { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
+  { code: 'WT', name: 'Wrist Watch', shortName: 'Watch', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'beltColour', 'dialSize', 'beltSize', 'watchCategory'], isActive: true },
+  { code: 'CK', name: 'Clock', shortName: 'Clock', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'bodyColour', 'dialSize', 'batterySize', 'clockCategory'], isActive: true },
+  { code: 'HA', name: 'Hearing Aid', shortName: 'Hearing Aid', attributes: ['brandName', 'subbrand', 'modelNo', 'serialNo', 'machineCapacity', 'machineType'], isActive: true },
+  { code: 'SMTSG', name: 'Smart Sunglass', shortName: 'Smart Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
+  { code: 'SMTFR', name: 'Smart Glasses', shortName: 'Smart Glasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
+  { code: 'SMTWT', name: 'Smart Watch', shortName: 'Smart Watch', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'bodyColour', 'beltColour', 'dialSize', 'beltSize', 'yearOfLaunch'], isActive: true },
+  { code: 'ACC', name: 'Accessories', shortName: 'Accessories', attributes: ['brandName', 'subbrand', 'modelNo', 'size', 'pack', 'expiryDate', 'addOn1'], isActive: true },
+  { code: 'SVC', name: 'Service', shortName: 'Repair/Service', attributes: ['serviceName', 'serviceType', 'estimatedTime'], isActive: true },
 ];
