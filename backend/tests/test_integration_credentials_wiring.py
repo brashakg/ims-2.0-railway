@@ -436,7 +436,17 @@ def test_every_screen_reports_the_gate_the_send_path_actually_uses(monkeypatch):
     # Every input on which two hand-written parses of this env var can split:
     # padding (a .strip() one side has and the other does not) and an empty
     # value (an `or "off"` default one side applies and the other does not).
-    for raw in ("off", "live", "LIVE", " live", "live ", "	live", "", "test", " test "):
+    for raw in (
+        "off",
+        "live",
+        "LIVE",
+        " live",
+        "live ",
+        "\tlive",
+        "",
+        "test",
+        " test ",
+    ):
         _arm_gate(monkeypatch, raw)
         gate = providers.dispatch_mode()
         readouts = {
