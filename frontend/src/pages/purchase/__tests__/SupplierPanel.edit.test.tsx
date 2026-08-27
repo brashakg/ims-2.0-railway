@@ -158,6 +158,31 @@ describe('SupplierPanel GST treatment chip', () => {
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
   });
 
+  it('renders NO tax verdict for a vendor GSTIN whose state code the server does not know', async () => {
+    // "88" parses as two digits but is not an Indian GST state. The engine's
+    // parser (org_validation) reads NO state off such a GSTIN, so the card
+    // must not print "Other state - IGST" (88 != 20) over a state that does
+    // not exist. Honest fallback: the unknown chip.
+    const junk: Supplier = { ...base, stateCode: undefined, state: '', gstNumber: '88AABCU9603R1ZF' };
+    render(<SupplierPanel suppliers={[junk]} />);
+    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
+  });
+
+  it("renders NO tax verdict when the buying store's own GSTIN carries an unknown state code", async () => {
+    // Same gate on the buyer side: a store GSTIN with a junk prefix must not
+    // anchor an IGST/CGST claim against a real vendor state.
+    storeInfo.current = {
+      storeName: 'X', address: '', city: '', state: '', pincode: '',
+      gstin: '99AABCU9603R1ZF',
+    };
+    render(<SupplierPanel suppliers={[base]} />);
+    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
+  });
+
   it('shows no tax chip at all for an unregistered vendor', () => {
     // No GSTIN means no GST on the purchase -- neither split applies, and the
     // GSTIN line already says "Unregistered".

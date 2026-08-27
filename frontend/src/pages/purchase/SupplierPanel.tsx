@@ -77,13 +77,24 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   // The buying store's own GST REGISTRATION decides how a purchase from each
   // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
   const storeInfo = useStorePrintInfo();
-  const buyerStateCode = gstinStateCode(storeInfo?.gstin);
   const stateNames = useGstStateCodes();
+  // A two-digit prefix the server's state list does not contain is not a
+  // state. The engine's parser (org_validation.validate_gstin, behind
+  // determine_place_of_supply) rejects such a GSTIN and reads NO state off it,
+  // so a card that keeps the raw digits prints a tax verdict ("Other state -
+  // IGST") over a pair the engine never established. Unknown code -> '' ->
+  // taxSplit says 'unknown'. Same stateListLoaded idiom as
+  // SupplierFormModal.handleSave: until the list arrives there is nothing to
+  // check against, so the raw read stands for that first paint.
+  const stateListLoaded = Object.keys(stateNames).length > 0;
+  const knownStateCode = (code: string): string =>
+    stateListLoaded && !stateNames[code] ? '' : code;
+  const buyerStateCode = knownStateCode(gstinStateCode(storeInfo?.gstin));
 
   return (
     <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
       {suppliers.map((supplier) => {
-        const vendorStateCode = gstinStateCode(supplier.gstNumber);
+        const vendorStateCode = knownStateCode(gstinStateCode(supplier.gstNumber));
         // Display only -- an unregistered vendor still has an address to show.
         const vendorState =
           supplier.state || stateNames[supplier.stateCode || vendorStateCode] || '';
