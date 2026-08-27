@@ -51,6 +51,11 @@ from api.services import smartglass_listing as sgl  # noqa: E402
 # the OPTIONAL shape in preference to the REQUIRED model_name and the suite
 # passed anyway. `Rectangle` is live vocabulary too (the Blayzer Optics models
 # carry shape_rectangle), and it is what makes the two fields separable.
+#
+# One shared value REMAINS, because the live product genuinely answers "Yes"
+# twice: charging_case and prescription_ready. This dict cannot say which of
+# the two a builder read -- test_charging_case_and_prescription_are_answered_
+# by_their_own_fields splits them, and is the ONLY test that can.
 FULL_ATTRS = {
     "brand_name": "Ray-Ban",
     "subbrand": "Meta",
@@ -412,6 +417,25 @@ def test_yes_no_fields_read_as_yes_no_not_as_text():
     assert not any("prescription" in b.lower() for b in bullets)
 
 
+def test_charging_case_and_prescription_are_answered_by_their_own_fields():
+    """FULL_ATTRS answers "Yes" to BOTH yes/no questions (the live RW4006
+    genuinely does), and the test above answers "No" to both -- so a builder
+    reading the WRONG field was invisible: _bullet_battery reading
+    prescription_ready, and _bullet_prescription reading charging_case, each
+    survived the whole suite. A fixture value shared by two fields cannot say
+    which field the code read; split answers can, so both splits are pinned."""
+    case_no_rx = dict(FULL_ATTRS, charging_case="Yes", prescription_ready="No")
+    bullets = sgl.build_spec_bullets(case_no_rx)
+    assert "Up to ~4 hours per charge, plus a portable charging case" in bullets
+    assert not any("prescription" in b.lower() for b in bullets)
+
+    rx_no_case = dict(FULL_ATTRS, charging_case="No", prescription_ready="Yes")
+    bullets = sgl.build_spec_bullets(rx_no_case)
+    assert "Up to ~4 hours per charge" in bullets  # exact bullet: no case clause
+    assert not any("charging case" in b.lower() for b in bullets)
+    assert "Prescription-ready (single-vision and progressive lenses)" in bullets
+
+
 def test_html_is_escaped():
     html = sgl.build_description_html(
         {"brand_name": "<script>x</script>", "voice_assistant": "A & B"}
@@ -640,8 +664,10 @@ def _smartglass_create(**over):
         brand="Ray-Ban",
         model="RW4006",
         attributes=dict(FULL_ATTRS),
+        # Different on purpose: two fields sharing one value is the fixture
+        # trap that hid the charging_case/prescription_ready mutants.
         mrp=41900,
-        offer_price=41900,
+        offer_price=37900,
     )
     base.update(over)
     return pr.ProductCreate(**base)
