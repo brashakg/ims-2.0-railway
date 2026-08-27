@@ -25,6 +25,8 @@ export interface Supplier {
   address: string;
   city: string;
   state: string;
+  /** 2-digit GST state code. Derived from the GSTIN by the backend. */
+  stateCode?: string;
   gstNumber: string;
   paymentTerms: number; // days
   creditLimit: number;
