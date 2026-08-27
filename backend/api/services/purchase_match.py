@@ -731,3 +731,61 @@ def over_billed_products(
                 }
             )
     return out
+
+
+def billing_claim_thresholds(
+    grn: Optional[dict],
+    proposed_lines: Optional[List[dict]],
+) -> Optional[Dict[str, dict]]:
+    """Per-product ceilings for an ATOMIC claim of a receipt's billable units.
+
+    :func:`over_billed_products` is a read-then-decide check: two bookings of
+    the same receipt in the same instant both read the same prior-bill set,
+    both pass, and both insert. This turns the same rule into a value a guarded
+    single-document update can test, so only one of them can win.
+
+    For each product the invoice bills, returns:
+      {product_id: {"qty": <units this bill takes>,
+                    "max_prior": <largest already-claimed qty that still fits>}}
+
+    ``max_prior`` is ``accepted_qty - qty`` widened by the same float-noise
+    epsilon the cap uses, so an exact-balance part bill (12 then 8 of 20) is
+    never refused by rounding. The caller turns each entry into a filter clause
+    -- "the counter is missing, or no greater than max_prior" -- and $incs by
+    ``qty`` in the same update.
+
+    Returns None when the bill overshoots the receipt on its OWN (a negative
+    ceiling): there is no prior quantity that would make it fit, so the claim
+    must be refused outright rather than expressed as a filter. Returns {} when
+    there is nothing to claim (no keyed products, or a receipt we cannot key --
+    same fail-open-on-unknowable rule as over_billed_products).
+    """
+    accepted = _grn_accepted_by_product(grn)
+    if not accepted:
+        return {}
+    proposed = _invoice_by_product(proposed_lines)
+
+    out: Dict[str, dict] = {}
+    for pid, line in proposed.items():
+        qty = _f(line.get("invoiced_qty"))
+        if qty <= 0:
+            continue
+        max_prior = round(_f(accepted.get(pid, 0)) - qty + _QTY_EPS, 6)
+        if max_prior < 0:
+            return None
+        out[pid] = {"qty": qty, "max_prior": max_prior}
+    return out
+
+
+def billed_qty_by_product(bill_lines: Optional[List[dict]]) -> Dict[str, float]:
+    """{product_id: units} rolled up from bill lines -- the quantity a set of
+    already-booked bills has consumed from a receipt.
+
+    Same keying and coercion as the cap itself (lines with no product_id carry
+    no receivable quantity and are skipped), so the atomic claim can baseline
+    its counter from exactly the totals the cap measured.
+    """
+    return {
+        pid: _f(line.get("invoiced_qty"))
+        for pid, line in _invoice_by_product(bill_lines).items()
+    }
