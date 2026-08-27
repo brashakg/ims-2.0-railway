@@ -223,20 +223,30 @@ def _load_linked_dcs(db, dc_ids):
     return docs
 
 
-def _load_standard_grn(grn_id):
-    """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED before it can be
-    billed -- the mirror of the DC guard in `_load_linked_dcs`.
+def _load_standard_grn(grn_id, expected_vendor_id=None):
+    """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED -- and that it
+    belongs to the vendor being billed -- before it can be billed. The mirror of
+    the DC guards in `_load_linked_dcs` + `_assert_dcs_single_vendor_store`.
 
     A GRN only mints stock at accept time, so booking a purchase invoice against
     a PENDING / PARTIALLY_ACCEPTED GRN would record a payable (and its ITC) for
     goods not yet accepted into stock. The frontend already filters to ACCEPTED
     GRNs; this is the server-side enforcement.
 
+    ``expected_vendor_id`` (the vendor the bill is being booked against) is
+    cross-checked against the GRN's own vendor_id -- WITHOUT it, a receipt from
+    vendor B could be billed under vendor A: A's payable rises, A's GSTIN claims
+    the ITC, and B's goods stay unbilled. The DC path has blocked exactly this
+    since F9 P3 (`_assert_dcs_single_vendor_store` -> 409 mixed_vendors); the
+    single-GRN branch had drifted without it. Same verdict, same 409 shape. A
+    GRN with no vendor_id (legacy row) is not checked, matching the DC guard.
+
     Loads via the GRN repository (the same path draft/match already use), so a
-    caller need not hold the doc. Raises HTTPException (404 / 400) if the GRN is
-    missing or its status is not ACCEPTED. A Delivery Challan is out of scope here
-    (it is billed via the /from-dcs consolidated path) -> 400. Fail-soft only when
-    there is no GRN repository / no DB (returns None).
+    caller need not hold the doc. Raises HTTPException (404 / 400 / 409) if the
+    GRN is missing, its status is not ACCEPTED, or it belongs to another vendor.
+    A Delivery Challan is out of scope here (it is billed via the /from-dcs
+    consolidated path) -> 400. Fail-soft only when there is no GRN repository /
+    no DB (returns None).
     """
     if not grn_id:
         return None
@@ -263,7 +273,162 @@ def _load_standard_grn(grn_id):
                 f"goods receipt first, then raise the purchase invoice."
             ),
         )
+    grn_vendor_id = doc.get("vendor_id")
+    if expected_vendor_id and grn_vendor_id and grn_vendor_id != expected_vendor_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_vendor_mismatch",
+                "message": (
+                    f"GRN {grn_id} was received from vendor {grn_vendor_id}, but "
+                    f"this invoice is being booked against vendor "
+                    f"{expected_vendor_id}. A goods receipt can only be billed "
+                    f"by the vendor that supplied it."
+                ),
+                "grn_vendor_id": grn_vendor_id,
+                "invoice_vendor_id": expected_vendor_id,
+            },
+        )
     return doc
+
+
+def _assert_grn_not_over_billed(db, grn, proposed_lines):
+    """LEAK GUARD: a goods receipt may be billed in PARTS, but never for more
+    units than it actually accepted.
+
+    Without this, the single-GRN branch had no "already invoiced" control at all
+    -- one 20-unit receipt could be billed three times over (three 201s, all
+    match_status MATCHED, exceptions []) and the AP payable simply tripled. The
+    DC branch has been safe since F9 (a DC carries dc_matched and 409s on the
+    second attempt); this branch had drifted without an equivalent.
+
+    Deliberately NOT a binary "this GRN is already invoiced" refusal: see
+    purchase_match.over_billed_products for why part-billing must keep working.
+    The rule enforced is the one the rest of the purchase flow already models --
+    cumulative billed qty must not EXCEED accepted qty, per product.
+
+    Reads every bill already linked to this grn_id and adds this invoice's
+    computed lines on top. Raises 409 (grn_over_billed) naming each offending
+    product. A DB read failure is a LOUD 503, not a silent pass: unlike the
+    duplicate-invoice-number guard there is no unique index behind this one, so
+    failing soft here would simply re-open the leak.
+
+    RESIDUAL RACE (accepted): two bookings of the same GRN in the same instant
+    both pass this pre-check and both insert. Closing that needs a claimed
+    counter on the GRN (the DC path's guarded find_one_and_update shape); AP
+    booking is a deliberate, low-frequency single-accountant action, so the
+    pre-check is proportionate. The over-bill still surfaces in the PO-variance
+    report, which prompts a debit note for exactly this overage.
+    """
+    if db is None or not grn:
+        return
+    grn_id = grn.get("grn_id")
+    if not grn_id:
+        return
+    try:
+        prior_bills = list(
+            db.get_collection("vendor_bills").find(
+                {"grn_id": grn_id},
+                {"_id": 0, "bill_id": 1, "bill_number": 1, "lines": 1},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[AP] over-bill guard could not read prior bills for GRN %s: %s",
+            grn_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify how much of this goods receipt has already "
+                "been billed. The invoice was NOT booked -- retry shortly."
+            ),
+        ) from exc
+
+    prior_lines = []
+    for bill in prior_bills:
+        prior_lines.extend(bill.get("lines") or [])
+    over = pmatch.over_billed_products(grn, prior_lines, proposed_lines)
+    if not over:
+        return
+
+    already_billed_by = [b.get("bill_number") or b.get("bill_id") for b in prior_bills]
+    detail_lines = "; ".join(
+        f"{o['product_id']}: receipt accepted {o['accepted_qty']:g}, already "
+        f"billed {o['already_billed_qty']:g}, this invoice {o['this_bill_qty']:g} "
+        f"(over by {o['over_by']:g})"
+        for o in over
+    )
+    logger.error(
+        "[AP] over-bill BLOCKED on GRN %s (already billed by %s): %s",
+        grn_id,
+        ",".join(str(b) for b in already_billed_by) or "-",
+        detail_lines,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "grn_over_billed",
+            "message": (
+                f"This invoice would bill more units than goods receipt "
+                f"{grn_id} accepted -- {detail_lines}. Bill only the balance "
+                f"still unbilled on this receipt, or raise a fresh receipt for "
+                f"the extra goods."
+            ),
+            "grn_id": grn_id,
+            "already_billed_by": already_billed_by,
+            "products": over,
+        },
+    )
+
+
+def assert_grn_billable_header_only(db, grn_id, vendor_id):
+    """The same two guards for the HEADER-ONLY vendor-bill door
+    (vendors.create_vendor_bill), which accepts a grn_id but carries no lines.
+
+    With no lines there is no per-product quantity to apportion, so the
+    cumulative test above cannot run -- the conservative equivalent is that a
+    receipt already carrying a bill may not take a second, blind one. (Split
+    billing stays available through the first-class purchase-invoice door, which
+    does carry lines and is quantity-checked.)
+    """
+    grn = _load_standard_grn(grn_id, expected_vendor_id=vendor_id)
+    if grn is None or db is None:
+        return
+    try:
+        existing = db.get_collection("vendor_bills").find_one(
+            {"grn_id": grn_id}, {"_id": 0, "bill_id": 1, "bill_number": 1}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[AP] header-bill GRN guard could not read prior bills for %s: %s",
+            grn_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify whether this goods receipt has already been "
+                "billed. The bill was NOT recorded -- retry shortly."
+            ),
+        ) from exc
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grn_already_billed",
+                "message": (
+                    f"Goods receipt {grn_id} is already billed by "
+                    f"{existing.get('bill_number') or existing.get('bill_id')}. "
+                    f"To bill the balance of a part-delivered receipt, use the "
+                    f"purchase-invoice screen (it checks quantities line by "
+                    f"line); a header-only bill cannot prove what is left."
+                ),
+                "grn_id": grn_id,
+                "billed_by": existing.get("bill_number") or existing.get("bill_id"),
+            },
+        )
 
 
 def _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=None):
@@ -592,10 +757,13 @@ async def create_purchase_invoice(
     # F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed -- a
     # GRN mints stock only at accept time, so booking against a PENDING /
     # PARTIALLY_ACCEPTED GRN records a payable + ITC for goods not yet received
-    # into stock. DC-consolidated invoices validate each linked DC separately
-    # below (via _load_linked_dcs), so the single-GRN guard skips them.
+    # into stock. It must also belong to THIS vendor (expected_vendor_id), the
+    # single-GRN mirror of the DC path's mixed_vendors 409. DC-consolidated
+    # invoices validate each linked DC separately below (via _load_linked_dcs),
+    # so the single-GRN guard skips them.
+    grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
-        _load_standard_grn(body.grn_id)
+        grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
@@ -641,6 +809,12 @@ async def create_purchase_invoice(
                 f"computed taxable+tax {computed['total']}."
             ),
         )
+
+    # A goods receipt may be billed in PARTS, never for more units than it
+    # accepted. Runs on the computed lines (so it sees exactly what is about to
+    # be booked) and BEFORE any write. Skipped when there is no resolvable GRN.
+    if grn_doc is not None:
+        _assert_grn_not_over_billed(db, grn_doc, computed["lines"])
 
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(body.invoice_date, credit_days)
@@ -927,6 +1101,27 @@ async def create_purchase_invoice(
 # ---------------------------------------------------------------------------
 
 
+def _stamp_bill_actor_names(db, bills: list) -> None:
+    """Add ``*_name`` beside the raw user ids the AP screens print.
+
+    Two of them reach the owner as prose: the override banner
+    ("Override approved by ...", exception_override.approved_by) and the recon
+    console's tick tooltips / last-updated line (recon.<flag>_by,
+    recon.last_updated_by). Every writer stamps a user id ("user-superadmin"),
+    never a name, so those lines used to read the id straight out. The name was
+    in the users collection all along -- nobody looked it up.
+
+    In place, batched (one users read per id-set), fail-soft: an id that no
+    longer resolves gets no ``_name`` and the screen falls back to the id.
+    """
+    from ..services.name_resolver import stamp_user_names
+
+    from .purchase_recon import RECON_ACTOR_FIELDS
+
+    stamp_user_names(db, [b.get("exception_override") for b in bills], ("approved_by",))
+    stamp_user_names(db, [b.get("recon") for b in bills], RECON_ACTOR_FIELDS)
+
+
 @router.get("")
 @router.get("/")
 async def list_purchase_invoices(
@@ -961,6 +1156,7 @@ async def list_purchase_invoices(
     rows.sort(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
+    _stamp_bill_actor_names(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
 
 
@@ -1403,10 +1599,14 @@ async def approve_invoice_exception(
     except Exception:
         pass
 
+    # Name the approver on a COPY, after the write: the stored override must
+    # keep the raw id, so a renamed user is never frozen into the audit trail.
+    echo = dict(override["exception_override"])
+    _stamp_bill_actor_names(db, [{"exception_override": echo}])
     return {
         "invoice_id": invoice_id,
         "match_status": pmatch.MATCH_OVERRIDE,
-        "exception_override": override["exception_override"],
+        "exception_override": echo,
     }
 
 
@@ -1856,4 +2056,5 @@ async def get_purchase_invoice(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    _stamp_bill_actor_names(db, [doc])
     return doc

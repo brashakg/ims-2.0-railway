@@ -19,21 +19,30 @@ export interface ReconBlock {
   entered_tally: boolean;
   filed_gst: boolean;
   payment_settled: boolean;
-  // Per-flag audit stamps (present only when the flag is true)
+  // Per-flag audit stamps (present only when the flag is true). Every *_by
+  // holds a raw user id; the backend resolves it to a person and returns the
+  // display name beside it as *_by_name. That name is ABSENT when the id no
+  // longer matches a user, so always render `*_by_name || *_by`.
   reconciled_by?: string;
+  reconciled_by_name?: string;
   reconciled_at?: string;
   entered_tally_by?: string;
+  entered_tally_by_name?: string;
   entered_tally_at?: string;
   filed_gst_by?: string;
+  filed_gst_by_name?: string;
   filed_gst_at?: string;
   payment_settled_by?: string;
+  payment_settled_by_name?: string;
   payment_settled_at?: string;
   // Optional free-text note
   note?: string;
   note_by?: string;
+  note_by_name?: string;
   note_at?: string;
   // Last-touch audit stamp
   last_updated_by?: string;
+  last_updated_by_name?: string;
   last_updated_at?: string;
 }
 

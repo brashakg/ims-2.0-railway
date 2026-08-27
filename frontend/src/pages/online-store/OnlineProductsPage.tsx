@@ -39,6 +39,7 @@ import {
   Search,
   AlertTriangle,
   Send,
+  EyeOff,
 } from 'lucide-react';
 import {
   catalogProductsApi,
@@ -268,17 +269,22 @@ export default function OnlineProductsPage() {
     load();
   }, [load]);
 
-  // Single-product push. DARK by default: unless the owner has armed the
-  // triple-gate on the server this is a SIMULATED dry-run and nothing reaches
-  // the storefront — formatPushResult stamps SIMULATED vs LIVE on the toast so
-  // it can never be mistaken, and the banner above the list shows the current
-  // posture BEFORE the click.
+  // Single-product push. ONE PRESS, GOES LIVE (owner ruling 2026-08-25): when
+  // the gates are armed this PUBLISHES — the product is in front of customers on
+  // bettervision.in immediately, not staged for a second press. DARK by default:
+  // with the triple-gate off it is a SIMULATED dry-run and nothing reaches the
+  // storefront — formatPushResult stamps SIMULATED vs LIVE on the toast so it can
+  // never be mistaken, and the banner above the list shows the posture BEFORE the
+  // click. A product with no photograph is REFUSED (never published bare).
   const pushRow = async (row: ProductRow) => {
     if (!canPush || pushingId) return;
     const ok = window.confirm(
-      `Send "${row.title}" to the website?\n\n` +
+      `Publish "${row.title}" to the website?\n\n` +
+        'When the live gates are armed this puts the product IN FRONT OF CUSTOMERS on ' +
+        'bettervision.in immediately. A product with no photograph is refused. ' +
+        'You can pull it back with "Take off website".\n\n' +
         'If the live gates are off this runs as a dry-run (SIMULATED) and nothing reaches ' +
-        'the storefront. When the gates are armed this writes to the live website.',
+        'the storefront.',
     );
     if (!ok) return;
     setPushingId(row.product_id);
@@ -294,6 +300,35 @@ export default function OnlineProductsPage() {
     } catch (e: any) {
       toast.error(
         `${row.title}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+      );
+    } finally {
+      setPushingId(null);
+    }
+  };
+
+  // TAKE-DOWN. The reversibility that makes one-press publishing survivable:
+  // pull ONE bad listing straight back off bettervision.in. NOT a delete — the
+  // Shopify product and its id are kept, so "Send to website" puts it back on
+  // the SAME listing (a lost id would mint a duplicate live product).
+  const takeDownRow = async (row: ProductRow) => {
+    if (!canPush || pushingId) return;
+    const ok = window.confirm(
+      `Take "${row.title}" OFF the website?\n\n` +
+        'It stops being visible to customers on bettervision.in. Nothing is deleted — ' +
+        'press "Send to website" to put it straight back.',
+    );
+    if (!ok) return;
+    setPushingId(row.product_id);
+    try {
+      const res = await pushApi.takeDownProduct(row.product_id);
+      const msg = formatPushResult(row.title, res);
+      if (res.ok) toast.success(msg);
+      else toast.error(msg);
+      load();
+      bannerRef.current?.refresh();
+    } catch (e: any) {
+      toast.error(
+        `${row.title}: take-down failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
       );
     } finally {
       setPushingId(null);
@@ -469,6 +504,22 @@ export default function OnlineProductsPage() {
                                 <Send className="w-3 h-3" />
                               )}
                               Send to website
+                            </button>
+                          )}
+                          {canPush && r.shopify_mapped && (
+                            <button
+                              type="button"
+                              onClick={() => takeDownRow(r)}
+                              disabled={pushingId === r.product_id}
+                              className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+                              title="Pull this product off the website. Nothing is deleted — you can send it back."
+                            >
+                              {pushingId === r.product_id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <EyeOff className="w-3 h-3" />
+                              )}
+                              Take off website
                             </button>
                           )}
                         </div>

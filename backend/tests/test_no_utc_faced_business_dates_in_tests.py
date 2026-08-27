@@ -68,7 +68,7 @@ WHAT THIS GUARD HONESTLY CANNOT DO
    A CI job that runs the suite once at a shifted clock would close (2)
    properly; this guard is the cheap tripwire, not a substitute for it.
 3. ``[:10]`` is a blunt arm: it also matches a uuid-hex slice, which is why
-   three such lines sit in ALLOWED. Narrowing it would lose ``opened_at[:10]``
+   four such lines sit in ALLOWED. Narrowing it would lose ``opened_at[:10]``
    -- the exact line that started this.
 
 No emoji (Windows cp1252).
@@ -152,6 +152,10 @@ ALLOWED = {
     # mints a barcode per seeded unit. Arrived with the suite itself and was
     # never allow-listed, so `test (3.10)` has been red on main since.
     ("test_stock_count_lifecycle.py", 'bc = f"BC-{uuid.uuid4().hex[:10]}"'): _HEX,
+    (
+        "test_stock_count_lifecycle.py",
+        'bc = f"BC-{uuid.uuid4().hex[:10]}"',
+    ): _HEX,
     (
         "test_clinical_rx_list_range.py",
         'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
@@ -291,17 +295,6 @@ ALLOWED = {
         "reads back exactly what the writer wrote. Whether a clinical Rx date "
         "ought to be the IST business day is a production question, not a "
         "fixture one."
-    ),
-    ("test_vouchers.py", "yesterday = date.today() - timedelta(days=1)"): (
-        "SAME FRAME AS PRODUCTION: vouchers.py:128 `_today_iso()` is "
-        "`date.today()`. An expiry a day back is expired in either frame."
-    ),
-    ("test_vouchers.py", "v = await _issue(amount=500.0, expiry_date=date.today())"): (
-        "SAME FRAME AS PRODUCTION (vouchers.py:128), and this is the "
-        "end-of-day boundary case, so it records a LIVE BUG-104 residue: "
-        "because `_today_iso()` is the UTC day, a gift card expiring TODAY "
-        "reads as EXPIRED between 00:00 and 05:30 IST. Move `_today_iso` to "
-        "the IST day and this fixture moves with it."
     ),
     # -- neither a seed nor a query ------------------------------------------
     (

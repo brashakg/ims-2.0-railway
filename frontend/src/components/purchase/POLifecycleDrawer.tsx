@@ -56,6 +56,10 @@ export interface POTimelineEvent {
   at?: string | null;
   ref?: string | null;
   detail?: string | null;
+  /** WHO did it -- a person's display name, or the raw stamped user id when
+   *  that id no longer resolves to a user. Absent when the event carries no
+   *  actor at all; the drawer then names nobody rather than guessing. */
+  by?: string | null;
 }
 
 export interface POTimelineGRN {
@@ -347,9 +351,9 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                               <p className="text-xs text-gray-500 whitespace-nowrap">{fmtDateTime(ev.at)}</p>
                             )}
                           </div>
-                          {(ev.ref || ev.detail) && (
+                          {(ev.ref || ev.detail || ev.by) && (
                             <p className="text-xs text-gray-500 mt-0.5">
-                              {[ev.ref, ev.detail].filter(Boolean).join(' — ')}
+                              {[ev.ref, ev.detail, ev.by ? `by ${ev.by}` : null].filter(Boolean).join(' — ')}
                             </p>
                           )}
                         </li>

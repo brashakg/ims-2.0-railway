@@ -81,6 +81,10 @@ def _force_live(monkeypatch, graphql_response):
         lambda db, storefront_id="BV": {"shop_url": "test.myshopify.com",
                     "access_token": "shpat_test", "source": "vault"},
     )
+    # The press PUBLISHES now, and a press that could not publish leaves the
+    # row queued on purpose (_requeue_unpublished). Pin the Online Store
+    # publication so these fixtures exercise a press that actually went live.
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _SpyGraphQL(graphql_response)
     monkeypatch.setattr(shopify_push, "_graphql", spy)
     return spy
@@ -186,7 +190,7 @@ def test_mode_dark_when_creds_missing_even_if_gates_on(monkeypatch):
 def test_push_product_simulated_no_network(monkeypatch, reason):
     _force_dark(monkeypatch, reason)
     product = {"id": "P1", "title": "Ray-Ban Aviator", "brand": "Ray-Ban",
-               "ecom": {"status": "PUBLISHED", "handle": "rayban-aviator"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rayban-aviator"}}
     res = _run(shopify_push.push_product(_EngineDB(), product, []))
     assert res.mode == "SIMULATED"
     assert res.ok is True            # a dry-run is a success
@@ -250,21 +254,35 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     })
     db = _EngineDB()
     db["catalog_products"].insert_one(
-        {"id": "P1", "title": "RB", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+        {"id": "P1", "title": "RB", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
     )
     product = db["catalog_products"].find_one({"id": "P1"})
 
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.mode == "LIVE" and res.ok is True
+    assert res.mode == "LIVE"
+    # This fixture carries NO price, so the publish is withheld -- and a press
+    # that put nothing in front of a customer must say so (it is not a Shopify
+    # breakage either, hence its own reason rather than a bare failure).
+    assert res.ok is False and res.reason == "publish_withheld"
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
-    assert len(spy.calls) == 1  # the network boundary WAS hit (once)
+    # The network boundary WAS hit: the product, then its photograph (the
+    # photo rides the SAME press since 2026-08-25).
+    assert len(spy.calls) == 2
+    assert "imsProductCreate(" in spy.calls[0]["query"]
+    assert "productCreateMedia" in spy.calls[1]["query"]
 
-    # Idempotency write-back: the gid is now on the doc + dirty cleared.
+    # Idempotency write-back: the gid is now on the doc.
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_product_id"] == "gid://shopify/Product/111"
-    assert saved["ecom"]["locally_modified"] is False
     assert "last_pushed_at" in saved["ecom"]
+    # ...and the row is STILL QUEUED, because this fixture carries no price:
+    # publish is withheld for an unpriced product (a 0.00 listing is worse
+    # than no listing), and a press that reached Shopify without making the
+    # product VISIBLE must not de-queue it -- otherwise the product sits on
+    # Shopify, invisible, with the screen reporting nothing pending.
+    # (The drain-on-success half is test_online_push_dirty_flag.py.)
+    assert saved["ecom"]["locally_modified"] is True
 
 
 def test_push_product_live_repush_updates_not_duplicates(monkeypatch):
@@ -278,7 +296,7 @@ def test_push_product_live_repush_updates_not_duplicates(monkeypatch):
     })
     db = _EngineDB()
     product = {"id": "P1", "title": "RB",
-               "ecom": {"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/111"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/111"}}
 
     res = _run(shopify_push.push_product(db, product, []))
     assert res.action == "update"
@@ -358,7 +376,7 @@ def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
     db = _EngineDB()
     # Parent product must already carry a Shopify gid (media attaches to a product).
     db["catalog_products"].insert_one(
-        {"id": "P1", "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
     )
     db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
@@ -377,7 +395,7 @@ def test_push_image_live_skips_when_parent_not_on_shopify(monkeypatch):
     media call (you must push the product first)."""
     spy = _force_live(monkeypatch, {"data": {"productCreateMedia": {"media": [], "mediaUserErrors": []}}})
     db = _EngineDB()
-    db["catalog_products"].insert_one({"id": "P1", "ecom": {}})  # no shopify_product_id
+    db["catalog_products"].insert_one({"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {}})  # no shopify_product_id
     db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "u", "status": "APPROVED"}
     )
@@ -397,7 +415,7 @@ def test_push_product_live_failsoft_on_transport_error(monkeypatch):
 
     monkeypatch.setattr(shopify_push, "_graphql", _raise)
     res = _run(shopify_push.push_product(_EngineDB(),
-                                         {"id": "P1", "title": "X", "ecom": {"status": "DRAFT"}}, []))
+                                         {"id": "P1", "title": "X", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "DRAFT"}}, []))
     assert res.mode == "LIVE" and res.ok is False
     assert "boom" in (res.error or "")
 
@@ -408,12 +426,16 @@ def test_push_product_live_failsoft_on_transport_error(monkeypatch):
 
 def test_build_product_input_maps_status_and_options():
     product = {"id": "P1", "title": "RB", "brand": "Ray-Ban", "category": "SUNGLASS",
-               "ecom": {"status": "DRAFT", "handle": "rb",
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "DRAFT", "handle": "rb",
                         "seo": {"title": "RB SEO", "tags": ["new", "summer"]}}}
     variants = [{"sku": "S-1", "option_color": "Black", "option_size": "M"},
                 {"sku": "S-2", "option_color": "Gold", "option_size": "M"}]
     inp = shopify_push.build_product_input(product, variants)
-    assert inp["status"] == "DRAFT"
+    # OWNER RULING 2026-08-25 "one press, goes live": ecom.status DRAFT is the
+    # un-advanced create-time default that nothing in IMS ever moved, so the
+    # payload goes out ACTIVE. Only ARCHIVED still maps through as itself
+    # (test_online_push_publishes.py covers both).
+    assert inp["status"] == "ACTIVE"
     assert inp["vendor"] == "Ray-Ban"
     assert inp["productType"] == "SUNGLASS"
     assert inp["seo"]["title"] == "RB SEO"
@@ -531,9 +553,9 @@ def test_status_endpoint_reports_dark_and_counts(client, auth_headers, patched_d
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
     # Seed a staged + pushed product and a pending collection.
-    conn.db["catalog_products"].insert_one({"id": "P1", "ecom": {"locally_modified": True}})
+    conn.db["catalog_products"].insert_one({"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"locally_modified": True}})
     conn.db["catalog_products"].insert_one(
-        {"id": "P2", "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+        {"id": "P2", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
     conn.db["ecom_collections"].insert_one(
         {"collection_id": "C1", "handle": "sg", "title": "SG", "locally_modified": True})
 
@@ -558,7 +580,7 @@ def test_live_push_product_simulated_over_http_writes_audit(client, auth_headers
     _force_dark(monkeypatch, "writes_off")
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "title": "Ray-Ban", "brand": "Ray-Ban",
-         "ecom": {"status": "PUBLISHED", "handle": "rb"}}
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb"}}
     )
 
     r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
@@ -657,9 +679,9 @@ def _seed_pending(conn):
     """Seed a mix of pending + already-pushed/clean docs across all four entities."""
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "title": "RB", "brand": "RB",
-         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
     conn.db["catalog_products"].insert_one(  # clean -> NOT swept
-        {"id": "P2", "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
+        {"id": "P2", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
     conn.db["ecom_collections"].insert_one(
         {"collection_id": "C1", "title": "SG", "handle": "sg",
          "collection_type": "CUSTOM", "locally_modified": True})
@@ -760,7 +782,7 @@ def test_all_pending_allows_offset_with_a_single_entity(
     _force_dark(monkeypatch, "writes_off")
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "mrp": 1000,
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
     r = client.post(
         "/api/v1/online-store/push/all-pending?entities=variant-prices&offset=1",
         headers=auth_headers,
@@ -888,7 +910,7 @@ def test_dark_push_plans_metafields_no_network(monkeypatch):
         "id": "P1",
         "title": "RB",
         "attributes": {"frame_material": "Metal"},
-        "ecom": {"status": "PUBLISHED"},
+        "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"},
     }
     res = _run(shopify_push.push_product(_EngineDB(), product, []))
     assert res.mode == "SIMULATED"
@@ -925,15 +947,19 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
             "id": "P1",
             "title": "RB",
             "attributes": {"frame_material": "Metal", "uv_protection": "UV400"},
-            "ecom": {"status": "PUBLISHED", "locally_modified": True},
+            "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True},
         }
     )
     product = db["catalog_products"].find_one({"id": "P1"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.mode == "LIVE" and res.ok is True
-    # Two network calls: productCreate, then ONE metafieldsSet chunk.
-    assert len(spy.calls) == 2
+    assert res.mode == "LIVE"
+    # (Unpriced fixture -> the publish is withheld; the metafield side channel
+    # below is what this test is about.)
+    # Three network calls: productCreate, ONE metafieldsSet chunk, then the
+    # photograph (which rides the same press since 2026-08-25).
+    assert len(spy.calls) == 3
     assert "metafieldsSet" in spy.calls[1]["query"]
+    assert "productCreateMedia" in spy.calls[2]["query"]
     mfs = spy.calls[1]["variables"]["metafields"]
     assert all(m["ownerId"] == "gid://shopify/Product/222" for m in mfs)
     assert sorted(m["key"] for m in mfs) == ["frame_material", "uv_protection"]
@@ -962,16 +988,20 @@ def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
             "id": "P1",
             "title": "RB",
             "attributes": {"frame_material": "Metal"},
-            "ecom": {"status": "PUBLISHED"},
+            "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"},
         }
     )
     product = db["catalog_products"].find_one({"id": "P1"})
     res = _run(shopify_push.push_product(db, product, []))
-    assert res.ok is True  # the product write itself succeeded
     assert res.mode == "LIVE"
+    # A metafield error is a SIDE CHANNEL: it never becomes the push's own
+    # verdict. (This unpriced fixture is withheld at the publish door -- a
+    # different, honestly reported outcome -- and "boom" is not the reason.)
+    assert res.reason == "publish_withheld"
+    assert "boom" not in (res.error or "")
     assert res.metafields["set"] == 0
     assert any("boom" in e for e in res.metafields["errors"])
-    assert len(spy.calls) == 2
+    assert len(spy.calls) == 3  # + the photograph
 
 
 # ---------------------------------------------------------------------------
@@ -1019,7 +1049,7 @@ def test_build_variant_price_inputs_pure():
 def test_push_variant_prices_simulated_plans_no_network(monkeypatch):
     _force_dark(monkeypatch, "writes_off")
     product = {"id": "P1", "mrp": 100, "offer_price": 90,
-               "ecom": {"shopify_product_id": "77"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "77"}}
     variants = [{"shopify_variant_id": "111"}]
     res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
     assert res.mode == "SIMULATED" and res.ok is True
@@ -1036,7 +1066,7 @@ def test_push_variant_prices_live_bulk_update(monkeypatch):
         }}
     })
     product = {"id": "P1", "mrp": 100, "offer_price": 90,
-               "ecom": {"shopify_product_id": "77"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "77"}}
     variants = [{"shopify_variant_id": "111", "gtin": "8056597626088"}]
     res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
     assert res.mode == "LIVE" and res.ok is True
@@ -1048,7 +1078,7 @@ def test_push_variant_prices_live_bulk_update(monkeypatch):
 
 def test_push_variant_prices_live_requires_parent_gid(monkeypatch):
     spy = _force_live(monkeypatch, {"data": {}})
-    product = {"id": "P1", "mrp": 100, "ecom": {}}  # never pushed yet
+    product = {"id": "P1", "mrp": 100, "images": ["https://cdn.example.com/p.jpg"], "ecom": {}}  # never pushed yet
     variants = [{"shopify_variant_id": "111", "discounted_price": 90}]
     res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
     assert res.ok is False
@@ -1201,7 +1231,7 @@ def test_variant_prices_pseudo_default_variant_resync(monkeypatch):
     _force_dark(monkeypatch, "writes_off")
     product = {
         "id": "P1", "title": "RB", "mrp": 5000, "offer_price": 4000,
-        "ecom": {
+        "images": ["https://cdn.example.com/p.jpg"], "ecom": {
             "shopify_product_id": "gid://shopify/Product/1",
             "shopify_variant_id": "gid://shopify/ProductVariant/11",
             "online_offer_price": 4500, "online_compare_at_price": 5000,
@@ -1224,7 +1254,7 @@ def test_variant_prices_no_default_gid_stays_noop(monkeypatch):
     CREATE variants from the price resync)."""
     _force_dark(monkeypatch, "writes_off")
     product = {"id": "P1", "mrp": 5000,
-               "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
     res = _run(shopify_push.push_variant_prices(_EngineDB(), product, []))
     assert res.action == "noop" and res.ok is True
 
@@ -1239,13 +1269,13 @@ def test_variant_prices_sweep_pages_and_tallies_noop(client, auth_headers, patch
     # (-> noop), P3 has no variant rows and no default gid (-> noop).
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "mrp": 1000,
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
     conn.db["catalog_products"].insert_one(
         {"id": "P2", "mrp": 1000,
-         "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
     conn.db["catalog_products"].insert_one(
         {"id": "P3", "mrp": 1000,
-         "ecom": {"shopify_product_id": "gid://shopify/Product/3"}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/3"}})
     conn.db["catalog_products"].insert_one({"id": "P4", "mrp": 1000})  # unmapped
     conn.db["catalog_variants"].insert_one(
         {"sku": "V1", "parent_product_id": "P1", "mrp": 1000,
@@ -1294,7 +1324,7 @@ def test_push_history_endpoint_reads_ledger(client, auth_headers, patched_db, mo
     _force_dark(monkeypatch, "writes_off")
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "sku": "SKU-1", "name": "Ray-Ban Aviator",
-         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
     # A push writes the ledger row this endpoint reads.
     r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
     assert r.status_code == 200, r.text
@@ -1429,7 +1459,7 @@ def test_push_history_mock_collection_keeps_the_python_post_filter(
     conn, audit_repo = patched_db
     _force_dark(monkeypatch, "writes_off")
     conn.db["catalog_products"].insert_one(
-        {"id": "P1", "sku": "SKU-1", "ecom": {"status": "PUBLISHED", "handle": "rb"}})
+        {"id": "P1", "sku": "SKU-1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb"}})
     r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
     assert r.status_code == 200, r.text
 

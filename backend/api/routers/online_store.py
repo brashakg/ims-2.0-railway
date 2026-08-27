@@ -219,8 +219,13 @@ async def online_store_summary(
     # any new write semantics. Same route + same roles as this summary, so NO
     # new rbac_policy row is needed. Simple count_documents at ~4.4k docs.
     products_ecom = {
-        # ecom.status is the field the Shopify push honours (DRAFT->DRAFT,
-        # PUBLISHED->ACTIVE). A status query implies the ecom sub-doc exists.
+        # ecom.status no longer STEERS the push (since the 2026-08-25 "one
+        # press, goes live" ruling the payload is ACTIVE for everything except
+        # ARCHIVED) -- it RECORDS what IMS knows about the storefront: PUBLISHED
+        # is written only after a successful sales-channel publish, DRAFT at
+        # create time and after a take-down. So this card means "IMS has never
+        # recorded a successful publish for these", which is what the owner
+        # needs to read. A status query implies the ecom sub-doc exists.
         "draft": _safe_count(
             db, "catalog_products", {"ecom.status": "DRAFT"}, count_failures
         ),

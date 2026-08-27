@@ -4797,6 +4797,17 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/product/{product_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # TAKE-DOWN (owner ruling 2026-08-25): pull ONE product off the live
+    # storefront. Same {ADMIN, SUPERADMIN} set as every other row in this push
+    # family, so the module grant-union is UNCHANGED (no capability broadening
+    # -- see the rbac capability-union gotcha). The literal /take-down suffix
+    # is more specific than the /product/{product_id} POST above and resolves
+    # on its own.
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/push/product/{product_id}/take-down",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/online-store/push/collection/{collection_id}",
