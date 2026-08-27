@@ -506,6 +506,8 @@ export const reportsApi = {
       store_id: string | null;
       technicians: Array<{
         technician_id: string | null;
+        /** Display name resolved server-side; absent when the id names nobody. */
+        technician_id_name?: string;
         jobs_completed: number;
         avg_turnaround_days: number | null;
         qc_fail_rate: number | null;

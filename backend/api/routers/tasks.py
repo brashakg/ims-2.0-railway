@@ -294,21 +294,24 @@ def _canon_task_out(task: dict) -> dict:
 
 
 def _enrich_assignee_names(tasks: list) -> None:
-    """backlog #4: add assigned_to_name beside assigned_to so the Hub shows the
-    assignee's NAME, not a raw user id. Batched single lookup, in-place, fail-
-    soft. If assigned_to is a role label (not a user_id) it simply stays as-is.
+    """backlog #4: add assigned_to_name AND assigned_by_name beside the raw
+    ids so the Hub and the task drawer show PEOPLE, not user ids. The drawer's
+    "Created ... by" line and escalation-ladder rung 1 print assigned_by, which
+    the create door stamps as current_user["user_id"] and nothing ever named.
+    Batched single lookup, in-place, fail-soft. If assigned_to is a role label,
+    or assigned_by is "system" (auto-generated tasks), it resolves to nobody,
+    gets NO _name sibling, and the screen prints it verbatim -- never an
+    invented name.
     """
     if not tasks:
         return
     try:
-        from ..services.name_resolver import user_name_map
+        from ..services.name_resolver import stamp_user_names
 
-        db = get_db()
-        nmap = user_name_map(db, [t.get("assigned_to") for t in tasks])
-        for t in tasks:
-            a = t.get("assigned_to")
-            if a and not t.get("assigned_to_name") and str(a) in nmap:
-                t["assigned_to_name"] = nmap[str(a)]
+        stamp_user_names(
+            get_db(), [t for t in tasks if isinstance(t, dict)],
+            ("assigned_to", "assigned_by"),
+        )
     except Exception:  # noqa: BLE001
         pass
 

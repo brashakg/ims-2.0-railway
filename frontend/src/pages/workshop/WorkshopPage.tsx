@@ -67,6 +67,9 @@ interface Job {
   status: JobStatus;
   priority: JobPriority;
   assignedTo?: string;
+  /** Display name resolved server-side; absent when the id names nobody
+      (deleted account) — the screen and job card then print the raw id. */
+  assignedToName?: string;
   expectedDate: string;
   promisedDate: string;
   createdAt: string;
@@ -921,7 +924,7 @@ const loadJobs = async () => {
                     </div>
                     {job.assignedTo && (
                       <p className="text-xs text-gray-500 mb-3">
-                        Assigned: {job.assignedTo}
+                        Assigned: {job.assignedToName || job.assignedTo}
                       </p>
                     )}
                     <button
@@ -1035,7 +1038,7 @@ const loadJobs = async () => {
                   {selectedJob.assignedTo && (
                     <div>
                       <p className="text-sm text-gray-500">Assigned To</p>
-                      <p className="font-medium">{selectedJob.assignedTo}</p>
+                      <p className="font-medium">{selectedJob.assignedToName || selectedJob.assignedTo}</p>
                     </div>
                   )}
                   {selectedJob.completedAt && (
@@ -1282,7 +1285,7 @@ const loadJobs = async () => {
             lensType: printJob.lensType,
             priority: printJob.priority,
             dueDate: printJob.promisedDate,
-            assignedTechnician: printJob.assignedTo,
+            assignedTechnician: printJob.assignedToName || printJob.assignedTo,
             status: STATUS_CONFIG[printJob.status].label,
             createdDate: printJob.createdAt,
           }}

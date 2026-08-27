@@ -170,6 +170,8 @@ export interface PettyCashSettlementRecord {
   status: string;
   note?: string | null;
   settled_by?: string;
+  /** Display name resolved server-side; absent when the id names nobody. */
+  settled_by_name?: string;
   settled_at?: string;
 }
 
