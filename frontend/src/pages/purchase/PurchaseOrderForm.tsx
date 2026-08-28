@@ -13,6 +13,9 @@ import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
+import { storeApi } from '../../services/api/stores';
+import { isInterStateSupply } from '../../constants/gst';
+import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type {
   ComposerVendorOption,
@@ -26,28 +29,104 @@ interface PickedProduct {
   productName: string;
   sku: string;
   costPrice: number;
+  gstRate: number | null;
+  hsn: string | null;
+  /** The one-line identity a buyer scans: colour, size, MRP -- what actually
+   *  separates two frames of the same model. */
+  detail: string;
+  hasCost: boolean;
 }
 
-// Minimal shape we read off a /products row -- the endpoint returns full docs.
+// Shape we read off a /products row -- the endpoint returns full docs. The
+// identity fields live either flat (legacy rows) or under `attributes`
+// (canonical), so both are read.
 interface ProductHit {
   product_id?: string;
   productId?: string;
   sku?: string;
   name?: string;
   brand?: string;
+  model?: string;
+  color?: string;
+  colour?: string;
+  size?: string;
+  category?: string;
+  mrp?: number;
   cost_price?: number;
+  hsn_code?: string | null;
+  gst_rate?: number | null;
   catalog_status?: string;
+  /** What the catalogue still lacks on this product, straight off the product
+   *  spine. A missing cost is the ONE gap that does not stop the order going
+   *  out (the rate typed here becomes the cost); anything else does. */
+  done_gaps?: string[];
+  attributes?: Record<string, unknown>;
+}
+
+const GAP_LABELS: Record<string, string> = {
+  category: 'category',
+  brand_name: 'brand',
+  model_no: 'model number',
+  colour_code: 'colour code',
+  size: 'size',
+  mrp: 'MRP',
+  offer_price: 'selling price',
+  MRP_BELOW_OFFER: 'MRP below the selling price',
+  hsn_code: 'HSN number',
+  gst_rate: 'GST rate',
+};
+
+/** The gaps that will actually stop this PO being SENT. A missing cost is
+ *  excluded on purpose (owner ruling 2026-08-26): the rate typed on this order
+ *  becomes the cost, so it can no longer be a blocker. */
+export function blockingGaps(hit: ProductHit): string[] {
+  return (hit.done_gaps || [])
+    .filter((g) => g !== 'cost_price')
+    .map((g) => GAP_LABELS[g] || g.replace(/_/g, ' '));
+}
+
+function attr(hit: ProductHit, ...keys: string[]): string {
+  const bag = (hit.attributes || {}) as Record<string, unknown>;
+  for (const k of keys) {
+    const flat = (hit as unknown as Record<string, unknown>)[k];
+    const val = bag[k] ?? flat;
+    if (val !== undefined && val !== null && String(val).trim()) return String(val).trim();
+  }
+  return '';
+}
+
+/** Brand + model is the headline; a bare product `name` is the fallback for a
+ *  legacy row that has no model. */
+export function productHeadline(hit: ProductHit): string {
+  const brand = attr(hit, 'brand', 'brand_name');
+  const model = attr(hit, 'model', 'model_no', 'model_name');
+  const headline = [brand, model].filter(Boolean).join(' ');
+  return headline || (hit.name || '').trim() || (hit.sku || '');
+}
+
+/** Colour, size and MRP -- the fields that tell two near-identical frames
+ *  apart on a 40-line purchase order. */
+export function productDetail(hit: ProductHit): string {
+  const bits: string[] = [];
+  const colour = attr(hit, 'color', 'colour', 'colour_code', 'frame_color');
+  const size = attr(hit, 'size', 'lens_size');
+  if (colour) bits.push(colour);
+  if (size) bits.push(size);
+  if (Number(hit.mrp) > 0) bits.push(`MRP ${'₹'}${Number(hit.mrp).toLocaleString('en-IN')}`);
+  return bits.join(' · ');
 }
 
 function hitToPicked(hit: ProductHit): PickedProduct {
-  const brand = (hit.brand || '').trim();
-  const name = (hit.name || '').trim();
-  const display = [brand, name].filter(Boolean).join(' ') || name || (hit.sku || '');
+  const rate = hit.gst_rate;
   return {
     productId: String(hit.product_id || hit.productId || ''),
-    productName: display,
+    productName: productHeadline(hit),
     sku: hit.sku || '',
     costPrice: Number(hit.cost_price) > 0 ? Number(hit.cost_price) : 0,
+    gstRate: typeof rate === 'number' && rate >= 0 ? rate : null,
+    hsn: (hit.hsn_code || '').trim() || null,
+    detail: productDetail(hit),
+    hasCost: Number(hit.cost_price) > 0,
   };
 }
 
@@ -167,7 +246,7 @@ function ProductSearchSelect({
   onClear,
   onSetNew,
 }: {
-  picked: { productId: string; productName: string; sku: string };
+  picked: { productId: string; productName: string; sku: string; detail?: string };
   newProduct?: ComposerNewProduct | null;
   onPick: (p: PickedProduct) => void;
   onClear: () => void;
@@ -228,9 +307,14 @@ function ProductSearchSelect({
 
   if (picked.productId) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm">
-        <span className="font-medium text-gray-900 truncate">{picked.productName}</span>
-        <span className="text-xs text-gray-500 shrink-0">{picked.sku}</span>
+      <div className="flex items-start gap-2 px-3 py-2 bg-white border border-gray-300 rounded-lg">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-gray-900 truncate">{picked.productName}</p>
+          <p className="text-xs text-gray-500 truncate">
+            {picked.sku}
+            {picked.detail ? ` · ${picked.detail}` : ''}
+          </p>
+        </div>
         <button
           type="button"
           onClick={() => {
@@ -274,7 +358,7 @@ function ProductSearchSelect({
         Not in the catalogue? Enter the item&apos;s details
       </button>
       {open && (
-        <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
+        <div className="absolute z-20 mt-1 w-full max-h-80 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
           {results.length === 0 ? (
             <div className="px-3 py-2 text-sm text-gray-500">
               {query.trim().length < 2 ? 'Type to search...' : 'No catalogued products match.'}
@@ -291,18 +375,67 @@ function ProductSearchSelect({
                     onPick(p);
                     setOpen(false);
                   }}
-                  className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                  className="w-full text-left px-3 py-2.5 hover:bg-gray-50 border-b border-gray-100 last:border-0"
                 >
-                  <div className="text-sm font-medium text-gray-900 truncate">{p.productName}</div>
-                  <div className="text-xs text-gray-500 flex items-center gap-2">
-                    <span>{p.sku}</span>
-                    {p.costPrice > 0 && <span>{'₹'}{p.costPrice.toLocaleString()} cost</span>}
-                    {hit.catalog_status && hit.catalog_status !== 'ACTIVE' && (
+                  {/* Line 1 -- WHICH product: brand + model, given the room to
+                      be read in full. */}
+                  <div className="text-sm font-semibold text-gray-900 truncate">{p.productName}</div>
+                  {/* Line 2 -- WHICH ONE of them: colour, size, MRP. This is
+                      what separates two frames of the same model. */}
+                  {p.detail ? (
+                    <div className="text-xs text-gray-600 truncate">{p.detail}</div>
+                  ) : null}
+                  {/* Line 3 -- what the buyer needs to price it. */}
+                  <div className="text-xs text-gray-500 flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5">
+                    <span className="font-mono">{p.sku}</span>
+                    {hit.category ? <span>{String(hit.category).replace(/_/g, ' ').toLowerCase()}</span> : null}
+                    {/* The product's own catalogued rate -- which the
+                        cataloguing door derived from this very HSN, server-side,
+                        so it is the rate the purchase order will be stored at.
+                        This list keeps no HSN -> rate table of its own. A
+                        missing HSN is still flagged on its own, because a
+                        product can carry a rate and have no HSN, which a GST
+                        purchase document may not. */}
+                    {p.gstRate !== null ? (
+                      <span>
+                        {p.gstRate}% GST{p.hsn ? ` · HSN ${p.hsn}` : ''}
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium">
+                        GST rate unknown
+                      </span>
+                    )}
+                    {!p.hsn ? (
                       <span
                         className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium"
-                        title="Draft product -- can be added to a PO, but the PO can't be sent until cataloguing is complete"
+                        title="A purchase order must carry an HSN for every line. Add it on the product."
                       >
-                        Draft
+                        No HSN
+                      </span>
+                    ) : null}
+                    {p.hasCost ? (
+                      <span>
+                        {'₹'}
+                        {p.costPrice.toLocaleString('en-IN')} cost
+                      </span>
+                    ) : (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium"
+                        title="No cost recorded yet. The rate you type on this order becomes the cost, and the order can still be sent."
+                      >
+                        No cost yet
+                      </span>
+                    )}
+                    {/* The honest blocker. The old chip said EVERY draft
+                        product stopped the PO being sent -- which made all 68
+                        live products look blocked when only their cost was
+                        missing, and a missing cost has never stopped a send. */}
+                    {blockingGaps(hit).length > 0 && (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-medium"
+                        title={`This order cannot be sent until the product has its ${blockingGaps(hit).join(', ')}.`}
+                      >
+                        Missing {blockingGaps(hit).join(', ')}
                       </span>
                     )}
                   </div>
@@ -334,6 +467,43 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
   const vendorOptions = suppliers.map(supplierToVendor);
 
+  // Which of OUR GSTINs is receiving decides CGST+SGST vs IGST. With 3 legal
+  // entities over 4 GSTINs in 2 states, that is a per-shop fact, so read the
+  // shop rather than assume a home state. Fail-soft: no shop -> the composer
+  // says the split could not be told rather than showing a wrong one.
+  const storeId = user?.activeStoreId ?? '';
+  const [store, setStore] = useState<{ gstin?: string; state?: string } | null>(null);
+  const [vendorId, setVendorId] = useState('');
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .getStore(storeId)
+      .then((doc) => {
+        if (!cancelled) setStore(doc || null);
+      })
+      .catch(() => {
+        if (!cancelled) setStore(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storeId]);
+
+  const vendor = suppliers.find((s) => s.id === vendorId);
+  // Server-fed state list: a GSTIN prefix it does not contain ("88...") is not
+  // a state, so the composer says "cannot tell" instead of quoting IGST off a
+  // registration the engine reads no state from. Fail-closed until it loads.
+  const stateNames = useGstStateCodes();
+  const interstate =
+    vendor && store
+      ? isInterStateSupply(
+          { gstin: vendor.gstNumber, state: vendor.state },
+          { gstin: store.gstin, state: store.state },
+          stateNames,
+        )
+      : null;
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
@@ -356,11 +526,18 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
           <PurchaseOrderComposer
             mode="page"
             vendors={vendorOptions}
+            interstate={interstate}
+            onVendorChange={setVendorId}
             allowAddLine
             allowRemoveLine
             renderProductCell={({ line, pickProduct, clearProduct, setNewProduct }) => (
               <ProductSearchSelect
-                picked={{ productId: line.productId, productName: line.productName, sku: line.sku }}
+                picked={{
+                  productId: line.productId,
+                  productName: line.productName,
+                  sku: line.sku,
+                  detail: line.productDetail ?? '',
+                }}
                 newProduct={line.newProduct}
                 onPick={(p) =>
                   pickProduct({
@@ -368,6 +545,9 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                     productName: p.productName,
                     sku: p.sku,
                     costPrice: p.costPrice,
+                    gstRate: p.gstRate,
+                    hsn: p.hsn,
+                    detail: p.detail,
                   })
                 }
                 onClear={clearProduct}
@@ -423,6 +603,24 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
               onCreated(newPO);
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+              // Say what is missing rather than letting a short tax total pass
+              // unnoticed -- the server is the authority on the rate, so this
+              // reports what it actually stored, including the lines it taxed
+              // off a catalogue rate but could not tie to an HSN.
+              const warnings = resp.gst_warnings ?? [];
+              if (warnings.length > 0) {
+                toast.warning(
+                  `GST needs attention on ${warnings
+                    .map((w) => `${w.product_name || w.product_id} (${w.missing})`)
+                    .join(', ')} — add the HSN number on the product.`,
+                );
+              }
+              const filled = resp.cost_filled ?? [];
+              if (filled.length > 0) {
+                toast.info(
+                  `Cost recorded for ${filled.length} ${filled.length === 1 ? 'product' : 'products'} from the rates on this order.`,
+                );
+              }
             }}
           />
         </div>

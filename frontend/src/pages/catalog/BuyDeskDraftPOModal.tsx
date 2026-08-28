@@ -20,7 +20,10 @@ import { FileText, X as XIcon } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi } from '../../services/api';
-import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
+import {
+  PurchaseOrderComposer,
+  gstForProduct,
+} from '../../components/purchase/PurchaseOrderComposer';
 import type {
   ComposerVendorOption,
   ComposerLine,
@@ -64,7 +67,11 @@ export default function BuyDeskDraftPOModal({
         sku: r.sku || '',
         quantity: r.buy_signal && r.buy_signal > 0 ? r.buy_signal : 1,
         unitCost: 0,
-        taxRate: 18,
+        // NOT a flat 18. Frames, spectacle lenses and contact lenses are all
+        // 5%, so one house rate over-taxed the preview on most of this shop's
+        // catalogue -- and the server never charged it, which made the screen
+        // and the saved order disagree. Same rule as the manual form's picker.
+        ...gstForProduct({ gstRate: r.gst_rate, hsn: r.hsn_code }),
         costTouched: false,
         lastPaid: null,
       })),

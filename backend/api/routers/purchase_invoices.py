@@ -1839,12 +1839,22 @@ async def draft_invoice_from_grn(
     recipient_entity_id = None
     try:
         if db is not None and grn.get("store_id"):
-            store = db.get_collection("stores").find_one(
-                {"store_id": grn.get("store_id")}, {"_id": 0, "entity_id": 1}
+            store_doc = db.get_collection("stores").find_one(
+                {"store_id": grn.get("store_id")},
+                {"_id": 0, "entity_id": 1},
             )
-            recipient_entity_id = (store or {}).get("entity_id")
+            recipient_entity_id = (store_doc or {}).get("entity_id")
     except Exception:
         recipient_entity_id = None
+    # No place-of-supply hint: the bill receives on the entity's PRIMARY
+    # registration. For a single-state entity that is the only GSTIN it has.
+    # For an entity registered in TWO states buying for a shop outside its
+    # primary state, this still classifies differently from the purchase order
+    # (which reads the receiving shop's own state) -- a known, open
+    # disagreement. Changing it would RE-CLASSIFY live purchase bills, and this
+    # business does not re-state, so it is an owner decision that has not been
+    # taken. It is written down here and in the PR rather than half-built: a
+    # switch nobody can reach is not a decision, it is dead code.
     recipient = _resolve_recipient(db, recipient_entity_id, None, None)
 
     raw_lines = pinv.lines_from_grn(grn, po)

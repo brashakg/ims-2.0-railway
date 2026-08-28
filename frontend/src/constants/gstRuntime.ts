@@ -175,7 +175,10 @@ export function hsnOptions(): Array<{ value: string; label: string; gstRate: num
   // The codes the local list describes, at the rate it states -- unless the
   // owner-editable master has that code, in which case the master wins.
   for (const hsn of Object.values(HSN_CODES)) {
-    const gstRate = _byHsn[hsn.code] ?? hsn.gstRate;
+    // HSN_CODES entries carry NO rate of their own (deleted with the drifted
+    // copies); offline the code's rate is its category's, off the one local
+    // fallback table. The owner-editable master still wins once loaded.
+    const gstRate = _byHsn[hsn.code] ?? getGSTRateByCategory(hsn.category);
     opts.set(hsn.code, {
       value: hsn.code,
       label: `${hsn.code} - ${hsn.description} (GST: ${gstRate}%)`,

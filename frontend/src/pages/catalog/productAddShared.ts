@@ -21,6 +21,7 @@ import type {
 } from '../../services/api/catalog';
 import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
 import { mapSpecsToCategoryFields } from './autopilotSpecMap';
+import type { TaxedCategory } from '../../constants/gst';
 import { resolveGstRate, resolveHsn } from '../../constants/gstRuntime';
 
 // Product categories with display names + emoji (used in the category picker).
@@ -45,7 +46,13 @@ export const CATEGORIES = [
   // SMTSG survives as a FIELD-LIST alias below for legacy/stored codes.
   { code: 'SMTFR', name: 'Smartglasses', icon: '🥽' },
   { code: 'SMTWT', name: 'Smart Watch', icon: '⌚' },
-] as const;
+  // A picker code MUST be one constants/gst.ts prices (TaxedCategory), or this
+  // list fails `tsc`. Without that, a new category falls through that table's
+  // unknown-category defaults -- HSN 900490 at 18% -- while the server stores
+  // the rate the picked HSN actually carries, so the form asserts one number
+  // under helper text promising another. CCL did exactly that: 18% on screen,
+  // 5% stored, on a category these shops bill every day.
+] as const satisfies ReadonlyArray<{ code: TaxedCategory; name: string; icon: string }>;
 
 export interface CategoryField {
   name: string;
@@ -685,6 +692,20 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
 export function resolveHsnGst(category: string): { hsnCode: string; gstRate: string } {
   const hsnCode = resolveHsn(category);
   return { hsnCode, gstRate: resolveGstRate(category, hsnCode).toString() };
+}
+
+// May the Add-Product form quote `resolveHsnGst(category).gstRate` as the rate
+// this product will carry?
+//
+// Only while the HSN on the form is still the one the category implies. The
+// rate on screen comes from the CATEGORY; the rate that gets STORED comes from
+// the HSN, server-side (product_master.normalise_payload ->
+// gst_rates.resolve_gst_rate_strict). Those are the same number for the HSN a
+// category auto-fills, and only then -- so the moment the cataloguer picks a
+// different code the box must stop quoting a number and say the HSN settles it
+// on save.
+export function hsnImpliesCategoryRate(category: string, hsnCode: string): boolean {
+  return !hsnCode || !category || hsnCode === resolveHsnGst(category).hsnCode;
 }
 
 // ============================================================================

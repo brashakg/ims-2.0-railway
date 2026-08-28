@@ -14,8 +14,9 @@ What this REUSES (no fork)
     ``orders._build_invoice_gst_split``: place-of-supply from the recipient's
     2-digit GST state code, inter-state => full IGST, intra-state => CGST + SGST
     with the residual paisa pushed onto SGST so CGST + SGST == line tax exactly.
-  * State code extraction -- ``org_validation.normalize_state_code`` + the GSTIN
-    first-two-chars rule (same as the orders ``_invoice_state_code`` helper).
+  * State code extraction -- ``org_validation.resolve_state_code``, the same
+    parser the purchase order, the purchase bill and the sale invoice call
+    (``state_code_of`` below is a three-line delegate, not a copy).
   * Atomic FY-scoped consecutive serial -- the ``counters`` collection
     ``find_one_and_update($inc)`` pattern from ``je_service._next_je_number`` /
     ``order_repository.next_invoice_number`` (Rule 46(b): a unique serial per
@@ -139,46 +140,37 @@ def _now_ist() -> datetime:
 
 def state_code_of(*candidates: Any) -> str:
     """Best-effort 2-digit GST state code from the first usable candidate.
-    Accepts a 2-digit code, a 2-letter / full state name, or a 15-char GSTIN
-    (state = first two chars). Mirrors orders._invoice_state_code. Never raises."""
-    try:
-        from api.services.org_validation import (
-            normalize_state_code,
-            INDIAN_STATE_CODES,
-        )
-    except Exception:  # noqa: BLE001
-        normalize_state_code = None
-        INDIAN_STATE_CODES = {}
 
-    def _valid_code(code: Any) -> str:
-        c = str(code or "").strip()
-        if len(c) == 2 and c.isdigit() and (not INDIAN_STATE_CODES or c in INDIAN_STATE_CODES):
-            return c
-        return ""
+    THIN DELEGATE to ``org_validation.resolve_state_code`` -- the same parser
+    the purchase ORDER (routers/vendors.py), the purchase BILL
+    (services/purchase_invoice_engine.state_code_of) and the sale
+    (routers/orders._invoice_state_code) call.
 
-    for cand in candidates:
-        s = str(cand or "").strip()
-        if not s:
-            continue
-        # A GSTIN: first two chars are the state code.
-        if len(s) == 15:
-            code = _valid_code(s[:2])
-            if code:
-                return code
-        # A direct 2-digit code.
-        code = _valid_code(s)
-        if code:
-            return code
-        # A name / abbreviation routed through the canonical normalizer.
-        if normalize_state_code is not None:
-            try:
-                norm = normalize_state_code(s)
-            except Exception:  # noqa: BLE001
-                norm = None
-            code = _valid_code(norm)
-            if code:
-                return code
-    return ""
+    Until 2026-08-27 this was a local copy. It mirrored the OLD orders helper
+    and so never gained the bare-leading-2-digit fallback the others have, and
+    "27-Maharashtra" -- the GST portal's own display form, which imported
+    vendor rows carry -- resolved to "" here while resolving to "27" on the
+    order and the bill. "" reads as "state unknown", which takes the
+    conservative intra-state default, so a debit note reversing an IGST
+    purchase came out CGST + SGST. The copy is DELETED, not synchronised.
+
+    What deleting the copy promotes (things it was masking):
+      * a bare leading 2-digit code now resolves: "27-Maharashtra" -> "27",
+        "20-Jharkhand" -> "20". That is the whole point.
+      * a 2-digit prefix that is not a real GST state code still resolves to ""
+        -- unchanged; both copies validated against INDIAN_STATE_CODES.
+      * "Maharashtra (27)" resolves to "" on BOTH -- unchanged, and still a
+        divergence against print_legal / itc_reconcile (see the survivor list
+        in org_validation.resolve_state_code's docstring).
+      * the copy degraded to a partial answer if org_validation failed to
+        import. It cannot fail: that module is ``import re`` plus literals and
+        routers import it at module scope, so the app would not start. Same
+        reasoning that deleted ``financial_year_label``'s inline fallback in
+        the BUG-104 sweep below.
+    """
+    from api.services.org_validation import resolve_state_code
+
+    return resolve_state_code(*candidates)
 
 
 def financial_year_label(dt: Optional[datetime] = None) -> str:

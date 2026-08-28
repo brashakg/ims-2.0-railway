@@ -5406,48 +5406,22 @@ async def cancel_order(
 def _invoice_state_code(*candidates) -> str:
     """Best-effort 2-digit GST state code from the first usable candidate.
     Accepts a 2-digit code, a 2-letter / full state name, or a 15-char GSTIN
-    (state = first two chars). ASCII-only; never raises."""
+    (state = first two chars). ASCII-only; never raises.
+
+    Thin alias over the shared resolver in org_validation, which the purchase
+    side (a PO's vendor-vs-delivery-store place of supply), the purchase bill
+    and the RTV debit note call too, so those four cannot answer two ways about
+    the same row. NOT a claim about every state parser: the PRINTED invoice's
+    HSN tax summary still decides IGST-vs-CGST/SGST with print_legal's own
+    parser, which answers differently on some inputs (see the list in
+    org_validation.resolve_state_code). Fail-soft to "" if org_validation
+    cannot be imported, exactly as before.
+    """
     try:
-        from ..services.org_validation import (
-            normalize_state_code,
-            INDIAN_STATE_CODES,
-        )
+        from ..services.org_validation import resolve_state_code
     except Exception:  # noqa: BLE001
-        normalize_state_code = None
-        INDIAN_STATE_CODES = {}
-
-    def _valid_code(code) -> str:
-        """Accept a 2-digit string only if it's a real GST state code."""
-        c = str(code or "").strip()
-        if (
-            len(c) == 2
-            and c.isdigit()
-            and (not INDIAN_STATE_CODES or c in INDIAN_STATE_CODES)
-        ):
-            return c
         return ""
-
-    for cand in candidates:
-        if cand is None:
-            continue
-        s = str(cand).strip()
-        if not s:
-            continue
-        # A full GSTIN -> first two chars are the state code.
-        if len(s) == 15 and s[:2].isdigit():
-            code = _valid_code(s[:2])
-            if code:
-                return code
-        # 2-digit code / 2-letter abbreviation / full state name.
-        if normalize_state_code is not None:
-            code = _valid_code(normalize_state_code(s))
-            if code:
-                return code
-        # Bare 2-digit code (when org_validation is unavailable).
-        code = _valid_code(s[:2])
-        if code:
-            return code
-    return ""
+    return resolve_state_code(*candidates)
 
 
 def _customer_state_code(customer: Optional[dict]) -> str:
@@ -5541,16 +5515,14 @@ def _build_invoice_gst_split(
     for rate in sorted(per_rate.keys()):
         taxable = round(per_rate[rate]["taxable"], 2)
         tax = round(per_rate[rate]["tax"], 2)
-        if interstate:
-            cgst = 0.0
-            sgst = 0.0
-            igst = tax
-        else:
-            cgst = round(tax / 2.0, 2)
-            # Residual on SGST so a half-paisa never drifts one-sided; keeps
-            # cgst + sgst == the stored line tax exactly.
-            sgst = round(tax - cgst, 2)
-            igst = 0.0
+        # Shared with the purchase side (vendors.py PO GST) so an inter-state
+        # supply can never split one way on a sale and another on a purchase.
+        # The odd paisa lands on EITHER head (measured 50/50 over 100,000
+        # odd-paise amounts -- see split_gst's docstring); the invariant is
+        # cgst + sgst == the stored line tax exactly.
+        from ..services.gst_rates import split_gst
+
+        cgst, sgst, igst = split_gst(tax, interstate)
         rows.append(
             {
                 "rate": rate,

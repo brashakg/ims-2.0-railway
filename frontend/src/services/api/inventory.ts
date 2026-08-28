@@ -621,6 +621,30 @@ export interface BrandInsightsResponse {
 // Vendors API
 // ============================================================================
 
+/** What POST /vendors/purchase-orders answers with. The SERVER is the
+ *  authority on GST: it resolves each line's rate from the product's HSN and
+ *  splits CGST+SGST vs IGST from the vendor's and the receiving shop's GST
+ *  numbers. `gst_warnings` names EVERY line whose HSN could not settle the
+ *  rate -- including the ones it taxed anyway off the catalogue rate, because
+ *  an HSN is required on a purchase order whether or not the line was taxed
+ *  (`taxed` says which). `cost_filled` names the products whose cost this
+ *  order's rates recorded. */
+export interface CreatedPurchaseOrder {
+  po_id: string;
+  po_number: string;
+  total_amount: number;
+  interstate?: boolean;
+  gst_summary?: { cgst: number; sgst: number; igst: number; tax: number };
+  gst_warnings?: Array<{
+    product_id: string;
+    product_name?: string;
+    missing: string;
+    taxed: boolean;
+  }>;
+  cost_filled?: Array<{ product_id: string; cost_price: number }>;
+  message?: string;
+}
+
 export const vendorsApi = {
   // Vendors
   getVendors: async (params?: { search?: string; is_active?: boolean }) => {
@@ -723,9 +747,9 @@ export const vendorsApi = {
     }>;
     expected_date?: string;
     notes?: string;
-  }) => {
+  }): Promise<CreatedPurchaseOrder> => {
     const response = await api.post('/vendors/purchase-orders', po);
-    return response.data;
+    return response.data as CreatedPurchaseOrder;
   },
 
   // Procurement Phase 2C: most-recent agreed purchase price per product for a

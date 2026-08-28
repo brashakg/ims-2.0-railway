@@ -205,10 +205,32 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                 <span className="text-gray-600">Subtotal</span>
                 <span className="font-medium text-gray-900">{'\u20B9'}{po.subtotal.toLocaleString()}</span>
               </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Tax</span>
-                <span className="font-medium text-gray-900">{'\u20B9'}{po.taxAmount.toLocaleString()}</span>
-              </div>
+              {/* The split the server stored, not a single opaque "Tax" line:
+                  the same money is a different GST return depending on which
+                  one it is. Orders raised before the split was stored still
+                  show the plain total. */}
+              {po.gstSummary && po.interstate === true ? (
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">IGST</span>
+                  <span className="font-medium text-gray-900">{'\u20B9'}{po.gstSummary.igst.toLocaleString()}</span>
+                </div>
+              ) : po.gstSummary ? (
+                <>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">CGST</span>
+                    <span className="font-medium text-gray-900">{'\u20B9'}{po.gstSummary.cgst.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">SGST</span>
+                    <span className="font-medium text-gray-900">{'\u20B9'}{po.gstSummary.sgst.toLocaleString()}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">Tax</span>
+                  <span className="font-medium text-gray-900">{'\u20B9'}{po.taxAmount.toLocaleString()}</span>
+                </div>
+              )}
               <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
                 <span className="text-gray-900">Total</span>
                 <span className="text-gray-900">{'\u20B9'}{po.total.toLocaleString()}</span>

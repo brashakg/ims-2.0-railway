@@ -53,6 +53,16 @@ export interface PurchaseOrder {
   subtotal: number;
   taxAmount: number;
   total: number;
+  /** How the tax on this order actually splits, as the SERVER stored it
+   *  (purchase_orders.gst_summary). A purchase inside the state is CGST + SGST,
+   *  half each; across states it is one IGST charge. Same money either way --
+   *  what changes is the return it is filed in, so a saved order has to show
+   *  which one it is, not a single "Tax" line. Absent on orders raised before
+   *  the split was stored. */
+  gstSummary?: { cgst: number; sgst: number; igst: number; tax: number };
+  /** true = IGST, false = CGST + SGST, undefined = the order predates the
+   *  split (or the server could not tell). */
+  interstate?: boolean;
   approvedBy?: string;
   receivedDate?: string;
   notes?: string;

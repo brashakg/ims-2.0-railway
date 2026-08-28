@@ -27,21 +27,13 @@ itc_reconcile compares against the entity's primary state. We WRITE it onto the
 invoice doc so the register classifies correctly from then on.
 
 Paisa-exactness mirrors itc_reconcile / the sales-invoice split: CGST is
-round(tax/2) and SGST is the residual (tax - cgst), so CGST + SGST == tax to the
-paisa even on odd-paise tax amounts (e.g. 5.01 -> 2.50 + 2.51).
+round(tax/2) and SGST is tax - cgst, so CGST + SGST == tax to the paisa on
+every amount. Which head carries the odd paisa is NOT fixed -- measured over
+100,000 odd-paise amounts it is CGST on exactly half and SGST on the other half
+(1.01 -> 0.51 + 0.50, 5.01 -> 2.50 + 2.51); see gst_rates.split_gst.
 """
 
 from typing import List, Optional, Tuple
-
-try:
-    # Reuse the canonical state-code normaliser (handles "MH" / "Maharashtra" /
-    # "27" / a full GSTIN's 2-char prefix). Import defensively so the engine is
-    # importable in isolation for unit tests even if the package layout shifts.
-    from .org_validation import normalize_state_code as _normalize_state_code
-except Exception:  # pragma: no cover - defensive fallback
-
-    def _normalize_state_code(value):
-        return value
 
 
 def _f(v) -> float:
@@ -59,21 +51,25 @@ def state_code_of(value: Optional[str]) -> str:
     "27" / "27-Maharashtra", a 2-letter abbreviation ("MH"), or a full state
     name. Returns "" when nothing usable can be derived (so a missing supplier
     or recipient GSTIN degrades to intra-state rather than mis-classifying).
+
+    THIN ALIAS over org_validation.resolve_state_code, which the sale side
+    (orders.py), the purchase ORDER (vendors.py), this purchase BILL and the
+    RTV debit note all call. Two parsers is how the same vendor/store pair came
+    to get opposite tax verdicts on the order and on the bill. Those four are
+    the whole invoice chain; they are NOT every state parser in the codebase --
+    resolve_state_code's own docstring names the ones still outside it.
+
+    One deliberate difference from the old local copy: a 2-digit prefix that is
+    not a real GST state code ("99AAA...", a legacy "25"/"28" registration that
+    no longer exists) now resolves to "" instead of being taken at face value,
+    which degrades to intra-state -- the conservative default this engine
+    already documents -- rather than asserting a state that does not exist.
     """
-    if value is None:
+    try:
+        from .org_validation import resolve_state_code as _resolve_state_code
+    except Exception:  # pragma: no cover - defensive, matches the import above
         return ""
-    s = str(value).strip().upper()
-    if not s:
-        return ""
-    # A GSTIN (or any 15-char id) embeds the state code in the first two digits.
-    if len(s) >= 12 and s[:2].isdigit():
-        return s[:2]
-    # Otherwise let the canonical normaliser map abbr / name / code -> "NN".
-    norm = _normalize_state_code(s)
-    norm = str(norm or "").strip().upper()
-    if len(norm) >= 2 and norm[:2].isdigit():
-        return norm[:2]
-    return ""
+    return _resolve_state_code(value)
 
 
 def determine_place_of_supply(
@@ -115,20 +111,21 @@ def split_line_gst(taxable, gst_rate, interstate: bool) -> dict:
 
     Returns {taxable, gst_rate, gst, cgst, sgst, igst, line_total}. The tax is
     computed once as round(taxable * rate / 100); for an inter-state line the
-    whole tax is IGST, otherwise it splits CGST = round(tax/2) and SGST = the
-    residual so CGST + SGST == tax to the paisa.
+    whole tax is IGST, otherwise it splits CGST = round(tax/2) and SGST =
+    tax - cgst so CGST + SGST == tax to the paisa. The odd paisa lands on
+    either head -- measured 50/50, see gst_rates.split_gst.
     """
+    from .gst_rates import split_gst
+
     tax_base = _f(taxable)
     rate = _f(gst_rate)
     gst = round(tax_base * rate / 100.0, 2)
-    if interstate:
-        cgst = 0.0
-        sgst = 0.0
-        igst = gst
-    else:
-        cgst = round(gst / 2, 2)
-        sgst = round(gst - cgst, 2)  # residual -> exact sum
-        igst = 0.0
+    # The sales invoice, the purchase order and this purchase bill all call
+    # gst_rates.split_gst, so an inter-state supply cannot be halved one way on
+    # a sale and another on a purchase. NOT "one split for the whole app":
+    # reports.py / finance.py still halve inline and transfers.py and
+    # rtv_debit_note.py keep their own. See the note above split_gst.
+    cgst, sgst, igst = split_gst(gst, interstate)
     return {
         "taxable": tax_base,
         "gst_rate": rate,

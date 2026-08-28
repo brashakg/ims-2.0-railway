@@ -84,6 +84,7 @@ import {
   validateReviewForm,
   buildProductPayload,
   resolveHsnGst,
+  hsnImpliesCategoryRate,
   productToFormValues,
   catalogDocToFormValues,
   formValuesToCatalogUpdate,
@@ -318,6 +319,14 @@ export function QuickAddPage() {
       setGstRate(gr);
     }
   }, [selectedCategory, isReviewMode]);
+
+  // Does the HSN on the form still imply the rate the form is showing?
+  // The rule itself lives in productAddShared.hsnImpliesCategoryRate, where it
+  // can be tested without standing this whole page up.
+  const hsnMatchesCategory = useMemo(
+    () => hsnImpliesCategoryRate(selectedCategory, hsnCode),
+    [hsnCode, selectedCategory],
+  );
 
   // Keyboard-first: when a category is picked, move focus to the first
   // category field so the user can start typing without reaching for the mouse.
@@ -2789,14 +2798,25 @@ export function QuickAddPage() {
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-700 mb-1">GST Rate (%)</label>
+                          {/* The HSN decides the rate, and the SERVER reads the
+                              HSN -- the save derives gst_rate from hsn_code
+                              (product_master.normalise_payload). So the moment
+                              this HSN is not the one this category implies, this
+                              box stops naming a number it cannot stand behind
+                              rather than showing the category's rate as if the
+                              HSN had agreed to it. */}
                           <input
                             type="text"
-                            title="GST Rate (auto-filled from HSN)"
-                            value={`${gstRate}%`}
+                            title="GST rate - settled from the HSN when the product is saved"
+                            value={hsnMatchesCategory ? `${gstRate}%` : 'Set from the HSN on save'}
                             readOnly
                             className="input-field w-full bg-gray-50 cursor-not-allowed"
                           />
-                          <p className="text-xs text-gray-500 mt-1">Auto-filled from HSN code</p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {hsnMatchesCategory
+                              ? 'Settled from the HSN when you save'
+                              : `Settled from HSN ${hsnCode} when you save`}
+                          </p>
                         </div>
                         {/* SG/FR render Weight inline in the attribute grid
                             (between Warranty and UPC) — not duplicated here. */}
@@ -3189,7 +3209,14 @@ export function QuickAddPage() {
               />
               {canSeeCost && costPrice && <ReviewRow label="Cost" value={`₹${costPrice}`} />}
               {weight && <ReviewRow label="Weight" value={`${weight} g`} />}
-              <ReviewRow label="HSN / GST" value={selectedCategory ? `${hsnCode || '—'} · ${gstRate}%` : '—'} />
+              <ReviewRow
+                label="HSN / GST"
+                value={
+                  !selectedCategory
+                    ? '—'
+                    : `${hsnCode || '—'} · ${hsnMatchesCategory ? `${gstRate}%` : 'set from the HSN on save'}`
+                }
+              />
               <ReviewRow
                 label="Discount band"
                 value={

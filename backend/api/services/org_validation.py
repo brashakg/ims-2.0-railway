@@ -266,3 +266,99 @@ def resolve_gstin_for_state(gstins, state_code: Optional[str]) -> Optional[dict]
         if isinstance(g, dict) and (g.get("state_code") or "").strip() == sc:
             return g
     return None
+
+
+# Two digits that ARE the value or are followed by a non-digit (see the
+# fallback in resolve_state_code below). "27-Maharashtra" yes, "190001" no.
+_LEADING_STATE_CODE_RE = re.compile(r"(\d{2})(?:\D|$)")
+
+
+def resolve_state_code(*candidates) -> str:
+    """Best-effort 2-digit GST state code from the FIRST usable candidate.
+
+    Accepts, in any order and in any mix: a 15-char GSTIN (state = first two
+    chars), a bare 2-digit code, a 2-letter abbreviation, or a full state name.
+    Returns "" when nothing resolves. ASCII-only; never raises.
+
+    WHO CALLS THIS (measured 2026-08-27, every backend hit listed): the sale
+    (routers/orders._invoice_state_code), the purchase ORDER (routers/vendors
+    via purchase_invoice_engine), the purchase BILL
+    (purchase_invoice_engine.state_code_of) and the RTV debit note
+    (rtv_debit_note.state_code_of). The last three are three-line delegates,
+    so the PO -> bill -> debit-note chain cannot answer two ways.
+
+    IT IS NOT "the single place a state code is parsed" IN THIS CODEBASE, and
+    that sentence must not be written here until the list below is empty and
+    re-measured. Six modules outside that chain still parse one themselves and
+    DO answer differently (measured, same inputs; see
+    tests/test_state_parser_divergence.py, which pins this table):
+
+        input               here  print_legal  itc_reconcile  gstn_export
+        '27-Maharashtra'    27    27           27             ''
+        'Maharashtra (27)'  ''    27           27             ''
+        'MH'                27    ''           ''             ''
+        'Maharashtra'       27    ''           ''             27
+        '27AAAAA0000A1Z5'   27    27           27             ''
+
+      services/print_legal._state_code_of  - printed-invoice HSN tax summary
+      services/itc_reconcile._state_code   - ITC register IGST routing
+      services/gstn_export._state_code     - GSTR export; own 38-name table
+      routers/transfers._store_state_code  - inter-store transfer mirror bill
+      routers/stores._state_code_for       - stamps state_code onto a store
+                                             row at birth; reads names and
+                                             bare codes but drops the portal
+                                             form AND GSTINs (both -> None)
+      routers/finance._norm_state          - GST-summary inter-state check;
+                                             passes unresolvable values
+                                             through UNCHANGED, so '27' vs
+                                             '27-Maharashtra' compares as
+                                             inter-state
+    plus two inline ``gstin[:2]`` sites, routers/reports.py:3587 and
+    services/einvoice.py:178+276. None is touched by this change.
+    """
+
+    def _valid_code(code) -> str:
+        c = str(code or "").strip()
+        if len(c) == 2 and c.isdigit() and c in INDIAN_STATE_CODES:
+            return c
+        return ""
+
+    for cand in candidates:
+        if cand is None:
+            continue
+        s = str(cand).strip()
+        if not s:
+            continue
+        # A full GSTIN -> first two chars are the state code.
+        if len(s) == 15 and s[:2].isdigit():
+            code = _valid_code(s[:2])
+            if code:
+                return code
+        # 2-digit code / 2-letter abbreviation / full state name.
+        code = _valid_code(normalize_state_code(s))
+        if code:
+            return code
+        # LAST: a bare leading 2-digit code. This is NOT a nicety -- it is the
+        # GST portal's own display form ("27-Maharashtra", "20-Jharkhand"),
+        # what imported customer/vendor rows carry, and what a truncated or
+        # mistyped GSTIN still leads with. Without it those all resolve to "",
+        # which reads as "unknown state" -> intra-state -> an out-of-state B2B
+        # sale billed CGST+SGST instead of IGST and filed in the wrong GSTR-1
+        # bucket.
+        #
+        # The two digits must be the WHOLE value or be followed by a non-digit.
+        # A longer run of digits is not a state code with a label after it, it
+        # is some other number: "190001" is a Srinagar PIN and used to resolve
+        # to "19" (West Bengal), and "1900" likewise. Both now resolve to "".
+        # Being wrong about the state is worse than not knowing it -- "" is
+        # visibly flagged on the screen, "19" is not.
+        #
+        # The code is still checked against INDIAN_STATE_CODES, which rejects
+        # "88-Nowhere" but NOT "99-Nowhere": "99" is a real entry (Centre
+        # Jurisdiction). This guard is about digit runs, not about fake states.
+        m = _LEADING_STATE_CODE_RE.match(s)
+        if m:
+            code = _valid_code(m.group(1))
+            if code:
+                return code
+    return ""
