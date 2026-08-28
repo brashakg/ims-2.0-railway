@@ -496,7 +496,7 @@ def test_restamp_promotes_cl_draft_when_attributes_completed():
         "mrp": 1200.0,
         "offer_price": 1000.0,
         "cost_price": 500.0,
-        "hsn_code": "90013000",
+        "hsn_code": "900130",
         "gst_rate": 5.0,
         "catalog_status": "DRAFT",
         "done_gaps": ["power"],

@@ -105,22 +105,12 @@ export function resolveHsn(category?: string | null): string {
   return _hsnByCat[canonicalCategory(category)] || '';
 }
 
-/** Resolve the GST rate (%) for a line, in the SAME four steps the server
+/** The SERVER's GST rate (%) for a line, in the same three steps the server
  *  takes: editable master by exact HSN -> editable master by category hint ->
- *  the server's canonical category table -> the offline table in
- *  constants/gst.ts. Synchronous + always returns a number.
- *
- *  Step 3 is the one that used to be a hand-written copy over here. The copy
- *  disagreed with the server: an EYE_TEST / CONSULTATION line is an exempt
- *  health service billed at 0% (SAC 9993), and the copy had no row for it, so
- *  the screen and the printed invoice quoted the unknown-category default while
- *  the customer was charged nothing. Reading the server's own table removes the
- *  whole class -- nothing over here has to be told when a rate changes.
- *
- *  Step 4 is reached only for a category the server does not name (a legacy or
- *  free-text spelling) or before the endpoint has answered. It is a rate on the
- *  POS billing path, so it stays hand-written and deliberately dull. */
-export function resolveGstRate(category?: string | null, hsnCode?: string | null): number {
+ *  the server's canonical category table. Returns null until the endpoint has
+ *  answered (or for a category the server does not name) -- a DISPLAY caller
+ *  must then show nothing, never a hand-typed value. */
+export function serverGstRate(category?: string | null, hsnCode?: string | null): number | null {
   if (hsnCode) {
     const hc = String(hsnCode).trim();
     if (hc && _byHsn[hc] != null) return _byHsn[hc];
@@ -134,7 +124,37 @@ export function resolveGstRate(category?: string | null, hsnCode?: string | null
   // hint sends it to COLORED_CONTACT_LENS, which has no master row, so the raw
   // plural would have fallen through to the 18% default while the server bills 5%.
   if (norm && _rateByCat[norm] != null) return _rateByCat[norm];
-  return getGSTRateByCategory(norm);
+  return null;
+}
+
+/** Resolve the GST rate (%) for a line: serverGstRate() above, then the
+ *  offline table in constants/gst.ts. Synchronous + always returns a number.
+ *
+ *  The server tables used to be a hand-written copy over here. The copy
+ *  disagreed with the server: an EYE_TEST / CONSULTATION line is an exempt
+ *  health service billed at 0% (SAC 9993), and the copy had no row for it, so
+ *  the screen and the printed invoice quoted the unknown-category default while
+ *  the customer was charged nothing. Reading the server's own table removes the
+ *  whole class -- nothing over here has to be told when a rate changes.
+ *
+ *  The offline step is reached only for a category the server does not name (a
+ *  legacy or free-text spelling) or before the endpoint has answered. It is a
+ *  rate on the POS billing path, so it stays hand-written and deliberately
+ *  dull. Display-only callers use serverGstRate() and skip it. */
+export function resolveGstRate(category?: string | null, hsnCode?: string | null): number {
+  const server = serverGstRate(category, hsnCode);
+  if (server != null) return server;
+  return getGSTRateByCategory(_normalizeCat(category));
+}
+
+/** The category_hint vocabulary of the editable HSN->GST master, straight off
+ *  the server's hint map (the distinct values of gst_rates._CATEGORY_HINT).
+ *  resolve_gst_rate matches a master row's stored hint against THIS vocabulary,
+ *  so offering any other spelling would make the row silently no-op. Empty
+ *  until the endpoint has answered -- a select must then offer nothing rather
+ *  than a hand-typed list. */
+export function categoryHintOptions(): string[] {
+  return [...new Set(Object.values(_hint))].sort();
 }
 
 /** The HSN codes the cataloguing screen may offer, server-first.

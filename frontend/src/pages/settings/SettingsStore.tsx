@@ -15,6 +15,7 @@ import {
 } from '../../services/api';
 import type { Category, Brand } from './settingsTypes';
 import { CATEGORY_DEFINITIONS } from './settingsTypes';
+import { loadHsnRates, resolveHsn, serverGstRate } from '../../constants/gstRuntime';
 
 // ============================================================================
 // Transform helpers
@@ -46,6 +47,14 @@ const transformBrand = (b: any): Brand => ({
 
 export function CategorySection() {
   const categories = CATEGORY_DEFINITIONS;
+  // HSN + GST are SERVER-FED (GET /products/gst-rates via gstRuntime). The old
+  // hand-typed columns on CATEGORY_DEFINITIONS contradicted the server on 7 of
+  // 13 rows and were rendered here as fact. Until the endpoint answers the
+  // screen shows an em-dash, never a hand-typed value.
+  const [, setRatesLoaded] = useState(0);
+  useEffect(() => {
+    loadHsnRates().then(() => setRatesLoaded((n) => n + 1));
+  }, []);
 
   return (
     <div className="card">
@@ -60,7 +69,10 @@ export function CategorySection() {
       </div>
 
       <div className="space-y-3">
-        {categories.map(cat => (
+        {categories.map(cat => {
+          const hsn = resolveHsn(cat.code);
+          const rate = serverGstRate(cat.code, hsn);
+          return (
           <div
             key={cat.code}
             className="p-4 border border-gray-200 rounded-lg"
@@ -79,7 +91,7 @@ export function CategorySection() {
                     <span className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono">{cat.code}</span>
                   </div>
                   <p className="text-xs text-gray-500">
-                    HSN: {cat.hsnCode} | GST: {cat.gstRate}%
+                    HSN: {hsn || '—'} | GST: {rate == null ? '—' : `${rate}%`}
                   </p>
                 </div>
               </div>
@@ -105,7 +117,8 @@ export function CategorySection() {
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

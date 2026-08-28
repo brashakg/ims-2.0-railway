@@ -89,20 +89,19 @@ def _get_categories_from_db() -> List[str]:
 # Contact-lens product categories. CL identity fields only apply to these.
 # Kept in sync with schemas.py PRODUCT_SCHEMA category enum.
 CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
-# India: contact lenses are HSN 9001 (90013000) at 5% GST under GST 2.0
-# (effective 22 Sep 2025; verified against the 56th GST Council press release
-# Annexure-I Sr. 351 -- the 12% slab was eliminated, so 5% is now correct, not
-# 12%). HSN/GST defaults for EVERY category come from the canonical table in
-# api/services/gst_rates.py, which the POS billing engine (orders.py) also
-# reads, so the product master rate always equals what POS bills.
+# HSN/GST defaults for EVERY category (contact lenses included: 900130 at 5%
+# under GST 2.0) come from the canonical table in api/services/gst_rates.py,
+# which the POS billing engine (orders.py) also reads, so the product master
+# rate always equals what POS bills. No per-category default constants here:
+# the old CL_HSN_DEFAULT carried an 8-digit spelling of the HSN that the door
+# never stored, and two spellings of one product's HSN split it across two
+# rows of the invoice HSN-wise summary and of GSTR-1.
 from ..services.gst_rates import (
     gst_rate_for_category,
     hsn_for_category,
     GST_CATEGORY_TABLE,
 )
 
-CL_HSN_DEFAULT = "90013000"
-CL_GST_DEFAULT = 5.0
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
 
 # Unification step-8: the canonical product-category taxonomy lives in ONE
