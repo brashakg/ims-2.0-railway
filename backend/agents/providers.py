@@ -327,11 +327,27 @@ async def send_whatsapp(
 # ============================================================================
 
 
-async def send_sms(phone: str, message: str) -> DispatchResult:
-    """Send a transactional SMS via MSG91. Returns DispatchResult; never raises."""
+async def send_sms(
+    phone: str, message: str, *, dlt_template_id: Optional[str] = None
+) -> DispatchResult:
+    """Send a transactional SMS via MSG91. Returns DispatchResult; never raises.
+
+    dlt_template_id: optional per-flow DLT template override (the SMS-fallback
+    build stamps it on the queued row from the template registry's
+    sms_template_id field). None keeps today's behaviour exactly: the single
+    default template from creds/env. The resolved template id rides
+    DispatchResult.meta so the SIMULATED path proves the payload shape."""
     phone_norm = _normalize_phone(phone)
     if not phone_norm:
         return DispatchResult(ok=False, status="FAILED", error="invalid phone", channel="sms")
+
+    # Resolve the DLT template BEFORE the dispatch gate so a dark deploy can
+    # prove which template a send WOULD use (mirrors send_whatsapp.meta).
+    creds = _msg91()
+    resolved_template = (dlt_template_id or "").strip() or (
+        creds.get("sms_template_id") or ""
+    )
+    meta = {"dlt_template_id": resolved_template, "sender": creds.get("sender") or ""}
 
     should, reason = _should_dispatch(phone_norm)
     if not should:
@@ -341,9 +357,9 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
             status="SIMULATED",
             provider_id=f"sim-sms-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
             channel="sms",
+            meta=meta,
         )
 
-    creds = _msg91()
     api_key = creds.get("api_key") or ""
     if not api_key:
         return DispatchResult(
@@ -357,7 +373,7 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
     # MSG91 SMS Flow API. Requires DLT-approved template + sender ID.
     # https://docs.msg91.com/sms/send-sms
     payload = {
-        "template_id": creds.get("sms_template_id") or "",
+        "template_id": resolved_template,
         "sender": creds.get("sender") or "",
         "short_url": "0",
         "recipients": [{"mobiles": phone_norm, "BODY": message}],
@@ -381,6 +397,7 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
             status="SENT",
             provider_id=body.get("request_id") or None,
             channel="sms",
+            meta=meta,
         )
     except httpx.TimeoutException:
         return DispatchResult(ok=False, status="FAILED", error="timeout", channel="sms")
@@ -388,6 +405,287 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
         return DispatchResult(ok=False, status="FAILED", error=f"http {e}", channel="sms")
     except (ValueError, KeyError, TypeError) as e:
         return DispatchResult(ok=False, status="FAILED", error=f"parse {e}", channel="sms")
+
+
+# ============================================================================
+# Email via MSG91 (transactional TRANSPORT; flows stay owner-triggered)
+# ============================================================================
+
+# Sending domain + from-address are env keys (the msg91_catalog_map names
+# them); a deployment without them cannot send email and says so honestly.
+# Paths are env-overridable like MSG91_SHORTURL_PATH so the exact endpoint can
+# be corrected at arming time without a code change (nothing is called dark).
+MSG91_EMAIL_PATH = (os.getenv("MSG91_EMAIL_PATH") or "email/send").strip("/")
+MSG91_EMAIL_VALIDATE_PATH = (
+    os.getenv("MSG91_EMAIL_VALIDATE_PATH") or "email/validate"
+).strip("/")
+
+_EMAIL_RE_MIN = ("@", ".")  # cheap sanity only; MSG91 validation is the judge
+
+
+def _should_dispatch_email(to_email: str) -> tuple[bool, str]:
+    """Email twin of _should_dispatch. Same gate, TEST_EMAIL instead of
+    TEST_PHONE for DISPATCH_MODE=test."""
+    if DISPATCH_MODE == "off":
+        return False, "DISPATCH_MODE=off - staging / dry-run; not emailing"
+    if DISPATCH_MODE == "test":
+        test_email = os.getenv("TEST_EMAIL", "").strip().lower()
+        if not test_email:
+            return False, "DISPATCH_MODE=test but TEST_EMAIL unset"
+        if to_email.strip().lower() != test_email:
+            return False, "DISPATCH_MODE=test - only TEST_EMAIL receives email"
+        return True, "test dispatch to TEST_EMAIL"
+    if DISPATCH_MODE == "live":
+        return True, "live dispatch"
+    return False, f"unknown DISPATCH_MODE={DISPATCH_MODE!r} - defaulting to off"
+
+
+async def send_email(
+    to_email: str,
+    subject: str,
+    body_text: str,
+    *,
+    to_name: Optional[str] = None,
+) -> DispatchResult:
+    """Send ONE transactional email via the MSG91 email API. Returns
+    DispatchResult; never raises.
+
+    TRANSPORT ONLY: nothing queues email automatically - the flows that use
+    this (invoice / warranty / Rx-copy) stay owner-triggered buttons. The
+    SIMULATED path resolves domain + from-address and fills meta so a dark
+    deploy proves the payload shape end to end without touching MSG91.
+    """
+    addr = str(to_email or "").strip()
+    if not all(ch in addr for ch in _EMAIL_RE_MIN) or " " in addr:
+        return DispatchResult(
+            ok=False, status="FAILED", error="invalid email", channel="email"
+        )
+
+    domain = os.getenv("MSG91_EMAIL_DOMAIN", "").strip()
+    from_email = os.getenv("MSG91_EMAIL_FROM", "").strip()
+    meta = {
+        "domain": domain,
+        "from_email": from_email,
+        "to": addr,
+        "subject": str(subject or ""),
+    }
+
+    should, reason = _should_dispatch_email(addr)
+    if not should:
+        logger.info(f"[PROVIDER] Suppressed email: {reason}")
+        return DispatchResult(
+            ok=True,
+            status="SIMULATED",
+            provider_id=f"sim-email-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            channel="email",
+            meta=meta,
+        )
+
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 auth key not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or MSG91_API_KEY)",
+            channel="email",
+        )
+    if not domain or not from_email:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 email not configured (MSG91_EMAIL_DOMAIN / MSG91_EMAIL_FROM)",
+            channel="email",
+        )
+
+    # MSG91 email API shape (https://docs.msg91.com/email/send-email).
+    payload = {
+        "recipients": [
+            {"to": [{"email": addr, "name": str(to_name or "") or addr}]}
+        ],
+        "from": {"email": from_email},
+        "domain": domain,
+        "subject": str(subject or ""),
+        "body": {"type": "text/plain", "data": str(body_text or "")},
+    }
+    headers = {"authkey": api_key, "content-type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MSG91_BASE_URL}/{MSG91_EMAIL_PATH}/", headers=headers, json=payload
+            )
+        if resp.status_code not in (200, 201, 202):
+            logger.warning(f"[PROVIDER] MSG91 email {resp.status_code}: {resp.text[:300]}")
+            return DispatchResult(
+                ok=False,
+                status="FAILED",
+                error=f"MSG91 returned {resp.status_code}",
+                channel="email",
+            )
+        body = resp.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        provider_id = (
+            (data or {}).get("unique_id") if isinstance(data, dict) else None
+        ) or body.get("request_id") or body.get("unique_id") or None
+        return DispatchResult(
+            ok=True, status="SENT", provider_id=provider_id, channel="email", meta=meta
+        )
+    except httpx.TimeoutException:
+        return DispatchResult(ok=False, status="FAILED", error="timeout", channel="email")
+    except httpx.HTTPError as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"http {e}", channel="email")
+    except (ValueError, KeyError, TypeError) as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"parse {e}", channel="email")
+
+
+def email_validation_armed() -> tuple[bool, str]:
+    """THE one arming gate for billed email validation (validate-on-capture
+    AND the batch job read it - one rule, one implementation). Armed only
+    when DISPATCH_MODE is test/live AND an MSG91 auth key exists; anything
+    else is dark = zero network calls = zero spend."""
+    if DISPATCH_MODE not in ("test", "live"):
+        return False, f"DISPATCH_MODE={DISPATCH_MODE or 'off'} - validations are billed; not spending"
+    creds = _msg91()
+    if not (creds.get("api_key") or ""):
+        return False, "MSG91 auth key not configured"
+    return True, "armed"
+
+
+async def validate_email(email: str) -> Optional[dict]:
+    """Check ONE address against MSG91's email-validation API.
+
+    Returns {"status": "valid"|"invalid"|"risky"|"unknown", "raw": <verbatim>}
+    or None when nothing was checked. DARK-SAFE AND SPEND-SAFE BY
+    CONSTRUCTION: validations are billed per address, so with DISPATCH_MODE
+    off (default) or no MSG91 auth key this returns None WITHOUT any network
+    call - a dark deploy spends nothing and stamps nothing. Never raises.
+    """
+    addr = str(email or "").strip()
+    if not all(ch in addr for ch in _EMAIL_RE_MIN) or " " in addr:
+        return None
+    armed, _reason = email_validation_armed()
+    if not armed:
+        return None
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=min(PROVIDER_TIMEOUT, 10.0)) as client:
+            resp = await client.post(
+                f"{MSG91_BASE_URL}/{MSG91_EMAIL_VALIDATE_PATH}/",
+                headers={"authkey": api_key, "content-type": "application/json"},
+                json={"email": addr},
+            )
+        if resp.status_code not in (200, 201):
+            logger.warning(
+                f"[PROVIDER] MSG91 email-validate {resp.status_code}: {resp.text[:200]}"
+            )
+            return None
+        body = resp.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        raw = (
+            (data or {}).get("result") if isinstance(data, dict) else None
+        ) or body.get("result") or body.get("status") or ""
+        verdict = str(raw).strip().lower()
+        if verdict in ("valid", "deliverable", "ok"):
+            status = "valid"
+        elif verdict in ("invalid", "undeliverable", "bad"):
+            status = "invalid"
+        elif verdict in ("risky", "unknown", "catch-all", "catchall", "accept_all"):
+            status = "risky"
+        else:
+            status = "unknown"
+        return {"status": status, "raw": str(raw)[:100]}
+    except httpx.HTTPError as e:
+        logger.warning(f"[PROVIDER] MSG91 email-validate failed: {e}")
+        return None
+    except (ValueError, KeyError, TypeError) as e:
+        logger.warning(f"[PROVIDER] MSG91 email-validate parse failed: {e}")
+        return None
+
+
+# ============================================================================
+# Voice via MSG91 (TTS escalation call with press-1-to-acknowledge IVR)
+# ============================================================================
+
+MSG91_VOICE_PATH = (os.getenv("MSG91_VOICE_PATH") or "voice/call").strip("/")
+
+
+async def send_voice_call(phone: str, message: str) -> DispatchResult:
+    """Place ONE text-to-speech voice call via the MSG91 voice API, asking the
+    callee to press 1 to acknowledge (the DTMF event comes back on the
+    /integrations/msg91/webhooks/voice receiver). Returns DispatchResult;
+    never raises. SIMULATED (with the full payload shape in meta) while
+    DISPATCH_MODE is off - a dark deploy proves the shape and calls no one.
+    """
+    phone_norm = _normalize_phone(phone)
+    if not phone_norm:
+        return DispatchResult(ok=False, status="FAILED", error="invalid phone", channel="voice")
+
+    tts = str(message or "").strip()
+    meta = {"to": phone_norm, "tts": tts[:500], "dtmf_ack_digit": "1"}
+
+    should, reason = _should_dispatch(phone_norm)
+    if not should:
+        logger.info(f"[PROVIDER] Suppressed voice call to {phone_norm[-4:]}: {reason}")
+        return DispatchResult(
+            ok=True,
+            status="SIMULATED",
+            provider_id=f"sim-voice-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
+            channel="voice",
+            meta=meta,
+        )
+
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 auth key not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or MSG91_API_KEY)",
+            channel="voice",
+        )
+
+    # MSG91 voice API (panel-documented; path env-correctable at arming time).
+    payload = {
+        "to": phone_norm,
+        "type": "tts",
+        "message": tts,
+        "collect_dtmf": True,
+    }
+    headers = {"authkey": api_key, "content-type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MSG91_BASE_URL}/{MSG91_VOICE_PATH}/", headers=headers, json=payload
+            )
+        if resp.status_code not in (200, 201, 202):
+            logger.warning(f"[PROVIDER] MSG91 voice {resp.status_code}: {resp.text[:300]}")
+            return DispatchResult(
+                ok=False,
+                status="FAILED",
+                error=f"MSG91 returned {resp.status_code}",
+                channel="voice",
+            )
+        body = resp.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        provider_id = (
+            (data or {}).get("request_id") if isinstance(data, dict) else None
+        ) or body.get("request_id") or None
+        return DispatchResult(
+            ok=True, status="SENT", provider_id=provider_id, channel="voice", meta=meta
+        )
+    except httpx.TimeoutException:
+        return DispatchResult(ok=False, status="FAILED", error="timeout", channel="voice")
+    except httpx.HTTPError as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"http {e}", channel="voice")
+    except (ValueError, KeyError, TypeError) as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"parse {e}", channel="voice")
 
 
 # ============================================================================

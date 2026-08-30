@@ -1479,6 +1479,14 @@ def _process_msg91_events(channel: str, payload: Any) -> Dict[str, int]:
             for phone, referral in _iter_meta_referrals(payload):
                 if stamp_ctwa_attribution(phone, referral):
                     counts["ctwa_stamped"] += 1
+
+        # Voice-escalation IVR: a pressed "1" on the escalation call
+        # acknowledges the matching task (mirrors POST /tasks/{id}/acknowledge
+        # + a history row naming channel=voice_ivr). Fail-soft like the rest.
+        if channel == "voice":
+            from ..services.voice_escalation import apply_voice_acks
+
+            counts["voice_acks"] = apply_voice_acks(payload)
     except Exception as exc:  # noqa: BLE001
         logger.error("[WEBHOOKS] msg91 %s event processing failed: %s", channel, exc)
     return counts

@@ -992,10 +992,21 @@ class MegaphoneAgent(JarvisAgent):
             message = row.get("message") or row.get("body") or ""
             template_id = row.get("template_id")
 
-            # We need a phone and SOMETHING to send. If message is empty
-            # and we can populate from template, that's notification_service's
-            # job — MEGAPHONE only drains pre-populated messages.
-            if not phone or not message:
+            # EMAIL rows need an address + message (no phone); the phone
+            # channels need a phone + message. MEGAPHONE only drains
+            # pre-populated messages — populating is notification_service's job.
+            if channel == "email":
+                email_to = row.get("customer_email") or ""
+                if not email_to or not message:
+                    self._update_status(
+                        notif_coll,
+                        row,
+                        status="FAILED",
+                        error="missing email or message",
+                    )
+                    stats["failed"] += 1
+                    continue
+            elif not phone or not message:
                 self._update_status(
                     notif_coll,
                     row,
@@ -1008,7 +1019,21 @@ class MegaphoneAgent(JarvisAgent):
             # Dispatch
             try:
                 if channel == "sms":
-                    result = await send_sms(phone, message)
+                    # dlt_template_id: per-flow DLT override stamped by the
+                    # SMS-fallback queue (registry sms_template_id); None on
+                    # every pre-existing row -> the single default template.
+                    result = await send_sms(
+                        phone, message, dlt_template_id=row.get("dlt_template_id")
+                    )
+                elif channel == "email":
+                    from ..providers import send_email  # lazy import
+
+                    result = await send_email(
+                        row.get("customer_email") or "",
+                        row.get("subject") or f"Message from {row.get('store_id') or 'your store'}",
+                        message,
+                        to_name=row.get("customer_name"),
+                    )
                 else:
                     # store_id rides the queued row (send_notification stamps
                     # it); the send door resolves the shop's own Coexistence

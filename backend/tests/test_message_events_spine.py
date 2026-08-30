@@ -98,12 +98,19 @@ def _doc_matches(doc, flt):
                     return False
                 if op == "$in" and actual not in opv:
                     return False
+                if op == "$nin" and actual in opv:
+                    return False
                 if op == "$ne" and actual == opv:
                     return False
                 if op == "$type" and not isinstance(actual, str):
                     return False
         else:
-            if actual != expected:
+            # Mongo array-contains semantics: a scalar filter value matches a
+            # doc whose field is a LIST containing it (e.g. roles: ["ADMIN"]).
+            if isinstance(actual, list) and not isinstance(expected, (dict, list)):
+                if expected not in actual:
+                    return False
+            elif actual != expected:
                 return False
     return True
 
@@ -149,6 +156,12 @@ class FakeCollection:
             _set_path(d, k, v)
         for k, v in (update.get("$inc") or {}).items():
             _set_path(d, k, (_get_path(d, k) or 0) + v)
+        for k, v in (update.get("$push") or {}).items():
+            arr = _get_path(d, k)
+            if not isinstance(arr, list):
+                arr = []
+            arr.append(v)
+            _set_path(d, k, arr)
 
     def update_one(self, flt, update, upsert=False):
         for d in self.docs:

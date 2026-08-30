@@ -66,6 +66,9 @@ describe('WhatsApp template mapping editor', () => {
     const nameInput = await screen.findByPlaceholderText('e.g. bv_order_delivered_v1');
     fireEvent.change(nameInput, { target: { value: 'bv_birthday_v3' } });
     fireEvent.change(screen.getByPlaceholderText('en'), { target: { value: 'en_US' } });
+    fireEvent.change(screen.getByPlaceholderText('e.g. 1107170000000012345'), {
+      target: { value: 'ZZ_DLT_1107_BDAY' },
+    });
 
     fireEvent.click(screen.getByText('Save mapping'));
 
@@ -74,6 +77,9 @@ describe('WhatsApp template mapping editor', () => {
     expect(templateId).toBe('BIRTHDAY_WISH');
     expect(body.wa_template_name).toBe('bv_birthday_v3');
     expect(body.wa_language).toBe('en_US');
+    // The SMS-fallback DLT template id rides the SAME save (registry row,
+    // never env) - dropping it would silently disable the flow's fallback.
+    expect(body.sms_template_id).toBe('ZZ_DLT_1107_BDAY');
     // The full doc shape still rides along (backend model requires it).
     expect(body.template_id).toBe('BIRTHDAY_WISH');
     expect(typeof body.content).toBe('string');
