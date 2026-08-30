@@ -538,16 +538,16 @@ def _spine_repo():
     return ProductRepository(coll)
 
 
-def _edit_spine(db, monkeypatch, **fields):
+def _edit_spine(db, monkeypatch, repo=None, spine_id="P1", **fields):
     from api.routers import products as products_mod
     import api.dependencies as deps_mod
 
-    repo = _spine_repo()
+    repo = repo or _spine_repo()
     monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
     monkeypatch.setattr(deps_mod, "get_db", lambda: _SpineConn(db["catalog_products"]))
     _run(
         products_mod.update_product(
-            "P1",
+            spine_id,
             products_mod.ProductUpdate(**fields),
             {
                 "user_id": "u1",
@@ -569,6 +569,67 @@ def test_price_edit_on_the_billing_spine_queues_the_twin(db, monkeypatch):
     assert saved["pricing"]["mrp"] == 6000.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
+
+
+def _door_created_spine_repo():
+    """A spine row as the CREATE DOOR writes it: `pim_product_id` is a SEPARATE
+    uuid the door minted, and the catalog twin is keyed on THAT id -- not the
+    spine's own. 71 of the 77 live products are shaped this way (prod census
+    2026-08-30); only 6 legacy/convergence twins share the spine id."""
+    coll = MockCollection("products")
+    coll.insert_one(
+        {
+            "_id": "SPINE-77",
+            "product_id": "SPINE-77",
+            "id": "SPINE-77",
+            "sku": "FR-RB-0077",
+            "brand": "Ray-Ban",
+            "model": "RB1077",
+            "category": "FRAME",
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "cost_price": 2000.0,
+            "hsn_code": "900311",
+            "gst_rate": 5.0,
+            "is_active": True,
+            "pim_product_id": "P1",  # the twin's key -- a DIFFERENT uuid
+            "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1077"},
+            "catalog_status": "ACTIVE",
+        }
+    )
+    return ProductRepository(coll)
+
+
+def test_a_door_created_products_price_edit_reaches_its_pim_keyed_twin(
+    db, monkeypatch
+):
+    """THE 71-of-77 BUG. A door-created product's catalog twin is keyed on
+    pim_product_id (a different uuid), but the PUT /products mirror filtered on
+    the SPINE id -- so the write matched nothing: the POS price moved, the
+    WEBSITE price stayed stale, and ecom.locally_modified landed nowhere, so
+    the edit never even queued. Silently. The mirror must resolve the twin the
+    way the service door does: pim_product_id first, spine id as the legacy
+    fallback (which test_price_edit_on_the_billing_spine_queues_the_twin pins)."""
+    _seed_pushed(db)  # the twin lives at id "P1" == the spine's pim_product_id
+
+    _edit_spine(
+        db,
+        monkeypatch,
+        repo=_door_created_spine_repo(),
+        spine_id="SPINE-77",
+        mrp=6000.0,
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["pricing"]["mrp"] == 6000.0, (
+        "the price edit must reach the pim-keyed twin, not silently miss it"
+    )
+    assert saved["ecom"]["locally_modified"] is True, (
+        "the edit must QUEUE the twin for the manual Online Store push"
+    )
+    assert _pending(db) == 1
+    # ...and nothing was upserted/written under the spine's own id.
+    assert db["catalog_products"].find_one({"id": "SPINE-77"}) is None
 
 
 def test_internal_cost_edit_on_the_billing_spine_does_not_queue(db, monkeypatch):
