@@ -5259,6 +5259,20 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {
+        "method": "POST",
+        "path": "/api/v1/prescriptions/{prescription_id}/photo",
+        "allowed": [
+            "ADMIN", "CASHIER", "OPTOMETRIST", "SALES_CASHIER",
+            "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN",
+        ],
+        "self_enforced": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/prescriptions/{prescription_id}/photo",
+        "allowed": "AUTHENTICATED",
+    },
+    {
         "method": "PUT",
         "path": "/api/v1/prescriptions/{prescription_id}",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"],

@@ -295,7 +295,20 @@ export const prescriptionApi = {
     // Flat POS-form keys -> nested right_eye/left_eye. Without this the POST
     // 422'd with "field required: right_eye, left_eye", which is why adding a
     // prescription failed wherever the PrescriptionForm was used.
-    const response = await api.post('/prescriptions', toPrescriptionCreatePayload(data));
+    // photo_file is a File for uploadPrescriptionPhoto, never JSON.
+    const { photo_file: _photo, ...jsonData } = data || {};
+    const response = await api.post('/prescriptions', toPrescriptionCreatePayload(jsonData));
+    return response.data;
+  },
+
+  // Attach a photo of the paper Rx (outside prescriptions). Multipart;
+  // backend stores it in GridFS (kind rx_photo) and stamps the doc.
+  uploadPrescriptionPhoto: async (prescriptionId: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await api.post(`/prescriptions/${prescriptionId}/photo`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   },
 

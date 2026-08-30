@@ -392,7 +392,7 @@ export function ClinicPrescriptionHistory({
       } else {
         // NEW — fresh record, never touches an existing one.
         const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
-        await prescriptionApi.createPrescription({
+        const created = await prescriptionApi.createPrescription({
           ...rxData,
           patient_id: formPatientId || effectiveCustomerId,
           customer_id: effectiveCustomerId,
@@ -407,6 +407,16 @@ export function ClinicPrescriptionHistory({
           next_checkup: rxData.next_checkup || undefined,
           remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
         });
+        if (created?.prescription_id && rxData.photo_file) {
+          try {
+            await prescriptionApi.uploadPrescriptionPhoto(
+              created.prescription_id,
+              rxData.photo_file
+            );
+          } catch {
+            toast.warning('Prescription saved, but the photo upload failed.');
+          }
+        }
         toast.success('New prescription created');
       }
       setFormOpen(false);
