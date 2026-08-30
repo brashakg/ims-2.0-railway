@@ -1013,6 +1013,45 @@ def _resolve_recipient(db, body_entity_id, body_gstin, body_pos) -> dict:
     return {"recipient_entity_id": entity_id, "recipient_gstin": recipient_gstin}
 
 
+def _delivery_store_declared_state(db, grn_doc, linked_dc_ids) -> Optional[str]:
+    """2-digit declared state of the store the goods were DELIVERED to, or None.
+
+    The purchase-order door (vendors._po_gst_parties) passes the delivery
+    store's declared state as the explicit place of supply -- the norm-correct
+    answer for goods. This resolves the same value for the bill door: the
+    receiving store comes from the linked GRN (or the first linked DC -- a
+    cross-store consolidation is rejected by _assert_dcs_single_vendor_store
+    anyway), and its state is read exactly the way the PO reads it
+    (state_code first, the state name as fallback). Fail-soft: any miss
+    returns None and the engine keeps its existing recipient-GSTIN fallback.
+    """
+    store_id = (grn_doc or {}).get("store_id")
+    if not store_id and linked_dc_ids and db is not None:
+        try:
+            dc = db.get_collection("grns").find_one(
+                {"grn_id": linked_dc_ids[0]}, {"_id": 0, "store_id": 1}
+            )
+            store_id = (dc or {}).get("store_id")
+        except Exception:
+            store_id = None
+    if db is None or not store_id:
+        return None
+    try:
+        store_doc = (
+            db.get_collection("stores").find_one(
+                {"store_id": store_id}, {"_id": 0, "state_code": 1, "state": 1}
+            )
+            or {}
+        )
+    except Exception:
+        return None
+    return (
+        pinv.state_code_of(store_doc.get("state_code"))
+        or pinv.state_code_of(store_doc.get("state"))
+        or None
+    )
+
+
 def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
     """Supplier GSTIN from the vendor doc (fetched via repo or direct)."""
     if vendor and vendor.get("gstin"):
@@ -1382,11 +1421,25 @@ async def create_purchase_invoice(
         db, body.recipient_entity_id, body.recipient_gstin, body.place_of_supply
     )
 
+    # Place of supply for GOODS follows the delivery location. When the client
+    # sends no explicit place_of_supply, default it to the DELIVERY store's
+    # declared state -- the same answer the purchase order already passes
+    # (vendors._po_gst_parties) -- instead of letting the engine fall back to
+    # the recipient GSTIN's state: a store carrying a fallback GSTIN registered
+    # in another state would otherwise book the OPPOSITE inter-state verdict on
+    # the bill vs its own PO. An explicit client value stays authoritative, and
+    # _resolve_recipient above deliberately still sees the RAW body value:
+    # which of our registrations claims the ITC is the separate, owner-gated
+    # recipient-GSTIN question this default must not touch.
+    place_of_supply = body.place_of_supply or _delivery_store_declared_state(
+        db, grn_doc, body.linked_dc_ids
+    )
+
     computed = pinv.compute_invoice(
         [ln.model_dump() for ln in body.lines],
         supplier_gstin,
         recipient.get("recipient_gstin"),
-        body.place_of_supply,
+        place_of_supply,
     )
 
     # Reconcile a client-supplied grand total against the server math.
