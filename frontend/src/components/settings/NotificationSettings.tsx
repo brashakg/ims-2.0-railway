@@ -301,7 +301,7 @@ export function NotificationSettings() {
                 <p className="text-blue-800">
                   Better Vision sends WhatsApp and SMS through MSG91. The auth key,
                   WhatsApp number, SMS template ID and sender ID are entered once under{' '}
-                  <Link to="/settings?tab=integrations" className="underline font-medium">
+                  <Link to="/settings/integrations" className="underline font-medium">
                     Settings &rarr; Integrations &rarr; WhatsApp Business (MSG91)
                   </Link>
                   . Your MSG91 account must be DLT-registered for Indian telecom rules.

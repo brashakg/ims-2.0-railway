@@ -316,7 +316,7 @@ export default function OndcSellerPage() {
             ACTIVE automatically.
           </p>
           <Link
-            to="/settings?tab=integrations"
+            to="/settings/integrations"
             className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
           >
             <Settings className="h-4 w-4" />
