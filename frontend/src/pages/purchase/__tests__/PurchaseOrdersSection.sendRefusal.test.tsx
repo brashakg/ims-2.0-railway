@@ -69,7 +69,7 @@ vi.mock('../../../services/api', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { PurchaseManagementPage } from '../PurchaseManagementPage';
+import { PurchaseOrdersSection } from '../PurchaseOrdersSection';
 import { buildApiError } from '../../../services/api/client';
 
 const RAW_PO = {
@@ -97,7 +97,7 @@ beforeEach(() => {
 async function openDraftPO() {
   const { container } = render(
     <MemoryRouter>
-      <PurchaseManagementPage />
+      <PurchaseOrdersSection />
     </MemoryRouter>,
   );
   await screen.findByText('PO-2026-0042');

@@ -271,8 +271,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       // Purchase Orders + Vendors land on the real Purchase Management module
       // (its POs / Suppliers tabs). The former /purchase/orders and
       // /purchase/vendors pages were dead-duplicate stubs and were retired.
-      { id: 'supply-po', label: 'Purchase Orders', path: '/purchase?tab=purchase-orders' },
-      { id: 'supply-vendor', label: 'Vendor Management', path: '/purchase?tab=suppliers' },
+      { id: 'supply-po', label: 'Purchase Orders', path: '/purchase/orders' },
+      { id: 'supply-vendor', label: 'Vendor Management', path: '/purchase/suppliers' },
       { id: 'supply-grn', label: 'Goods Receipt Notes', path: '/purchase/grn' },
       { id: 'supply-replenish', label: 'Stock Replenishment', path: '/inventory/replenishment' },
       { id: 'supply-audit', label: 'Stock Audit', path: '/inventory/audit' },
