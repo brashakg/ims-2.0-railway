@@ -5725,9 +5725,12 @@ def _build_invoice_gst_split(
     }
 
 
-@router.get("/{order_id}/invoice")
-async def get_invoice(order_id: str, current_user: dict = Depends(get_current_user)):
-    """Get/generate invoice for order"""
+def _assemble_invoice(order_id: str, current_user: dict):
+    """Shared invoice assembly for the JSON and PDF doors: IDOR/DRAFT/GSTIN
+    gates, idempotent serial minting, C-6 CGST/SGST/IGST split. Returns
+    (payload, order, customer_doc); (None, None, None) when no DB (the JSON
+    door then serves its legacy mock envelope). ONE brain -- the PDF renderer
+    (services/invoice_pdf.py) lays out, never recomputes."""
     repo = get_order_repository()
 
     if repo is not None:
@@ -5780,7 +5783,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
         except Exception:
             customer_doc = None
 
-        # Return existing invoice or generate a new one.
+        # Return the existing invoice or generate a new one.
         #
         # GST compliance (P3-A): a NEW invoice gets a consecutive serial that
         # is unique per (configured-prefix, financial year) -- e.g.
@@ -5810,7 +5813,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
             order.get("items", []), store_doc, customer_doc
         )
 
-        return {
+        payload = {
             "invoiceNumber": invoice_number,
             "orderId": order_id,
             "orderNumber": order.get("order_number"),
@@ -5830,8 +5833,46 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
             "taxSummary": gst_split["rows"],
             "taxTotals": gst_split["totals"],
         }
+        return payload, order, customer_doc
 
-    return {"invoiceNumber": "BV/INV/2024/0001", "orderId": order_id}
+    return None, None, None
+
+
+@router.get("/{order_id}/invoice")
+async def get_invoice(order_id: str, current_user: dict = Depends(get_current_user)):
+    """Get/generate invoice for order"""
+    payload, _order, _customer = _assemble_invoice(order_id, current_user)
+    if payload is None:
+        return {"invoiceNumber": "BV/INV/2024/0001", "orderId": order_id}
+    return payload
+
+
+@router.get("/{order_id}/invoice.pdf")
+async def get_invoice_pdf(
+    order_id: str, current_user: dict = Depends(get_current_user)
+):
+    """A4 tax-invoice PDF (F52): the SAME assembly as the JSON door (same
+    serial, same GST split -- minted idempotently, so JSON-then-PDF or
+    PDF-then-JSON always show one invoice number), rendered server-side so
+    it can be WhatsApp'd as a document and printed without the browser."""
+    payload, order, customer_doc = _assemble_invoice(order_id, current_user)
+    if payload is None or order is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    from fastapi.responses import Response
+
+    from ..services.invoice_pdf import build_invoice_pdf
+
+    pdf = build_invoice_pdf(payload, order, customer_doc)
+    fname = str(payload.get("invoiceNumber") or order_id).replace("/", "-")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{fname}.pdf"',
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 # ============================================================================
