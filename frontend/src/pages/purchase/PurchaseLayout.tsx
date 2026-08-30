@@ -11,6 +11,7 @@
 // clears the param. Keeps the button in the header without cross-component
 // plumbing, and makes "new PO" deep-linkable.
 
+import { useEffect } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Plus,
@@ -38,6 +39,25 @@ export function PurchaseLayout() {
   const onlineStore = useIsOnlineStore();
   const { pathname } = useLocation();
   const navigate = useNavigate();
+
+  // Warm the sibling section chunks once the browser is idle, so the FIRST
+  // click on any tab renders without the lazy-chunk download spinner (owner
+  // feedback: switching sections felt like a page reload). Vite dedupes these
+  // against the route-level lazy() imports — no double download.
+  useEffect(() => {
+    const idle: (cb: () => void) => void =
+      'requestIdleCallback' in window
+        ? (cb) => (window as Window & { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(cb)
+        : (cb) => { setTimeout(cb, 1500); };
+    idle(() => {
+      void import('./PurchaseOrdersSection');
+      void import('./PurchaseInvoicesSection');
+      void import('./PurchaseVarianceTab');
+      void import('./SuppliersSection');
+      void import('./VendorReturns');
+      void import('./PurchaseAnalyticsSection');
+    });
+  }, []);
 
   // Sections whose primary create action lives in the header.
   const headerAction =
