@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, develop]
 
+# A newer commit on the same ref cancels the older in-flight run — no more
+# queue pile-ups when pushes land in quick succession. main is exempt so a
+# deploy-validating run is never killed mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
