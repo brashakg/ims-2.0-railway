@@ -141,6 +141,19 @@ class PurchaseInvoiceCreate(BaseModel):
     # When present, the booking runs dc_bulk_match (DC-received vs billed qty)
     # and flips dc_matched=true on each linked DC.
     linked_dc_ids: Optional[List[str]] = None
+    # What this bill is FOR: "GOODS" or "SERVICES". Free-text lines carry no
+    # product_id, so the goods trigger below cannot see them -- the manual form
+    # booked "20 pcs assorted frames" as prose with no receipt. With no receipt
+    # linked the caller must now declare the kind; GOODS demands the receipt,
+    # SERVICES books as before. Kept Optional in the SCHEMA so the handler can
+    # answer with a stable plain-English 422 (BILL_KIND_REQUIRED), and so a
+    # receipt-linked booking (from-GRN / from-DCs) needs no declaration.
+    bill_kind: Optional[str] = None
+
+    @field_validator("bill_kind", mode="before")
+    @classmethod
+    def _normalize_bill_kind(cls, v):
+        return ap_engine.normalize_bill_kind(v)
 
     @field_validator("invoice_number", mode="before")
     @classmethod
@@ -1361,34 +1374,55 @@ async def create_purchase_invoice(
     # can be read must not decide whether a bill needs a receipt, or an
     # unreadable DB (or a typo'd id) would be the bypass instead.
     #
-    # A genuine no-order purchase (goods bought over the counter, no PO) still
-    # has a way out, and the message must name one the UI can actually WALK.
-    # GRNCreate accepts a Delivery Challan with no po_id, but the receiving
-    # screen (GoodsReceiptNote.handleSubmit) refuses to submit without a PO
-    # selected even in DC mode -- so until that screen learns no-PO receiving,
-    # the reachable route is: log a PO for the delivery, receive it, bill
-    # against the receipt. An accountant who cannot see a way out will find
-    # the bypass instead -- and a message pointing at a door the screen keeps
-    # shut is the same thing with extra steps.
-    if (
-        not body.grn_id
-        and not body.linked_dc_ids
-        and (body.po_id or _line_product_ids(body.lines))
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "GRN_LINK_REQUIRED",
-                "message": (
-                    "Link the goods receipt for this bill before booking it - "
-                    "the quantities have to be tallied before the purchase is "
-                    "final. If these goods arrived without a purchase order, "
-                    "log a purchase order for the delivery and receive it on "
-                    "the Goods Receipt screen first, then book the bill "
-                    "against that receipt."
-                ),
-            },
-        )
+    # AND THE DECLARATION IS A TRIGGER TOO. A free-text line ("20 pcs assorted
+    # frames") names no product_id, so the goods trigger above is blind to it
+    # -- prose was the bypass. With no receipt linked, the caller must now say
+    # what the bill is FOR (bill_kind): GOODS joins the trigger; SERVICES
+    # (freight, rent, job-work, expenses) books header-and-lines as before;
+    # saying nothing is refused outright. Declaring SERVICES cannot dodge the
+    # product/PO trigger -- a line that names a stocked product is goods,
+    # whatever the header claims. (Residual, accepted by the owner as the
+    # floor: goods typed as prose AND deliberately declared services still
+    # book -- software cannot read the carton.)
+    #
+    # A genuine no-order purchase (goods bought over the counter, no PO) has a
+    # way out the UI can actually WALK: the Goods Receipt screen's
+    # Delivery-Challan mode receives without a PO (vendor picker + product
+    # lines), and the receipt it posts is linkable from every billing door.
+    if not body.grn_id and not body.linked_dc_ids:
+        if (
+            body.po_id
+            or _line_product_ids(body.lines)
+            or body.bill_kind == ap_engine.BILL_KIND_GOODS
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "GRN_LINK_REQUIRED",
+                    "message": (
+                        "Link the goods receipt for this bill before booking "
+                        "it - the quantities have to be tallied before the "
+                        "purchase is final. If the goods arrived without a "
+                        "purchase order, log them as a Delivery Challan on "
+                        "the Goods Receipt screen (tick 'This is a Delivery "
+                        "Challan', pick the vendor, add what arrived), then "
+                        "bill against that receipt."
+                    ),
+                },
+            )
+        if body.bill_kind is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "BILL_KIND_REQUIRED",
+                    "message": (
+                        "Say what this bill is for: goods, or "
+                        "services/expenses. A goods bill must link its goods "
+                        "receipt; a services or expense bill (freight, rent, "
+                        "job-work) books as before."
+                    ),
+                },
+            )
 
     # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
     _assert_products_catalogued(body.lines, _line_products(db, body.lines))
@@ -1594,6 +1628,21 @@ async def create_purchase_invoice(
         "igst_total": computed["igst_total"],
         "total_amount": total,
         "total": total,
+        # The declared/derived nature of the bill: receipt-linked or
+        # goods-triggered bookings are GOODS whatever the caller sent; only a
+        # declared-SERVICES prose bill reaches here as SERVICES. Legacy rows
+        # (booked before this field existed) simply lack it -- readers do not
+        # key on it.
+        "bill_kind": (
+            ap_engine.BILL_KIND_GOODS
+            if (
+                body.grn_id
+                or body.linked_dc_ids
+                or body.po_id
+                or _line_product_ids(body.lines)
+            )
+            else body.bill_kind
+        ),
         "tds": round(body.tds, 2),
         "itc_eligible": bool(body.itc_eligible),
         "reverse_charge": bool(body.reverse_charge),

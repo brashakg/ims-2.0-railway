@@ -14,6 +14,7 @@ import {
 import {
   cashFlowApi, vendorApApi,
   type OwnerDashboard, type CashFlowForecast, type ApAgingByVendor, type VendorLedger,
+  type VendorReceiptRow,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
 
@@ -23,8 +24,12 @@ const AP_LABELS: Record<string, string> = { current: 'Current', '1_30': '1-30d',
 
 function errMsg(e: unknown, fb: string) {
   if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string } } }).response;
-    if (r?.data?.detail) return r.data.detail;
+    const r = (e as { response?: { data?: { detail?: string | { message?: string } } } }).response;
+    const d = r?.data?.detail;
+    // Structured refusals ({code, message}) carry their text in .message —
+    // rendering the raw object printed "[object Object]" in the toast.
+    if (typeof d === 'string') return d;
+    if (d && typeof d === 'object' && d.message) return d.message;
   }
   return e instanceof Error ? e.message : fb;
 }
@@ -336,7 +341,36 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   const today = new Date().toISOString().slice(0, 10);
   const set = (k: string, v: string | number) => setF((p) => ({ ...p, [k]: v }));
 
+  // Goods bills must link their goods receipt (owner ruling 15) — this form
+  // used to book "20 pcs assorted frames" as prose with nothing to tally.
+  // The choice is REQUIRED; GOODS then requires picking one of the vendor's
+  // ACCEPTED receipts (a PO-backed GRN or a no-PO Delivery Challan).
+  const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
+  // null = not loaded yet / load failed (distinct from a real empty list).
+  const [receipts, setReceipts] = useState<VendorReceiptRow[] | null>(null);
+  const [receiptsFailed, setReceiptsFailed] = useState(false);
+  const [receiptId, setReceiptId] = useState('');
+
+  useEffect(() => {
+    if (kind !== 'bill' || billKind !== 'GOODS') return;
+    let cancelled = false;
+    vendorApApi.listReceipts(vendorId).then((rows) => {
+      if (cancelled) return;
+      setReceipts(rows ?? []);
+      setReceiptsFailed(rows === null);
+    });
+    return () => { cancelled = true; };
+  }, [kind, billKind, vendorId]);
+
   const save = async () => {
+    if (kind === 'bill' && !billKind) {
+      toast.error('Say what this bill is for: goods, or services/expenses');
+      return;
+    }
+    if (kind === 'bill' && billKind === 'GOODS' && !receiptId) {
+      toast.error('Pick the goods receipt this bill settles — no receipt, no goods bill');
+      return;
+    }
     setSaving(true);
     try {
       if (kind === 'bill') {
@@ -345,6 +379,8 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         await vendorApApi.createBill(vendorId, {
           bill_number: String(f.bill_number || ''), bill_date: String(f.bill_date || today),
           taxable_amount: taxable, tax_amount: tax, total_amount: taxable + tax, notes: String(f.notes || ''),
+          bill_kind: billKind as 'GOODS' | 'SERVICES',
+          grn_id: billKind === 'GOODS' ? receiptId : undefined,
         });
       } else if (kind === 'payment') {
         await vendorApApi.createPayment(vendorId, {
@@ -373,6 +409,38 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
       </div>
       <div className="grid grid-cols-2 gap-2">
         {kind === 'bill' && <>
+          <select
+            className={`${cls} col-span-2`}
+            value={billKind}
+            onChange={(e) => { setBillKind(e.target.value as '' | 'GOODS' | 'SERVICES'); setReceiptId(''); }}
+          >
+            <option value="">This bill is for…</option>
+            <option value="GOODS">Goods (frames, lenses, stock — needs the goods receipt)</option>
+            <option value="SERVICES">Services / expenses (rent, freight, job-work)</option>
+          </select>
+          {billKind === 'GOODS' && (
+            <div className="col-span-2">
+              <select className={cls} value={receiptId} onChange={(e) => setReceiptId(e.target.value)}>
+                <option value="">
+                  {receipts === null ? 'Loading receipts…' : 'Pick the goods receipt…'}
+                </option>
+                {(receipts ?? []).map((g) => (
+                  <option key={g.grn_id} value={g.grn_id}>
+                    {g.grn_number || g.grn_id}
+                    {g.grn_subtype === 'DELIVERY_CHALLAN' ? ` · DC ${g.dc_number || ''} ${g.dc_date || ''}` : g.vendor_invoice_no ? ` · inv ${g.vendor_invoice_no}` : ''}
+                  </option>
+                ))}
+              </select>
+              {receiptsFailed ? (
+                <p className="text-xs text-red-600 mt-1">Could not load this vendor&rsquo;s receipts — try again in a moment.</p>
+              ) : receipts !== null && receipts.length === 0 ? (
+                <p className="text-xs text-amber-700 mt-1">
+                  No unbilled goods receipts for this vendor at your store. Receive the goods first —
+                  bought without a PO? Log them as a Delivery Challan on the Goods Receipt screen, then record the bill here.
+                </p>
+              ) : null}
+            </div>
+          )}
           <input className={cls} placeholder="Bill / invoice no" onChange={(e) => set('bill_number', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
           <input className={cls} type="number" placeholder="Taxable amount" onChange={(e) => set('taxable_amount', e.target.value)} />

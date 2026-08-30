@@ -508,6 +508,9 @@ class TestCreateRunsMatch:
             po_id=None,
             grn_id=None,
             invoice_number="INV-NOLINK",
+            # A receipt-less bill must declare its kind (goods_bill_kind gate);
+            # this test is about the match verdict, not the declaration.
+            bill_kind="SERVICES",
             lines=[
                 {
                     "description": "Courier charges",

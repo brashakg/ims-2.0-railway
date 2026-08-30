@@ -79,6 +79,30 @@ TCS_206C1H_THRESHOLD: float = 5000000.0  # Rs 50 lakh per buyer per FY
 # date; the rest are days PAST the due date.
 AGING_BUCKETS = ["current", "1_30", "31_60", "61_90", "90_plus"]
 
+# The declared nature of a vendor bill. GOODS bills must link the goods receipt
+# (owner ruling 15: the receipt, not the paperwork, settles a purchase of
+# stock); SERVICES covers everything with no receipt to link -- freight, rent,
+# job-work, an expense bill. ONE normaliser, used by BOTH create doors
+# (vendors.create_vendor_bill and purchase_invoices.create_purchase_invoice),
+# so the two cannot drift on what counts as a goods declaration.
+BILL_KIND_GOODS = "GOODS"
+BILL_KIND_SERVICES = "SERVICES"
+
+
+def normalize_bill_kind(value):
+    """None when absent/blank (a legacy client or stored row); the canonical
+    'GOODS' / 'SERVICES' for a recognized declaration; ValueError otherwise
+    (so a schema validator surfaces the allowed values instead of silently
+    reading a typo as 'not goods')."""
+    if value is None or str(value).strip() == "":
+        return None
+    s = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    if s == BILL_KIND_GOODS:
+        return BILL_KIND_GOODS
+    if s in ("SERVICES", "SERVICE", "EXPENSE", "EXPENSES", "SERVICES_EXPENSES"):
+        return BILL_KIND_SERVICES
+    raise ValueError("bill_kind must be GOODS or SERVICES")
+
 
 def _f(v) -> float:
     """Coerce anything to a float, defaulting to 0.0."""

@@ -1018,6 +1018,13 @@ function InvoiceFormDrawer({
   const [saving, setSaving] = useState(false);
 
   const locked = Boolean(prefill.grn_id); // from a GRN -> keep the link fixed
+  // Receipt already linked (from-GRN or consolidated DCs)? Then this IS a
+  // goods bill and no declaration is asked for. A manual invoice must say
+  // what it is for: GOODS routes to a receipt-first flow (the server refuses
+  // a receipt-less goods bill — GRN_LINK_REQUIRED); SERVICES books as before.
+  const prefillDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
+  const receiptLinked = locked || Boolean(prefillDcIds && prefillDcIds.length);
+  const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
 
   // Default place_of_supply from the chosen vendor's state (the supplier's
   // state IS the place of supply for a purchase). Only auto-fill when empty so
@@ -1053,6 +1060,16 @@ function InvoiceFormDrawer({
     if (!vendorId) { toast.error('Select a supplier'); return; }
     if (!vendorInvoiceNo.trim()) { toast.error('Supplier invoice number is required'); return; }
     if (validLines.length === 0) { toast.error('Add at least one line item with a name and quantity'); return; }
+    if (!receiptLinked && !billKind) {
+      toast.error('Say what this bill is for: goods, or services/expenses');
+      return;
+    }
+    if (!receiptLinked && billKind === 'GOODS') {
+      // Client mirror of the server's GRN_LINK_REQUIRED — goods bills start
+      // from the receipt, and the guidance box names the routes.
+      toast.error('A goods bill starts from its goods receipt — see the note above the Book button');
+      return;
+    }
 
     setSaving(true);
     try {
@@ -1090,6 +1107,7 @@ function InvoiceFormDrawer({
         lines: payloadLines,
         notes: notes.trim() || undefined,
         linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
+        bill_kind: receiptLinked ? 'GOODS' : (billKind as 'GOODS' | 'SERVICES'),
       };
       await purchaseInvoicesApi.create(payload);
       toast.success('Purchase invoice booked');
@@ -1126,6 +1144,31 @@ function InvoiceFormDrawer({
         </div>
 
         <div className="p-5 space-y-5">
+          {/* What is this bill for? (only asked when no receipt is linked) */}
+          {!receiptLinked && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">This bill is for</label>
+              <select
+                className="border border-gray-300 rounded px-2 py-1.5 text-sm w-full"
+                value={billKind}
+                onChange={(e) => setBillKind(e.target.value as '' | 'GOODS' | 'SERVICES')}
+              >
+                <option value="">Choose: goods, or services/expenses…</option>
+                <option value="GOODS">Goods (frames, lenses, stock — needs the goods receipt)</option>
+                <option value="SERVICES">Services / expenses (rent, freight, job-work)</option>
+              </select>
+              {billKind === 'GOODS' && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  A goods bill starts from its goods receipt, so the quantities are tallied before the
+                  purchase is final. Close this form and use <span className="font-semibold">Create from GRN</span> (a
+                  PO-backed receipt) or <span className="font-semibold">Match DCs to Invoice</span> (Delivery
+                  Challans). Goods bought without a PO? Log them as a Delivery Challan on the
+                  Goods Receipt screen first (tick &lsquo;This is a Delivery Challan&rsquo;, pick the vendor, add what arrived).
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Header */}
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
             <div>
@@ -1244,7 +1287,12 @@ function InvoiceFormDrawer({
           </p>
           <div className="flex gap-2">
             <button type="button" onClick={onClose} className="btn sm">Cancel</button>
-            <button type="button" onClick={book} disabled={saving} className="btn sm primary disabled:opacity-60">
+            <button
+              type="button"
+              onClick={book}
+              disabled={saving || (!receiptLinked && billKind === 'GOODS')}
+              className="btn sm primary disabled:opacity-60"
+            >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />} Book invoice
             </button>
           </div>

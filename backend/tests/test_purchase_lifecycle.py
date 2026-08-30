@@ -865,7 +865,7 @@ def _line(**over):
     return pi_mod.PurchaseInvoiceLine(**ln)
 
 
-def _book(products, po_id="PO1", grn_id="G1", lines=None):
+def _book(products, po_id="PO1", grn_id="G1", lines=None, bill_kind=None):
     # copy: the fake collection mutates in place, and these fixtures are
     # module-level dicts shared by every test in the class.
     db = _DB(products=[dict(p) for p in products], vendor_bills=[], vendors=[])
@@ -886,6 +886,7 @@ def _book(products, po_id="PO1", grn_id="G1", lines=None):
             po_id=po_id,
             grn_id=grn_id,
             lines=lines or [_line()],
+            bill_kind=bill_kind,
         )
         out = asyncio.run(
             pi_mod.create_purchase_invoice(
@@ -942,12 +943,14 @@ class TestTheInvoiceIsTheGate:
             _book([_COMPLETE_PRODUCT], po_id=None, grn_id=None)
         assert exc.value.status_code == 422
         assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
-        # ...and it must name a way out the UI can actually walk (the receiving
-        # screen still requires a PO even in DC mode, so the message must not
-        # send anyone down the Delivery-Challan route it cannot reach).
+        # ...and it must name a way out the UI can actually walk. The Goods
+        # Receipt screen's Delivery-Challan mode now receives WITHOUT a PO
+        # (vendor picker + typed product lines), so the message names that
+        # route -- it used to be forbidden here precisely because the screen
+        # kept that door shut.
         msg = exc.value.detail["message"]
-        assert "log a purchase order for the delivery" in msg
-        assert "Delivery Challan" not in msg
+        assert "Delivery Challan" in msg
+        assert "Goods Receipt" in msg
 
     def test_a_product_id_we_cannot_find_still_needs_the_receipt(self):
         """Naming the id is the trigger, not finding it. The catalogue gate
@@ -1010,14 +1013,76 @@ class TestTheInvoiceIsTheGate:
 
     def test_an_invoice_that_names_no_goods_is_untouched(self):
         """Services, freight, rent and expense bills carry no product line at
-        all -- they have no receipt to link and must stay bookable."""
+        all -- they have no receipt to link and must stay bookable. Since the
+        free-text hole closed they SAY so (bill_kind=SERVICES, the choice the
+        form now requires) -- and then book exactly as before."""
         out, _ = _book(
             [_COMPLETE_PRODUCT],
             po_id=None,
             grn_id=None,
             lines=[_line(product_id=None, description="Courier charges")],
+            bill_kind="SERVICES",
         )
         assert out["invoice_number"] == "INV-GATE-1"
+
+    def test_prose_only_lines_must_declare_goods_or_services(self):
+        """THE FREE-TEXT HOLE (audit-reproduced): 21 pcs of frames described
+        only in prose carry no product_id, so the goods trigger above cannot
+        see them -- Rs 72,450 booked with no receipt, no tally, no 3-way
+        match. With no receipt linked the bill must now declare its kind."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [_COMPLETE_PRODUCT],
+                po_id=None,
+                grn_id=None,
+                lines=[
+                    _line(
+                        product_id=None,
+                        description="20 pcs assorted frames",
+                        qty=21,
+                        unit_price=3450,
+                    )
+                ],
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "BILL_KIND_REQUIRED"
+
+    def test_declaring_goods_in_prose_demands_the_receipt(self):
+        """The honest half of the choice: prose lines + bill_kind=GOODS is a
+        goods bill and refuses without its receipt, message naming the no-PO
+        Delivery-Challan route."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [_COMPLETE_PRODUCT],
+                po_id=None,
+                grn_id=None,
+                lines=[
+                    _line(
+                        product_id=None,
+                        description="20 pcs assorted frames",
+                        qty=21,
+                        unit_price=3450,
+                    )
+                ],
+                bill_kind="GOODS",
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
+        assert "Delivery Challan" in exc.value.detail["message"]
+
+    def test_declaring_services_cannot_dodge_a_line_that_names_a_product(self):
+        """bill_kind=SERVICES on a bill whose line names a stocked product is
+        still a goods bill -- the product trigger outranks the header claim."""
+        with pytest.raises(HTTPException) as exc:
+            _book(
+                [_COMPLETE_PRODUCT],
+                po_id=None,
+                grn_id=None,
+                lines=[_line(product_id="P1", qty=20, unit_price=3900)],
+                bill_kind="SERVICES",
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail["code"] == "GRN_LINK_REQUIRED"
 
     def test_a_missing_cost_price_never_blocks_the_bill_that_carries_it(self):
         """Rulings 11 + 12: the cost arrives LATE, and THIS bill is the

@@ -9,9 +9,10 @@
 // getPurchaseOrders API (empty state when none) -- no mock data.
 
 import { useState, useEffect, useMemo, startTransition } from 'react';
-import { Check, AlertCircle, Package, FileText, Printer, Loader2 } from 'lucide-react';
+import { Check, AlertCircle, Package, FileText, Printer, Loader2, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
+import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -148,6 +149,18 @@ export function GoodsReceiptNote() {
   const [isDcMode, setIsDcMode] = useState(false);
   const [dcNumber, setDcNumber] = useState('');
   const [dcDate, setDcDate] = useState(new Date().toISOString().split('T')[0]);
+  // No-PO DC receiving (goods bought over the counter — no pre-logged PO).
+  // The backend has accepted a PO-less DELIVERY_CHALLAN since F9; the screen
+  // used to hard-require a PO anyway, which made the accountant's "link the
+  // goods receipt" refusal a wall. Vendor picker + typed product lines.
+  const [dcVendorId, setDcVendorId] = useState('');
+  const [dcVendors, setDcVendors] = useState<Array<{ vendor_id: string; name: string }>>([]);
+  const [dcVendorsFailed, setDcVendorsFailed] = useState(false);
+  const [dcQuery, setDcQuery] = useState('');
+  const [dcResults, setDcResults] = useState<
+    Array<{ product_id: string; name?: string; product_name?: string; sku?: string; hsn_code?: string }>
+  >([]);
+  const [dcSearching, setDcSearching] = useState(false);
   const [grns, setGrns] = useState<GRN[]>([]);
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
@@ -227,6 +240,98 @@ export function GoodsReceiptNote() {
     setPos(await fetchPurchaseOrders());
   };
 
+  // Receiving without a PO = DC mode with no PO picked. Lines are then typed
+  // in from the product picker instead of hydrated from a PO.
+  const noPoDc = isDcMode && !poNumber;
+
+  // Load the vendor list the first time DC mode is switched on. Fail-soft with
+  // a visible error state — with no vendors the no-PO path cannot post, and a
+  // silent empty dropdown would read as "no vendors exist".
+  useEffect(() => {
+    if (!isDcMode || dcVendors.length > 0) return;
+    let cancelled = false;
+    vendorsApi
+      .getVendors({ is_active: true })
+      .then((resp: any) => {
+        if (cancelled) return;
+        const rows: any[] = Array.isArray(resp) ? resp : resp?.vendors || [];
+        setDcVendors(
+          rows
+            .map((v) => ({
+              vendor_id: v.vendor_id || v.id || '',
+              name: v.trade_name || v.legal_name || v.vendor_id || 'Vendor',
+            }))
+            .filter((v) => v.vendor_id),
+        );
+        setDcVendorsFailed(false);
+      })
+      .catch(() => {
+        if (!cancelled) setDcVendorsFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDcMode]);
+
+  // Debounced product search for the no-PO DC lines (same pattern as the PO
+  // composer's ProductSearchSelect).
+  useEffect(() => {
+    if (!noPoDc) return;
+    const q = dcQuery.trim();
+    if (q.length < 2) {
+      setDcResults([]);
+      return;
+    }
+    let cancelled = false;
+    setDcSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await productApi.getProducts({ search: q, limit: 10 });
+        if (!cancelled) setDcResults((data?.products || []).slice(0, 10));
+      } catch {
+        if (!cancelled) setDcResults([]);
+      } finally {
+        if (!cancelled) setDcSearching(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [dcQuery, noPoDc]);
+
+  // Add a typed line for the no-PO DC. po_qty mirrors received_qty (nothing
+  // was ordered, so there is no variance to show) and starts untallied —
+  // the receiver still ticks each line after counting.
+  const addDcLine = (p: {
+    product_id: string;
+    name?: string;
+    product_name?: string;
+    sku?: string;
+    hsn_code?: string;
+  }) => {
+    setDcQuery('');
+    setDcResults([]);
+    setReceivedItems((arr) => {
+      if (arr.some((r) => r.product_id === p.product_id)) return arr;
+      return [
+        ...arr,
+        {
+          po_item_id: '',
+          product_id: p.product_id,
+          product_name: p.name || p.product_name || p.product_id,
+          sku: p.sku,
+          hsn_code: p.hsn_code,
+          po_qty: 1,
+          received_qty: 1,
+          tallied: false,
+          rejected_qty: 0,
+        },
+      ];
+    });
+  };
+
   // When a PO is picked, hydrate the receive lines from its order items.
   const onSelectPO = (poId: string) => {
     setPoNumber(poId);
@@ -268,41 +373,57 @@ export function GoodsReceiptNote() {
     return { ord, rec, short, over };
   }, [receivedItems]);
 
-  // 4-step receive flow state: PO -> lines -> inspection -> post.
+  // 4-step receive flow state: PO (or DC vendor) -> lines -> inspection -> post.
   const steps = useMemo(() => {
-    const hasPO = !!poNumber;
+    const hasSource = !!poNumber || (isDcMode && !!dcVendorId);
     const hasLines = receivedItems.length > 0;
     const allTallied =
       receivedItems.length > 0 && receivedItems.every((i) => i.tallied);
     const inspected = allTallied && (allChecksComplete || !!discrepancies);
     return [
-      { done: hasPO, active: !hasPO, t: 'Match PO & vendor invoice', s: poNumber ? poNumber : 'Pick the order being received' },
       {
-        done: hasPO && hasLines && allTallied,
-        active: hasPO && hasLines && !allTallied,
+        done: hasSource,
+        active: !hasSource,
+        t: isDcMode && !poNumber ? 'Pick the vendor (DC, no PO)' : 'Match PO & vendor invoice',
+        s: poNumber || (isDcMode && dcVendorId ? 'Receiving without a PO' : 'Pick the order being received'),
+      },
+      {
+        done: hasSource && hasLines && allTallied,
+        active: hasSource && hasLines && !allTallied,
         t: 'Tally what arrived',
         s: hasLines
           ? `${receivedItems.filter((i) => i.tallied).length} / ${receivedItems.length} lines ticked`
-          : 'No lines on this PO',
+          : isDcMode && !poNumber
+            ? 'Add the items received'
+            : 'No lines on this PO',
       },
       { done: inspected, active: hasLines && !inspected, t: 'Quality inspection', s: `${checksComplete}/${INSPECTION_CHECKLIST.length} checks` },
       { done: false, active: inspected && hasLines, t: 'Post & close', s: 'Stock ledger updated' },
     ];
-  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete]);
+  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete, isDcMode, dcVendorId]);
 
   const handleSubmit = async () => {
-    if (!poNumber) {
+    if (!poNumber && !isDcMode) {
       toast.error('Please select a Purchase Order');
       return;
     }
-    if (receivedItems.length === 0) {
-      toast.error('No line items to receive on this PO');
+    if (noPoDc && !dcVendorId) {
+      toast.error('Pick the vendor this Delivery Challan is from');
       return;
     }
-    // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED); this is
-    // the friendly version so the receiver is not sent a raw 422.
+    if (receivedItems.length === 0) {
+      toast.error(noPoDc ? 'Add the items that arrived' : 'No line items to receive on this PO');
+      return;
+    }
+    if (noPoDc && receivedItems.some((i) => i.received_qty <= 0)) {
+      toast.error('Every line needs a quantity of at least 1');
+      return;
+    }
+    // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED) for
+    // PO-backed receipts; a PO-less DC has no server mirror, so the tick here
+    // is the ONLY "a person counted this" record — required, not decorative.
     const untallied = receivedItems.filter((i) => !i.tallied);
-    if (!isDcMode && untallied.length > 0) {
+    if ((!isDcMode || noPoDc) && untallied.length > 0) {
       toast.error(
         `Tick every line to confirm what arrived (${untallied.length} still unchecked)`,
       );
@@ -329,16 +450,19 @@ export function GoodsReceiptNote() {
       // Step 1 — create the GRN doc (status PENDING). This records the receipt
       // + per-line accept/reject and stamps each line's short/exact/over flag.
       const created = await vendorsApi.createGRN({
-        po_id: poNumber,
+        po_id: poNumber || undefined,
         // F9 — in DC mode the vendor invoice no. arrives later; send the
         // subtype + dc_number/dc_date so the bulk DC->invoice tally can pick it.
         grn_subtype: isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
         dc_number: isDcMode ? dcNumber.trim() : undefined,
         dc_date: isDcMode ? dcDate : undefined,
+        // No-PO DC: the vendor comes from the picker (a PO-backed receipt
+        // derives it from the PO server-side).
+        vendor_id: noPoDc ? dcVendorId : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
         vendor_invoice_date: new Date().toISOString().split('T')[0],
         items: receivedItems.map((item) => ({
-          po_item_id: item.po_item_id,
+          po_item_id: item.po_item_id || undefined,
           product_id: item.product_id,
           received_qty: item.received_qty,
           accepted_qty: item.received_qty - item.rejected_qty,
@@ -390,6 +514,9 @@ export function GoodsReceiptNote() {
       setDiscrepancies('');
       setIsDcMode(false);
       setDcNumber('');
+      setDcVendorId('');
+      setDcQuery('');
+      setDcResults([]);
       // Posting changes which POs are still receivable — refresh both lists.
       await Promise.all([reloadGrns(), reloadPurchaseOrders()]);
     } catch (err) {
@@ -555,7 +682,18 @@ export function GoodsReceiptNote() {
                 <input
                   type="checkbox"
                   checked={isDcMode}
-                  onChange={(e) => setIsDcMode(e.target.checked)}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setIsDcMode(on);
+                    // Leaving DC mode with typed (no-PO) lines: those lines
+                    // belong to no PO, so they cannot post as STANDARD.
+                    if (!on && !poNumber) {
+                      setReceivedItems([]);
+                      setDcVendorId('');
+                      setDcQuery('');
+                      setDcResults([]);
+                    }
+                  }}
                 />
                 This is a Delivery Challan (no invoice yet)
               </label>
@@ -584,6 +722,28 @@ export function GoodsReceiptNote() {
                       className="input w-full"
                     />
                   </div>
+                  {!poNumber && (
+                    <div className="tablet:col-span-2">
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                        Vendor (no purchase order — pick who supplied the goods)
+                      </label>
+                      <select
+                        value={dcVendorId}
+                        onChange={(e) => setDcVendorId(e.target.value)}
+                        className="input w-full"
+                      >
+                        <option value="">Select the vendor…</option>
+                        {dcVendors.map((v) => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>
+                        ))}
+                      </select>
+                      {dcVendorsFailed && (
+                        <p className="text-xs mt-1" style={{ color: 'var(--err)' }}>
+                          Could not load the vendor list — reload the page and try again.
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {pos.length === 0 ? (
@@ -591,17 +751,19 @@ export function GoodsReceiptNote() {
                   <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
                   No open purchase orders to receive against.
                   <div className="text-xs mt-1" style={{ color: 'var(--ink-5)' }}>
-                    Create or send a PO from Purchase Management first.
+                    {isDcMode
+                      ? 'A Delivery Challan needs no PO — pick the vendor above and add the items below.'
+                      : 'Create or send a PO from Purchase Management first. Goods arriving with a Delivery Challan need no PO — tick the box above.'}
                   </div>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
-                      Purchase order
+                      {isDcMode ? 'Purchase order (optional for a DC)' : 'Purchase order'}
                     </label>
                     <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
-                      <option value="">Select a PO…</option>
+                      <option value="">{isDcMode ? 'No PO — receiving over the counter' : 'Select a PO…'}</option>
                       {pos.map((p) => (
                         <option key={p.po_id} value={p.po_id}>
                           {p.po_number}
@@ -630,8 +792,134 @@ export function GoodsReceiptNote() {
             </div>
           </div>
 
+          {/* No-PO DC: type in what arrived (product picker + qty + tally) */}
+          {noPoDc && (
+            <div className="card">
+              <div className="card-head">
+                <h3 className="flex items-center gap-2">
+                  <Package className="w-4 h-4" /> Items received · no purchase order
+                </h3>
+                <span className="meta">search the catalogue · tick each line after counting</span>
+              </div>
+              <div className="card-body">
+                <div className="relative mb-3" style={{ maxWidth: 420 }}>
+                  <input
+                    type="text"
+                    value={dcQuery}
+                    onChange={(e) => setDcQuery(e.target.value)}
+                    placeholder="Search a product to add (name / SKU)…"
+                    className="input w-full"
+                  />
+                  {dcSearching && (
+                    <Loader2 className="w-4 h-4 animate-spin absolute right-2 top-2.5" style={{ color: 'var(--ink-4)' }} />
+                  )}
+                  {dcResults.length > 0 && (
+                    <div
+                      className="absolute z-20 mt-1 w-full rounded-lg shadow-lg overflow-hidden"
+                      style={{ background: 'var(--panel, #fff)', border: '1px solid var(--line)' }}
+                    >
+                      {dcResults.map((p) => (
+                        <button
+                          key={p.product_id}
+                          type="button"
+                          className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                          onClick={() => addDcLine(p)}
+                        >
+                          <span style={{ color: 'var(--ink)' }}>{p.name || p.product_name || p.product_id}</span>
+                          {p.sku ? (
+                            <span className="mono text-xs ml-2" style={{ color: 'var(--ink-4)' }}>{p.sku}</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {dcQuery.trim().length >= 2 && !dcSearching && dcResults.length === 0 && (
+                    <p className="text-xs mt-1" style={{ color: 'var(--ink-4)' }}>
+                      Nothing found — the item may not be catalogued yet. Catalogue it first, then receive it.
+                    </p>
+                  )}
+                </div>
+                {receivedItems.length === 0 ? (
+                  <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
+                    Add each item that arrived, set the quantity, and tick it once counted.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto -mx-4 sm:mx-0">
+                    <table className="tbl">
+                      <thead>
+                        <tr>
+                          <th>Tally</th>
+                          <th>Item</th>
+                          <th className="right">Qty received</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {receivedItems.map((item, idx) => (
+                          <tr key={item.product_id}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={item.tallied}
+                                aria-label={`Tally line ${idx + 1}: ${item.product_name}`}
+                                onChange={(e) => {
+                                  const v = e.target.checked;
+                                  setReceivedItems((arr) =>
+                                    arr.map((r, j) => (j === idx ? { ...r, tallied: v } : r)),
+                                  );
+                                }}
+                              />
+                            </td>
+                            <td>
+                              <div className="font-medium" style={{ color: 'var(--ink)' }}>{item.product_name}</div>
+                              <div className="mono text-xs" style={{ color: 'var(--ink-4)' }}>
+                                {item.sku || item.product_id}
+                              </div>
+                            </td>
+                            <td className="right">
+                              <input
+                                type="number"
+                                min={1}
+                                value={item.received_qty}
+                                aria-label={`Quantity on line ${idx + 1}`}
+                                onChange={(e) => {
+                                  const v = Math.max(0, parseInt(e.target.value) || 0);
+                                  setReceivedItems((arr) =>
+                                    arr.map((r, j) =>
+                                      // po_qty mirrors received_qty: nothing was
+                                      // ordered, so there is no variance to keep.
+                                      j === idx ? { ...r, received_qty: v, po_qty: v } : r,
+                                    ),
+                                  );
+                                }}
+                                className="input"
+                                style={{ width: 72, textAlign: 'right', height: 30, padding: '0 6px' }}
+                              />
+                            </td>
+                            <td className="right">
+                              <button
+                                type="button"
+                                className="btn sm"
+                                title="Remove line"
+                                onClick={() =>
+                                  setReceivedItems((arr) => arr.filter((_, j) => j !== idx))
+                                }
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Items reception */}
-          {receivedItems.length > 0 && (
+          {receivedItems.length > 0 && !noPoDc && (
             <div className="card">
               <div className="card-head">
                 <h3 className="flex items-center gap-2">
@@ -846,7 +1134,9 @@ export function GoodsReceiptNote() {
           {/* Footer actions */}
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
-              Posting against {poNumber || 'the selected PO'} adds {totals.rec} unit{totals.rec === 1 ? '' : 's'} to this store&rsquo;s stock · the PO is marked partially / fully received · variance raises a debit note.
+              {noPoDc
+                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
+                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}
             </span>
             <span className="flex-1" />
             <button
@@ -860,7 +1150,11 @@ export function GoodsReceiptNote() {
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={submitting || !poNumber || receivedItems.length === 0}
+              disabled={
+                submitting ||
+                receivedItems.length === 0 ||
+                (!poNumber && !(isDcMode && dcVendorId))
+              }
               className="btn accent"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
