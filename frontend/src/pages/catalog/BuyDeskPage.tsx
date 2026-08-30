@@ -230,7 +230,8 @@ export default function BuyDeskPage() {
             )}
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[860px] text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
               <tr>
                 <th className="px-4 py-2.5 w-10">
@@ -300,6 +301,7 @@ export default function BuyDeskPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

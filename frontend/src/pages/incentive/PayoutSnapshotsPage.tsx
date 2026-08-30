@@ -69,7 +69,8 @@ export function PayoutSnapshotsPage() {
       </div>
 
       <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
           <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wider text-gray-600">
             <tr>
               <th className="px-3 py-2 text-left">Snapshot</th>
@@ -146,6 +147,7 @@ export function PayoutSnapshotsPage() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

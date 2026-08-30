@@ -27,6 +27,21 @@
   .top-nav-trigger { padding: 0 9px; gap: 5px; font-size: 12.5px; }
   .top-nav-wordmark,
   .top-nav-avatar-name { display: none; }
+
+  /* PRINT — the 240px+320px side rails leave the paper preview ~210px on
+     iPad portrait; stack like phone does (inline grid style needs !important). */
+  .pr-body { grid-template-columns: 1fr !important; }
+  .pr-tpl-list, .pr-options {
+    border: 0 !important;
+    border-bottom: 1px solid var(--line) !important;
+  }
+}
+
+/* JARVIS — ask panel: 1fr + 320px sidebar on wide screens, stacked below 900px.
+   Lives here (not inline) because inline grid-template-columns can't collapse. */
+.jarvis-ask-grid { display: grid; grid-template-columns: 1fr 320px; }
+@media (max-width: 899px) {
+  .jarvis-ask-grid { grid-template-columns: 1fr; }
 }
 
 /* ─────────────────────────── PHONE (≤ 767) ─────────────────────────── */
