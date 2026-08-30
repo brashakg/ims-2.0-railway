@@ -3521,6 +3521,19 @@ async def update_product(
                     if _conn is not None and getattr(_conn, "is_connected", False):
                         _cat = _conn.get_collection("catalog_products")
                         if _cat is not None:
+                            # THE TWIN'S KEY IS NOT ALWAYS THE SPINE'S. A
+                            # door-created product's catalog twin is keyed on
+                            # `pim_product_id` -- a DIFFERENT uuid the create
+                            # door minted (product_master._build_pim_doc:
+                            # {"id": spine["pim_product_id"]}). Only legacy /
+                            # convergence twins share the spine id. Filtering
+                            # on product_id here silently missed the twin for
+                            # every door-created product: the POS price moved,
+                            # the website price stayed stale, and nothing ever
+                            # queued. Same resolution the service door uses
+                            # (product_master.update_product mirrors onto
+                            # updated["pim_product_id"]).
+                            _twin_id = existing.get("pim_product_id") or product_id
                             # A QUEUED ROW MUST BELONG TO A STATUS BUCKET. This
                             # door sets the flag by dot-notation, so on a twin
                             # with no `ecom` sub-doc Mongo creates
@@ -3530,10 +3543,10 @@ async def update_product(
                             # one door over). Defaulted only when ABSENT, so an
                             # edit can never demote a live product back to DRAFT.
                             if _cat_patch.get("ecom.locally_modified"):
-                                _twin = _cat.find_one({"id": product_id}) or {}
+                                _twin = _cat.find_one({"id": _twin_id}) or {}
                                 if not (_twin.get("ecom") or {}).get("status"):
                                     _cat_patch["ecom.status"] = "DRAFT"
-                            _cat.update_one({"id": product_id}, {"$set": _cat_patch})
+                            _cat.update_one({"id": _twin_id}, {"$set": _cat_patch})
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "[PRODUCTS] catalog mirror on update skipped for %s",
