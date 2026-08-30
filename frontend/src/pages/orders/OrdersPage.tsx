@@ -75,9 +75,47 @@ const isOnRxHold = (order: Order): boolean => {
   return Boolean(o.rx_pending || o.fulfillment_hold || o.rxPending || o.fulfillmentHold);
 };
 
+// A stock-miss hold (paid online order whose units could not be claimed)
+// rides the same fulfillment_hold flag but is NOT an Rx problem — labelling
+// it "Rx hold" sends staff after a prescription that was never the issue.
+// Mirrors the backend classifier (orders.order_hold_kinds), including the
+// legacy shape where the stock reason rode rx_hold_reason.
+const isOnStockHold = (order: Order): boolean => {
+  if (!isOnRxHold(order)) return false;
+  const o = order as unknown as {
+    stock_hold_reason?: string;
+    rx_hold_reason?: string;
+    rxHoldReason?: string;
+  };
+  return Boolean(
+    o.stock_hold_reason ||
+      String(o.rx_hold_reason || o.rxHoldReason || '').startsWith(
+        'Stock could not be claimed',
+      ),
+  );
+};
+
+const hasRxPending = (order: Order): boolean => {
+  const o = order as unknown as { rx_pending?: boolean; rxPending?: boolean };
+  return Boolean(o.rx_pending || o.rxPending);
+};
+
+/** Short label naming the active hold(s): "Rx hold" / "stock hold" / both. */
+const holdLabel = (order: Order): string => {
+  const stock = isOnStockHold(order);
+  if (!stock) return 'Rx hold';
+  return hasRxPending(order) ? 'Rx + stock hold' : 'Stock hold';
+};
+
 const rxHoldReason = (order: Order): string => {
-  const o = order as unknown as { rx_hold_reason?: string; rxHoldReason?: string };
-  return String(o.rx_hold_reason || o.rxHoldReason || '');
+  const o = order as unknown as {
+    rx_hold_reason?: string;
+    rxHoldReason?: string;
+    stock_hold_reason?: string;
+  };
+  return [String(o.rx_hold_reason || o.rxHoldReason || ''), String(o.stock_hold_reason || '')]
+    .filter(Boolean)
+    .join(' · ');
 };
 
 export function OrdersPage() {
@@ -591,10 +629,10 @@ export function OrdersPage() {
                         {isOnRxHold(order) && (
                           <span
                             className="text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 inline-flex items-center gap-1"
-                            title="On Rx hold - clear the hold before marking it delivered/ready"
+                            title={`On ${holdLabel(order).toLowerCase()} - clear the hold before marking it delivered/ready`}
                           >
                             <AlertCircle className="w-3 h-3" />
-                            Rx hold
+                            {holdLabel(order)}
                           </span>
                         )}
                       </div>
@@ -679,9 +717,12 @@ export function OrdersPage() {
                 <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 text-amber-700 mt-0.5 flex-shrink-0" />
                   <div className="text-sm text-amber-800">
-                    <span className="font-medium">On Rx hold.</span> This order is missing a valid
-                    prescription and cannot be marked ready, delivered, or shipped until an admin
-                    clears the hold.
+                    <span className="font-medium">On {holdLabel(selectedOrder).toLowerCase()}.</span>{' '}
+                    {isOnStockHold(selectedOrder) && !hasRxPending(selectedOrder)
+                      ? 'This order is paid but its stock could not be claimed (oversell); it cannot be marked ready, delivered, or shipped until the stock is resolved and an admin clears the hold.'
+                      : isOnStockHold(selectedOrder)
+                        ? 'This order is missing a valid prescription AND its stock could not be claimed; it cannot be marked ready, delivered, or shipped until an admin clears the holds.'
+                        : 'This order is missing a valid prescription and cannot be marked ready, delivered, or shipped until an admin clears the hold.'}
                     {rxHoldReason(selectedOrder) && (
                       <span className="block text-amber-700 mt-0.5">{rxHoldReason(selectedOrder)}</span>
                     )}
@@ -817,7 +858,7 @@ export function OrdersPage() {
                       disabled={isOnRxHold(selectedOrder)}
                       title={
                         isOnRxHold(selectedOrder)
-                          ? 'On Rx hold - clear the hold before marking it delivered/ready'
+                          ? `On ${holdLabel(selectedOrder).toLowerCase()} - clear the hold before marking it delivered/ready`
                           : undefined
                       }
                       className={clsx(

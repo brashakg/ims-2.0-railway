@@ -134,6 +134,7 @@ _LIST_PROJECTION: Dict[str, int] = {
     "rx_pending": 1,
     "rx_hold_reasons": 1,
     "rx_hold_reason": 1,
+    "stock_hold_reason": 1,
     "fulfillment_hold": 1,
     "rx_hold_cleared": 1,
     "rx_hold_cleared_at": 1,
@@ -707,10 +708,22 @@ async def clear_rx_hold(
     if not order:
         raise HTTPException(status_code=404, detail="Online order not found")
 
-    if not (order.get("rx_pending") or order.get("fulfillment_hold")):
+    # NAME what is being released (Rx hold, stock hold, or both) -- the shared
+    # classifier also recognises legacy stock-miss orders whose reason ingest
+    # wrote into rx_hold_reason before the stock hold owned its own field.
+    # Late import: online_store_orders must not import orders at module level.
+    from .orders import order_hold_kinds
+
+    released = order_hold_kinds(order)
+    if not released:
         raise HTTPException(
-            status_code=409, detail="This order has no active Rx hold to clear."
+            status_code=409, detail="This order has no active hold to clear."
         )
+    _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold"}
+    released_message = (
+        " and ".join(_HOLD_NAMES[k] for k in released).capitalize()
+        + " released - the order can now be fulfilled."
+    )
 
     note = (body.note or "").strip() if body and body.note else None
     prescription_id = (
@@ -737,12 +750,21 @@ async def clear_rx_hold(
             status_code=503, detail="Could not update the order (database error)"
         )
 
-    _write_rx_hold_audit(order, current_user, note=note, prescription_id=prescription_id)
+    _write_rx_hold_audit(
+        order,
+        current_user,
+        note=note,
+        prescription_id=prescription_id,
+        released=released,
+    )
     return {
         "order_id": order_id,
         "rx_pending": False,
         "fulfillment_hold": False,
         "rx_hold_cleared": True,
+        # What was actually released, so the FE toast / caller can say it.
+        "released": released,
+        "message": released_message,
     }
 
 
@@ -752,6 +774,7 @@ def _write_rx_hold_audit(
     *,
     note: Optional[str] = None,
     prescription_id: Optional[str] = None,
+    released: Optional[list] = None,
 ) -> None:
     """Chained audit row for an Rx-hold release. The RELEASE itself is never
     blocked by an audit problem (mirrors _write_remap_audit's fail-soft
@@ -786,6 +809,9 @@ def _write_rx_hold_audit(
                     "shopify_order_id": order.get("shopify_order_id"),
                     "prior_rx_hold_reasons": order.get("rx_hold_reasons"),
                     "prior_rx_hold_reason": order.get("rx_hold_reason"),
+                    "prior_stock_hold_reason": order.get("stock_hold_reason"),
+                    # Which hold(s) this release actually cleared (RX / STOCK).
+                    "released": released or [],
                     "note": note,
                     "prescription_id": prescription_id,
                 },
