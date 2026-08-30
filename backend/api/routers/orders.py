@@ -2194,10 +2194,11 @@ async def create_order(
                 if _mrp and _up < _mrp - 1e-6:
                     _implied = (_mrp - _up) / _mrp * 100.0
                     _eff_disc = max(item.discount_percent, _implied)
-                if _ceiling and _up < _ceiling - 1e-6:
-                    _loyalty_eff = max(
-                        _loyalty_eff, (_ceiling - _up) / _ceiling * 100.0
-                    )
+                from api.services.loyalty_engine import implied_ceiling_discount
+
+                _loyalty_eff = max(
+                    _loyalty_eff, implied_ceiling_discount(_up, _mrp, _offer)
+                )
 
             # Enforce discount cap (admins bypass) -- against the EFFECTIVE discount
             effective_cap = user_discount_cap
@@ -3737,10 +3738,11 @@ async def add_order_item(
                     )
                 if _mrp and _mrp > 0 and _up < _mrp - 1e-6:
                     _eff_disc = max(item.discount_percent, (_mrp - _up) / _mrp * 100.0)
-                if _ceiling and _up < _ceiling - 1e-6:
-                    _loyalty_eff = max(
-                        _loyalty_eff, (_ceiling - _up) / _ceiling * 100.0
-                    )
+                from api.services.loyalty_engine import implied_ceiling_discount
+
+                _loyalty_eff = max(
+                    _loyalty_eff, implied_ceiling_discount(_up, _mrp, _offer)
+                )
                 from api.services.pricing_caps import (
                     effective_discount_cap as product_discount_cap,
                 )

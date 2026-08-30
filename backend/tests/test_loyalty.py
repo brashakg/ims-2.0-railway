@@ -1172,3 +1172,153 @@ def test_phantom_analytics_earn_doors_are_gone(client, auth_headers):
     )
     assert r1.status_code in (404, 405)
     assert r2.status_code in (404, 405)
+
+
+# ============================================================================
+# Round-4 (panel probes turned regression tests): reversal-after-regate must
+# not over-claw; stamp-stripped edited lines must not under-claw or over-earn.
+# ============================================================================
+
+
+class _FakeProductRepo:
+    """mrp/offer lookups for the effective-discount re-derivation."""
+
+    def __init__(self, products):
+        self._p = products
+
+    def find_by_id(self, pid):
+        return self._p.get(pid)
+
+
+def test_cancel_after_regate_claws_only_the_remainder(patched_loyalty):
+    """Panel probe: earn 100 on A + 50 on B; edit-regate claws 40 on A; a
+    later cancel of A must claw only the remaining 60 — final balance 50,
+    not 10 (the pre-fix reversal ignored regate rows and double-clawed)."""
+    from api.routers.loyalty import regate_earn_after_edit, reverse_for_cancel
+
+    _seed_earned_order(patched_loyalty, "cust-rv1", "ORD-A", 100)
+    _seed_earned_order(patched_loyalty, "cust-rv1", "ORD-B", 50)
+
+    # Edit makes 40% of A's earn ineligible: one 4000 line at 40% discount,
+    # one 6000 clean line -> target 60, claw 40.
+    edited = {
+        "order_id": "ORD-A",
+        "customer_id": "cust-rv1",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [
+            {
+                "category": "FRAME",
+                "item_total": 4000,
+                "discount_percent": 40,
+                "effective_discount_percent": 40,
+            },
+            {
+                "category": "FRAME",
+                "item_total": 6000,
+                "effective_discount_percent": 0,
+            },
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 40
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv1")
+    assert acct["balance_points"] == 110  # 150 - 40
+
+    rev = reverse_for_cancel("ORD-A", "cust-rv1")
+    assert rev.get("ok"), rev
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv1")
+    # Only the remaining 60 of A's earn is clawed; B's 50 stands.
+    assert acct["balance_points"] == 50
+    assert acct["lifetime_earned"] == 50  # 150 - 40 (regate) - 60 (cancel)
+
+
+def test_regate_rederives_implied_discount_when_stamp_stripped(
+    patched_loyalty, monkeypatch
+):
+    """Panel probe: a superadmin edit rebuilds lines WITHOUT the
+    effective_discount_percent stamp. A typed-below-shelf price (10% under
+    MRP, explicit 0%) must still zero that line's earn via the catalog
+    re-derivation — pre-fix the regate clawed 10 instead of 100."""
+    from api.routers import loyalty as loyalty_module
+    from api.routers.loyalty import regate_earn_after_edit
+
+    monkeypatch.setattr(
+        loyalty_module,
+        "get_product_repository",
+        lambda: _FakeProductRepo({"p-shelf": {"mrp": 10000.0, "offer_price": None}}),
+    )
+    _seed_earned_order(patched_loyalty, "cust-rv2", "ORD-C", 100)
+    edited = {
+        "order_id": "ORD-C",
+        "customer_id": "cust-rv2",
+        "grand_total": 9000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        # Rebuilt line: no effective stamp, explicit 0%, unit_price 10% under
+        # the catalog MRP -> ineligible (>=5%).
+        "items": [
+            {
+                "category": "FRAME",
+                "product_id": "p-shelf",
+                "quantity": 1,
+                "unit_price": 9000.0,
+                "discount_percent": 0,
+                "item_total": 9000.0,
+            }
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 100, out
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv2")
+    assert acct["balance_points"] == 0
+
+
+def test_manual_earn_rederives_implied_discount(
+    client, auth_headers, patched_loyalty, monkeypatch
+):
+    """POST /earn on a stamp-stripped order (post-edit) must not mint points
+    for a typed-below-shelf line."""
+    from api.routers import loyalty as loyalty_module
+
+    monkeypatch.setattr(
+        loyalty_module,
+        "get_product_repository",
+        lambda: _FakeProductRepo({"p-shelf2": {"mrp": 10000.0, "offer_price": None}}),
+    )
+    patched_loyalty["orders"].seed(
+        "ORD-D",
+        "cust-rv3",
+        9000.0,
+        items=[
+            {
+                "category": "FRAME",
+                "product_id": "p-shelf2",
+                "quantity": 1,
+                "unit_price": 9000.0,
+                "discount_percent": 0,
+                "item_total": 9000.0,
+            }
+        ],
+    )
+    r = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-rv3", "order_id": "ORD-D"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["awarded"] == 0
+
+
+def test_implied_ceiling_discount_table():
+    """The single shared formula: at-ceiling 0; below-MRP implied; HQ item
+    measured against OFFER (at-offer 0, below-offer positive); garbage 0."""
+    from api.services.loyalty_engine import implied_ceiling_discount
+
+    assert implied_ceiling_discount(200.0, 200.0, None) == 0.0
+    assert abs(implied_ceiling_discount(180.0, 200.0, None) - 10.0) < 1e-9
+    assert implied_ceiling_discount(150.0, 200.0, 150.0) == 0.0  # HQ at offer
+    assert implied_ceiling_discount(120.0, 200.0, 150.0) > 0.0  # HQ below offer
+    assert implied_ceiling_discount("??", 200.0, None) == 0.0
+    assert implied_ceiling_discount(100.0, None, None) == 0.0

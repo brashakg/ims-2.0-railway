@@ -36,9 +36,11 @@ from ..dependencies import (
     get_loyalty_settings_repository,
     get_loyalty_transaction_repository,
     get_order_repository,
+    get_product_repository,
 )
 from ..services.loyalty_engine import (
     calc_earn_points,
+    implied_ceiling_discount,
     calc_redeem,
     compute_tier,
     expirable_points_by_lot,
@@ -333,7 +335,9 @@ async def earn(
     # Per-line data comes from the ORDER document, never body.items: client
     # lines could omit discount_percent/promo stamps and defeat the >=5%/offer
     # earn gate (same "points are money" stance as the basis clamp above).
-    items = order_doc.get("items") or []
+    # Effective discounts are re-derived because a superadmin items-edit
+    # rebuilds lines without the create-time stamp.
+    items = _with_effective_discounts(order_doc.get("items") or [])
     earn_result = calc_earn_points(
         rupee_value,
         items,
@@ -1476,6 +1480,17 @@ def _reverse_order_loyalty(
         for t in ledger
         if t.get("order_id") == order_id and t.get("type") == "EARN"
     )
+    # Edit-regate claws (negative ADJUST rows) already took part of this
+    # order's earn back; a full reversal must claw only the REMAINDER, or a
+    # cancel after an edit-regate double-claws (and double-decrements
+    # lifetime_earned, and can refuse on a spurious underflow).
+    _regate_claw = sum(
+        int(t.get("points") or 0)
+        for t in ledger
+        if t.get("type") == "ADJUST"
+        and t.get("edit_regate_of_order_id") == order_id
+    )
+    earned = max(0, earned + _regate_claw)
     redeemed = sum(
         int(t.get("points") or 0)
         for t in ledger
@@ -1624,6 +1639,52 @@ def _reverse_order_loyalty(
     }
 
 
+def _with_effective_discounts(items):
+    """Return copies of order lines with effective_discount_percent filled.
+
+    A superadmin items-edit rebuilds lines WITHOUT the create-time stamp
+    (rebuild_edited_line consults no catalog by design), so any earn math
+    that runs after an edit — POST /earn and the edit re-gate — must
+    re-derive the implied discount from the catalog or a typed-below-shelf
+    price becomes invisible and points over-credit. Fail toward the explicit
+    value (pre-existing blindness) when the product can't be resolved.
+    """
+    try:
+        pr = get_product_repository()
+    except Exception:  # noqa: BLE001
+        pr = None
+    out = []
+    for line in items or []:
+        line = dict(line)
+        if line.get("effective_discount_percent") is None:
+            try:
+                eff = float(line.get("discount_percent") or 0.0)
+            except (TypeError, ValueError):
+                eff = 0.0
+            pid = str(line.get("product_id") or "")
+            if (
+                pr is not None
+                and pid
+                and not pid.startswith(("custom-", "lens-", "lens-sug-"))
+            ):
+                try:
+                    product = pr.find_by_id(pid)
+                    if product:
+                        eff = max(
+                            eff,
+                            implied_ceiling_discount(
+                                line.get("unit_price"),
+                                product.get("mrp"),
+                                product.get("offer_price"),
+                            ),
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+            line["effective_discount_percent"] = round(eff, 4)
+        out.append(line)
+    return out
+
+
 def regate_earn_after_edit(
     order_doc: Dict[str, Any],
     user_id: Optional[str] = None,
@@ -1702,7 +1763,7 @@ def regate_earn_after_edit(
         target = int(
             calc_earn_points(
                 basis,
-                order_doc.get("items") or [],
+                _with_effective_discounts(order_doc.get("items") or []),
                 tier,
                 settings,
                 cart_discount_percent=float(

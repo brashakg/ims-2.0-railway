@@ -88,6 +88,25 @@ def _line_categories(items: Iterable[Dict[str, Any]]) -> List[Tuple[float, float
     return out
 
 
+def implied_ceiling_discount(unit_price, mrp, offer) -> float:
+    """Percent discount implied by a unit_price under the catalog CEILING
+    (offer when offer<mrp else mrp). 0 when at/above the ceiling or when no
+    catalog price is known. THE single implementation — the order create
+    door, the draft add-item door, and the earn re-derivation all call this
+    (one-rule-two-implementations defence)."""
+    try:
+        up = float(unit_price or 0.0)
+        m = float(mrp) if mrp is not None else None
+        o = float(offer) if offer is not None else None
+    except (TypeError, ValueError):
+        return 0.0
+    hq = bool(o and m and o < m)
+    ceiling = o if hq else (m if (m and m > 0) else None)
+    if ceiling and up < ceiling - 1e-6:
+        return (ceiling - up) / ceiling * 100.0
+    return 0.0
+
+
 # Owner hard rule (2026-08-30): loyalty earns ONLY when no offer is applied
 # and the discount on that item / that bill is under 5%. At or above 5% (or
 # any promo), the item's — or with a bill discount, the whole bill's — earn
