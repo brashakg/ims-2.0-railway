@@ -1,14 +1,23 @@
 name: Frontend Tests & Build
 
 on:
+  # No claude/** push trigger — PR branches run via pull_request only (see
+  # backend-ci.yml for the rationale).
   push:
-    branches: [main, develop, 'claude/**']
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
 defaults:
   run:
     working-directory: frontend
+
+# A newer commit on the same ref cancels the older in-flight run — no more
+# queue pile-ups when pushes land in quick succession. main is exempt so a
+# deploy-validating run is never killed mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test-and-build:
@@ -18,7 +27,9 @@ jobs:
         # Vite 7 (the build tool) requires Node 20.19+ / 22.12+, and Node 18
         # reached end-of-life in Apr 2025. Testing on 18.x failed at `vite build`
         # regardless of this branch; run the supported LTS lines instead.
-        node-version: [20.x, 22.x]
+        # One Node — a Vite build does not differ across 20/22, and the dual
+        # matrix doubled every PR's frontend wall time.
+        node-version: [22.x]
 
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +86,7 @@ jobs:
         with:
           name: frontend-build-${{ matrix.node-version }}
           path: frontend/dist/
-          retention-days: 30
+          retention-days: 3
 
   dead-code:
     # Advisory only — knip reports unused files/exports/dependencies to the job
