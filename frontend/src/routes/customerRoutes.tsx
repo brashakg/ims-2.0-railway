@@ -97,9 +97,8 @@ export const customerRoutes = (
       }
     />
 
-    {/* F41: Lapsed-patient reactivation — in-app work-list of
-        clinically lapsed patients to bring back. Store-facing;
-        in-app only (no message send, no voucher mint). */}
+    {/* F41: Lapsed-patient reactivation — salvaged + WIRED 2026-08-31
+        (page was finished but no menu ever linked it). */}
     <Route
       path="customers/reactivation"
       element={

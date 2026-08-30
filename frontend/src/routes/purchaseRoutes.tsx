@@ -20,7 +20,6 @@ const PurchaseAnalyticsSection = lazy(() => import('../pages/purchase/PurchaseAn
 const GoodsReceiptNote = lazy(() => import('../pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
-const VendorRMA = lazy(() => import('../pages/purchase/VendorRMA').then(m => ({ default: m.VendorRMA })));
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 
@@ -152,16 +151,6 @@ export const purchaseRoutes = (
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
           <GoodsReceiptCockpit />
-        </ProtectedRoute>
-      }
-    />
-
-    {/* N4: Vendor RMA + credit-note reconciliation (vendor/AP roles) */}
-    <Route
-      path="purchase/vendor-rma"
-      element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <VendorRMA />
         </ProtectedRoute>
       }
     />

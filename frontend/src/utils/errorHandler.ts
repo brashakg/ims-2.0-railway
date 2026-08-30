@@ -133,20 +133,6 @@ export function formatApiError(error: unknown): FormattedError {
   };
 }
 
-export function getErrorDescription(status: number): string {
-  const descriptions: Record<number, string> = {
-    400: 'Bad request. Please check your input.',
-    401: 'Session expired. Please log in again.',
-    403: 'You do not have permission to access this resource.',
-    404: 'The requested resource was not found.',
-    429: 'Too many requests. Please wait and try again.',
-    500: 'Server error. Please try again later.',
-    503: 'Service unavailable. The server is temporarily down.',
-  };
-
-  return descriptions[status] || 'An error occurred. Please try again.';
-}
-
 export function isRetryableError(error: unknown): boolean {
   if (error instanceof Error) {
     return (

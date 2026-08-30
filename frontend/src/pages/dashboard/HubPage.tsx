@@ -13,6 +13,7 @@ import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
+import { HandoffUploadModal } from '../../components/handoffs/HandoffUploadModal';
 import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
 import { NewTaskModal } from '../../components/tasks/NewTaskModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
@@ -126,6 +127,7 @@ export default function HubPage() {
   // Kept for the handoff INBOX card (existing received-file cards still render);
   // bumped to refetch it.
   const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
+  const [showHandoffUpload, setShowHandoffUpload] = useState(false);
 
   const MAX_SHARE_BYTES = 25 * 1024 * 1024; // 25 MB — matches backend cap
 
@@ -541,8 +543,25 @@ export default function HubPage() {
         <DashboardNotifications />
       </section>
 
-      {/* Handoff inbox — only renders when the user has at least one card. */}
+      {/* Handoff inbox — only renders when the user has at least one card.
+          Salvage 2026-08-31: the SEND door existed on the backend + this
+          inbox, but no screen ever mounted the upload modal — wired here. */}
+      <section style={{ marginBottom: 6, display: 'flex', justifyContent: 'flex-end' }}>
+        <button type="button" className="btn sm" onClick={() => setShowHandoffUpload(true)}>
+          Send a handoff
+        </button>
+      </section>
       <HandoffInboxCard refreshKey={inboxRefreshKey} />
+      {showHandoffUpload && (
+        <HandoffUploadModal
+          isOpen={showHandoffUpload}
+          onClose={() => setShowHandoffUpload(false)}
+          onSent={() => {
+            setShowHandoffUpload(false);
+            setInboxRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
 
       {/* F50: clinical -> retail handovers — only renders when the sales floor
           has at least one active CLINICAL_RX from optometry. */}
