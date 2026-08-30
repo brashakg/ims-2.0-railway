@@ -11,13 +11,15 @@
 import { useEffect, useState } from 'react';
 import {
   IndianRupee, Phone, CreditCard, FileText,
-  CheckCircle, X,
+  CheckCircle, X, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
 import { usePOSStore } from '../../stores/posStore';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
 import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
+import DenominationGrid from '../cash/DenominationGrid';
+import { blankDenoms, hasCount, setPieces as setRowPieces, type DenomRow } from '../../utils/denominations';
 
 // Fallback while the policy fetch is in flight / failed. MIRRORS the backend
 // registry default for `pos.emi_annual_rate_percent` (backend
@@ -33,8 +35,17 @@ function fc(amount: number | undefined | null): string {
 // ============================================================================
 // Cash Change Calculator
 // ============================================================================
+// Owner ruling 2026-08-25: the tendered figure (and an OPTIONAL note-by-note
+// grid) is now RECORDED on the sale -- it feeds posStore.cash_tender, which
+// POSLayout attaches to the CASH payment leg the backend already reads
+// (orders.py cash_leg_record). The change arithmetic DISPLAYED here is
+// untouched, the payment amounts are untouched, and skipping everything still
+// completes the sale exactly as before (the record lands as NOT_CAPTURED).
 function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
+  const setCashTender = usePOSStore((s) => s.setCashTender);
   const [cashTendered, setCashTendered] = useState('');
+  const [noteRows, setNoteRows] = useState<DenomRow[]>(blankDenoms());
+  const [showNotes, setShowNotes] = useState(false);
   const tendered = parseFloat(cashTendered) || 0;
   const change = tendered - grandTotal;
   const quickAmounts = [
@@ -44,18 +55,39 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
     Math.ceil(grandTotal / 2000) * 2000,
   ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
 
+  // Mirror what was typed/tapped into the store so Complete Order can attach
+  // it to the CASH leg. Blank tendered + untouched grid -> null (NOT_CAPTURED
+  // on the server -- never a fabricated zero).
+  const publish = (amountStr: string, rows: DenomRow[]) => {
+    const amt = parseFloat(amountStr) || 0;
+    const counted = hasCount(rows);
+    if (amt > 0 || counted) {
+      setCashTender({ tendered_amount: amt, rows: counted ? rows.filter((r) => r.pieces > 0) : undefined });
+    } else {
+      setCashTender(null);
+    }
+  };
+  const onTendered = (v: string) => { setCashTendered(v); publish(v, noteRows); };
+  const onNotePieces = (i: number, pieces: number) => {
+    setNoteRows((rows) => {
+      const next = setRowPieces(rows, i, pieces);
+      publish(cashTendered, next);
+      return next;
+    });
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
       <p className="text-sm font-medium text-gray-700">Cash Tendered</p>
       <div className="flex gap-2 items-center">
         <span className="text-gray-500 text-lg">{'₹'}</span>
-        <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
+        <input type="number" value={cashTendered} onChange={(e) => onTendered(e.target.value)}
           onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
           className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-lg font-semibold text-center text-gray-900" />
       </div>
       <div className="flex gap-2">
         {quickAmounts.map(amt => (
-          <button key={amt} onClick={() => setCashTendered(String(amt))}
+          <button key={amt} onClick={() => onTendered(String(amt))}
             className="px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-100">{fc(amt)}</button>
         ))}
       </div>
@@ -63,6 +95,16 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
         <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
           {change >= 0 ? `Change: ₹${Math.round(change).toLocaleString('en-IN')}` : `Short: ₹${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
         </div>
+      )}
+      {/* Optional: WHICH notes came over the counter. Collapsed by default so
+          the fast path costs nothing; skipping it never blocks the sale. */}
+      <button type="button" onClick={() => setShowNotes((v) => !v)}
+        className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700">
+        {showNotes ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        Count the notes received (optional)
+      </button>
+      {showNotes && (
+        <DenominationGrid rows={noteRows} onChange={onNotePieces} />
       )}
     </div>
   );

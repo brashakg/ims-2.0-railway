@@ -733,22 +733,27 @@ _REGISTRY_LIST: List[PolicySpec] = [
     ),
     # --- F23 Blind EOD cash tally & Z-Read (#23) ---
     # The variance tolerance band (absolute paisa): a counted-vs-expected gap
-    # within this band closes BALANCED; beyond it is flagged OVERAGE/SHORTAGE.
-    # Default 0 = exact-match required (any gap is flagged); raise it per store
-    # to allow a small rounding band. The reopen-roles key controls WHICH roles
-    # may release the transparent soft-lock on a closed Z-Read (the router also
+    # within this band closes BALANCED; beyond it is flagged OVERAGE/SHORTAGE,
+    # a written explanation becomes mandatory to lock/close, and a task lands
+    # on the store manager. Default Rs 100 (owner ruling 2026-08-25: ONE band,
+    # Rs 100, everywhere) -- store-scopable here in Settings > Cash Register.
+    # This is the ONLY band: the Finance close reads it too (the closer-typed
+    # tolerance was deleted). The reopen-roles key controls WHICH roles may
+    # release the transparent soft-lock on a closed Z-Read (the router also
     # gates this; the policy lets the owner widen/narrow it per scope).
     _spec(
         key="till.variance_tolerance_paisa",
         type="money_paisa",
-        default=0,
+        default=10000,
         scopes=("global", "entity", "store"),
         write_roles=("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"),
         group="Cash Register",
         label="Till variance tolerance",
         minimum=0,
         help="Absolute counted-vs-expected gap (paisa) within which an EOD "
-        "cash tally is treated as BALANCED. 0 = exact match required.",
+        "cash tally is treated as BALANCED. Beyond it the variance needs a "
+        "written explanation and the store manager is alerted. Default "
+        "10000 = Rs 100 (owner ruling 2026-08-25).",
     ),
     _spec(
         key="till.reopen_roles",

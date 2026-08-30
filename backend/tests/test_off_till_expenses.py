@@ -404,7 +404,10 @@ def _close(role="STORE_MANAGER"):
         json={
             "session_id": "ZZ-CR-OPEN",
             "denominations": [{"face": 500, "pieces": 87, "kind": "note"}],
-            "tolerance": 0,
+            # The small real short below is beyond the Rs 100 policy band, and
+            # an out-of-band close now DEMANDS a written explanation (owner
+            # ruling 2026-08-25). The closer-typed tolerance field is gone.
+            "note": "ZZ test close - small short explained",
         },
     )
 

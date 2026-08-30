@@ -18,7 +18,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { usePOSStore } from '../../stores/posStore';
 import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from '../../utils/categoryNormalize';
-import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
+import type { SaleType, POSStep, CartLineItem, CashTenderCapture } from '../../stores/posStore';
+import { buildPaymentBody } from './paymentBody';
 import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi, loyaltyApi } from '../../services/api';
 import type { Prescription } from '../../types';
@@ -669,35 +670,24 @@ export function POSLayout() {
           store.clearPendingLoyaltyRedeem();
         }
 
+        // The optional cash-accountability capture attaches to the FIRST cash
+        // leg only — the customer handed one wad over once; attaching it to a
+        // second cash leg would double the note-by-note ledger.
+        let cashCapture: CashTenderCapture | null = store.cash_tender;
         for (const p of (store.payments || [])) {
           // Skip the LOYALTY tender — it is a UI-only line that tracks the
           // rupee value of the deferred redeem; the actual ledger entry was
           // created by /loyalty/redeem above (or skipped on failure).
           if (p.method === 'LOYALTY') continue;
           try {
-            const body: Record<string, unknown> = {
-              method: p.method,
-              amount: p.amount,
-              reference: p.reference,
-              voucher_code: p.voucherCode,
-            };
-            // EMI requires emi_months on the backend (else 400). Forward the
-            // tenure/provider the POS already captured — without this every EMI
-            // payment silently failed and the order stayed unpaid.
-            // POS-2: also pass emi_principal (financed balance) so the backend
-            // builds the schedule on the loan amount, not the down-payment.
-            if (p.method === 'EMI') {
-              body.emi_months = p.emiTenure;
-              body.emi_provider = p.emiProvider;
-              if (p.emiBalance && p.emiBalance > 0) {
-                body.emi_principal = p.emiBalance;
-              }
-            }
+            const body = buildPaymentBody(p, p.method === 'CASH' ? cashCapture : null);
+            if (p.method === 'CASH') cashCapture = null;
             await orderApi.addPayment(result.order_id, body as any);
           } catch {
             // Don't block order — payment can be recorded later
           }
         }
+        store.setCashTender(null);
         store.setOrderResult(result.order_id, result.order_number);
 
         // Phase 6.8 — auto-create workshop job + prompt sales to fill
