@@ -21,14 +21,6 @@ export const taskRoutes = (
       }
     />
     <Route
-      path="tasks/dashboard"
-      element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF']}>
-          <TasksDashboard />
-        </ProtectedRoute>
-      }
-    />
-    <Route
       path="tasks/checklists"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}>

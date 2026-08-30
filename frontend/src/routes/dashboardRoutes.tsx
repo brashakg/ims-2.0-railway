@@ -6,8 +6,6 @@ import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 
 const DashboardPage = lazy(() => import('../pages/dashboard/HubPage'));
 const NotificationsPage = lazy(() => import('../pages/notifications/NotificationsPage'));
-const ExecutiveDashboard = lazy(() => import('../pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
-const EnterpriseAnalyticsDashboard = lazy(() => import('../pages/dashboard/EnterpriseAnalyticsDashboard'));
 
 export const dashboardRoutes = (
   <>
@@ -17,21 +15,5 @@ export const dashboardRoutes = (
     {/* Notifications (any authenticated user) */}
     <Route path="notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
 
-    <Route
-      path="dashboard/executive"
-      element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']}>
-          <ExecutiveDashboard />
-        </ProtectedRoute>
-      }
-    />
-    <Route
-      path="dashboard/analytics"
-      element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']}>
-          <EnterpriseAnalyticsDashboard />
-        </ProtectedRoute>
-      }
-    />
   </>
 );

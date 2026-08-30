@@ -138,21 +138,6 @@ export async function connectQz(): Promise<boolean> {
   return result;
 }
 
-/** Is QZ available right now (connected)? Best-effort, never throws. */
-export async function isQzAvailable(): Promise<boolean> {
-  const qz = await loadQz();
-  if (!qz) return false;
-  try {
-    return !!(qz.websocket.isActive && qz.websocket.isActive());
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Open a print window for an HTML label document and trigger the browser
- * print dialog. This is the universal fallback. Returns a PrintResult.
- */
 export function printHtmlFallback(htmlDocument: string): PrintResult {
   try {
     const win = window.open('', '_blank', 'width=420,height=620');
