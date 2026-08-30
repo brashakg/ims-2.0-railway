@@ -626,6 +626,9 @@ class TestDuplicateVendorBill:
             "taxable_amount": 1000.0,
             "tax_amount": 180.0,
             "total_amount": 1180.0,
+            # A receipt-less bill must declare its kind (goods_bill_kind gate);
+            # these tests are about the duplicate-number guard, not the kind.
+            "bill_kind": "SERVICES",
         }
 
     def test_duplicate_bill_number_is_rejected_with_409(self, monkeypatch):

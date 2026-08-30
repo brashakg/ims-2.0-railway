@@ -5115,6 +5115,19 @@ class VendorBillCreate(BaseModel):
     po_id: Optional[str] = None
     grn_id: Optional[str] = None
     notes: Optional[str] = None
+    # What this bill is FOR. "GOODS" must link its goods receipt (grn_id);
+    # "SERVICES" (freight, rent, job-work, expenses) books header-only as
+    # always. REQUIRED on this door when no receipt is linked -- this form used
+    # to book "20 pcs assorted frames" as prose with no receipt, no products,
+    # which dodged owner ruling 15 entirely. Optional in the SCHEMA so the
+    # handler can refuse with a stable, plain-English 422 (BILL_KIND_REQUIRED)
+    # instead of a raw pydantic error, and so stored legacy rows re-read fine.
+    bill_kind: Optional[str] = None
+
+    @field_validator("bill_kind", mode="before")
+    @classmethod
+    def _normalize_bill_kind(cls, v):
+        return ap_engine.normalize_bill_kind(v)
 
 
 class VendorPaymentCreate(BaseModel):
@@ -5256,16 +5269,77 @@ async def create_vendor_bill(
 
         check_period_locked(db_early, bill.bill_date)
 
+    # Owner ruling 15, on the door that used to dodge it: a bill for GOODS must
+    # link its goods receipt, and this form books pure prose ("20 pcs assorted
+    # frames", Rs 52,500, no products named), so the only way to know a bill is
+    # for goods is to ASK. With no receipt linked the caller must declare
+    # GOODS or SERVICES; GOODS then refuses until a receipt is linked, naming
+    # the no-PO Delivery-Challan route the receiving screen now actually has.
+    # A deliberate SERVICES/expense bill books exactly as before. (Residual,
+    # accepted by the owner as the floor: goods deliberately declared as
+    # services still book -- no software can read the carton.)
+    if not bill.grn_id:
+        if bill.bill_kind is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "BILL_KIND_REQUIRED",
+                    "message": (
+                        "Say what this bill is for: goods, or "
+                        "services/expenses. A goods bill must link its goods "
+                        "receipt; a services or expense bill (freight, rent, "
+                        "job-work) books as before."
+                    ),
+                },
+            )
+        if bill.bill_kind == ap_engine.BILL_KIND_GOODS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "GRN_LINK_REQUIRED",
+                    "message": (
+                        "This bill is for goods, so link the goods receipt "
+                        "before recording it - the quantities have to be "
+                        "tallied before the purchase is final. If the goods "
+                        "arrived without a purchase order, log them as a "
+                        "Delivery Challan on the Goods Receipt screen (tick "
+                        "'This is a Delivery Challan', pick the vendor, add "
+                        "what arrived), then link that receipt here."
+                    ),
+                },
+            )
+
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
     # here too: bill another vendor's receipt, or bill one receipt again and
     # again. Reuse the purchase-invoice guards (imported at call time, like
-    # check_period_locked above, so no cross-router import cycle). No grn_id ->
-    # a plain header bill, unchanged.
+    # check_period_locked above, so no cross-router import cycle).
+    #
+    # A DELIVERY CHALLAN receipt is billable here too (the whole point of the
+    # no-PO receive path: goods bought over the counter get a DC receipt, and
+    # THIS is the screen the accountant records the bill on). The DC takes the
+    # same one-bill-per-receipt stance as the STANDARD header guard, enforced
+    # by CLAIMING the DC (dc_matched) before the bill is written -- so neither
+    # a second header bill nor a later consolidated /from-dcs invoice can bill
+    # the same goods again.
+    _dc_receipt = None
     if bill.grn_id:
-        from .purchase_invoices import assert_grn_billable_header_only
+        from .purchase_invoices import (
+            assert_grn_billable_header_only,
+            _load_linked_dcs,
+            _assert_dcs_single_vendor_store,
+        )
 
-        assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+        grn_repo = get_grn_repository()
+        linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
+        if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
+            # 404 missing / 400 not-ACCEPTED / 409 already-matched.
+            dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
+            # 409 mixed_vendors when the DC belongs to another vendor.
+            _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
+            _dc_receipt = dc_docs[0] if dc_docs else None
+        else:
+            assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
 
     # Duplicate bill guard: the same vendor invoice number must not be recorded
     # twice for the same vendor. A double-entry would double the outstanding
@@ -5307,16 +5381,59 @@ async def create_vendor_bill(
         "outstanding": round(bill.total_amount, 2),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
+        # A receipt-linked bill IS a goods bill whatever the caller declared;
+        # otherwise the declared kind (the gate above proved it is SERVICES).
+        "bill_kind": ap_engine.BILL_KIND_GOODS if bill.grn_id else bill.bill_kind,
         "notes": bill.notes,
         "status": "OUTSTANDING",
         "created_by": current_user.get("user_id"),
         "created_at": datetime.now().isoformat(),
     }
     db = _get_db()
+
+    # CLAIM the Delivery Challan before the payable exists (the DC branch's
+    # proven guarded-stamp shape): of two racing bills on the same DC exactly
+    # one wins the find_one_and_update, so the loser books nothing. Claiming
+    # first means a double payable is never written even transiently; the cost
+    # is un-stamping if the insert then fails, handled below.
+    if _dc_receipt is not None and db is not None:
+        from .purchase_invoices import _stamp_dcs_matched
+
+        stamped = _stamp_dcs_matched(db, [bill.grn_id], bill_id)
+        if bill.grn_id not in stamped:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Delivery Challan {bill.grn_id} was just billed by "
+                    f"another invoice. Nothing was recorded."
+                ),
+            )
     if db is not None:
         try:
             db.get_collection("vendor_bills").insert_one(dict(doc))
         except Exception as exc:
+            # Give the claimed DC back (guarded by OUR bill_id so a rival's
+            # stamp is never touched); without this a failed insert would
+            # leave the receipt looking billed with no bill to show for it.
+            if _dc_receipt is not None:
+                try:
+                    db.get_collection("grns").find_one_and_update(
+                        {"grn_id": bill.grn_id, "linked_bulk_invoice_id": bill_id},
+                        {
+                            "$set": {
+                                "dc_matched": False,
+                                "linked_bulk_invoice_id": None,
+                                "dc_matched_at": None,
+                            }
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.error(
+                        "[AP] could not release DC %s after failed bill insert "
+                        "%s -- the DC reads as billed until manually cleared",
+                        bill.grn_id,
+                        bill_id,
+                    )
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
     return _clean(doc)
 

@@ -388,6 +388,9 @@ class TestOneReceiptCannotBeBilledBeyondWhatItReceived:
         services = _invoice(invoice_number="INV-FREIGHT")
         services.pop("grn_id")
         services.pop("po_id")
+        # Declared services/expense bill -- the choice the form now requires
+        # on every receipt-less bill (goods_bill_kind gate).
+        services["bill_kind"] = "SERVICES"
         services["lines"] = [
             {
                 "description": "Freight",
@@ -520,13 +523,15 @@ class TestHeaderOnlyBillDoorGuardsItsReceiptLink:
         assert "accepted" in r.text.lower()
         assert _bills(db) == []
 
-    def test_a_plain_header_bill_with_no_receipt_link_still_works(self):
-        """The only UI caller (Cash Flow -> Record bill) sends no grn_id; that
-        path must be exactly as it was."""
+    def test_a_declared_services_header_bill_with_no_receipt_still_works(self):
+        """The UI caller (Cash Flow -> Record bill) can send no grn_id only by
+        declaring the bill SERVICES; a declared expense bill books exactly as
+        the old unguarded path did. (An undeclared or GOODS-declared
+        receipt-less bill is refused -- test_goods_bill_kind_gate.py.)"""
         db, cli = self._env(_grn_doc())
-        r = cli.post(
-            "/api/v1/vendors/V-RV1/bills", json=self._payload("HB-PLAIN", grn_id=None)
-        )
+        body = self._payload("HB-PLAIN", grn_id=None)
+        body["bill_kind"] = "SERVICES"
+        r = cli.post("/api/v1/vendors/V-RV1/bills", json=body)
         assert r.status_code == 201, r.text
         assert _payable(db) == RECEIPT_TOTAL
 

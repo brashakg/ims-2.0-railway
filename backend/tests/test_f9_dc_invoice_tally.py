@@ -928,6 +928,9 @@ class TestDcInvoiceTally:
         body = _invoice_body(
             [{"description": "Freight", "qty": 10, "unit_price": 100, "gst_rate": 5}]
         )
+        # A receipt-less bill must declare its kind (goods_bill_kind gate);
+        # this test is about dc_match_status, not the declaration.
+        body["bill_kind"] = "SERVICES"
         r = c.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
         assert r.json()["dc_match_status"] == "N_A"

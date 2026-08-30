@@ -22,7 +22,28 @@ export interface VendorBill {
   status?: string;
   po_id?: string;
   grn_id?: string;
+  // What the bill is FOR: 'GOODS' (must link its goods receipt via grn_id) or
+  // 'SERVICES' (freight, rent, job-work, expenses — header-only as always).
+  // The server REFUSES a receipt-less bill that does not declare one
+  // (BILL_KIND_REQUIRED) and a GOODS bill with no receipt (GRN_LINK_REQUIRED).
+  // Absent on legacy rows booked before the field existed.
+  bill_kind?: 'GOODS' | 'SERVICES';
   notes?: string;
+}
+
+// A goods receipt row (STANDARD GRN or Delivery Challan) as returned by
+// GET /vendors/grn — the pickable "receipt link" for a GOODS vendor bill.
+export interface VendorReceiptRow {
+  grn_id: string;
+  grn_number?: string;
+  grn_subtype?: string;      // 'STANDARD' | 'DELIVERY_CHALLAN'
+  status?: string;
+  dc_number?: string;
+  dc_date?: string;
+  dc_matched?: boolean;      // a matched DC is already billed
+  vendor_invoice_no?: string;
+  created_at?: string;
+  total_accepted?: number;
 }
 
 export interface VendorPayment {
@@ -231,6 +252,9 @@ export interface PurchaseInvoiceCreate {
   notes?: string;
   // F9 — grn_ids of the Delivery Challans this consolidated invoice covers.
   linked_dc_ids?: string[];
+  // What the bill is FOR ('GOODS' | 'SERVICES'). Required by the server on a
+  // receipt-less booking; a GOODS bill refuses without its receipt link.
+  bill_kind?: 'GOODS' | 'SERVICES';
 }
 
 // Server-prepared draft returned by create-from-GRN: a NOT-yet-booked invoice
@@ -326,6 +350,22 @@ export const vendorApApi = {
     const res = await api.post(`/vendors/${vendorId}/bills`, payload);
     return res.data as VendorBill;
   },
+  // ACCEPTED goods receipts for one vendor (STANDARD GRNs + Delivery
+  // Challans) — the receipt a GOODS bill must link. Returns null when the
+  // endpoint cannot be reached, so the form can tell "no receipts" apart from
+  // "could not load" instead of silently walling the user in.
+  listReceipts: async (vendorId: string): Promise<VendorReceiptRow[] | null> => {
+    try {
+      const res = await api.get('/vendors/grn', {
+        params: { vendor_id: vendorId, status: 'ACCEPTED' },
+      });
+      const d = res.data as { grns?: VendorReceiptRow[] };
+      // A DC already matched to an invoice is billed — not linkable again.
+      return (d.grns ?? []).filter((g) => !g.dc_matched);
+    } catch {
+      return null;
+    }
+  },
   createPayment: async (vendorId: string, payload: Partial<VendorPayment> & { amount: number; payment_date: string }) => {
     const res = await api.post(`/vendors/${vendorId}/payments`, payload);
     return res.data as VendorPayment;
@@ -394,6 +434,7 @@ export const purchaseInvoicesApi = {
       store_id: payload.store_id,
       notes: payload.notes,
       linked_dc_ids: payload.linked_dc_ids,
+      bill_kind: payload.bill_kind,
       lines: payload.lines.map((l) => ({
         product_id: l.product_id,
         description: l.product_name,
