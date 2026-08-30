@@ -840,6 +840,89 @@ def test_fallback_exhausted_still_records_miss(wired, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Stock-miss FLAG-AND-HOLD + task (launch-gate P1): a paid online order that
+# cannot claim its stock used to book CONFIRMED with its only trace a
+# sync-page tile + a Sentry error -- surfaces no store ever opens. Now the
+# order goes on fulfillment_hold (the flag the orders screens already badge
+# and the lifecycle transitions already refuse) and ONE P1 system task lands
+# with the fulfilling store's manager, so a human is told TODAY. The order
+# still books: Shopify took payment (owner: never lose the sale).
+# ---------------------------------------------------------------------------
+
+
+class _FakeUserRepo:
+    """One STORE_MANAGER per store: manager-of-<store_id>."""
+
+    def find_by_role(self, role, store_id=None):
+        if role == "STORE_MANAGER" and store_id:
+            return [{"user_id": f"manager-of-{store_id}", "roles": [role]}]
+        return []
+
+
+def test_stock_miss_holds_the_order_and_tasks_the_fulfilling_stores_manager(
+    wired, monkeypatch
+):
+    """Stock-miss ingest -> the order books, carries the fulfillment hold the
+    orders screens already know how to show, and ONE P1 task exists for the
+    fulfilling store, assigned to its manager."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    monkeypatch.setattr(
+        orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock()
+    )
+    monkeypatch.setattr(
+        shopify_ingest, "_available_stores_for_product", lambda db, pid: []
+    )
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    monkeypatch.setattr(deps, "get_user_repository", lambda: _FakeUserRepo())
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(9200, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created", "the paid order must STILL book"
+
+    # The order carries the hold every orders surface reads.
+    order = wired["orders"].find_one({"shopify_order_id": "9200"})
+    assert order["fulfillment_hold"] is True, (
+        "a paid order that could not claim stock must go on fulfillment hold"
+    )
+    assert "Stock could not be claimed" in order["rx_hold_reason"]
+    assert order["rx_pending"] is False  # a stock hold is NOT an Rx hold
+
+    # ONE P1 task, store-scoped to the fulfilling store, assigned to its manager.
+    stock_tasks = [
+        t
+        for t in task_repo.created
+        if t["source_ref"] == f"online_stock_miss:{res['order_id']}"
+    ]
+    assert len(stock_tasks) == 1, "the store must be actively told TODAY"
+    assert stock_tasks[0]["store_id"] == "ST-MAIN-1"
+    assert stock_tasks[0]["assigned_to"] == "manager-of-ST-MAIN-1"
+    assert stock_tasks[0]["priority"] == "P1"
+
+
+def test_clean_ingest_raises_no_stock_miss_task_and_no_hold(wired, monkeypatch):
+    """The other direction: an order whose units all claim cleanly must NOT be
+    held and must NOT task anyone."""
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    stock = _FakeStockRepoPerStore({"ST-MAIN-1": 5})
+    task_repo = _wire_fallback(monkeypatch, stock, [])
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(9201, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    order = wired["orders"].find_one({"shopify_order_id": "9201"})
+    assert not order.get("fulfillment_hold"), "a clean claim must not hold the order"
+    assert task_repo.created == [], "a clean claim must not task anyone"
+    assert wired["db"].get_collection("online_stock_miss").docs == []
+
+
+# ---------------------------------------------------------------------------
 # GUEST checkout (regression): a Shopify GUEST order has customer == None (the
 # key is PRESENT but null). Both the Rx-hold customer-id derivation and the
 # order-doc customer_id previously did payload.get("customer", {}).get("id") --

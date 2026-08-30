@@ -561,10 +561,15 @@ def _raise_fallback_ship_tasks(
 def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
     """Fail-LOUD record of an online stock-decrement miss (an oversell: a paid
     online order whose physical units could not all be claimed). Logs at ERROR
-    (so Sentry captures it) and writes an `online_stock_miss` doc that the
-    sync-health tile surfaces for operator follow-up. Itself fully fail-soft --
-    recording the miss must never raise out of ingestion (the invoice is already
-    booked). reason: 'under_claim' | 'exception'."""
+    (so Sentry captures it), writes an `online_stock_miss` doc for the
+    sync-health tile, puts the order on FULFILLMENT HOLD (the same flag the
+    Rx flag-and-hold stamps -- the orders screens already badge it and the
+    lifecycle transitions already refuse a held order), and raises ONE system
+    task to the fulfilling store so a human is told TODAY -- a store does not
+    open the sync page. The order itself still books: Shopify took payment
+    (owner: never lose the sale). Itself fully fail-soft -- recording the miss
+    must never raise out of ingestion (the invoice is already booked).
+    reason: 'under_claim' | 'exception'."""
     logger.error(
         "[SHOPIFY_INGEST] ONLINE STOCK MISS order=%s store=%s reason=%s detail=%s",
         order_id,
@@ -572,29 +577,101 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
         reason,
         detail,
     )
+    if db is None:
+        return
     try:
-        if db is None:
-            return
         coll = (
             db.get_collection("online_stock_miss")
             if hasattr(db, "get_collection")
             else db["online_stock_miss"]
         )
-        if coll is None:
-            return
-        coll.insert_one(
-            {
-                "order_id": order_id,
-                "store_id": store_id,
-                "reason": reason,
-                "detail": detail,
-                "resolved": False,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        if coll is not None:
+            coll.insert_one(
+                {
+                    "order_id": order_id,
+                    "store_id": store_id,
+                    "reason": reason,
+                    "detail": detail,
+                    "resolved": False,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] could not record stock miss for %s: %s", order_id, exc
+        )
+
+    # FLAG-AND-HOLD (house shape, owner 2026-06-30): fulfillment_hold is the
+    # one flag every orders surface reads (FE: rx_pending || fulfillment_hold)
+    # and the ready/shipped/delivered transitions reject while it is set. The
+    # reason lands in rx_hold_reason ONLY when empty (never clobbers a real Rx
+    # detail); clear-rx-hold releases it after the stock is resolved.
+    order = None
+    try:
+        orders = (
+            db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+        )
+        if orders is not None:
+            order = orders.find_one({"order_id": order_id})
+            hold_set = {"fulfillment_hold": True}
+            if not (order or {}).get("rx_hold_reason"):
+                hold_set["rx_hold_reason"] = (
+                    "Stock could not be claimed for this paid online order "
+                    "(oversell) - resolve stock, then clear the hold."
+                )
+            orders.update_one({"order_id": order_id}, {"$set": hold_set})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] stock-miss hold skipped for %s: %s", order_id, exc
+        )
+
+    # ONE task per order (dedupe_ref), store-scoped to the fulfilling store and
+    # best-effort assigned to its STORE_MANAGER; an unassigned/unacked task
+    # climbs the escalation ladder on its own.
+    try:
+        from ..dependencies import get_task_repository, get_user_repository
+        from .task_triggers import create_system_task
+
+        assigned = None
+        try:
+            user_repo = get_user_repository()
+            if user_repo is not None and store_id:
+                managers = user_repo.find_by_role("STORE_MANAGER", store_id) or []
+                if managers:
+                    assigned = managers[0].get("user_id")
+        except Exception:  # noqa: BLE001
+            assigned = None
+
+        order_ref = (order or {}).get("order_number") or order_id
+        expected = claimed = None
+        if isinstance(detail, dict):
+            expected = detail.get("expected")
+            claimed = detail.get("claimed")
+        units_bit = (
+            f" Units: {claimed} of {expected} claimed."
+            if expected is not None
+            else ""
+        )
+        create_system_task(
+            get_task_repository(),
+            title=f"Online order {order_ref}: PAID but stock could not be claimed",
+            description=(
+                f"Online order {order_ref} is paid (the invoice is booked) but "
+                f"its physical units could not all be claimed from stock "
+                f"({reason}).{units_bit} The order is on fulfillment hold. "
+                "Find or arrange the goods, then have an admin clear the hold "
+                "before dispatch."
+            ),
+            priority="P1",
+            category="ONLINE_ORDER",
+            store_id=store_id,
+            dedupe_ref=f"online_stock_miss:{order_id}",
+            assigned_to=assigned,
+            extra={"link": "/orders", "payload": {"order_id": order_id, "reason": reason}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] stock-miss task skipped for %s: %s", order_id, exc
         )
 
 
