@@ -334,62 +334,6 @@ _INTEGRATION_CATALOG = [
              "placeholder": "https://preprod.gateway.ondc.org", "optional": True},
         ],
     },
-    {
-        # Catalog-Autopilot data source: the AUTHORIZED Ray-Ban / Oakley /
-        # Luxottica wholesale portal. Consumed by MyLuxotticaAdapter (priority 2)
-        # via integration_config.get_myluxottica_config(); env vars
-        # MYLUXOTTICA_USER/PASS remain a fallback.
-        "type": "myluxottica",
-        "name": "myLuxottica (dealer catalog)",
-        "description": "Authorized Ray-Ban / Oakley / Luxottica wholesale source "
-                       "for Catalog Autopilot (dealer-portal login).",
-        "category": "Commerce",
-        "fields": [
-            {"key": "user", "label": "Dealer Username / Email", "secret": False,
-             "placeholder": "Your myLuxottica dealer login"},
-            {"key": "password", "label": "Password", "secret": True,
-             "placeholder": "myLuxottica portal password"},
-            {"key": "base_url", "label": "Portal Base URL (optional)", "secret": False,
-             "placeholder": "https://my.essilorluxottica.com", "optional": True},
-        ],
-    },
-    {
-        # Catalog-Autopilot data source: open-web search via Google Programmable
-        # Search (Custom Search JSON API). Consumed by MarketplaceAdapter
-        # (priority 4) via integration_config.get_websearch_config(); env vars
-        # GOOGLE_CSE_KEY/GOOGLE_CSE_CX (or SERP_API_KEY) remain a fallback.
-        "type": "web_search",
-        "name": "Web Search (Google Custom Search)",
-        "description": "Powers Autopilot open-web results. Create a Programmable "
-                       "Search Engine at programmablesearchengine.google.com + an "
-                       "API key in Google Cloud.",
-        "category": "Commerce",
-        "fields": [
-            {"key": "api_key", "label": "Google API Key", "secret": True,
-             "placeholder": "Google Cloud API key with Custom Search JSON API"},
-            {"key": "cx", "label": "Search Engine ID (cx)", "secret": False,
-             "placeholder": "Your Programmable Search Engine ID"},
-        ],
-    },
-    {
-        # Catalog-Autopilot data source: Google Gemini with the built-in Google
-        # Search grounding tool. Consumed by GeminiSearchAdapter (priority 2)
-        # via integration_config.get_gemini_config(); env vars GEMINI_API_KEY /
-        # GOOGLE_API_KEY remain a fallback. Runs on the owner's Google Cloud
-        # credit and returns web-referenced product data with source links.
-        "type": "gemini",
-        "name": "Gemini Web Search (Google AI)",
-        "description": "Powers Autopilot's referenced web results on your Google "
-                       "Cloud credit. Get a key at aistudio.google.com/app/apikey. "
-                       "Returns product specs WITH the source pages Gemini used.",
-        "category": "Commerce",
-        "fields": [
-            {"key": "api_key", "label": "Gemini API Key", "secret": True,
-             "placeholder": "Google AI Studio / Gemini API key"},
-            {"key": "model", "label": "Model (optional)", "secret": False,
-             "placeholder": "gemini-2.0-flash", "optional": True},
-        ],
-    },
     # ---- Messaging ---------------------------------------------------------
     {
         "type": "whatsapp",

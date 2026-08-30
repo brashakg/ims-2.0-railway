@@ -51,7 +51,6 @@ from .handoffs import router as handoffs_router
 from .transfers import router as transfers_router
 from .item_events import router as item_events_router
 from .catalog import router as catalog_router
-from .catalog_autopilot import router as catalog_autopilot_router
 from .catalog_import import router as catalog_import_router
 from .buy_desk import router as buy_desk_router
 from .jarvis import router as jarvis_router
@@ -156,7 +155,6 @@ __all__ = [
     "transfers_router",
     "item_events_router",
     "catalog_router",
-    "catalog_autopilot_router",
     "catalog_import_router",
     "buy_desk_router",
     "jarvis_router",

@@ -5,7 +5,7 @@ Regression cover for the 2026-07-29 prod audit: 353 of 2,815 gtin-bearing
 unvalidated passthrough -- every door `$set` whatever string it was handed --
 so these tests pin the guard at all three layers:
 
-    entry    product_master.normalise_payload   (form + autopilot + import)
+    entry    product_master.normalise_payload   (form + import)
     storage  CatalogVariantRepository.upsert    (the Mongo write door)
     exit     shopify_push._publishable_gtin     (last gate before customers)
 

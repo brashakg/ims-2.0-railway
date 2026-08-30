@@ -476,7 +476,7 @@ export const productApi = {
     return { ...data, url: resolveApiAssetUrl(data.url) };
   },
 
-  // RE-HOST an external image URL (an Autopilot brand-site photo): the backend
+  // RE-HOST an external image URL (a brand-site photo): the backend
   // copies the bytes into OUR file store via an SSRF-hardened server-side
   // fetch, so the product never depends on the brand site keeping the file.
   // Same response shape as uploadProductImage, with a stable internal url.

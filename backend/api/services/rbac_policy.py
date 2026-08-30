@@ -887,32 +887,6 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/catalog/sku-counts", "allowed": "AUTHENTICATED"},
-    # --- /api/v1/catalog-autopilot ---
-    {
-        "method": "POST",
-        "path": "/api/v1/catalog-autopilot/candidates/{candidate_id}/decision",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/catalog-autopilot/jobs",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/catalog-autopilot/jobs",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/catalog-autopilot/jobs/{job_id}",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/catalog-autopilot/sources",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
     # --- /api/v1/clinical ---
     {"method": "GET", "path": "/api/v1/clinical", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/clinical/", "allowed": "PUBLIC"},
@@ -5539,7 +5513,7 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/image",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
-    # Autopilot v2 image RE-HOST: server-side copies an external (brand-site)
+    # Image RE-HOST: server-side copies an external (brand-site)
     # image into our GridFS so products never hotlink. Same catalog write gate
     # as the multipart upload; the fetch itself is SSRF-hardened in
     # services/image_rehost.py (private/loopback/metadata ranges blocked).
