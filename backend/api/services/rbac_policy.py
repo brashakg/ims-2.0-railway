@@ -3998,6 +3998,34 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/loyalty/program-stats",
         "allowed": "AUTHENTICATED",
     },
+    # OTP on loyalty redemption (owner ruling 2026-08-30: redemption ONLY,
+    # never customer creation). Same POS money family as /loyalty/redeem -
+    # these two only send/check the customer's verification code; the debit
+    # stays behind /loyalty/redeem itself.
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/redeem/otp/send",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+        ],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/redeem/otp/verify",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+        ],
+    },
     {
         "method": "POST",
         "path": "/api/v1/loyalty/redeem",

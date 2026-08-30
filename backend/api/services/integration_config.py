@@ -223,6 +223,10 @@ def get_msg91_config() -> Dict[str, Any]:
         or os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", ""),
         "sms_template_id": cfg.get("sms_template_id")
         or os.getenv("MSG91_SMS_TEMPLATE_ID", ""),
+        # OTP flow template (MSG91 OTP API). Used ONLY by the loyalty-points
+        # redemption OTP (owner ruling 2026-08-30); read by providers.send_otp.
+        "otp_template_id": cfg.get("otp_template_id")
+        or os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
         # DLT-registered sender ID; BVOPTL is the owner's registered header.
         "sender": cfg.get("sender") or os.getenv("MSG91_SENDER", "") or "BVOPTL",
         "store_numbers": _parse_store_numbers(

@@ -40,6 +40,11 @@ export interface IntegrationStatusItem {
   env_keys: IntegrationEnvKey[];
   collection: IntegrationCollectionState | null;
   notes: string;
+  /** Can the integration's live action fire right now? Hook / not-wired
+   *  rows are always false. */
+  armed?: boolean;
+  /** Vendor docs / product page for hook-only rows. */
+  docs?: string;
 }
 
 // MSG91 + Coexistence messaging preflight: honest per-item readiness rows,

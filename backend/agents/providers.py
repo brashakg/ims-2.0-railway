@@ -413,3 +413,106 @@ def provider_ready(channel: str) -> bool:
     if channel == "sms":
         return bool(creds.get("sms_template_id"))
     return False
+
+
+# ============================================================================
+# OTP via the MSG91 OTP API (loyalty-points redemption ONLY - owner ruling
+# 2026-08-30: never customer creation)
+# ============================================================================
+
+
+async def send_otp(phone: str, otp: str, *, expiry_minutes: int = 5) -> DispatchResult:
+    """Deliver a verification code to a customer's mobile via the MSG91 OTP
+    API. Returns DispatchResult; never raises.
+
+    IMS generates AND verifies the code itself (api.services.loyalty_otp) -
+    MSG91 is transport only. That keeps verification ONE implementation that
+    behaves identically dark and armed; we pass our own `otp` value to the
+    endpoint instead of letting MSG91 mint one.
+
+    Same dispatch gate as every send: DISPATCH_MODE=off -> SIMULATED (payload
+    shape proven via meta, which never carries the code itself); test -> only
+    TEST_PHONE; live -> real send. Armed with no OTP template id -> honest
+    FAILED naming the owner's next step.
+    """
+    phone_norm = _normalize_phone(phone)
+    if not phone_norm:
+        return DispatchResult(ok=False, status="FAILED", error="invalid phone", channel="otp")
+
+    creds = _msg91()
+    template_id = creds.get("otp_template_id") or ""
+
+    # The code is a money-gating secret: it never appears in meta or logs.
+    meta = {
+        "endpoint": "/otp",
+        "template_id_set": bool(template_id),
+        "mobile_last4": phone_norm[-4:],
+        "expiry_minutes": int(expiry_minutes),
+    }
+
+    should, reason = _should_dispatch(phone_norm)
+    if not should:
+        logger.info(f"[PROVIDER] Suppressed OTP to {phone_norm[-4:]}: {reason}")
+        return DispatchResult(
+            ok=True,
+            status="SIMULATED",
+            provider_id=f"sim-otp-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            channel="otp",
+            meta=meta,
+        )
+
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 auth key not configured "
+                  "(Settings -> Integrations -> WhatsApp Business, or MSG91_API_KEY)",
+            channel="otp",
+        )
+    if not template_id:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error="MSG91 OTP template id not configured "
+                  "(Settings -> Integrations -> WhatsApp Business (MSG91) -> "
+                  "OTP Template ID, or MSG91_OTP_TEMPLATE_ID)",
+            channel="otp",
+        )
+
+    # MSG91 OTP API - https://docs.msg91.com/otp . Passing `otp` makes MSG91
+    # deliver OUR code instead of generating its own, so IMS's local verify
+    # stays the single authority.
+    params = {
+        "template_id": template_id,
+        "mobile": phone_norm,
+        "otp": str(otp),
+        "otp_expiry": str(int(expiry_minutes)),
+    }
+    headers = {"authkey": api_key, "content-type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+            resp = await client.post(f"{MSG91_BASE_URL}/otp", params=params, headers=headers)
+        if resp.status_code not in (200, 201, 202):
+            logger.warning(f"[PROVIDER] MSG91 OTP {resp.status_code}: {resp.text[:300]}")
+            return DispatchResult(
+                ok=False,
+                status="FAILED",
+                error=f"MSG91 returned {resp.status_code}",
+                channel="otp",
+            )
+        body = resp.json()
+        return DispatchResult(
+            ok=True,
+            status="SENT",
+            provider_id=body.get("request_id") or None,
+            channel="otp",
+            meta=meta,
+        )
+    except httpx.TimeoutException:
+        return DispatchResult(ok=False, status="FAILED", error="timeout", channel="otp")
+    except httpx.HTTPError as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"http {e}", channel="otp")
+    except (ValueError, KeyError, TypeError) as e:
+        return DispatchResult(ok=False, status="FAILED", error=f"parse {e}", channel="otp")

@@ -84,10 +84,10 @@ _REGISTRY: List[Dict[str, Any]] = [
         "powers": "DLT transactional SMS fallback (MEGAPHONE)",
         "source": "env_or_collection",
         "env_required": ["MSG91_API_KEY", "MSG91_SMS_TEMPLATE_ID"],
-        "env_optional": ["MSG91_SENDER"],
+        "env_optional": ["MSG91_SENDER", "MSG91_OTP_TEMPLATE_ID"],
         "collection_type": "whatsapp",
         "collection_required": ["api_key", "sms_template_id"],
-        "collection_optional": ["sender"],
+        "collection_optional": ["sender", "otp_template_id"],
         "dispatch_gated": True,
     },
     {
@@ -158,6 +158,89 @@ _REGISTRY: List[Dict[str, Any]] = [
         "dispatch_gated": False,
         "notes": "Exports offline-tool JSON only. Live e-filing needs a licensed GSP (build item).",
     },
+    # ------------------------------------------------------------------------
+    # MSG91 hook-only rows (full-catalog map, 2026-08-30). Deliberately NOT
+    # wired: each is a decided integration point, listed honestly so the owner
+    # can see the whole MSG91 surface - with WHY it is a hook and WHEN it
+    # would be adopted. No credential fields on purpose (the dead-end-tile
+    # class was purged in #1016): a row grows env/collection keys only when
+    # its connector is actually built.
+    # ------------------------------------------------------------------------
+    {
+        "id": "msg91_rcs",
+        "label": "MSG91 RCS",
+        "powers": "Google-verified rich cards / carousels for Android customers off WhatsApp",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/rcs",
+        "notes": "Hook only. Rs 2,000/mo floor; arm when WhatsApp delivery "
+                 "reports show a measurable non-WhatsApp Android segment.",
+    },
+    {
+        "id": "msg91_hello",
+        "label": "MSG91 Hello",
+        "powers": "Shared team inbox + mobile app so several staff can answer one store's WhatsApp",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/hello",
+        "notes": "Hook only. The WhatsApp Business app on the shop phone is "
+                 "the answering surface today (Coexistence); adopt the free "
+                 "Hello tier only if multi-staff replying starts to hurt.",
+    },
+    {
+        "id": "msg91_segmento",
+        "label": "MSG91 Segmento",
+        "powers": "Contact / audience store on the MSG91 panel",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/segmento",
+        "notes": "Hook only. IMS's customer database stays the one "
+                 "segmentation brain; a one-way mirror gets built only if an "
+                 "MSG91 panel feature ever demands audiences there.",
+    },
+    {
+        "id": "msg91_campaign",
+        "label": "MSG91 Campaign",
+        "powers": "Drag-drop omnichannel journeys on the MSG91 panel",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/campaign",
+        "notes": "Hook only. IMS's own notification flows ARE the journey "
+                 "engine; moving journeys to the panel would fork the brain.",
+    },
+    {
+        "id": "msg91_one_api",
+        "label": "MSG91 One API",
+        "powers": "Single endpoint with panel-side templates + automatic channel fallback",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/one-api",
+        "notes": "Hook only. Panel-side templates would be a SECOND template "
+                 "authority next to IMS's registry (the drift class already "
+                 "bitten 4 times); fallback = IMS reacting to delivery "
+                 "reports instead.",
+    },
+    {
+        "id": "msg91_push",
+        "label": "MSG91 Push Notification",
+        "powers": "Browser / app push for staff alerts even with the IMS tab closed",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/push-notification",
+        "notes": "Hook only. The in-app bell + WhatsApp already cover staff "
+                 "alerts; adopt if the bell proves miss-prone.",
+    },
+    {
+        "id": "msg91_numbers",
+        "label": "MSG91 Numbers",
+        "powers": "Virtual long codes: inbound SMS keywords + missed-call lead capture",
+        "source": "not_wired",
+        "dispatch_gated": False,
+        "docs": "https://msg91.com/in/numbers",
+        "notes": "Hook only. For the offline-ads missed-call experiment "
+                 "('missed call for a free eye test') if it ever runs; "
+                 "WhatsApp owns two-way chat today.",
+    },
 ]
 
 
@@ -224,6 +307,11 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
         "collection": None,
         "configured": False,
         "state": "dormant",
+        # armed: is the integration's live action currently able to fire?
+        # Resolved from the final state below; hook / not_wired rows are
+        # always False.
+        "armed": False,
+        "docs": entry.get("docs", ""),
         "notes": entry.get("notes", ""),
     }
 
@@ -267,10 +355,12 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
     if source == "not_wired":
         out["state"] = "not_wired"
         out["configured"] = False
+        out["armed"] = False
         return out
     if source == "export_only":
         out["state"] = "export_only"
         out["configured"] = True
+        out["armed"] = True  # export works now, no creds or gate involved
         return out
 
     if source == "env":
@@ -285,9 +375,11 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
         out["state"] = "dormant"
     elif not dispatch_gated:
         out["state"] = "active"  # read-only, runs as soon as creds exist
+        out["armed"] = True
     else:
         if mode == "live":
             out["state"] = "live"
+            out["armed"] = True
         elif mode == "test":
             # Only MSG91 honors an allowlist in test mode; for the others
             # non-live still means simulated. We surface "test_only" only for

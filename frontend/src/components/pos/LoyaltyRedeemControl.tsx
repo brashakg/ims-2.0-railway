@@ -31,6 +31,15 @@ export function LoyaltyRedeemControl() {
   const [loading, setLoading] = useState(false);
   const [pointsToRedeem, setPointsToRedeem] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+  // OTP-on-redemption (owner ruling: loyalty redemption ONLY). The server
+  // says whether this store requires it; when it does, Apply first sends a
+  // code to the CUSTOMER's mobile and staff enter it here. When it does not
+  // (dark deploy / policy off), this state stays inert and the control
+  // behaves exactly as before.
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [otpSentTo, setOtpSentTo] = useState<string | null>(null);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpBusy, setOtpBusy] = useState(false);
 
   const customerId = store.customer?.id;
   const orderTotal = store.getGrandTotal();
@@ -52,6 +61,7 @@ export function LoyaltyRedeemControl() {
         if (!alive) return;
         setAccount(envelope.account);
         setSettings(envelope.settings);
+        setOtpRequired(envelope.redeem_otp_required === true);
         // Default redeem amount: balance, but never more than the cap
         // would allow. The redeem endpoint applies the real cap; this is
         // just the UI default.
@@ -119,16 +129,10 @@ export function LoyaltyRedeemControl() {
     return Math.round(points * rate * 100) / 100;
   };
 
-  const apply = () => {
-    setError(null);
-    if (pointsToRedeem < minRedeem) {
-      setError(`Minimum redeem is ${minRedeem} points.`);
-      return;
-    }
-    if (pointsToRedeem > maxAllowed) {
-      setError(`Cannot exceed ${maxAllowed} points (balance or order cap).`);
-      return;
-    }
+  // The original apply body: records the deferred intent + LOYALTY tender
+  // line. Runs directly when no OTP is required; after a verified code when
+  // it is.
+  const commitApply = () => {
     const rupeeValue = computeRupeeValue(pointsToRedeem);
     // Record the deferred intent — the actual /loyalty/redeem call (which
     // atomically debits points) runs in POSLayout after createOrder succeeds.
@@ -150,6 +154,71 @@ export function LoyaltyRedeemControl() {
       balance_points: balance - pointsToRedeem,
     });
     store.setCustomerLoyaltyPoints(balance - pointsToRedeem);
+  };
+
+  const validateBounds = (): boolean => {
+    setError(null);
+    if (pointsToRedeem < minRedeem) {
+      setError(`Minimum redeem is ${minRedeem} points.`);
+      return false;
+    }
+    if (pointsToRedeem > maxAllowed) {
+      setError(`Cannot exceed ${maxAllowed} points (balance or order cap).`);
+      return false;
+    }
+    return true;
+  };
+
+  const apply = async () => {
+    if (!validateBounds()) return;
+    if (!otpRequired) {
+      commitApply();
+      return;
+    }
+    // OTP path: send the code to the customer's stored mobile and open the
+    // code input. Nothing is applied until the code verifies.
+    setOtpBusy(true);
+    try {
+      const res = await loyaltyApi.redeemOtpSend(String(customerId));
+      if (!res.otp_required) {
+        // Server says the gate is off (e.g. policy changed) - proceed as today.
+        commitApply();
+        return;
+      }
+      setOtpSentTo(res.sent_to_last4 ?? '');
+      setOtpCode('');
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })
+        ?.response?.data?.detail;
+      setError(
+        typeof detail === 'string'
+          ? detail
+          : 'Could not send the verification code. Try again.',
+      );
+    } finally {
+      setOtpBusy(false);
+    }
+  };
+
+  const verifyAndApply = async () => {
+    if (!validateBounds()) return;
+    setOtpBusy(true);
+    try {
+      await loyaltyApi.redeemOtpVerify(String(customerId), otpCode.trim());
+      setOtpSentTo(null);
+      setOtpCode('');
+      commitApply();
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })
+        ?.response?.data?.detail;
+      setError(
+        typeof detail === 'string'
+          ? detail
+          : 'That code is not correct - check with the customer and retry.',
+      );
+    } finally {
+      setOtpBusy(false);
+    }
   };
 
   return (
@@ -196,13 +265,57 @@ export function LoyaltyRedeemControl() {
         <p className="text-xs text-red-600">{error}</p>
       )}
 
-      <button
-        onClick={apply}
-        disabled={pointsToRedeem < minRedeem || pointsToRedeem > maxAllowed}
-        className="w-full px-4 py-2 rounded-lg text-sm font-semibold bg-bv-red-600 text-white disabled:bg-gray-200 disabled:text-gray-500 hover:bg-bv-red-700"
-      >
-        {`Apply ₹${rupeeForCurrent.toLocaleString('en-IN')} discount`}
-      </button>
+      {otpSentTo !== null ? (
+        <div className="space-y-2">
+          <p className="text-xs text-gray-600">
+            Code sent to the customer&apos;s mobile
+            {otpSentTo ? ` ending ${otpSentTo}` : ''}. Ask the customer for it.
+          </p>
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+            placeholder="6-digit code"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm tracking-widest"
+            aria-label="Customer verification code"
+          />
+          <button
+            onClick={verifyAndApply}
+            disabled={otpBusy || otpCode.trim().length < 4}
+            className="w-full px-4 py-2 rounded-lg text-sm font-semibold bg-bv-red-600 text-white disabled:bg-gray-200 disabled:text-gray-500 hover:bg-bv-red-700"
+          >
+            {otpBusy ? 'Checking…' : `Verify & apply ₹${rupeeForCurrent.toLocaleString('en-IN')} discount`}
+          </button>
+          <button
+            onClick={apply}
+            disabled={otpBusy}
+            className="w-full px-4 py-1.5 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 disabled:text-gray-400"
+          >
+            Resend code
+          </button>
+        </div>
+      ) : (
+        <>
+          {otpRequired && (
+            <p className="text-[11px] text-gray-500">
+              This store verifies redemptions: a one-time code goes to the
+              customer&apos;s mobile first.
+            </p>
+          )}
+          <button
+            onClick={apply}
+            disabled={otpBusy || pointsToRedeem < minRedeem || pointsToRedeem > maxAllowed}
+            className="w-full px-4 py-2 rounded-lg text-sm font-semibold bg-bv-red-600 text-white disabled:bg-gray-200 disabled:text-gray-500 hover:bg-bv-red-700"
+          >
+            {otpBusy
+              ? 'Sending code…'
+              : `Apply ₹${rupeeForCurrent.toLocaleString('en-IN')} discount`}
+          </button>
+        </>
+      )}
     </div>
   );
 }

@@ -278,10 +278,13 @@ def test_dispatch_mode_can_never_come_from_the_database(monkeypatch, rec):
     # And the resolver hands the sender credentials ONLY - no send switch.
     # (store_numbers is the Coexistence per-store sender map - a credential-
     # shaped field, still no dispatch switch.)
+    # (otp_template_id: the MSG91 OTP-flow template for the loyalty-redemption
+    # OTP - a template NAME, still no dispatch switch.)
     assert set(get_msg91_config()) == {
         "api_key",
         "whatsapp_number",
         "sms_template_id",
+        "otp_template_id",
         "sender",
         "store_numbers",
     }
