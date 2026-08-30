@@ -542,8 +542,17 @@ export function ClinicPrescriptionHistory({
                   <div className="divide-y divide-gray-100">
                     {member.prescriptions.map((rx) => {
                       const v = rxValidity(rx);
-                      const re = rx.right_eye || rx.rightEye || {};
-                      const le = rx.left_eye || rx.leftEye || {};
+                      // A CONTACT_LENS Rx has NO right_eye/left_eye -- its
+                      // powers live in cl_right/cl_left (cl_power + BC/DIA).
+                      // Reading the spectacle fields on a CL row rendered a
+                      // card of dashes; show the CL fitting values instead.
+                      const isCL = rx.rx_kind === 'CONTACT_LENS';
+                      const re = isCL ? rx.cl_right || {} : rx.right_eye || rx.rightEye || {};
+                      const le = isCL ? rx.cl_left || {} : rx.left_eye || rx.leftEye || {};
+                      const eyeText = (e: any) =>
+                        isCL
+                          ? `${fmtPower(e.cl_power)} · BC ${e.base_curve ?? '-'} · DIA ${e.diameter ?? '-'}`
+                          : `${fmtPower(e.sph ?? e.sphere)} / ${fmtPower(e.cyl ?? e.cylinder)} / ${e.axis ?? '-'}`;
                       return (
                         <div key={rx.prescription_id || rx.id} className="px-4 py-3">
                           <div className="flex items-start justify-between gap-3 mb-2">
@@ -569,11 +578,11 @@ export function ClinicPrescriptionHistory({
                           <div className="grid grid-cols-2 gap-3 text-xs mb-2">
                             <div className="bg-gray-50 rounded p-2">
                               <span className="text-gray-500">OD: </span>
-                              <span className="font-medium">{fmtPower(re.sph ?? re.sphere)} / {fmtPower(re.cyl ?? re.cylinder)} / {re.axis ?? '-'}</span>
+                              <span className="font-medium">{eyeText(re)}</span>
                             </div>
                             <div className="bg-gray-50 rounded p-2">
                               <span className="text-gray-500">OS: </span>
-                              <span className="font-medium">{fmtPower(le.sph ?? le.sphere)} / {fmtPower(le.cyl ?? le.cylinder)} / {le.axis ?? '-'}</span>
+                              <span className="font-medium">{eyeText(le)}</span>
                             </div>
                           </div>
 
