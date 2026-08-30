@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi, storeApi } from '../../services/api';
+import { marketingApi } from '../../services/api/marketing';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
@@ -802,10 +803,49 @@ export function OrdersPage() {
                   customerPhone={selectedOrder.customerPhone}
                   status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'PROCESSING' | 'READY' | 'DELIVERED' | 'CANCELLED'}
                   createdAt={selectedOrder.createdAt}
-                  onSendNotification={(status, channel) => {
-                    toast.success(`${channel} notification sent for status: ${status}`);
+                  onSendNotification={async (status, channel) => {
+                    // Was a fake toast with NO API call — a silent lie to
+                    // staff. Queues through the audited MSG91 pipeline now.
+                    const template = (
+                      {
+                        CONFIRMED: 'ORDER_CONFIRMED',
+                        READY: 'ORDER_READY',
+                        DELIVERED: 'ORDER_DELIVERED',
+                      } as Record<string, string>
+                    )[status];
+                    if (!template) return;
+                    try {
+                      await marketingApi.sendNotification({
+                        customer_id: selectedOrder.customerId,
+                        customer_phone: selectedOrder.customerPhone || '',
+                        customer_name: selectedOrder.customerName,
+                        template_id: template,
+                        channel,
+                        variables: { order_number: selectedOrder.orderNumber },
+                        category: 'SERVICE',
+                      });
+                      toast.success(`${channel} notification queued for ${selectedOrder.customerName}`);
+                    } catch (err: any) {
+                      toast.error(err?.response?.data?.detail || 'Failed to queue notification');
+                    }
                   }}
                 />
+
+                {/* Thank-you + Google review link (separate send per owner spec) */}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await marketingApi.sendReviewRequest(selectedOrder.id);
+                      toast.success('Thank-you + review link queued on WhatsApp');
+                    } catch (err: any) {
+                      toast.error(err?.response?.data?.detail || 'Failed to send review request');
+                    }
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg px-3 py-2 transition-colors"
+                >
+                  Send thank-you + review link (WhatsApp)
+                </button>
 
                 {/* Shipping (Shiprocket) — book + track customer shipments */}
                 <OrderShippingCard

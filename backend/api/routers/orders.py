@@ -4942,6 +4942,53 @@ async def deliver_order(
                 await trigger_nps_on_delivery(order, current_user)
             except Exception as _nps_exc:
                 logger.warning("[ORDERS] NPS auto-trigger failed (non-fatal): %s", _nps_exc)
+            # Owner ruling (mockup sign-off): auto-WhatsApp on completion —
+            # queue the ORDER_DELIVERED text (MEGAPHONE drains it; DISPATCH_MODE
+            # off = queued only). Fail-soft: a messaging failure must never
+            # block the handover.
+            try:
+                _cust_phone = order.get("customer_phone")
+                if not _cust_phone and order.get("customer_id"):
+                    _crepo = get_customer_repository()
+                    _cdoc = (
+                        _crepo.find_by_id(order.get("customer_id"))
+                        if _crepo is not None
+                        else None
+                    )
+                    _cust_phone = (_cdoc or {}).get("mobile") or (_cdoc or {}).get(
+                        "phone"
+                    )
+                if _cust_phone:
+                    from ..services.notification_service import (
+                        send_notification as _queue_notification,
+                    )
+                    from ..services.print_identity import load_store as _load_store
+
+                    _store_name = (
+                        (_load_store(order.get("store_id")) or {}).get("name")
+                        or "our store"
+                    )
+                    await _queue_notification(
+                        store_id=order.get("store_id") or "",
+                        customer_id=order.get("customer_id") or "",
+                        customer_phone=_cust_phone,
+                        customer_name=order.get("customer_name") or "Customer",
+                        template_id="ORDER_DELIVERED",
+                        channel="WHATSAPP",
+                        variables={
+                            "order_number": order.get("order_number") or order_id,
+                            "store_name": _store_name,
+                        },
+                        category="SERVICE",
+                        triggered_by=current_user.get("user_id") or "auto",
+                        related_entity_type="order",
+                        related_entity_id=order_id,
+                    )
+            except Exception as _ntf_exc:
+                logger.warning(
+                    "[ORDERS] delivered-notification queue failed (non-fatal): %s",
+                    _ntf_exc,
+                )
             return {
                 "order_id": order_id,
                 "status": "DELIVERED",
