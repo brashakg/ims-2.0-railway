@@ -1,18 +1,20 @@
 // ============================================================================
-// IMS 2.0 - Purchase page: the Edit pencil must open an EDITOR
+// IMS 2.0 - Suppliers section: the Edit pencil must open an EDITOR
 // ============================================================================
 // Owner report (2026-08-26): "edit vendor button is not working".
 //
 // SupplierPanel.edit.test.tsx proves the pencil calls onEdit. That is only half
 // the wire. The other half -- the page passing the clicked vendor INTO the
 // modal -- was pinned by nothing: deleting `supplier={editingSupplier}` from
-// PurchaseManagementPage left `tsc -b` clean and every purchase test green,
-// while the pencil silently opened a blank "Add Supplier" form whose Save would
-// CREATE A SECOND VENDOR instead of editing the one on the card. That is the
-// owner's exact complaint, regressing in silence.
+// the page left `tsc -b` clean and every purchase test green, while the pencil
+// silently opened a blank "Add Supplier" form whose Save would CREATE A SECOND
+// VENDOR instead of editing the one on the card. That is the owner's exact
+// complaint, regressing in silence.
 //
-// So this test drives the real page: click Suppliers, click the pencil, and
-// assert the modal that opens is the EDITOR, carrying that vendor's values.
+// Wave 1 split: the Suppliers flow now lives at /purchase/suppliers
+// (SuppliersSection); this test drives that section directly: click the
+// pencil, assert the modal that opens is the EDITOR carrying that vendor's
+// values.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -89,7 +91,7 @@ vi.mock('../../../services/api', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { PurchaseManagementPage } from '../PurchaseManagementPage';
+import { SuppliersSection } from '../SuppliersSection';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -97,19 +99,18 @@ beforeEach(() => {
   getPurchaseOrders.mockResolvedValue({ purchase_orders: [] });
 });
 
-async function openSuppliersTab() {
+async function openSuppliersSection() {
   render(
-    <MemoryRouter>
-      <PurchaseManagementPage />
+    <MemoryRouter initialEntries={['/purchase/suppliers']}>
+      <SuppliersSection />
     </MemoryRouter>,
   );
-  fireEvent.click(await screen.findByText('Suppliers'));
   return screen.findByText('Universal Optics');
 }
 
-describe('Purchase page - Edit pencil opens the supplier EDITOR', () => {
+describe('Suppliers section - Edit pencil opens the supplier EDITOR', () => {
   it('opens "Edit Supplier" pre-filled with the vendor that was clicked', async () => {
-    await openSuppliersTab();
+    await openSuppliersSection();
 
     fireEvent.click(screen.getByRole('button', { name: /edit universal optics/i }));
 
