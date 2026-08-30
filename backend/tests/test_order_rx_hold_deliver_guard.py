@@ -213,3 +213,96 @@ def test_predicate_helpers():
     assert_no_active_rx_hold({"rx_pending": False})  # no raise
     with pytest.raises(Exception):
         assert_no_active_rx_hold({"fulfillment_hold": True})
+
+
+# ---------------------------------------------------------------------------
+# PR #1029 follow-up 2: the refusal NAMES the hold. A stock-miss order rides
+# the same fulfillment_hold flag, but telling staff "Rx hold" sent them
+# chasing a prescription that was never the problem.
+# ---------------------------------------------------------------------------
+
+
+def test_hold_kinds_classifier():
+    from api.routers.orders import order_hold_kinds
+
+    # Rx shape (ingest stamps rx_pending + fulfillment_hold together).
+    assert order_hold_kinds({"rx_pending": True, "fulfillment_hold": True}) == ["RX"]
+    # Stock-miss shape: its own reason field, no rx_pending.
+    assert order_hold_kinds(
+        {"fulfillment_hold": True, "stock_hold_reason": "Stock could not be claimed"}
+    ) == ["STOCK"]
+    # LEGACY stock-miss shape (first cut of #1029): the stock reason rode
+    # rx_hold_reason. Still classified STOCK so old held orders stay honest.
+    assert order_hold_kinds(
+        {
+            "fulfillment_hold": True,
+            "rx_hold_reason": "Stock could not be claimed for this paid online order",
+        }
+    ) == ["STOCK"]
+    # Both at once.
+    assert order_hold_kinds(
+        {
+            "rx_pending": True,
+            "fulfillment_hold": True,
+            "stock_hold_reason": "Stock could not be claimed",
+        }
+    ) == ["RX", "STOCK"]
+    # A bare fulfillment_hold with no marker is the historical Rx shape.
+    assert order_hold_kinds({"fulfillment_hold": True}) == ["RX"]
+    # A CLEARED order (reason kept as audit trail, flags off) carries no kind.
+    assert order_hold_kinds(
+        {"fulfillment_hold": False, "stock_hold_reason": "Stock could not be claimed"}
+    ) == []
+    assert order_hold_kinds(None) == []
+
+
+def test_refusal_names_the_stock_hold():
+    """The lifecycle 400 for a stock-miss order says STOCK hold -- not Rx."""
+    from api.routers.orders import assert_no_active_rx_hold
+
+    with pytest.raises(Exception) as ei:
+        assert_no_active_rx_hold(
+            {
+                "fulfillment_hold": True,
+                "stock_hold_reason": "Stock could not be claimed",
+            }
+        )
+    detail = str(ei.value.detail)
+    assert "stock hold" in detail
+    assert "Rx hold" not in detail, (
+        "a stock miss must not be refused as an 'Rx hold' -- that message "
+        "sends staff to collect a prescription that was never the problem"
+    )
+
+
+def test_refusal_names_both_holds_when_both_are_active():
+    from api.routers.orders import assert_no_active_rx_hold
+
+    with pytest.raises(Exception) as ei:
+        assert_no_active_rx_hold(
+            {
+                "rx_pending": True,
+                "fulfillment_hold": True,
+                "stock_hold_reason": "Stock could not be claimed",
+            }
+        )
+    detail = str(ei.value.detail)
+    assert "Rx hold" in detail and "stock hold" in detail
+
+
+def test_deliver_route_400_names_the_stock_hold(client, auth_headers, wired_orders):
+    """End to end through the deliver route: a stock-miss-held READY order is
+    refused with the STOCK wording."""
+    _seed_order(
+        wired_orders["order_repo"],
+        status="READY",
+        fulfillment_hold=True,
+        stock_hold_reason=(
+            "Stock could not be claimed for this paid online order (oversell)"
+        ),
+    )
+    resp = client.post("/api/v1/orders/ord-hold-1/deliver", headers=auth_headers)
+    assert resp.status_code == 400, resp.text
+    assert "stock hold" in resp.text.lower()
+    assert "rx hold" not in resp.text.lower()
+    assert wired_orders["order_repo"].find_by_id("ord-hold-1")["status"] == "READY"

@@ -33,7 +33,6 @@ import {
   type ZRead,
   type VarianceStatus,
 } from '../../services/api/till';
-import { returnsApi } from '../../services/api/returns';
 import DenomGrid from '../../components/cash/DenominationGrid';
 import FaceTallyTable from '../../components/cash/FaceTallyTable';
 import {
@@ -63,6 +62,14 @@ function varianceTone(status: VarianceStatus): string {
   return 'text-red-700';
 }
 
+// Out-of-band = |variance| beyond the band the verdict was judged against
+// (owner ruling 2026-08-25: Rs 100 by default, store-scopable in Settings).
+// Locking such a day REQUIRES a written explanation; the server enforces it.
+function needsVarianceNote(s: TillSession): boolean {
+  if (s.variance_paisa == null) return false;
+  return Math.abs(s.variance_paisa) > Math.abs(s.tolerance_paisa ?? 0);
+}
+
 export default function BlindEodTallyPage() {
   const { user } = useAuth();
   const toast = useToast();
@@ -85,20 +92,17 @@ export default function BlindEodTallyPage() {
   const [openDenoms, setOpenDenoms] = useState<DenomRow[]>(blankDenoms());
   const [shift, setShift] = useState('PM');
 
-  // Blind-close state
+  // Blind-close state. The hand-typed "cash paid out" box was DELETED (owner
+  // ruling 2026-08-25): the payouts leg is auto-pulled from the expenses book
+  // server-side, so there is nothing left for a cashier to key twice.
   const [blindDenoms, setBlindDenoms] = useState<DenomRow[]>(blankDenoms());
-  const [payouts, setPayouts] = useState('');
   const [confirming, setConfirming] = useState(false);
-
-  // Customer CASH refunds already recorded for this store today. These are
-  // auto-deducted from the expected drawer, so keying them again into "cash
-  // paid out" double-counts them (the pre-fix workaround did exactly that).
-  // Sourced from the returns history the cashier can already see, so this
-  // never leaks a system-expected figure -- blind enforcement is preserved.
-  const [recordedCashRefunds, setRecordedCashRefunds] = useState(0);
 
   // Reopen state
   const [reopenReason, setReopenReason] = useState('');
+  // Mandatory note for an out-of-band lock (owner ruling 2026-08-25): the
+  // server refuses the lock without it when |variance| is beyond the band.
+  const [lockNote, setLockNote] = useState('');
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -125,31 +129,6 @@ export default function BlindEodTallyPage() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  // Today's recorded customer CASH refunds for this store (auto-deducted from
-  // the drawer). Drives the conditional double-entry warning by the payout box.
-  useEffect(() => {
-    if (!storeId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await returnsApi.list({ store_id: storeId, return_type: 'RETURN', limit: 100 });
-        const today = new Date().toISOString().slice(0, 10);
-        const total = (res?.returns || []).reduce((sum: number, r: any) => {
-          if (String(r?.created_at || '').slice(0, 10) !== today) return sum;
-          if (String(r?.status || '').toUpperCase() !== 'COMPLETED') return sum;
-          if (!r?.drawer_auto_netted) return sum;
-          return sum + (r?.refund_tenders || [])
-            .filter((t: any) => String(t?.method || '').toUpperCase() === 'CASH')
-            .reduce((s: number, t: any) => s + (Number(t?.amount) || 0), 0);
-        }, 0);
-        if (!cancelled) setRecordedCashRefunds(Math.round(total * 100) / 100);
-      } catch {
-        if (!cancelled) setRecordedCashRefunds(0);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [storeId]);
 
   // The session this user is actively working (OPEN or BLIND_SUBMITTED), if any.
   const activeSession = useMemo(
@@ -200,13 +179,11 @@ export default function BlindEodTallyPage() {
         blind_denominations: blindDenoms.filter((r) => r.pieces > 0),
         closing_count_state: hasCount(blindDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         blind_count_paisa: blindTotalPaisa,
-        cash_payouts_paisa: Math.round((parseFloat(payouts) || 0) * 100),
         idempotency_key: `${activeSession.session_id}:blind`,
       });
       toast.success('Count submitted. Awaiting manager review.');
       setConfirming(false);
       setBlindDenoms(blankDenoms());
-      setPayouts('');
       await load();
     } catch (e: any) {
       toast.error('Could not submit count');
@@ -216,10 +193,18 @@ export default function BlindEodTallyPage() {
   };
 
   const onLock = async (s: TillSession) => {
+    // Out-of-band variance needs the written explanation BEFORE the lock —
+    // the server refuses it anyway (400 variance_note_required); this just
+    // asks plainly instead of bouncing.
+    if (needsVarianceNote(s) && !lockNote.trim()) {
+      toast.error('This variance is beyond the allowed band — a note explaining it is required to lock.');
+      return;
+    }
     setBusy(true);
     try {
-      await tillApi.lock(s.session_id);
+      await tillApi.lock(s.session_id, lockNote.trim() || undefined);
       toast.success('Z-Read locked');
+      setLockNote('');
       await load();
     } catch {
       toast.error('Could not lock');
@@ -351,32 +336,14 @@ export default function BlindEodTallyPage() {
             system figure — your manager reveals the variance when they lock.
           </p>
           <DenomGrid rows={blindDenoms} onChange={setBlindPieces} disabled={confirming} />
-          <div className="flex items-center gap-3 mt-3">
-            <label className="text-sm text-gray-600">Cash paid out — petty cash / vendor (₹)</label>
-            <input
-              type="number"
-              min={0}
-              value={payouts}
-              disabled={confirming}
-              onChange={(e) => setPayouts(e.target.value)}
-              className="w-28 px-2 py-1 border border-gray-300 rounded text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-bv disabled:bg-gray-50"
-            />
-          </div>
-          {recordedCashRefunds > 0 ? (
-            <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>
-                <span className="font-semibold">{paisaToInr(Math.round(recordedCashRefunds * 100))}</span>{' '}
-                of customer cash refunds were recorded on the Returns screen today and are{' '}
-                <span className="font-semibold">already deducted</span> from this drawer. Do not
-                enter them here — this box is for petty cash / vendor payouts only.
-              </span>
-            </div>
-          ) : (
-            <p className="text-xs text-gray-500 mt-1">
-              Petty cash / vendor payouts only. Customer refunds recorded on the Returns screen are deducted automatically.
-            </p>
-          )}
+          {/* The hand-typed payouts box is GONE (owner ruling 2026-08-25):
+              petty-cash / vendor payouts come from the Expenses screen and
+              customer refunds from the Returns screen — both are deducted
+              automatically, so there is nothing left to key twice here. */}
+          <p className="text-xs text-gray-500 mt-2">
+            Cash payouts (petty cash / vendor, from the Expenses screen) and customer refunds
+            (from the Returns screen) are deducted automatically — record them there, not here.
+          </p>
           <div className="flex items-center justify-between mt-4">
             <span className="text-sm text-gray-600">
               Counted: <span className="font-semibold text-gray-900 tabular-nums">{paisaToInr(blindTotalPaisa)}</span>
@@ -433,13 +400,29 @@ export default function BlindEodTallyPage() {
                   {canLock && (
                     <button
                       onClick={() => onLock(s)}
-                      disabled={busy}
+                      disabled={busy || (needsVarianceNote(s) && !lockNote.trim())}
                       className="inline-flex items-center gap-2 px-3 py-1.5 bg-bv text-white rounded-lg text-sm font-medium hover:bg-bv-600 disabled:opacity-50"
                     >
                       <Lock className="w-4 h-4" /> Lock Z-Read
                     </button>
                   )}
                 </div>
+                {/* Mandatory above the band (owner ruling 2026-08-25): the
+                    server refuses an out-of-band lock without an explanation. */}
+                {canLock && needsVarianceNote(s) && (
+                  <div className="mt-3">
+                    <label className="text-xs text-amber-700 block mb-1 font-medium">
+                      This variance is beyond the allowed band — explain it to lock
+                    </label>
+                    <input
+                      type="text"
+                      value={lockNote}
+                      onChange={(e) => setLockNote(e.target.value)}
+                      placeholder="e.g. Rs 200 change given from the safe, slip attached"
+                      className="w-full px-2 py-1.5 border border-amber-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-bv"
+                    />
+                  </div>
+                )}
                 {/* Z-Read identity, visible so a manager can foot it by eye:
                     opening + cash sales - cash refunds - cash paid out = expected.
                     cash_sales_paisa is GROSS; recorded customer cash refunds are
@@ -448,7 +431,7 @@ export default function BlindEodTallyPage() {
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
                   <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
                   <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash paid out" value={paisaToInr(s.cash_payouts_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
@@ -512,7 +495,7 @@ export default function BlindEodTallyPage() {
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
                   <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
                   <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash paid out" value={paisaToInr(s.cash_payouts_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>

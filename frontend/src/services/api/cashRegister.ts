@@ -118,7 +118,9 @@ export interface ClosePayload {
   closing_count_state?: CountState;
   bank_deposit?: number;
   counted_override?: number;
-  tolerance?: number;
+  // `tolerance` was DELETED (owner ruling 2026-08-25): the band is the ONE
+  // store-scopable policy the server reads; a closer never chooses it.
+  // `note` is MANDATORY server-side when |variance| is beyond that band.
   note?: string;
 }
 

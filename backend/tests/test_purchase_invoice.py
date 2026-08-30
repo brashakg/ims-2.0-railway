@@ -54,6 +54,35 @@ BUY_MH = "27ZZZZZ9999Z1Z9"  # our entity (recipient) in Maharashtra
 
 
 # ===========================================================================
+# ENGINE - the ONE invoice-number normaliser (P0-1 launch gate)
+# ===========================================================================
+
+
+class TestNormalizeInvoiceNo:
+    """Both duplicate guards -- the GRN create guard (vendors.py) and the
+    payable dedupe here -- must compare through THIS one function; two
+    spellings of the folding rule is how the payable got booked twice."""
+
+    def test_case_and_punctuation_fold_to_one_identity(self):
+        assert (
+            pinv.normalize_invoice_no("GO-INV-9007")
+            == pinv.normalize_invoice_no("go inv/9007")
+            == pinv.normalize_invoice_no(" GO.INV..9007 ")
+            == "GOINV9007"
+        )
+
+    def test_different_numbers_stay_different(self):
+        assert pinv.normalize_invoice_no("INV-9007") != pinv.normalize_invoice_no(
+            "INV-9008"
+        )
+
+    def test_blank_and_none_are_falsy(self):
+        assert pinv.normalize_invoice_no(None) == ""
+        assert pinv.normalize_invoice_no("") == ""
+        assert pinv.normalize_invoice_no("   ") == ""
+
+
+# ===========================================================================
 # ENGINE - state codes + place-of-supply
 # ===========================================================================
 
@@ -443,6 +472,44 @@ class TestCreateBooksApAndItc:
         r2 = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         assert r2.status_code == 409, r2.text
         assert "already" in r2.json()["detail"].lower()
+
+    def test_punctuation_variant_invoice_number_still_409(self):
+        """P0-1 (launch gate), money side: 'GO-INV-9007' then 'go inv/9007'
+        is the SAME vendor bill retyped with different separators -- the old
+        exact-string dedupe booked the payable twice (Rs 63,000 x2 in the
+        gate's repro). The comparison must be case/punctuation-folded, and
+        the 409 must name the variant already on record. Each books half the
+        receipt (5 of 10 accepted) so the over-bill cap stays silent and the
+        DEDUPE alone must refuse."""
+        db = _FakeDB()
+        cli = _app(db)
+        half = dict(_invoice_body(invoice_number="GO-INV-9007"))
+        half["lines"] = [dict(half["lines"][0], qty=5)]
+        half["total"] = 525.0
+        r1 = cli.post("/api/v1/vendors/purchase-invoices", json=half)
+        assert r1.status_code == 201, r1.text
+        variant = dict(half, invoice_number="go inv/9007")
+        r2 = cli.post("/api/v1/vendors/purchase-invoices", json=variant)
+        assert r2.status_code == 409, r2.text
+        detail = r2.json()["detail"]
+        assert "already" in detail.lower()
+        assert "GO-INV-9007" in detail  # names the recorded variant
+
+    def test_genuinely_different_invoice_numbers_both_book(self):
+        """The fold must not over-match: INV-9007 and INV-9008 are two real
+        bills (part-billing one receipt) and both must book."""
+        db = _FakeDB()
+        cli = _app(db)
+        half = dict(_invoice_body(invoice_number="INV-9007"))
+        half["lines"] = [dict(half["lines"][0], qty=5)]
+        half["total"] = 525.0
+        assert (
+            cli.post("/api/v1/vendors/purchase-invoices", json=half).status_code
+            == 201
+        )
+        other = dict(half, invoice_number="INV-9008")
+        r2 = cli.post("/api/v1/vendors/purchase-invoices", json=other)
+        assert r2.status_code == 201, r2.text
 
     def test_total_reconcile_guard_400(self):
         db = _FakeDB()

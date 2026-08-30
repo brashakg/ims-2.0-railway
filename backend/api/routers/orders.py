@@ -465,33 +465,77 @@ def validate_status_transition(current: str, target: str) -> bool:
 # flags back to False; a released (or never-held) order therefore passes here.
 # ---------------------------------------------------------------------------
 
-# Plain-English 400 message shown to staff (ASCII only -- Windows cp1252).
+# Plain-English 400 messages shown to staff (ASCII only -- Windows cp1252).
+# The refusal NAMES the hold it enforces: telling staff "Rx hold" for a stock
+# miss sent them chasing a prescription that was never the problem.
 RX_HOLD_BLOCK_DETAIL = (
     "This order is on Rx hold - clear the hold before marking it "
     "delivered/ready."
 )
+STOCK_HOLD_BLOCK_DETAIL = (
+    "This order is on stock hold - it is paid but its units could not be "
+    "claimed from stock (oversell). Resolve the stock, then clear the hold "
+    "before marking it delivered/ready."
+)
+RX_AND_STOCK_HOLD_BLOCK_DETAIL = (
+    "This order is on Rx hold AND stock hold - clear both before marking it "
+    "delivered/ready."
+)
+
+# Before the stock hold owned its own field (stock_hold_reason), ingest
+# stamped its reason INTO rx_hold_reason with this exact opening. Legacy
+# held orders are recognised by it so they still release/report honestly.
+_LEGACY_STOCK_REASON_PREFIX = "Stock could not be claimed"
+
+
+def order_hold_kinds(order: Optional[dict]) -> list:
+    """Which ACTIVE hold(s) an order carries: ["RX"], ["STOCK"], or both.
+
+    An order is held while EITHER ``rx_pending`` OR ``fulfillment_hold`` is
+    truthy (the release-side predicate in online_store_orders.clear_rx_hold
+    sets both to False). Within a held order:
+      * RX    -- rx_pending is set (the clinical flag-and-hold).
+      * STOCK -- a stock-miss marker exists: its own stock_hold_reason field,
+        or (legacy shape) the stock reason ingest used to write into
+        rx_hold_reason.
+      * A held order with NO marker at all is the historical Rx shape.
+    Empty list == not held. Tolerant of a missing/None order."""
+    if not order or not (order.get("rx_pending") or order.get("fulfillment_hold")):
+        return []
+    kinds = []
+    if order.get("rx_pending"):
+        kinds.append("RX")
+    if order.get("stock_hold_reason") or str(
+        order.get("rx_hold_reason") or ""
+    ).startswith(_LEGACY_STOCK_REASON_PREFIX):
+        kinds.append("STOCK")
+    if not kinds:
+        kinds.append("RX")
+    return kinds
 
 
 def order_has_active_rx_hold(order: Optional[dict]) -> bool:
-    """True when an order still carries an ACTIVE clinical Rx flag-and-hold.
-
-    Mirrors the release-side predicate in
-    ``online_store_orders.clear_rx_hold``: an order is held while EITHER
-    ``rx_pending`` OR ``fulfillment_hold`` is truthy. Clearing the hold sets
-    both to False, so a released order returns False and advances normally; a
-    normal (never-held) order also returns False. Tolerant of a missing/None
-    order (returns False)."""
-    if not order:
-        return False
-    return bool(order.get("rx_pending") or order.get("fulfillment_hold"))
+    """True when an order still carries an ACTIVE flag-and-hold (Rx or stock
+    -- both ride fulfillment_hold; see order_hold_kinds). A released or
+    never-held order returns False and advances normally."""
+    return bool(order_hold_kinds(order))
 
 
 def assert_no_active_rx_hold(order: Optional[dict]) -> None:
     """Reject (400) any advance to READY / DELIVERED / FULFILLED on an order
-    that still carries an active Rx flag-and-hold. No-op for a non-held (or
-    cleared) order, so it never blocks normal fulfillment."""
-    if order_has_active_rx_hold(order):
-        raise HTTPException(status_code=400, detail=RX_HOLD_BLOCK_DETAIL)
+    that still carries an active flag-and-hold, NAMING the hold (Rx, stock,
+    or both). No-op for a non-held (or cleared) order, so it never blocks
+    normal fulfillment."""
+    kinds = order_hold_kinds(order)
+    if not kinds:
+        return
+    if kinds == ["STOCK"]:
+        detail = STOCK_HOLD_BLOCK_DETAIL
+    elif "STOCK" in kinds:
+        detail = RX_AND_STOCK_HOLD_BLOCK_DETAIL
+    else:
+        detail = RX_HOLD_BLOCK_DETAIL
+    raise HTTPException(status_code=400, detail=detail)
 
 
 class PaymentMethod(str, Enum):

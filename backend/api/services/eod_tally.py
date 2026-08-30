@@ -76,7 +76,9 @@ COIN_FACES = _denom.COIN_FACES
 POLICY_TOLERANCE = "till.variance_tolerance_paisa"
 POLICY_REOPEN_ROLES = "till.reopen_roles"
 
-_DEFAULT_TOLERANCE_PAISA = 0
+# Rs 100 (owner ruling 2026-08-25) -- mirrors the registry default in
+# policy_registry.py; change both together.
+_DEFAULT_TOLERANCE_PAISA = 10000
 _DEFAULT_REOPEN_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 
 
@@ -187,6 +189,86 @@ def get_reopen_roles(store_id: Optional[str] = None, entity_id: Optional[str] = 
         return set(_DEFAULT_REOPEN_ROLES)
 
 
+def needs_variance_note(variance_paisa: Any, tolerance_paisa: Any) -> bool:
+    """True when the counted-vs-expected gap is beyond the band -- the state in
+    which the owner's 2026-08-25 ruling makes a written explanation MANDATORY
+    to lock/close and alerts the store manager. A None variance needs no note:
+    a day nobody counted has nothing to explain. ONE implementation -- the
+    blind lock and the Finance close both call this."""
+    if variance_paisa is None:
+        return False
+    try:
+        return abs(int(variance_paisa)) > abs(int(tolerance_paisa or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def raise_variance_task(
+    *,
+    store_id: Optional[str],
+    session_date: Optional[str],
+    variance_paisa: Any,
+    tolerance_paisa: Any,
+    note: Optional[str] = None,
+    source: str = "day-end close",
+) -> None:
+    """A SYSTEM task on the store manager's worklist for an out-of-band
+    day-end cash variance (owner ruling 2026-08-25: manager alert above the
+    band). REUSES ``task_triggers.create_system_task`` -- the in-app bell
+    already feeds from the tasks stream, so no new notification mechanism.
+    Deduped per (store, day): the blind lock and the Finance close raise ONE
+    task for one drawer-day. Fail-soft: an alert failure never undoes the
+    lock/close that triggered it."""
+    try:
+        v = int(variance_paisa or 0)
+    except (TypeError, ValueError):
+        return
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        rupees = abs(v) / 100.0
+        try:
+            band_rupees = abs(int(tolerance_paisa or 0)) / 100.0
+        except (TypeError, ValueError):
+            band_rupees = 0.0
+        direction = "OVER" if v > 0 else "SHORT"
+        day = str(session_date or "")
+        create_system_task(
+            get_task_repository(),
+            title=(
+                f"Cash drawer {direction} by Rs {rupees:.2f} at "
+                f"{store_id} ({day})"
+            ),
+            description=(
+                f"The {day} day-end cash count at store {store_id} is "
+                f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
+                f"Rs {band_rupees:.2f}. Recorded at the {source}. "
+                + (
+                    f"Explanation given: {str(note).strip()}"
+                    if str(note or "").strip()
+                    else "No explanation was recorded."
+                )
+            ),
+            priority="P2",
+            category="Finance",
+            store_id=store_id,
+            assigned_to="STORE_MANAGER",
+            dedupe_ref=f"till_variance:{store_id}:{day}",
+            extra={
+                "link": "/finance/cash-register",
+                "payload": {
+                    "store_id": store_id,
+                    "session_date": day,
+                    "variance_paisa": v,
+                    "tolerance_paisa": int(tolerance_paisa or 0),
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
 def variance_status(variance_paisa: int, tolerance_paisa: int = 0) -> str:
     """Classify a signed variance against a tolerance band (absolute paisa).
     BALANCED (|v| <= tol), OVERAGE (drawer over beyond tol), SHORTAGE (short)."""
@@ -289,6 +371,40 @@ def compute_expected(
         "window_start": recon.get("window_start"),
         "window_end": recon.get("window_end"),
     }
+
+
+def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: Any):
+    """Cash payouts for the session window, pulled from the EXPENSES BOOK.
+
+    Owner ruling 2026-08-25 (blind is THE day-end): the payouts leg of the
+    Z-Read identity is no longer a figure a cashier types into a box -- it is
+    what the Expenses screen already recorded. ONE implementation on purpose:
+    this delegates to finance's ``_cash_expenses_for_window`` (CASH-mode,
+    APPROVED/PAID/SENT_TO_ACCOUNTANT/REIMBURSED, payroll-shaped heads
+    excluded), the SAME function the Finance close charges the drawer with --
+    so the two doors can never disagree about the day's payouts.
+
+    ``window_end`` is EXCLUSIVE (start + 1 day for the standard session day),
+    so the upper bound handed to the IST-day filter is the last instant INSIDE
+    the window -- passing the exclusive end verbatim would pull in a whole
+    extra day of expenses. Lazy import (the router imports this module).
+    Fail-soft to (0, 0), same as the finance close's own read.
+
+    Returns ``(payouts_paisa, off_till_excluded_count)`` -- the second figure
+    is a COUNT of payroll-shaped expenses deliberately left out (never their
+    amount), so the session can say its payouts leg omits something."""
+    from datetime import timedelta
+
+    try:
+        from ..routers.finance import _cash_expenses_for_window
+
+        start_iso = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
+        end_inside = window_end - timedelta(seconds=1) if hasattr(window_end, "isoformat") else window_end
+        end_iso = end_inside.isoformat() if hasattr(end_inside, "isoformat") else str(end_inside)
+        win = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
+        return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
+    except Exception:  # noqa: BLE001
+        return 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +782,6 @@ def blind_submit(
     closing_count_state: Optional[str] = None,
     blind_count_paisa: Optional[int] = None,
     allow_uncounted_total: bool = False,
-    cash_payouts_paisa: int = 0,
     window_start: Any = None,
     window_end: Any = None,
     idempotency_key: Optional[str] = None,
@@ -739,7 +854,10 @@ def blind_submit(
         ws, we = window_start, window_end
     else:
         ws, we = _session_day_window(session)
-    payouts = int(cash_payouts_paisa or 0)
+    # AUTO-PULLED, never hand-typed (owner ruling 2026-08-25): the payouts leg
+    # comes from the expenses book for the session window -- the same read the
+    # Finance close charges the drawer with.
+    payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
     exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
     expected_cash_paisa = exp["expected_cash_paisa"]
     variance_paisa = counted - expected_cash_paisa
@@ -773,6 +891,11 @@ def blind_submit(
                     ),
                     "blind_count_paisa": counted,
                     "cash_payouts_paisa": payouts,
+                    # AUTO_EXPENSES: the figure above came from the expenses
+                    # book, not a hand-typed box. The advisory says a payroll-
+                    # shaped expense was deliberately left out (count only).
+                    "cash_payouts_source": "AUTO_EXPENSES",
+                    "off_till_expense_advisory": off_till_excluded > 0,
                     "expected_cash_paisa": expected_cash_paisa,
                     "cash_sales_paisa": exp["cash_sales_paisa"],
                     "cash_refunds_paisa": exp.get("cash_refunds_paisa", 0),
@@ -860,7 +983,6 @@ def _record_screen_close(
     closing_rows: Optional[List[Dict[str, Any]]] = None,
     closing_count_state: Optional[str] = None,
     counted_paisa: Optional[int] = None,
-    cash_payouts_paisa: int = 0,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Land a closing count from EITHER close screen on the SAME till session.
@@ -963,7 +1085,6 @@ def _record_screen_close(
         closing_count_state=closing_count_state,
         blind_count_paisa=forward_total,
         allow_uncounted_total=not rows,
-        cash_payouts_paisa=cash_payouts_paisa,
         actor=actor,
     )
     if not res.get("ok"):
@@ -1001,11 +1122,23 @@ def _record_screen_close(
 # ---------------------------------------------------------------------------
 
 
-def lock_session(db, session_id: str, *, actor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def lock_session(
+    db,
+    session_id: str,
+    *,
+    actor: Optional[Dict[str, Any]] = None,
+    variance_note: Optional[str] = None,
+) -> Dict[str, Any]:
     """Soft-lock the Z-Read ATOMICALLY -- the SAME guarded-find_one_and_update
     shape as E5's ``lock_reconciliation``: a single guarded update on
     ``status:BLIND_SUBMITTED`` flips it to LOCKED in one op. Two concurrent locks
     -> exactly one wins (the loser sees the doc no longer BLIND_SUBMITTED).
+
+    MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25): when the stored
+    variance is beyond the tolerance band, the lock is REFUSED unless a
+    non-blank ``variance_note`` explains it -- the same shape as the reopen's
+    mandatory reason. An out-of-band lock also raises a SYSTEM task on the
+    store manager's worklist (the in-app bell feeds from tasks).
 
     Unlike E5's HARD lock this is a TRANSPARENT SOFT-LOCK: it stamps
     ``locked_by``/``locked_at`` + a Z-Read number, and the session can later be
@@ -1026,6 +1159,24 @@ def lock_session(db, session_id: str, *, actor: Optional[Dict[str, Any]] = None)
 
     store_id = session.get("store_id")
     day = str(session.get("session_date") or "")
+
+    # Out-of-band variance demands a written explanation BEFORE the lock. The
+    # band is the one stored at blind-submit (the band the verdict was judged
+    # against); a legacy session without one reads the live policy.
+    variance_paisa = session.get("variance_paisa")
+    tolerance_paisa = session.get("tolerance_paisa")
+    if tolerance_paisa is None:
+        tolerance_paisa = get_variance_tolerance_paisa(store_id=store_id)
+    clean_note = str(variance_note or "").strip()
+    out_of_band = needs_variance_note(variance_paisa, tolerance_paisa)
+    if out_of_band and not clean_note:
+        return {
+            "ok": False,
+            "error": "variance_note_required",
+            "http": 400,
+            "variance_paisa": variance_paisa,
+            "tolerance_paisa": int(tolerance_paisa or 0),
+        }
     # Mint the Z-Read serial only if not already assigned (a reopen->relock keeps
     # the same Z-Read number -- it is the same business day-close).
     zread = session.get("zread_number") or _next_zread_number(db, store_id, day)
@@ -1044,6 +1195,9 @@ def lock_session(db, session_id: str, *, actor: Optional[Dict[str, Any]] = None)
                     "locked_at": now,
                     "locked_by": (actor or {}).get("user_id"),
                     "locked_by_name": (actor or {}).get("full_name") or (actor or {}).get("username") or (actor or {}).get("name"),
+                    # The mandatory explanation for an out-of-band variance
+                    # (None when the day balanced and none was given).
+                    "variance_note": clean_note or None,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -1073,11 +1227,23 @@ def lock_session(db, session_id: str, *, actor: Optional[Dict[str, Any]] = None)
             "expected_cash_paisa": locked.get("expected_cash_paisa"),
             "variance_paisa": locked.get("variance_paisa"),
             "variance_status": locked.get("variance_status"),
+            "variance_note": locked.get("variance_note"),
         },
         store_id=store_id,
         severity="WARNING" if str(locked.get("variance_status")) != "BALANCED" else "INFO",
         detail={"session_date": day},
     )
+    # Manager alert above the band (owner ruling 2026-08-25). After the lock
+    # won -- exactly one of two concurrent locks reaches this line.
+    if out_of_band:
+        raise_variance_task(
+            store_id=store_id,
+            session_date=day,
+            variance_paisa=variance_paisa,
+            tolerance_paisa=tolerance_paisa,
+            note=clean_note,
+            source="blind EOD Z-Read lock",
+        )
     locked["session_id"] = locked.get("_id")
     return {"ok": True, "session": locked}
 
@@ -1306,6 +1472,10 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "cash_sales_paisa": cash_sales,
         "cash_refunds_paisa": cash_refunds,
         "cash_payouts_paisa": payouts,
+        # AUTO_EXPENSES on sessions submitted after the 2026-08-25 ruling;
+        # None on older sessions whose payouts were hand-keyed.
+        "cash_payouts_source": session.get("cash_payouts_source"),
+        "off_till_expense_advisory": bool(session.get("off_till_expense_advisory")),
         "refund_double_entry_advisory": bool(
             session.get("refund_double_entry_advisory")
         ),
@@ -1321,6 +1491,7 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "counted_cash_paisa": counted,
         "variance_paisa": variance,
         "variance_status": session.get("variance_status"),
+        "variance_note": session.get("variance_note"),
         "tolerance_paisa": session.get("tolerance_paisa"),
         "locked_at": session.get("locked_at"),
         "locked_by": session.get("locked_by"),

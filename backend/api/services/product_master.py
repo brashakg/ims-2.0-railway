@@ -2359,6 +2359,86 @@ def create_product(
     return created
 
 
+def mirror_update_to_catalog_twin(
+    *, product_id: str, current: Dict[str, Any], patch: Dict[str, Any], db=None
+) -> None:
+    """THE spine-edit -> catalog-twin mirror rule (products convergence).
+
+    This rule used to live TWICE -- inline in the PUT /products route AND
+    inside update_product below -- and the two copies drifted (PR #1029
+    follow-up: different field sets, different price spellings, a
+    description-only edit queued on one door and not the other). Both doors
+    now call HERE; do not re-inline a copy at a call site.
+
+    The one behaviour (decided per disagreement, differential probe 2026-08-30):
+
+      * mrp / offer_price are written in BOTH spellings -- top-level AND
+        pricing.* -- because the Shopify push resolves the TOP-LEVEL value
+        first (shopify_push._resolve_variant_pricing), so a PM-born twin with
+        a stale top-level price would ship the OLD price if only pricing.*
+        moved; catalog-door twins and the PIM screens read the nested shape.
+      * cost_price / discount_category (uppercased) go to pricing.* only --
+        that is the only spelling any twin carries or any reader consults.
+      * hsn_code / gst_rate / is_active / description mirror top-level.
+      * the twin QUEUES for the manual Online Store push
+        (ecom.locally_modified) only when a field the storefront actually
+        shows moved: mrp / offer_price (the variant price fallbacks) or
+        description (descriptionHtml). A description-only edit DOES queue --
+        the pending count must be truthful about copy changes. cost / tier /
+        hsn / gst / is_active are in NO pushed payload: queuing on them would
+        send a push that changes nothing on Shopify.
+      * twin key: current.pim_product_id first (door-created products key the
+        twin on that separate uuid), spine product_id as the legacy /
+        convergence fallback.
+      * a MISSING twin is a NO-OP -- never an upsert. A twin is born only at
+        the create door; upserting here would mint a fragment doc with no
+        sku/name/ecom identity, invisible to every sku-joined consumer.
+      * UNCONDITIONAL (no mirror_enabled() gate): a local Mongo twin write is
+        not an external write -- the flag guards the external Postgres/Shopify
+        legs, exactly the _stage_catalog_draft precedent.
+      * a queued row must belong to a status bucket: ecom.status defaults to
+        DRAFT only when ABSENT, so an edit can never demote a live product.
+
+    Fail-soft: never raises; a mirror error is logged and the spine save
+    stands. Queuing is not publishing: a human still presses the push button.
+    """
+    try:
+        if db is None or not getattr(db, "is_connected", True):
+            return
+        cat = db.get_collection("catalog_products")
+        if cat is None:
+            return
+        cat_patch: Dict[str, Any] = {}
+        for key in ("mrp", "offer_price"):
+            if key in patch:
+                cat_patch[key] = patch[key]
+                cat_patch[f"pricing.{key}"] = patch[key]
+        if "cost_price" in patch:
+            cat_patch["pricing.cost_price"] = patch["cost_price"]
+        if "discount_category" in patch:
+            dc = patch["discount_category"]
+            cat_patch["pricing.discount_category"] = (
+                dc.upper() if isinstance(dc, str) else dc
+            )
+        for key in ("hsn_code", "gst_rate", "is_active", "description"):
+            if key in patch:
+                cat_patch[key] = patch[key]
+        if any(k in patch for k in ("mrp", "offer_price", "description")):
+            cat_patch["ecom.locally_modified"] = True
+        if not cat_patch:
+            return
+        twin_id = current.get("pim_product_id") or product_id
+        if cat_patch.get("ecom.locally_modified"):
+            twin = cat.find_one({"id": twin_id}) or {}
+            if not (twin.get("ecom") or {}).get("status"):
+                cat_patch["ecom.status"] = "DRAFT"
+        cat.update_one({"id": twin_id}, {"$set": cat_patch})
+    except Exception:  # noqa: BLE001 -- the spine save must stand regardless
+        logger.warning(
+            "[PM] catalog twin mirror skipped for %s", product_id, exc_info=True
+        )
+
+
 def update_product(
     *,
     product_id: str,
@@ -2366,7 +2446,6 @@ def update_product(
     actor: str,
     actor_name: Optional[str] = None,
     product_repo=None,
-    catalog_repo=None,
     audit_repo=None,
     db=None,
 ) -> Dict[str, Any]:
@@ -2374,8 +2453,9 @@ def update_product(
     (raise offer above existing MRP, OR lower MRP below existing offer) by
     merging the patch against the current doc before evaluating.
 
-    Mirrors the spine update to the PIM doc when present + the flag is on.
-    Writes a before/after audit row.
+    Mirrors the spine update to the catalog twin via
+    mirror_update_to_catalog_twin (the ONE mirror rule, shared with the
+    PUT /products route). Writes a before/after audit row.
     """
     if product_repo is None:
         raise ProductMasterError("No product repository.", status=500)
@@ -2441,47 +2521,10 @@ def update_product(
         pass
     updated = product_repo.find_by_id(product_id) or current
 
-    # Mirror to the PIM doc (flag-gated, best-effort).
-    if mirror_enabled() and updated.get("pim_product_id"):
-        try:
-            pim_patch = {
-                k: clean[k]
-                for k in ("mrp", "offer_price", "hsn_code", "gst_rate")
-                if k in clean
-            }
-            if pim_patch:
-                # QUEUE THE TWIN. mrp / offer_price are the variant price
-                # fallbacks the Shopify push sends, so a price changed HERE has
-                # to reach the storefront -- and the push selects rows by exactly
-                # one flag. Without this the mirror moved the price in IMS and
-                # the website kept the old one, silently, forever. Same rule as
-                # the products.py door: only fields the storefront actually shows
-                # queue a push (hsn_code / gst_rate are in no pushed payload).
-                # Queuing is not publishing: a human still presses the button.
-                if any(k in pim_patch for k in ("mrp", "offer_price")):
-                    pim_patch["ecom.locally_modified"] = True
-                    # ...and a queued row must belong to a status bucket, or the
-                    # Online Store screen counts it as pending while both status
-                    # cards ignore it. Defaulted only when ABSENT, so this can
-                    # never demote a live product back to DRAFT.
-                    twin = None
-                    if db is not None:
-                        try:
-                            twin = db.get_collection("catalog_products").find_one(
-                                {"id": updated["pim_product_id"]}
-                            )
-                        except Exception:  # noqa: BLE001 -- best-effort read
-                            twin = None
-                    if not ((twin or {}).get("ecom") or {}).get("status"):
-                        pim_patch["ecom.status"] = "DRAFT"
-                if catalog_repo is not None:
-                    catalog_repo.upsert({"id": updated["pim_product_id"], **pim_patch})
-                elif db is not None:
-                    db.get_collection("catalog_products").update_one(
-                        {"id": updated["pim_product_id"]}, {"$set": pim_patch}
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[PM] PIM update mirror failed for %s: %s", product_id, exc)
+    # Mirror to the catalog twin -- the ONE shared rule (see its docstring).
+    mirror_update_to_catalog_twin(
+        product_id=product_id, current=updated, patch=clean, db=db
+    )
 
     if audit_repo is not None:
         try:

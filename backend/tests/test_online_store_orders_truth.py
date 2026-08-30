@@ -523,6 +523,88 @@ def test_clear_rx_hold_conflict_when_no_hold(ctx):
     assert r.status_code == 409
 
 
+# ---------------------------------------------------------------------------
+# PR #1029 follow-up 2: the release NAMES what it released. A stock-miss hold
+# rides the same fulfillment_hold flag as the Rx hold, but calling its release
+# "Rx hold cleared" told staff a prescription was verified when what actually
+# happened was a stock resolution.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_hold_names_a_stock_release(ctx):
+    """A stock-miss-held order (fulfillment_hold + its own stock_hold_reason,
+    rx_pending False) releases with a message that says STOCK, not Rx."""
+    _seed_booked(
+        ctx,
+        "5015",
+        fulfillment_hold=True,
+        stock_hold_reason=(
+            "Stock could not be claimed for this paid online order "
+            "(oversell) - resolve stock, then clear the hold."
+        ),
+    )
+    r = ctx["client"].post(f"{BASE}/ord-5015/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == ["STOCK"]
+    assert "stock hold" in body["message"].lower()
+    assert "rx" not in body["message"].lower(), (
+        "a stock release must not claim a prescription was verified"
+    )
+    doc = ctx["orders"].find_one({"order_id": "ord-5015"})
+    assert doc["fulfillment_hold"] is False
+
+
+def test_clear_hold_names_an_rx_release(ctx):
+    _seed_booked(ctx, "5016", rx_pending=True, fulfillment_hold=True)
+    r = ctx["client"].post(f"{BASE}/ord-5016/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == ["RX"]
+    assert "rx hold" in body["message"].lower()
+    assert "stock" not in body["message"].lower()
+
+
+def test_clear_hold_names_both_when_both_are_active(ctx):
+    _seed_booked(
+        ctx,
+        "5017",
+        rx_pending=True,
+        fulfillment_hold=True,
+        rx_hold_reasons=["RX_MISSING"],
+        stock_hold_reason="Stock could not be claimed for this paid online order",
+    )
+    r = ctx["client"].post(f"{BASE}/ord-5017/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == ["RX", "STOCK"]
+    assert "rx hold" in body["message"].lower()
+    assert "stock hold" in body["message"].lower()
+
+
+def test_clear_hold_releases_a_legacy_stock_miss_shape_and_names_it(ctx):
+    """Orders held by the FIRST cut of the stock-miss hold (PR #1029) carry the
+    stock reason INSIDE rx_hold_reason and no stock_hold_reason field. They
+    must still release cleanly -- and be named a STOCK release."""
+    _seed_booked(
+        ctx,
+        "5018",
+        fulfillment_hold=True,
+        rx_hold_reason=(
+            "Stock could not be claimed for this paid online order "
+            "(oversell) - resolve stock, then clear the hold."
+        ),
+    )
+    r = ctx["client"].post(f"{BASE}/ord-5018/clear-rx-hold", headers=_hdr(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == ["STOCK"]
+    assert "stock hold" in body["message"].lower()
+    doc = ctx["orders"].find_one({"order_id": "ord-5018"})
+    assert doc["fulfillment_hold"] is False
+    assert doc["rx_hold_cleared"] is True
+
+
 def test_clear_rx_hold_missing_order_404(ctx):
     r = ctx["client"].post(f"{BASE}/nope/clear-rx-hold", headers=_hdr(["ADMIN"]))
     assert r.status_code == 404

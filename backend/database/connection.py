@@ -769,6 +769,28 @@ class DatabaseConnection:
             name="uniq_dc_vendor_number_store",
             background=True,
         )
+        # P0-1 (launch gate): the STANDARD twin of the DC index above. A
+        # vendor invoice number identifies one delivery + one bill, so two
+        # live (non-VOID) STANDARD receipts must never share it per vendor +
+        # store. Keys on the case/punctuation-FOLDED number the create path
+        # stamps (vendor_invoice_no_norm), so 'GO-INV-9007' vs 'GO-INV/9007'
+        # collide; legacy rows without the field are simply not indexed
+        # (same fail-soft posture as the DC index). $in on status keeps a
+        # VOIDed receipt out of the index so the sanctioned void-then-recreate
+        # correction path still works ($in in partialFilterExpression needs
+        # Mongo 8.0+; prod is 8.3 and eod_tally already relies on it).
+        _idx(
+            "grns",
+            [("vendor_id", 1), ("vendor_invoice_no_norm", 1), ("store_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "STANDARD",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            name="uniq_std_vendor_invoice_store",
+            background=True,
+        )
 
         # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
         # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-
