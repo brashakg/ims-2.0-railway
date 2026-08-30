@@ -28,14 +28,6 @@ export const analyticsV2Api = {
     const response = await api.get('/analytics-v2/loyalty/tiers', { params: { store_id: storeId } });
     return response.data;
   },
-  earnLoyaltyPoints: async (data: { customer_id: string; order_id: string; amount: number }) => {
-    const response = await api.post('/analytics-v2/loyalty/earn', data);
-    return response.data;
-  },
-  redeemLoyaltyPoints: async (data: { customer_id: string; points: number; redemption_type: string }) => {
-    const response = await api.post('/analytics-v2/loyalty/redeem', data);
-    return response.data;
-  },
 
   // 14: Contact Lens Subscriptions
   getCLSubscriptions: async (storeId?: string) => {

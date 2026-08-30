@@ -36,9 +36,11 @@ from ..dependencies import (
     get_loyalty_settings_repository,
     get_loyalty_transaction_repository,
     get_order_repository,
+    get_product_repository,
 )
 from ..services.loyalty_engine import (
     calc_earn_points,
+    implied_ceiling_discount,
     calc_redeem,
     compute_tier,
     expirable_points_by_lot,
@@ -330,12 +332,20 @@ async def earn(
                 }
 
     account = accounts.find_or_create(body.customer_id)
-    items = [i.model_dump(exclude_none=True) for i in (body.items or [])]
+    # Per-line data comes from the ORDER document, never body.items: client
+    # lines could omit discount_percent/promo stamps and defeat the >=5%/offer
+    # earn gate (same "points are money" stance as the basis clamp above).
+    # Effective discounts are re-derived because a superadmin items-edit
+    # rebuilds lines without the create-time stamp.
+    items = _with_effective_discounts(order_doc.get("items") or [])
     earn_result = calc_earn_points(
         rupee_value,
         items,
         account.get("tier", "BRONZE"),
         settings,
+        cart_discount_percent=float(
+            order_doc.get("cart_discount_percent") or 0.0
+        ),
     )
 
     points = int(earn_result.get("points") or 0)
@@ -1049,6 +1059,7 @@ def earn_for_order_internal(
     rupee_value: float,
     user_id: Optional[str] = None,
     store_id: Optional[str] = None,
+    cart_discount_percent: float = 0.0,
 ) -> Dict[str, Any]:
     """Fire-and-forget earn invocation from the order-create path.
 
@@ -1078,6 +1089,7 @@ def earn_for_order_internal(
             items or [],
             account.get("tier", "BRONZE"),
             settings,
+            cart_discount_percent=cart_discount_percent,
         )
         points = int(result.get("points") or 0)
         if points <= 0:
@@ -1468,6 +1480,17 @@ def _reverse_order_loyalty(
         for t in ledger
         if t.get("order_id") == order_id and t.get("type") == "EARN"
     )
+    # Edit-regate claws (negative ADJUST rows) already took part of this
+    # order's earn back; a full reversal must claw only the REMAINDER, or a
+    # cancel after an edit-regate double-claws (and double-decrements
+    # lifetime_earned, and can refuse on a spurious underflow).
+    _regate_claw = sum(
+        int(t.get("points") or 0)
+        for t in ledger
+        if t.get("type") == "ADJUST"
+        and t.get("edit_regate_of_order_id") == order_id
+    )
+    earned = max(0, earned + _regate_claw)
     redeemed = sum(
         int(t.get("points") or 0)
         for t in ledger
@@ -1614,6 +1637,183 @@ def _reverse_order_loyalty(
         "net_delta": net_delta,
         "txn_id": txn_id,
     }
+
+
+def _with_effective_discounts(items):
+    """Return copies of order lines with effective_discount_percent filled.
+
+    A superadmin items-edit rebuilds lines WITHOUT the create-time stamp
+    (rebuild_edited_line consults no catalog by design), so any earn math
+    that runs after an edit — POST /earn and the edit re-gate — must
+    re-derive the implied discount from the catalog or a typed-below-shelf
+    price becomes invisible and points over-credit. Fail toward the explicit
+    value (pre-existing blindness) when the product can't be resolved.
+    """
+    try:
+        pr = get_product_repository()
+    except Exception:  # noqa: BLE001
+        pr = None
+    out = []
+    for line in items or []:
+        line = dict(line)
+        if line.get("effective_discount_percent") is None:
+            try:
+                eff = float(line.get("discount_percent") or 0.0)
+            except (TypeError, ValueError):
+                eff = 0.0
+            pid = str(line.get("product_id") or "")
+            if (
+                pr is not None
+                and pid
+                and not pid.startswith(("custom-", "lens-", "lens-sug-"))
+            ):
+                try:
+                    product = pr.find_by_id(pid)
+                    if product:
+                        eff = max(
+                            eff,
+                            implied_ceiling_discount(
+                                line.get("unit_price"),
+                                product.get("mrp"),
+                                product.get("offer_price"),
+                            ),
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+            line["effective_discount_percent"] = round(eff, 4)
+        out.append(line)
+    return out
+
+
+def regate_earn_after_edit(
+    order_doc: Dict[str, Any],
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Re-run the >=5%/offer earn gate after a discount-changing ORDER EDIT
+    and claw back points that are no longer eligible (owner hard rule
+    2026-08-30 -- earn fires at create, but a superadmin edit can raise
+    discounts afterwards and must not leave pre-gate points standing).
+
+    Delta semantics, not full reversal: recompute what the edited order WOULD
+    earn now, compare against the order's net earned-so-far (EARN rows minus
+    prior regate claws), and claw only the difference. Never credits -- an
+    edit that LOWERS a discount does not mint points retroactively. Repeated
+    edits converge (net == target -> no write). Fail-soft: always returns a
+    dict, never raises.
+
+    ponytail: the read-compare-claw is not race-guarded per delta (unlike the
+    unique-indexed full reversals); superadmin edits are a rare single-human
+    flow. Add a per-(order, net) claim key if concurrent edits ever appear.
+    """
+    try:
+        order_id = str(order_doc.get("order_id") or "")
+        customer_id = order_doc.get("customer_id") or ""
+        if not order_id or not customer_id or customer_id.startswith(
+            ("walkin-", "walk-in")
+        ):
+            return {"ok": True, "clawed": 0, "skipped_reason": "no_customer"}
+        accounts = get_loyalty_account_repository()
+        txns = get_loyalty_transaction_repository()
+        if accounts is None or txns is None:
+            return {"ok": False, "reason": "loyalty_db_unavailable"}
+        account = accounts.find_or_create(customer_id)
+        ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
+        if not read_ok:
+            logger.error(
+                "edit-regate ledger read FAILED cust=%s order=%s -- refusing "
+                "to claw on an unreadable ledger", customer_id, order_id,
+            )
+            return {"ok": False, "reason": "ledger_read_failed"}
+
+        earn_rows = [
+            t for t in ledger
+            if t.get("order_id") == order_id and t.get("type") == "EARN"
+        ]
+        earned = sum(int(t.get("points") or 0) for t in earn_rows)
+        prior_claw = sum(
+            int(t.get("points") or 0)
+            for t in ledger
+            if t.get("type") == "ADJUST"
+            and t.get("edit_regate_of_order_id") == order_id
+        )
+        # A full reversal (cancel/return) already zeroed this order's loyalty.
+        if any(
+            t.get("type") == "ADJUST"
+            and t.get(_REVERSAL_ORDER_FIELD) == order_id
+            for t in ledger
+        ):
+            return {"ok": True, "clawed": 0, "skipped_reason": "already_reversed"}
+
+        net = earned + prior_claw  # prior_claw rows carry negative points
+        if net <= 0:
+            return {"ok": True, "clawed": 0, "skipped_reason": "nothing_earned"}
+
+        settings = _settings_safe()
+        basis = max(
+            round(
+                float(order_doc.get("grand_total") or 0.0)
+                - float(order_doc.get("tax_amount") or 0.0),
+                2,
+            ),
+            0.0,
+        )
+        tier = (earn_rows[0].get("tier_at_earn") if earn_rows else None) or (
+            account.get("tier", "BRONZE")
+        )
+        target = int(
+            calc_earn_points(
+                basis,
+                _with_effective_discounts(order_doc.get("items") or []),
+                tier,
+                settings,
+                cart_discount_percent=float(
+                    order_doc.get("cart_discount_percent") or 0.0
+                ),
+            ).get("points")
+            or 0
+        )
+        delta = net - min(target, net)  # never credit
+        if delta <= 0:
+            return {"ok": True, "clawed": 0}
+
+        balance = int(account.get("balance_points", 0))
+        if balance < delta:
+            # Mirror the full-reversal stance: fail toward NOT clawing and
+            # escalate loudly rather than driving the balance negative.
+            logger.error(
+                "edit-regate BALANCE UNDERFLOW cust=%s order=%s balance=%s "
+                "delta=%s -- points already spent; human reconciliation needed",
+                customer_id, order_id, balance, delta,
+            )
+            return {"ok": False, "reason": "balance_underflow",
+                    "balance": balance, "delta": delta}
+
+        txn_id = str(uuid.uuid4())
+        txns.create(
+            {
+                "txn_id": txn_id,
+                "customer_id": customer_id,
+                "type": "ADJUST",
+                "points": -delta,
+                "order_id": order_id,
+                "edit_regate_of_order_id": order_id,
+                "reason": (
+                    f"earn re-gate after order edit: order {order_id} now "
+                    f"eligible for {min(target, net)} of {net} earned points"
+                ),
+                "created_by": user_id,
+                "created_at": datetime.now(),
+            }
+        )
+        accounts.adjust_balance(
+            customer_id,
+            delta_points=-delta,
+            delta_lifetime_earned=-delta,
+        )
+        return {"ok": True, "clawed": delta, "txn_id": txn_id}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("regate_earn_after_edit failed: %s", exc)
+        return {"ok": False, "reason": "error", "error": str(exc)}
 
 
 def reverse_for_return(

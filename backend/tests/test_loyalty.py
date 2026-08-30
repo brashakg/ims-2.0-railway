@@ -176,12 +176,22 @@ class FakeOrderRepo:
     def __init__(self):
         self._orders = {}
 
-    def seed(self, order_id, customer_id, grand_total, tax_amount=0.0):
+    def seed(
+        self,
+        order_id,
+        customer_id,
+        grand_total,
+        tax_amount=0.0,
+        items=None,
+        cart_discount_percent=0.0,
+    ):
         self._orders[order_id] = {
             "order_id": order_id,
             "customer_id": customer_id,
             "grand_total": float(grand_total),
             "tax_amount": float(tax_amount),
+            "items": items,
+            "cart_discount_percent": float(cart_discount_percent),
         }
 
     def find_by_id(self, order_id):
@@ -798,17 +808,517 @@ def test_sunglass_item_earns_with_multiplier_saved_from_settings_screen(
     assert mults["OPTICAL_LENS"] == 1.8
     assert "SUNGLASSES" not in mults and "RX_LENSES" not in mults
 
-    patched_loyalty["orders"].seed("ORD-SG", "cust-sg", 10000.0)
+    # Lines live on the ORDER: POST /earn ignores client items by design
+    # (owner rule 2026-08-30 — client lines could hide discounts/offers).
+    patched_loyalty["orders"].seed(
+        "ORD-SG",
+        "cust-sg",
+        10000.0,
+        items=[{"category": "SUNGLASS", "item_total": 10000}],
+    )
     resp = client.post(
         "/api/v1/loyalty/earn",
-        json={
-            "customer_id": "cust-sg",
-            "order_id": "ORD-SG",
-            "items": [{"category": "SUNGLASS", "item_total": 10000}],
-        },
+        json={"customer_id": "cust-sg", "order_id": "ORD-SG"},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
     # 10000 x 2.0 x 0.01 x 1.0 (BRONZE) = 200. The pre-fix engine silently
     # earned 100 here (multiplier never matched).
     assert resp.json()["awarded"] == 200
+
+
+# ============================================================================
+# Owner hard rule 2026-08-30: no earn on >=5% discount or any applied offer.
+# Discriminating power: every test below awards points if the gate in
+# calc_earn_points is reverted.
+# ============================================================================
+
+
+def test_earn_line_at_5pct_discount_earns_zero_for_that_line():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "discount_percent": 5},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    # Only the clean line earns: 5000 * 1.0 * 0.01 = 50
+    assert out["points"] == 50
+    assert out["ineligible_lines"] == 1
+
+
+def test_earn_line_under_5pct_discount_still_earns():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "discount_percent": 4.99},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 100
+    assert out["ineligible_lines"] == 0
+
+
+def test_earn_promo_line_earns_zero():
+    """An applied offer (promo engine stamp) zeroes that line's earn."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "promo_discount_amount": 250.0},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 50
+    assert out["ineligible_lines"] == 1
+
+
+def test_earn_bill_discount_at_5pct_zeroes_whole_bill():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 9500}]
+    out = calc_earn_points(
+        9500.0, items, "BRONZE", DEFAULT_SETTINGS, cart_discount_percent=5.0
+    )
+    assert out["points"] == 0
+    assert out["skipped_reason"] == "bill_discount_5pct_or_more"
+
+
+def test_earn_bill_discount_under_5pct_earns():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 9510}]
+    out = calc_earn_points(
+        9510.0, items, "BRONZE", DEFAULT_SETTINGS, cart_discount_percent=4.9
+    )
+    assert out["points"] == 95
+
+
+def test_earn_all_lines_ineligible_names_the_reason():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 5000, "discount_percent": 40}]
+    out = calc_earn_points(5000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 0
+    assert out["skipped_reason"] == "discount_5pct_or_offer"
+
+
+def test_earn_endpoint_ignores_client_items_uses_order_lines(
+    client, auth_headers, patched_loyalty
+):
+    """POST /earn must read per-line data from the ORDER; client items that
+    hide the discount cannot mint points (points are money)."""
+    patched_loyalty["orders"].seed(
+        "ORD-G1",
+        "cust-g1",
+        10000.0,
+        items=[{"category": "FRAME", "item_total": 10000, "discount_percent": 40}],
+    )
+    resp = client.post(
+        "/api/v1/loyalty/earn",
+        json={
+            "customer_id": "cust-g1",
+            "order_id": "ORD-G1",
+            "rupee_value": 10000.0,
+            # attacker/typo surface: clean-looking client lines
+            "items": [{"category": "FRAME", "item_total": 10000}],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["awarded"] == 0
+
+
+def test_earn_endpoint_reads_bill_discount_from_order_doc(
+    client, auth_headers, patched_loyalty
+):
+    patched_loyalty["orders"].seed(
+        "ORD-G2",
+        "cust-g2",
+        9000.0,
+        items=[{"category": "FRAME", "item_total": 9000}],
+        cart_discount_percent=10.0,
+    )
+    resp = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-g2", "order_id": "ORD-G2"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["awarded"] == 0
+
+
+def test_earn_internal_hook_gates_on_cart_discount(patched_loyalty):
+    """earn_for_order_internal threads cart_discount_percent to the engine."""
+    from api.routers.loyalty import earn_for_order_internal
+
+    out = earn_for_order_internal(
+        customer_id="cust-g3",
+        order_id="ORD-G3",
+        items=[{"category": "FRAME", "item_total": 8000}],
+        rupee_value=8000.0,
+        cart_discount_percent=7.5,
+    )
+    assert out["awarded"] == 0
+    assert out["skipped_reason"] == "bill_discount_5pct_or_more"
+
+
+from tests.test_fcostfloor import (  # noqa: F401,E402
+    floor_env as floor_env2,
+    _seed_product as _seed_product2,
+)
+
+
+# ============================================================================
+# Round-2 adversarial fixes: implied-discount stamp, fail-closed parsing,
+# and the post-edit earn re-gate. Each fails if its fix is reverted.
+# ============================================================================
+
+
+def test_engine_gates_on_effective_discount_stamp():
+    """A typed-below-shelf price (discount_percent 0, effective stamp >=5)
+    earns nothing -- the implied-discount bypass is closed."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {
+            "category": "FRAME",
+            "item_total": 9000,
+            "discount_percent": 0,
+            "effective_discount_percent": 10.0,
+        },
+        {"category": "FRAME", "item_total": 5000, "effective_discount_percent": 0},
+    ]
+    out = calc_earn_points(14000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 50  # only the clean 5000 line
+    assert out["ineligible_lines"] == 1
+
+
+def test_engine_fails_closed_on_garbage_discount():
+    """Unparsable discount values mint NO points (points are money)."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 5000, "discount_percent": "??"}]
+    out = calc_earn_points(5000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 0
+
+
+def test_create_door_stamps_effective_discount(client, auth_headers, floor_env2):
+    """A unit_price typed 10% under MRP persists effective_discount_percent
+    ~10 even though discount_percent is 0 -- the loyalty gate's input."""
+    pid = _seed_product2(floor_env2, pid="p-eff1", cost_price=50.0, mrp=200.0)
+    r = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-x",
+            "items": [
+                {
+                    "product_id": pid,
+                    "product_name": "Floor Frame",
+                    "item_type": "FRAME",
+                    "category": "FRAME",
+                    "quantity": 1,
+                    "unit_price": 180.0,
+                    "discount_reason": "test: price honored from display",
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    order_id = r.json().get("order_id") or (r.json().get("order") or {}).get("order_id")
+    doc = floor_env2["order_repo"].find_by_id(order_id)
+    line = doc["items"][0]
+    assert line["discount_percent"] == 0
+    assert abs(line["effective_discount_percent"] - 10.0) < 0.01
+
+
+def test_create_door_at_mrp_stamps_zero(client, auth_headers, floor_env2):
+    pid = _seed_product2(floor_env2, pid="p-eff2", cost_price=50.0, mrp=200.0)
+    r = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-x",
+            "items": [
+                {
+                    "product_id": pid,
+                    "product_name": "Floor Frame",
+                    "item_type": "FRAME",
+                    "category": "FRAME",
+                    "quantity": 1,
+                    "unit_price": 200.0,
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    order_id = r.json().get("order_id") or (r.json().get("order") or {}).get("order_id")
+    doc = floor_env2["order_repo"].find_by_id(order_id)
+    assert doc["items"][0]["effective_discount_percent"] == 0
+
+
+def _seed_earned_order(patched_loyalty, customer_id, order_id, points):
+    """Seed an account + an EARN ledger row the way the real earn door does."""
+    accounts = patched_loyalty["accounts"]
+    txns = patched_loyalty["txns"]
+    accounts.find_or_create(customer_id)
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    txns.claim_earn_for_order(
+        customer_id,
+        order_id,
+        {
+            "txn_id": str(_uuid.uuid4()),
+            "customer_id": customer_id,
+            "type": "EARN",
+            "points": points,
+            "rupee_value": float(points * 100),
+            "order_id": order_id,
+            "tier_at_earn": "BRONZE",
+            "created_at": _dt.now(),
+        },
+    )
+    accounts.adjust_balance(
+        customer_id, delta_points=points, delta_lifetime_earned=points
+    )
+
+
+def test_regate_claws_earn_when_edit_raises_discount(patched_loyalty):
+    """Superadmin edit pushes the bill discount to 40% -> the create-time
+    earn is clawed back in full."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg1", "ORD-RG1", 100)
+    edited = {
+        "order_id": "ORD-RG1",
+        "customer_id": "cust-rg1",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 40.0,
+        "items": [{"category": "FRAME", "item_total": 10000}],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 100
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg1")
+    assert acct["balance_points"] == 0
+    assert acct["lifetime_earned"] == 0
+    # Converges: a second identical call claws nothing more.
+    again = regate_earn_after_edit(edited, user_id="sa-1")
+    assert again["ok"] and again["clawed"] == 0
+
+
+def test_regate_never_credits(patched_loyalty):
+    """An edit that makes the order MORE eligible does not mint points."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg2", "ORD-RG2", 50)
+    edited = {
+        "order_id": "ORD-RG2",
+        "customer_id": "cust-rg2",
+        "grand_total": 100000.0,  # would earn 1000 if recredited
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [{"category": "FRAME", "item_total": 100000}],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 0
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg2")
+    assert acct["balance_points"] == 50
+
+
+def test_regate_partial_claw_on_line_mix(patched_loyalty):
+    """Edit makes ONE of two lines ineligible -> claw only the difference."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg3", "ORD-RG3", 100)
+    edited = {
+        "order_id": "ORD-RG3",
+        "customer_id": "cust-rg3",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [
+            {"category": "FRAME", "item_total": 5000, "discount_percent": 40},
+            {"category": "FRAME", "item_total": 5000},
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    # target = 50 (clean line only) -> claw 100-50
+    assert out["ok"] and out["clawed"] == 50
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg3")
+    assert acct["balance_points"] == 50
+
+
+def test_phantom_analytics_earn_doors_are_gone(client, auth_headers):
+    """The ungated analytics-v2 earn/redeem endpoints are deleted (405/404)."""
+    r1 = client.post(
+        "/api/v1/analytics-v2/loyalty/earn",
+        json={"customer_id": "c", "order_id": "o", "amount": 99999},
+        headers=auth_headers,
+    )
+    r2 = client.post(
+        "/api/v1/analytics-v2/loyalty/redeem",
+        json={"customer_id": "c", "points": 10, "redemption_type": "discount"},
+        headers=auth_headers,
+    )
+    assert r1.status_code in (404, 405)
+    assert r2.status_code in (404, 405)
+
+
+# ============================================================================
+# Round-4 (panel probes turned regression tests): reversal-after-regate must
+# not over-claw; stamp-stripped edited lines must not under-claw or over-earn.
+# ============================================================================
+
+
+class _FakeProductRepo:
+    """mrp/offer lookups for the effective-discount re-derivation."""
+
+    def __init__(self, products):
+        self._p = products
+
+    def find_by_id(self, pid):
+        return self._p.get(pid)
+
+
+def test_cancel_after_regate_claws_only_the_remainder(patched_loyalty):
+    """Panel probe: earn 100 on A + 50 on B; edit-regate claws 40 on A; a
+    later cancel of A must claw only the remaining 60 — final balance 50,
+    not 10 (the pre-fix reversal ignored regate rows and double-clawed)."""
+    from api.routers.loyalty import regate_earn_after_edit, reverse_for_cancel
+
+    _seed_earned_order(patched_loyalty, "cust-rv1", "ORD-A", 100)
+    _seed_earned_order(patched_loyalty, "cust-rv1", "ORD-B", 50)
+
+    # Edit makes 40% of A's earn ineligible: one 4000 line at 40% discount,
+    # one 6000 clean line -> target 60, claw 40.
+    edited = {
+        "order_id": "ORD-A",
+        "customer_id": "cust-rv1",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [
+            {
+                "category": "FRAME",
+                "item_total": 4000,
+                "discount_percent": 40,
+                "effective_discount_percent": 40,
+            },
+            {
+                "category": "FRAME",
+                "item_total": 6000,
+                "effective_discount_percent": 0,
+            },
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 40
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv1")
+    assert acct["balance_points"] == 110  # 150 - 40
+
+    rev = reverse_for_cancel("ORD-A", "cust-rv1")
+    assert rev.get("ok"), rev
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv1")
+    # Only the remaining 60 of A's earn is clawed; B's 50 stands.
+    assert acct["balance_points"] == 50
+    assert acct["lifetime_earned"] == 50  # 150 - 40 (regate) - 60 (cancel)
+
+
+def test_regate_rederives_implied_discount_when_stamp_stripped(
+    patched_loyalty, monkeypatch
+):
+    """Panel probe: a superadmin edit rebuilds lines WITHOUT the
+    effective_discount_percent stamp. A typed-below-shelf price (10% under
+    MRP, explicit 0%) must still zero that line's earn via the catalog
+    re-derivation — pre-fix the regate clawed 10 instead of 100."""
+    from api.routers import loyalty as loyalty_module
+    from api.routers.loyalty import regate_earn_after_edit
+
+    monkeypatch.setattr(
+        loyalty_module,
+        "get_product_repository",
+        lambda: _FakeProductRepo({"p-shelf": {"mrp": 10000.0, "offer_price": None}}),
+    )
+    _seed_earned_order(patched_loyalty, "cust-rv2", "ORD-C", 100)
+    edited = {
+        "order_id": "ORD-C",
+        "customer_id": "cust-rv2",
+        "grand_total": 9000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        # Rebuilt line: no effective stamp, explicit 0%, unit_price 10% under
+        # the catalog MRP -> ineligible (>=5%).
+        "items": [
+            {
+                "category": "FRAME",
+                "product_id": "p-shelf",
+                "quantity": 1,
+                "unit_price": 9000.0,
+                "discount_percent": 0,
+                "item_total": 9000.0,
+            }
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 100, out
+    acct = patched_loyalty["accounts"].find_by_id("cust-rv2")
+    assert acct["balance_points"] == 0
+
+
+def test_manual_earn_rederives_implied_discount(
+    client, auth_headers, patched_loyalty, monkeypatch
+):
+    """POST /earn on a stamp-stripped order (post-edit) must not mint points
+    for a typed-below-shelf line."""
+    from api.routers import loyalty as loyalty_module
+
+    monkeypatch.setattr(
+        loyalty_module,
+        "get_product_repository",
+        lambda: _FakeProductRepo({"p-shelf2": {"mrp": 10000.0, "offer_price": None}}),
+    )
+    patched_loyalty["orders"].seed(
+        "ORD-D",
+        "cust-rv3",
+        9000.0,
+        items=[
+            {
+                "category": "FRAME",
+                "product_id": "p-shelf2",
+                "quantity": 1,
+                "unit_price": 9000.0,
+                "discount_percent": 0,
+                "item_total": 9000.0,
+            }
+        ],
+    )
+    r = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-rv3", "order_id": "ORD-D"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["awarded"] == 0
+
+
+def test_implied_ceiling_discount_table():
+    """The single shared formula: at-ceiling 0; below-MRP implied; HQ item
+    measured against OFFER (at-offer 0, below-offer positive); garbage 0."""
+    from api.services.loyalty_engine import implied_ceiling_discount
+
+    assert implied_ceiling_discount(200.0, 200.0, None) == 0.0
+    assert abs(implied_ceiling_discount(180.0, 200.0, None) - 10.0) < 1e-9
+    assert implied_ceiling_discount(150.0, 200.0, 150.0) == 0.0  # HQ at offer
+    assert implied_ceiling_discount(120.0, 200.0, 150.0) > 0.0  # HQ below offer
+    assert implied_ceiling_discount("??", 200.0, None) == 0.0
+    assert implied_ceiling_discount(100.0, None, None) == 0.0
