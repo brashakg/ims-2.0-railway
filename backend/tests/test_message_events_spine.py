@@ -771,6 +771,31 @@ def test_flows_outside_the_review_recall_set_are_untouched(monkeypatch):
     assert ORIGINAL_LINK in note["message"]
 
 
+def test_dark_never_shortens_even_with_the_key_already_pasted_in(monkeypatch):
+    """THE arming-runbook state: the owner pastes the MSG91 key into
+    Settings (creds are DB-first and live without a redeploy) and has NOT
+    yet flipped DISPATCH_MODE. Credentials present + gate dark must still
+    mean zero network calls and a byte-identical link.
+
+    The existing dark test plants NO key, so the no-credentials guard
+    masks the DISPATCH_MODE guard: deleting the dispatch line left all 37
+    tests green (verifier mutation M3, 2026-08-31). This one plants a
+    real-looking key so only the dispatch check stands between dark and
+    a live call to MSG91."""
+    monkeypatch.setattr(providers, "_msg91", lambda: {"api_key": "ZZ_AUTHKEY_1"})
+
+    def _boom(*a, **kw):
+        raise AssertionError("dark must never reach the shortener")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _boom)
+    for mode in ("off", "", "garbage"):
+        monkeypatch.setattr(providers, "DISPATCH_MODE", mode)
+        assert asyncio.run(providers.shorten_url(ORIGINAL_LINK)) == ORIGINAL_LINK, (
+            f"DISPATCH_MODE={mode!r} with a key present must pass the link"
+            " through untouched"
+        )
+
+
 def test_shorten_url_refuses_non_http_input(monkeypatch):
     monkeypatch.setattr(providers, "DISPATCH_MODE", "live")
     monkeypatch.setattr(providers, "_msg91", lambda: {"api_key": "ZZ_AUTHKEY_1"})
