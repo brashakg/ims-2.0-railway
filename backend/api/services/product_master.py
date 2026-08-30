@@ -1164,9 +1164,9 @@ def _guard_gtin_attribute(
     Both live doors feed straight into here, which is why the check belongs at
     this chokepoint rather than in either of them:
       - the Add-Product form's free-text "GTIN (mfr)" box;
-      - Catalog Autopilot, which scrapes a manufacturer spec table and maps any
+      - legacy Catalog Autopilot docs (feature removed 2026-08-30), which mapped
         row labelled gtin/ean/"ean code"/barcode into this attribute verbatim
-        (frontend/src/pages/catalog/autopilotSpecMap.ts).
+        manufacturer spec-table keys onto category fields.
 
     STRICT (the interactive form): raise 422 so the cataloguer sees the bad
     value and fixes or clears it -- silently discarding what someone just typed

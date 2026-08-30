@@ -1,7 +1,7 @@
 """
-IMS 2.0 - SSRF-hardened external image fetch (Autopilot image RE-HOST)
+IMS 2.0 - SSRF-hardened external image fetch (image RE-HOST)
 ======================================================================
-Catalog Autopilot finds product images on brand sites. Hotlinking them means a
+Product images pasted/imported from brand sites get hotlinked otherwise - a
 product photo dies the day the brand site moves the file - so on "Use this"
 the FE asks the backend to COPY the bytes into our own GridFS file store
 (POST /products/image/from-url). That endpoint fetches an ARBITRARY,

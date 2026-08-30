@@ -80,7 +80,7 @@ function pushRecent(next: RecentItem): RecentItem[] {
 // the exact same visibility filter both shells use (filterVisibleGroups: role
 // ceiling + per-user module deny). OS-052: the palette used to keep its own
 // hand-maintained copy of the nav, which silently drifted (zero Online Store
-// entries, a phantom "Catalog Autopilot" row, ~20 newer items missing).
+// entries, phantom rows for retired pages, ~20 newer items missing).
 // Deriving from the single nav source of truth means a new nav item is
 // jumpable the moment it ships — the two can never drift again.
 // ----------------------------------------------------------------------------

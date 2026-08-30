@@ -90,10 +90,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // Cataloguing Scorecard + QC review (attribution phase 2). requireRoles
       // mirrors the /catalog/scorecard ProtectedRoute gate + backend rbac rows.
       { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
-      // Catalog Autopilot is now merged INLINE into the Add Product screen (the
+      // Catalog Autopilot was REMOVED entirely (owner 2026-08-30: unused). The
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
-      // /catalog/autopilot route still resolves (it redirects to /catalog/add)
-      // so bookmarks + the ?prefill=autopilot handoff keep working.
+      // /catalog/autopilot route still resolves (redirects to /catalog/add)
+      // so old bookmarks land somewhere useful.
       { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
       // Collections Phase 1: merchandising view over the ecom collections
       // system — governed chip builder + per-collection stock/sales KPIs.

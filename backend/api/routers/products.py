@@ -3062,7 +3062,7 @@ async def upload_product_image(
 
 
 class ImageFromUrlBody(BaseModel):
-    """Body for the Autopilot image RE-HOST endpoint."""
+    """Body for the image RE-HOST endpoint."""
 
     url: str
 
@@ -3072,9 +3072,9 @@ def rehost_product_image_from_url(
     body: ImageFromUrlBody,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
-    """RE-HOST an external product image into OUR file store (Autopilot v2).
+    """RE-HOST an external product image into OUR file store.
 
-    Catalog Autopilot candidates carry brand-site image URLs; hotlinking them
+    Pasted/imported brand-site image URLs get hotlinked otherwise; that
     means the product photo dies whenever the brand site moves the file. This
     endpoint server-side fetches the external image ONCE and persists the
     bytes durably in the shared GridFS store (kind="product_image", exactly

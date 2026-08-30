@@ -11,8 +11,8 @@ const CatalogManagerPage = lazy(() => import('../pages/catalog/CatalogManagerPag
 // /catalog/add — the single product-add door (Quick Add). Guided + Bulk modes
 // were removed; Quick Add absorbed every field/section Guided had.
 const QuickAddPage = lazy(() => import('../pages/catalog/QuickAddPage'));
-// CatalogAutopilotPage is retired from the nav + routes (merged inline into
-// QuickAddPage); /catalog/autopilot now redirects to /catalog/add. The page file
+// Catalog Autopilot was removed entirely (owner 2026-08-30: unused feature);
+// /catalog/autopilot redirects to /catalog/add. The old page file
 // is kept in the tree but no longer imported here.
 const BuyDeskPage = lazy(() => import('../pages/catalog/BuyDeskPage'));
 // /catalog/scorecard — per-user cataloguing performance (volume, approvals,
@@ -109,12 +109,8 @@ export const catalogRoutes = (
       }
     />
 
-    {/* Catalog Autopilot is now merged INLINE into the Add Product
-        screen ("Auto-fill from web" panel). The standalone page +
-        nav item were retired; this route redirects to /catalog/add
-        so old bookmarks / handoffs still land somewhere useful. The
-        ?prefill=autopilot sessionStorage handoff is unaffected (it
-        navigates straight to /catalog/add). */}
+    {/* Catalog Autopilot was removed (owner 2026-08-30). Old bookmarks
+        land on /catalog/add. */}
     <Route
       path="catalog/autopilot"
       element={<Navigate to="/catalog/add" replace />}
