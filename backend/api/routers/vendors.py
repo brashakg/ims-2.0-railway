@@ -5427,12 +5427,30 @@ async def create_vendor_bill(
     # Duplicate bill guard: the same vendor invoice number must not be recorded
     # twice for the same vendor. A double-entry would double the outstanding
     # payable and produce a duplicate payment row in the ledger.
+    # Compared case/punctuation-FOLDED through the ONE normaliser
+    # (purchase_invoice_engine.normalize_invoice_no -- the same fold the GRN
+    # duplicate guard and the line-detail invoice door use): the exact-string
+    # check here let 'GO-INV/9007' book the payable a second time next to
+    # 'GO-INV-9007'. ponytail: linear scan over one vendor's bills; index a
+    # normalised column if a vendor ever holds thousands.
     if db_early is not None:
         try:
-            dup = db_early.get_collection("vendor_bills").find_one(
-                {"vendor_id": vendor_id, "bill_number": bill.bill_number},
-                {"_id": 0, "bill_id": 1},
+            from ..services.purchase_invoice_engine import normalize_invoice_no
+            _target = normalize_invoice_no(bill.bill_number)
+            _rows = db_early.get_collection("vendor_bills").find(
+                {"vendor_id": vendor_id},
+                {"_id": 0, "bill_id": 1, "bill_number": 1},
             )
+            dup = None
+            if _target:
+                dup = next(
+                    (
+                        r
+                        for r in _rows
+                        if normalize_invoice_no(r.get("bill_number")) == _target
+                    ),
+                    None,
+                )
             if dup:
                 raise HTTPException(
                     status_code=409,
