@@ -175,7 +175,12 @@ async def notify_escalation(
         try:
             from agents.providers import send_whatsapp  # lazy import
 
-            res = await send_whatsapp(phone, escalation_whatsapp_text(task, reason))
+            res = await send_whatsapp(
+                phone,
+                escalation_whatsapp_text(task, reason),
+                template_id="TASK_ESCALATION",
+                store_id=task.get("store_id"),
+            )
             result["whatsapp"] = getattr(res, "status", "sent")
         except Exception as e:  # noqa: BLE001
             logger.warning("[TASK_NOTIFY] whatsapp send failed: %s", e)

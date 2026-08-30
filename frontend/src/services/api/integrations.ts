@@ -42,12 +42,31 @@ export interface IntegrationStatusItem {
   notes: string;
 }
 
+// MSG91 + Coexistence messaging preflight: honest per-item readiness rows,
+// each carrying the owner's named next step. Names/ids/counts only - the
+// backend never puts a credential value or a phone number in here.
+export interface MessagingPreflightRow {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+  next_step: string;
+}
+
+export interface MessagingPreflight {
+  generated_at?: string;
+  rows: MessagingPreflightRow[];
+  ok: boolean;
+}
+
 export interface IntegrationStatusReport {
   generated_at: string;
   dispatch_mode: string;
   test_phone_set: boolean;
   summary: { total: number; configured: number; live: number };
   integrations: IntegrationStatusItem[];
+  // Optional: absent on older backends; the card renders it only when present.
+  messaging_preflight?: MessagingPreflight;
 }
 
 export async function getIntegrationStatus(): Promise<IntegrationStatusReport> {

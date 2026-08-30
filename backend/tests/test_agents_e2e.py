@@ -319,10 +319,13 @@ async def test_scenario_6_megaphone_dispatch_off_simulates(monkeypatch):
     from agents.providers import send_whatsapp, send_sms, dispatch_mode
     assert dispatch_mode() == "off"
 
+    # ORDER_DELIVERED is a registry-seeded flow key: an UNMAPPED flow now
+    # refuses outright (never sends a guessed template name), so the
+    # dispatch-off contract is probed on a real flow.
     res_wa = await send_whatsapp(
         phone="+919999999999",
         message="hello — test",
-        template_id="t-test",
+        template_id="ORDER_DELIVERED",
     )
     res_sms = await send_sms(phone="+919999999999", message="hello")
 

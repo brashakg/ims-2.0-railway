@@ -1010,8 +1010,14 @@ class MegaphoneAgent(JarvisAgent):
                 if channel == "sms":
                     result = await send_sms(phone, message)
                 else:
+                    # store_id rides the queued row (send_notification stamps
+                    # it); the send door resolves the shop's own Coexistence
+                    # number from it, falling back to the default number.
                     result = await send_whatsapp(
-                        phone, message, template_id=template_id
+                        phone,
+                        message,
+                        template_id=template_id,
+                        store_id=row.get("store_id"),
                     )
             except Exception as e:
                 # Defense-in-depth — provider clients already fail soft, but

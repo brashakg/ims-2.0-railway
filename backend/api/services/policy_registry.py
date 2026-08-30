@@ -414,6 +414,29 @@ _REGISTRY_LIST: List[PolicySpec] = [
         maximum=180,
     ),
     # --- Communications (DECISIONS sec 10) ---
+    # Coexistence double-answer guard (MSG91 build, 2026-08-30). Each shop's
+    # WhatsApp number runs on the shop phone AND the API, so MEGAPHONE's
+    # inbound auto-reply must not answer next to a human. DEFAULT off: staff
+    # reply in the ordinary WhatsApp Business app, IMS stays quiet.
+    # after_hours replies only outside the store's working_hours (else the
+    # shared 21:00-09:00 IST quiet window). Enforced at the single auto-reply
+    # send site: api.services.whatsapp_intents.auto_reply_allowed.
+    _spec(
+        key="msg.auto_reply_mode",
+        type="enum",
+        default="off",
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Communications",
+        label="WhatsApp inbound auto-reply",
+        enum=("off", "after_hours", "always"),
+        env="MSG_AUTO_REPLY_MODE",
+        help="When IMS answers an inbound WhatsApp automatically. off "
+        "(default): never - staff on the shop phone reply themselves "
+        "(Coexistence-safe). after_hours: only when the store is closed "
+        "(store working hours, else 9 PM - 9 AM IST). always: every "
+        "inbound gets the automated reply.",
+    ),
     _spec(
         key="comms.cap_per_customer_30d",
         type="int",

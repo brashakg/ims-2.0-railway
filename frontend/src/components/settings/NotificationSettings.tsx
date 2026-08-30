@@ -98,6 +98,17 @@ export function NotificationSettings() {
   const [selectedTemplate, setSelectedTemplate] = useState<NotificationTemplate | null>(null);
   const [testPhone, setTestPhone] = useState('');
 
+  // WhatsApp template-registry mapping per flow (MSG91/Meta approved template
+  // name + language + category). Loaded from the saved notification_templates
+  // docs; edited in the preview pane; saved via the SAME PUT the toggle uses.
+  const [waMappings, setWaMappings] = useState<
+    Record<string, { name: string; language: string; category: string }>
+  >({});
+  const [waDraft, setWaDraft] = useState<{ name: string; language: string; category: string }>({
+    name: '', language: '', category: '',
+  });
+  const [waSaving, setWaSaving] = useState(false);
+
   const canManageSettings = hasRole(['SUPERADMIN', 'ADMIN']);
 
   // The only three values the server's gate can report. Anything else is
@@ -161,6 +172,19 @@ export function NotificationSettings() {
         const overrides = new Map<string, any>(
           rows.map((t: any) => [t.template_id ?? t.id, t])
         );
+        // Overlay saved WhatsApp registry mappings (wa_* fields on the doc).
+        const mappings: Record<string, { name: string; language: string; category: string }> = {};
+        rows.forEach((t: any) => {
+          const id = t.template_id ?? t.id;
+          if (id && (t.wa_template_name || t.wa_language || t.wa_category)) {
+            mappings[id] = {
+              name: t.wa_template_name ?? '',
+              language: t.wa_language ?? '',
+              category: t.wa_category ?? '',
+            };
+          }
+        });
+        setWaMappings(mappings);
         setTemplates((base) =>
           base.map((t) => {
             const o = overrides.get(t.id);
@@ -180,6 +204,47 @@ export function NotificationSettings() {
     }
   };
 
+
+  // Keep the mapping editor in sync with the selected flow AND with mappings
+  // that arrive after the templates fetch settles (selection can beat it).
+  useEffect(() => {
+    if (!selectedTemplate) return;
+    const saved = waMappings[selectedTemplate.id];
+    setWaDraft({
+      name: saved?.name ?? '',
+      language: saved?.language ?? '',
+      category: saved?.category ?? '',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTemplate?.id, waMappings]);
+
+  const handleSaveWaMapping = async () => {
+    if (!selectedTemplate) return;
+    setWaSaving(true);
+    try {
+      // Backend NotificationTemplate model requires the full shape; wa_*
+      // fields ride the same doc (None values are dropped server-side, so
+      // this save cannot wipe anything it does not send).
+      await settingsApi.updateNotificationTemplate(selectedTemplate.id, {
+        template_id: selectedTemplate.id,
+        template_type: selectedTemplate.channel,
+        trigger_event: selectedTemplate.id,
+        is_enabled: selectedTemplate.isActive,
+        subject: selectedTemplate.subject,
+        content: selectedTemplate.template,
+        variables: selectedTemplate.variables,
+        wa_template_name: waDraft.name.trim(),
+        wa_language: waDraft.language.trim(),
+        wa_category: waDraft.category,
+      });
+      setWaMappings((prev) => ({ ...prev, [selectedTemplate.id]: { ...waDraft } }));
+      toast.success('WhatsApp template mapping saved');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to save WhatsApp template mapping');
+    } finally {
+      setWaSaving(false);
+    }
+  };
 
   const handleToggleTemplate = async (templateId: string) => {
     const current = templates.find((t) => t.id === templateId);
@@ -483,6 +548,73 @@ export function NotificationSettings() {
                     </div>
                   </div>
                 </div>
+
+                {/* WhatsApp template mapping (MSG91/Meta approved template).
+                    The message SENDS under this approved name; until one is
+                    saved, the code-seeded placeholder applies and MSG91 will
+                    reject it in live mode. */}
+                {selectedTemplate.channel !== 'SMS' && (
+                  <div className="card">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-1">
+                      WhatsApp template mapping
+                    </h3>
+                    <p className="text-xs text-gray-500 mb-3">
+                      Enter the MSG91-approved template name for this flow. Until
+                      then a placeholder name applies and live sends for this flow
+                      will be rejected by MSG91.
+                    </p>
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Approved template name
+                        </label>
+                        <input
+                          type="text"
+                          value={waDraft.name}
+                          onChange={(e) => setWaDraft((d) => ({ ...d, name: e.target.value }))}
+                          className="input-field w-full font-mono"
+                          placeholder="e.g. bv_order_delivered_v1"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Language
+                          </label>
+                          <input
+                            type="text"
+                            value={waDraft.language}
+                            onChange={(e) => setWaDraft((d) => ({ ...d, language: e.target.value }))}
+                            className="input-field w-full"
+                            placeholder="en"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Meta category
+                          </label>
+                          <select
+                            value={waDraft.category}
+                            onChange={(e) => setWaDraft((d) => ({ ...d, category: e.target.value }))}
+                            className="input-field w-full"
+                          >
+                            <option value="">(keep default)</option>
+                            <option value="utility">utility</option>
+                            <option value="marketing">marketing</option>
+                            <option value="auth">auth</option>
+                          </select>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleSaveWaMapping}
+                        disabled={waSaving}
+                        className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-60"
+                      >
+                        {waSaving ? 'Saving...' : 'Save mapping'}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Test Notification */}
                 <div className="card">

@@ -178,6 +178,13 @@ export const settingsApi = {
     subject?: string;
     content?: string;
     variables?: string[];
+    // WhatsApp template registry mapping (MSG91/Meta approved template).
+    // Omitted fields keep their stored value - the backend drops nulls
+    // before the write so a toggle never wipes a saved mapping.
+    wa_template_name?: string;
+    wa_language?: string;
+    wa_category?: string;
+    wa_variables?: string[];
   }) => {
     const response = await api.put(`/settings/notifications/templates/${templateId}`, template);
     return response.data;

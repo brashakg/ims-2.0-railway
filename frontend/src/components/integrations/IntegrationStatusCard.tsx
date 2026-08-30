@@ -14,6 +14,7 @@ import {
   getIntegrationStatus,
   type IntegrationStatusReport,
   type IntegrationStatusItem,
+  type MessagingPreflightRow,
 } from '../../services/api/integrations';
 
 const STATE_META: Record<string, { label: string; cls: string }> = {
@@ -95,6 +96,63 @@ function IntegrationRow({ item }: { item: IntegrationStatusItem }) {
           <span>{item.notes}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Messaging preflight (MSG91 + Coexistence): honest readiness rows, each with
+// the owner's named next step. Rendered only when the backend supplies it.
+// ---------------------------------------------------------------------------
+
+function PreflightRow({ row }: { row: MessagingPreflightRow }) {
+  return (
+    <div className="py-2 border-t border-gray-100 first:border-t-0" data-testid={`preflight-${row.id}`}>
+      <div className="flex items-start gap-2">
+        {row.ok ? (
+          <Check className="w-4 h-4 mt-0.5 shrink-0 text-green-600" />
+        ) : (
+          <X className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" />
+        )}
+        <div className="min-w-0">
+          <span className="text-sm font-medium text-gray-900">{row.label}</span>
+          <span className="text-sm text-gray-500"> — {row.detail}</span>
+          {!row.ok && row.next_step && (
+            <div className="mt-0.5 text-xs text-amber-700">
+              Next step: {row.next_step}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function MessagingPreflightPanel({ report }: { report: IntegrationStatusReport }) {
+  const pf = report.messaging_preflight;
+  if (!pf || !Array.isArray(pf.rows) || pf.rows.length === 0) return null;
+  return (
+    <div className="mt-5">
+      <div className="flex items-center gap-2 mb-1">
+        <h4 className="font-semibold text-gray-900 text-sm">Messaging preflight (MSG91 + Coexistence)</h4>
+        <span
+          className={clsx(
+            'px-2 py-0.5 rounded-full text-[10px] font-medium',
+            pf.ok ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800',
+          )}
+        >
+          {pf.ok ? 'Ready' : 'Not ready'}
+        </span>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        Everything WhatsApp/SMS needs before arming, checked live. Nothing sends
+        until DISPATCH_MODE is armed on the server.
+      </p>
+      <div>
+        {pf.rows.map((row) => (
+          <PreflightRow key={row.id} row={row} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -184,6 +242,8 @@ export function IntegrationStatusCard() {
           ))}
         </div>
       )}
+
+      {report && <MessagingPreflightPanel report={report} />}
     </div>
   );
 }
