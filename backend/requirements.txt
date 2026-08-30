@@ -21,9 +21,11 @@ python-multipart==0.0.32
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
 # 48.0.0 fixes CVE-2024-12797, PYSEC-2026-35 (X.509 DNS name-constraint
 # bypass) and CVE-2026-26007 (EC public-key subgroup check); 48.0.1 fixes
-# GHSA-537c-gmf6-5ccf (vulnerable OpenSSL bundled in the wheel) -- all
-# without breaking API changes for our RSA-sign-only usage.
-cryptography==48.0.1
+# GHSA-537c-gmf6-5ccf (vulnerable OpenSSL bundled in the wheel); 50.0.0 fixes
+# CVE-2026-69247/69248/69249 (PKCS7 decrypt oracle, exponential cert-chain
+# recursion DoS, wildcard DNS-constraint bypass) -- none reachable from our
+# RSA-sign-only usage, but no breaking API changes for us either way.
+cryptography==50.0.0
 
 # Database
 pymongo==4.17.0
@@ -54,8 +56,12 @@ openpyxl==3.1.5
 # Pillow (manylinux wheels, no runtime system deps) normalises fetched product
 # images (any format -> RGB JPEG, downscaled) before embedding. Both lazy-imported
 # inside services/catalogue_pdf.py so a missing wheel can't crash app startup.
+# 12.3.0 fixes 18 CVEs since 11.3.0 (decompression bombs, OOB heap writes in
+# PSD/PCF/BDF/GD/font parsing, unbounded PDF zlib decompress, JPEG2000 tile
+# overflow) -- directly relevant here since this path decodes untrusted
+# fetched images.
 reportlab==4.2.5
-Pillow==11.3.0
+Pillow==12.3.0
 
 # Production Server (optional, uvicorn is primary)
 gunicorn==23.0.0
