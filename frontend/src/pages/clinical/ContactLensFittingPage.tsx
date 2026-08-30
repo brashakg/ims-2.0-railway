@@ -26,6 +26,7 @@ import { useAuth } from '../../context/AuthContext';
 import { customerApi, prescriptionApi } from '../../services/api';
 import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
 import { validateEyeDetailed } from '../../constants/rxLimits';
+import { formatPowerOrDash } from '../../utils/rxPowerValue';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
 const MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] as const;
@@ -360,7 +361,10 @@ export function ContactLensFittingPage() {
                 <tbody>
                   {fittings.map((rx) => {
                     const r = rx.cl_right || {}; const l = rx.cl_left || {};
-                    const cell = (e: any) => `${e.cl_power ?? '—'} · ${e.base_curve ?? '—'} · ${e.diameter ?? '—'}`;
+                    // Power goes through the shared signed formatter: a fitted
+                    // +4.00 is STORED as the number 4, and echoing it raw
+                    // printed an unsigned "4". BC/DIA are mm, never signed.
+                    const cell = (e: any) => `${formatPowerOrDash(e.cl_power)} · ${e.base_curve ?? '—'} · ${e.diameter ?? '—'}`;
                     const date = (rx.test_date || rx.testDate || rx.created_at || '').slice(0, 10);
                     return (
                       <tr key={rx.prescription_id || rx.id} className="border-b border-gray-50">
