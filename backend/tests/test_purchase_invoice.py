@@ -848,3 +848,100 @@ class TestDuplicateInvoiceRaceMaps409:
         r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         assert r.status_code == 409, r.text
         assert "already" in r.json()["detail"].lower()
+
+
+# ===========================================================================
+# BILL door - place of supply follows the DELIVERY store
+# ===========================================================================
+# The PO door (vendors._po_gst_parties) passes the delivery store's declared
+# state as the explicit place of supply -- the norm-correct answer for goods.
+# The bill door used to pass None and let the engine fall back to the
+# recipient GSTIN's state, so a store carrying a fallback GSTIN registered in
+# ANOTHER state booked the OPPOSITE inter-state verdict on the bill vs its
+# own PO. The shared GRN fixture (G1) is received at store S1; these tests
+# give S1 a declared state and watch the verdict follow the goods, not the
+# registration. The recipient-GSTIN choice itself is deliberately untouched
+# (an owner-gated question) -- the last assertion of the first test pins that.
+
+
+class TestBillPlaceOfSupplyFollowsDeliveryStore:
+    def test_missing_pos_defaults_to_delivery_store_declared_state(self):
+        """MH supplier, goods delivered to an MH store, entity GSTIN in JH:
+        the bill books INTRA-state (the goods never crossed a border), not the
+        IGST verdict the JH registration's state implies."""
+        db = _FakeDB()
+        db.collections["stores"][0]["state_code"] = "27"  # S1 is in Maharashtra
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "27"  # the delivery state
+        assert doc["interstate"] is False
+        assert doc["igst_total"] == 0.0
+        assert doc["cgst_total"] == 25.0 and doc["sgst_total"] == 25.0
+        # The ITC-register key (the supplier state) is untouched by the default.
+        assert doc["place_of_supply"] == "27"
+        # Owner-gated question NOT taken here: the entity's primary JH
+        # registration still claims the ITC.
+        assert doc["recipient_gstin"] == BUY_JH
+
+    def test_missing_pos_reads_state_name_when_no_code(self):
+        """The store fallback reads state_code first, the state NAME second --
+        the same two reads the PO door makes."""
+        db = _FakeDB()
+        db.collections["stores"][0]["state"] = "Maharashtra"
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "27"
+        assert doc["interstate"] is False
+
+    def test_dc_consolidated_bill_reads_the_dc_stores_declared_state(self):
+        """The DC branch of _delivery_store_declared_state is live behaviour
+        (prod holds 2 DELIVERY_CHALLAN receipts): a bill linked to a DC and
+        no GRN must resolve the delivery state through the DC's store. The
+        verifier proved this branch could silently break ({"grn_id": ...} ->
+        {"dc_id": ...}) with every other test green, so this one pins the
+        lookup itself."""
+        from api.routers.purchase_invoices import _delivery_store_declared_state
+
+        db = _FakeDB()
+        db.collections["grns"] = [{"grn_id": "DC1", "store_id": "S2"}]
+        db.collections["stores"].append({"store_id": "S2", "state_code": "27"})
+
+        got = _delivery_store_declared_state(db, None, ["DC1"])
+        assert got == "27", f"the DC's store state must resolve, got {got!r}"
+
+        # And an attached GRN doc outranks the DC list (first read wins).
+        db.collections["stores"].append({"store_id": "S3", "state_code": "20"})
+        got2 = _delivery_store_declared_state(db, {"store_id": "S3"}, ["DC1"])
+        assert got2 == "20"
+
+    def test_explicit_client_pos_stays_authoritative(self):
+        """An explicit place_of_supply beats the store default: with the
+        delivery store declared MH, an explicit '20' still books inter-state."""
+        db = _FakeDB()
+        db.collections["stores"][0]["state_code"] = "27"
+        cli = _app(db)
+        r = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(place_of_supply="20"),
+        )
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "20"
+        assert doc["interstate"] is True
+        assert doc["igst_total"] == 50.0 and doc["cgst_total"] == 0.0
+
+    def test_store_without_declared_state_keeps_gstin_fallback(self):
+        """A store with NO declared state changes nothing: the engine's
+        recipient-GSTIN fallback still answers (inter-state here) -- the
+        pre-fix behaviour for every store whose state was never filled in."""
+        db = _FakeDB()  # S1 carries no state_code / state
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "20"
+        assert doc["interstate"] is True

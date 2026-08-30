@@ -25,6 +25,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { customerApi, prescriptionApi } from '../../services/api';
 import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
+import { formatPowerOrDash } from '../../utils/rxPowerValue';
 import { validateEyeDetailed } from '../../constants/rxLimits';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
@@ -360,7 +361,10 @@ export function ContactLensFittingPage() {
                 <tbody>
                   {fittings.map((rx) => {
                     const r = rx.cl_right || {}; const l = rx.cl_left || {};
-                    const cell = (e: any) => `${e.cl_power ?? '—'} · ${e.base_curve ?? '—'} · ${e.diameter ?? '—'}`;
+                    // Power goes through the shared display formatter so a
+                    // stored +4.00 (a bare number 4) renders SIGNED, exactly
+                    // as on the printed card. BC/DIA are unsigned by nature.
+                    const cell = (e: any) => `${formatPowerOrDash(e.cl_power)} · ${e.base_curve ?? '—'} · ${e.diameter ?? '—'}`;
                     const date = (rx.test_date || rx.testDate || rx.created_at || '').slice(0, 10);
                     return (
                       <tr key={rx.prescription_id || rx.id} className="border-b border-gray-50">
