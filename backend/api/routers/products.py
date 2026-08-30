@@ -3475,78 +3475,24 @@ async def update_product(
             status_fields = _pm.apply_restamp_atomic(
                 product_id, existing, update_data, product_repo=repo
             )
-            # Products-convergence (inverse of catalog.py update->spine): mirror a
-            # price / tier / gst / active edit onto the catalog_products twin
-            # (shared id) so the storefront/PIM does not silently diverge from the
-            # billing spine after a spine-side edit. Only the fields actually
-            # changed are pushed (dot-notation onto the nested catalog pricing).
-            # Fail-soft: a catalog-sync error never breaks the product save.
+            # Products-convergence: mirror the edit onto the catalog_products
+            # twin so the storefront/PIM does not silently diverge from the
+            # billing spine. THE ONE rule lives in
+            # product_master.mirror_update_to_catalog_twin (which fields, both
+            # price spellings, what queues, pim-key-then-spine-key twin
+            # resolution, no upsert) -- this route used to carry its own copy,
+            # which drifted from the /products/master door's (PR #1029
+            # follow-up). Do not re-inline it here. Fail-soft: a mirror error
+            # never breaks the product save.
             try:
-                _cat_patch: dict = {}
-                if "mrp" in update_data:
-                    _cat_patch["pricing.mrp"] = update_data["mrp"]
-                if "offer_price" in update_data:
-                    _cat_patch["pricing.offer_price"] = update_data["offer_price"]
-                if "cost_price" in update_data:
-                    _cat_patch["pricing.cost_price"] = update_data["cost_price"]
-                if "discount_category" in update_data:
-                    _dc = update_data["discount_category"]
-                    _cat_patch["pricing.discount_category"] = (
-                        _dc.upper() if isinstance(_dc, str) else _dc
-                    )
-                if "hsn_code" in update_data:
-                    _cat_patch["hsn_code"] = update_data["hsn_code"]
-                if "gst_rate" in update_data:
-                    _cat_patch["gst_rate"] = update_data["gst_rate"]
-                if "is_active" in update_data:
-                    _cat_patch["is_active"] = update_data["is_active"]
-                if "description" in update_data:
-                    _cat_patch["description"] = update_data["description"]
-                # Queue the twin for the MANUAL Online Store push, but ONLY when
-                # a field the storefront actually shows moved. mrp / offer_price
-                # are the variant price fallbacks
-                # (shopify_push._resolve_variant_pricing) and description becomes
-                # descriptionHtml. cost_price / discount_category / hsn_code /
-                # gst_rate / is_active are in NO pushed payload -- flagging on
-                # those alone would queue a push that changes nothing on Shopify.
-                # Queuing is not publishing: a human still presses the button.
-                if any(
-                    _k in update_data for _k in ("mrp", "offer_price", "description")
-                ):
-                    _cat_patch["ecom.locally_modified"] = True
-                if _cat_patch:
-                    from ..dependencies import get_db as _gdb
+                from ..dependencies import get_db as _gdb
 
-                    _conn = _gdb()
-                    if _conn is not None and getattr(_conn, "is_connected", False):
-                        _cat = _conn.get_collection("catalog_products")
-                        if _cat is not None:
-                            # THE TWIN'S KEY IS NOT ALWAYS THE SPINE'S. A
-                            # door-created product's catalog twin is keyed on
-                            # `pim_product_id` -- a DIFFERENT uuid the create
-                            # door minted (product_master._build_pim_doc:
-                            # {"id": spine["pim_product_id"]}). Only legacy /
-                            # convergence twins share the spine id. Filtering
-                            # on product_id here silently missed the twin for
-                            # every door-created product: the POS price moved,
-                            # the website price stayed stale, and nothing ever
-                            # queued. Same resolution the service door uses
-                            # (product_master.update_product mirrors onto
-                            # updated["pim_product_id"]).
-                            _twin_id = existing.get("pim_product_id") or product_id
-                            # A QUEUED ROW MUST BELONG TO A STATUS BUCKET. This
-                            # door sets the flag by dot-notation, so on a twin
-                            # with no `ecom` sub-doc Mongo creates
-                            # {ecom: {locally_modified: true}} -- pending on the
-                            # Online Store screen while the DRAFT and PUBLISHED
-                            # cards both count it as neither (the 6eede9b bug,
-                            # one door over). Defaulted only when ABSENT, so an
-                            # edit can never demote a live product back to DRAFT.
-                            if _cat_patch.get("ecom.locally_modified"):
-                                _twin = _cat.find_one({"id": _twin_id}) or {}
-                                if not (_twin.get("ecom") or {}).get("status"):
-                                    _cat_patch["ecom.status"] = "DRAFT"
-                            _cat.update_one({"id": _twin_id}, {"$set": _cat_patch})
+                _pm.mirror_update_to_catalog_twin(
+                    product_id=product_id,
+                    current=existing,
+                    patch=update_data,
+                    db=_gdb(),
+                )
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "[PRODUCTS] catalog mirror on update skipped for %s",

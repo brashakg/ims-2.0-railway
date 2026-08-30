@@ -890,8 +890,24 @@ def test_stock_miss_holds_the_order_and_tasks_the_fulfilling_stores_manager(
     assert order["fulfillment_hold"] is True, (
         "a paid order that could not claim stock must go on fulfillment hold"
     )
-    assert "Stock could not be claimed" in order["rx_hold_reason"]
+    # The stock hold owns its OWN reason field. Riding rx_hold_reason made
+    # every surface call it "Rx hold" -- staff chased a prescription that was
+    # never the problem (PR #1029 follow-up 2).
+    assert "Stock could not be claimed" in order["stock_hold_reason"]
+    assert not order.get("rx_hold_reason"), (
+        "a stock miss must not write clinical Rx fields"
+    )
     assert order["rx_pending"] is False  # a stock hold is NOT an Rx hold
+
+    # ...and the shared classifier + refusal NAME it a stock hold, so the
+    # lifecycle 400 no longer misdirects staff to the Rx flow.
+    import pytest as _pytest
+
+    assert orders_mod.order_hold_kinds(order) == ["STOCK"]
+    with _pytest.raises(Exception) as ei:
+        orders_mod.assert_no_active_rx_hold(order)
+    assert "stock hold" in str(ei.value.detail)
+    assert "Rx hold" not in str(ei.value.detail)
 
     # ONE P1 task, store-scoped to the fulfilling store, assigned to its manager.
     stock_tasks = [

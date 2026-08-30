@@ -604,8 +604,12 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
     # FLAG-AND-HOLD (house shape, owner 2026-06-30): fulfillment_hold is the
     # one flag every orders surface reads (FE: rx_pending || fulfillment_hold)
     # and the ready/shipped/delivered transitions reject while it is set. The
-    # reason lands in rx_hold_reason ONLY when empty (never clobbers a real Rx
-    # detail); clear-rx-hold releases it after the stock is resolved.
+    # stock hold owns its OWN reason field (stock_hold_reason) -- it must not
+    # ride rx_hold_reason: that field is clinical Rx detail, and a stock miss
+    # labelled "Rx hold" sent staff chasing a prescription that was never the
+    # problem (orders.order_hold_kinds tells the two apart; it also still
+    # recognises legacy orders whose stock reason landed in rx_hold_reason).
+    # clear-rx-hold releases it after the stock is resolved.
     order = None
     try:
         orders = (
@@ -613,12 +617,13 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
         )
         if orders is not None:
             order = orders.find_one({"order_id": order_id})
-            hold_set = {"fulfillment_hold": True}
-            if not (order or {}).get("rx_hold_reason"):
-                hold_set["rx_hold_reason"] = (
+            hold_set = {
+                "fulfillment_hold": True,
+                "stock_hold_reason": (
                     "Stock could not be claimed for this paid online order "
                     "(oversell) - resolve stock, then clear the hold."
-                )
+                ),
+            }
             orders.update_one({"order_id": order_id}, {"$set": hold_set})
     except Exception as exc:  # noqa: BLE001
         logger.warning(

@@ -87,8 +87,15 @@ interface OrderRow {
   map_status: MapStatus;
   map_error: string | null;
   placed_at: string | null;
-  /** Clinical FLAG-AND-HOLD: spectacle-lens order without a captured Rx. */
+  /** FLAG-AND-HOLD: any active hold (rx_pending || fulfillment_hold). */
   rx_hold: boolean;
+  /** The clinical half specifically (rx_pending). */
+  rx_pending: boolean;
+  /** Stock-miss hold: a PAID order whose units could not be claimed
+   *  (oversell). Rides the same fulfillment_hold flag but is NOT an Rx
+   *  problem — the chip/confirm wording must not send staff after a
+   *  prescription. */
+  stock_hold: boolean;
   rx_hold_cleared: boolean;
   rx_hold_reasons: string[];
 }
@@ -102,6 +109,13 @@ function toRow(o: Record<string, any>): OrderRow {
     ? o.rx_hold_reasons.map((r: unknown) => String(r)).filter(Boolean)
     : [];
   if (!reasons.length && o.rx_hold_reason) reasons.push(String(o.rx_hold_reason));
+  // The stock hold owns its own reason field; legacy stock-miss orders (first
+  // cut of #1029) carried the stock text inside rx_hold_reason instead.
+  if (o.stock_hold_reason) reasons.push(String(o.stock_hold_reason));
+  const legacyStockReason = String(o.rx_hold_reason || '').startsWith(
+    'Stock could not be claimed',
+  );
+  const isHeld = !!(o.fulfillment_hold || o.rx_pending);
   return {
     id: o.order_id != null ? String(o.order_id) : null,
     order_number: o.order_number ?? null,
@@ -122,7 +136,9 @@ function toRow(o: Record<string, any>): OrderRow {
     map_status: mapStatus,
     map_error: o.map_error ?? null,
     placed_at: o.placed_at ?? o.created_at ?? null,
-    rx_hold: !!(o.fulfillment_hold || o.rx_pending),
+    rx_hold: isHeld,
+    rx_pending: !!o.rx_pending,
+    stock_hold: isHeld && (!!o.stock_hold_reason || legacyStockReason),
     rx_hold_cleared: !!o.rx_hold_cleared,
     rx_hold_reasons: reasons,
   };
@@ -449,14 +465,27 @@ export default function OnlineOrdersPage() {
   const handleClearHold = useCallback(
     async (order: OrderRow) => {
       if (!order.id) return;
-      const sure = window.confirm(
-        'Clear the Rx hold on this order?\n\nConfirm only after the prescription has been captured or verified — the order then becomes deliverable.',
-      );
+      // Name the hold being cleared — telling staff "Rx hold" for a stock
+      // miss asks them to verify a prescription that was never the problem.
+      const confirmMsg =
+        order.stock_hold && !order.rx_pending
+          ? 'Clear the stock hold on this order?\n\nConfirm only after the stock has been found or arranged — the order then becomes deliverable.'
+          : order.stock_hold
+            ? 'Clear the Rx + stock hold on this order?\n\nConfirm only after the prescription is verified AND the stock is resolved — the order then becomes deliverable.'
+            : 'Clear the Rx hold on this order?\n\nConfirm only after the prescription has been captured or verified — the order then becomes deliverable.';
+      const sure = window.confirm(confirmMsg);
       if (!sure) return;
       setClearingId(order.id);
       try {
-        await api.post(`/online-store/orders/${encodeURIComponent(order.id)}/clear-rx-hold`);
-        toast.success('Rx hold cleared — the order can now be fulfilled.');
+        const res = await api.post(
+          `/online-store/orders/${encodeURIComponent(order.id)}/clear-rx-hold`,
+        );
+        const releasedMsg = (res?.data as Record<string, any> | undefined)?.message;
+        toast.success(
+          typeof releasedMsg === 'string' && releasedMsg
+            ? releasedMsg
+            : 'Hold cleared — the order can now be fulfilled.',
+        );
         await load();
       } catch (e) {
         const msg =
@@ -711,10 +740,17 @@ export default function OnlineOrdersPage() {
                         title={
                           order.rx_hold_reasons.length
                             ? order.rx_hold_reasons.join(' · ')
-                            : 'Spectacle-lens order held: no valid prescription captured yet'
+                            : order.stock_hold
+                              ? 'Paid order held: its stock could not be claimed (oversell)'
+                              : 'Spectacle-lens order held: no valid prescription captured yet'
                         }
                       >
-                        <ShieldCheck className="w-3 h-3" /> Rx HOLD
+                        <ShieldCheck className="w-3 h-3" />{' '}
+                        {order.stock_hold
+                          ? order.rx_pending
+                            ? 'Rx + STOCK HOLD'
+                            : 'STOCK HOLD'
+                          : 'Rx HOLD'}
                       </span>
                     )}
                     {payLabel && (
@@ -800,7 +836,13 @@ export default function OnlineOrdersPage() {
                         onClick={() => handleClearHold(order)}
                         disabled={isClearing}
                         className="btn-outline inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
-                        title="Release the Rx hold after the prescription is captured/verified"
+                        title={
+                          order.stock_hold && !order.rx_pending
+                            ? 'Release the stock hold after the goods are found/arranged'
+                            : order.stock_hold
+                              ? 'Release the Rx + stock hold after the prescription is verified and the stock is resolved'
+                              : 'Release the Rx hold after the prescription is captured/verified'
+                        }
                       >
                         {isClearing ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
