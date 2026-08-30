@@ -5279,6 +5279,24 @@ async def create_vendor_bill(
     # accepted by the owner as the floor: goods deliberately declared as
     # services still book -- no software can read the carton.)
     if not bill.grn_id:
+        # A named purchase order IS a goods signal the software can see --
+        # the line-detail invoice door refuses exactly this shape
+        # (po_id with no receipt -> GRN_LINK_REQUIRED), and the two doors
+        # must not drift. A declared SERVICES bill that names a PO is a
+        # contradiction, not a carve-out.
+        if getattr(bill, "po_id", None):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "GRN_LINK_REQUIRED",
+                    "message": (
+                        "This bill names a purchase order, so it is a "
+                        "goods bill - link the goods receipt for that "
+                        "order before recording it. A services or "
+                        "expense bill should not name a purchase order."
+                    ),
+                },
+            )
         if bill.bill_kind is None:
             raise HTTPException(
                 status_code=422,

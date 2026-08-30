@@ -308,6 +308,38 @@ class TestHeaderBillMustDeclareItsKind:
         assert _bills(db)[0]["bill_kind"] == "GOODS"
         assert _bills(db)[0]["grn_id"] == "G-STD-1"
 
+    def test_naming_a_po_is_a_goods_signal_even_declared_services(self):
+        """The verifier booked Rs 52,500 receipt-less by declaring SERVICES
+        while NAMING a purchase order -- a goods signal the software can
+        see, and the exact shape the line-detail invoice door refuses.
+        The two doors must give one answer to one signal."""
+        db = _db()
+        _wire(db)
+        r = _vcli().post(
+            "/api/v1/vendors/V-G1/bills",
+            json=_frames_payload(bill_kind="SERVICES", po_id="PO-77"),
+        )
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "GRN_LINK_REQUIRED"
+        assert "purchase order" in r.json()["detail"]["message"].lower()
+        assert _bills(db) == []
+        assert _payable(db) == 0.0
+
+    def test_a_receipt_linked_bill_is_stamped_goods_whatever_was_declared(self):
+        """The stored bill_kind is a FACT derived from the receipt, not the
+        caller's word: a bill linking a goods receipt is GOODS even if the
+        caller typed SERVICES. Pinned because disabling the stamp survived
+        the whole suite (verifier, 2026-08-30)."""
+        db = _db()
+        db.get_collection("grns").insert_one(_std_grn_doc())
+        _wire(db)
+        r = _vcli().post(
+            "/api/v1/vendors/V-G1/bills",
+            json=_frames_payload(bill_kind="SERVICES", grn_id="G-STD-1"),
+        )
+        assert r.status_code == 201, r.text
+        assert _bills(db)[0]["bill_kind"] == "GOODS"
+
     def test_a_typo_kind_is_refused_with_the_allowed_values(self):
         db = _db()
         _wire(db)
