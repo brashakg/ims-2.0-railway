@@ -143,6 +143,7 @@ def test_bug118_hq_discounted_below_offer_blocked(client, staff_headers, priced_
 
 def test_bug118_cart_discount_on_hq_discounted_blocked(client, staff_headers, priced_orders):
     pid = _seed_product(priced_orders, mrp=10000.0, offer_price=9000.0, cost_price=4000.0)
-    r = _post(client, staff_headers, [_item(pid, 9000.0)], cart_discount_percent=5.0)
+    r = _post(client, staff_headers, [_item(pid, 9000.0)], cart_discount_percent=5.0,
+              cart_discount_reason="test: bug118 probe")
     assert r.status_code == 403, r.text
     assert "cart discount" in r.text.lower()
