@@ -2146,6 +2146,7 @@ async def create_order(
             # Consumed by loyalty_engine's >=5% earn gate; must be reset every
             # iteration (the _ceiling vars below persist across loop turns).
             _loyalty_eff = float(item.discount_percent or 0.0)
+            _below_ceiling = False  # typed unit_price under the catalog price
             if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
                 _mrp = _mrp_by_pid.get(_pid)
                 _offer = _offer_by_pid.get(_pid)
@@ -2153,6 +2154,7 @@ async def create_order(
                 _up = item.unit_price
                 _hq_discounted = bool(_offer and _mrp and _offer < _mrp)
                 _ceiling = _offer if _hq_discounted else _mrp
+                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
                 if _ceiling and _up > _ceiling + 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -2285,23 +2287,24 @@ async def create_order(
                     )
 
             # Owner ruling 2026-08-30: a MANUAL discount always carries a
-            # written reason (no applicable offer means someone chose to give
-            # it). Offer-price/MRP pricing is not a manual discount, and promo
-            # engine discounts ride applied_promos — neither trips this guard.
-            # The C-4 zero-total gate below additionally demands an APPROVER
-            # for 100% discounts; this guard covers the 1-99% band.
-            if (item.discount_percent or 0) > 0 and not str(
-                item.discount_reason or ""
-            ).strip():
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"A discount reason is required for "
-                        f"{item.product_name or item.product_id} "
-                        f"({round(item.discount_percent, 2)}% manual discount, "
-                        f"no offer applied)."
-                    ),
-                )
+            # written reason — whether given as a discount_percent OR by
+            # typing a unit_price under the catalog price (the adversarial
+            # review's "type the price instead of the %" bypass). Selling AT
+            # the catalog offer/MRP is not a manual discount; promo-engine
+            # discounts ride applied_promos — neither trips this guard. The
+            # C-4 zero-total gate below additionally demands an APPROVER for
+            # 100% discounts. Minimum 4 characters ("." is not a reason —
+            # matches the superadmin-edit reason floor).
+            if (item.discount_percent or 0) > 0 or _below_ceiling:
+                if len(str(item.discount_reason or "").strip()) < 4:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"A discount reason (at least 4 characters) is "
+                            f"required for {item.product_name or item.product_id} "
+                            f"— manual discount with no offer applied."
+                        ),
+                    )
 
             discount_amount = item_total * (item.discount_percent / 100)
             item_subtotal = item_total - discount_amount
@@ -2472,14 +2475,15 @@ async def create_order(
         # Owner ruling 2026-08-30: bill-level manual discounts carry a written
         # reason — for EVERY role, admins included (the reason is
         # accountability, not a cap; mirrors the per-line guard above).
-        if cart_discount_percent > 0 and not str(
+        if cart_discount_percent > 0 and len(str(
             order.cart_discount_reason or ""
-        ).strip():
+        ).strip()) < 4:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"A reason is required for the {cart_discount_percent}% "
-                    f"bill-level discount (no offer applied)."
+                    f"A reason (at least 4 characters) is required for the "
+                    f"{cart_discount_percent}% bill-level discount "
+                    f"(no offer applied)."
                 ),
             )
 
@@ -3729,6 +3733,7 @@ async def add_order_item(
         # Mirror of create_order's loyalty-effective discount (branch-drift
         # defence) — explicit + implied vs the offer/MRP ceiling.
         _loyalty_eff = float(item.discount_percent or 0.0)
+        _below_ceiling = False  # typed unit_price under the catalog price
         _pid = item.product_id or ""
         # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
         # cost_at_sale below and fed to the floor pass. None (virtual id /
@@ -3753,6 +3758,7 @@ async def add_order_item(
                 _up = item.unit_price
                 _hq = bool(_offer and _mrp and _offer < _mrp)
                 _ceiling = _offer if _hq else (_mrp if (_mrp and _mrp > 0) else None)
+                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
                 if _ceiling and _up > _ceiling + 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -3824,20 +3830,19 @@ async def add_order_item(
             )
 
         # Owner ruling 2026-08-30: same manual-discount-needs-a-reason rule
-        # as create_order (this path duplicates the create guards; keeping
-        # them in lockstep is the branch-drift defence).
-        if (item.discount_percent or 0) > 0 and not str(
-            item.discount_reason or ""
-        ).strip():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"A discount reason is required for "
-                    f"{item.product_name or item.product_id} "
-                    f"({round(item.discount_percent, 2)}% manual discount, "
-                    f"no offer applied)."
-                ),
-            )
+        # as create_order (explicit % OR a typed unit_price under the catalog
+        # ceiling; min 4 chars). This path duplicates the create guards —
+        # keeping them in lockstep is the branch-drift defence.
+        if (item.discount_percent or 0) > 0 or _below_ceiling:
+            if len(str(item.discount_reason or "").strip()) < 4:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"A discount reason (at least 4 characters) is required "
+                        f"for {item.product_name or item.product_id} — manual "
+                        f"discount with no offer applied."
+                    ),
+                )
 
         # Calculate item totals
         item_total = item.unit_price * item.quantity

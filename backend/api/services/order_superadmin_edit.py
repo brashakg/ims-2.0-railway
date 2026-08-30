@@ -106,6 +106,12 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
         "discount_percent": disc_pct,
         "discount_amount": discount_amount,
         "item_total": item_total,
+        # Owner ruling 2026-08-30: discount accountability survives an edit —
+        # the reason/approver recorded at sale must not be wiped by a
+        # superadmin line rebuild (the edit's own top-level reason is audited
+        # separately as superadmin_edit_reason).
+        "discount_reason": line.get("discount_reason"),
+        "discount_approved_by": line.get("discount_approved_by"),
         # Carry COGS + clinical fields through unchanged when supplied so a
         # historical P&L / lab spec is not silently dropped on an edit.
         "cost_at_sale": line.get("cost_at_sale"),

@@ -647,6 +647,7 @@ export function POSLayout() {
           quantity: item.quantity,
           unit_price: item.unit_price,
           discount_percent: item.discount_percent,
+          discount_reason: item.discount_reason || undefined,
           prescription_id: item.linked_prescription_id,
           lens_details: item.lens_details,
           item_note: item.item_note || undefined,
@@ -1397,7 +1398,8 @@ export function POSLayout() {
       {discountItem && (
         <DiscountModal item={{ product_id: discountItem.product_id, name: discountItem.name, sku: discountItem.sku, unitPrice: discountItem.unit_price, quantity: discountItem.quantity, category: discountItem.category, brand: discountItem.brand, discountPercent: discountItem.discount_percent } as any}
           maxDiscountPercent={user?.discountCap || 10}
-          onApply={(pct) => { store.applyDiscount(discountItem.id, pct); setDiscountItem(null); }}
+          onApply={(pct, _amt, reason) => { store.applyDiscount(discountItem.id, pct, reason); setDiscountItem(null); }}
+          initialReason={discountItem.discount_reason || ''}
           onClose={() => setDiscountItem(null)} />
       )}
       {showReceipt && <POSReceipt onClose={() => setShowReceipt(false)} />}

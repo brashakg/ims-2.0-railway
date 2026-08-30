@@ -11,8 +11,11 @@ import clsx from 'clsx';
 interface DiscountModalProps {
   item: CartItem;
   maxDiscountPercent: number; // From user.discountCap
-  onApply: (discountPercent: number, discountAmount: number) => void;
+  // Owner ruling 2026-08-30: every manual discount carries a written reason
+  // (server enforces >=4 chars; the modal enforces it up front).
+  onApply: (discountPercent: number, discountAmount: number, reason: string) => void;
   onClose: () => void;
+  initialReason?: string;
 }
 
 // Quick discount percentage options
@@ -23,8 +26,10 @@ export function DiscountModal({
   maxDiscountPercent,
   onApply,
   onClose,
+  initialReason,
 }: DiscountModalProps) {
   const [discountType, setDiscountType] = useState<'percent' | 'amount'>('percent');
+  const [reason, setReason] = useState<string>(initialReason || '');
   const [inputValue, setInputValue] = useState<string>(
     item.discountPercent > 0 ? item.discountPercent.toString() : ''
   );
@@ -62,16 +67,20 @@ export function DiscountModal({
     setInputValue(percent.toString());
   };
 
+  const reasonMissing =
+    calculations.discountPercent > 0 && reason.trim().length < 4;
+
   const handleApply = () => {
-    if (calculations.exceedsLimit) return;
+    if (calculations.exceedsLimit || reasonMissing) return;
     onApply(
       Math.round(calculations.discountPercent * 100) / 100,
-      calculations.discountAmount
+      calculations.discountAmount,
+      reason.trim()
     );
   };
 
   const handleClearDiscount = () => {
-    onApply(0, 0);
+    onApply(0, 0, '');
   };
 
   return (
@@ -219,6 +228,33 @@ export function DiscountModal({
             </div>
           </div>
 
+          {/* Discount reason — compulsory when any discount is given
+              (owner ruling 2026-08-30: no offer applied means someone chose
+              to give it; the reason is the accountability). */}
+          {calculations.discountPercent > 0 && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Reason for discount <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={reason}
+                onChange={e => setReason(e.target.value)}
+                maxLength={200}
+                placeholder="e.g. price match — competitor quote"
+                className={clsx(
+                  'input-field',
+                  reasonMissing && 'border-amber-400 focus:border-amber-500'
+                )}
+              />
+              {reasonMissing && (
+                <p className="mt-1 text-xs text-amber-600">
+                  Required — at least 4 characters. No reason, no discount.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Calculation Preview */}
           {parseFloat(inputValue) > 0 && (
             <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
@@ -254,7 +290,7 @@ export function DiscountModal({
             </button>
             <button
               onClick={handleApply}
-              disabled={calculations.exceedsLimit || parseFloat(inputValue) < 0}
+              disabled={calculations.exceedsLimit || reasonMissing || parseFloat(inputValue) < 0}
               className="btn-primary"
             >
               Apply Discount

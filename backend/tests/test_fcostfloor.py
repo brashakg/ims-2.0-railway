@@ -137,8 +137,7 @@ def _item(pid, unit_price, **over):
     # Owner ruling 2026-08-30: every MANUAL discount carries a written reason
     # (see test_discount_reason_and_bill_type.py). These tests exercise the
     # FLOOR, so a boilerplate reason keeps them focused on their own gate.
-    if float(it.get("discount_percent") or 0) > 0 and not it.get("discount_reason"):
-        it["discount_reason"] = "test: floor-suite discount"
+    it.setdefault("discount_reason", "test: floor-suite discount")
     return it
 
 

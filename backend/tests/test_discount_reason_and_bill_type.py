@@ -80,7 +80,7 @@ def test_line_discount_without_reason_is_400(client, auth_headers, floor_env):
         [_raw_item(pid, 200.0, discount_percent=10)],
     )
     assert r.status_code == 400
-    assert "reason is required" in r.json()["detail"].lower()
+    assert "is required" in r.json()["detail"].lower()
 
 
 def test_line_discount_with_reason_is_accepted(client, auth_headers, floor_env):
@@ -102,7 +102,7 @@ def test_cart_discount_without_reason_is_400(client, auth_headers, floor_env):
         cart_discount_percent=2,
     )
     assert r.status_code == 400
-    assert "reason is required" in r.json()["detail"].lower()
+    assert "is required" in r.json()["detail"].lower()
 
 
 def test_cart_discount_with_reason_is_accepted(client, auth_headers, floor_env):

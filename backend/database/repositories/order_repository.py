@@ -68,9 +68,10 @@ def fy_label(dt: datetime) -> str:
 
 # Owner ruling 2026-08-30: the BILL TYPE follows the money — no separate
 # order-type step at the POS. Derived from payment_status in ONE place so the
-# rule can never fork (payment_status itself is computed in add_payment below
-# and in the superadmin-edit recomputes in orders.py, all of which stamp
-# bill_type through this helper).
+# rule can never fork (payment_status is computed in add_payment below, in
+# the superadmin-edit recomputes in orders.py, and in the UPI auto-reconcile
+# in services/upi_qr.py — ALL of which stamp bill_type through this helper;
+# grep payment_status writers before adding another).
 #   PAID    -> FINAL   (full amount received: final bill)
 #   PARTIAL -> ADVANCE (part received: advance, balance at delivery)
 #   CREDIT  -> CREDIT  (approved pay-later promise)

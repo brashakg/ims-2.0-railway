@@ -68,6 +68,9 @@ def _item(pid, unit_price, **over):
     it = {"product_id": pid, "product_name": "Priced Frame", "item_type": "FRAME",
           "category": "FRAME", "quantity": 1, "unit_price": unit_price}
     it.update(over)
+    # Owner ruling 2026-08-30: manual discounts (incl. typed-below-catalog
+    # prices) need a reason; boilerplate keeps these tests on their own gates.
+    it.setdefault("discount_reason", "test: pricing-suite probe")
     return it
 
 

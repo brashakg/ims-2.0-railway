@@ -283,6 +283,9 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
     new_status = (
         "PAID" if new_balance <= 0.01 else ("PARTIAL" if new_paid > 0 else "UNPAID")
     )
+    # Owner ruling 2026-08-30: bill type follows the money — same single
+    # derivation as add_payment / the superadmin recomputes.
+    from database.repositories.order_repository import derive_bill_type
 
     try:
         orders_coll.update_one(
@@ -293,6 +296,7 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
                     "amount_paid": new_paid,
                     "balance_due": max(0.0, new_balance),
                     "payment_status": new_status,
+                    "bill_type": derive_bill_type(new_status),
                     "updated_at": now_iso,
                 },
             },
