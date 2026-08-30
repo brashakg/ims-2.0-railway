@@ -259,3 +259,97 @@ def test_deliver_with_payment_cashier_partial_collect_still_gated(
     # money recorded (by design — non-atomic), delivery refused
     assert doc["amount_paid"] == 500.0
     assert doc["status"] == "READY"
+
+
+# ---------------------------------------------------------------------------
+# Panel should-fixes: the CREDIT (khata) case, and the REAL engine end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_credit_khata_delivery_gated_for_cashier_manager_passes(
+    client, wired_orders
+):
+    """The headline behavior change: a CREDIT-tender (khata) sale keeps its
+    full balance_due, so cashiers can no longer hand it over ungated —
+    manager delivers directly. Fails if the gate regresses to PARTIAL-only."""
+    _seed_order(
+        wired_orders["order_repo"],
+        amount_paid=0.0,
+        balance_due=1000.0,
+        payment_status="CREDIT",
+        payments=[{"payment_id": "p-cr", "method": "CREDIT", "amount": 1000.0}],
+    )
+    r = client.post("/api/v1/orders/ord-hold-1/deliver", headers=_cashier_headers())
+    assert r.status_code == 403, r.text
+    r2 = client.post("/api/v1/orders/ord-hold-1/deliver", headers=_manager_headers())
+    assert r2.status_code == 200, r2.text
+
+
+def test_real_engine_token_roundtrip_through_the_door(
+    client, wired_orders, monkeypatch
+):
+    """REAL ApprovalEngine end-to-end (no fakes): cashier requests, manager
+    PIN-approves, the door consumes the token once — a replay on a second
+    order is refused. Pins the kwargs/context contract the gate sends."""
+    from api.routers import orders as orders_module
+    from api.services.approvals import ApprovalEngine, set_approver_pin
+
+    fake_db = wired_orders["db"]
+    # The gate builds its engine over _get_db(); point it at the same store.
+    monkeypatch.setattr(orders_module, "_get_db", lambda: fake_db)
+
+    # Manager with a PIN on the users collection the engine reads.
+    fake_db.get_collection("users").insert_one(
+        {"user_id": "test-mgr-9", "roles": ["STORE_MANAGER"],
+         "store_ids": ["BV-TEST-01"]}
+    )
+    res = set_approver_pin(fake_db, "test-mgr-9", "4321", "test-mgr-9")
+    assert res.get("ok"), res
+
+    engine = ApprovalEngine(db=fake_db)
+    req = engine.request(
+        action_type="CREDIT_DELIVERY",
+        requested_by="test-cashier-9",
+        requested_by_roles=["SALES_CASHIER"],
+        store_id="BV-TEST-01",
+        context={"order_id": "ord-hold-1"},
+        reason="customer taking delivery on credit",
+    )
+    assert req.get("ok"), req
+    approved = engine.approve(
+        req["request_id"],
+        approver_user_id="test-mgr-9",
+        approver_roles=["STORE_MANAGER"],
+        pin="4321",
+        approver_store_ids=["BV-TEST-01"],
+    )
+    assert approved.get("ok"), approved
+    token = approved["approval_token"]
+
+    _seed_order(
+        wired_orders["order_repo"],
+        amount_paid=0.0,
+        balance_due=1000.0,
+        payment_status="PARTIAL",
+    )
+    r = client.post(
+        "/api/v1/orders/ord-hold-1/deliver",
+        json={"approval_token": token},
+        headers=_cashier_headers(),
+    )
+    assert r.status_code == 200, r.text
+
+    # Replay against ANOTHER order: consumed + context-bound -> refused.
+    _seed_order(
+        wired_orders["order_repo"],
+        order_id="ord-hold-2",
+        amount_paid=0.0,
+        balance_due=500.0,
+        payment_status="PARTIAL",
+    )
+    r2 = client.post(
+        "/api/v1/orders/ord-hold-2/deliver",
+        json={"approval_token": token},
+        headers=_cashier_headers(),
+    )
+    assert r2.status_code == 403, r2.text

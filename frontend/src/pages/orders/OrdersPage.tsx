@@ -175,6 +175,9 @@ export function OrdersPage() {
   // Deliver confirmation modal state
   const [showDeliverModal, setShowDeliverModal] = useState(false);
   const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
+  // Credit-delivery gate (owner ruling): delivering with a balance due needs
+  // a manager, or a manager-approved token pasted here by other roles.
+  const [deliverToken, setDeliverToken] = useState('');
   const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
 
   // Build item #16 — post-creation order/invoice edit. Owner decision 2026-06-19:
@@ -440,6 +443,7 @@ export function OrdersPage() {
   // Open deliver confirmation modal
   const openDeliverModal = (order: Order) => {
     setDeliverOrder(order);
+    setDeliverToken('');
     setShowDeliverModal(true);
   };
 
@@ -449,7 +453,10 @@ export function OrdersPage() {
 
     setIsDeliveringOrder(true);
     try {
-      await orderApi.deliverOrder(deliverOrder.id);
+      await orderApi.deliverOrder(
+        deliverOrder.id,
+        deliverToken.trim() ? { approval_token: deliverToken.trim() } : undefined
+      );
       toast.success('Order marked as delivered');
       setShowDeliverModal(false);
       setDeliverOrder(null);
@@ -1100,7 +1107,31 @@ export function OrdersPage() {
                   <span className="text-sm text-gray-500">Grand Total:</span>
                   <span className="font-bold text-gray-900">{formatCurrency(deliverOrder.grandTotal || 0)}</span>
                 </div>
+                {(deliverOrder.balanceDue || 0) > 0 && (
+                  <div className="flex justify-between mt-1">
+                    <span className="text-sm font-medium text-red-600">Balance Due:</span>
+                    <span className="font-bold text-red-600">{formatCurrency(deliverOrder.balanceDue || 0)}</span>
+                  </div>
+                )}
               </div>
+
+              {/* Credit-delivery gate: a balance still due needs a manager */}
+              {(deliverOrder.balanceDue || 0) > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                  <p className="text-sm text-amber-800">
+                    <strong>{formatCurrency(deliverOrder.balanceDue || 0)} is still due.</strong>{' '}
+                    Collect it first (Record Payment), or deliver on credit — managers
+                    can deliver directly; other roles need a manager-approved token.
+                  </p>
+                  <input
+                    type="text"
+                    value={deliverToken}
+                    onChange={(e) => setDeliverToken(e.target.value)}
+                    placeholder="Manager approval token (if you are not a manager)"
+                    className="input-field text-sm"
+                  />
+                </div>
+              )}
 
               {/* Confirmation message */}
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
