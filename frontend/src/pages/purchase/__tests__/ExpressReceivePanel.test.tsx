@@ -33,6 +33,20 @@ vi.mock('../../../context/ToastContext', () => ({
 import { ExpressReceivePanel } from '../ExpressReceivePanel';
 import { grnCockpitApi } from '../../../services/api/grnCockpit';
 import type { CockpitOpenPO } from '../../../services/api/grnCockpit';
+import { buildApiError } from '../../../services/api/client';
+import type { AxiosError } from 'axios';
+
+/** Reject EXACTLY what the production interceptor delivers for a backend
+ * refusal — an ApiError built by the real transform (P0-3 launch gate).
+ * Hand-built `{response:{data:{detail}}}` axios shapes are banned here: the
+ * client strips `.response` before any component sees the error, so fixtures
+ * shaped that way kept these tests green while the recovery banner was dead
+ * in prod (hollow-double class). */
+const serverRefusal = (status: number, detail: unknown) =>
+  buildApiError({
+    message: `Request failed with status code ${status}`,
+    response: { status, data: { detail } },
+  } as unknown as AxiosError<{ message?: string; detail?: string }>);
 
 const uploadDocMock = grnCockpitApi.uploadDoc as unknown as ReturnType<typeof vi.fn>;
 const expressMock = grnCockpitApi.expressReceive as unknown as ReturnType<typeof vi.fn>;
@@ -285,13 +299,9 @@ describe('ExpressReceivePanel — non-clean edits flip to the two-step path', ()
   });
 
   it('falls back to two-step when the server answers EXPRESS_NOT_CLEAN', async () => {
-    expressMock.mockRejectedValue({
-      response: {
-        data: {
-          detail: { code: 'EXPRESS_NOT_CLEAN', message: 'Line 1 is not clean' },
-        },
-      },
-    });
+    expressMock.mockRejectedValue(
+      serverRefusal(400, { code: 'EXPRESS_NOT_CLEAN', message: 'Line 1 is not clean' }),
+    );
     const onFallback = vi.fn();
     const { container } = renderPanel({ onFallbackToTwoStep: onFallback });
     await passStep1(container);
@@ -308,19 +318,15 @@ describe('ExpressReceivePanel — server failure modes', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('EXPRESS_PARTIAL shows the bold recovery banner linking pending receipts', async () => {
-    expressMock.mockRejectedValue({
-      response: {
-        data: {
-          detail: {
-            code: 'EXPRESS_PARTIAL',
-            grn_id: 'grn-9',
-            grn_number: 'GRN-BOK-26-0099',
-            message:
-              'Receipt GRN-BOK-26-0099 was created but not accepted -- open the receiving screen to accept or void it.',
-          },
-        },
-      },
-    });
+    expressMock.mockRejectedValue(
+      serverRefusal(409, {
+        code: 'EXPRESS_PARTIAL',
+        grn_id: 'grn-9',
+        grn_number: 'GRN-BOK-26-0099',
+        message:
+          'Receipt GRN-BOK-26-0099 was created but not accepted -- open the receiving screen to accept or void it.',
+      }),
+    );
     const onOpenPending = vi.fn();
     const { container } = renderPanel({ onOpenPendingReceipts: onOpenPending });
     await passStep1(container);
@@ -339,16 +345,12 @@ describe('ExpressReceivePanel — server failure modes', () => {
   });
 
   it('ATTACHMENT_REQUIRED returns to step 1 with the toast', async () => {
-    expressMock.mockRejectedValue({
-      response: {
-        data: {
-          detail: {
-            code: 'ATTACHMENT_REQUIRED',
-            message: 'Attach the vendor invoice or delivery challan.',
-          },
-        },
-      },
-    });
+    expressMock.mockRejectedValue(
+      serverRefusal(400, {
+        code: 'ATTACHMENT_REQUIRED',
+        message: 'Attach the vendor invoice or delivery challan.',
+      }),
+    );
     const { container } = renderPanel();
     await passStep1(container);
     await passStep2();
@@ -368,5 +370,59 @@ describe('ExpressReceivePanel — server failure modes', () => {
     expect(
       screen.getByRole('button', { name: /continue — check items/i }),
     ).toBeDisabled();
+  });
+
+  it('GRN_DUPLICATE (the human retry after a failure face) shows the recovery banner, never "try again"', async () => {
+    // P0-1/P0-3 launch gate: the backend's create-time duplicate guard 409s
+    // a re-submitted receipt. The screen must say the receipt EXISTS and
+    // route to the pending-receipts panel — an invitation to retry is
+    // exactly what double-minted the stock before the guard.
+    expressMock.mockRejectedValue(
+      serverRefusal(409, {
+        code: 'GRN_DUPLICATE',
+        grn_id: 'grn-1st',
+        grn_number: 'GRN-BOK-26-0042',
+        grn_status: 'PARTIALLY_ACCEPTED',
+        message:
+          "Goods receipt GRN-BOK-26-0042 already exists for vendor invoice 'INV-77' (PARTIALLY_ACCEPTED) - open the receiving screen's pending receipts panel to finish (accept) or void it - do not create it again.",
+      }),
+    );
+    const onOpenPending = vi.fn();
+    const { container } = renderPanel({ onOpenPendingReceipts: onOpenPending });
+    await passStep1(container);
+    await passStep2();
+    fireEvent.click(
+      screen.getByRole('button', { name: /put on shelf & send to accounts/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/GRN-BOK-26-0042 already exists for this vendor invoice/i),
+      ).toBeInTheDocument(),
+    );
+    // The server's exact recovery instruction is rendered.
+    expect(
+      screen.getByText(/pending receipts panel to finish/i),
+    ).toBeInTheDocument();
+    // No generic toast, and nothing on the screen says "try again".
+    expect(toastMock.error).not.toHaveBeenCalled();
+    expect(screen.queryByText(/try again/i)).not.toBeInTheDocument();
+    // The banner's button routes to the pending receipts panel.
+    fireEvent.click(screen.getByRole('button', { name: /open pending receipts/i }));
+    expect(onOpenPending).toHaveBeenCalledWith('GRN-BOK-26-0042');
+  });
+
+  it('a 409 without a structured detail never toasts "try again"', async () => {
+    expressMock.mockRejectedValue(serverRefusal(409, {}));
+    const { container } = renderPanel();
+    await passStep1(container);
+    await passStep2();
+    fireEvent.click(
+      screen.getByRole('button', { name: /put on shelf & send to accounts/i }),
+    );
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledTimes(1));
+    const text = String(toastMock.error.mock.calls[0][0]);
+    expect(text.toLowerCase()).not.toContain('try again');
+    expect(text.toLowerCase()).toContain('pending receipts');
   });
 });

@@ -206,9 +206,16 @@ export function PurchaseManagementPage() {
   );
 
   // ---- PO Status Action handler ----
+  // P0-4 (launch gate): state mutates ONLY after the API succeeds, and a
+  // refusal is TOASTED, never swallowed. The old catch discarded the server's
+  // refusal and then flipped the row + fired toast.success('') anyway — a
+  // manager believed a PO reached the vendor that never did, so goods were
+  // never ordered. The approve/order/receive "actions" called no API at all
+  // (local status theater that evaporated on reload); their buttons are
+  // removed in PurchaseOrderDetail, and this handler no longer knows them.
   const handlePOAction = async (po: PurchaseOrder, action: string) => {
-    let newStatus: POStatus = po.status;
-    let message = '';
+    let newStatus: POStatus;
+    let message: string;
 
     try {
       switch (action) {
@@ -218,37 +225,24 @@ export function PurchaseManagementPage() {
           newStatus = 'PENDING';
           message = `${po.poNumber} submitted for approval`;
           break;
-        case 'approve':
-          newStatus = 'APPROVED';
-          message = `${po.poNumber} approved`;
-          break;
         case 'reject':
           await vendorsApi.cancelPurchaseOrder(po.id, 'Rejected by approver');
           newStatus = 'CANCELLED';
           message = `${po.poNumber} rejected`;
           break;
-        case 'order':
-          newStatus = 'ORDERED';
-          message = `${po.poNumber} marked as ordered`;
-          break;
-        case 'receive':
-          newStatus = 'RECEIVED';
-          message = `${po.poNumber} marked as received`;
-          break;
         default:
           return;
       }
-    } catch {
-      // If API call fails, still update local state optimistically for non-critical actions
-      // (approve/order/receive don't have dedicated status-change endpoints yet)
+    } catch (err) {
+      toast.error(
+        err instanceof Error && err.message
+          ? err.message
+          : `${po.poNumber} was NOT updated — the server refused the request.`,
+      );
+      return;
     }
 
-    const updatedPO: PurchaseOrder = {
-      ...po,
-      status: newStatus,
-      ...(action === 'approve' ? { approvedBy: 'Current User' } : {}),
-      ...(action === 'receive' ? { receivedDate: new Date().toISOString().split('T')[0] } : {}),
-    };
+    const updatedPO: PurchaseOrder = { ...po, status: newStatus };
 
     setPurchaseOrders(prev => prev.map(p => p.id === po.id ? updatedPO : p));
     setSelectedPO(updatedPO);

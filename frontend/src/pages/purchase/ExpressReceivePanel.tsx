@@ -31,6 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import { grnCockpitApi } from '../../services/api/grnCockpit';
+import { ApiError } from '../../services/api/client';
 import type {
   CockpitOpenPO,
   ExpressReceiveItemInput,
@@ -86,7 +87,7 @@ interface PanelLine {
 type PanelStage =
   | { kind: 'steps'; step: 1 | 2 | 3 }
   | { kind: 'success'; result: ExpressReceiveResult }
-  | { kind: 'partial'; grnNumber: string; message: string };
+  | { kind: 'partial'; grnNumber: string; message: string; headline?: string };
 
 interface ExpressReceivePanelProps {
   po: CockpitOpenPO;
@@ -111,10 +112,14 @@ const fmtMoney = (n: number | null | undefined) =>
 
 const todayISO = () => new Date().toISOString().split('T')[0];
 
-/** Pull the FastAPI error detail (object or string) out of an axios error. */
+/** Pull the FastAPI error detail out of the error the api client ACTUALLY
+ * delivers: an ApiError carrying `.detail` (P0-3 launch gate). The axios
+ * `.response` is stripped by the interceptor before any component sees the
+ * error — reading it here is how the EXPRESS_PARTIAL recovery banner went
+ * dead and staff saw "try again" instead (the retry that double-mints). */
 function apiErrorDetail(err: unknown): unknown {
-  return (err as { response?: { data?: { detail?: unknown } } })?.response?.data
-    ?.detail;
+  if (err instanceof ApiError) return err.detail ?? err.message;
+  return err instanceof Error ? err.message : undefined;
 }
 
 function StepIndicator({ step }: { step: 1 | 2 | 3 }) {
@@ -332,7 +337,21 @@ export function ExpressReceivePanel({
         message?: string;
         grn_number?: string;
       };
-      if (d.code === 'EXPRESS_NOT_CLEAN' || d.code === 'EXPRESS_STANDARD_ONLY') {
+      if (d.code === 'GRN_DUPLICATE') {
+        // P0-1/P0-3: this exact submit already has a receipt (the human
+        // retry after a timeout or an EXPRESS_PARTIAL face). The one thing
+        // this screen must NOT do is invite another attempt — show the
+        // recovery banner naming the existing receipt and route to the
+        // pending-receipts panel.
+        setStage({
+          kind: 'partial',
+          headline: `Receipt ${d.grn_number || ''} already exists for this vendor invoice`.trim(),
+          grnNumber: d.grn_number ?? '',
+          message:
+            d.message ??
+            'This delivery was already received — do not create it again. Finish or void it from the pending receipts panel.',
+        });
+      } else if (d.code === 'EXPRESS_NOT_CLEAN' || d.code === 'EXPRESS_STANDARD_ONLY') {
         // Server disagrees this is a clean express receipt — hand the exact
         // same state to the existing two-step path (it carries the full
         // discrepancy controls).
@@ -354,11 +373,17 @@ export function ExpressReceivePanel({
           d.message ?? 'The bill attachment did not go through — upload it again.',
         );
       } else {
+        // "Try again" is only safe advice when nothing was created. A 409
+        // means a conflicting receipt EXISTS server-side — repeating the
+        // submit is exactly the double-mint the backend just refused.
+        const is409 = err instanceof ApiError && err.status === 409;
         toast.error(
           d.message ??
             (typeof detail === 'string'
               ? detail
-              : 'Express receive failed — try again or use the step-by-step receive.'),
+              : is409
+                ? 'Express receive was refused — this receipt may already exist. Check the pending receipts panel; do not submit it again.'
+                : 'Express receive failed — try again or use the step-by-step receive.'),
         );
       }
     } finally {
@@ -380,7 +405,8 @@ export function ExpressReceivePanel({
           role="alert"
         >
           <p className="font-bold text-sm mb-1" style={{ color: 'var(--ink)' }}>
-            Receipt {stage.grnNumber} was saved but is NOT on the shelf yet
+            {stage.headline ??
+              `Receipt ${stage.grnNumber} was saved but is NOT on the shelf yet`}
           </p>
           <p className="text-sm mb-3" style={{ color: 'var(--ink-2)' }}>
             {stage.message}
