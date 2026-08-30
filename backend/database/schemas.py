@@ -873,6 +873,26 @@ INDEXES = {
                 "dc_number": {"$exists": True},
             },
             "name": "uniq_dc_vendor_number_store",
+        },
+        # P0-1 (launch gate): STANDARD twin of the DC index -- two live
+        # (non-VOID) STANDARD receipts must never share one vendor invoice
+        # number per vendor + store. Keys on the folded number the create
+        # path stamps (vendor_invoice_no_norm); legacy rows without the
+        # field stay un-indexed (fail-soft, like the DC index). $in in the
+        # partial filter needs Mongo 8.0+ (prod 8.3; eod_tally precedent).
+        {
+            "keys": [
+                ("vendor_id", 1),
+                ("vendor_invoice_no_norm", 1),
+                ("store_id", 1),
+            ],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "STANDARD",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_std_vendor_invoice_store",
         }
     ],
     "tasks": [

@@ -1356,20 +1356,43 @@ async def create_purchase_invoice(
 
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
-    # entry would double the payable AND double-count the ITC.
+    # entry would double the payable AND double-count the ITC. Compared
+    # case/punctuation-FOLDED (pinv.normalize_invoice_no, the SAME normaliser
+    # the GRN duplicate guard uses): the exact-string check let 'GO-INV/9007'
+    # book the payable a second time next to 'GO-INV-9007'. ponytail: linear
+    # scan over one vendor's bills; index vendor_invoice_no_norm here too if a
+    # vendor ever holds thousands.
     if db is not None:
         try:
-            dup = db.get_collection("vendor_bills").find_one(
-                {"vendor_id": body.vendor_id, "bill_number": body.invoice_number},
-                {"_id": 0, "bill_id": 1},
-            )
+            target = pinv.normalize_invoice_no(body.invoice_number)
+            dup = None
+            if target:
+                rows = db.get_collection("vendor_bills").find(
+                    {"vendor_id": body.vendor_id},
+                    {"_id": 0, "bill_id": 1, "bill_number": 1},
+                )
+                dup = next(
+                    (
+                        r
+                        for r in rows
+                        if pinv.normalize_invoice_no(r.get("bill_number"))
+                        == target
+                    ),
+                    None,
+                )
             if dup:
+                recorded = dup.get("bill_number")
+                variant = (
+                    f" (recorded as '{recorded}')"
+                    if recorded and recorded != body.invoice_number
+                    else ""
+                )
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         f"Invoice number '{body.invoice_number}' is already "
-                        f"recorded for this vendor. Duplicate vendor invoices "
-                        f"are not allowed."
+                        f"recorded for this vendor{variant}. Duplicate vendor "
+                        f"invoices are not allowed."
                     ),
                 )
         except HTTPException:

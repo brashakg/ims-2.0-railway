@@ -228,17 +228,39 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Handle final error after retries exhausted
-const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-  if (error.response?.status === 401) {
-    // Clear auth state on unauthorized (refresh already failed or was not
-    // possible by the time we get here -> same logout flow as before).
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-    localStorage.removeItem('ims_user');
-    window.location.href = '/login';
+// P0-3 (launch gate): the ONE error shape this client delivers. The
+// interceptor has always rejected with a bare `new Error(message)` — the
+// axios `.response` never leaves this file — yet screens kept reading
+// `err.response.data.detail`, so every structured recovery branch
+// (EXPRESS_PARTIAL's banner, ATTACHMENT_* re-prompt) was dead and staff saw
+// a generic "try again" — the retry that mints a delivery's stock twice.
+// ApiError keeps the user-facing `message` exactly as before and ADDS the
+// structured fields alongside it: `status`, the backend's `code`, and the
+// raw `detail`. Components key recovery flows off THESE (the
+// DuplicateProductError pattern), never off `.response`.
+export class ApiError extends Error {
+  status?: number;
+  code?: string;
+  detail?: unknown;
+  constructor(
+    message: string,
+    opts: { status?: number; code?: string; detail?: unknown } = {},
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = opts.status;
+    this.code = opts.code;
+    this.detail = opts.detail;
   }
+}
 
+// Pure transform: axios error -> the ApiError components actually receive.
+// Exported so tests reject fixtures through the REAL production transform
+// instead of hand-built axios shapes the client never delivers (the
+// hollow-double class: green tests over a dead code path).
+export function buildApiError(
+  error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>,
+): ApiError {
   // Build user-friendly error message
   let message: string;
 
@@ -283,7 +305,33 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     }
   }
 
-  return Promise.reject(new Error(message));
+  const status = error.response?.status;
+  // Structured fields ride along for 4xx only: the 5xx generic-text rule
+  // above exists so no internal error can leak to a user, and stripping the
+  // payload keeps a component from rendering what the message rule hid.
+  const rawDetail = status && status < 500 ? error.response?.data?.detail : undefined;
+  const code =
+    rawDetail &&
+    typeof rawDetail === 'object' &&
+    !Array.isArray(rawDetail) &&
+    typeof (rawDetail as unknown as { code?: unknown }).code === 'string'
+      ? (rawDetail as unknown as { code: string }).code
+      : undefined;
+  return new ApiError(message, { status, code, detail: rawDetail });
+}
+
+// Handle final error after retries exhausted
+const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
+  if (error.response?.status === 401) {
+    // Clear auth state on unauthorized (refresh already failed or was not
+    // possible by the time we get here -> same logout flow as before).
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    localStorage.removeItem('ims_user');
+    window.location.href = '/login';
+  }
+
+  return Promise.reject(buildApiError(error));
 };
 
 // ── Additive camelCase aliasing ─────────────────────────────────────────

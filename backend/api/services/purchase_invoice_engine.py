@@ -33,7 +33,28 @@ every amount. Which head carries the odd paisa is NOT fixed -- measured over
 (1.01 -> 0.51 + 0.50, 5.01 -> 2.50 + 2.51); see gst_rates.split_gst.
 """
 
+import re
 from typing import List, Optional, Tuple
+
+_INVOICE_NO_JUNK = re.compile(r"[^0-9A-Z]+")
+
+
+def normalize_invoice_no(value) -> str:
+    """Case/punctuation-folded identity of a vendor document number.
+
+    'GO-INV-9007', 'GO-INV/9007', 'go inv 9007' are the SAME piece of paper --
+    a clerk retyping the number from the printed bill must not be able to book
+    the payable (or mint the receipt) twice by varying separators or case.
+    Returns '' for None/blank, so callers can treat falsy as "no number".
+
+    THE one implementation: the GRN duplicate guard (vendors._create_grn_impl)
+    and the purchase-invoice duplicate guard (purchase_invoices) both compare
+    through this function. Do not re-implement the folding at a call site --
+    two spellings of this rule is how the payable got booked twice.
+    """
+    if value is None:
+        return ""
+    return _INVOICE_NO_JUNK.sub("", str(value).upper())
 
 
 def _f(v) -> float:
