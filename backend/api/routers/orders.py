@@ -2970,6 +2970,7 @@ async def create_order(
                         rupee_value=float(taxable_after_cart_discount),
                         user_id=current_user.get("user_id"),
                         store_id=store_id,
+                        cart_discount_percent=cart_discount_percent,
                     )
             except Exception:
                 pass  # fail-soft — loyalty must never block POS

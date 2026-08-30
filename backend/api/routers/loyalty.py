@@ -330,12 +330,18 @@ async def earn(
                 }
 
     account = accounts.find_or_create(body.customer_id)
-    items = [i.model_dump(exclude_none=True) for i in (body.items or [])]
+    # Per-line data comes from the ORDER document, never body.items: client
+    # lines could omit discount_percent/promo stamps and defeat the >=5%/offer
+    # earn gate (same "points are money" stance as the basis clamp above).
+    items = order_doc.get("items") or []
     earn_result = calc_earn_points(
         rupee_value,
         items,
         account.get("tier", "BRONZE"),
         settings,
+        cart_discount_percent=float(
+            order_doc.get("cart_discount_percent") or 0.0
+        ),
     )
 
     points = int(earn_result.get("points") or 0)
@@ -1049,6 +1055,7 @@ def earn_for_order_internal(
     rupee_value: float,
     user_id: Optional[str] = None,
     store_id: Optional[str] = None,
+    cart_discount_percent: float = 0.0,
 ) -> Dict[str, Any]:
     """Fire-and-forget earn invocation from the order-create path.
 
@@ -1078,6 +1085,7 @@ def earn_for_order_internal(
             items or [],
             account.get("tier", "BRONZE"),
             settings,
+            cart_discount_percent=cart_discount_percent,
         )
         points = int(result.get("points") or 0)
         if points <= 0:

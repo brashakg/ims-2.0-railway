@@ -176,12 +176,22 @@ class FakeOrderRepo:
     def __init__(self):
         self._orders = {}
 
-    def seed(self, order_id, customer_id, grand_total, tax_amount=0.0):
+    def seed(
+        self,
+        order_id,
+        customer_id,
+        grand_total,
+        tax_amount=0.0,
+        items=None,
+        cart_discount_percent=0.0,
+    ):
         self._orders[order_id] = {
             "order_id": order_id,
             "customer_id": customer_id,
             "grand_total": float(grand_total),
             "tax_amount": float(tax_amount),
+            "items": items,
+            "cart_discount_percent": float(cart_discount_percent),
         }
 
     def find_by_id(self, order_id):
@@ -798,17 +808,161 @@ def test_sunglass_item_earns_with_multiplier_saved_from_settings_screen(
     assert mults["OPTICAL_LENS"] == 1.8
     assert "SUNGLASSES" not in mults and "RX_LENSES" not in mults
 
-    patched_loyalty["orders"].seed("ORD-SG", "cust-sg", 10000.0)
+    # Lines live on the ORDER: POST /earn ignores client items by design
+    # (owner rule 2026-08-30 — client lines could hide discounts/offers).
+    patched_loyalty["orders"].seed(
+        "ORD-SG",
+        "cust-sg",
+        10000.0,
+        items=[{"category": "SUNGLASS", "item_total": 10000}],
+    )
     resp = client.post(
         "/api/v1/loyalty/earn",
-        json={
-            "customer_id": "cust-sg",
-            "order_id": "ORD-SG",
-            "items": [{"category": "SUNGLASS", "item_total": 10000}],
-        },
+        json={"customer_id": "cust-sg", "order_id": "ORD-SG"},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
     # 10000 x 2.0 x 0.01 x 1.0 (BRONZE) = 200. The pre-fix engine silently
     # earned 100 here (multiplier never matched).
     assert resp.json()["awarded"] == 200
+
+
+# ============================================================================
+# Owner hard rule 2026-08-30: no earn on >=5% discount or any applied offer.
+# Discriminating power: every test below awards points if the gate in
+# calc_earn_points is reverted.
+# ============================================================================
+
+
+def test_earn_line_at_5pct_discount_earns_zero_for_that_line():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "discount_percent": 5},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    # Only the clean line earns: 5000 * 1.0 * 0.01 = 50
+    assert out["points"] == 50
+    assert out["ineligible_lines"] == 1
+
+
+def test_earn_line_under_5pct_discount_still_earns():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "discount_percent": 4.99},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 100
+    assert out["ineligible_lines"] == 0
+
+
+def test_earn_promo_line_earns_zero():
+    """An applied offer (promo engine stamp) zeroes that line's earn."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {"category": "FRAME", "item_total": 5000, "promo_discount_amount": 250.0},
+        {"category": "FRAME", "item_total": 5000},
+    ]
+    out = calc_earn_points(10000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 50
+    assert out["ineligible_lines"] == 1
+
+
+def test_earn_bill_discount_at_5pct_zeroes_whole_bill():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 9500}]
+    out = calc_earn_points(
+        9500.0, items, "BRONZE", DEFAULT_SETTINGS, cart_discount_percent=5.0
+    )
+    assert out["points"] == 0
+    assert out["skipped_reason"] == "bill_discount_5pct_or_more"
+
+
+def test_earn_bill_discount_under_5pct_earns():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 9510}]
+    out = calc_earn_points(
+        9510.0, items, "BRONZE", DEFAULT_SETTINGS, cart_discount_percent=4.9
+    )
+    assert out["points"] == 95
+
+
+def test_earn_all_lines_ineligible_names_the_reason():
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 5000, "discount_percent": 40}]
+    out = calc_earn_points(5000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 0
+    assert out["skipped_reason"] == "discount_5pct_or_offer"
+
+
+def test_earn_endpoint_ignores_client_items_uses_order_lines(
+    client, auth_headers, patched_loyalty
+):
+    """POST /earn must read per-line data from the ORDER; client items that
+    hide the discount cannot mint points (points are money)."""
+    patched_loyalty["orders"].seed(
+        "ORD-G1",
+        "cust-g1",
+        10000.0,
+        items=[{"category": "FRAME", "item_total": 10000, "discount_percent": 40}],
+    )
+    resp = client.post(
+        "/api/v1/loyalty/earn",
+        json={
+            "customer_id": "cust-g1",
+            "order_id": "ORD-G1",
+            "rupee_value": 10000.0,
+            # attacker/typo surface: clean-looking client lines
+            "items": [{"category": "FRAME", "item_total": 10000}],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["awarded"] == 0
+
+
+def test_earn_endpoint_reads_bill_discount_from_order_doc(
+    client, auth_headers, patched_loyalty
+):
+    patched_loyalty["orders"].seed(
+        "ORD-G2",
+        "cust-g2",
+        9000.0,
+        items=[{"category": "FRAME", "item_total": 9000}],
+        cart_discount_percent=10.0,
+    )
+    resp = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-g2", "order_id": "ORD-G2"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["awarded"] == 0
+
+
+def test_earn_internal_hook_gates_on_cart_discount(patched_loyalty):
+    """earn_for_order_internal threads cart_discount_percent to the engine."""
+    from api.routers.loyalty import earn_for_order_internal
+
+    out = earn_for_order_internal(
+        customer_id="cust-g3",
+        order_id="ORD-G3",
+        items=[{"category": "FRAME", "item_total": 8000}],
+        rupee_value=8000.0,
+        cart_discount_percent=7.5,
+    )
+    assert out["awarded"] == 0
+    assert out["skipped_reason"] == "bill_discount_5pct_or_more"

@@ -88,11 +88,20 @@ def _line_categories(items: Iterable[Dict[str, Any]]) -> List[Tuple[float, float
     return out
 
 
+# Owner hard rule (2026-08-30): loyalty earns ONLY when no offer is applied
+# and the discount on that item / that bill is under 5%. At or above 5% (or
+# any promo), the item's — or with a bill discount, the whole bill's — earn
+# becomes 0. Enforced HERE and only here; both earn doors route through this
+# function (one-rule-two-implementations defence).
+LOYALTY_MAX_DISCOUNT_PCT = 5.0
+
+
 def calc_earn_points(
     rupee_value: float,
     items: Optional[List[Dict[str, Any]]],
     tier: str,
     settings: Dict[str, Any],
+    cart_discount_percent: float = 0.0,
 ) -> Dict[str, Any]:
     """Compose: per-line(value × category_multiplier) × tier_multiplier ×
     points_per_rupee. Falls back to flat rate when items aren't supplied.
@@ -122,14 +131,34 @@ def calc_earn_points(
             "tier_multiplier": tier_multiplier(tier, settings),
         }
 
+    if float(cart_discount_percent or 0.0) >= LOYALTY_MAX_DISCOUNT_PCT:
+        return {
+            "points": 0,
+            "rupee_value": rupee_value,
+            "skipped_reason": "bill_discount_5pct_or_more",
+            "tier_at_earn": tier,
+            "tier_multiplier": tier_multiplier(tier, settings),
+        }
+
     rate = float(settings.get("points_per_rupee", 0.01) or 0.0)
     tier_mult = tier_multiplier(tier, settings)
 
     # Per-line earn when items are given. Each line uses its own category
     # multiplier and its own line value (item_total / line_total / amount).
     weighted_value = 0.0
+    ineligible_lines = 0
     if items:
         for line in items:
+            # Hard rule: a line with a manual discount >= 5% or any applied
+            # promo earns nothing (at-offer/MRP pricing has discount_percent 0
+            # and no promo stamp, so it stays eligible).
+            if (
+                float(line.get("discount_percent") or 0.0)
+                >= LOYALTY_MAX_DISCOUNT_PCT
+                or float(line.get("promo_discount_amount") or 0.0) > 0.0
+            ):
+                ineligible_lines += 1
+                continue
             value = float(
                 line.get("item_total")
                 or line.get("line_total")
@@ -151,6 +180,13 @@ def calc_earn_points(
 
     raw_points = weighted_value * rate * tier_mult
     points = int(raw_points)  # truncate — points are always integer
+    skipped = None
+    if points <= 0:
+        skipped = (
+            "discount_5pct_or_offer"
+            if ineligible_lines and items and ineligible_lines == len(items)
+            else "rounded_to_zero"
+        )
     return {
         "points": max(0, points),
         "rupee_value": rupee_value,
@@ -158,7 +194,8 @@ def calc_earn_points(
         "tier_at_earn": tier,
         "tier_multiplier": tier_mult,
         "points_per_rupee": rate,
-        "skipped_reason": None if points > 0 else "rounded_to_zero",
+        "ineligible_lines": ineligible_lines,
+        "skipped_reason": skipped,
     }
 
 
