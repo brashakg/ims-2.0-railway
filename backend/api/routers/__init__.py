@@ -69,6 +69,7 @@ from .points import router as points_router
 from .payout import router as payout_router
 from .kicker import router as kicker_router
 from .webhooks import router as webhooks_router
+from .webhooks import msg91_events_router
 from .loyalty import router as loyalty_router
 from .vendor_portal import router as vendor_portal_router
 from .portal import router as portal_router
@@ -172,6 +173,7 @@ __all__ = [
     "payout_router",
     "kicker_router",
     "webhooks_router",
+    "msg91_events_router",
     "loyalty_router",
     "vendor_portal_router",
     "portal_router",

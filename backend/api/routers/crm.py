@@ -7,7 +7,7 @@ lifecycle management, and customer intelligence
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime, date, timedelta, timezone
 import re
 import uuid
@@ -199,6 +199,10 @@ class Customer360Response(BaseModel):
     loyalty_data: LoyaltyTierResponse
     prescriptions: List[PrescriptionWithStatusResponse]
     interactions_count: int
+    # Message-events timeline (delivered / read / failed / clicked rows from
+    # the message_events spine, mobile-primary match, newest first). Additive
+    # and default-empty so pre-spine clients and a spine hiccup change nothing.
+    message_timeline: List[Dict[str, Any]] = []
 
 
 class CustomerSegmentResponse(BaseModel):
@@ -280,6 +284,18 @@ async def get_customer_360(
         # Get interaction count
         interactions = db.query_customer_interactions(customer_id, limit=100)
 
+        # Message timeline from the message_events spine (delivery reports,
+        # reads, failures, link clicks -- mobile-primary match). Fail-soft []
+        # so a spine hiccup never 500s the whole 360 view.
+        try:
+            from ..services.message_events import customer_message_timeline
+
+            message_timeline = customer_message_timeline(
+                customer.get("mobile") or customer.get("phone")
+            )
+        except Exception:  # noqa: BLE001
+            message_timeline = []
+
         return {
             "id": customer_id,
             "name": customer.get("name", ""),
@@ -291,6 +307,7 @@ async def get_customer_360(
             "loyalty_data": loyalty_data,
             "prescriptions": prescriptions_with_status,
             "interactions_count": len(interactions),
+            "message_timeline": message_timeline,
         }
     except HTTPException:
         raise
