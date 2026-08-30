@@ -86,7 +86,7 @@ jobs:
         with:
           name: frontend-build-${{ matrix.node-version }}
           path: frontend/dist/
-          retention-days: 30
+          retention-days: 3
 
   dead-code:
     # Advisory only — knip reports unused files/exports/dependencies to the job
