@@ -195,3 +195,16 @@ def test_pdf_contains_invoice_content(wired):
     p = client.get("/orders/ORD-PDF-1/invoice.pdf")
     assert p.content[:5] == b"%PDF-"
     assert len(p.content) > 1500  # a real laid-out page, not a stub
+
+
+def test_pdf_survives_and_keeps_angle_bracket_names(wired):
+    """Panel blocker F1: '<'+letter crashed reportlab (500) and '<Word>' was
+    silently swallowed from the statutory doc. With escaping, the PDF renders
+    and the literal text survives into the content stream."""
+    client, repo = wired
+    repo._doc["items"][0]["product_name"] = "Frame <Titan> 50% <off promo"
+    repo._doc["customer_name"] = "A<B&C>D"
+    p = client.post if False else client.get
+    r = p("/orders/ORD-PDF-1/invoice.pdf")
+    assert r.status_code == 200, r.text
+    assert r.content[:5] == b"%PDF-"

@@ -27,6 +27,16 @@ from .print_identity import resolve_issuing_identity
 from .print_legal import amount_in_words, declarations, format_date
 
 
+def _esc(text: Any) -> str:
+    """Escape the 3 XML-special chars for reportlab Paragraph markup.
+    MANDATORY on every Paragraph sink: un-escaped '<'+letter CRASHES the
+    parser (500 on the PDF door) and '<Word>' is silently SWALLOWED as a
+    tag -- "Frame <Titan> XL" would print "Frame XL" on a statutory
+    invoice. Mirrors catalogue_pdf._escape."""
+    t = "" if text is None else str(text)
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _rs(v: Any) -> str:
     try:
         return "Rs {:,.2f}".format(float(v))
@@ -64,7 +74,6 @@ def build_invoice_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "taxable_value": _f(it.get("taxable_value")),
                 "gst_rate": _f(it.get("gst_rate")),
                 "tax_amount": _f(it.get("tax_amount")),
-                "item_total": _f(it.get("item_total"), unit * qty),
             }
         )
     return rows
@@ -95,11 +104,13 @@ def build_invoice_pdf(
     entity = ident.get("entity") or {}
     overrides = ident.get("overrides") or {}
 
+    # Neutral fallback chain -- never another chain's hardcoded name (a
+    # WizOpt store under a DB hiccup must not print "Better Vision").
     legal_name = (
         entity.get("legal_name")
         or entity.get("name")
         or store.get("name")
-        or "Better Vision"
+        or str(order.get("store_id") or "")
     )
     store_gstin = payload.get("storeGstin") or store.get("gstin") or ""
     address = str(
@@ -108,7 +119,7 @@ def build_invoice_pdf(
     phone = str(store.get("phone") or "").strip()
 
     # GSTIN-conditional title -- same rule the FE GSTInvoice applies.
-    title = "TAX INVOICE" if store_gstin else "INVOICE"
+    title = "TAX INVOICE" if store_gstin else "SALES RECEIPT"
 
     styles = {
         "h1": ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=14, leading=17),
@@ -134,17 +145,17 @@ def build_invoice_pdf(
 
     # ---- Header: issuing identity + document title ----
     head_left = [
-        Paragraph(legal_name, styles["h1"]),
+        Paragraph(_esc(legal_name), styles["h1"]),
     ]
     if address:
-        head_left.append(Paragraph(address, styles["small"]))
+        head_left.append(Paragraph(_esc(address), styles["small"]))
     id_bits = []
     if store_gstin:
         id_bits.append(f"GSTIN: {store_gstin}")
     if phone:
         id_bits.append(f"Phone: {phone}")
     if id_bits:
-        head_left.append(Paragraph(" | ".join(id_bits), styles["small"]))
+        head_left.append(Paragraph(_esc(" | ".join(id_bits)), styles["small"]))
 
     pos = str(payload.get("placeOfSupply") or "").strip()
     if pos and payload.get("placeOfSupplyAssumed"):
@@ -160,7 +171,7 @@ def build_invoice_pdf(
         ["Supply Type", "Inter-state (IGST)" if payload.get("interstate") else "Intra-state (CGST+SGST)"]
     )
     meta_tbl = Table(
-        [[Paragraph(k, styles["cellb"]), Paragraph(v, styles["cell"])] for k, v in meta_rows],
+        [[Paragraph(_esc(k), styles["cellb"]), Paragraph(_esc(v), styles["cell"])] for k, v in meta_rows],
         colWidths=[28 * mm, 52 * mm],
     )
     meta_tbl.setStyle(
@@ -186,18 +197,18 @@ def build_invoice_pdf(
     # ---- Bill-to ----
     cust_lines = [Paragraph("Bill To", styles["cellb"])]
     cust_lines.append(
-        Paragraph(str(payload.get("customerName") or "Walk-in customer"), styles["cell"])
+        Paragraph(_esc(payload.get("customerName") or "Walk-in customer"), styles["cell"])
     )
     c = customer or {}
     cust_gstin = payload.get("customerGstin") or c.get("gstin")
     if cust_gstin:
-        cust_lines.append(Paragraph(f"GSTIN: {cust_gstin}", styles["small"]))
+        cust_lines.append(Paragraph(_esc(f"GSTIN: {cust_gstin}"), styles["small"]))
     cphone = str(c.get("mobile") or c.get("phone") or "").strip()
     if cphone:
-        cust_lines.append(Paragraph(f"Phone: {cphone}", styles["small"]))
+        cust_lines.append(Paragraph(_esc(f"Phone: {cphone}"), styles["small"]))
     caddr = str(c.get("address") or "").strip()
     if caddr:
-        cust_lines.append(Paragraph(caddr, styles["small"]))
+        cust_lines.append(Paragraph(_esc(caddr), styles["small"]))
     story.extend(cust_lines)
     story.append(Spacer(1, 4 * mm))
 
@@ -209,8 +220,8 @@ def build_invoice_pdf(
         data.append(
             [
                 Paragraph(str(i), styles["cell"]),
-                Paragraph(ln["description"], styles["cell"]),
-                Paragraph(ln["hsn"], styles["cell"]),
+                Paragraph(_esc(ln["description"]), styles["cell"]),
+                Paragraph(_esc(ln["hsn"]), styles["cell"]),
                 Paragraph("{:g}".format(ln["qty"]), styles["cell"]),
                 Paragraph(_rs(ln["unit_price"]), styles["cell"]),
                 Paragraph(
@@ -325,17 +336,17 @@ def build_invoice_pdf(
         overrides.get("declaration_text") or declarations("tax_invoice") or ""
     ).strip()
     if decl:
-        story.append(Paragraph(decl, styles["small"]))
+        story.append(Paragraph(_esc(decl), styles["small"]))
         story.append(Spacer(1, 6 * mm))
     signatory = str(overrides.get("signatory_name") or "").strip()
     story.append(
         Paragraph(
-            f"For {legal_name}", styles["cellb"]
+            _esc(f"For {legal_name}"), styles["cellb"]
         )
     )
     story.append(Spacer(1, 8 * mm))
     story.append(
-        Paragraph(signatory or "Authorised Signatory", styles["small"])
+        Paragraph(_esc(signatory or "Authorised Signatory"), styles["small"])
     )
 
     doc.build(story)

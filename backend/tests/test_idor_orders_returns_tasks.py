@@ -171,6 +171,7 @@ def test_order_mutations_cross_store_403(monkeypatch):
         ("post", "/api/v1/orders/ORD-1/deliver", {}),
         ("post", "/api/v1/orders/ORD-1/cancel", {"params": _CANCEL_QS}),
         ("get", "/api/v1/orders/ORD-1/invoice", {}),
+        ("get", "/api/v1/orders/ORD-1/invoice.pdf", {}),
         (
             "post",
             "/api/v1/orders/ORD-1/bopis-transfer",
