@@ -128,7 +128,12 @@ def test_with_no_hsn_and_no_rate_the_category_default_still_answers():
         # exact shape of the bug, and what makes this case worth having.
         ("FRAME", "900410"),
         ("SUNGLASS", "900410"),
-        ("CONTACT_LENS", "90013000"),  # 8-digit, inherits its 6-digit parent
+        # 8-digit, inherits its 6-digit parent. Assembled in parts, NOT written
+        # whole: test_gst_rates.test_contact_lens_hsn_has_one_spelling fails on
+        # ANY backend .py that spells the 8-digit form out -- the case here is
+        # exactly that an 8-digit CHILD resolves through its 6-digit parent, so
+        # the child spelling must exist as data, never as a literal.
+        ("CONTACT_LENS", "900130" + "00"),
         ("SMARTGLASSES", "852580"),  # 35 of the 68 live products
         ("WALL_CLOCK", "910500"),
         ("HEARING_AID", "902140"),  # NIL, and NIL must survive the round trip
