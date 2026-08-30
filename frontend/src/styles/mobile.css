@@ -28,6 +28,13 @@
   .top-nav-wordmark,
   .top-nav-avatar-name { display: none; }
 
+  /* SETTINGS — the 240px rail leaves the content pane too narrow on iPad
+     portrait (768-834); stack like phone does. */
+  @media (max-width: 834px) {
+    .setup-grid { grid-template-columns: 1fr !important; min-height: 0 !important; }
+    .s-nav { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; max-height: 280px; }
+  }
+
   /* PRINT — the 240px+320px side rails leave the paper preview ~210px on
      iPad portrait; stack like phone does (inline grid style needs !important). */
   .pr-body { grid-template-columns: 1fr !important; }
