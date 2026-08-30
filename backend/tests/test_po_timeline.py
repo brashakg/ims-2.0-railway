@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
@@ -200,6 +201,52 @@ def test_grn_lookup_failure_is_fail_soft(monkeypatch):
     # PO events still present; no crash.
     assert [e["kind"] for e in out["events"]] == ["ordered", "sent"]
     assert out["grns"] == [] and out["invoices"] == []
+
+
+def test_timeline_survives_prod_mix_of_datetime_and_string_timestamps(
+    monkeypatch,
+):
+    """P0-2 (launch gate): prod rows MIX types in `at` -- the repo layer's
+    _add_timestamps overwrites created_at with a raw datetime on every create,
+    while sent_at / accepted_at / vendor_bills created_at stay ISO strings.
+    The bare sort raised TypeError (datetime < str) and 500'd this drawer for
+    every sent PO -- live on 3 of prod's 7 POs at gate time. The exact prod
+    shape (po.created_at datetime, po.sent_at str, grn.created_at datetime,
+    grn.accepted_at str) must sort chronologically, not crash."""
+    po = _po()
+    po["created_at"] = datetime(2026, 6, 1, 10, 0, 0)  # repo layer: datetime
+    # po["sent_at"] stays the ISO string "2026-06-02T09:00:00"
+    grns = [
+        {
+            "po_id": "PO1",
+            "grn_id": "G1",
+            "grn_number": "RCPT-1",
+            "status": "ACCEPTED",
+            "created_at": datetime(2026, 6, 5, 11, 0, 0),  # datetime
+            "accepted_at": "2026-06-05T12:00:00",  # ISO string
+            "total_received": 5,
+            "total_accepted": 5,
+        }
+    ]
+    bills = [
+        {
+            "doc_type": "PURCHASE_INVOICE",
+            "grn_id": "G1",
+            "po_id": "PO1",
+            "bill_id": "B1",
+            "invoice_number": "INV-9",
+            "status": "OUTSTANDING",
+            "total": 5250,
+            "created_at": "2026-06-06T10:00:00",  # raw insert_one: ISO string
+        }
+    ]
+    _wire(monkeypatch, po, grns, bills)
+    out = _call()  # before the fix: TypeError -> 500
+    kinds = [e["kind"] for e in out["events"]]
+    assert kinds == ["ordered", "sent", "box_received", "on_shelf", "bill_settled"]
+    # The event payload keeps its ORIGINAL value -- only the sort key is
+    # normalised (readers/serialisers already handle both shapes).
+    assert out["events"][0]["at"] == datetime(2026, 6, 1, 10, 0, 0)
 
 
 # ---------------------------------------------------------------------------

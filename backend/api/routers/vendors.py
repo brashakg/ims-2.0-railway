@@ -33,6 +33,9 @@ from ..services import ap_engine
 from ..services import org_validation as ov
 from ..utils.ist import fy_start_year_ist, ist_date_str, now_ist
 from ..services import product_master as _pm
+from ..services.purchase_invoice_engine import (
+    normalize_invoice_no as _normalize_invoice_no,
+)
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ..services.file_store import (
     get_file_store,
@@ -2339,8 +2342,24 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
     except Exception as e:  # noqa: BLE001
         logger.warning("[VENDOR] po-timeline invoice lookup failed: %s", e)
 
-    # Chronological (blank timestamps sort last, stable).
-    events.sort(key=lambda e: (e.get("at") is None, e.get("at") or ""))
+    # Chronological (blank timestamps sort last, stable). `at` MIXES TYPES on
+    # prod data: the repo layer's _add_timestamps overwrites created_at with a
+    # raw datetime on every create, while sent_at / accepted_at / vendor_bills
+    # created_at are ISO strings -- so a bare sort raised TypeError
+    # (datetime < str) and 500'd this drawer for every sent PO. Normalise the
+    # SORT KEY only (datetime -> isoformat, else str); the event payload keeps
+    # its original value. Do NOT "fix" _add_timestamps instead -- every
+    # collection depends on its current behavior (one_rule_two_implementations
+    # ledger: the two timestamp conventions are the underlying disease).
+    def _at_sort_key(ev: dict):
+        at = ev.get("at")
+        if at is None:
+            return (True, "")
+        if isinstance(at, datetime):
+            return (False, at.isoformat())
+        return (False, str(at))
+
+    events.sort(key=_at_sort_key)
 
     # WHO did it. Every writer stamps a user_id ("user-superadmin"), never a
     # name, so the drawer used to print that id straight into the prose -- an
@@ -2735,6 +2754,89 @@ async def download_grn_doc(
     )
 
 
+def _find_duplicate_standard_grn(
+    grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=None
+):
+    """First non-VOID non-DC GRN already holding this vendor invoice number.
+
+    P0-1 (launch gate): the STANDARD twin of the DC duplicate guard. The
+    invoice number is compared case/punctuation-folded (normalize_invoice_no,
+    the same normaliser the payable dedupe uses) so 'GO-INV-9007' and
+    'GO-INV/9007' read as the same piece of paper. Candidates are matched by
+    po_id OR vendor_id (two equality queries -- the repo layer speaks no $or),
+    then filtered in Python so legacy rows without the norm field are still
+    caught. A VOIDed receipt frees its invoice number (that is the sanctioned
+    correction path). Fail-soft on a repo error, mirroring the DC guard; the
+    partial unique index (uniq_std_vendor_invoice_store) is the atomic
+    race backstop.
+
+    ponytail: linear scan over one vendor's receipts -- fine at this scale;
+    move to an indexed query on vendor_invoice_no_norm if a vendor ever holds
+    thousands of GRNs.
+    """
+    norm = _normalize_invoice_no(invoice_no)
+    if not norm or grn_repo is None:
+        return None
+    candidates: dict = {}
+    for flt in (
+        {"po_id": po_id} if po_id else None,
+        {"vendor_id": vendor_id} if vendor_id else None,
+    ):
+        if not flt:
+            continue
+        try:
+            rows = grn_repo.find_many(flt, limit=500) or []
+        except Exception:  # noqa: BLE001 - fail-soft, like the DC guard
+            rows = []
+        for r in rows:
+            rid = r.get("grn_id")
+            if rid and rid not in candidates:
+                candidates[rid] = r
+    for r in candidates.values():
+        if r.get("grn_id") == exclude_grn_id:
+            continue
+        if r.get("status") == "VOID":
+            continue
+        if r.get("grn_subtype") == GRN_SUBTYPE_DC:
+            continue
+        if _normalize_invoice_no(r.get("vendor_invoice_no")) == norm:
+            return r
+    return None
+
+
+def _duplicate_grn_detail(dup: dict, invoice_no) -> dict:
+    """409 payload for a duplicate STANDARD receipt.
+
+    The message must say the receipt EXISTS and where to finish it -- never
+    'try again': the person reading it has just watched a submit apparently
+    fail (timeout, EXPRESS_PARTIAL) and a retry is exactly what would have
+    double-minted the stock before this guard existed.
+    """
+    number = dup.get("grn_number") or dup.get("grn_id")
+    status = dup.get("status") or "PENDING"
+    if status == "ACCEPTED":
+        hint = (
+            "its goods are already on the shelf. Do not receive this delivery "
+            "again - if the vendor really shipped a second box under the same "
+            "invoice number, check with purchase first."
+        )
+    else:
+        hint = (
+            "open the receiving screen's pending receipts panel to finish "
+            "(accept) or void it - do not create it again."
+        )
+    return {
+        "code": "GRN_DUPLICATE",
+        "grn_id": dup.get("grn_id"),
+        "grn_number": dup.get("grn_number"),
+        "grn_status": status,
+        "message": (
+            f"Goods receipt {number} already exists for vendor invoice "
+            f"'{invoice_no}' ({status}) - {hint}"
+        ),
+    }
+
+
 @router.post("/grn", status_code=201)
 async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
@@ -2960,6 +3062,25 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             except Exception:
                 pass
 
+    # P0-1 (launch gate): the STANDARD twin of the DC guard above. A vendor
+    # invoice number identifies ONE physical delivery + ONE bill, so a second
+    # non-VOID receipt carrying it (per PO or per vendor, case/punctuation
+    # folded) is a double-submit -- which used to double-mint the stock AND
+    # open the payable to being booked twice. The comment at the express 409
+    # admitted this hole ("_create_grn_impl has no duplicate guard for
+    # STANDARD receipts"); this closes it for BOTH doors, since express
+    # creates through this shared impl. A legitimately split delivery arrives
+    # with DIFFERENT invoice numbers per shipment and passes untouched.
+    if not is_dc:
+        dup = _find_duplicate_standard_grn(
+            grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
+        )
+        if dup is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+            )
+
     # Ruling 14 -- THE TALLY. Every line of a PO-backed receipt must be ticked
     # before the receipt is written: the quantity that arrived has been counted
     # against the quantity that was ordered, line by line, by a person. Without
@@ -3034,6 +3155,14 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "vendor_name": po.get("vendor_name") if po else None,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
+        # Folded identity for the uniq_std_vendor_invoice_store partial unique
+        # index (the atomic backstop behind the racy check-then-insert guard
+        # above). None for a DC so DC rows never enter that index.
+        "vendor_invoice_no_norm": (
+            (_normalize_invoice_no(grn.vendor_invoice_no) or None)
+            if not is_dc
+            else None
+        ),
         "vendor_invoice_date": grn.vendor_invoice_date,
         # F-S3: the receipt document the ops user attached (file_store id +
         # metadata). The accountant reconciliation console reads these to render
@@ -3095,6 +3224,32 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 )
             raise HTTPException(
                 status_code=500, detail="Failed to save Delivery Challan"
+            )
+        # P0-1: the STANDARD mirror of the DC branch above. With the
+        # uniq_std_vendor_invoice_store partial unique index, a concurrent
+        # duplicate that raced past the app-level guard surfaces as a
+        # swallowed DuplicateKeyError (create() -> None). Re-probe: rival row
+        # holds the invoice number -> the SAME 409 as the guard; any other
+        # save failure is a loud 500, never a false "GRN created".
+        if created is None and not is_dc:
+            dup = None
+            try:
+                dup = _find_duplicate_standard_grn(
+                    grn_repo,
+                    grn.po_id,
+                    vendor_id,
+                    grn.vendor_invoice_no,
+                    exclude_grn_id=grn_id,
+                )
+            except Exception:  # noqa: BLE001
+                dup = None
+            if dup is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                )
+            raise HTTPException(
+                status_code=500, detail="Failed to save goods receipt"
             )
 
     # F9: audit the DC log (immutable; a DC is the accountable checkpoint between
@@ -3832,9 +3987,10 @@ async def accept_grn(
     Double-click safe FOR THIS ENDPOINT (F8): acceptance is CLAIMED with one
     guarded single-document update (status-keyed + lock field) before any stock
     is minted, so of two concurrent POSTs on the SAME grn_id exactly one mints
-    and the other gets a 409. (POST /grn/express is NOT covered: each click
-    creates a NEW grn_id, so the per-GRN claim never engages -- that needs a
-    create-time duplicate guard, tracked separately.) Sequential re-POSTs are
+    and the other gets a 409. (POST /grn/express creates a NEW grn_id per
+    click, so the per-GRN claim never engages there -- the create-time
+    duplicate guard in _create_grn_impl covers it: a second non-VOID STANDARD
+    receipt for the same vendor invoice number is a 409.) Sequential re-POSTs are
     additionally idempotent -- the minting loop skips any (grn_id, product_id,
     grn_line_index) that already has units in stock_units, so a partially-failed
     accept can be safely retried without double-counting.
@@ -4504,10 +4660,11 @@ async def express_receive_grn(
     # EXPRESS_PARTIAL is a 409, NOT a 500. The GRN row already exists, so this
     # is a conflict, not a server fault -- and the distinction is a stock-safety
     # one, not a semantic nicety: the frontend api client auto-retries every 5xx
-    # POST three times, _create_grn_impl has no duplicate guard for STANDARD
-    # receipts (only DELIVERY_CHALLAN has one), and each retry therefore creates
-    # a NEW grn_id and mints the WHOLE delivery again -- which the per-(grn,
-    # line, unit) unique index cannot catch, because it keys on source_id.
+    # POST three times, and each retry creates a NEW grn_id that mints the
+    # WHOLE delivery again -- which the per-(grn, line, unit) unique index
+    # cannot catch, because it keys on source_id. (_create_grn_impl now also
+    # 409s a retry outright via the STANDARD duplicate guard on the vendor
+    # invoice number -- this 409 remains the first line of defence.)
     # Before this PR every raise inside accept was a PRE-mint 4xx, so a retried
     # express duplicate held zero units and was harmlessly voidable; the two
     # MID-mint 503s added here (count-verify and heartbeat) fire AFTER stock is
