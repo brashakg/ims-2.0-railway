@@ -316,6 +316,9 @@ def test_a_close_after_ist_midnight_still_counts_that_days_expenses(monkeypatch)
         json={
             "session_id": "ZZ-CR-1",
             "denominations": [{"face": 500, "pieces": 34}],
+            # Out-of-band variance needs the mandatory explanation to close
+            # (owner ruling 2026-08-25); this test is about the WINDOW.
+            "note": "ZZ test close - variance explained",
         },
     )
     assert resp.status_code == 200, resp.text

@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
+import type { DenomRow } from '../utils/denominations';
 import { resolveGstRate, isInclusivePricing } from '../constants/gstRuntime';
 
 // ============================================================================
@@ -115,6 +116,16 @@ export interface PaymentEntry {
   processingFee?: number;        // 2% of loan amount
 }
 
+// Owner ruling 2026-08-25 (per-sale cash accountability): what the customer
+// physically handed over on the CASH portion of the sale -- the figure the
+// change calculator already collects, plus an optional note-by-note count.
+// ATTACHED RECORD ONLY: it rides alongside the payment amounts and can never
+// change them; a cashier who skips it completes the sale exactly as before.
+export interface CashTenderCapture {
+  tendered_amount: number;       // rupees the customer handed over
+  rows?: DenomRow[];             // optional note-by-note breakdown of it
+}
+
 export interface POSState {
   // Current transaction
   sale_type: SaleType;
@@ -169,6 +180,9 @@ export interface POSState {
   // POSLayout after createOrder succeeds.
   pendingLoyaltyRedeem: { points: number; rupeeValue: number; orderValue: number } | null;
 
+  // Per-sale cash accountability (optional; see CashTenderCapture).
+  cash_tender: CashTenderCapture | null;
+
   // UI state
   is_processing: boolean;
 
@@ -201,6 +215,7 @@ export interface POSState {
   // Payment
   addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => void;
   removePayment: (index: number) => void;
+  setCashTender: (capture: CashTenderCapture | null) => void;
   setAdvancePayment: (isAdvance: boolean) => void;
   setDeliveryDate: (date: string | null) => void;
   setDeliveryTimeSlot: (slot: string | null) => void;
@@ -329,6 +344,7 @@ const initialState = {
   customerLoyaltyPoints: 0,
   appliedVoucher: undefined,
   pendingLoyaltyRedeem: null,
+  cash_tender: null,
 };
 
 // ============================================================================
@@ -448,6 +464,8 @@ export const usePOSStore = create<POSState>()(
           ],
         }));
       },
+
+      setCashTender: (capture: CashTenderCapture | null) => set({ cash_tender: capture }),
 
       removePayment: (index: number) => {
         set((state: POSState) => {

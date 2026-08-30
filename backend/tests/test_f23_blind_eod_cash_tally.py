@@ -357,6 +357,14 @@ def test_non_cash_tenders_excluded_from_drawer_expected(db):
 
 def test_full_close_variance_is_paisa_exact(db):
     _seed_order(db, order_id="O3", store_id="BV-1", payments=[_pay("CASH", 1000.0)])
+    # Payouts are AUTO-PULLED from the expenses book (owner ruling 2026-08-25):
+    # a Rs 50 CASH expense on the session day is the 5000-paisa payout leg --
+    # there is no hand-typed figure any more.
+    db.get_collection("expenses").insert_one({
+        "expense_id": "EXP-1", "store_id": "BV-1", "amount": 50.0,
+        "payment_mode": "CASH", "status": "APPROVED",
+        "expense_date": "2026-06-09", "category": "Stationery",
+    })
     # opening 200.00, cash sales 1000.00, payouts 50.00 -> expected 1150.00 (115000 paisa).
     opened = till.open_session(db, store_id="BV-1", session_date="2026-06-09",
                                opening_float_paisa=20000, actor=_cashier())
@@ -365,9 +373,11 @@ def test_full_close_variance_is_paisa_exact(db):
     res = till.blind_submit(db, sid, blind_count_paisa=114500,
                             blind_denominations=[{"face": 500, "pieces": 2}, {"face": 100, "pieces": 1},
                                                  {"face": 20, "pieces": 2}, {"face": 5, "pieces": 1}],
-                            cash_payouts_paisa=5000, actor=_cashier())
+                            actor=_cashier())
     assert res["ok"] is True
     s = res["session"]
+    assert s["cash_payouts_paisa"] == 5000
+    assert s["cash_payouts_source"] == "AUTO_EXPENSES"
     assert s["expected_cash_paisa"] == 115000
     assert s["variance_paisa"] == -500
     assert s["variance_status"] == "SHORTAGE"
@@ -592,12 +602,16 @@ def test_lock_reveals_expected_and_variance(db):
     till.blind_submit(db, sid, blind_count_paisa=70500,  # over by 5.00
                       blind_denominations=[{"face": 500, "pieces": 1}, {"face": 200, "pieces": 1},
                                            {"face": 5, "pieces": 1}], actor=_cashier())
-    res = till.lock_session(db, sid, actor=_manager())
+    # Tolerance is pinned to 0 here, so Rs 5 over is OUT OF BAND: the lock now
+    # demands the written explanation (owner ruling 2026-08-25).
+    res = till.lock_session(db, sid, actor=_manager(),
+                            variance_note="Rs 5 over - extra coin found under the tray")
     assert res["ok"] is True
     s = res["session"]
     assert s["expected_cash_paisa"] == 70000
     assert s["variance_paisa"] == 500
     assert s["variance_status"] == "OVERAGE"
+    assert s["variance_note"] == "Rs 5 over - extra coin found under the tray"
 
 
 def test_zread_carries_the_identity_fields(db):

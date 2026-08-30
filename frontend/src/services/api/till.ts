@@ -51,7 +51,14 @@ export interface TillSession {
   negative_expected_advisory?: boolean | null;
   variance_paisa?: number | null;
   variance_status?: VarianceStatus;
+  // The mandatory written explanation for an out-of-band variance (owner
+  // ruling 2026-08-25); null when the day balanced.
+  variance_note?: string | null;
   tolerance_paisa?: number | null;
+  // AUTO_EXPENSES since 2026-08-25: cash_payouts_paisa is pulled from the
+  // expenses book at blind-submit, never hand-typed.
+  cash_payouts_source?: string | null;
+  off_till_expense_advisory?: boolean | null;
   by_mode?: Record<string, { collected: number; refunded: number; net: number; count: number; ledger?: string }> | null;
   zread_number?: string | null;
   locked_at?: string | null;
@@ -90,7 +97,10 @@ export interface ZRead {
   counted_cash_paisa?: number | null;
   variance_paisa?: number | null;
   variance_status?: VarianceStatus;
+  variance_note?: string | null;
   tolerance_paisa?: number | null;
+  cash_payouts_source?: string | null;
+  off_till_expense_advisory?: boolean | null;
   locked_at?: string | null;
   locked_by_name?: string | null;
   reopen_count?: number;
@@ -119,7 +129,8 @@ export interface BlindSubmitPayload {
   blind_denominations: DenominationLine[];
   closing_count_state?: CountState;
   blind_count_paisa?: number;
-  cash_payouts_paisa?: number;
+  // cash_payouts_paisa was DELETED (owner ruling 2026-08-25): the payouts leg
+  // is auto-pulled from the expenses book server-side.
   idempotency_key?: string;
 }
 
@@ -147,8 +158,12 @@ export const tillApi = {
     const res = await api.post(`/till/sessions/${sessionId}/blind-submit`, payload);
     return (res.data as SessionEnvelope).session;
   },
-  lock: async (sessionId: string): Promise<TillSession> => {
-    const res = await api.post(`/till/sessions/${sessionId}/lock`, {});
+  lock: async (sessionId: string, varianceNote?: string): Promise<TillSession> => {
+    // variance_note is MANDATORY when the variance is beyond the band (the
+    // server refuses with 400 variance_note_required otherwise).
+    const res = await api.post(`/till/sessions/${sessionId}/lock`, {
+      variance_note: varianceNote || undefined,
+    });
     return (res.data as SessionEnvelope).session;
   },
   reopen: async (sessionId: string, reason: string): Promise<TillSession> => {

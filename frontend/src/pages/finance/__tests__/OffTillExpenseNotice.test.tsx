@@ -133,9 +133,12 @@ describe('CashRegisterPage - the counter is told the expected figure is not ever
     // POSITIVE CONTROL. Without an anchor proving the reconciliation panel
     // actually rendered, "no advisory" would also be satisfied by a page that
     // crashed, stayed on its spinner, or took the ONLINE branch -- i.e. the
-    // assertion would be true by construction.
-    expect(await screen.findAllByText(/expected in drawer/i)).not.toHaveLength(0);
-    expect(screen.getByText(/− Cash payouts \/ expenses/i)).toBeInTheDocument();
+    // assertion would be true by construction. Since the 2026-08-25 ruling the
+    // panel is BLIND while counting: the anchor is the blinded close panel,
+    // and the expected figure must NOT be on the page.
+    expect(await screen.findByText(/Close the day/i)).toBeInTheDocument();
+    expect(screen.getByText(/stays hidden while you count/i)).toBeInTheDocument();
+    expect(screen.queryByText(/expected in drawer/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId(ADVISORY)).not.toBeInTheDocument();
   });
 
