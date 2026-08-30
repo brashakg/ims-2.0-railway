@@ -8,24 +8,30 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
-import { useToast } from '../../context/ToastContext';
-import { vendorsApi } from '../../services/api';
 import { SupplierPanel } from './SupplierPanel';
 import { SupplierFormModal } from './SupplierFormModal';
-import { mapVendorToSupplier } from './purchaseMappers';
+import { useSuppliers, vendorsQueryKey } from './purchaseQueries';
 import type { Supplier } from './purchaseTypes';
 
 export function SuppliersSection() {
-  const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [showSupplierModal, setShowSupplierModal] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+
+  // Cached across section switches; refreshes in the background.
+  const suppliersQ = useSuppliers();
+  const suppliers = suppliersQ.data ?? [];
+  const isLoading = suppliersQ.isPending;
+  const loadError = suppliersQ.isError ? 'Failed to load purchase data' : null;
+
+  // Cache writer for add/edit: the ledger updates in place, no refetch flash.
+  const patchSuppliers = (fn: (old: Supplier[]) => Supplier[]) =>
+    queryClient.setQueryData<Supplier[]>(vendorsQueryKey, (old) => fn(old ?? []));
 
   // Header "New supplier" button navigates to ?new=1 (see PurchaseLayout).
   useEffect(() => {
@@ -37,25 +43,8 @@ export function SuppliersSection() {
     }
   }, [searchParams, setSearchParams]);
 
-  useEffect(() => {
-    loadData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const loadData = async () => {
-    setIsLoading(true);
-    setLoadError(null);
-    try {
-      const vendorsResp = await vendorsApi.getVendors({ is_active: true });
-      const rawVendors: unknown[] = vendorsResp?.vendors ?? [];
-      setSuppliers(rawVendors.map(mapVendorToSupplier));
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to load purchase data';
-      setLoadError(msg);
-      toast.error('Failed to load purchase data');
-    } finally {
-      setIsLoading(false);
-    }
+  const loadData = () => {
+    void suppliersQ.refetch();
   };
 
   const filteredSuppliers = suppliers.filter(supplier =>
@@ -110,7 +99,7 @@ export function SuppliersSection() {
         <SupplierFormModal
           onClose={() => setShowSupplierModal(false)}
           onCreated={(newSupplier) => {
-            setSuppliers(prev => [...prev, newSupplier]);
+            patchSuppliers(prev => [...prev, newSupplier]);
             setShowSupplierModal(false);
           }}
         />
@@ -122,7 +111,7 @@ export function SuppliersSection() {
           supplier={editingSupplier}
           onClose={() => setEditingSupplier(null)}
           onSaved={(saved) => {
-            setSuppliers(prev => prev.map(s => (s.id === saved.id ? saved : s)));
+            patchSuppliers(prev => prev.map(s => (s.id === saved.id ? saved : s)));
             setEditingSupplier(null);
           }}
         />

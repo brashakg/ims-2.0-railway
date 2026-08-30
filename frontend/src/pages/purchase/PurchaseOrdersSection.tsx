@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -13,23 +14,35 @@ import { vendorsApi } from '../../services/api';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
 import { PurchaseOrderDetail } from './PurchaseOrderDetail';
-import { mapVendorToSupplier, mapPOtoPurchaseOrder } from './purchaseMappers';
-import type { POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
+import { useSuppliers, usePurchaseOrdersQuery, purchaseOrdersQueryKey } from './purchaseQueries';
+import type { POStatus, PurchaseOrder } from './purchaseTypes';
 
 export function PurchaseOrdersSection() {
   const toast = useToast();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<POStatus | 'ALL'>('ALL');
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [showCreatePO, setShowCreatePO] = useState(false);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
+
+  // Cached across section switches (owner: switching felt like a reload).
+  // First visit fetches; later visits render instantly + refresh in background.
+  const storeId = user?.activeStoreId;
+  const suppliersQ = useSuppliers();
+  const posQ = usePurchaseOrdersQuery(storeId);
+  const suppliers = suppliersQ.data ?? [];
+  const purchaseOrders = posQ.data ?? [];
+  const isLoading = (suppliersQ.isPending || posQ.isPending);
+  const loadError = suppliersQ.isError || posQ.isError
+    ? 'Failed to load purchase data'
+    : null;
+
+  // Cache writer for PO mutations: the list updates in place, no refetch flash.
+  const patchPOs = (fn: (old: PurchaseOrder[]) => PurchaseOrder[]) =>
+    queryClient.setQueryData<PurchaseOrder[]>(purchaseOrdersQueryKey(storeId), (old) => fn(old ?? []));
 
   // Header "New PO" button navigates to ?new=1 (see PurchaseLayout).
   useEffect(() => {
@@ -41,35 +54,9 @@ export function PurchaseOrdersSection() {
     }
   }, [searchParams, setSearchParams]);
 
-  useEffect(() => {
-    loadData();
-    // Refetch POs when the topbar store changes (loadData scopes by activeStoreId).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.activeStoreId]);
-
-  const loadData = async () => {
-    setIsLoading(true);
-    setLoadError(null);
-    try {
-      const storeId = user?.activeStoreId;
-
-      const [vendorsResp, posResp] = await Promise.all([
-        vendorsApi.getVendors({ is_active: true }),
-        vendorsApi.getPurchaseOrders(storeId ? { store_id: storeId } : {}),
-      ]);
-
-      const rawVendors: unknown[] = vendorsResp?.vendors ?? [];
-      const rawPOs: unknown[] = posResp?.purchase_orders ?? [];
-
-      setSuppliers(rawVendors.map(mapVendorToSupplier));
-      setPurchaseOrders(rawPOs.map(mapPOtoPurchaseOrder));
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to load purchase data';
-      setLoadError(msg);
-      toast.error('Failed to load purchase data');
-    } finally {
-      setIsLoading(false);
-    }
+  const loadData = () => {
+    void suppliersQ.refetch();
+    void posQ.refetch();
   };
 
   const filteredPOs = purchaseOrders.filter(po => {
@@ -118,7 +105,7 @@ export function PurchaseOrdersSection() {
 
     const updatedPO: PurchaseOrder = { ...po, status: newStatus };
 
-    setPurchaseOrders(prev => prev.map(p => p.id === po.id ? updatedPO : p));
+    patchPOs(prev => prev.map(p => p.id === po.id ? updatedPO : p));
     setSelectedPO(updatedPO);
     toast.success(message);
   };
@@ -185,7 +172,7 @@ export function PurchaseOrdersSection() {
           existingPOCount={purchaseOrders.length}
           onClose={() => setShowCreatePO(false)}
           onCreated={(newPO) => {
-            setPurchaseOrders(prev => [newPO, ...prev]);
+            patchPOs(prev => [newPO, ...prev]);
             setShowCreatePO(false);
           }}
         />

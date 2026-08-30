@@ -90,6 +90,7 @@ vi.mock('../../../services/api', () => ({
   productApi: { getProducts: vi.fn() },
 }));
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { SuppliersSection } from '../SuppliersSection';
 
@@ -101,9 +102,11 @@ beforeEach(() => {
 
 async function openSuppliersSection() {
   render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <MemoryRouter initialEntries={['/purchase/suppliers']}>
       <SuppliersSection />
-    </MemoryRouter>,
+    </MemoryRouter>
+    </QueryClientProvider>,
   );
   return screen.findByText('Universal Optics');
 }

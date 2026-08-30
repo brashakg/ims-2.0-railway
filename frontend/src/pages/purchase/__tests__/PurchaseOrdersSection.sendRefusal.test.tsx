@@ -68,6 +68,7 @@ vi.mock('../../../services/api', () => ({
   productApi: { getProducts: vi.fn() },
 }));
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { PurchaseOrdersSection } from '../PurchaseOrdersSection';
 import { buildApiError } from '../../../services/api/client';
@@ -96,9 +97,11 @@ beforeEach(() => {
 
 async function openDraftPO() {
   const { container } = render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <MemoryRouter>
       <PurchaseOrdersSection />
-    </MemoryRouter>,
+    </MemoryRouter>
+    </QueryClientProvider>,
   );
   await screen.findByText('PO-2026-0042');
   // The eye (view) button on the PO row has no accessible name — find the
