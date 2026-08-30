@@ -31,7 +31,7 @@ vi.mock('../../../components/purchase/POLifecycleDrawer', () => ({
 }));
 
 import { PurchaseOrderDetail } from '../PurchaseOrderDetail';
-import { mapPOtoPurchaseOrder } from '../PurchaseManagementPage';
+import { mapPOtoPurchaseOrder } from '../purchaseMappers';
 import type { PurchaseOrder } from '../purchaseTypes';
 
 const SERVER_PO = {

@@ -527,7 +527,7 @@ function QueueRow({
         <td className="py-2.5 pr-3 text-xs">
           <div className="flex flex-col gap-0.5">
             {(invoice.po_number || invoice.po_id) && (
-              <Link to="/purchase?tab=purchase-orders" className="text-blue-600 hover:underline">
+              <Link to="/purchase/orders" className="text-blue-600 hover:underline">
                 PO {invoice.po_number ?? invoice.po_id}
               </Link>
             )}
@@ -537,7 +537,7 @@ function QueueRow({
               </Link>
             )}
             {dcCount > 0 && (
-              <Link to="/purchase?tab=purchase-invoices" className="text-blue-600 hover:underline">
+              <Link to="/purchase/invoices" className="text-blue-600 hover:underline">
                 {dcCount} DC{dcCount !== 1 ? 's' : ''} linked
               </Link>
             )}
@@ -1253,7 +1253,7 @@ export default function ReconConsole() {
             </span>
           )}
           <Link
-            to="/purchase?tab=purchase-invoices"
+            to="/purchase/invoices"
             className="text-xs font-medium text-blue-600 hover:underline whitespace-nowrap"
             title="Book invoices, match Delivery Challans in bulk, and view 3-way match detail"
           >
