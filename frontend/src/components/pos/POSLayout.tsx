@@ -20,8 +20,9 @@ import { usePOSStore } from '../../stores/posStore';
 import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from '../../utils/categoryNormalize';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { submitPosOrder } from './submitOrder';
+import { resolveBarcode, posPriceGuard, cartItemFromProduct } from './productIntake';
 import { useProducts } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // POS Rx auto-attach (clinic initiative C5-A): owner-gated convenience. When the
@@ -2220,49 +2221,15 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const categories = CATEGORY_BROWSE_OPTIONS.filter(o => POS_CHIP_VALUES.includes(o.value));
 
   const handleBarcodeScan = async (barcode: string) => {
-    const code = (barcode || '').trim();
-    if (!code) return;
-    // Resolve the EXACT physical unit by its intake barcode (GET
-    // /inventory/barcode/{code}), scoped to the active store. This is the real
-    // scan path -- the old code searched the product TEXT index (which never
-    // indexed the barcode field), so a genuine intake barcode matched nothing
-    // and was silently dumped into the search box (a Fail-Loudly violation).
-    try {
-      const hit = await inventoryApi.searchByBarcode(code, store.store_id || '');
-      // A foreign-store unit must NOT be quietly sold at this terminal.
-      if (hit?.cross_store) {
-        setBlockMsg(`Barcode ${code} belongs to another store's stock -- it cannot be sold here.`);
-        setTimeout(() => setBlockMsg(null), 6000);
-        return;
-      }
-      // Build a cart-ready product from the joined product master (the scan
-      // endpoint joins `products` onto the `stock_units` row); fall back to the
-      // unit's own fields if the join is absent.
-      const p = hit?.product || {};
-      const product = {
-        product_id: p.product_id || hit?.product_id,
-        name: p.name || p.model || hit?.product_name,
-        sku: p.sku || hit?.sku,
-        barcode: hit?.barcode || code,
-        brand: p.brand,
-        subbrand: p.subbrand || p.sub_brand,
-        category: p.category || hit?.category,
-        hsn_code: p.hsn_code || hit?.hsn_code,
-        mrp: p.mrp,
-        offer_price: p.offer_price ?? p.offerPrice,
-        image_url: p.image_url,
-      };
-      if (product.product_id) {
-        handleAddProduct(product);
-        return;
-      }
-      // Hit with no resolvable product -- loud-fail rather than swallow it.
-      setBlockMsg(`Barcode ${code} found but its product record is missing. Tell the manager.`);
-      setTimeout(() => setBlockMsg(null), 6000);
-    } catch {
-      // 404 (or any error) = this barcode is not in stock. Fail loudly; add
-      // NOTHING (do not dump the scanned value into the search box).
-      setBlockMsg(`Barcode ${code} not found in stock. Check the item or search by name.`);
+    // Shared intake brain (productIntake.ts) — scan resolution + fail-loud
+    // messaging live there, one copy for both POS surfaces.
+    const res = await resolveBarcode(store.store_id || '', barcode);
+    if (res.ok && res.product) {
+      handleAddProduct(res.product);
+      return;
+    }
+    if (res.message) {
+      setBlockMsg(res.message);
       setTimeout(() => setBlockMsg(null), 6000);
     }
   };
@@ -2283,28 +2250,17 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   } : null;
 
   const handleAddProduct = (product: any) => {
-    const mrp = product.mrp || 0;
-    const offerPrice = product.offer_price || product.offerPrice || mrp;
-    if (offerPrice > mrp && mrp > 0) {
-      setBlockMsg(`BLOCKED: ${product.name} -- Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
-      setTimeout(() => setBlockMsg(null), 6000);
-      return;
-    }
-    const finalPrice = offerPrice || mrp;
-    if (!finalPrice || finalPrice <= 0 || isNaN(finalPrice)) {
-      setBlockMsg(`BLOCKED: ${product.name} -- Invalid pricing (${fc(finalPrice)}). Contact HQ to fix.`);
+    // Shared MONEY guard (productIntake.ts): offer>MRP and zero/NaN pricing
+    // block at add time; the cart-line mapping is the shared one too.
+    const guard = posPriceGuard(product);
+    if (!guard.ok) {
+      setBlockMsg(guard.message || 'Blocked');
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
     setBlockMsg(null);
     startTransition(() => {
-      store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
-        // The product's stored HSN, so the tax invoice prints the code this
-        // product is registered under rather than deriving one from its
-        // category (see CartLineItem.hsn_code).
-        hsn_code: product.hsn_code,
-        unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
-        is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
+      store.addToCart(cartItemFromProduct(product, guard));
     });
   };
 
