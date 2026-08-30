@@ -31,6 +31,7 @@ from ..dependencies import (
 # SAME clinical Rx-power validation the clinical paths use, and must not let a
 # spectacle-lens / contact-lens line be ordered without a prescription. Reuse
 # the canonical shared validators (NOT a re-derivation of the limits).
+from database.repositories.order_repository import derive_bill_type
 from ..services.rx_validation import (
     _validate_rx_number as _validate_rx_power,
     _validate_axis as _validate_rx_axis,
@@ -2145,6 +2146,7 @@ async def create_order(
             # Consumed by loyalty_engine's >=5% earn gate; must be reset every
             # iteration (the _ceiling vars below persist across loop turns).
             _loyalty_eff = float(item.discount_percent or 0.0)
+            _below_ceiling = False  # typed unit_price under the catalog price
             if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
                 _mrp = _mrp_by_pid.get(_pid)
                 _offer = _offer_by_pid.get(_pid)
@@ -2152,6 +2154,7 @@ async def create_order(
                 _up = item.unit_price
                 _hq_discounted = bool(_offer and _mrp and _offer < _mrp)
                 _ceiling = _offer if _hq_discounted else _mrp
+                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
                 if _ceiling and _up > _ceiling + 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -2281,6 +2284,32 @@ async def create_order(
                         detail=f"Discount {round(_eff_disc, 2)}% on {item.product_name or item.product_id} "
                         f"(explicit discount and/or unit price below MRP) exceeds your limit of "
                         f"{effective_cap}%. Contact a manager for approval.",
+                    )
+
+            # Owner ruling 2026-08-30: a MANUAL discount always carries a
+            # written reason — whether given as a discount_percent OR by
+            # typing a unit_price under the catalog price (the adversarial
+            # review's "type the price instead of the %" bypass). Selling AT
+            # the catalog offer/MRP is not a manual discount; promo-engine
+            # discounts ride applied_promos — neither trips this guard. The
+            # C-4 zero-total gate below additionally demands an APPROVER for
+            # 100% discounts. Minimum 4 characters ("." is not a reason —
+            # matches the superadmin-edit reason floor).
+            if (item.discount_percent or 0) > 0 or _below_ceiling:
+                if len(str(item.discount_reason or "").strip()) < 4:
+                    _why = (
+                        "price is below the current catalog price"
+                        if not (item.discount_percent or 0) > 0
+                        else "manual discount with no offer applied"
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"A discount reason (at least 4 characters) is "
+                            f"required for {item.product_name or item.product_id} "
+                            f"— {_why}. Use the item's Discount button to add "
+                            f"the reason."
+                        ),
                     )
 
             discount_amount = item_total * (item.discount_percent / 100)
@@ -2449,6 +2478,21 @@ async def create_order(
         # across the cart's real product lines. It used to be clamped only to the
         # role cap, so a cart discount could land >cap on a Cartier (2%) or
         # NON_DISCOUNTABLE (0%) line the per-item path above would block.
+        # Owner ruling 2026-08-30: bill-level manual discounts carry a written
+        # reason — for EVERY role, admins included (the reason is
+        # accountability, not a cap; mirrors the per-line guard above).
+        if cart_discount_percent > 0 and len(str(
+            order.cart_discount_reason or ""
+        ).strip()) < 4:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"A reason (at least 4 characters) is required for the "
+                    f"{cart_discount_percent}% bill-level discount "
+                    f"(no offer applied)."
+                ),
+            )
+
         if not is_admin and cart_discount_percent > 0:
             cart_cap = user_discount_cap
             from api.services.pricing_caps import (
@@ -2786,6 +2830,9 @@ async def create_order(
             "amount_paid": 0.0,
             "balance_due": grand_total,
             "payment_status": "UNPAID",
+            # Owner ruling 2026-08-30: bill type follows the money (derived
+            # in ONE place — database/repositories/order_repository.py).
+            "bill_type": derive_bill_type("UNPAID"),
             "status": "DRAFT",
             "expected_delivery": expected_delivery.isoformat(),
             "delivery_time_slot": order.delivery_time_slot,
@@ -3157,9 +3204,19 @@ def _rebuilt_items_or_existing(
 
     if body_items is None:
         return [dict(it) for it in (existing_items or [])]
+    # SuperadminEditLine carries no discount_reason/discount_approved_by
+    # (Pydantic strips unknown keys), so merge them from the STORED line by
+    # item_id — an edit must not wipe the accountability trail.
+    _stored_by_id = {
+        it.get("item_id"): it for it in (existing_items or []) if it.get("item_id")
+    }
     rebuilt = []
     for line in body_items:
         payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
+        stored = _stored_by_id.get(payload.get("item_id")) or {}
+        for _k in ("discount_reason", "discount_approved_by"):
+            if payload.get(_k) is None and stored.get(_k) is not None:
+                payload[_k] = stored.get(_k)
         rebuilt.append(rebuild_edited_line(payload))
     if not rebuilt:
         raise HTTPException(
@@ -3284,6 +3341,7 @@ async def superadmin_edit_order(
         update_data["payment_status"] = "PARTIAL"
     else:
         update_data["payment_status"] = "UNPAID"
+    update_data["bill_type"] = derive_bill_type(update_data["payment_status"])
 
     after_order = dict(order)
     after_order.update(update_data)
@@ -3473,6 +3531,7 @@ async def superadmin_invoice_change(
             if balance_due <= 0.01
             else ("PARTIAL" if amount_paid > 0 else "UNPAID")
         )
+        update_data["bill_type"] = derive_bill_type(update_data["payment_status"])
 
         # SYNCHRONOUS immutable audit BEFORE persisting.
         _write_order_edit_audit(
@@ -3690,6 +3749,7 @@ async def add_order_item(
         # Mirror of create_order's loyalty-effective discount (branch-drift
         # defence) — explicit + implied vs the offer/MRP ceiling.
         _loyalty_eff = float(item.discount_percent or 0.0)
+        _below_ceiling = False  # typed unit_price under the catalog price
         _pid = item.product_id or ""
         # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
         # cost_at_sale below and fed to the floor pass. None (virtual id /
@@ -3714,6 +3774,7 @@ async def add_order_item(
                 _up = item.unit_price
                 _hq = bool(_offer and _mrp and _offer < _mrp)
                 _ceiling = _offer if _hq else (_mrp if (_mrp and _mrp > 0) else None)
+                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
                 if _ceiling and _up > _ceiling + 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -3784,6 +3845,26 @@ async def add_order_item(
                 f"{_cap}%. Contact a manager for approval.",
             )
 
+        # Owner ruling 2026-08-30: same manual-discount-needs-a-reason rule
+        # as create_order (explicit % OR a typed unit_price under the catalog
+        # ceiling; min 4 chars). This path duplicates the create guards —
+        # keeping them in lockstep is the branch-drift defence.
+        if (item.discount_percent or 0) > 0 or _below_ceiling:
+            if len(str(item.discount_reason or "").strip()) < 4:
+                _why = (
+                    "price is below the current catalog price"
+                    if not (item.discount_percent or 0) > 0
+                    else "manual discount with no offer applied"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"A discount reason (at least 4 characters) is required "
+                        f"for {item.product_name or item.product_id} — {_why}. "
+                        f"Use the item's Discount button to add the reason."
+                    ),
+                )
+
         # Calculate item totals
         item_total = item.unit_price * item.quantity
         discount_amount = item_total * (item.discount_percent / 100)
@@ -3803,6 +3884,10 @@ async def add_order_item(
             "discount_percent": item.discount_percent,
             "effective_discount_percent": round(_loyalty_eff, 4),
             "discount_amount": discount_amount,
+            # The guard above VALIDATED these; persist them or the audit
+            # trail records a demanded-but-dropped reason (panel round 3).
+            "discount_reason": item.discount_reason,
+            "discount_approved_by": item.discount_approved_by,
             "item_total": item_subtotal,
             "prescription_id": item.prescription_id,
             "lens_options": item.lens_options,

@@ -554,6 +554,7 @@ def test_c4_zero_total_without_approver_rejected_400(
         auth_headers,
         [_frame_item(1000.0)],
         cart_discount_percent=100.0,
+        cart_discount_reason="test: full comp",
     )
     assert resp.status_code == 400, resp.text
     assert "approver" in resp.text.lower() and "reason" in resp.text.lower()
@@ -1064,6 +1065,8 @@ def _capped_item(pid, price, pct):
         "quantity": 1,
         "unit_price": price,
         "discount_percent": pct,
+        # Owner ruling 2026-08-30: manual discounts need a reason.
+        "discount_reason": ("test: cap check" if pct else None),
     }
 
 

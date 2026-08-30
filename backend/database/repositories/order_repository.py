@@ -66,6 +66,31 @@ def fy_label(dt: datetime) -> str:
     return f"{start}-{(start + 1) % 100:02d}"
 
 
+# Owner ruling 2026-08-30: the BILL TYPE follows the money — no separate
+# order-type step at the POS. Derived from payment_status in ONE place so the
+# rule can never fork (payment_status is computed in add_payment below, in
+# the superadmin-edit recomputes in orders.py, and in the UPI auto-reconcile
+# in services/upi_qr.py — the POS-path writers and the online sync stamp bill_type (ladder-known statuses only; ONDC creation docs and refund/void webhooks do not — refund bill-type semantics await an owner ruling, and bill_type has no consumers there today) through this helper;
+# grep payment_status writers before adding another).
+#   PAID    -> FINAL   (full amount received: final bill)
+#   PARTIAL -> ADVANCE (part received: advance, balance at delivery)
+#   CREDIT  -> CREDIT  (approved pay-later promise)
+#   UNPAID  -> PENDING (no tender yet)
+BILL_TYPE_BY_PAYMENT_STATUS = {
+    "PAID": "FINAL",
+    "PARTIAL": "ADVANCE",
+    "CREDIT": "CREDIT",
+    "UNPAID": "PENDING",
+}
+
+
+def derive_bill_type(payment_status: str) -> str:
+    return BILL_TYPE_BY_PAYMENT_STATUS.get(
+        str(payment_status or "").upper(), "PENDING"
+    )
+
+
+
 class OrderRepository(BaseRepository):
     """Repository for Order operations"""
     
@@ -301,6 +326,8 @@ class OrderRepository(BaseRepository):
                 "amount_paid": amount_paid,
                 "balance_due": max(0.0, balance_due),
                 "payment_status": payment_status,
+                # Owner ruling 2026-08-30: bill type follows the money.
+                "bill_type": derive_bill_type(payment_status),
                 "credit_sale": credit_sale,
             })
         except ValueError:

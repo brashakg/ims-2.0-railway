@@ -911,6 +911,20 @@ def _sync_existing_order_status(
                     # computed.
                     money["payment_status"] = "PAID"
 
+        # Bill type follows the money — derived ONCE, from the FINAL
+        # payment_status (deriving before the PARTIAL->PAID flip above wrote
+        # PAID + ADVANCE in one $set, clobbering add_payment's FINAL). Only
+        # ladder-known statuses stamp: a REFUNDED/CANCELLED/PARTIAL_REFUND
+        # webhook must not overwrite a paid order's FINAL with PENDING —
+        # refund bill-type semantics are an owner decision, not a default.
+        from database.repositories.order_repository import (
+            BILL_TYPE_BY_PAYMENT_STATUS,
+            derive_bill_type,
+        )
+
+        if money["payment_status"] in BILL_TYPE_BY_PAYMENT_STATUS:
+            money["bill_type"] = derive_bill_type(money["payment_status"])
+
         # OS-030 (sync half), ROW-GRANULAR (panel fix 2): reconcile ONLY the
         # pipeline's own synthesized gateway row -- its amount is the collected
         # money the staff tenders do not explain (amount_paid - staff_sum) --

@@ -68,6 +68,9 @@ def _item(pid, unit_price, **over):
     it = {"product_id": pid, "product_name": "Priced Frame", "item_type": "FRAME",
           "category": "FRAME", "quantity": 1, "unit_price": unit_price}
     it.update(over)
+    # Owner ruling 2026-08-30: manual discounts (incl. typed-below-catalog
+    # prices) need a reason; boilerplate keeps these tests on their own gates.
+    it.setdefault("discount_reason", "test: pricing-suite probe")
     return it
 
 
@@ -143,6 +146,7 @@ def test_bug118_hq_discounted_below_offer_blocked(client, staff_headers, priced_
 
 def test_bug118_cart_discount_on_hq_discounted_blocked(client, staff_headers, priced_orders):
     pid = _seed_product(priced_orders, mrp=10000.0, offer_price=9000.0, cost_price=4000.0)
-    r = _post(client, staff_headers, [_item(pid, 9000.0)], cart_discount_percent=5.0)
+    r = _post(client, staff_headers, [_item(pid, 9000.0)], cart_discount_percent=5.0,
+              cart_discount_reason="test: bug118 probe")
     assert r.status_code == 403, r.text
     assert "cart discount" in r.text.lower()

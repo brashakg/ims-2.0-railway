@@ -106,6 +106,7 @@ def _item(pid, *, discount_percent, brand=None, unit_price=10000.0):
         "product_id": pid, "product_name": "Priced Frame", "item_type": "FRAME",
         "category": "FRAME", "quantity": 1, "unit_price": unit_price,
         "discount_percent": discount_percent,
+        "discount_reason": ("test: cap-suite discount" if discount_percent else None),
     }
     if brand:
         it["brand"] = brand

@@ -134,10 +134,18 @@ def _item(pid, unit_price, **over):
     it = {"product_id": pid, "product_name": "Floor Frame", "item_type": "FRAME",
           "category": "FRAME", "quantity": 1, "unit_price": unit_price}
     it.update(over)
+    # Owner ruling 2026-08-30: every MANUAL discount carries a written reason
+    # (see test_discount_reason_and_bill_type.py). These tests exercise the
+    # FLOOR, so a boilerplate reason keeps them focused on their own gate.
+    it.setdefault("discount_reason", "test: floor-suite discount")
     return it
 
 
 def _post(client, headers, items, customer_id="cust-x", **extra):
+    # Same ruling at bill level: default a reason whenever a test passes a
+    # cart discount without one, so floor tests keep testing the floor.
+    if float(extra.get("cart_discount_percent") or 0) > 0:
+        extra.setdefault("cart_discount_reason", "test: floor-suite cart discount")
     return client.post(
         "/api/v1/orders",
         json={"customer_id": customer_id, "items": items, **extra},

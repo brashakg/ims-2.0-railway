@@ -607,3 +607,42 @@ def test_invalid_mode_rejected_422(client, auth_headers, wired):
         headers=auth_headers,
     )
     assert resp.status_code == 422, resp.text
+
+
+def test_pre_invoice_edit_keeps_line_discount_reason(client, auth_headers, wired):
+    """SuperadminEditLine carries no reason fields (Pydantic strips unknown
+    keys), so the router must merge them from the STORED line by item_id —
+    an edit must not wipe the accountability trail. Fails if the merge in
+    _rebuilt_items_or_existing is reverted."""
+    _seed_order(
+        wired["order_repo"],
+        items=[
+            {
+                "item_id": "line-1",
+                "item_type": "FRAME",
+                "category": "FRAME",
+                "product_name": "Test Frame",
+                "quantity": 1,
+                "unit_price": 1000.0,
+                "discount_percent": 10,
+                "discount_amount": 100.0,
+                "discount_reason": "price match - Titan quote",
+                "discount_approved_by": "mgr-7",
+                "item_total": 900.0,
+                "gst_rate": 5.0,
+            }
+        ],
+    )
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={
+            "reason": "test: correct unit price",
+            "items": [_edit_item(unit_price=900.0, discount=10)],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    doc = wired["order_repo"].find_by_id("ord-16")
+    line = doc["items"][0]
+    assert line["discount_reason"] == "price match - Titan quote"
+    assert line["discount_approved_by"] == "mgr-7"
