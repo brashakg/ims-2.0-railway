@@ -400,6 +400,87 @@ async def handle_unknown(
 
 
 # ============================================================================
+# Coexistence double-answer guard
+# ============================================================================
+# Each shop's WhatsApp number runs on the shop phone AND the API. A human on
+# the shop phone answers customers; IMS must not answer NEXT to them. Policy
+# msg.auto_reply_mode (registered in policy_registry, default "off") decides:
+#   off         -> never auto-reply (Coexistence-safe default)
+#   after_hours -> auto-reply only while the store is CLOSED (store
+#                  working_hours where stored, else the shared 21:00-09:00
+#                  IST quiet window), evaluated in IST
+#   always      -> auto-reply to every inbound
+# THE one implementation: dispatch_intent below is the only auto-reply send
+# site, and it gates through auto_reply_allowed().
+
+_DEFAULT_OPEN_START_MIN = 9 * 60  # fallback open window 09:00-21:00 IST,
+_DEFAULT_OPEN_END_MIN = 21 * 60  # i.e. after-hours == the shared quiet window
+
+
+def _store_working_minutes(store_id: str) -> Tuple[int, int]:
+    """(open_minute, close_minute) of the store's IST working window.
+
+    Reads stores.working_hours "HH:MM-HH:MM"; missing store / missing or
+    unparseable value -> the 09:00-21:00 default. Never raises."""
+    try:
+        db = _get_db()
+        if db is None or not store_id:
+            return _DEFAULT_OPEN_START_MIN, _DEFAULT_OPEN_END_MIN
+        doc = db.get_collection("stores").find_one(
+            {"store_id": store_id}, {"_id": 0, "working_hours": 1}
+        )
+        raw = str((doc or {}).get("working_hours") or "")
+        start_s, end_s = raw.split("-", 1)
+        sh, sm = start_s.strip().split(":", 1)
+        eh, em = end_s.strip().split(":", 1)
+        start = int(sh) * 60 + int(sm)
+        end = int(eh) * 60 + int(em)
+        if 0 <= start < 24 * 60 and 0 <= end < 24 * 60:
+            return start, end
+    except Exception:  # noqa: BLE001 - fail-soft to the sane default window
+        pass
+    return _DEFAULT_OPEN_START_MIN, _DEFAULT_OPEN_END_MIN
+
+
+def _store_open_now(store_id: str, now: Optional[datetime] = None) -> bool:
+    """True when the store is inside its working hours RIGHT NOW, in IST
+    (BUG-104 discipline: the shared agents.quiet_hours IST clock, never a
+    naive server-local now())."""
+    from agents.quiet_hours import now_ist  # shared IST clock
+
+    t = now_ist(now)
+    minutes = t.hour * 60 + t.minute
+    start, end = _store_working_minutes(store_id)
+    if start <= end:
+        return start <= minutes < end
+    # Overnight window (e.g. "18:00-02:00") wraps midnight.
+    return minutes >= start or minutes < end
+
+
+def auto_reply_allowed(
+    store_id: str, now: Optional[datetime] = None
+) -> Tuple[bool, str]:
+    """(allowed, reason) for sending an automated inbound reply.
+
+    Fail-CLOSED: any policy-read error means "off" -- a config hiccup must
+    never make IMS answer next to a human on the shop phone."""
+    try:
+        from api.services.policy_engine import get_policy
+
+        scope = {"store_id": store_id} if store_id else None
+        mode = str(get_policy("msg.auto_reply_mode", scope) or "off").strip().lower()
+    except Exception:  # noqa: BLE001
+        mode = "off"
+    if mode == "always":
+        return True, "auto_reply_mode=always"
+    if mode == "after_hours":
+        if _store_open_now(store_id, now):
+            return False, "store open - a human on the shop phone answers"
+        return True, "after hours - store closed"
+    return False, "auto_reply_mode=off (Coexistence default: staff reply in the WhatsApp app)"
+
+
+# ============================================================================
 # Main dispatcher
 # ============================================================================
 
@@ -463,11 +544,27 @@ async def dispatch_intent(
         handler = _HANDLER_MAP.get(intent, handle_unknown)
         reply_text = await handler(phone, customer, store_id)
 
+        # Coexistence double-answer guard: the handler ran (opt-outs are
+        # recorded, follow-ups created) but the automated REPLY only goes
+        # out when policy allows -- by default a human on the shop phone
+        # answers, not IMS.
+        allowed, why = auto_reply_allowed(store_id)
+        if not allowed:
+            result["reply_sent"] = False
+            result["reply_suppressed"] = why
+            logger.info("[WA_INTENTS] auto-reply suppressed: %s", why)
+            return result
+
         # Send reply via outbound provider (fail-soft).
         try:
             from agents.providers import send_whatsapp
 
-            dispatch_result = await send_whatsapp(phone, reply_text)
+            dispatch_result = await send_whatsapp(
+                phone,
+                reply_text,
+                template_id="WA_INTENT_REPLY",
+                store_id=store_id,
+            )
             result["reply_sent"] = dispatch_result.ok
             result["reply_status"] = dispatch_result.status
         except Exception as e:

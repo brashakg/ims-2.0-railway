@@ -155,7 +155,12 @@ def test_whatsapp_credentials_saved_on_the_screen_reach_the_sender(monkeypatch, 
     monkeypatch.setattr(providers, "DISPATCH_MODE", "live")
     monkeypatch.setattr(providers.httpx, "AsyncClient", rec.client())
 
-    res = asyncio.run(providers.send_whatsapp("+919999999999", "hi", template_id="t1"))
+    # ORDER_DELIVERED is a registry-seeded flow: the send door refuses
+    # unmapped flow keys outright (Coexistence piece 3), so the wiring probes
+    # ride a real flow.
+    res = asyncio.run(
+        providers.send_whatsapp("+919999999999", "hi", template_id="ORDER_DELIVERED")
+    )
 
     assert res.status == "SENT", res
     assert len(rec.calls) == 1, "no outbound call was made"
@@ -201,7 +206,9 @@ def test_a_credential_saved_after_boot_is_picked_up_without_a_restart(monkeypatc
 
     monkeypatch.setattr(providers, "DISPATCH_MODE", "live")
     monkeypatch.setattr(providers.httpx, "AsyncClient", rec.client())
-    asyncio.run(providers.send_whatsapp("+919999999999", "hi", template_id="t1"))
+    asyncio.run(
+        providers.send_whatsapp("+919999999999", "hi", template_id="ORDER_DELIVERED")
+    )
     assert rec.calls[0]["headers"]["authkey"] == "MARKER-LATE-KEY"
 
 
@@ -217,7 +224,9 @@ def test_env_vars_still_work_when_nothing_is_saved_in_the_database(monkeypatch, 
     assert providers.provider_ready("whatsapp") is True
     assert providers.provider_ready("sms") is True
 
-    asyncio.run(providers.send_whatsapp("+919999999999", "hi", template_id="t1"))
+    asyncio.run(
+        providers.send_whatsapp("+919999999999", "hi", template_id="ORDER_DELIVERED")
+    )
     assert rec.calls[0]["headers"]["authkey"] == "MARKER-ENV-KEY"
     assert rec.calls[0]["json"]["integrated_number"] == "MARKER-ENV-NUMBER"
 
@@ -227,7 +236,9 @@ def test_missing_credentials_fail_honestly_and_never_crash(monkeypatch, rec):
     monkeypatch.setattr(providers, "DISPATCH_MODE", "live")
     monkeypatch.setattr(providers.httpx, "AsyncClient", rec.client())
 
-    wa = asyncio.run(providers.send_whatsapp("+919999999999", "hi", template_id="t1"))
+    wa = asyncio.run(
+        providers.send_whatsapp("+919999999999", "hi", template_id="ORDER_DELIVERED")
+    )
     sms = asyncio.run(providers.send_sms("+919999999999", "hi"))
 
     for res in (wa, sms):
@@ -258,16 +269,21 @@ def test_dispatch_mode_can_never_come_from_the_database(monkeypatch, rec):
     monkeypatch.setattr(providers, "DISPATCH_MODE", "off")
     monkeypatch.setattr(providers.httpx, "AsyncClient", rec.client())
 
-    res = asyncio.run(providers.send_whatsapp("+919999999999", "hi", template_id="t1"))
+    res = asyncio.run(
+        providers.send_whatsapp("+919999999999", "hi", template_id="ORDER_DELIVERED")
+    )
 
     assert res.status == "SIMULATED", res
     assert rec.calls == [], "DISPATCH_MODE=off still sent a real message"
     # And the resolver hands the sender credentials ONLY - no send switch.
+    # (store_numbers is the Coexistence per-store sender map - a credential-
+    # shaped field, still no dispatch switch.)
     assert set(get_msg91_config()) == {
         "api_key",
         "whatsapp_number",
         "sms_template_id",
         "sender",
+        "store_numbers",
     }
 
 

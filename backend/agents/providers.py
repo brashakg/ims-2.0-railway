@@ -102,6 +102,11 @@ class DispatchResult:
     error: Optional[str] = None
     channel: Optional[str] = None
     dispatched_at: str = ""
+    # WhatsApp only: the resolved template + sender the send used (or WOULD
+    # have used -- the SIMULATED path fills this too, so a dark deploy can
+    # prove the payload shape end to end without touching MSG91). Contains
+    # no credential; never persisted by the drain.
+    meta: Optional[dict] = None
 
     def __post_init__(self):
         if not self.dispatched_at:
@@ -149,18 +154,80 @@ def _normalize_phone(phone: str) -> str:
 # ============================================================================
 
 
-async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] = None) -> DispatchResult:
+async def send_whatsapp(
+    phone: str,
+    message: str,
+    *,
+    template_id: Optional[str] = None,
+    store_id: Optional[str] = None,
+    variables: Optional[dict] = None,
+) -> DispatchResult:
     """
-    Send a WhatsApp message via MSG91. Returns DispatchResult; never raises.
+    Send a WhatsApp template message via MSG91. Returns DispatchResult;
+    never raises.
 
-    template_id: MSG91 DLT-approved template id. If None, MSG91 will reject
-      the send (WhatsApp Business requires pre-approved templates). The
-      template bindings themselves live in notification_service.TEMPLATES
-      and are passed as the message body here.
+    template_id: the FLOW KEY. The actual Meta/MSG91 template name, language,
+      category and variable order come from the template registry (ONE lookup:
+      api.services.notification_templates.resolve_wa_template -- owner-edited
+      DB row over the code seed). A flow with NO mapping REFUSES honestly:
+      a guessed template name is never sent, in any DISPATCH_MODE.
+
+    store_id: Coexistence sender context. The integrated number is resolved
+      per store (ONE resolver: integration_config.resolve_whatsapp_sender);
+      no/unmapped store falls back to the single default number.
+
+    variables: optional values for the registry's ordered variable list. When
+      every listed variable is supplied, the payload carries body_1..body_n in
+      registry order; otherwise the whole message rides body_1 (legacy shape).
+
+    Template + sender are resolved BEFORE the dispatch gate so the SIMULATED
+    path proves the payload shape end to end (see DispatchResult.meta).
     """
     phone_norm = _normalize_phone(phone)
     if not phone_norm:
         return DispatchResult(ok=False, status="FAILED", error="invalid phone", channel="whatsapp")
+
+    # --- template registry: the ONE lookup; unmapped flows refuse ----------
+    from api.services.notification_templates import resolve_wa_template
+
+    tpl = resolve_wa_template(template_id)
+    if tpl is None:
+        return DispatchResult(
+            ok=False,
+            status="FAILED",
+            error=(
+                f"no WhatsApp template mapped for flow '{template_id or '(none)'}' "
+                "- map it under Settings -> Notifications -> Templates; a guessed "
+                "template name is never sent"
+            ),
+            channel="whatsapp",
+        )
+
+    # --- sender resolution: per-store Coexistence number -------------------
+    from api.services.integration_config import resolve_whatsapp_sender
+
+    integrated_number = resolve_whatsapp_sender(store_id)
+
+    # --- components: registry variable order when values are supplied ------
+    var_order = tpl.get("variables") or []
+    components = None
+    if variables and var_order and all(v in variables for v in var_order):
+        components = {
+            f"body_{i}": {"type": "text", "value": str(variables[name])}
+            for i, name in enumerate(var_order, start=1)
+        }
+    if components is None:
+        components = {"body_1": {"type": "text", "value": message}}
+
+    meta = {
+        "flow_key": template_id,
+        "template_name": tpl["template_name"],
+        "language": tpl["language"],
+        "category": tpl["category"],
+        "store_id": store_id,
+        "integrated_number": integrated_number,
+        "components": components,
+    }
 
     should, reason = _should_dispatch(phone_norm)
     if not should:
@@ -170,11 +237,11 @@ async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] 
             status="SIMULATED",
             provider_id=f"sim-wa-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
             channel="whatsapp",
+            meta=meta,
         )
 
     creds = _msg91()
     api_key = creds.get("api_key") or ""
-    integrated_number = creds.get("whatsapp_number") or ""
 
     if not api_key:
         return DispatchResult(
@@ -204,15 +271,13 @@ async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] 
             "messaging_product": "whatsapp",
             "type": "template",
             "template": {
-                "name": template_id or "generic_text",
-                "language": {"code": "en", "policy": "deterministic"},
+                "name": tpl["template_name"],
+                "language": {"code": tpl["language"], "policy": "deterministic"},
                 "namespace": os.getenv("MSG91_WHATSAPP_NAMESPACE", ""),
                 "to_and_components": [
                     {
                         "to": [phone_norm],
-                        "components": {
-                            "body_1": {"type": "text", "value": message},
-                        },
+                        "components": components,
                     }
                 ],
             },
@@ -247,6 +312,7 @@ async def send_whatsapp(phone: str, message: str, *, template_id: Optional[str] 
             status="SENT",
             provider_id=request_id or None,
             channel="whatsapp",
+            meta=meta,
         )
     except httpx.TimeoutException:
         return DispatchResult(ok=False, status="FAILED", error="timeout", channel="whatsapp")

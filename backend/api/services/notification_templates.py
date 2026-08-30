@@ -118,6 +118,115 @@ def resolve_template(
     return content, subject
 
 
+# ---------------------------------------------------------------------------
+# WhatsApp template registry (Coexistence build, piece 3)
+# ---------------------------------------------------------------------------
+# Maps each outbound WhatsApp FLOW to the MSG91/Meta template it sends:
+# {flow_key: {template_name, language, category, variables(ordered)}}.
+#
+# The SEED below is code-versioned and mirrors, byte for byte, the template
+# name each flow puts on the wire TODAY (the flow key itself for queued
+# notification_service flows -- the drain passes row.template_id as the
+# payload name -- and "generic_text" for the three direct-call flows that
+# used to pass template_id=None). So a fresh deploy behaves identically.
+# As MSG91 approves real templates, the owner replaces these names via
+# Settings -> Notifications -> Templates (the wa_* fields on the SAME
+# notification_templates doc); the DB row then wins over the seed.
+#
+# A flow key with NO row here and NO DB row REFUSES to send (the send door
+# in agents.providers returns FAILED naming the flow) -- a guessed template
+# name is never sent. `variables` is the ORDERED Meta body-variable list;
+# empty means the whole message rides body_1 (today's shape).
+
+WA_TEMPLATE_SEED: dict = {
+    # --- flows queued through notification_service (drain -> send door) ---
+    "PRESCRIPTION_EXPIRY": {"template_name": "PRESCRIPTION_EXPIRY", "language": "en", "category": "utility", "variables": ["customer_name", "store_name", "expiry_date", "store_phone"]},
+    "BIRTHDAY_WISH": {"template_name": "BIRTHDAY_WISH", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name"]},
+    "ANNUAL_CHECKUP_REMINDER": {"template_name": "ANNUAL_CHECKUP_REMINDER", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name"]},
+    "ORDER_DELIVERED": {"template_name": "ORDER_DELIVERED", "language": "en", "category": "utility", "variables": ["customer_name", "order_number", "store_name"]},
+    "GOOGLE_REVIEW_REQUEST": {"template_name": "GOOGLE_REVIEW_REQUEST", "language": "en", "category": "utility", "variables": ["customer_name", "store_name", "review_link"]},
+    "WALKOUT_RECOVERY": {"template_name": "WALKOUT_RECOVERY", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name", "frame_names", "discount_percent", "validity_date"]},
+    "REFERRAL_INVITE": {"template_name": "REFERRAL_INVITE", "language": "en", "category": "marketing", "variables": ["customer_name", "referral_code", "referee_reward", "referrer_reward"]},
+    "NPS_SURVEY": {"template_name": "NPS_SURVEY", "language": "en", "category": "utility", "variables": ["customer_name", "store_name", "survey_link"]},
+    "CL_REORDER_REMINDER": {"template_name": "CL_REORDER_REMINDER", "language": "en", "category": "utility", "variables": []},
+    "RX_PORTAL_OTP": {"template_name": "RX_PORTAL_OTP", "language": "en", "category": "auth", "variables": []},
+    "POOL_REDEEM_OTP": {"template_name": "POOL_REDEEM_OTP", "language": "en", "category": "auth", "variables": []},
+    "repair_ready": {"template_name": "repair_ready", "language": "en", "category": "utility", "variables": []},
+    # --- direct-call flows (previously template_id=None -> "generic_text") ---
+    "WORKSHOP_READY": {"template_name": "generic_text", "language": "en", "category": "utility", "variables": []},
+    "TASK_ESCALATION": {"template_name": "generic_text", "language": "en", "category": "utility", "variables": []},
+    "WA_INTENT_REPLY": {"template_name": "generic_text", "language": "en", "category": "utility", "variables": []},
+}
+
+_WA_CATEGORIES = ("utility", "marketing", "auth")
+
+
+def resolve_wa_template(flow_key: Optional[str]) -> Optional[dict]:
+    """THE one WhatsApp-template lookup for the send door.
+
+    Returns {template_name, language, category, variables} for `flow_key`,
+    resolving the owner-edited DB row (wa_template_name etc. on the
+    notification_templates doc) over the code seed. Returns None when the
+    flow is unmapped in BOTH -- the send door then refuses honestly instead
+    of sending a guessed name. Never raises.
+    """
+    if not flow_key:
+        return None
+    seed = WA_TEMPLATE_SEED.get(flow_key)
+    try:
+        doc = _find_saved_template(flow_key, None)
+    except Exception:  # noqa: BLE001 - registry read is fail-soft
+        doc = None
+    db_name = ""
+    if isinstance(doc, dict):
+        db_name = str(doc.get("wa_template_name") or "").strip()
+    if db_name:
+        seed = seed or {}
+        category = str(doc.get("wa_category") or seed.get("category") or "utility").strip().lower()
+        if category not in _WA_CATEGORIES:
+            category = "utility"
+        variables = doc.get("wa_variables")
+        if not isinstance(variables, list):
+            variables = seed.get("variables") or []
+        return {
+            "template_name": db_name,
+            "language": str(doc.get("wa_language") or seed.get("language") or "en").strip() or "en",
+            "category": category,
+            "variables": [str(v) for v in variables],
+        }
+    if seed:
+        return dict(seed)
+    return None
+
+
+def wa_registry_report() -> dict:
+    """Per-flow mapping report for the messaging preflight (names only).
+
+    {flow_key: {"template_name": ..., "source": "db"|"seed",
+                "seed_default": bool}} -- seed_default marks a flow still on
+    its code-seeded placeholder name (MSG91 will reject it until the owner
+    maps the real approved template name). Never raises.
+    """
+    out: dict = {}
+    for key in sorted(WA_TEMPLATE_SEED):
+        resolved = resolve_wa_template(key) or {}
+        seed_name = WA_TEMPLATE_SEED[key]["template_name"]
+        name = resolved.get("template_name", seed_name)
+        source = "seed"
+        try:
+            doc = _find_saved_template(key, None)
+            if isinstance(doc, dict) and str(doc.get("wa_template_name") or "").strip():
+                source = "db"
+        except Exception:  # noqa: BLE001
+            pass
+        out[key] = {
+            "template_name": name,
+            "source": source,
+            "seed_default": source == "seed",
+        }
+    return out
+
+
 def render(template: str, variables: Optional[dict]) -> str:
     """Apply simple {placeholder} substitution. A missing variable returns the
     template unchanged (matches notification_service.populate_template's

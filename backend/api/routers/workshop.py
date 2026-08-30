@@ -2817,7 +2817,12 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
         try:
             from agents.providers import send_whatsapp  # lazy import
 
-            res = await send_whatsapp(phone, _ready_whatsapp_text(job))
+            res = await send_whatsapp(
+                phone,
+                _ready_whatsapp_text(job),
+                template_id="WORKSHOP_READY",
+                store_id=job.get("store_id"),
+            )
             wa_status = getattr(res, "status", "SENT")
         except Exception as e:  # noqa: BLE001
             logger.warning("[WORKSHOP] notify-ready whatsapp failed: %s", e)

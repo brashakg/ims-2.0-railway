@@ -302,6 +302,160 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
     return out
 
 
+def _preflight_row(
+    row_id: str, label: str, ok: bool, detail: str, next_step: str = ""
+) -> Dict[str, Any]:
+    return {
+        "id": row_id,
+        "label": label,
+        "ok": bool(ok),
+        "detail": detail,
+        "next_step": next_step,
+    }
+
+
+def build_messaging_preflight(db=None) -> Dict[str, Any]:
+    """MSG91 + Coexistence messaging preflight: every row honest, with the
+    owner's NEXT STEP named. Reports presence/counts/ids only -- never a
+    credential value and never a phone number. Fail-soft throughout."""
+    from api.services.integration_config import get_msg91_config
+    from api.services.notification_templates import wa_registry_report
+
+    try:
+        cfg = get_msg91_config()
+    except Exception:
+        cfg = {}
+    mode = _dispatch_mode()
+    rows: List[Dict[str, Any]] = []
+
+    # 1. Credentials
+    api_key_ok = bool(cfg.get("api_key"))
+    rows.append(_preflight_row(
+        "creds", "MSG91 auth key",
+        api_key_ok,
+        "auth key present" if api_key_ok else "no MSG91 auth key anywhere",
+        "" if api_key_ok else "Paste the MSG91 auth key under Settings -> "
+        "Integrations -> WhatsApp Business (MSG91), or set MSG91_API_KEY on Railway.",
+    ))
+
+    # 2. Default sender number
+    default_ok = bool(cfg.get("whatsapp_number"))
+    rows.append(_preflight_row(
+        "default_number", "Default WhatsApp number",
+        default_ok,
+        "default integrated number set" if default_ok
+        else "no default WhatsApp integrated number",
+        "" if default_ok else "Enter the WhatsApp Integrated Number in the "
+        "same tile (or MSG91_WHATSAPP_INTEGRATED_NUMBER) - it is the fallback "
+        "sender for stores without their own mapped number.",
+    ))
+
+    # 3. Per-store Coexistence numbers
+    store_map = cfg.get("store_numbers") or {}
+    store_ids: List[str] = []
+    stores_readable = False
+    try:
+        coll = db.get_collection("stores") if db is not None else None
+        if coll is not None:
+            store_ids = [
+                s.get("store_id")
+                for s in coll.find(
+                    {"is_active": {"$ne": False}}, {"_id": 0, "store_id": 1}
+                )
+                if s.get("store_id")
+            ]
+            stores_readable = True
+    except Exception:
+        stores_readable = False
+    missing_stores = [s for s in store_ids if s not in store_map]
+    if not stores_readable:
+        rows.append(_preflight_row(
+            "store_numbers", "Per-store WhatsApp numbers",
+            False,
+            f"{len(store_map)} store(s) mapped; could not read the stores list "
+            "to check coverage",
+            "Open this screen with the database reachable to verify every "
+            "store is mapped.",
+        ))
+    else:
+        rows.append(_preflight_row(
+            "store_numbers", "Per-store WhatsApp numbers",
+            bool(store_ids) and not missing_stores,
+            f"{len(store_ids) - len(missing_stores)} of {len(store_ids)} active "
+            "stores mapped"
+            + (f"; missing: {', '.join(missing_stores)}" if missing_stores else ""),
+            "" if not missing_stores and store_ids else
+            "Map each shop's own WhatsApp number in Settings -> Integrations -> "
+            "WhatsApp Business (MSG91) -> 'Per-store WhatsApp numbers' "
+            "(STORE-ID:number, comma-separated). Unmapped stores send from the "
+            "default number.",
+        ))
+
+    # 4. Template registry
+    try:
+        registry = wa_registry_report()
+    except Exception:
+        registry = {}
+    seed_defaults = sorted(k for k, v in registry.items() if v.get("seed_default"))
+    mapped_count = len(registry) - len(seed_defaults)
+    rows.append(_preflight_row(
+        "templates", "WhatsApp templates mapped",
+        bool(registry) and not seed_defaults,
+        f"{mapped_count} of {len(registry)} flows carry an owner-mapped, "
+        "approved template name"
+        + (f"; still on seed defaults: {', '.join(seed_defaults)}"
+           if seed_defaults else ""),
+        "" if not seed_defaults else "Once MSG91 approves each WhatsApp "
+        "template, enter its approved name against the flow under Settings -> "
+        "Notifications -> Templates. Flows on seed-default names will be "
+        "rejected by MSG91 when live.",
+    ))
+
+    # 5. DLT ids
+    pe_id_ok = bool(os.getenv("DLT_PE_ID") or os.getenv("MSG91_DLT_PE_ID"))
+    sms_tpl_ok = bool(cfg.get("sms_template_id"))
+    dlt_detail = []
+    dlt_detail.append("DLT PE id set" if pe_id_ok else "DLT PE id missing")
+    dlt_detail.append(
+        "SMS DLT template id set" if sms_tpl_ok else "SMS DLT template id missing"
+    )
+    rows.append(_preflight_row(
+        "dlt", "DLT registration ids",
+        pe_id_ok and sms_tpl_ok,
+        "; ".join(dlt_detail),
+        "" if (pe_id_ok and sms_tpl_ok) else "After DLT entity registration, "
+        "set DLT_PE_ID on Railway and the SMS Template ID in the WhatsApp "
+        "Business (MSG91) tile.",
+    ))
+
+    # 6. Dispatch mode (the send gate -- env-only, on purpose)
+    rows.append(_preflight_row(
+        "dispatch_mode", "Sending mode (DISPATCH_MODE)",
+        mode in ("test", "live"),
+        f"DISPATCH_MODE={mode}"
+        + ("" if mode in ("test", "live") else " - nothing is sent to anyone"),
+        "" if mode == "live" else "When ready to arm: set DISPATCH_MODE=test "
+        "with TEST_PHONE on Railway so every flow reaches your own phone "
+        "first, then DISPATCH_MODE=live. This switch is env-only by design.",
+    ))
+
+    # 7. Test phone
+    test_phone_ok = bool(os.getenv("TEST_PHONE"))
+    rows.append(_preflight_row(
+        "test_phone", "TEST_PHONE",
+        test_phone_ok,
+        "TEST_PHONE set" if test_phone_ok else "TEST_PHONE not set",
+        "" if test_phone_ok else "Set TEST_PHONE on Railway (your own number) "
+        "- required before DISPATCH_MODE=test can deliver anything.",
+    ))
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+        "ok": all(r["ok"] for r in rows),
+    }
+
+
 def build_integration_status(db=None) -> Dict[str, Any]:
     """Full read-only integration status report. KEYS ONLY, never values.
 
@@ -320,6 +474,11 @@ def build_integration_status(db=None) -> Dict[str, Any]:
     configured_count = sum(1 for i in items if i["configured"])
     live_count = sum(1 for i in items if i["state"] in ("live", "active"))
 
+    try:
+        preflight = build_messaging_preflight(db)
+    except Exception:  # noqa: BLE001 - the preflight must never sink the report
+        preflight = {"rows": [], "ok": False}
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dispatch_mode": mode,
@@ -330,4 +489,5 @@ def build_integration_status(db=None) -> Dict[str, Any]:
             "live": live_count,
         },
         "integrations": items,
+        "messaging_preflight": preflight,
     }

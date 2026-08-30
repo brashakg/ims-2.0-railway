@@ -349,6 +349,12 @@ _INTEGRATION_CATALOG = [
              "placeholder": "DLT-approved template ID", "optional": True},
             {"key": "sender", "label": "SMS Sender ID", "secret": False,
              "placeholder": "BVOPTL", "optional": True},
+            {"key": "store_numbers", "label": "Per-store WhatsApp numbers", "secret": False,
+             "placeholder": "STORE-ID:919812345678, STORE-ID2:919887654321",
+             "optional": True,
+             "help": "Coexistence: each shop's own WhatsApp Business number, as "
+                     "comma-separated store_id:number pairs. Stores not listed "
+                     "here send from the WhatsApp Integrated Number above."},
         ],
     },
     {
@@ -633,6 +639,16 @@ class NotificationTemplate(BaseModel):
     subject: Optional[str] = None  # For email
     content: str
     variables: List[str] = []  # Available variables like {customer_name}, {order_id}
+    # --- WhatsApp template registry mapping (MSG91/Meta approved template) ---
+    # Read by notification_templates.resolve_wa_template: the approved template
+    # NAME this flow sends, its language code, Meta category and ORDERED
+    # variable list. All optional; when absent the code seed applies. On save,
+    # None values are DROPPED before the $set so an unrelated edit (e.g. the
+    # enable toggle) never wipes a stored mapping.
+    wa_template_name: Optional[str] = None
+    wa_language: Optional[str] = None
+    wa_category: Optional[str] = None  # utility | marketing | auth
+    wa_variables: Optional[List[str]] = None
 
 
 _VALID_RECEIPT_WIDTHS = {58, 80}
@@ -1239,6 +1255,20 @@ async def get_notification_logs(
     return {"logs": docs, "total": len(docs)}
 
 
+_WA_MAPPING_FIELDS = ("wa_template_name", "wa_language", "wa_category", "wa_variables")
+
+
+def _template_payload(template: NotificationTemplate) -> dict:
+    """model_dump minus absent WA-mapping fields, so a $set from an edit that
+    did not submit them (the enable toggle sends the base shape only) never
+    overwrites a stored WhatsApp template mapping with None."""
+    payload = template.model_dump()
+    for key in _WA_MAPPING_FIELDS:
+        if payload.get(key) is None:
+            payload.pop(key, None)
+    return payload
+
+
 @router.get("/notifications/templates")
 async def get_notification_templates(current_user: dict = Depends(get_current_user)):
     """Get all notification templates"""
@@ -1273,7 +1303,7 @@ async def update_notification_template(
     """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = template.model_dump()
+    payload = _template_payload(template)
     payload["template_id"] = template_id  # path is canonical
     collection = _get_settings_collection("notification_templates")
     if collection is not None:
@@ -1292,7 +1322,7 @@ async def create_notification_template(
     template_id so a repeat create is idempotent rather than duplicating."""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = template.model_dump()
+    payload = _template_payload(template)
     collection = _get_settings_collection("notification_templates")
     if collection is not None:
         collection.update_one(
@@ -1361,7 +1391,8 @@ async def test_notification(
 
     mode = dispatch_mode()
     body = f"[IMS test] template {template_id}"
-    result = await send_whatsapp(test_phone, body, template_id=template_id)
+    # System/HQ probe: no store context -> the default sender number.
+    result = await send_whatsapp(test_phone, body, template_id=template_id, store_id=None)
     dispatched = result.status == "SENT"
 
     if result.status == "SIMULATED":
@@ -1381,6 +1412,10 @@ async def test_notification(
         "status": result.status,
         "provider_id": result.provider_id,
         "error": result.error,
+        # The resolved template + sender the send used (or WOULD use when
+        # SIMULATED) -- proves the payload shape end to end while dark.
+        # Contains no credential value.
+        "payload_preview": result.meta,
     }
 
 

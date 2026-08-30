@@ -170,17 +170,47 @@ def get_whatsapp_config() -> Dict[str, Any]:
     }
 
 
+def _parse_store_numbers(raw: Any) -> Dict[str, str]:
+    """Parse the per-store WhatsApp sender map (Coexistence).
+
+    Accepts an already-shaped dict, or the Settings text format
+    "STORE-ID:919812345678, STORE-2:919887654321" -- comma-separated
+    store_id:number pairs. Fragments without a colon, or with an empty
+    side, are skipped (fail-soft); ids and numbers are stripped.
+    Returns {} when nothing usable.
+    """
+    if isinstance(raw, dict):
+        return {
+            str(k).strip(): str(v).strip()
+            for k, v in raw.items()
+            if str(k).strip() and str(v).strip()
+        }
+    out: Dict[str, str] = {}
+    for pair in str(raw or "").split(","):
+        if ":" not in pair:
+            continue
+        sid, num = pair.split(":", 1)
+        sid, num = sid.strip(), num.strip()
+        if sid and num:
+            out[sid] = num
+    return out
+
+
 def get_msg91_config() -> Dict[str, Any]:
     """Return MSG91 messaging credentials (WhatsApp Business + transactional SMS).
 
     DB key  : type="whatsapp" -> config.api_key, config.whatsapp_number,
-              config.sms_template_id, config.sender
+              config.sms_template_id, config.sender, config.store_numbers
               (Settings -> Integrations -> "WhatsApp Business (MSG91)")
     Env vars: MSG91_API_KEY, MSG91_WHATSAPP_INTEGRATED_NUMBER,
-              MSG91_SMS_TEMPLATE_ID, MSG91_SENDER
+              MSG91_SMS_TEMPLATE_ID, MSG91_SENDER, MSG91_STORE_NUMBERS
 
     Read FRESH per send so a Save in the hub takes effect without a redeploy.
     Fail-soft: DB absent/disabled -> env-only, exactly as before.
+
+    store_numbers is the Coexistence per-store sender map, parsed to
+    {store_id: integrated_number}. Numbers are not secrets, but they live in
+    the same encrypted-at-rest integrations doc as everything else here.
 
     BOUNDARY: this resolves CREDENTIALS only. Whether IMS is allowed to send
     at all stays with DISPATCH_MODE, which is env-only by design and is NEVER
@@ -195,7 +225,33 @@ def get_msg91_config() -> Dict[str, Any]:
         or os.getenv("MSG91_SMS_TEMPLATE_ID", ""),
         # DLT-registered sender ID; BVOPTL is the owner's registered header.
         "sender": cfg.get("sender") or os.getenv("MSG91_SENDER", "") or "BVOPTL",
+        "store_numbers": _parse_store_numbers(
+            cfg.get("store_numbers") or os.getenv("MSG91_STORE_NUMBERS", "")
+        ),
     }
+
+
+def resolve_whatsapp_sender(store_id: Any = None) -> str:
+    """THE one store -> WhatsApp-sender resolution (Meta Coexistence).
+
+    Under Coexistence each shop's own WhatsApp Business number runs on the
+    app AND the API, so IMS must send from the SHOP's number, not one shared
+    number. Resolution:
+      1. store_id given AND mapped in store_numbers -> that shop's number.
+      2. otherwise -> the single default number (Settings tile first, then
+         MSG91_WHATSAPP_INTEGRATED_NUMBER) -- a single-number or unarmed
+         deployment behaves exactly as before.
+    Returns "" when nothing is configured (the send door then fails honestly).
+
+    Do NOT re-implement this mapping anywhere else; every WhatsApp send goes
+    through agents.providers.send_whatsapp, which calls this.
+    """
+    cfg = get_msg91_config()
+    if store_id:
+        mapped = (cfg.get("store_numbers") or {}).get(str(store_id).strip())
+        if mapped:
+            return mapped
+    return cfg.get("whatsapp_number") or ""
 
 
 def get_slack_config() -> Dict[str, Any]:
