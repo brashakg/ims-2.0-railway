@@ -1410,3 +1410,63 @@ def test_degraded_vocab_import_still_maps_voided_and_refunded(wired, monkeypatch
     )
     o3 = _the_order(wired, 7052)
     assert o3["payment_status"] == "PARTIAL_REFUND"
+
+
+# ---------------------------------------------------------------------------
+# Bill type follows the money on the SYNC writer (round-4 panel finding):
+# derived once from the FINAL payment_status (after the covered-partial flip),
+# and never stamped for refund/void statuses the ladder does not know.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_paid_stamps_final_bill_type(wired):
+    _seed_online_order(wired, 8101, grand=999.0)
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8101", _sync_payload(8101, "paid")
+    )
+    assert ok is True
+    o = _the_order(wired, 8101)
+    assert o["payment_status"] == "PAID"
+    assert o["bill_type"] == "FINAL"
+
+
+def test_sync_covered_partial_stamps_final_not_advance(wired):
+    """partially_paid webhook + staff till money covering the rest: the
+    payment_status flips to PAID inside the recompute — bill_type must be
+    derived AFTER that flip (pre-fix: PAID with bill_type ADVANCE in one
+    $set, clobbering add_payment's FINAL)."""
+    _seed_online_order(
+        wired,
+        8102,
+        grand=999.0,
+        amount_paid=700.0,
+        balance_due=299.0,
+        payment_status="PARTIAL",
+        payments=[{"payment_id": "p-s1", "method": "CASH", "amount": 700.0}],
+    )
+    ok = online_order_mapper._sync_existing_order_status(
+        wired["db"], "8102", _sync_payload(8102, "partially_paid", "299.00")
+    )
+    assert ok is True
+    o = _the_order(wired, 8102)
+    assert o["payment_status"] == "PAID"
+    assert o["bill_type"] == "FINAL"
+
+
+def test_sync_refund_leaves_bill_type_untouched(wired):
+    """A refunded webhook maps payment_status to a non-ladder value; it must
+    NOT overwrite the paid order's FINAL with PENDING."""
+    _seed_online_order(
+        wired,
+        8103,
+        grand=999.0,
+        amount_paid=999.0,
+        balance_due=0.0,
+        payment_status="PAID",
+        bill_type="FINAL",
+    )
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "8103", _sync_payload(8103, "refunded")
+    )
+    o = _the_order(wired, 8103)
+    assert o["bill_type"] == "FINAL"

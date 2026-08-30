@@ -70,7 +70,7 @@ def fy_label(dt: datetime) -> str:
 # order-type step at the POS. Derived from payment_status in ONE place so the
 # rule can never fork (payment_status is computed in add_payment below, in
 # the superadmin-edit recomputes in orders.py, and in the UPI auto-reconcile
-# in services/upi_qr.py — the POS-path writers stamp bill_type (online/ONDC creation docs and shopify REFUNDED do not yet — bill_type has no consumers there today) through this helper;
+# in services/upi_qr.py — the POS-path writers and the online sync stamp bill_type (ladder-known statuses only; ONDC creation docs and refund/void webhooks do not — refund bill-type semantics await an owner ruling, and bill_type has no consumers there today) through this helper;
 # grep payment_status writers before adding another).
 #   PAID    -> FINAL   (full amount received: final bill)
 #   PARTIAL -> ADVANCE (part received: advance, balance at delivery)

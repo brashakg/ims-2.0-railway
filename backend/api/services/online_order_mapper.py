@@ -874,14 +874,7 @@ def _sync_existing_order_status(
             2,
         )
 
-        from database.repositories.order_repository import derive_bill_type
-
-        money: Dict[str, Any] = {
-            "payment_status": st["payment_status"],
-            # Bill type follows the money on EVERY payment_status writer —
-            # a web order flipping UNPAID->PAID must not keep a stale type.
-            "bill_type": derive_bill_type(st["payment_status"]),
-        }
+        money: Dict[str, Any] = {"payment_status": st["payment_status"]}
         if st["payment_status"] == "PAID":
             money["amount_paid"] = grand_total
             money["balance_due"] = 0.0
@@ -917,6 +910,20 @@ def _sync_existing_order_status(
                     # clobber the PAID status the staff add_payment already
                     # computed.
                     money["payment_status"] = "PAID"
+
+        # Bill type follows the money — derived ONCE, from the FINAL
+        # payment_status (deriving before the PARTIAL->PAID flip above wrote
+        # PAID + ADVANCE in one $set, clobbering add_payment's FINAL). Only
+        # ladder-known statuses stamp: a REFUNDED/CANCELLED/PARTIAL_REFUND
+        # webhook must not overwrite a paid order's FINAL with PENDING —
+        # refund bill-type semantics are an owner decision, not a default.
+        from database.repositories.order_repository import (
+            BILL_TYPE_BY_PAYMENT_STATUS,
+            derive_bill_type,
+        )
+
+        if money["payment_status"] in BILL_TYPE_BY_PAYMENT_STATUS:
+            money["bill_type"] = derive_bill_type(money["payment_status"])
 
         # OS-030 (sync half), ROW-GRANULAR (panel fix 2): reconcile ONLY the
         # pipeline's own synthesized gateway row -- its amount is the collected

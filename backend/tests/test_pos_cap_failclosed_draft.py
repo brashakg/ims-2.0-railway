@@ -142,3 +142,38 @@ def test_draft_happy_path_within_luxury_cap_ok(client, staff_headers, draft_orde
     _seed_product(draft_orders, pid="FR-CARTIER-OK2", discount_category="LUXURY", brand="Cartier")
     r = _add(client, staff_headers, oid, _item("FR-CARTIER-OK2", discount_percent=1.0, brand="Cartier"))
     assert r.status_code in (200, 201), r.text
+
+
+# ---------------------------------------------------------------------------
+# Round-4 panel finding: add_order_item VALIDATED the discount reason but
+# DROPPED it from the persisted line. These fail if the two item_data lines
+# (or the below-ceiling message at this door) are reverted.
+# ---------------------------------------------------------------------------
+
+
+def test_draft_add_item_persists_discount_reason(client, staff_headers, draft_orders):
+    oid = _seed_draft(draft_orders)
+    pid = _seed_product(draft_orders, pid="p-reason-1")
+    r = _add(
+        client,
+        staff_headers,
+        oid,
+        _item(pid, discount_percent=5),
+    )
+    assert r.status_code == 200, r.text
+    doc = draft_orders["order_repo"].find_by_id(oid)
+    line = doc["items"][-1]
+    assert line["discount_reason"] == "test: cap-suite discount"
+    assert "discount_approved_by" in line
+
+
+def test_draft_add_item_below_ceiling_names_price_case(
+    client, staff_headers, draft_orders
+):
+    oid = _seed_draft(draft_orders)
+    pid = _seed_product(draft_orders, pid="p-reason-2", mrp=10000.0)
+    it = _item(pid, discount_percent=0, unit_price=9000.0)
+    it.pop("discount_reason", None)
+    r = _add(client, staff_headers, oid, it)
+    assert r.status_code == 400, r.text
+    assert "below the current catalog price" in r.json()["detail"].lower()
