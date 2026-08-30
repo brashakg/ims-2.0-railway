@@ -518,8 +518,25 @@ export function POSLayout() {
         ipd: rxData.ipd || undefined,
         lens_recommendation: rxData.lens_type || undefined,
         next_checkup: rxData.next_checkup || undefined,
+        // First-class field (backend persists it); the remarks copy stays so
+        // the printed Rx card keeps showing the doctor until the card reads
+        // doctor_name directly.
+        doctor_name: rxData.doctor_name || undefined,
         remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
       } as any);
+
+      if (result?.prescription_id && rxData.photo_file) {
+        // Fail-soft: the Rx photo is evidence, not a gate — a failed upload
+        // must never lose the sale.
+        try {
+          await prescriptionApi.uploadPrescriptionPhoto(
+            result.prescription_id,
+            rxData.photo_file
+          );
+        } catch {
+          toast.warning('Prescription saved, but the photo upload failed — retry from the Rx card.');
+        }
+      }
 
       if (result?.prescription_id) {
         store.setPrescription({

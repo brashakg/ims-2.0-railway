@@ -272,6 +272,11 @@ PRESCRIPTION_SCHEMA = {
         "prescription_date": {"bsonType": "date"},
         "validity_months": {"bsonType": "int"},
         "source": {"enum": ["TESTED_AT_STORE", "FROM_DOCTOR"]},
+        # Outside-Rx provenance: the EXTERNAL doctor's real name (FROM_DOCTOR
+        # docs previously misattributed the Rx to the staff member who keyed
+        # it) and the GridFS id of the customer's prescription photo.
+        "doctor_name": {"bsonType": "string"},
+        "rx_photo_file_id": {"bsonType": "string"},
         # rx_kind discriminates spectacle vs contact-lens Rx. Optional +
         # absent on every legacy doc (which is treated as SPECTACLE).
         "rx_kind": {"enum": ["SPECTACLE", "CONTACT_LENS"]},

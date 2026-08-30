@@ -4,7 +4,8 @@ IMS 2.0 - Prescriptions Router
 Prescription management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 from typing_extensions import Literal
@@ -337,6 +338,11 @@ class PrescriptionCreate(BaseModel):
     # caller omits it, the endpoint derives it from the JWT (full_name/username),
     # and read-back resolves it from the users collection for older docs.
     optometrist_name: Optional[str] = None
+    # Outside Rx (FROM_DOCTOR): the EXTERNAL doctor's real name. Without it the
+    # card attributed the Rx to whichever staff member keyed it in — the actual
+    # prescriber was unrecordable (crm.py's doctor_name read field had no
+    # writer). Ignored for TESTED_AT_STORE.
+    doctor_name: Optional[str] = Field(default=None, max_length=120)
     validity_months: Optional[int] = Field(default=None, ge=6, le=24)
     # Optional back-date: when supplied the prescription is stamped with this
     # date instead of utcnow(), and expiry_date is derived from it. Must not be
@@ -489,6 +495,7 @@ class PrescriptionUpdate(BaseModel):
     next_checkup: Optional[str] = None
     remarks: Optional[str] = None
     optometrist_id: Optional[str] = None
+    doctor_name: Optional[str] = Field(default=None, max_length=120)
     # Re-dating an edit: when validity_months changes we recompute expiry_date.
     validity_months: Optional[int] = Field(default=None, ge=6, le=24)
 
@@ -1352,6 +1359,8 @@ async def create_prescription(
             "source": rx.source,
             "optometrist_id": rx.optometrist_id,
             "optometrist_name": optometrist_name,
+            # Only meaningful for FROM_DOCTOR; harmless None otherwise.
+            "doctor_name": (rx.doctor_name or "").strip() or None,
             "prescription_date": prescription_date.isoformat(),
             # test_date mirrors prescription_date so legacy readers (clinical
             # report queries, _rx_validity, family-view sort) that look for
@@ -1415,6 +1424,127 @@ async def create_prescription(
         "prescription_number": generate_rx_number(),
         "message": "Prescription created",
     }
+
+
+_RX_PHOTO_KIND = "rx_photo"
+_RX_PHOTO_MIMES = frozenset(
+    {"image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif", "image/webp"}
+)
+
+
+@router.post("/{prescription_id}/photo", status_code=201)
+async def upload_prescription_photo(
+    prescription_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Attach a photo of an OUTSIDE prescription (the paper the customer
+    brought). Stored in GridFS with kind=rx_photo; the doc keeps only the
+    file id (GRN #760 pattern: id validated by the store, not trusted).
+    Re-upload replaces the photo; the old blob is deleted best-effort."""
+    user_roles = current_user.get("roles", [])
+    if not set(user_roles) & {
+        "SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST",
+        "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+    }:
+        raise HTTPException(status_code=403, detail="Not authorised")
+
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    rx_doc = repo.find_by_id(prescription_id)
+    if not rx_doc:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+    mime = (file.content_type or "").lower()
+    if mime not in _RX_PHOTO_MIMES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Photo must be an image ({sorted(_RX_PHOTO_MIMES)}); got '{mime}'",
+        )
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    from ..services.file_store import MAX_FILE_SIZE_BYTES, get_file_store
+
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Photo exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    fs = get_file_store()
+    if fs is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    file_id = fs.put(
+        content=content,
+        filename=file.filename or "prescription.jpg",
+        mime_type=mime,
+        metadata={
+            "kind": _RX_PHOTO_KIND,
+            "prescription_id": prescription_id,
+            "uploader_id": current_user.get("user_id"),
+        },
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    old_file_id = rx_doc.get("rx_photo_file_id")
+    repo.update(
+        prescription_id,
+        {
+            "rx_photo_file_id": file_id,
+            "rx_photo_uploaded_by": current_user.get("user_id"),
+            "rx_photo_uploaded_at": datetime.now().isoformat(),
+        },
+    )
+    if old_file_id and old_file_id != file_id:
+        try:
+            fs.delete(old_file_id)
+        except Exception:
+            pass  # orphaned blob is a cleanup nit, not a failure
+
+    _audit_rx(
+        "PRESCRIPTION_PHOTO_UPLOADED",
+        prescription_id,
+        current_user,
+        customer_id=rx_doc.get("customer_id"),
+        after_state={"rx_photo_file_id": file_id},
+    )
+    return {"prescription_id": prescription_id, "rx_photo_file_id": file_id}
+
+
+@router.get("/{prescription_id}/photo")
+async def download_prescription_photo(
+    prescription_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream the attached outside-Rx photo (kind-checked in the store)."""
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    rx_doc = repo.find_by_id(prescription_id)
+    if not rx_doc:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+    file_id = rx_doc.get("rx_photo_file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="No photo attached")
+    from ..services.file_store import get_file_store
+
+    fs = get_file_store()
+    if fs is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    blob = fs.get(file_id, require_kind=_RX_PHOTO_KIND)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="Photo no longer available")
+    content, filename, mime_type = blob
+    return Response(
+        content=content,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 @router.put("/{prescription_id}")

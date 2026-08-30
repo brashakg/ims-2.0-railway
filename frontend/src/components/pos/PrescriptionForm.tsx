@@ -61,6 +61,10 @@ interface PrescriptionData {
   issue_date?: string;
   expiry_date?: string;
   doctor_name?: string;
+  // Photo of the paper Rx the customer brought (outside prescriptions).
+  // Uploaded AFTER create via prescriptionApi.uploadPrescriptionPhoto —
+  // stripped from the JSON payload in toPrescriptionCreatePayload.
+  photo_file?: File | null;
   // ---- Contact-lens fields (only sent when rx_kind === CONTACT_LENS) ----
   cl_brand?: string;
   cl_series?: string;
@@ -323,17 +327,41 @@ export function PrescriptionForm({
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Prescribing Doctor Name
-            </label>
-            <input
-              type="text"
-              placeholder="Dr. Name"
-              value={prescription.doctor_name || ''}
-              onChange={(e) => handleStringInputChange('doctor_name', e.target.value)}
-              className="input-field"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Prescribing Doctor Name
+              </label>
+              <input
+                type="text"
+                placeholder="Dr. Name"
+                value={prescription.doctor_name || ''}
+                onChange={(e) => handleStringInputChange('doctor_name', e.target.value)}
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Photo of prescription
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={(e) =>
+                  setPrescription((prev) => ({
+                    ...prev,
+                    photo_file: e.target.files?.[0] || null,
+                  }))
+                }
+                className="input-field pt-2"
+              />
+              {prescription.photo_file && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {prescription.photo_file.name} attached — uploads on save
+                </p>
+              )}
+            </div>
           </div>
 
           {rxKind === 'SPECTACLE' && (
