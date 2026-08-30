@@ -7166,6 +7166,17 @@ POLICY: List[Dict[str, object]] = [
     {"method": "POST", "path": "/api/v1/webhooks/shiprocket", "allowed": "PUBLIC"},
     {"method": "POST", "path": "/api/v1/webhooks/shopify", "allowed": "PUBLIC"},
     {"method": "POST", "path": "/api/v1/webhooks/msg91/delivery", "allowed": "PUBLIC"},
+    # MSG91 "Webhook (New)" per-channel receivers (delivery reports, click
+    # events, WhatsApp inbound). PUBLIC like the receivers above -- the HMAC
+    # signature / shared token IS the auth (verified inside the handler
+    # against the msg91 integration's webhook_secret / MSG91_WEBHOOK_TOKEN);
+    # MSG91 has no IMS bearer token. {channel} is a closed 6-value allowlist
+    # inside the handler (sms/whatsapp/email/voice/rcs/shorturl).
+    {
+        "method": "POST",
+        "path": "/api/v1/integrations/msg91/webhooks/{channel}",
+        "allowed": "PUBLIC",
+    },
     # CRM-14: WhatsApp inbound (Meta Business API).
     # GET = Meta verify-token challenge (PUBLIC -- Meta hits this with no IMS auth).
     # POST = Meta message delivery (HMAC-signed by Meta; no IMS bearer token).

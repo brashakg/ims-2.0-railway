@@ -147,6 +147,10 @@ _KEEP_HEADERS = frozenset(
         "x-shopify-triggered-at",
         "x-shiprocket-signature",
         "x-shiprocket-event",
+        # MSG91 delivery-report receivers. The HMAC signature is safe to keep;
+        # the token alternatives (authkey / x-msg91-token / ?token=) are the
+        # SECRET itself and are deliberately NOT in this set.
+        "x-msg91-signature",
     }
 )
 
@@ -540,6 +544,15 @@ def _load_secret(vendor: str) -> tuple[Optional[str], bool]:
             or os.getenv("SHOPIFY_API_SECRET")
             or None
         )
+        if secret:
+            lookup_ok = True
+
+    # MSG91 env fallback (same philosophy as the Shopify block above): the
+    # delivery-report webhook secret can live on Railway as
+    # MSG91_WEBHOOK_TOKEN, so the receivers verify without anyone pasting a
+    # key into Settings. Also rescues the lookup-failure case identically.
+    if not secret and vendor.lower() == "msg91":
+        secret = os.getenv("MSG91_WEBHOOK_TOKEN") or None
         if secret:
             lookup_ok = True
     return secret, lookup_ok
@@ -1172,38 +1185,34 @@ async def _ingest(
 # bearer token).
 # ============================================================================
 
-# MSG91 DLR status -> canonical delivery_status on notification_logs.
-# MSG91 reports both numeric codes and string statuses depending on channel;
-# we accept either. Anything unknown is recorded verbatim (upper-cased) so we
-# never silently swallow a status we don't yet model.
-_MSG91_STATUS_MAP = {
-    "1": "DELIVERED",
-    "delivered": "DELIVERED",
-    "read": "READ",
-    "2": "FAILED",
-    "failed": "FAILED",
-    "undelivered": "FAILED",
-    "rejected": "FAILED",
-    "blocked": "FAILED",
-    "sent": "SENT",
-    "submitted": "SENT",
-}
+# The MSG91 status map + canonicaliser used to live HERE. They moved to
+# api.services.message_events (canonical_dlr_status / event_for) when the
+# second MSG91 receiver below landed, so the two receivers share ONE
+# interpretation of a delivery report (apply_delivery_report) instead of two
+# copies that drift. Do not re-add a status map to this module.
 
 
-def _canonical_dlr_status(raw: str) -> str:
-    return _MSG91_STATUS_MAP.get(
-        str(raw or "").strip().lower(), str(raw or "").upper() or "UNKNOWN"
-    )
+def _first(d: Dict[str, Any], *keys):
+    """First truthy value of `keys` in dict `d` (MSG91 nests DLR data
+    differently per product; never assume one exact shape)."""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return v
+    return None
 
 
 @router.post("/msg91/delivery")
 async def receive_msg91_delivery(request: Request):
-    """MSG91 WhatsApp/SMS delivery-report webhook.
+    """MSG91 WhatsApp/SMS delivery-report webhook (the pre-existing receiver).
 
-    Verifies the HMAC signature, then advances `delivery_status` on the
-    notification_logs row whose `provider_msg_id` / `provider_id` matches the
-    DLR's request id. Stub-level handler: it does the lookup + status advance
-    and records the raw DLR; it does not (yet) fan out further events.
+    Verifies the HMAC signature, then hands the report to the ONE
+    interpreter (message_events.apply_delivery_report): it advances
+    `delivery_status` on the matching notification_logs row exactly as this
+    handler always did, AND records the spine event in message_events --
+    the same shape the channel receiver below writes.
 
     Fail-soft like the other receivers: over rate limit -> 429, missing
     secret -> 200 skipped (so MSG91 won't hammer its retry queue), bad
@@ -1239,15 +1248,6 @@ async def receive_msg91_delivery(request: Request):
     except (UnicodeDecodeError, ValueError):
         payload = {}
 
-    # MSG91 nests DLR data differently per product; pull the common fields with
-    # several fallbacks rather than assuming one exact shape.
-    def _first(d: Dict[str, Any], *keys):
-        for k in keys:
-            v = d.get(k)
-            if v:
-                return v
-        return None
-
     body_obj = payload if isinstance(payload, dict) else {}
     data_obj = body_obj.get("data") if isinstance(body_obj.get("data"), dict) else {}
     request_id = _first(
@@ -1258,28 +1258,23 @@ async def receive_msg91_delivery(request: Request):
         or _first(data_obj, "status", "deliveryStatus", "delivery_status", "event")
         or ""
     )
-    canonical = _canonical_dlr_status(raw_status)
 
-    updated = 0
-    db = _get_db()
-    if db is not None and request_id:
-        try:
-            coll = db.get_collection("notification_logs")
-            update = {
-                "delivery_status": canonical,
-                "dlr_received_at": datetime.now(timezone.utc).isoformat(),
-                "dlr_raw_status": str(raw_status),
-            }
-            if canonical == "DELIVERED":
-                update["delivered_at"] = update["dlr_received_at"]
-            res = coll.update_many(
-                {"$or": [{"provider_msg_id": request_id}, {"provider_id": request_id}]},
-                {"$set": update},
-            )
-            updated = getattr(res, "modified_count", 0) or 0
-        except Exception as e:
-            # Stay green so MSG91 doesn't retry-storm; the miss is logged.
-            logger.error(f"[WEBHOOKS] msg91 DLR update failed: {e}")
+    from ..services.message_events import apply_delivery_report, canonical_dlr_status
+
+    if request_id:
+        applied = apply_delivery_report(
+            provider_message_id=str(request_id),
+            raw_status=raw_status,
+            mobile=_first(body_obj, "mobile", "number", "telNum", "msisdn", "to")
+            or _first(data_obj, "mobile", "number", "telNum", "msisdn", "to"),
+            at=_first(body_obj, "timestamp", "date", "deliveredAt")
+            or _first(data_obj, "timestamp", "date", "deliveredAt"),
+        )
+        canonical = applied["delivery_status"]
+        updated = applied["logs_updated"]
+    else:
+        canonical = canonical_dlr_status(raw_status)
+        updated = 0
 
     if request_id and updated == 0:
         logger.info(
@@ -1294,6 +1289,320 @@ async def receive_msg91_delivery(request: Request):
         "request_id": request_id,
         "delivery_status": canonical,
         "updated": updated,
+    }
+
+
+# ============================================================================
+# MSG91 "Webhook (New)" -- per-channel delivery-report / inbound receiver
+# POST /api/v1/integrations/msg91/webhooks/{channel}
+#
+# Mounted as its OWN router (msg91_events_router) so main.py can put it at the
+# /api/v1/integrations/msg91/webhooks prefix while everything reuses this
+# module's building blocks (rate limit, secret loading, inbox persistence,
+# fingerprint dedupe). Follows the /webhooks/shopify pattern: PUBLIC route,
+# the signature/token IS the auth, answer fast (MSG91 gives 8s and retries
+# 4-5 times on non-2xx), durable inbox row before the 200, fail-soft
+# processing after it.
+#
+# Auth: X-MSG91-Signature HMAC (hex sha256, webhook_verify.verify_msg91) OR a
+# shared token (MSG91's webhook UI can attach a header; we accept
+# `x-msg91-token` / `authkey` headers or a `?token=` query param), both
+# checked constant-time against the msg91 integration doc's webhook_secret
+# with the MSG91_WEBHOOK_TOKEN env fallback (_load_secret).
+#
+# Processing is INLINE (a few Mongo writes), not dispatched to NEXUS: the
+# inbox row is the durable audit record ("queue"), and everything after it is
+# fail-soft -- a processing hiccup never turns into a 5xx retry storm.
+# ============================================================================
+
+_MSG91_CHANNELS = frozenset(
+    {"sms", "whatsapp", "email", "voice", "rcs", "shorturl"}
+)
+
+msg91_events_router = APIRouter()
+
+
+def _msg91_request_authenticated(
+    request: Request, raw_body: bytes, secret: str
+) -> bool:
+    """True when the request proves knowledge of the msg91 webhook secret,
+    either by HMAC signature or by shared token. Constant-time comparisons
+    only; fail-closed on anything else."""
+    try:
+        sig = request.headers.get("x-msg91-signature") or ""
+        if sig and webhook_verify.verify_msg91(raw_body, sig, secret):
+            return True
+        token = (
+            request.headers.get("x-msg91-token")
+            or request.headers.get("authkey")
+            or request.query_params.get("token")
+            or ""
+        )
+        if token and hmac.compare_digest(token.strip(), secret):
+            return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _iter_msg91_events(payload: Any) -> list:
+    """Flatten an MSG91 webhook body into event dicts:
+    {provider_message_id, raw_status, mobile, at, url}.
+
+    MSG91's shapes vary per channel and product generation, so this walks the
+    three shapes seen in their docs -- a flat dict (Webhook New), a list of
+    request blocks each carrying a per-number `report` list (classic SMS DLR),
+    and a Meta-cloud envelope with entry[].changes[].value.statuses[]
+    (WhatsApp) -- extracting leniently. Anything unusable is skipped; the
+    enrichment inside record_message_event fills gaps from notification_logs.
+    """
+    out: list = []
+
+    def _flat(d: Dict[str, Any], inherited_id=None):
+        data_obj = d.get("data") if isinstance(d.get("data"), dict) else {}
+        pid = (
+            _first(d, "request_id", "requestId", "messageId", "message_id", "msg_id")
+            or _first(
+                data_obj, "request_id", "requestId", "messageId", "message_id", "msg_id"
+            )
+            or inherited_id
+        )
+        status = _first(
+            d, "status", "deliveryStatus", "delivery_status", "event", "eventName"
+        ) or _first(
+            data_obj, "status", "deliveryStatus", "delivery_status", "event", "eventName"
+        )
+        if not (pid and status):
+            return
+        out.append(
+            {
+                "provider_message_id": str(pid),
+                "raw_status": status,
+                "mobile": _first(d, "mobile", "number", "telNum", "msisdn", "to", "recipient")
+                or _first(data_obj, "mobile", "number", "telNum", "msisdn", "to", "recipient"),
+                "at": _first(d, "timestamp", "date", "deliveredAt", "updated_at")
+                or _first(data_obj, "timestamp", "date", "deliveredAt", "updated_at"),
+                "url": _first(d, "url", "short_url", "shortUrl", "link")
+                or _first(data_obj, "url", "short_url", "shortUrl", "link"),
+            }
+        )
+
+    def _one(item: Any):
+        if not isinstance(item, dict):
+            return
+        # Meta-cloud envelope (WhatsApp channel): statuses[] per change.
+        for entry in item.get("entry") or []:
+            if not isinstance(entry, dict):
+                continue
+            for change in entry.get("changes") or []:
+                value = (change or {}).get("value") or {}
+                for st in value.get("statuses") or []:
+                    if not isinstance(st, dict):
+                        continue
+                    if not (st.get("id") and st.get("status")):
+                        continue
+                    out.append(
+                        {
+                            "provider_message_id": str(st["id"]),
+                            "raw_status": st["status"],
+                            "mobile": st.get("recipient_id"),
+                            "at": st.get("timestamp"),
+                            "url": None,
+                        }
+                    )
+        if item.get("entry"):
+            return
+        # Classic SMS DLR: request block with a per-number report list.
+        reports = item.get("report")
+        if isinstance(reports, list):
+            rid = _first(item, "requestId", "request_id", "messageId", "message_id")
+            for rep in reports:
+                if isinstance(rep, dict):
+                    _flat(rep, inherited_id=rid)
+            return
+        _flat(item)
+
+    if isinstance(payload, list):
+        for item in payload:
+            _one(item)
+    else:
+        _one(payload)
+    return out
+
+
+def _iter_meta_referrals(payload: Any) -> list:
+    """(phone, referral) pairs from Meta-shaped inbound messages carrying
+    Click-to-WhatsApp ad metadata. [] when none."""
+    pairs: list = []
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for entry in item.get("entry") or []:
+            if not isinstance(entry, dict):
+                continue
+            for change in entry.get("changes") or []:
+                value = (change or {}).get("value") or {}
+                for msg in value.get("messages") or []:
+                    if not isinstance(msg, dict):
+                        continue
+                    referral = msg.get("referral")
+                    if isinstance(referral, dict) and referral and msg.get("from"):
+                        pairs.append((msg.get("from"), referral))
+    return pairs
+
+
+def _process_msg91_events(channel: str, payload: Any) -> Dict[str, int]:
+    """Inline, fail-soft processing of a persisted msg91 channel delivery:
+    feed each report through the ONE interpreter, and stamp CTWA attribution
+    from WhatsApp inbound referrals. Never raises."""
+    counts = {"events_recorded": 0, "ctwa_stamped": 0}
+    try:
+        from ..services.message_events import (
+            apply_delivery_report,
+            stamp_ctwa_attribution,
+        )
+
+        for ev in _iter_msg91_events(payload):
+            applied = apply_delivery_report(
+                provider_message_id=ev["provider_message_id"],
+                raw_status=ev["raw_status"],
+                channel=channel,
+                mobile=ev.get("mobile"),
+                at=ev.get("at"),
+                url=ev.get("url"),
+            )
+            if applied.get("event_result") == "recorded":
+                counts["events_recorded"] += 1
+
+        if channel == "whatsapp":
+            for phone, referral in _iter_meta_referrals(payload):
+                if stamp_ctwa_attribution(phone, referral):
+                    counts["ctwa_stamped"] += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[WEBHOOKS] msg91 %s event processing failed: %s", channel, exc)
+    return counts
+
+
+@msg91_events_router.post("/{channel}")
+async def receive_msg91_channel(channel: str, request: Request):
+    """MSG91 per-channel webhook receiver (delivery reports, click events,
+    WhatsApp inbound). See the block comment above for the contract."""
+    channel = (channel or "").strip().lower()
+    if channel not in _MSG91_CHANNELS:
+        raise HTTPException(status_code=404, detail="unknown channel")
+
+    _enforce_webhook_rate_limit(request, f"msg91_{channel}")
+
+    raw_body = await request.body()
+
+    secret, lookup_ok = _load_secret("msg91")
+    if not lookup_ok:
+        logger.error(
+            "[WEBHOOKS] msg91/%s: cannot resolve the webhook secret (storage "
+            "unavailable) -- returning 503 so the vendor retries",
+            channel,
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+    if not secret:
+        # Same contract as the vendor receivers: ACK so MSG91 does not
+        # retry-storm, but record a metadata-only inbox row so the gap is
+        # discoverable in data, and process NOTHING unauthenticated.
+        logger.warning(
+            "[WEBHOOKS] msg91/%s: no webhook secret configured -- CANNOT verify "
+            "this delivery; recording it as skipped and processing nothing",
+            channel,
+        )
+        return _record_unverifiable(request, "msg91", raw_body)
+
+    if not _msg91_request_authenticated(request, raw_body, secret):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, ValueError):
+        payload = {
+            "_unparseable_body": raw_body[:1024].decode("utf-8", errors="replace")
+        }
+
+    # The channel comes from the PATH (unsigned), but it is bounded by the
+    # closed 6-value allowlist above -- same bounded-amplification argument as
+    # the Shopify topic scopes. Scoping the fingerprint by channel keeps one
+    # body posted to two channels from collapsing into one dedupe key.
+    fingerprint = webhook_verify.body_fingerprint("msg91", raw_body, scope=channel)
+
+    coll = _get_inbox_collection()
+    if coll is None:
+        logger.error(
+            "[WEBHOOKS] msg91/%s: inbox collection unavailable -- returning 503 "
+            "so the vendor retries (refusing to ack-and-drop)",
+            channel,
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    try:
+        existing = coll.find_one({"vendor": "msg91", "body_fingerprint": fingerprint})
+    except Exception:  # noqa: BLE001
+        existing = None
+    if existing is not None:
+        # Processing is inline and idempotent (the spine dedupes per event),
+        # so a retry of an already-recorded delivery just ACKs.
+        return {
+            "status": "duplicate",
+            "vendor": "msg91",
+            "channel": channel,
+            "webhook_id": existing.get("webhook_id"),
+        }
+
+    webhook_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    try:
+        coll.insert_one(
+            {
+                "webhook_id": webhook_id,
+                "vendor": "msg91",
+                "channel": channel,
+                "received_at": now,
+                "headers": _filter_headers(request),
+                "payload": payload,
+                "raw_body_size": len(raw_body or b""),
+                "processed": False,
+                "processed_at": None,
+                "skipped_reason": None,
+                "event_id": None,
+                "body_fingerprint": fingerprint,
+                "signature_verified": True,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        if _is_duplicate_key_error(e):
+            return {"status": "duplicate", "vendor": "msg91", "channel": channel}
+        logger.error("[WEBHOOKS] msg91/%s inbox insert failed: %s", channel, e)
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    # Durable row written -- everything after this is fail-soft and the
+    # response is 200 regardless (the inbox row is the recovery surface).
+    counts = _process_msg91_events(channel, payload)
+    try:
+        coll.update_one(
+            {"webhook_id": webhook_id},
+            {
+                "$set": {
+                    "processed": True,
+                    "processed_at": datetime.now(timezone.utc),
+                    **counts,
+                }
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[WEBHOOKS] msg91/%s inbox mark-processed failed: %s", channel, e)
+
+    return {
+        "status": "received",
+        "vendor": "msg91",
+        "channel": channel,
+        "webhook_id": webhook_id,
+        **counts,
     }
 
 
@@ -1553,6 +1862,11 @@ def _extract_message_parts(body: Dict[str, Any]) -> list[Dict[str, Any]]:
                             "timestamp": msg.get("timestamp"),
                             "received_at": datetime.now(timezone.utc).isoformat(),
                             "direction": "inbound",
+                            # Click-to-WhatsApp ads: Meta attaches a referral
+                            # object when the chat came from an ad click.
+                            "referral": msg.get("referral")
+                            if isinstance(msg.get("referral"), dict)
+                            else None,
                         }
                     )
     except Exception as e:
@@ -1679,6 +1993,16 @@ async def receive_whatsapp_inbound(request: Request):
 
             # Persist message to conversation thread.
             _upsert_conversation(phone, customer_id, customer_name, msg)
+
+            # CTWA ads attribution -- capture only, fail-soft. (The other
+            # stamping site is _process_msg91_events for the MSG91 door.)
+            if msg.get("referral"):
+                try:
+                    from ..services.message_events import stamp_ctwa_attribution
+
+                    stamp_ctwa_attribution(phone, msg["referral"])
+                except Exception as _ctwa_exc:  # noqa: BLE001
+                    logger.debug("[WA_INBOUND] CTWA stamp failed: %s", _ctwa_exc)
 
             intent_result = await dispatch_intent(
                 phone=phone,

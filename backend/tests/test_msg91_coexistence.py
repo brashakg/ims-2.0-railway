@@ -637,6 +637,9 @@ def test_preflight_names_the_missing_stores_and_next_steps(monkeypatch):
         "dlt",
         "dispatch_mode",
         "test_phone",
+        # Added by the phase-2 messaging data spine (delivery-report
+        # ingestion): honest failure counts over the last 7 days.
+        "delivery_failures",
     }
     assert rows["creds"]["ok"] is True
     assert rows["store_numbers"]["ok"] is False

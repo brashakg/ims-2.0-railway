@@ -102,6 +102,7 @@ from .routers import (
     payout_router,
     kicker_router,
     webhooks_router,
+    msg91_events_router,
     loyalty_router,
     vendor_portal_router,
     portal_router,
@@ -1532,6 +1533,13 @@ app.include_router(
     kicker_router, prefix="/api/v1/incentive/kicker", tags=["Product Incentive"]
 )
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
+# MSG91 "Webhook (New)" per-channel receivers (delivery reports, clicks,
+# WhatsApp inbound). PUBLIC + signed, same auth model as /webhooks/* above.
+app.include_router(
+    msg91_events_router,
+    prefix="/api/v1/integrations/msg91/webhooks",
+    tags=["Webhooks"],
+)
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"])
 # F11/F12 - Advanced promotions + cross-category bundling engine. CRUD + pure

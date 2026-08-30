@@ -391,6 +391,74 @@ async def send_sms(phone: str, message: str) -> DispatchResult:
 
 
 # ============================================================================
+# Short URLs via MSG91 (click tracking on review-request / recall links)
+# ============================================================================
+
+# Endpoint path under MSG91_BASE_URL. Env-overridable so the exact path can be
+# corrected at arming time without a code change (MSG91's short-URL API is
+# panel-documented; nothing here is ever called while dark).
+MSG91_SHORTURL_PATH = (os.getenv("MSG91_SHORTURL_PATH") or "shorturl").strip("/")
+
+
+async def shorten_url(url: str) -> str:
+    """Wrap ONE http(s) link in an MSG91 short URL so the click comes back on
+    the /integrations/msg91/webhooks/shorturl receiver as a message_events
+    row with event=clicked. Returns the URL to put in the message; NEVER
+    raises.
+
+    DARK-SAFE BY CONSTRUCTION: with DISPATCH_MODE=off (the default) or no
+    MSG91 auth key, the input is returned UNTOUCHED -- message bodies stay
+    byte-identical to a deploy without this feature. Any provider failure
+    (non-200, timeout, unrecognised response) also passes the original
+    through: a long link that works beats a short link that does not.
+    """
+    original = str(url or "")
+    if not original.startswith(("http://", "https://")):
+        return original
+    if DISPATCH_MODE not in ("test", "live"):
+        return original
+
+    creds = _msg91()
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        return original
+
+    try:
+        async with httpx.AsyncClient(timeout=min(PROVIDER_TIMEOUT, 5.0)) as client:
+            resp = await client.post(
+                f"{MSG91_BASE_URL}/{MSG91_SHORTURL_PATH}/",
+                headers={"authkey": api_key, "content-type": "application/json"},
+                json={"url": original},
+            )
+        if resp.status_code not in (200, 201):
+            logger.warning(
+                f"[PROVIDER] MSG91 shorturl {resp.status_code}: {resp.text[:200]}"
+            )
+            return original
+        body = resp.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        candidates = [
+            (data or {}).get("shortUrl") if isinstance(data, dict) else None,
+            (data or {}).get("short_url") if isinstance(data, dict) else None,
+            data if isinstance(data, str) else None,
+            body.get("shortUrl") if isinstance(body, dict) else None,
+            body.get("short_url") if isinstance(body, dict) else None,
+        ]
+        for cand in candidates:
+            short = str(cand or "").strip()
+            if short.startswith(("http://", "https://")):
+                return short
+        logger.warning("[PROVIDER] MSG91 shorturl response had no short link")
+        return original
+    except httpx.HTTPError as e:
+        logger.warning(f"[PROVIDER] MSG91 shorturl failed: {e}")
+        return original
+    except (ValueError, KeyError, TypeError) as e:
+        logger.warning(f"[PROVIDER] MSG91 shorturl parse failed: {e}")
+        return original
+
+
+# ============================================================================
 # Capability probe
 # ============================================================================
 

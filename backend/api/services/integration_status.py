@@ -449,6 +449,40 @@ def build_messaging_preflight(db=None) -> Dict[str, Any]:
         "- required before DISPATCH_MODE=test can deliver anything.",
     ))
 
+    # 8. Delivery reports (the message_events spine). Counts only -- never a
+    # number or a name. A dark deploy has zero events and stays ok=True; the
+    # row turns red only on REAL failures reported by MSG91 in the window.
+    try:
+        from api.services.message_events import failure_counts
+
+        fc = failure_counts(days=7, db=db)
+    except Exception:  # noqa: BLE001
+        fc = None
+    if fc is None:
+        rows.append(_preflight_row(
+            "delivery_failures", "Delivery failures (7 days)",
+            False,
+            "could not read message_events",
+            "Open this screen with the database reachable.",
+        ))
+    else:
+        failed, total = fc["failed"], fc["total"]
+        if total == 0:
+            detail = (
+                "no delivery reports in the last 7 days (MSG91 posts them to "
+                "/api/v1/integrations/msg91/webhooks/<channel> once armed)"
+            )
+        else:
+            detail = f"{failed} failed of {total} delivery events in the last 7 days"
+        rows.append(_preflight_row(
+            "delivery_failures", "Delivery failures (7 days)",
+            failed == 0,
+            detail,
+            "" if failed == 0 else "Open the affected customers' Customer 360 "
+            "message timelines to see which flows failed; a dead WhatsApp "
+            "number is the usual cause (SMS fallback is the next build item).",
+        ))
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "rows": rows,

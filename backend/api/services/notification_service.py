@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 DLT_PE_ID = os.getenv("DLT_PE_ID", "") or os.getenv("MSG91_DLT_PE_ID", "")
 
 
+# Flows whose link variables get MSG91 short-URL click tracking: the review
+# request plus the recall class (the 11-month re-test business). Scoped on
+# purpose -- other flows' links (portal OTP links, survey links) stay as-is
+# until the owner asks for click data on them.
+SHORTURL_FLOWS = frozenset(
+    {
+        "GOOGLE_REVIEW_REQUEST",
+        "PRESCRIPTION_EXPIRY",
+        "ANNUAL_CHECKUP_REMINDER",
+        "CL_REORDER_REMINDER",
+    }
+)
+
+
 def _dispatch_mode() -> str:
     """Current dispatch mode (off/test/live), read fresh so a runtime env change
     is reflected. Falls back to the provider module's value, else the env."""
@@ -133,6 +147,26 @@ async def send_notification(
 
     # Always include customer_name in variables
     variables.setdefault("customer_name", customer_name)
+
+    # Short-URL wrapping for review-request + recall links: ONE wrap site,
+    # because every one of these flows queues through this door. Each http(s)
+    # link variable is wrapped via MSG91's short-URL API so the click comes
+    # back as a message_events "clicked" row (the first conversion metric of
+    # the ads funnel). Dark-safe: agents.providers.shorten_url returns the
+    # link UNTOUCHED unless DISPATCH_MODE is armed AND MSG91 creds exist, and
+    # passes the original through on any provider failure -- so with the gate
+    # off the queued message is byte-identical to before this feature.
+    if template_id in SHORTURL_FLOWS:
+        for _var_name, _var_value in list(variables.items()):
+            if isinstance(_var_value, str) and _var_value.startswith(
+                ("http://", "https://")
+            ):
+                try:
+                    from agents.providers import shorten_url
+
+                    variables[_var_name] = await shorten_url(_var_value)
+                except Exception as _short_exc:  # noqa: BLE001
+                    logger.debug("shorturl wrap skipped: %s", _short_exc)
 
     # Build message from template
     message = populate_template(template_id, variables)
