@@ -830,6 +830,27 @@ class TestBillPlaceOfSupplyFollowsDeliveryStore:
         assert doc["supply_place_recipient"] == "27"
         assert doc["interstate"] is False
 
+    def test_dc_consolidated_bill_reads_the_dc_stores_declared_state(self):
+        """The DC branch of _delivery_store_declared_state is live behaviour
+        (prod holds 2 DELIVERY_CHALLAN receipts): a bill linked to a DC and
+        no GRN must resolve the delivery state through the DC's store. The
+        verifier proved this branch could silently break ({"grn_id": ...} ->
+        {"dc_id": ...}) with every other test green, so this one pins the
+        lookup itself."""
+        from api.routers.purchase_invoices import _delivery_store_declared_state
+
+        db = _FakeDB()
+        db.collections["grns"] = [{"grn_id": "DC1", "store_id": "S2"}]
+        db.collections["stores"].append({"store_id": "S2", "state_code": "27"})
+
+        got = _delivery_store_declared_state(db, None, ["DC1"])
+        assert got == "27", f"the DC's store state must resolve, got {got!r}"
+
+        # And an attached GRN doc outranks the DC list (first read wins).
+        db.collections["stores"].append({"store_id": "S3", "state_code": "20"})
+        got2 = _delivery_store_declared_state(db, {"store_id": "S3"}, ["DC1"])
+        assert got2 == "20"
+
     def test_explicit_client_pos_stays_authoritative(self):
         """An explicit place_of_supply beats the store default: with the
         delivery store declared MH, an explicit '20' still books inter-state."""
