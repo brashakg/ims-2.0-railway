@@ -781,3 +781,62 @@ class TestDuplicateInvoiceRaceMaps409:
         r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         assert r.status_code == 409, r.text
         assert "already" in r.json()["detail"].lower()
+
+
+class TestDeliveryStorePlaceOfSupply:
+    """When the client sends no place_of_supply, the bill must read the
+    DELIVERY store's declared state (the same value the PO door passes in
+    vendors._po_gst_context) -- NOT the recipient GSTIN's state, which
+    _derive_store_gstin can stamp from the entity's primary registration in
+    ANOTHER state. Classifying by that fallback GSTIN books the OPPOSITE
+    inter/intra-state verdict on the bill than the PO booked on the same
+    purchase."""
+
+    def test_pos_defaults_to_delivery_store_declared_state(self):
+        # A Maharashtra shop (declared state 27) owned by an entity whose only
+        # GSTIN is Jharkhand (20). Supplier is MH. The recipient-GSTIN fallback
+        # said INTER-state (20 vs 27); the goods terminate in MH, so the bill
+        # must book INTRA-state -- the verdict the PO door already gives.
+        db = _FakeDB()
+        db.collections["stores"][0]["state_code"] = "27"
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "27"
+        assert doc["interstate"] is False
+        assert doc["cgst_total"] == 25.0 and doc["sgst_total"] == 25.0
+        assert doc["igst_total"] == 0.0
+        # WHICH registration receives (and claims the ITC) is untouched -- the
+        # recipient GSTIN is still the entity's own (the owner-gated question).
+        assert doc["recipient_gstin"] == BUY_JH
+
+    def test_explicit_client_pos_still_wins_over_store_state(self):
+        # The client explicitly says place of supply is Jharkhand (20); the
+        # store's declared MH state must NOT override an explicit value.
+        db = _FakeDB()
+        db.collections["stores"][0]["state_code"] = "27"
+        cli = _app(db)
+        r = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(place_of_supply="20"),
+        )
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "20"
+        assert doc["interstate"] is True
+        assert doc["igst_total"] == 50.0
+        assert doc["cgst_total"] == 0.0 and doc["sgst_total"] == 0.0
+
+    def test_store_without_declared_state_keeps_gstin_fallback(self):
+        # No declared state on the store (the endpoint-unloaded shape) -> the
+        # pre-existing recipient-GSTIN fallback stands: MH supplier vs JH
+        # recipient GSTIN books inter-state, exactly as before.
+        db = _FakeDB()
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["supply_place_recipient"] == "20"
+        assert doc["interstate"] is True
+        assert doc["igst_total"] == 50.0

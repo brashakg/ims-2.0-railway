@@ -1028,6 +1028,51 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+def _delivery_store_state(db, grn_doc, linked_dc_ids) -> str:
+    """Declared state of the DELIVERY store, "" when it cannot be derived.
+
+    Place of supply for goods is where delivery terminates, so when the client
+    sends no explicit place_of_supply the bill reads the receiving store's own
+    declared state -- the very value the purchase-order door already passes
+    (vendors.py _po_gst_context) -- rather than falling back to the recipient
+    GSTIN's state. stores.py _derive_store_gstin can stamp a store with the
+    entity's PRIMARY registration from ANOTHER state, and classifying by that
+    fallback GSTIN books the OPPOSITE inter/intra-state verdict on the bill
+    than the PO booked on the same purchase.
+
+    The store is found on the single linked GRN, else on the first linked DC
+    that names one (a consolidated bill is single-store by
+    _assert_dcs_single_vendor_store). Fail-soft: any miss returns "" and the
+    caller keeps the recipient-GSTIN fallback unchanged.
+    """
+    if db is None:
+        return ""
+    store_id = (grn_doc or {}).get("store_id")
+    if not store_id:
+        for dc_id in linked_dc_ids or []:
+            try:
+                dc = db.get_collection("grns").find_one(
+                    {"grn_id": dc_id}, {"_id": 0, "store_id": 1}
+                )
+            except Exception:
+                dc = None
+            store_id = (dc or {}).get("store_id")
+            if store_id:
+                break
+    if not store_id:
+        return ""
+    try:
+        store_doc = db.get_collection("stores").find_one(
+            {"store_id": store_id}, {"_id": 0, "state_code": 1, "state": 1}
+        )
+    except Exception:
+        return ""
+    store_doc = store_doc or {}
+    return pinv.state_code_of(store_doc.get("state_code")) or pinv.state_code_of(
+        store_doc.get("state")
+    )
+
+
 def _line_product_ids(lines) -> list:
     """Distinct product ids named by the invoice lines, in line order.
 
@@ -1382,11 +1427,22 @@ async def create_purchase_invoice(
         db, body.recipient_entity_id, body.recipient_gstin, body.place_of_supply
     )
 
+    # Place of supply defaults to the DELIVERY store's declared state -- the
+    # same value the PO door passes -- so a store stamped with a fallback GSTIN
+    # from another state cannot book the opposite verdict on the bill than its
+    # own purchase order. An explicit client value stays authoritative. The
+    # recipient-GSTIN resolution above deliberately still reads only the
+    # client's value: WHICH registration receives (and claims the ITC) is a
+    # separate, owner-gated question this default does not touch.
+    place_of_supply = body.place_of_supply or (
+        _delivery_store_state(db, grn_doc, body.linked_dc_ids) or None
+    )
+
     computed = pinv.compute_invoice(
         [ln.model_dump() for ln in body.lines],
         supplier_gstin,
         recipient.get("recipient_gstin"),
-        body.place_of_supply,
+        place_of_supply,
     )
 
     # Reconcile a client-supplied grand total against the server math.
