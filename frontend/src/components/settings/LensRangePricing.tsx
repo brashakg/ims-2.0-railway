@@ -377,7 +377,7 @@ export function LensRangePricingSection() {
         {canEdit && (
           <div className="mt-6 border-t border-gray-200 pt-4">
             <p className="text-sm font-medium text-gray-700 mb-2">Add new range</p>
-            <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-7 gap-2">
               <select
                 value={newRow.brand_id}
                 onChange={(e) => setNewRow({ ...newRow, brand_id: e.target.value })}

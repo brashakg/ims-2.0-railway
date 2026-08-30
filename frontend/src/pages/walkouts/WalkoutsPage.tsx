@@ -209,7 +209,8 @@ export function WalkoutsPage() {
         {/* List */}
         <main className="col-span-12 lg:col-span-9">
           <div className="card overflow-hidden">
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-sm">
               <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wider text-gray-600">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium">Date</th>
@@ -264,6 +265,7 @@ export function WalkoutsPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
 
           {/* Pagination */}

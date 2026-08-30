@@ -1099,7 +1099,8 @@ export function GoodsReceiptCockpit() {
                       {receiveLines.length} tallied
                     </h3>
                   </div>
-                  <table className="tbl">
+                  <div className="overflow-x-auto">
+                  <table className="tbl min-w-[680px]">
                     <thead>
                       <tr>
                         <th>Tally</th>
@@ -1289,6 +1290,7 @@ export function GoodsReceiptCockpit() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
 
                 {/* MANDATORY attachment gate */}

@@ -1154,9 +1154,8 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
           render below. */}
       <div className="eyebrow" style={{ marginBottom: 10 }}>Ask intelligence</div>
       <div
+        className="jarvis-ask-grid"
         style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 320px',
           gap: 14,
           background: 'var(--surface)',
           border: '1px solid var(--line)',
