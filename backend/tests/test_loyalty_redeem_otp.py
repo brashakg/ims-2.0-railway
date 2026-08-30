@@ -149,17 +149,36 @@ def test_policy_key_registered_default_off_store_scopable():
 
 
 def test_gate_dark_never_even_reads_the_policy(monkeypatch):
-    """DISPATCH_MODE off/unset -> gate False, and the policy engine is not
-    consulted at all - an unarmed deployment is byte-identical to main."""
+    """DISPATCH_MODE off/unset -> gate False EVEN WHEN THE POLICY SAYS ON,
+    and the policy engine is not consulted at all - an unarmed deployment
+    is byte-identical to main.
+
+    The first version of this test used a RAISING bomb to prove the policy
+    was never read - useless: redeem_otp_required has a fail-soft
+    `except Exception: return False`, which swallowed the bomb, so deleting
+    the dispatch check left the whole suite green (verifier mutation M4,
+    2026-08-31). A raising detector inside a fail-soft function can never
+    detect anything. Two non-raising assertions replace it: the policy
+    RETURNS "on" and the gate must still be False (that kills the mutant),
+    and a recording spy proves it was never consulted."""
     from api.services import policy_engine
 
-    def _bomb(*a, **k):  # pragma: no cover - dying here IS the failure
-        raise AssertionError("policy engine consulted while dispatch is dark")
+    consulted = []
 
-    monkeypatch.setattr(policy_engine, "get_policy", _bomb)
+    def _spy(key, scope=None, *, default=None):
+        consulted.append(key)
+        return "on"  # the dangerous answer: dark must beat it anyway
+
+    monkeypatch.setattr(policy_engine, "get_policy", _spy)
     for mode in ("off", "", "garbage"):
         _arm(monkeypatch, mode)
-        assert loyalty_otp.redeem_otp_required("BV-TEST-01") is False
+        assert loyalty_otp.redeem_otp_required("BV-TEST-01") is False, (
+            f"dark ({mode!r}) must beat a policy answering 'on' - an owner"
+            " flipping the setting before arming would brick POS redemption"
+        )
+    assert consulted == [], (
+        f"the policy engine must not be consulted while dark: {consulted}"
+    )
 
 
 def test_gate_on_only_when_armed_and_policy_on(monkeypatch):
