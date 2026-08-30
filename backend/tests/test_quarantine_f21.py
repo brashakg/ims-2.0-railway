@@ -223,7 +223,7 @@ def test_pos_sell_of_quarantined_only_unit_returns_409(client, auth_headers):
                         "item_type": "FRAME",
                         "category": "FRAME",
                         "quantity": 1,
-                        "unit_price": 5000.0,
+                        "unit_price": 10000.0,
                     }
                 ],
             },

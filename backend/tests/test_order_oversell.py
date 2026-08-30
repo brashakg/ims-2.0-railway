@@ -73,7 +73,7 @@ def _post(client, headers, items, **extra):
 
 def _frame(qty=1, **over):
     it = {"product_id": "FR-1", "product_name": "Frame", "item_type": "FRAME",
-          "category": "FRAME", "quantity": qty, "unit_price": 5000.0}
+          "category": "FRAME", "quantity": qty, "unit_price": 10000.0}
     it.update(over)
     return it
 
