@@ -3881,7 +3881,11 @@ class CashRegisterClose(BaseModel):
     closing_count_state: Optional[str] = None
     bank_deposit: float = 0.0
     counted_override: Optional[float] = None  # optional override of denom sum
-    tolerance: float = 0.0
+    # ``tolerance`` was DELETED from this body (owner ruling 2026-08-25: ONE
+    # Rs 100 band, from policy). The closer choosing their own band was the
+    # exact thing the ruling banned; the server now reads
+    # ``till.variance_tolerance_paisa`` -- the SAME band the blind EOD uses.
+    # ``note`` becomes MANDATORY when the variance is beyond that band.
     note: Optional[str] = None
 
 
@@ -4618,6 +4622,11 @@ async def close_cash_register(
     start_iso = session.get("opened_at") or _iso_now()
     end_iso = _iso_now()
 
+    # ONE band, from policy (owner ruling 2026-08-25): the SAME store-scopable
+    # ``till.variance_tolerance_paisa`` the blind EOD verdict uses -- never a
+    # figure the closer types. Rupees at this door's boundary.
+    tolerance_rupees = till_service.get_variance_tolerance_paisa(store_id=store_id) / 100.0
+
     cash_sales, cash_refunds = _cash_sales_for_window(db, store_id, start_iso, end_iso)
     _cash_exp = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
     cash_expenses = _cash_exp.total
@@ -4658,7 +4667,7 @@ async def close_cash_register(
         cash_expenses=cash_expenses,
         bank_deposit=body.bank_deposit,
         denominations=denoms,
-        tolerance=body.tolerance,
+        tolerance=tolerance_rupees,
     )
     # build_close_summary uses the denoms total for counted; honour an override.
     summary["counted"] = counted
@@ -4679,7 +4688,7 @@ async def close_cash_register(
         summary["variance_status"] = cash_register.NEGATIVE_EXPECTED
     else:
         summary["variance_status"] = cash_register.variance_status(
-            summary["variance"], body.tolerance
+            summary["variance"], tolerance_rupees
         )
 
     # E5 (ADDITIVE): by-mode reconciliation over the same session window. This
@@ -4762,7 +4771,27 @@ async def close_cash_register(
         summary["variance_status"] = (
             cash_register.NEGATIVE_EXPECTED
             if summary.get("negative_expected_advisory")
-            else cash_register.variance_status(summary["variance"], body.tolerance)
+            else cash_register.variance_status(summary["variance"], tolerance_rupees)
+        )
+
+    # MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25). Checked AFTER
+    # the shared-record adoption so the figure judged is the ONE counted figure
+    # for the day. Same rule, same helper as the blind Z-Read lock. Refusing
+    # here is retry-safe: the count already landed on the shared till record,
+    # and a resubmit with the note adopts it back (already_counted) unchanged.
+    close_note = (body.note or "").strip()
+    variance_out_of_band = till_service.needs_variance_note(
+        cash_denom.rupees_to_paisa(summary["variance"]) if summary["variance"] is not None else None,
+        cash_denom.rupees_to_paisa(tolerance_rupees),
+    )
+    if variance_out_of_band and not close_note:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "variance_note_required: the drawer is over/short beyond the "
+                f"allowed band of Rs {tolerance_rupees:.0f} - a note explaining "
+                "the variance is required to close."
+            ),
         )
 
     update = {
@@ -4827,6 +4856,19 @@ async def close_cash_register(
         raise HTTPException(
             status_code=500,
             detail="Could not close the cash session - try again or contact support",
+        )
+
+    # Manager alert above the band (owner ruling 2026-08-25). SAME helper and
+    # SAME (store, day) dedupe as the blind Z-Read lock, so the two doors raise
+    # ONE task for one drawer-day. Fail-soft inside the helper.
+    if variance_out_of_band:
+        till_service.raise_variance_task(
+            store_id=store_id,
+            session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
+            variance_paisa=cash_denom.rupees_to_paisa(summary["variance"]),
+            tolerance_paisa=cash_denom.rupees_to_paisa(tolerance_rupees),
+            note=close_note,
+            source="Finance cash-register close",
         )
 
     merged = dict(session)
@@ -5239,12 +5281,12 @@ async def cash_reconciliation_summary(
                     if s.get("refund_double_entry_advisory")
                     else None
                 ),
-                # Always False for a blind EOD: `cash_payouts_paisa` is a figure
-                # the cashier hand-keys on the till screen (routers/till.py),
-                # not one derived from the `expenses` collection, so there is
-                # no expense head here to classify. Emitted anyway so every row
-                # in this one grid carries the same keys.
-                "off_till_expense_advisory": False,
+                # Since the 2026-08-25 ruling `cash_payouts_paisa` is AUTO-
+                # PULLED from the `expenses` collection at blind-submit, and
+                # the session stores whether a payroll-shaped head was
+                # deliberately left out. Older sessions (hand-keyed payouts)
+                # never stored the flag -> False, as before.
+                "off_till_expense_advisory": bool(s.get("off_till_expense_advisory")),
                 "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": locked_by,
                 "closed_by_name": s.get("locked_by_name"),

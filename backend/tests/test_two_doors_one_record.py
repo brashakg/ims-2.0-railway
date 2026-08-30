@@ -483,7 +483,10 @@ class TestTheFinanceDoorNeverFabricatesACount:
         A typed override of 0 is a human saying "I counted, it was empty", and
         that must still produce a real count and a real shortfall."""
         out = _cr_close(
-            db, opening_float=2000.0, denominations=[], counted_override=0.0
+            db, opening_float=2000.0, denominations=[], counted_override=0.0,
+            # This suite pins the band to 0, and a Rs 2,000 short is beyond any
+            # band: the 2026-08-25 ruling demands the explanation to close.
+            note="drawer emptied for banking before the count - slip attached",
         )
 
         assert out["counted"] == 0.0
@@ -498,6 +501,9 @@ class TestTheFinanceDoorNeverFabricatesACount:
             denominations=[{"face": 500, "kind": "note", "pieces": 4}],
             bank_deposit=0.0,
             closing_count_state="COUNTED",
+            # Band pinned to 0 by this suite; the Rs 2,000 overage (opening
+            # float 0) is out of band, so the close needs its explanation.
+            note="opening float was never declared - counted Rs 2,000 stands",
         )
 
         session = _sessions(db)[0]
@@ -520,6 +526,8 @@ class TestTheFinanceDoorNeverFabricatesACount:
             db,
             denominations=[{"face": 500, "kind": "note", "pieces": 1}],
             closing_count_state="COUNTED",
+            # Band pinned to 0; the Rs 500 variance is out of band -> note.
+            note="ZZ test close - variance explained",
         )
         assert _sessions(db)[0]["session_date"] == "2026-08-25"
 
@@ -564,6 +572,9 @@ class TestTheTwoScreensCannotShowTwoFigures:
             db,
             denominations=[{"face": 500, "kind": "note", "pieces": 4}],
             closing_count_state="COUNTED",
+            # Band pinned to 0; the adopted Rs 3,000 count vs expected 0 is out
+            # of band -> the mandatory explanation (2026-08-25 ruling).
+            note="day-end already counted this drawer - see Z-Read",
         )
 
         # ONE drawer, ONE counted figure -- on the close response, on the
@@ -591,6 +602,8 @@ class TestTheTwoScreensCannotShowTwoFigures:
             db,
             denominations=[{"face": 500, "kind": "note", "pieces": 4}],
             closing_count_state="COUNTED",
+            # Band pinned to 0; Rs 2,000 counted vs expected 0 -> note needed.
+            note="opening float was never declared - counted Rs 2,000 stands",
         )
         shared = _sessions(db)[0]
 

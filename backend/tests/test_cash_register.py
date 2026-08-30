@@ -345,7 +345,22 @@ class TestCashRegisterEndpoints:
         assert closed["variance"] == 0.0
         assert closed["variance_status"] == "BALANCED"
 
-    def test_close_detects_short_and_over(self):
+    def test_close_detects_short_and_over(self, monkeypatch):
+        """Owner ruling 2026-08-25: the band is the Rs 100 POLICY band (the
+        closer-typed tolerance is DELETED and ignored), an out-of-band close
+        is REFUSED until a note explains it, and once closed the STORE
+        MANAGER gets a SYSTEM task (the in-app bell feeds from tasks)."""
+        tasks: list = []
+
+        class _TaskRepo:
+            def find_many(self, q):
+                return [t for t in tasks if all(t.get(k) == v for k, v in (q or {}).items())]
+
+            def create(self, t):
+                tasks.append(dict(t))
+                return dict(t)
+
+        monkeypatch.setattr("api.dependencies.get_task_repository", lambda: _TaskRepo())
         db = _FakeDB()
         c = _client(db)
         # No sales/expenses -> expected == opening float == 1000.
@@ -354,19 +369,46 @@ class TestCashRegisterEndpoints:
             json={"store_id": "store-001", "opening_float": 1000, "denominations": []},
         ).json()["session_id"]
 
+        # Rs 150 short is beyond the Rs 100 band. A client-sent tolerance of
+        # Rs 100,000 must NOT widen it (the field no longer exists), and with
+        # no note the close is refused outright.
         r = c.post(
             "/finance/cash-register/close",
             json={
                 "session_id": sid,
                 "counted_override": 850,  # 150 short
                 "denominations": [],
-                "tolerance": 100,
+                "tolerance": 100000,  # ignored: closers no longer choose bands
             },
         )
-        body = r.json()
+        assert r.status_code == 400, r.text
+        assert "variance_note_required" in str(r.json().get("detail"))
+        assert tasks == []  # a close that never happened alerts nobody
+
+        # Same close WITH the mandatory explanation -> lands, verdict SHORT.
+        r2 = c.post(
+            "/finance/cash-register/close",
+            json={
+                "session_id": sid,
+                "counted_override": 850,
+                "denominations": [],
+                "note": "Rs 150 change float lent to the counter, slip attached",
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        body = r2.json()
         assert body["expected"] == 1000.0
         assert body["variance"] == -150.0
         assert body["variance_status"] == "SHORT"
+
+        # Manager alert above the band (owner ruling 2026-08-25): ONE SYSTEM
+        # task on the store manager's worklist, deduped per (store, day).
+        assert len(tasks) == 1, tasks
+        assert tasks[0]["assigned_to"] == "STORE_MANAGER"
+        assert tasks[0]["store_id"] == "store-001"
+        assert tasks[0]["source"] == "SYSTEM"
+        assert tasks[0]["source_ref"].startswith("till_variance:store-001:")
+        assert "SHORT" in tasks[0]["title"] and "150.00" in tasks[0]["title"]
 
     def test_double_open_blocked(self):
         db = _FakeDB()
@@ -470,7 +512,9 @@ class TestCashRegisterEndpoints:
                 "session_id": sid,
                 "denominations": [],
                 "counted_override": 0,
-                "tolerance": 0,
+                # |variance| = 3900 is beyond the Rs 100 policy band, so the
+                # 2026-08-25 ruling demands the explanation to close.
+                "note": "cash refund funded from the safe - cash-in missing",
             },
         )
         assert r.status_code == 200, r.text

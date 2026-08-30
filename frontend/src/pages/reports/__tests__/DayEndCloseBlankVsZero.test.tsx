@@ -115,12 +115,19 @@ describe('closing without counting the drawer', () => {
     expect(body.date).toBeTruthy();
   });
 
-  it('shows the operator "Not counted" rather than a fabricated shortfall', async () => {
+  it('shows the operator a blind variance box, never a fabricated shortfall', async () => {
     await renderReport();
     // Rs 1,600 of cash sales with nothing counted used to read as "-Rs 1,600
-    // cash short" before the button was even pressed.
-    expect(screen.getByText('Not counted')).toBeInTheDocument();
+    // cash short" before the button was even pressed. Since the 2026-08-25
+    // ruling (blind is THE day-end) the pending-day variance box is BLIND:
+    // it says the variance reveals at close, and the system-cash figure is
+    // hidden so the count cannot be anchored to it.
+    expect(screen.getByText(/Revealed when the day closes/i)).toBeInTheDocument();
     expect(screen.queryByText('Cash short')).not.toBeInTheDocument();
+    // The system-cash target itself is masked while counting: the CASH tile
+    // and the "System Cash (from POS)" figure both read Hidden (the non-cash
+    // tiles, which cannot anchor a drawer count, stay visible).
+    expect(screen.getAllByText('Hidden')).toHaveLength(2);
   });
 });
 

@@ -128,11 +128,13 @@ def test_with_no_hsn_and_no_rate_the_category_default_still_answers():
         # exact shape of the bug, and what makes this case worth having.
         ("FRAME", "900410"),
         ("SUNGLASS", "900410"),
-        # 8-digit, inherits its 6-digit parent. Assembled in parts because
-        # test_gst_rates.test_contact_lens_hsn_has_one_spelling red-flags the
-        # contiguous 8-digit spelling in ANY backend .py (two spellings of one
-        # HSN split GSTR-1 rows); the runtime value is untouched.
-        ("CONTACT_LENS", "900130" + "00"),
+        # 8-digit tariff item, inherits its 6-digit parent (900311 frames).
+        # Deliberately NOT the contact-lens code: the tree-wide tripwire in
+        # test_gst_rates.py::test_contact_lens_hsn_has_one_spelling bans any
+        # .py file writing the 8-digit CL spelling, and this fixture is how
+        # main went red when the two tests first met. The inheritance path
+        # is category-agnostic, so frames prove it just as well.
+        ("FRAME", "90031100"),
         ("SMARTGLASSES", "852580"),  # 35 of the 68 live products
         ("WALL_CLOCK", "910500"),
         ("HEARING_AID", "902140"),  # NIL, and NIL must survive the round trip

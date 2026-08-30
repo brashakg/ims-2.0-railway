@@ -538,16 +538,16 @@ def _spine_repo():
     return ProductRepository(coll)
 
 
-def _edit_spine(db, monkeypatch, **fields):
+def _edit_spine(db, monkeypatch, repo=None, spine_id="P1", **fields):
     from api.routers import products as products_mod
     import api.dependencies as deps_mod
 
-    repo = _spine_repo()
+    repo = repo or _spine_repo()
     monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
     monkeypatch.setattr(deps_mod, "get_db", lambda: _SpineConn(db["catalog_products"]))
     _run(
         products_mod.update_product(
-            "P1",
+            spine_id,
             products_mod.ProductUpdate(**fields),
             {
                 "user_id": "u1",
@@ -569,6 +569,67 @@ def test_price_edit_on_the_billing_spine_queues_the_twin(db, monkeypatch):
     assert saved["pricing"]["mrp"] == 6000.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
+
+
+def _door_created_spine_repo():
+    """A spine row as the CREATE DOOR writes it: `pim_product_id` is a SEPARATE
+    uuid the door minted, and the catalog twin is keyed on THAT id -- not the
+    spine's own. 71 of the 77 live products are shaped this way (prod census
+    2026-08-30); only 6 legacy/convergence twins share the spine id."""
+    coll = MockCollection("products")
+    coll.insert_one(
+        {
+            "_id": "SPINE-77",
+            "product_id": "SPINE-77",
+            "id": "SPINE-77",
+            "sku": "FR-RB-0077",
+            "brand": "Ray-Ban",
+            "model": "RB1077",
+            "category": "FRAME",
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "cost_price": 2000.0,
+            "hsn_code": "900311",
+            "gst_rate": 5.0,
+            "is_active": True,
+            "pim_product_id": "P1",  # the twin's key -- a DIFFERENT uuid
+            "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1077"},
+            "catalog_status": "ACTIVE",
+        }
+    )
+    return ProductRepository(coll)
+
+
+def test_a_door_created_products_price_edit_reaches_its_pim_keyed_twin(
+    db, monkeypatch
+):
+    """THE 71-of-77 BUG. A door-created product's catalog twin is keyed on
+    pim_product_id (a different uuid), but the PUT /products mirror filtered on
+    the SPINE id -- so the write matched nothing: the POS price moved, the
+    WEBSITE price stayed stale, and ecom.locally_modified landed nowhere, so
+    the edit never even queued. Silently. The mirror must resolve the twin the
+    way the service door does: pim_product_id first, spine id as the legacy
+    fallback (which test_price_edit_on_the_billing_spine_queues_the_twin pins)."""
+    _seed_pushed(db)  # the twin lives at id "P1" == the spine's pim_product_id
+
+    _edit_spine(
+        db,
+        monkeypatch,
+        repo=_door_created_spine_repo(),
+        spine_id="SPINE-77",
+        mrp=6000.0,
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["pricing"]["mrp"] == 6000.0, (
+        "the price edit must reach the pim-keyed twin, not silently miss it"
+    )
+    assert saved["ecom"]["locally_modified"] is True, (
+        "the edit must QUEUE the twin for the manual Online Store push"
+    )
+    assert _pending(db) == 1
+    # ...and nothing was upserted/written under the spine's own id.
+    assert db["catalog_products"].find_one({"id": "SPINE-77"}) is None
 
 
 def test_internal_cost_edit_on_the_billing_spine_does_not_queue(db, monkeypatch):
@@ -686,3 +747,143 @@ def test_an_internal_field_on_the_product_master_door_does_not_queue(db, monkeyp
     assert saved["gst_rate"] == 12.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is False
     assert _pending(db) == 0
+
+
+# ===========================================================================
+# 7. ONE mirror rule, not two (PR #1029 follow-up). The spine PUT and the
+# /products/master door used to carry SEPARATE copies of the edit->twin
+# mirror, and the copies had drifted: different field sets, different price
+# spellings (pricing.* vs top-level), a description-only edit queued on one
+# door and not the other, a flag gate on one door only, and no legacy-key
+# fallback on the service door. Both doors now call
+# product_master.mirror_update_to_catalog_twin; these tests pin each decided
+# behaviour AND the identity of the two doors' output.
+# ===========================================================================
+
+
+def _pm_edit(db, patch, repo=None):
+    pm.update_product(
+        product_id="PM1",
+        patch=patch,
+        actor="u1",
+        product_repo=repo or _pm_spine_repo(),
+        audit_repo=AuditRepository(MockCollection("audit_logs")),
+        db=db,
+    )
+
+
+def test_spine_price_edit_updates_the_top_level_price_the_push_reads(db, monkeypatch):
+    """THE stale-price hazard the dedup fixed on the ROUTER side. A PM-born
+    twin carries its price TOP-LEVEL (_build_pim_doc), and the push resolves
+    the top-level value FIRST (shopify_push._resolve_variant_pricing) -- so a
+    mirror that moved only pricing.mrp left the stale top-level 5000 winning:
+    the queued push would have shipped the OLD price. The mirror must write
+    BOTH spellings."""
+    _seed_pushed(db)  # twin has top-level mrp 5000.0 and NO pricing sub-doc
+    _edit_spine(db, monkeypatch, mrp=6000.0)
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["mrp"] == 6000.0, (
+        "top-level mrp is what the push resolves first; leaving it stale "
+        "ships the OLD price"
+    )
+    assert saved["pricing"]["mrp"] == 6000.0
+    # The push-side resolution actually lands on the new price.
+    price, mrp = shopify_push._resolve_variant_pricing(saved, {})
+    assert mrp == 6000.0
+
+
+def test_master_door_price_edit_lands_in_both_price_spellings(db):
+    """Same rule, other door: the service used to write ONLY the top-level
+    spelling, so a catalog-door twin's pricing.mrp went stale."""
+    _seed_pushed(db)
+    _pm_edit(db, {"mrp": 6000.0})
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["mrp"] == 6000.0
+    assert saved["pricing"]["mrp"] == 6000.0
+    assert saved["ecom"]["locally_modified"] is True
+
+
+def test_master_door_mirrors_with_the_mirror_flag_off(db):
+    """The mirror flag guards EXTERNAL (Postgres/Shopify) writes, not the
+    local Mongo twin (_stage_catalog_draft precedent). The service door used
+    to gate the twin mirror on it, so on a normal deploy (flag off) a price
+    edited through /products/master moved in IMS and NEVER reached the twin
+    or the queue. The autouse _mirror_off fixture keeps the flag OFF here."""
+    _seed_pushed(db)
+    _pm_edit(db, {"mrp": 6000.0})
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["mrp"] == 6000.0, "flag OFF must not silence the local twin mirror"
+    assert saved["ecom"]["locally_modified"] is True
+    assert _pending(db) == 1
+
+
+def test_master_door_reaches_a_legacy_spine_keyed_twin(db):
+    """The service door used to REQUIRE pim_product_id -- a legacy /
+    convergence twin (keyed on the spine's own id, 6 of the 77 live products)
+    was silently never mirrored from /products/master. The shared rule falls
+    back to the spine id, exactly as the spine PUT always did."""
+    coll = MockCollection("products")
+    coll.insert_one(
+        {
+            "_id": "P1",  # legacy: twin shares the spine's own id
+            "product_id": "P1",
+            "id": "P1",
+            "sku": "FR-RB-0003",
+            "brand": "Ray-Ban",
+            "model": "RB1003",
+            "category": "FRAME",
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "is_active": True,
+            "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1003"},
+        }
+    )
+    _seed_pushed(db)  # twin at id P1
+    pm.update_product(
+        product_id="P1",
+        patch={"mrp": 6000.0},
+        actor="u1",
+        product_repo=ProductRepository(coll),
+        audit_repo=AuditRepository(MockCollection("audit_logs")),
+        db=db,
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["mrp"] == 6000.0, "a legacy-keyed twin must not be silently missed"
+    assert saved["ecom"]["locally_modified"] is True
+
+
+def test_a_missing_twin_is_never_upserted_into_a_fragment(db, monkeypatch):
+    """A twin is born only at the create door. The service's old repo branch
+    UPSERTED the patch, minting a fragment doc (no sku, no name, no ecom
+    identity) invisible to every sku-joined consumer. Both doors: a missing
+    twin is a NO-OP."""
+    _edit_spine(db, monkeypatch, mrp=6000.0)  # no twin seeded
+    _pm_edit(db, {"mrp": 6500.0})
+
+    assert db["catalog_products"].find_one({"id": "P1"}) is None
+    assert len(db["catalog_products"]._data) == 0, "no fragment twin may be minted"
+
+
+def test_both_doors_write_the_identical_twin(db, monkeypatch):
+    """THE anti-drift tripwire. Drive the SAME price edit through BOTH doors
+    over identically seeded twins: the resulting twin docs must be EQUAL. If
+    someone re-inlines a copy of the mirror in either door and it drifts,
+    this is the test that reddens."""
+    _seed_pushed(db, "P1")
+    db2 = _DB()
+    _run_seed = _seed_pushed(db2, "P1")  # noqa: F841 -- same starting twin
+
+    _edit_spine(db, monkeypatch, offer_price=4200.0)
+    _pm_edit(db2, {"offer_price": 4200.0})
+
+    spine_twin = _load(db, "P1")
+    master_twin = copy.deepcopy(db2["catalog_products"].find_one({"id": "P1"}))
+    # The doors stamp no door-specific keys on the twin; compare whole docs.
+    assert spine_twin == master_twin, (
+        "the two edit doors produced DIFFERENT twins -- the mirror rule has "
+        "been duplicated and drifted again"
+    )

@@ -17,7 +17,7 @@ import {
   Lock,
   Unlock,
   AlertTriangle,
-  CheckCircle2,
+  EyeOff,
   Globe,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -69,10 +69,13 @@ export default function CashRegisterPage() {
   const [openDenoms, setOpenDenoms] = useState<DenomRow[]>(blankDenoms());
   const [shift, setShift] = useState('PM');
 
-  // Close-form state
+  // Close-form state. The closer-typed tolerance input was DELETED (owner
+  // ruling 2026-08-25): the band is the ONE store-scopable policy the server
+  // reads (`till.variance_tolerance_paisa`, default Rs 100) — never a figure
+  // whoever is closing gets to choose.
   const [closeDenoms, setCloseDenoms] = useState<DenomRow[]>(blankDenoms());
   const [bankDeposit, setBankDeposit] = useState('');
-  const [tolerance, setTolerance] = useState('200');
+  const [closeNote, setCloseNote] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,16 +100,11 @@ export default function CashRegisterPage() {
   const openTotal = useMemo(() => denomTotal(openDenoms), [openDenoms]);
   const countedTotal = useMemo(() => denomTotal(closeDenoms), [closeDenoms]);
 
-  // Live close-side reconciliation preview (counted - expected).
-  const liveExpected = useMemo(() => {
-    if (!preview) return 0;
-    const deposit = parseFloat(bankDeposit) || 0;
-    return Math.round((preview.expected - deposit) * 100) / 100;
-  }, [preview, bankDeposit]);
-  const liveVariance = countedTotal - liveExpected;
-  const tol = Math.abs(parseFloat(tolerance) || 0);
-  const liveStatus: 'BALANCED' | 'OVER' | 'SHORT' =
-    Math.abs(liveVariance) <= tol ? 'BALANCED' : liveVariance > 0 ? 'OVER' : 'SHORT';
+  // BLIND WHILE COUNTING (owner ruling 2026-08-25: blind is THE day-end). The
+  // live "Expected in drawer" figure and its running variance are NOT shown
+  // while a count is being typed — showing the target anchors the count, the
+  // exact thing the blind flow exists to prevent. Expected/variance appear
+  // only AFTER the close, on the response and in the history table.
 
   const setOpenPieces = (i: number, pieces: number) =>
     setOpenDenoms((rows) => setRowPieces(rows, i, pieces));
@@ -145,7 +143,7 @@ export default function CashRegisterPage() {
         denominations: closeDenoms.filter((r) => r.pieces > 0),
         closing_count_state: hasCount(closeDenoms) ? 'COUNTED' : 'NOT_CAPTURED',
         bank_deposit: parseFloat(bankDeposit) || 0,
-        tolerance: tol,
+        note: closeNote.trim() || undefined,
       });
       const v = closed.variance ?? 0;
       if (closed.variance_status === 'NOT_COUNTED') {
@@ -171,6 +169,7 @@ export default function CashRegisterPage() {
       }
       setCloseDenoms(blankDenoms());
       setBankDeposit('');
+      setCloseNote('');
       await load();
     } catch (e: unknown) {
       const msg =
@@ -218,13 +217,10 @@ export default function CashRegisterPage() {
               closeDenoms={closeDenoms}
               onCountChange={setClosePieces}
               countedTotal={countedTotal}
-              liveExpected={liveExpected}
-              liveVariance={liveVariance}
-              liveStatus={liveStatus}
               bankDeposit={bankDeposit}
               setBankDeposit={setBankDeposit}
-              tolerance={tolerance}
-              setTolerance={setTolerance}
+              closeNote={closeNote}
+              setCloseNote={setCloseNote}
               onClose={handleClose}
               busy={busy}
             />
@@ -375,19 +371,22 @@ function OpenView({
 // ----------------------------------------------------------------------------
 // Reconcile view (session live -> close)
 // ----------------------------------------------------------------------------
+// BLIND WHILE COUNTING (owner ruling 2026-08-25: blind is THE day-end). This
+// panel used to show "Expected in drawer", the full expected breakdown and a
+// live running variance NEXT TO the count grid — anchoring the count to the
+// target, the exact thing the blind flow exists to prevent. Those figures are
+// gone until the close is submitted; the variance verdict arrives on the close
+// response. The advisories stay: none of them carries the expected figure.
 function ReconcileView({
   session,
   preview,
   closeDenoms,
   onCountChange,
   countedTotal,
-  liveExpected,
-  liveVariance,
-  liveStatus,
   bankDeposit,
   setBankDeposit,
-  tolerance,
-  setTolerance,
+  closeNote,
+  setCloseNote,
   onClose,
   busy,
 }: {
@@ -396,28 +395,20 @@ function ReconcileView({
   closeDenoms: DenomRow[];
   onCountChange: (index: number, pieces: number) => void;
   countedTotal: number;
-  liveExpected: number;
-  liveVariance: number;
-  liveStatus: 'BALANCED' | 'OVER' | 'SHORT';
   bankDeposit: string;
   setBankDeposit: (s: string) => void;
-  tolerance: string;
-  setTolerance: (s: string) => void;
+  closeNote: string;
+  setCloseNote: (s: string) => void;
   onClose: () => void;
   busy: boolean;
 }) {
   return (
     <>
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      {/* KPI strip — only what the counter already knows (no system figures) */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
         <Stat label="Open since" value={fmtTime(session.opened_at)} sub={session.shift || ''} />
         <Stat label="Opening float" value={inr(session.opening_float)} />
-        <Stat label="Cash sales (session)" value={inr(preview?.cash_sales)} tone="good" />
-        <Stat
-          label="Expected in drawer"
-          value={inr(liveExpected)}
-          sub="after bank deposit"
-        />
+        <Stat label="Expected cash" value="Hidden" sub="revealed after the count is submitted" />
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -435,36 +426,29 @@ function ReconcileView({
           </div>
         </div>
 
-        {/* Reconciliation */}
+        {/* Close */}
         <div className="bg-white border border-gray-200 rounded-lg p-5">
-          <h2 className="text-sm font-semibold text-gray-700 mb-4">Reconciliation</h2>
-          <dl className="text-sm space-y-2">
-            <Row label="Opening float" value={inr(preview?.opening_float)} />
-            <Row label="+ Cash sales" value={inr(preview?.cash_sales)} tone="good" />
-            <Row label="− Cash refunds" value={inr(preview?.cash_refunds)} tone="bad" />
-            <Row label="− Cash payouts / expenses" value={inr(preview?.cash_expenses)} tone="bad" />
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-gray-500">− Bank deposit</dt>
-              <dd className="flex items-center gap-1">
-                <span className="text-gray-400">₹</span>
-                <input
-                  type="number"
-                  value={bankDeposit}
-                  onChange={(e) => setBankDeposit(e.target.value)}
-                  placeholder="0"
-                  className="w-28 text-right border border-gray-300 rounded px-2 py-1 text-sm tabular-nums"
-                />
-              </dd>
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-gray-100">
-              <dt className="font-medium text-gray-700">Expected in drawer</dt>
-              <dd className="font-semibold text-gray-900 tabular-nums">{inr(liveExpected)}</dd>
-            </div>
-            <div className="flex items-center justify-between">
-              <dt className="font-medium text-gray-700">Counted</dt>
-              <dd className="font-semibold text-gray-900 tabular-nums">{inr(countedTotal)}</dd>
-            </div>
-          </dl>
+          <h2 className="text-sm font-semibold text-gray-700 mb-4">Close the day</h2>
+          <div className="rounded-lg px-3 py-2 bg-gray-50 border border-gray-200 text-gray-600 text-xs flex items-start gap-2">
+            <EyeOff className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              The expected figure stays hidden while you count — the variance is
+              revealed when you close. Count what is actually in the drawer.
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3 mt-4 text-sm">
+            <span className="text-gray-500">− Bank deposit</span>
+            <span className="flex items-center gap-1">
+              <span className="text-gray-400">₹</span>
+              <input
+                type="number"
+                value={bankDeposit}
+                onChange={(e) => setBankDeposit(e.target.value)}
+                placeholder="0"
+                className="w-28 text-right border border-gray-300 rounded px-2 py-1 text-sm tabular-nums"
+              />
+            </span>
+          </div>
 
           {/* Double-count advisory: a recorded cash refund AND a manual cash
               payout/expense in the window may be the same money entered twice. */}
@@ -482,7 +466,7 @@ function ReconcileView({
           )}
           {/* Something booked at this store this period is NOT paid from the
               till (salaries / advances / PF-ESI never are), so it is not in
-              "Expected in drawer" above. Never adjust a figure a person counts
+              the expected-cash figure. Never adjust a figure a person counts
               money against without telling them.
 
               The backend supplies the wording and is authoritative; the local
@@ -499,39 +483,17 @@ function ReconcileView({
             </div>
           )}
 
-          {/* Variance banner */}
-          <div
-            className={`mt-4 rounded-lg px-3 py-3 flex items-center gap-2 text-sm font-medium ${
-              liveStatus === 'BALANCED'
-                ? 'bg-green-50 text-green-700'
-                : liveStatus === 'OVER'
-                  ? 'bg-amber-50 text-amber-700'
-                  : 'bg-red-50 text-red-700'
-            }`}
-            role="status"
-            aria-live="polite"
-          >
-            {liveStatus === 'BALANCED' ? (
-              <>
-                <CheckCircle2 className="w-4 h-4" /> Drawer balanced
-                {Math.abs(liveVariance) > 0 && ` (within ±${inr(Math.abs(parseFloat(tolerance) || 0))})`}
-              </>
-            ) : (
-              <>
-                <AlertTriangle className="w-4 h-4" />
-                {liveStatus === 'OVER' ? 'Cash excess: ' : 'Cash short: '}
-                {inr(Math.abs(liveVariance))}
-              </>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 mt-3">
-            <label className="text-xs text-gray-500">Tolerance ±₹</label>
-            <input
-              type="number"
-              value={tolerance}
-              onChange={(e) => setTolerance(e.target.value)}
-              className="w-24 text-right border border-gray-300 rounded px-2 py-1 text-sm tabular-nums"
+          {/* Mandatory beyond the band: the server refuses an over/short close
+              (beyond the Rs 100 policy band) without a written explanation. */}
+          <div className="mt-4">
+            <label className="text-xs text-gray-500 block mb-1">
+              Closing note — required if the drawer is over/short beyond the allowed band
+            </label>
+            <textarea
+              value={closeNote}
+              onChange={(e) => setCloseNote(e.target.value)}
+              placeholder="Explain any expected difference (e.g. change given from the safe)"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none"
             />
           </div>
 
@@ -571,24 +533,6 @@ function Stat({
         {value}
       </p>
       {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
-    </div>
-  );
-}
-
-function Row({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: 'good' | 'bad';
-}) {
-  const c = tone === 'good' ? 'text-green-700' : tone === 'bad' ? 'text-red-600' : 'text-gray-900';
-  return (
-    <div className="flex items-center justify-between">
-      <dt className="text-gray-500">{label}</dt>
-      <dd className={`tabular-nums ${c}`}>{value}</dd>
     </div>
   );
 }

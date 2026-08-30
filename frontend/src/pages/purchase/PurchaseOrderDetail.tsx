@@ -5,10 +5,7 @@
 import { useState, useEffect } from 'react';
 import {
   FileText,
-  CheckCircle,
   X as XIcon,
-  Truck,
-  Package,
   Printer,
   History,
 } from 'lucide-react';
@@ -269,45 +266,22 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               </button>
             )}
             {po.status === 'PENDING' && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onAction(po, 'reject')}
-                  className="px-4 py-2 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center gap-2"
-                >
-                  <XIcon className="w-4 h-4" />
-                  Reject
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onAction(po, 'approve')}
-                  className="btn-primary flex items-center gap-2"
-                >
-                  <CheckCircle className="w-4 h-4" />
-                  Approve
-                </button>
-              </>
-            )}
-            {po.status === 'APPROVED' && (
               <button
                 type="button"
-                onClick={() => onAction(po, 'order')}
-                className="btn-primary flex items-center gap-2"
+                onClick={() => onAction(po, 'reject')}
+                className="px-4 py-2 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center gap-2"
               >
-                <Truck className="w-4 h-4" />
-                Mark as Ordered
+                <XIcon className="w-4 h-4" />
+                Reject
               </button>
             )}
-            {po.status === 'ORDERED' && (
-              <button
-                type="button"
-                onClick={() => onAction(po, 'receive')}
-                className="btn-primary flex items-center gap-2"
-              >
-                <Package className="w-4 h-4" />
-                Mark as Received
-              </button>
-            )}
+            {/* P0-4 (launch gate): the Approve / Mark-as-Ordered /
+                Mark-as-Received buttons are REMOVED, not wired. They called
+                no API — pure local status theater that evaporated on reload
+                and made a manager believe lifecycle steps happened that
+                never reached the server. Receiving is done on the real
+                receiving screens; wiring approve/order here is a feature,
+                not a launch fix. */}
           </div>
         </div>
       </div>

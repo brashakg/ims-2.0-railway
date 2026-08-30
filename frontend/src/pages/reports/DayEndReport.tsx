@@ -12,7 +12,7 @@ import { istDayString } from '../../utils/datetime';
 import {
   IndianRupee, CreditCard, Phone, FileText,
   TrendingUp, Package, Printer,
-  AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Globe,
+  AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Globe, EyeOff,
 } from 'lucide-react';
 import clsx from 'clsx';
 import DenominationGrid from '../../components/cash/DenominationGrid';
@@ -243,6 +243,14 @@ export default function DayEndReport() {
 
   const fc = (amount: number) => `₹${Math.round(amount).toLocaleString('en-IN')}`;
 
+  // BLIND WHILE COUNTING (owner ruling 2026-08-25: blind is THE day-end).
+  // Until the day is CLOSED, the system-cash figure is not shown anywhere the
+  // count is entered — showing the target anchors the count. It reveals on
+  // the close record. ponytail: a manager can still derive cash from the
+  // other tiles by arithmetic; sealing that fully means gutting the report —
+  // the anchor beside the count box is what the ruling removes.
+  const cashBlind = !onlineStore && !isClosed;
+
   return (
     <div className="max-w-4xl mx-auto p-4 tablet:p-6 space-y-6 print:p-0">
       {/* Header */}
@@ -295,16 +303,24 @@ export default function DayEndReport() {
             <h3 className="font-semibold text-gray-900 mb-4">Payment Collection</h3>
             <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
               {[
-                { label: 'Cash', amount: summary.cashCollected, icon: IndianRupee, color: 'text-green-600' },
-                { label: 'UPI', amount: summary.upiCollected, icon: Phone, color: 'text-purple-600' },
-                { label: 'Card', amount: summary.cardCollected, icon: CreditCard, color: 'text-blue-600' },
-                { label: 'Bank Transfer', amount: summary.bankTransfer, icon: FileText, color: 'text-gray-600' },
-                { label: 'Total Collected', amount: summary.totalCollected, icon: TrendingUp, color: 'text-bv-red-600' },
+                // The CASH figure is the system-cash target — hidden until the
+                // day is closed so the drawer count stays blind.
+                { label: 'Cash', amount: summary.cashCollected, icon: IndianRupee, color: 'text-green-600', blind: cashBlind },
+                { label: 'UPI', amount: summary.upiCollected, icon: Phone, color: 'text-purple-600', blind: false },
+                { label: 'Card', amount: summary.cardCollected, icon: CreditCard, color: 'text-blue-600', blind: false },
+                { label: 'Bank Transfer', amount: summary.bankTransfer, icon: FileText, color: 'text-gray-600', blind: false },
+                { label: 'Total Collected', amount: summary.totalCollected, icon: TrendingUp, color: 'text-bv-red-600', blind: false },
               ].map(pm => (
                 <div key={pm.label} className="text-center">
                   <pm.icon className={clsx('w-5 h-5 mx-auto mb-1', pm.color)} />
                   <p className="text-xs text-gray-500">{pm.label}</p>
-                  <p className="text-lg font-bold text-gray-900">{fc(pm.amount)}</p>
+                  {pm.blind ? (
+                    <p className="text-lg font-bold text-gray-400" title="Hidden until the day is closed — count the drawer blind.">
+                      <EyeOff className="w-4 h-4 inline mr-1" />Hidden
+                    </p>
+                  ) : (
+                    <p className="text-lg font-bold text-gray-900">{fc(pm.amount)}</p>
+                  )}
                 </div>
               ))}
             </div>
@@ -339,9 +355,19 @@ export default function DayEndReport() {
           <div className="bg-white border border-gray-200 rounded-xl p-5">
             <h3 className="font-semibold text-gray-900 mb-4">Cash Reconciliation</h3>
             <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4 items-end">
+              {/* BLIND WHILE COUNTING: the system figure and the live variance
+                  used to sit right beside the count box — the anchor the
+                  2026-08-25 ruling removes. Both stay hidden until the day is
+                  closed; the close response reveals counted vs system. */}
               <div>
                 <p className="text-xs text-gray-500 mb-1">System Cash (from POS)</p>
-                <p className="text-2xl font-bold text-gray-900">{fc(summary.cashCollected)}</p>
+                {cashBlind ? (
+                  <p className="text-lg font-bold text-gray-400" title="Hidden until the day is closed — count the drawer blind.">
+                    <EyeOff className="w-4 h-4 inline mr-1" />Hidden
+                  </p>
+                ) : (
+                  <p className="text-2xl font-bold text-gray-900">{fc(summary.cashCollected)}</p>
+                )}
               </div>
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">Physical Cash Count</label>
@@ -351,7 +377,17 @@ export default function DayEndReport() {
                 {countedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(countedCash)}</p>}
               </div>
               <div>
-                {cashVariance === null ? (
+                {cashBlind ? (
+                  <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
+                    <p className="text-xs text-gray-500">Variance</p>
+                    <p className="text-sm font-semibold text-gray-600 flex items-center gap-1">
+                      <EyeOff className="w-4 h-4" /> Revealed when the day closes
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Count what is actually in the drawer &mdash; the system figure stays hidden until you close.
+                    </p>
+                  </div>
+                ) : cashVariance === null ? (
                   <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className="text-sm font-semibold text-gray-600">Not counted</p>

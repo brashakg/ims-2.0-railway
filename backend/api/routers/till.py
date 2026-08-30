@@ -142,8 +142,21 @@ class BlindSubmit(BaseModel):
     blind_count_paisa: Optional[int] = Field(
         None, description="Optional explicit total (paisa); must equal the denomination sum"
     )
-    cash_payouts_paisa: int = Field(0, ge=0, description="Cash paid out of the drawer during the session (paisa)")
+    # ``cash_payouts_paisa`` was DELETED from this body (owner ruling
+    # 2026-08-25): the payouts leg is auto-pulled from the expenses book by the
+    # service; a hand-typed figure from any client is ignored.
     idempotency_key: Optional[str] = Field(None, description="Retry-safe key; a duplicate submit returns existing state")
+
+
+class LockBody(BaseModel):
+    """Optional lock body. ``variance_note`` mirrors ReopenBody.reason: it is
+    the mandatory written explanation when the variance is beyond the band
+    (the SERVICE enforces the condition -- the field itself stays optional so
+    a balanced day locks with an empty body exactly as before)."""
+
+    variance_note: Optional[str] = Field(
+        None, description="Explanation for an out-of-band variance (mandatory beyond the band)"
+    )
 
 
 class ReopenBody(BaseModel):
@@ -228,7 +241,6 @@ async def submit_blind_count(
         blind_denominations=[d.model_dump() for d in body.blind_denominations],
         closing_count_state=body.closing_count_state,
         blind_count_paisa=body.blind_count_paisa,
-        cash_payouts_paisa=body.cash_payouts_paisa,
         idempotency_key=body.idempotency_key,
         actor=current_user,
     )
@@ -244,11 +256,13 @@ async def submit_blind_count(
 @router.post("/sessions/{session_id}/lock")
 async def lock_till_session(
     session_id: str,
+    body: Optional[LockBody] = None,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Reveal the variance to the manager and SOFT-LOCK the Z-Read (atomic).
     Manager/area-manager/admin only. The response reveals expected vs counted vs
-    variance. A second lock 409s (already_locked)."""
+    variance. A second lock 409s (already_locked). A variance beyond the band
+    REQUIRES ``variance_note`` (400 ``variance_note_required`` without it)."""
     if not (_roles(current_user) & _TILL_LOCK_ROLES):
         raise HTTPException(status_code=403, detail="not permitted to lock the Z-Read")
     db = _get_db()
@@ -257,7 +271,12 @@ async def lock_till_session(
         raise HTTPException(status_code=404, detail="till session not found")
     validate_store_access(session.get("store_id"), current_user)
 
-    res = till.lock_session(db, session_id, actor=current_user)
+    res = till.lock_session(
+        db,
+        session_id,
+        actor=current_user,
+        variance_note=(body.variance_note if body is not None else None),
+    )
     if not res.get("ok"):
         _raise(res)
     res["session"].pop("_id", None)

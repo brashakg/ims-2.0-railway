@@ -652,6 +652,32 @@ class TestDuplicateVendorBill:
         assert len(rows) == 1, f"the duplicate must not be stored: {rows!r}"
         assert sum(r["outstanding"] for r in rows) == 1180.0
 
+    def test_a_punctuation_variant_of_the_bill_number_is_the_same_bill(self, monkeypatch):
+        """One paper invoice, two spellings, one payable. The exact-string
+        guard let 'GO-INV/9007' book Rs 63,000 a second time next to
+        'GO-INV-9007' (adversarial verification, 2026-08-30). The guard now
+        folds through purchase_invoice_engine.normalize_invoice_no -- the
+        SAME normaliser the GRN duplicate guard and the line-detail invoice
+        door use, so the three doors cannot drift apart again."""
+        db = self._bill_env(monkeypatch)
+
+        first = _cli.post(
+            "/api/v1/vendors/v-1/bills", json=self._payload("GO-INV-9007")
+        )
+        assert first.status_code == 201, first.text
+
+        for variant in ("GO-INV/9007", "go inv 9007", "GO.INV.9007"):
+            second = _cli.post(
+                "/api/v1/vendors/v-1/bills", json=self._payload(variant)
+            )
+            assert second.status_code == 409, (
+                f"variant {variant!r} booked the payable twice: {second.text}"
+            )
+
+        rows = db.get_collection("vendor_bills").docs
+        assert len(rows) == 1, f"one paper bill, one row: {rows!r}"
+        assert sum(r["outstanding"] for r in rows) == 1180.0
+
     def test_same_bill_number_for_a_different_vendor_is_allowed(self, monkeypatch):
         """The guard is per-(vendor, bill_number) -- two vendors may legitimately
         both issue an invoice numbered INV-77."""
