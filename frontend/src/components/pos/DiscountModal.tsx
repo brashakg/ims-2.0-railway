@@ -230,30 +230,39 @@ export function DiscountModal({
 
           {/* Discount reason — compulsory when any discount is given
               (owner ruling 2026-08-30: no offer applied means someone chose
-              to give it; the reason is the accountability). */}
-          {calculations.discountPercent > 0 && (
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reason for discount <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={reason}
-                onChange={e => setReason(e.target.value)}
-                maxLength={200}
-                placeholder="e.g. price match — competitor quote"
-                className={clsx(
-                  'input-field',
-                  reasonMissing && 'border-amber-400 focus:border-amber-500'
-                )}
-              />
-              {reasonMissing && (
-                <p className="mt-1 text-xs text-amber-600">
-                  Required — at least 4 characters. No reason, no discount.
-                </p>
+              to give it; the reason is the accountability). Always visible:
+              at 0% it doubles as the price-override reason the server asks
+              for when an item's price sits below the current catalog price
+              (e.g. HQ raised the price mid-day). */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              {calculations.discountPercent > 0 ? (
+                <>Reason for discount <span className="text-red-500">*</span></>
+              ) : (
+                <>Reason / price-override note</>
               )}
-            </div>
-          )}
+            </label>
+            <input
+              type="text"
+              value={reason}
+              onChange={e => setReason(e.target.value)}
+              maxLength={200}
+              placeholder={
+                calculations.discountPercent > 0
+                  ? 'e.g. price match — competitor quote'
+                  : 'e.g. price honored from shelf display'
+              }
+              className={clsx(
+                'input-field',
+                reasonMissing && 'border-amber-400 focus:border-amber-500'
+              )}
+            />
+            {reasonMissing && (
+              <p className="mt-1 text-xs text-amber-600">
+                Required — at least 4 characters. No reason, no discount.
+              </p>
+            )}
+          </div>
 
           {/* Calculation Preview */}
           {parseFloat(inputValue) > 0 && (

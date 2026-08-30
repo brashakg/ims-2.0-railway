@@ -874,7 +874,14 @@ def _sync_existing_order_status(
             2,
         )
 
-        money: Dict[str, Any] = {"payment_status": st["payment_status"]}
+        from database.repositories.order_repository import derive_bill_type
+
+        money: Dict[str, Any] = {
+            "payment_status": st["payment_status"],
+            # Bill type follows the money on EVERY payment_status writer —
+            # a web order flipping UNPAID->PAID must not keep a stale type.
+            "bill_type": derive_bill_type(st["payment_status"]),
+        }
         if st["payment_status"] == "PAID":
             money["amount_paid"] = grand_total
             money["balance_due"] = 0.0

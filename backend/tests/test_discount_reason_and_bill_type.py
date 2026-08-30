@@ -183,3 +183,46 @@ def test_settling_a_credit_flips_to_final():
 )
 def test_derive_bill_type_table(status, expected):
     assert derive_bill_type(status) == expected
+
+
+def test_typed_price_below_ceiling_without_reason_is_400(
+    client, auth_headers, floor_env
+):
+    """A unit_price typed under the catalog MRP is a discount in disguise —
+    the reason guard must fire even with discount_percent 0. Fails if the
+    `or _below_ceiling` clause is reverted."""
+    pid = _seed_product(floor_env, pid="p-bc1", cost_price=50.0, mrp=200.0)
+    r = _raw_post(client, auth_headers, [_raw_item(pid, 180.0)])
+    assert r.status_code == 400
+    assert "is required" in r.json()["detail"].lower()
+    assert "below the current catalog price" in r.json()["detail"].lower()
+
+
+def test_typed_price_below_ceiling_with_reason_is_accepted(
+    client, auth_headers, floor_env
+):
+    pid = _seed_product(floor_env, pid="p-bc2", cost_price=50.0, mrp=200.0)
+    r = _raw_post(
+        client,
+        auth_headers,
+        [_raw_item(pid, 180.0, discount_reason="price honored from display")],
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_three_char_reason_is_400_four_is_accepted(
+    client, auth_headers, floor_env
+):
+    """Boundary: the 4-char floor is real, not a truthiness check. Fails if
+    `< 4` regresses to `not reason`."""
+    pid = _seed_product(floor_env, pid="p-bc3", cost_price=50.0, mrp=200.0)
+    r3 = _raw_post(
+        client, auth_headers,
+        [_raw_item(pid, 200.0, discount_percent=10, discount_reason="abc")],
+    )
+    assert r3.status_code == 400
+    r4 = _raw_post(
+        client, auth_headers,
+        [_raw_item(pid, 200.0, discount_percent=10, discount_reason="abcd")],
+    )
+    assert r4.status_code == 201, r4.text

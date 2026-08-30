@@ -2297,12 +2297,18 @@ async def create_order(
             # matches the superadmin-edit reason floor).
             if (item.discount_percent or 0) > 0 or _below_ceiling:
                 if len(str(item.discount_reason or "").strip()) < 4:
+                    _why = (
+                        "price is below the current catalog price"
+                        if not (item.discount_percent or 0) > 0
+                        else "manual discount with no offer applied"
+                    )
                     raise HTTPException(
                         status_code=400,
                         detail=(
                             f"A discount reason (at least 4 characters) is "
                             f"required for {item.product_name or item.product_id} "
-                            f"— manual discount with no offer applied."
+                            f"— {_why}. Use the item's Discount button to add "
+                            f"the reason."
                         ),
                     )
 
@@ -3198,9 +3204,19 @@ def _rebuilt_items_or_existing(
 
     if body_items is None:
         return [dict(it) for it in (existing_items or [])]
+    # SuperadminEditLine carries no discount_reason/discount_approved_by
+    # (Pydantic strips unknown keys), so merge them from the STORED line by
+    # item_id — an edit must not wipe the accountability trail.
+    _stored_by_id = {
+        it.get("item_id"): it for it in (existing_items or []) if it.get("item_id")
+    }
     rebuilt = []
     for line in body_items:
         payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
+        stored = _stored_by_id.get(payload.get("item_id")) or {}
+        for _k in ("discount_reason", "discount_approved_by"):
+            if payload.get(_k) is None and stored.get(_k) is not None:
+                payload[_k] = stored.get(_k)
         rebuilt.append(rebuild_edited_line(payload))
     if not rebuilt:
         raise HTTPException(
@@ -3835,12 +3851,17 @@ async def add_order_item(
         # keeping them in lockstep is the branch-drift defence.
         if (item.discount_percent or 0) > 0 or _below_ceiling:
             if len(str(item.discount_reason or "").strip()) < 4:
+                _why = (
+                    "price is below the current catalog price"
+                    if not (item.discount_percent or 0) > 0
+                    else "manual discount with no offer applied"
+                )
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         f"A discount reason (at least 4 characters) is required "
-                        f"for {item.product_name or item.product_id} — manual "
-                        f"discount with no offer applied."
+                        f"for {item.product_name or item.product_id} — {_why}. "
+                        f"Use the item's Discount button to add the reason."
                     ),
                 )
 
@@ -3863,6 +3884,10 @@ async def add_order_item(
             "discount_percent": item.discount_percent,
             "effective_discount_percent": round(_loyalty_eff, 4),
             "discount_amount": discount_amount,
+            # The guard above VALIDATED these; persist them or the audit
+            # trail records a demanded-but-dropped reason (panel round 3).
+            "discount_reason": item.discount_reason,
+            "discount_approved_by": item.discount_approved_by,
             "item_total": item_subtotal,
             "prescription_id": item.prescription_id,
             "lens_options": item.lens_options,

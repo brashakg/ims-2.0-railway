@@ -231,6 +231,9 @@ def test_reconcile_upi_payment_matches_and_records():
     updated = orders_coll.find_one({"order_id": "ord-1"})
     assert updated is not None
     assert updated["payment_status"] == "PAID"
+    # Bill type follows the money on the webhook writer too (round-2 panel
+    # blocker): a settled QR payment must not leave a stale bill_type.
+    assert updated["bill_type"] == "FINAL"
     assert len(updated["payments"]) == 1
     assert updated["payments"][0]["method"] == "UPI"
     assert updated["payments"][0]["auto_reconciled"] is True
