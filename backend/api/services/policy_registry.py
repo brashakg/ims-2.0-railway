@@ -437,6 +437,30 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "(store working hours, else 9 PM - 9 AM IST). always: every "
         "inbound gets the automated reply.",
     ),
+    # OTP on loyalty-points REDEMPTION (owner ruling 2026-08-30, final: this is
+    # the ONLY OTP surface - never customer creation). When "on" AND the
+    # dispatch gate is armed (DISPATCH_MODE test|live), redeeming points
+    # requires a verification code sent to the CUSTOMER's own mobile; staff
+    # enter it, the server verifies, points release. Dark (DISPATCH_MODE=off)
+    # or "off" = redemption exactly as today. Enforced at the single loyalty
+    # spend door: api.routers.loyalty.redeem via
+    # api.services.loyalty_otp.redeem_otp_required.
+    _spec(
+        key="msg.loyalty_otp",
+        type="enum",
+        default="off",
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Communications",
+        label="OTP on loyalty-points redemption",
+        enum=("off", "on"),
+        env="MSG_LOYALTY_OTP",
+        help="on: redeeming loyalty points requires a one-time code sent to "
+        "the customer's mobile (staff enter it at the POS) - stops anyone "
+        "redeeming a customer's points without the customer present. Only "
+        "bites once messaging is armed (DISPATCH_MODE test/live); while "
+        "dark, redemption works exactly as before. off (default): no OTP.",
+    ),
     _spec(
         key="comms.cap_per_customer_30d",
         type="int",

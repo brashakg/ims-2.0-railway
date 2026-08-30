@@ -93,7 +93,22 @@ function IntegrationRow({ item }: { item: IntegrationStatusItem }) {
       {item.notes && (
         <div className="mt-1.5 flex items-start gap-1 text-xs text-gray-500">
           <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0 text-amber-500" />
-          <span>{item.notes}</span>
+          <span>
+            {item.notes}
+            {item.docs && (
+              <>
+                {' '}
+                <a
+                  href={item.docs}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 hover:underline"
+                >
+                  Docs
+                </a>
+              </>
+            )}
+          </span>
         </div>
       )}
     </div>

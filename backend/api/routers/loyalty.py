@@ -32,12 +32,14 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_audit_repository,
+    get_customer_repository,
     get_loyalty_account_repository,
     get_loyalty_settings_repository,
     get_loyalty_transaction_repository,
     get_order_repository,
     get_product_repository,
 )
+from ..services import loyalty_otp
 from ..services.loyalty_engine import (
     calc_earn_points,
     implied_ceiling_discount,
@@ -101,6 +103,15 @@ class RedeemRequest(BaseModel):
     order_id: Optional[str] = None
     points: int = Field(..., gt=0)
     order_value: Optional[float] = Field(None, ge=0)
+
+
+class RedeemOtpSendRequest(BaseModel):
+    customer_id: str
+
+
+class RedeemOtpVerifyRequest(BaseModel):
+    customer_id: str
+    code: str = Field(..., min_length=1, max_length=12)
 
 
 class AdjustRequest(BaseModel):
@@ -191,6 +202,12 @@ async def get_account(
     """Account snapshot + last 20 ledger rows."""
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
+    # Whether redeeming for THIS staff member's store currently requires the
+    # customer-mobile OTP (policy msg.loyalty_otp AND dispatch armed). The POS
+    # control reads this so the gate-off path makes no extra request.
+    otp_required = loyalty_otp.redeem_otp_required(
+        current_user.get("active_store_id")
+    )
     if accounts is None or txns is None:
         # No DB -- empty envelope.
         return {
@@ -203,6 +220,7 @@ async def get_account(
             },
             "recent_transactions": [],
             "settings": _settings_safe(),
+            "redeem_otp_required": otp_required,
         }
 
     account = accounts.find_or_create(customer_id)
@@ -228,6 +246,7 @@ async def get_account(
         "recent_transactions": recent,
         "expiring_soon_points": expiring_soon,
         "settings": settings,
+        "redeem_otp_required": otp_required,
     }
 
 
@@ -423,6 +442,89 @@ async def earn(
     }
 
 
+# ----------------------------------------------------------------------------
+# OTP on redemption (owner ruling 2026-08-30: loyalty-points redemption ONLY,
+# never customer creation). Flow when armed + policy on:
+#   1. POST /redeem/otp/send    -> code goes to the CUSTOMER's stored mobile
+#   2. POST /redeem/otp/verify  -> staff enter the code; server verifies
+#   3. POST /redeem             -> consumes the verification, THEN debits
+# Dark or policy-off: /redeem behaves exactly as before (step 3 skips the
+# consume); the send endpoint answers {"otp_required": false} and sends
+# nothing. Gate + lifecycle live in api.services.loyalty_otp (one place).
+# ----------------------------------------------------------------------------
+
+
+@router.post("/redeem/otp/send")
+async def redeem_otp_send(
+    body: RedeemOtpSendRequest,
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
+):
+    """Send a redemption verification code to the customer's OWN mobile.
+
+    The number comes from the customer record - the client cannot supply a
+    phone, so staff cannot route the code to themselves.
+    """
+    if not loyalty_otp.redeem_otp_required(current_user.get("active_store_id")):
+        return {"otp_required": False}
+
+    customers = get_customer_repository()
+    if customers is None:
+        raise HTTPException(status_code=503, detail="Customer store unavailable")
+    customer = customers.find_by_id(body.customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    mobile = str(customer.get("mobile") or customer.get("phone") or "").strip()
+    if not mobile:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This customer has no mobile number on file, so a redemption "
+                "code cannot be sent. Add their mobile to the customer record "
+                "first."
+            ),
+        )
+
+    out = await loyalty_otp.start_challenge(
+        body.customer_id, mobile, created_by=current_user.get("user_id")
+    )
+    if not out.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Could not send the verification code: "
+                f"{out.get('error') or 'sending failed'}. Try again, or check "
+                "the messaging setup under Settings -> Integrations."
+            ),
+        )
+    _audit(
+        "loyalty.redeem_otp_send",
+        current_user,
+        {"send_status": out.get("send_status"), "mobile_last4": mobile[-4:]},
+        body.customer_id,
+    )
+    return {
+        "otp_required": True,
+        "sent_to_last4": mobile[-4:],
+        "send_status": out.get("send_status"),
+        "expires_in_seconds": out.get("expires_in_seconds"),
+    }
+
+
+@router.post("/redeem/otp/verify")
+async def redeem_otp_verify(
+    body: RedeemOtpVerifyRequest,
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
+):
+    """Check the staff-entered code. A wrong or expired code refuses with a
+    plain message and burns NOTHING - no points move here or on any later
+    redeem attempt until a correct code is entered."""
+    ok, reason = loyalty_otp.verify_challenge(body.customer_id, body.code)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    _audit("loyalty.redeem_otp_verified", current_user, {}, body.customer_id)
+    return {"verified": True}
+
+
 @router.post("/redeem")
 async def redeem(
     body: RedeemRequest,
@@ -516,6 +618,27 @@ async def redeem(
             },
         )
 
+    # OTP GATE (owner ruling 2026-08-30: loyalty redemption only). When the
+    # gate is on (policy msg.loyalty_otp "on" AND DISPATCH_MODE armed), the
+    # customer must have verified a code sent to their own mobile, and that
+    # verification is CONSUMED here - atomically, one verification = one
+    # redemption - BEFORE any points are debited. No consumable verification
+    # -> plain refusal with the balance untouched. Dark or policy-off, this
+    # block is a no-op and the redeem behaves exactly as before.
+    otp_gate_on = loyalty_otp.redeem_otp_required(
+        current_user.get("active_store_id")
+    )
+    if otp_gate_on and not loyalty_otp.consume_verified(body.customer_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This store requires the customer's OTP to redeem loyalty "
+                "points. Send the code to the customer's mobile and enter it "
+                "before applying the redemption. No points have been "
+                "deducted."
+            ),
+        )
+
     # ATOMIC GUARDED DEBIT (no double-spend). The Python balance check above
     # (calc_redeem) is advisory only -- two concurrent redeems can both pass it.
     # The authoritative debit is a single find_one_and_update whose FILTER
@@ -574,6 +697,10 @@ async def redeem(
         "loyalty.redeem",
         current_user,
         {
+            # Only stamped when the OTP gate actually ran - the dark /
+            # policy-off audit row stays byte-identical to before this gate
+            # existed.
+            **({"otp_verified": True} if otp_gate_on else {}),
             "requested_points": result.get("requested_points"),
             "capped_points": capped_points,
             "rupee_value": rupee_value,

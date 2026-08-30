@@ -57,6 +57,10 @@ export interface LoyaltyAccountResponse {
   recent_transactions: LoyaltyTransaction[];
   expiring_soon_points?: number;
   settings: LoyaltySettings;
+  /** True when redeeming for this store requires the customer-mobile OTP
+   *  (policy msg.loyalty_otp "on" AND messaging armed). Absent/false =
+   *  redemption works exactly as before. */
+  redeem_otp_required?: boolean;
 }
 
 export interface LoyaltyLedgerResponse {
@@ -147,6 +151,33 @@ export const loyaltyApi = {
   /** Deduct points and return the rupee discount they map to. */
   redeem: async (payload: RedeemRequest): Promise<RedeemResponse> => {
     const r = await api.post('/loyalty/redeem', payload);
+    return r.data;
+  },
+
+  /** OTP on redemption (only when the store policy + messaging arm it):
+   *  send the verification code to the CUSTOMER's stored mobile. */
+  redeemOtpSend: async (customerId: string): Promise<{
+    otp_required: boolean;
+    sent_to_last4?: string;
+    send_status?: string;
+    expires_in_seconds?: number;
+  }> => {
+    const r = await api.post('/loyalty/redeem/otp/send', {
+      customer_id: customerId,
+    });
+    return r.data;
+  },
+
+  /** Verify the staff-entered code. Throws (400, plain message) on a wrong
+   *  or expired code - nothing is spent either way. */
+  redeemOtpVerify: async (
+    customerId: string,
+    code: string,
+  ): Promise<{ verified: boolean }> => {
+    const r = await api.post('/loyalty/redeem/otp/verify', {
+      customer_id: customerId,
+      code,
+    });
     return r.data;
   },
 

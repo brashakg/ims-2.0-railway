@@ -347,6 +347,10 @@ _INTEGRATION_CATALOG = [
              "placeholder": "WhatsApp business number from MSG91"},
             {"key": "sms_template_id", "label": "SMS Template ID", "secret": False,
              "placeholder": "DLT-approved template ID", "optional": True},
+            {"key": "otp_template_id", "label": "OTP Template ID", "secret": False,
+             "placeholder": "MSG91 OTP flow template ID", "optional": True,
+             "help": "Used only by the loyalty-redemption OTP (Settings -> "
+                     "Policies -> 'OTP on loyalty-points redemption')."},
             {"key": "sender", "label": "SMS Sender ID", "secret": False,
              "placeholder": "BVOPTL", "optional": True},
             {"key": "store_numbers", "label": "Per-store WhatsApp numbers", "secret": False,
