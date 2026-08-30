@@ -2824,6 +2824,42 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
                 store_id=job.get("store_id"),
             )
             wa_status = getattr(res, "status", "SENT")
+            # Log the REAL send to notification_logs (channel expansions):
+            # WORKSHOP_READY is a direct send, so without this row a FAILED
+            # delivery report has nothing to match -> no enrichment and no
+            # SMS fallback. SENT-with-provider-id only: a dark deploy never
+            # reaches SENT, so nothing new is written while unarmed.
+            if wa_status == "SENT" and getattr(res, "provider_id", None):
+                try:
+                    from ..services.notification_service import (
+                        queue_notification_row,
+                    )
+
+                    queue_notification_row(
+                        store_id=job.get("store_id"),
+                        customer_id=job.get("customer_id"),
+                        customer_phone=phone,
+                        customer_name=job.get("customer_name") or "",
+                        template_id="WORKSHOP_READY",
+                        channel="WHATSAPP",
+                        message=_ready_whatsapp_text(job),
+                        category="SERVICE",
+                        triggered_by="workshop_ready",
+                        related_entity_type="workshop_job",
+                        related_entity_id=job_id,
+                        extra={
+                            # Already dispatched - never drain this row again.
+                            "status": "SENT",
+                            "delivery_status": "SENT",
+                            "sent_at": now.isoformat(),
+                            "provider_msg_id": res.provider_id,
+                            "provider_id": res.provider_id,
+                        },
+                    )
+                except Exception as log_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[WORKSHOP] notify-ready log row failed: %s", log_exc
+                    )
         except Exception as e:  # noqa: BLE001
             logger.warning("[WORKSHOP] notify-ready whatsapp failed: %s", e)
             wa_status = "FAILED"

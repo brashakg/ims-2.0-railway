@@ -185,6 +185,9 @@ export const settingsApi = {
     wa_language?: string;
     wa_category?: string;
     wa_variables?: string[];
+    // SMS-fallback sibling: DLT-approved SMS template id this flow falls
+    // back to when its WhatsApp send is reported FAILED (blank = no fallback).
+    sms_template_id?: string;
   }) => {
     const response = await api.put(`/settings/notifications/templates/${templateId}`, template);
     return response.data;

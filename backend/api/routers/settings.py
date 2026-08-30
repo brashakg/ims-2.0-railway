@@ -649,6 +649,12 @@ class NotificationTemplate(BaseModel):
     wa_language: Optional[str] = None
     wa_category: Optional[str] = None  # utility | marketing | auth
     wa_variables: Optional[List[str]] = None
+    # --- SMS-fallback sibling (channel expansions) ---
+    # DLT-approved SMS template id this flow falls back to when its WhatsApp
+    # send is reported FAILED. Read by notification_templates.
+    # resolve_sms_fallback; no code seed (a DLT id cannot be guessed), so an
+    # unmapped flow simply never falls back. Same drop-None-on-save rule.
+    sms_template_id: Optional[str] = None
 
 
 _VALID_RECEIPT_WIDTHS = {58, 80}
@@ -1255,13 +1261,19 @@ async def get_notification_logs(
     return {"logs": docs, "total": len(docs)}
 
 
-_WA_MAPPING_FIELDS = ("wa_template_name", "wa_language", "wa_category", "wa_variables")
+_WA_MAPPING_FIELDS = (
+    "wa_template_name",
+    "wa_language",
+    "wa_category",
+    "wa_variables",
+    "sms_template_id",
+)
 
 
 def _template_payload(template: NotificationTemplate) -> dict:
-    """model_dump minus absent WA-mapping fields, so a $set from an edit that
-    did not submit them (the enable toggle sends the base shape only) never
-    overwrites a stored WhatsApp template mapping with None."""
+    """model_dump minus absent WA/SMS-mapping fields, so a $set from an edit
+    that did not submit them (the enable toggle sends the base shape only)
+    never overwrites a stored template mapping with None."""
     payload = template.model_dump()
     for key in _WA_MAPPING_FIELDS:
         if payload.get(key) is None:

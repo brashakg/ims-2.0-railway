@@ -199,6 +199,29 @@ def resolve_wa_template(flow_key: Optional[str]) -> Optional[dict]:
     return None
 
 
+def resolve_sms_fallback(flow_key: Optional[str]) -> Optional[str]:
+    """THE one SMS-fallback template lookup (DLT template id) for a flow.
+
+    The wa_* registry fields gained an sms_* sibling: `sms_template_id` on the
+    SAME notification_templates doc holds the DLT-approved SMS template id the
+    flow falls back to when its WhatsApp send is reported FAILED. There is NO
+    code seed on purpose - a DLT template id is a real operator registration
+    that cannot be guessed, so an unmapped flow returns None and the fallback
+    refuses honestly (nothing is queued). Never raises.
+    """
+    if not flow_key:
+        return None
+    try:
+        doc = _find_saved_template(flow_key, None)
+    except Exception:  # noqa: BLE001 - registry read is fail-soft
+        doc = None
+    if isinstance(doc, dict):
+        template_id = str(doc.get("sms_template_id") or "").strip()
+        if template_id:
+            return template_id
+    return None
+
+
 def wa_registry_report() -> dict:
     """Per-flow mapping report for the messaging preflight (names only).
 

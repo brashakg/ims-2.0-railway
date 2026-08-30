@@ -46,6 +46,38 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
+async def _email_validation_stamp(email, source: str) -> Optional[dict]:
+    """Validate-on-capture (MSG91 email validation) - FLAG, NEVER BLOCK.
+
+    THE one implementation of the capture rule: the create door and the
+    update door both call this and $set whatever comes back under
+    `email_validation`. House pattern is flag-and-hold: an invalid/risky
+    verdict is STAMPED on the doc for a human to see, and the write proceeds
+    regardless - customer capture is never blocked by a deliverability guess.
+
+    Dark-safe and spend-safe: agents.providers.validate_email returns None
+    (no network call, nothing billed) unless DISPATCH_MODE is armed AND MSG91
+    creds exist - so an unarmed deploy stamps nothing and the stored doc is
+    byte-identical to before this feature. Never raises.
+    """
+    if not email:
+        return None
+    try:
+        from agents.providers import validate_email
+
+        verdict = await validate_email(email)
+    except Exception:  # noqa: BLE001 - capture must never block on validation
+        return None
+    if not verdict:
+        return None
+    return {
+        "status": verdict.get("status"),
+        "raw": verdict.get("raw"),
+        "checked_at": datetime.utcnow().isoformat(),
+        "source": source,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shared field validators -- the ONE place customer field rules live, so the
 # CREATE model and the UPDATE model can never drift apart again (the audit
@@ -837,6 +869,11 @@ async def create_customer(
 
         ensure_primary_member(customer_data)
 
+        # Email validate-on-capture: flag, never block (dark = no stamp).
+        stamp = await _email_validation_stamp(customer.email, "on_capture")
+        if stamp:
+            customer_data["email_validation"] = stamp
+
         created = repo.create(customer_data)
         if created:
             _audit_customer(
@@ -860,6 +897,88 @@ async def create_customer(
 
     # Stub response
     return {"customer_id": str(uuid.uuid4()), "name": customer.name}
+
+
+@router.post("/validate-emails")
+async def validate_customer_emails(
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Batch email validation over the existing customer list (MSG91).
+
+    Owner-triggered cleanup of the imported order-history emails: checks up
+    to `limit` customers that have an email but no `email_validation` stamp
+    yet, and stamps each with the verdict (flag only - nothing is deleted or
+    blocked, whatever the verdict). Re-running continues where it left off
+    (stamped docs are skipped), so the whole list can be cleaned in capped,
+    cost-bounded passes.
+
+    DARK UNTIL ARMED, SPENDING NOTHING: validations are billed per address,
+    so this refuses honestly (ran=false + the reason) unless DISPATCH_MODE
+    is armed AND MSG91 creds exist - the same single gate the on-capture
+    check reads (agents.providers.email_validation_armed).
+    """
+    from agents.providers import email_validation_armed, validate_email
+
+    armed, reason = email_validation_armed()
+    if not armed:
+        return {
+            "ran": False,
+            "reason": reason,
+            "checked": 0,
+            "remaining_unchecked": None,
+        }
+
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Customer storage unavailable")
+
+    flt = {
+        "email": {"$nin": [None, ""]},
+        "email_validation": {"$exists": False},
+    }
+    counts = {"valid": 0, "invalid": 0, "risky": 0, "unknown": 0, "skipped": 0}
+    checked = 0
+    now = datetime.utcnow().isoformat()
+    for doc in repo.collection.find(flt, {"customer_id": 1, "email": 1}).limit(limit):
+        verdict = await validate_email(doc.get("email"))
+        if not verdict:
+            # Unparseable address or a provider hiccup - do not stamp a guess.
+            counts["skipped"] += 1
+            continue
+        status = verdict.get("status") or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+        repo.collection.update_one(
+            {"customer_id": doc.get("customer_id")},
+            {
+                "$set": {
+                    "email_validation": {
+                        "status": status,
+                        "raw": verdict.get("raw"),
+                        "checked_at": now,
+                        "source": "batch",
+                    }
+                }
+            },
+        )
+        checked += 1
+    try:
+        remaining = repo.collection.count_documents(flt)
+    except Exception:  # noqa: BLE001
+        remaining = None
+    _audit_customer(
+        "CUSTOMER_EMAILS_VALIDATED",
+        None,
+        current_user,
+        detail={"checked": checked, "counts": counts},
+    )
+    return {
+        "ran": True,
+        "reason": "armed",
+        "checked": checked,
+        "counts": counts,
+        "remaining_unchecked": remaining,
+    }
 
 
 @router.get("/search")
@@ -1137,6 +1256,14 @@ async def update_customer(
         # pincode) so the GST place-of-supply reader stays current; when it sends
         # a structured dict, mirror it back to the flat fields the screen reads.
         _sync_address_representations(update_data, existing)
+
+        # Email validate-on-capture on a CHANGED address: flag, never block
+        # (dark = no stamp; same one rule as the create door).
+        new_email = update_data.get("email")
+        if new_email and new_email != existing.get("email"):
+            stamp = await _email_validation_stamp(new_email, "on_capture")
+            if stamp:
+                update_data["email_validation"] = stamp
 
         if not update_data:
             return {"message": "No changes", "customer_id": customer_id}

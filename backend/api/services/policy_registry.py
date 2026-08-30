@@ -437,6 +437,29 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "(store working hours, else 9 PM - 9 AM IST). always: every "
         "inbound gets the automated reply.",
     ),
+    # Voice escalation rung (MSG91 channel expansions). When ON, a P1 SYSTEM
+    # task (till variance, SLA breach) that passes its acknowledgement window
+    # unacked gets ONE TTS voice call to the store manager (press 1 in the
+    # IVR acknowledges via the MSG91 voice webhook). The escalation LADDER
+    # stays the task engine's - this only adds a rung at the single alert
+    # site (task_notify.notify_escalation -> voice_escalation). DEFAULT off;
+    # and like everything else it is dark until DISPATCH_MODE arms (the
+    # provider SIMULATES while off).
+    _spec(
+        key="msg.voice_escalation",
+        type="enum",
+        default="off",
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Communications",
+        label="Voice call on unacked P1 system tasks",
+        enum=("off", "on"),
+        env="MSG_VOICE_ESCALATION",
+        help="off (default): no calls. on: when a P1 SYSTEM task is still "
+        "unacknowledged past its SLA window, place one automated voice call "
+        "to the store manager; pressing 1 acknowledges the task. Nothing is "
+        "called while DISPATCH_MODE is off.",
+    ),
     _spec(
         key="comms.cap_per_customer_30d",
         type="int",
