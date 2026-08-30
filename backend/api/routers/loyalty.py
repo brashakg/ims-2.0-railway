@@ -1624,6 +1624,137 @@ def _reverse_order_loyalty(
     }
 
 
+def regate_earn_after_edit(
+    order_doc: Dict[str, Any],
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Re-run the >=5%/offer earn gate after a discount-changing ORDER EDIT
+    and claw back points that are no longer eligible (owner hard rule
+    2026-08-30 -- earn fires at create, but a superadmin edit can raise
+    discounts afterwards and must not leave pre-gate points standing).
+
+    Delta semantics, not full reversal: recompute what the edited order WOULD
+    earn now, compare against the order's net earned-so-far (EARN rows minus
+    prior regate claws), and claw only the difference. Never credits -- an
+    edit that LOWERS a discount does not mint points retroactively. Repeated
+    edits converge (net == target -> no write). Fail-soft: always returns a
+    dict, never raises.
+
+    ponytail: the read-compare-claw is not race-guarded per delta (unlike the
+    unique-indexed full reversals); superadmin edits are a rare single-human
+    flow. Add a per-(order, net) claim key if concurrent edits ever appear.
+    """
+    try:
+        order_id = str(order_doc.get("order_id") or "")
+        customer_id = order_doc.get("customer_id") or ""
+        if not order_id or not customer_id or customer_id.startswith(
+            ("walkin-", "walk-in")
+        ):
+            return {"ok": True, "clawed": 0, "skipped_reason": "no_customer"}
+        accounts = get_loyalty_account_repository()
+        txns = get_loyalty_transaction_repository()
+        if accounts is None or txns is None:
+            return {"ok": False, "reason": "loyalty_db_unavailable"}
+        account = accounts.find_or_create(customer_id)
+        ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
+        if not read_ok:
+            logger.error(
+                "edit-regate ledger read FAILED cust=%s order=%s -- refusing "
+                "to claw on an unreadable ledger", customer_id, order_id,
+            )
+            return {"ok": False, "reason": "ledger_read_failed"}
+
+        earn_rows = [
+            t for t in ledger
+            if t.get("order_id") == order_id and t.get("type") == "EARN"
+        ]
+        earned = sum(int(t.get("points") or 0) for t in earn_rows)
+        prior_claw = sum(
+            int(t.get("points") or 0)
+            for t in ledger
+            if t.get("type") == "ADJUST"
+            and t.get("edit_regate_of_order_id") == order_id
+        )
+        # A full reversal (cancel/return) already zeroed this order's loyalty.
+        if any(
+            t.get("type") == "ADJUST"
+            and t.get(_REVERSAL_ORDER_FIELD) == order_id
+            for t in ledger
+        ):
+            return {"ok": True, "clawed": 0, "skipped_reason": "already_reversed"}
+
+        net = earned + prior_claw  # prior_claw rows carry negative points
+        if net <= 0:
+            return {"ok": True, "clawed": 0, "skipped_reason": "nothing_earned"}
+
+        settings = _settings_safe()
+        basis = max(
+            round(
+                float(order_doc.get("grand_total") or 0.0)
+                - float(order_doc.get("tax_amount") or 0.0),
+                2,
+            ),
+            0.0,
+        )
+        tier = (earn_rows[0].get("tier_at_earn") if earn_rows else None) or (
+            account.get("tier", "BRONZE")
+        )
+        target = int(
+            calc_earn_points(
+                basis,
+                order_doc.get("items") or [],
+                tier,
+                settings,
+                cart_discount_percent=float(
+                    order_doc.get("cart_discount_percent") or 0.0
+                ),
+            ).get("points")
+            or 0
+        )
+        delta = net - min(target, net)  # never credit
+        if delta <= 0:
+            return {"ok": True, "clawed": 0}
+
+        balance = int(account.get("balance_points", 0))
+        if balance < delta:
+            # Mirror the full-reversal stance: fail toward NOT clawing and
+            # escalate loudly rather than driving the balance negative.
+            logger.error(
+                "edit-regate BALANCE UNDERFLOW cust=%s order=%s balance=%s "
+                "delta=%s -- points already spent; human reconciliation needed",
+                customer_id, order_id, balance, delta,
+            )
+            return {"ok": False, "reason": "balance_underflow",
+                    "balance": balance, "delta": delta}
+
+        txn_id = str(uuid.uuid4())
+        txns.create(
+            {
+                "txn_id": txn_id,
+                "customer_id": customer_id,
+                "type": "ADJUST",
+                "points": -delta,
+                "order_id": order_id,
+                "edit_regate_of_order_id": order_id,
+                "reason": (
+                    f"earn re-gate after order edit: order {order_id} now "
+                    f"eligible for {min(target, net)} of {net} earned points"
+                ),
+                "created_by": user_id,
+                "created_at": datetime.now(),
+            }
+        )
+        accounts.adjust_balance(
+            customer_id,
+            delta_points=-delta,
+            delta_lifetime_earned=-delta,
+        )
+        return {"ok": True, "clawed": delta, "txn_id": txn_id}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("regate_earn_after_edit failed: %s", exc)
+        return {"ok": False, "reason": "error", "error": str(exc)}
+
+
 def reverse_for_return(
     return_id: str, order_id: str, customer_id: str
 ) -> Dict[str, Any]:

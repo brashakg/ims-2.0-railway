@@ -714,16 +714,6 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {
-        "method": "POST",
-        "path": "/api/v1/analytics-v2/loyalty/earn",
-        "allowed": "AUTHENTICATED",
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/analytics-v2/loyalty/redeem",
-        "allowed": "AUTHENTICATED",
-    },
-    {
         "method": "GET",
         "path": "/api/v1/analytics-v2/loyalty/tiers",
         "allowed": "AUTHENTICATED",

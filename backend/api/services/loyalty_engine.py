@@ -149,14 +149,22 @@ def calc_earn_points(
     ineligible_lines = 0
     if items:
         for line in items:
-            # Hard rule: a line with a manual discount >= 5% or any applied
-            # promo earns nothing (at-offer/MRP pricing has discount_percent 0
-            # and no promo stamp, so it stays eligible).
-            if (
-                float(line.get("discount_percent") or 0.0)
-                >= LOYALTY_MAX_DISCOUNT_PCT
-                or float(line.get("promo_discount_amount") or 0.0) > 0.0
-            ):
+            # Hard rule: a line discounted >= 5% (explicit OR implied by a
+            # typed price under the offer/MRP ceiling — orders.py stamps the
+            # combined value as effective_discount_percent) or with any
+            # applied promo earns nothing. At-offer/MRP pricing stamps 0 and
+            # stays eligible. Unparsable values fail CLOSED (no free points).
+            try:
+                _disc = line.get("effective_discount_percent")
+                if _disc is None:
+                    _disc = line.get("discount_percent") or 0.0
+                _ineligible = (
+                    float(_disc) >= LOYALTY_MAX_DISCOUNT_PCT
+                    or float(line.get("promo_discount_amount") or 0.0) > 0.0
+                )
+            except (TypeError, ValueError):
+                _ineligible = True
+            if _ineligible:
                 ineligible_lines += 1
                 continue
             value = float(

@@ -111,18 +111,6 @@ def _day_key(value) -> str:
 # ============================================================================
 
 
-class LoyaltyEarnRequest(BaseModel):
-    customer_id: str
-    order_id: str
-    amount: float
-
-
-class LoyaltyRedeemRequest(BaseModel):
-    customer_id: str
-    points: int
-    redemption_type: str = "discount"
-
-
 class EyeCampCreateRequest(BaseModel):
     name: str
     date: str
@@ -613,100 +601,6 @@ async def loyalty_tiers(
         "total_customers": len(customers),
         "total_points_circulation": total_points,
     }
-
-
-@router.post("/loyalty/earn")
-async def loyalty_earn(
-    req: LoyaltyEarnRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Award loyalty points (1 point per Rs.100 spent)."""
-    db = _get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    points_earned = int(req.amount / 100)
-    if points_earned <= 0:
-        return {"message": "Amount too low for points", "points_earned": 0}
-
-    result = db.get_collection("customers").update_one(
-        {"customer_id": req.customer_id},
-        {"$inc": {"loyalty_points": points_earned}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    # Log the earn event
-    db.get_collection("loyalty_transactions").insert_one(
-        {
-            "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
-            "customer_id": req.customer_id,
-            "order_id": req.order_id,
-            "type": "earn",
-            "points": points_earned,
-            "amount": req.amount,
-            "created_at": datetime.now().isoformat(),
-            "created_by": current_user.get("user_id", "unknown"),
-        }
-    )
-
-    return {
-        "message": f"{points_earned} points awarded",
-        "points_earned": points_earned,
-    }
-
-
-@router.post("/loyalty/redeem")
-async def loyalty_redeem(
-    req: LoyaltyRedeemRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Redeem loyalty points. 100 points = Rs.100 discount."""
-    db = _get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    customer = db.get_collection("customers").find_one({"customer_id": req.customer_id})
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    current_points = int(customer.get("loyalty_points", 0) or 0)
-    if req.points > current_points:
-        raise HTTPException(
-            status_code=400, detail=f"Insufficient points. Available: {current_points}"
-        )
-
-    discount_value = req.points  # 100 points = Rs.100
-
-    db.get_collection("customers").update_one(
-        {"customer_id": req.customer_id},
-        {"$inc": {"loyalty_points": -req.points}},
-    )
-
-    db.get_collection("loyalty_transactions").insert_one(
-        {
-            "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
-            "customer_id": req.customer_id,
-            "type": "redeem",
-            "points": -req.points,
-            "discount_value": discount_value,
-            "redemption_type": req.redemption_type,
-            "created_at": datetime.now().isoformat(),
-            "created_by": current_user.get("user_id", "unknown"),
-        }
-    )
-
-    return {
-        "message": f"{req.points} points redeemed for Rs.{discount_value} discount",
-        "points_redeemed": req.points,
-        "discount_value": discount_value,
-        "remaining_points": current_points - req.points,
-    }
-
-
-# ============================================================================
-# 14. CONTACT LENS SUBSCRIPTION
-# ============================================================================
 
 
 @router.get("/cl-subscriptions")

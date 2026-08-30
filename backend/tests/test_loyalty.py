@@ -966,3 +966,209 @@ def test_earn_internal_hook_gates_on_cart_discount(patched_loyalty):
     )
     assert out["awarded"] == 0
     assert out["skipped_reason"] == "bill_discount_5pct_or_more"
+
+
+from tests.test_fcostfloor import (  # noqa: F401,E402
+    floor_env as floor_env2,
+    _seed_product as _seed_product2,
+)
+
+
+# ============================================================================
+# Round-2 adversarial fixes: implied-discount stamp, fail-closed parsing,
+# and the post-edit earn re-gate. Each fails if its fix is reverted.
+# ============================================================================
+
+
+def test_engine_gates_on_effective_discount_stamp():
+    """A typed-below-shelf price (discount_percent 0, effective stamp >=5)
+    earns nothing -- the implied-discount bypass is closed."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [
+        {
+            "category": "FRAME",
+            "item_total": 9000,
+            "discount_percent": 0,
+            "effective_discount_percent": 10.0,
+        },
+        {"category": "FRAME", "item_total": 5000, "effective_discount_percent": 0},
+    ]
+    out = calc_earn_points(14000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 50  # only the clean 5000 line
+    assert out["ineligible_lines"] == 1
+
+
+def test_engine_fails_closed_on_garbage_discount():
+    """Unparsable discount values mint NO points (points are money)."""
+    from api.services.loyalty_engine import calc_earn_points
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    items = [{"category": "FRAME", "item_total": 5000, "discount_percent": "??"}]
+    out = calc_earn_points(5000.0, items, "BRONZE", DEFAULT_SETTINGS)
+    assert out["points"] == 0
+
+
+def test_create_door_stamps_effective_discount(client, auth_headers, floor_env2):
+    """A unit_price typed 10% under MRP persists effective_discount_percent
+    ~10 even though discount_percent is 0 -- the loyalty gate's input."""
+    pid = _seed_product2(floor_env2, pid="p-eff1", cost_price=50.0, mrp=200.0)
+    r = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-x",
+            "items": [
+                {
+                    "product_id": pid,
+                    "product_name": "Floor Frame",
+                    "item_type": "FRAME",
+                    "category": "FRAME",
+                    "quantity": 1,
+                    "unit_price": 180.0,
+                    "discount_reason": "test: price honored from display",
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    order_id = r.json().get("order_id") or (r.json().get("order") or {}).get("order_id")
+    doc = floor_env2["order_repo"].find_by_id(order_id)
+    line = doc["items"][0]
+    assert line["discount_percent"] == 0
+    assert abs(line["effective_discount_percent"] - 10.0) < 0.01
+
+
+def test_create_door_at_mrp_stamps_zero(client, auth_headers, floor_env2):
+    pid = _seed_product2(floor_env2, pid="p-eff2", cost_price=50.0, mrp=200.0)
+    r = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-x",
+            "items": [
+                {
+                    "product_id": pid,
+                    "product_name": "Floor Frame",
+                    "item_type": "FRAME",
+                    "category": "FRAME",
+                    "quantity": 1,
+                    "unit_price": 200.0,
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    order_id = r.json().get("order_id") or (r.json().get("order") or {}).get("order_id")
+    doc = floor_env2["order_repo"].find_by_id(order_id)
+    assert doc["items"][0]["effective_discount_percent"] == 0
+
+
+def _seed_earned_order(patched_loyalty, customer_id, order_id, points):
+    """Seed an account + an EARN ledger row the way the real earn door does."""
+    accounts = patched_loyalty["accounts"]
+    txns = patched_loyalty["txns"]
+    accounts.find_or_create(customer_id)
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    txns.claim_earn_for_order(
+        customer_id,
+        order_id,
+        {
+            "txn_id": str(_uuid.uuid4()),
+            "customer_id": customer_id,
+            "type": "EARN",
+            "points": points,
+            "rupee_value": float(points * 100),
+            "order_id": order_id,
+            "tier_at_earn": "BRONZE",
+            "created_at": _dt.now(),
+        },
+    )
+    accounts.adjust_balance(
+        customer_id, delta_points=points, delta_lifetime_earned=points
+    )
+
+
+def test_regate_claws_earn_when_edit_raises_discount(patched_loyalty):
+    """Superadmin edit pushes the bill discount to 40% -> the create-time
+    earn is clawed back in full."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg1", "ORD-RG1", 100)
+    edited = {
+        "order_id": "ORD-RG1",
+        "customer_id": "cust-rg1",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 40.0,
+        "items": [{"category": "FRAME", "item_total": 10000}],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 100
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg1")
+    assert acct["balance_points"] == 0
+    assert acct["lifetime_earned"] == 0
+    # Converges: a second identical call claws nothing more.
+    again = regate_earn_after_edit(edited, user_id="sa-1")
+    assert again["ok"] and again["clawed"] == 0
+
+
+def test_regate_never_credits(patched_loyalty):
+    """An edit that makes the order MORE eligible does not mint points."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg2", "ORD-RG2", 50)
+    edited = {
+        "order_id": "ORD-RG2",
+        "customer_id": "cust-rg2",
+        "grand_total": 100000.0,  # would earn 1000 if recredited
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [{"category": "FRAME", "item_total": 100000}],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    assert out["ok"] and out["clawed"] == 0
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg2")
+    assert acct["balance_points"] == 50
+
+
+def test_regate_partial_claw_on_line_mix(patched_loyalty):
+    """Edit makes ONE of two lines ineligible -> claw only the difference."""
+    from api.routers.loyalty import regate_earn_after_edit
+
+    _seed_earned_order(patched_loyalty, "cust-rg3", "ORD-RG3", 100)
+    edited = {
+        "order_id": "ORD-RG3",
+        "customer_id": "cust-rg3",
+        "grand_total": 10000.0,
+        "tax_amount": 0.0,
+        "cart_discount_percent": 0.0,
+        "items": [
+            {"category": "FRAME", "item_total": 5000, "discount_percent": 40},
+            {"category": "FRAME", "item_total": 5000},
+        ],
+    }
+    out = regate_earn_after_edit(edited, user_id="sa-1")
+    # target = 50 (clean line only) -> claw 100-50
+    assert out["ok"] and out["clawed"] == 50
+    acct = patched_loyalty["accounts"].find_by_id("cust-rg3")
+    assert acct["balance_points"] == 50
+
+
+def test_phantom_analytics_earn_doors_are_gone(client, auth_headers):
+    """The ungated analytics-v2 earn/redeem endpoints are deleted (405/404)."""
+    r1 = client.post(
+        "/api/v1/analytics-v2/loyalty/earn",
+        json={"customer_id": "c", "order_id": "o", "amount": 99999},
+        headers=auth_headers,
+    )
+    r2 = client.post(
+        "/api/v1/analytics-v2/loyalty/redeem",
+        json={"customer_id": "c", "points": 10, "redemption_type": "discount"},
+        headers=auth_headers,
+    )
+    assert r1.status_code in (404, 405)
+    assert r2.status_code in (404, 405)

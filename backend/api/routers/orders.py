@@ -2139,6 +2139,12 @@ async def create_order(
             # capped exactly like an explicit discount and cannot bypass the cap.
             _pid = item.product_id or ""
             _eff_disc = item.discount_percent
+            # Loyalty-effective discount: explicit + implied vs the CEILING
+            # (offer if HQ-discounted else MRP), so an at-offer sale stays 0
+            # but a typed-below-shelf price counts as the discount it is.
+            # Consumed by loyalty_engine's >=5% earn gate; must be reset every
+            # iteration (the _ceiling vars below persist across loop turns).
+            _loyalty_eff = float(item.discount_percent or 0.0)
             if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
                 _mrp = _mrp_by_pid.get(_pid)
                 _offer = _offer_by_pid.get(_pid)
@@ -2188,6 +2194,10 @@ async def create_order(
                 if _mrp and _up < _mrp - 1e-6:
                     _implied = (_mrp - _up) / _mrp * 100.0
                     _eff_disc = max(item.discount_percent, _implied)
+                if _ceiling and _up < _ceiling - 1e-6:
+                    _loyalty_eff = max(
+                        _loyalty_eff, (_ceiling - _up) / _ceiling * 100.0
+                    )
 
             # Enforce discount cap (admins bypass) -- against the EFFECTIVE discount
             effective_cap = user_discount_cap
@@ -2391,6 +2401,7 @@ async def create_order(
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
                     "discount_percent": item.discount_percent,
+                    "effective_discount_percent": round(_loyalty_eff, 4),
                     "discount_amount": discount_amount,
                     # C-4 (DELTA 2): per-line approver + reason (consumed by the
                     # required-approval gate for a 100%-line-discount order).
@@ -3290,6 +3301,17 @@ async def superadmin_edit_order(
     if not repo.update(order_id, update_data):
         raise HTTPException(status_code=500, detail="Failed to save order edit")
 
+    # Owner hard rule: an edit that raises discounts must not leave the
+    # create-time loyalty earn standing. Delta-claw, fail-soft.
+    try:
+        from .loyalty import regate_earn_after_edit
+
+        regate_earn_after_edit(
+            {**order, **update_data}, user_id=current_user.get("user_id")
+        )
+    except Exception:
+        pass  # loyalty must never block a superadmin edit
+
     return {
         "order_id": order_id,
         "message": "Order edited",
@@ -3478,6 +3500,17 @@ async def superadmin_invoice_change(
                 status_code=500, detail="Failed to issue revised invoice"
             )
 
+        # Same earn re-gate as the pre-invoice edit door (the CREDIT_NOTE
+        # mode leaves the order's lines intact, so only REVISED needs it).
+        try:
+            from .loyalty import regate_earn_after_edit
+
+            regate_earn_after_edit(
+                {**order, **update_data}, user_id=current_user.get("user_id")
+            )
+        except Exception:
+            pass  # loyalty must never block the correction
+
         return {
             "order_id": order_id,
             "mode": "REVISED_INVOICE",
@@ -3653,6 +3686,9 @@ async def add_order_item(
         )
         _cap = _role_cap
         _eff_disc = item.discount_percent
+        # Mirror of create_order's loyalty-effective discount (branch-drift
+        # defence) — explicit + implied vs the offer/MRP ceiling.
+        _loyalty_eff = float(item.discount_percent or 0.0)
         _pid = item.product_id or ""
         # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
         # cost_at_sale below and fed to the floor pass. None (virtual id /
@@ -3701,6 +3737,10 @@ async def add_order_item(
                     )
                 if _mrp and _mrp > 0 and _up < _mrp - 1e-6:
                     _eff_disc = max(item.discount_percent, (_mrp - _up) / _mrp * 100.0)
+                if _ceiling and _up < _ceiling - 1e-6:
+                    _loyalty_eff = max(
+                        _loyalty_eff, (_ceiling - _up) / _ceiling * 100.0
+                    )
                 from api.services.pricing_caps import (
                     effective_discount_cap as product_discount_cap,
                 )
@@ -3759,6 +3799,7 @@ async def add_order_item(
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "discount_percent": item.discount_percent,
+            "effective_discount_percent": round(_loyalty_eff, 4),
             "discount_amount": discount_amount,
             "item_total": item_subtotal,
             "prescription_id": item.prescription_id,
