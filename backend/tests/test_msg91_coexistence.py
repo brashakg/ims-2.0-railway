@@ -665,3 +665,42 @@ def test_preflight_rides_the_integration_status_report(monkeypatch):
         "dispatch_mode",
         "templates",
     }
+
+def test_an_enable_toggle_cannot_wipe_a_stored_wa_template_mapping():
+    """The Settings enable-toggle PUTs the BASE template shape (no wa_* keys).
+    _template_payload must drop the absent mapping fields so the $set never
+    writes wa_template_name: None over an owner-typed, Meta-APPROVED mapping
+    -- the exact click he will make daily during go-live week. The verifier
+    proved this guard shipped with no discriminating test: reverting it left
+    every suite green. This test dies on that revert."""
+    from api.routers.settings import NotificationTemplate, _template_payload
+
+    toggle_shaped = NotificationTemplate(
+        template_id="ORDER_DELIVERED",
+        template_type="WHATSAPP",
+        trigger_event="ORDER_DELIVERED",
+        content="Your order is on its way",
+        is_enabled=True,
+    )
+    payload = _template_payload(toggle_shaped)
+    for key in ("wa_template_name", "wa_language", "wa_category", "wa_variables"):
+        assert key not in payload, (
+            f"{key} must be ABSENT from a toggle payload, or the $set wipes "
+            f"the stored mapping: {payload.get(key)!r}"
+        )
+
+    # And a stored mapping survives the toggle end to end against a fake
+    # collection: $set with the toggle payload must leave the owner's typed
+    # mapping in place. Values are distinguishable on purpose.
+    stored = {
+        "template_id": "ORDER_DELIVERED",
+        "wa_template_name": "order_delivered_v2_approved",
+        "wa_language": "en",
+        "wa_category": "utility",
+        "wa_variables": ["customer_name", "order_no"],
+        "is_enabled": False,
+    }
+    stored.update({k: v for k, v in payload.items()})
+    assert stored["wa_template_name"] == "order_delivered_v2_approved"
+    assert stored["wa_variables"] == ["customer_name", "order_no"]
+    assert stored["is_enabled"] is True
