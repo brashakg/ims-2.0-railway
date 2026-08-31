@@ -671,6 +671,18 @@ class PaymentCreate(BaseModel):
         super().__init__(**data)
 
 
+class SalespersonSplit(BaseModel):
+    """One share of a two-way sales credit (owner spec 13, default 50/50).
+
+    Percent is the SHARE OF CREDIT, not money: it splits incentive points and
+    attribution, never the customer's bill. The bill total is untouched.
+    """
+
+    salesperson_id: str = Field(..., min_length=1)
+    salesperson_name: Optional[str] = None
+    percent: float = Field(..., gt=0, le=100)
+
+
 class OrderCreate(BaseModel):
     customer_id: str
     patient_id: Optional[str] = None
@@ -699,7 +711,37 @@ class OrderCreate(BaseModel):
     # and the Visufit measurement ID for the per-staff Visufit coverage gate.
     salesperson_id: Optional[str] = None
     salesperson_name: Optional[str] = None
+    # OWNER SPEC 13: sales credit may be SPLIT TWO WAYS (default 50/50) when two
+    # people worked the sale — the POS chip shows "Priya 50 · Arjun 50".
+    # ADDITIVE: salesperson_id/_name remain the PRIMARY attribution every
+    # existing reader (reports, incentive queries, exports) already uses; the
+    # split is the finer record laid alongside. When a split is supplied the
+    # primary is derived from it, so the two can never disagree.
+    salespersons: Optional[List["SalespersonSplit"]] = None
     visufit_id: Optional[str] = None
+
+    @field_validator("salespersons")
+    @classmethod
+    def _validate_split(cls, v):
+        if v is None:
+            return v
+        if len(v) == 0:
+            return None
+        if len(v) > 2:
+            raise ValueError("Sales credit splits two ways at most.")
+        total = round(sum(float(s.percent or 0) for s in v), 2)
+        if abs(total - 100.0) > 0.01:
+            raise ValueError(
+                f"Sales credit must add up to 100% (got {total}%)."
+            )
+        if any(float(s.percent or 0) <= 0 for s in v):
+            raise ValueError("Each salesperson's share must be greater than 0%.")
+        ids = [str(s.salesperson_id or "").strip() for s in v]
+        if any(not i for i in ids):
+            raise ValueError("Every split entry needs a salesperson.")
+        if len(set(ids)) != len(ids):
+            raise ValueError("The same salesperson cannot take both shares.")
+        return v
 
     @field_validator("delivery_priority")
     @classmethod
@@ -1830,12 +1872,29 @@ async def create_order(
     # Salesperson attribution drives the incentive engine. Prefer the
     # explicit POS picker value; fall back to the logged-in user so older
     # clients (and quick sales) still attribute somewhere.
-    salesperson_id = order.salesperson_id or current_user.get("user_id")
-    salesperson_name = (
-        order.salesperson_name
-        or current_user.get("full_name")
-        or current_user.get("name")
-    )
+    # A supplied split OWNS the primary attribution: the largest share is the
+    # primary (ties -> the first listed), so salesperson_id and salespersons[]
+    # can never tell two different stories to two different readers.
+    salespersons_split = None
+    if order.salespersons:
+        salespersons_split = [
+            {
+                "salesperson_id": s.salesperson_id,
+                "salesperson_name": s.salesperson_name,
+                "percent": round(float(s.percent), 2),
+            }
+            for s in order.salespersons
+        ]
+        _primary = max(salespersons_split, key=lambda s: s["percent"])
+        salesperson_id = _primary["salesperson_id"]
+        salesperson_name = _primary.get("salesperson_name") or None
+    else:
+        salesperson_id = order.salesperson_id or current_user.get("user_id")
+        salesperson_name = (
+            order.salesperson_name
+            or current_user.get("full_name")
+            or current_user.get("name")
+        )
 
     # Validate items
     if not order.items:
@@ -2810,6 +2869,10 @@ async def create_order(
             "billed_to_member_name": billed_to_member_name,
             "salesperson_id": salesperson_id,
             "salesperson_name": salesperson_name,
+            # Owner spec 13 — the two-way split, when the counter recorded one.
+            # Absent on single-seller sales so existing docs/readers are
+            # byte-identical to before.
+            **({"salespersons": salespersons_split} if salespersons_split else {}),
             "visufit_id": (order.visufit_id or None),
             "items": items_data,
             "subtotal": subtotal,
