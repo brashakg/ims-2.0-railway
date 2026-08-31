@@ -41,19 +41,26 @@ function fc(amount: number | undefined | null): string {
 // (orders.py cash_leg_record). The change arithmetic DISPLAYED here is
 // untouched, the payment amounts are untouched, and skipping everything still
 // completes the sale exactly as before (the record lands as NOT_CAPTURED).
-function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
+// `cashDue` is the CASH LEG, not the bill. Getting that wrong is what produced
+// the owner-reported nonsense: UPI 590 + CARD 12,000 + CASH 28,000 on a 40,590
+// bill, 29,000 cash on the counter, and the screen shouting "Short: 11,590"
+// (= 40,590 - 29,000). The customer was not short a rupee - 29,000 handed over
+// against a 28,000 cash leg is 1,000 CHANGE. Telling a cashier to collect
+// another 11,590 that has already been paid by card and UPI is the worst
+// possible direction for this error to point.
+function CashChangeCalculator({ cashDue }: { cashDue: number }) {
   const setCashTender = usePOSStore((s) => s.setCashTender);
   const [cashTendered, setCashTendered] = useState('');
   const [noteRows, setNoteRows] = useState<DenomRow[]>(blankDenoms());
   const [showNotes, setShowNotes] = useState(false);
   const tendered = parseFloat(cashTendered) || 0;
-  const change = tendered - grandTotal;
+  const change = tendered - cashDue;
   const quickAmounts = [
-    Math.ceil(grandTotal / 100) * 100,
-    Math.ceil(grandTotal / 500) * 500,
-    Math.ceil(grandTotal / 1000) * 1000,
-    Math.ceil(grandTotal / 2000) * 2000,
-  ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
+    Math.ceil(cashDue / 100) * 100,
+    Math.ceil(cashDue / 500) * 500,
+    Math.ceil(cashDue / 1000) * 1000,
+    Math.ceil(cashDue / 2000) * 2000,
+  ].filter((v, i, a) => v >= cashDue && a.indexOf(v) === i).slice(0, 3);
 
   // Mirror what was typed/tapped into the store so Complete Order can attach
   // it to the CASH leg. Blank tendered + untouched grid -> null (NOT_CAPTURED
@@ -82,7 +89,7 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number }) {
       <div className="flex gap-2 items-center">
         <span className="text-gray-500 text-lg">{'₹'}</span>
         <input type="number" value={cashTendered} onChange={(e) => onTendered(e.target.value)}
-          onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
+          onFocus={(e) => e.target.select()} placeholder={String(Math.round(cashDue))}
           className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-lg font-semibold text-center text-gray-900" />
       </div>
       <div className="flex gap-2">
@@ -327,9 +334,20 @@ export function StepPayment() {
         ))}
       </div>}
 
-      {/* Cash change calculator — only if cash payment was added */}
+      {/* Cash change calculator — only if cash payment was added. It is scoped
+          to the CASH LEG: on a split bill the other tenders are already
+          settled, so comparing the notes on the counter against the WHOLE bill
+          reports a shortfall that does not exist. */}
       {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
-        <CashChangeCalculator grandTotal={total} />
+        <CashChangeCalculator
+          cashDue={
+            Math.round(
+              (store.payments || [])
+                .filter((p) => p.method === 'CASH')
+                .reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100,
+            ) / 100
+          }
+        />
       )}
 
       {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
