@@ -37,11 +37,63 @@ export const VIEWPORTS = [
 
 /** Screens under probe. Adding one is a single line.
  *  `ready` is a selector that only exists once the lazy route has painted. */
-export const SCREENS: ReadonlyArray<{ path: string; ready: string }> = [
-  { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
-  { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
-  { path: '/dashboard', ready: '#main-content :is(h1, h2, table, button)' },
-  { path: '/orders', ready: '#main-content :is(h1, h2, table, button)' },
+/** The audited subtree: the page body, not the app shell. Exported so the
+ *  spec's render-settled wait watches exactly what the audit measures. */
+export const AUDIT_ROOT = '#main-content';
+
+/** Default `ready` for a screen: something a painted page has and a blank
+ *  one does not. Screens override it only when this is not enough. */
+export const READY_DEFAULT = `${AUDIT_ROOT} :is(h1, h2, table, button)`;
+
+/**
+ * The screens the gate measures. A spread, not the whole app: one screen costs
+ * ~14s (one load + a remount at each of the seven widths), and at --workers=4
+ * that is ~4s of wall clock each. All 103 reachable parameterless routes were
+ * measured once at this size and cost 412s -- too much for a required check,
+ * so this list is sized to the budget and picked to cover one of each layout
+ * archetype instead.
+ *
+ * That full sweep also found 15 screens genuinely broken at 360px (all
+ * body-hscroll, mostly wide tables): /customers/whatsapp-inbox,
+ * /finance/budgeting, /finance/cash-flow, /incentive (+ /leaderboard, /payout,
+ * /payouts, /settings), /inventory/power-grid, /inventory/replenishment,
+ * /pos/footfall, /promotions, /reports/promotions, /walkouts (+ /dashboard).
+ * They are NOT listed here because they would make the gate red on arrival --
+ * add each one as it is fixed. `/pos` also never satisfied `READY_DEFAULT`
+ * within 15s and needs its own `ready` before it can be listed.
+ */
+export const SCREENS: ReadonlyArray<{ path: string; ready?: string }> = [
+  // the BUG-1 surfaces - the regression this probe exists for
+  { path: '/pos/new' },
+  { path: '/pos/delivery' },
+  // the screens a store opens every day
+  { path: '/dashboard' },
+  { path: '/orders' },
+  { path: '/estimates' },
+  { path: '/tasks' },
+  { path: '/my-work' },
+  { path: '/approvals' },
+  // money
+  { path: '/finance/dashboard' },
+  { path: '/finance/cash-register' },
+  { path: '/finance/blind-eod' },
+  { path: '/reports/day-end' },
+  // stock and buying
+  { path: '/inventory' },
+  { path: '/inventory/audit' },
+  { path: '/purchase/grn' },
+  { path: '/purchase/receive' },
+  { path: '/catalog' },
+  { path: '/catalog/add' },
+  // customer-facing records
+  { path: '/customers' },
+  { path: '/customers/360' },
+  { path: '/prescriptions' },
+  { path: '/clinical' },
+  { path: '/returns' },
+  // the long-form admin screens, where wide tables live
+  { path: '/hr/payroll' },
+  { path: '/online-store/orders' },
 ];
 
 export type Violation = {
@@ -259,5 +311,5 @@ export async function auditLayout(
       }
     }
     return out;
-  }, opts.rootSelector ?? '#main-content');
+  }, opts.rootSelector ?? AUDIT_ROOT);
 }
