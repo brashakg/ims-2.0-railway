@@ -186,7 +186,13 @@ describe('per-sale cash capture wiring (owner ruling 2026-08-25)', () => {
     ]);
     renderPOS();
 
-    const tenderedInput = await screen.findByPlaceholderText('1000');
+    // Anchored to the CASH LEG (600), not the grand total (1000). This file
+    // ALREADY asserted the recorded change is anchored to the cash leg
+    // (change_amount 100 below); the screen was the half still measuring
+    // against the whole bill, which is what produced the owner's
+    // "Short: Rs 11,590" on a fully-settled split bill. Only the lookup
+    // moves - every assertion below is untouched.
+    const tenderedInput = await screen.findByPlaceholderText('600');
     fireEvent.change(tenderedInput, { target: { value: '700' } });
 
     await completeOrder();
