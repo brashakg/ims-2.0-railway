@@ -135,13 +135,59 @@ jobs:
         working-directory: e2e
         run: npm ci || npm install
 
+      # ~150MB of chromium, re-downloaded on every run until now (25s of a
+      # ~2.5min job). The key is the lockfile, so a Playwright bump busts it.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
+
       - name: Install Playwright browsers (chromium)
         working-directory: e2e
         run: npx playwright install --with-deps chromium
 
-      - name: Run Playwright tests
+      # ---- The gate, in two invocations of ONE config ----
+      # Layout/popup specs are READ-ONLY (navigate + measure), so they run wide.
+      # Everything else mutates the seeded DB and stays at one worker. Both
+      # steps are in this job, so both still report into the single `e2e` check.
+      - name: Guard - every spec belongs to exactly one of the two runs
         working-directory: e2e
-        run: npx playwright test
+        run: |
+          n () { npx playwright test --list "$@" 2>/dev/null | grep -oE 'Total: [0-9]+' | grep -oE '[0-9]+'; }
+          all=$(n)
+          run=$(n --project=layout --project=stateful)
+          echo "the two runs cover $run of $all tests"
+          if [ "$run" != "$all" ] || [ -z "$all" ]; then
+            echo "::error::$((all - run)) test(s) would run in NEITHER lane - a spec or a project escapes the split"
+            exit 1
+          fi
+
+      - name: Run layout probe (read-only, parallel)
+        working-directory: e2e
+        env:
+          PW_HTML_DIR: playwright-report/layout
+        run: npx playwright test --project=layout --workers=4
+
+      - name: Run stateful specs (serial)
+        # Always run, even if the layout probe failed, so one red screen never
+        # hides a broken checkout flow.
+        if: ${{ !cancelled() }}
+        working-directory: e2e
+        env:
+          PW_HTML_DIR: playwright-report/stateful
+        run: npx playwright test --project=stateful --workers=1
+
+      # A `nohup ... &` server outlives its step. The runner tears the process
+      # tree down at job end, but killing them explicitly keeps :4173 / :8000
+      # free for anything added after this point and makes a wedged server a
+      # visible line in the log rather than a mystery timeout.
+      - name: Stop local servers
+        if: ${{ !cancelled() }}
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid" 2>/dev/null)" 2>/dev/null || true
+          pkill -f 'vite preview' 2>/dev/null || true
+          echo "servers stopped"
 
       - name: Dump server logs on failure
         if: failure()
