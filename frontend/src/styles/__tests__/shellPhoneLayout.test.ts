@@ -10,6 +10,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const css = readFileSync(join(__dirname, '..', '..', 'index.css'), 'utf8');
+// Comments stripped: a rule quoted inside an explanatory comment is not a
+// live rule, and a guard that cannot tell the two apart fires on the very
+// note left to stop the bug coming back.
+const mobileCss = readFileSync(join(__dirname, '..', 'mobile.css'), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
 
 describe('tablet / iPad shell layout', () => {
   it('lets .top-nav shrink below its content so the PAGE never scrolls sideways', () => {
@@ -24,6 +29,30 @@ describe('tablet / iPad shell layout', () => {
     expect(start).toBeGreaterThan(-1);
     const rule = css.slice(start, css.indexOf('}', start));
     expect(rule).toContain('min-width: 0;');
+  });
+});
+
+describe('mobile.css does not re-hide what index.css makes usable', () => {
+  // THE RECURRING BUG CLASS IN THIS FILE. mobile.css carries rules from
+  // superseded designs and wins with !important, silently overriding the
+  // phone treatment index.css was given later. This is the SECOND live case
+  // found in one day: the first duplicated every drawer label and made
+  // Reports / Print / Jarvis unreachable on a phone; the second hid the POS
+  // actions rail. The layout probe CANNOT catch either - it skips elements
+  // that compute to display:none, so a hidden control looks like no control.
+  it('does not hide the POS actions rail on phones', () => {
+    // .steps-rail carries Hold / Recall / New / +walk-in / Walkout
+    // (POSLayout.tsx:707) on the classic POS, which is the surface the stores
+    // are billing on today. index.css:2575+ restyles it into a horizontal
+    // strip at <=768px precisely so those stay reachable.
+    const hidden = /\.steps-rail\s*\{[^}]*display:\s*none/.test(mobileCss);
+    expect(
+      hidden,
+      'mobile.css hides .steps-rail, which removes Hold / Recall / New / ' +
+        '+walk-in / Walkout from the POS on every phone. index.css already ' +
+        'gives that rail a phone layout - delete the override, do not ' +
+        'reinstate it.',
+    ).toBe(false);
   });
 });
 

@@ -197,7 +197,13 @@
     grid-template-rows: auto auto auto !important;
     height: auto !important;
   }
-  .steps-rail { display: none !important; } /* horizontal stepper instead — page-specific */
+  /* DELETED: `.steps-rail { display: none !important }`. It hid Hold /
+     Recall / New / +walk-in / Walkout on every phone, overriding the
+     phone treatment index.css:2575+ deliberately gives that rail (a
+     horizontal button strip) - whose own comment says the old hiding
+     rule "made these impossible to use on mobile". The promised
+     "horizontal stepper instead" was never built. Guarded by
+     styles/__tests__/shellPhoneLayout.test.ts. */
   .cust-grid { grid-template-columns: 1fr !important; }
   .rx-grid { grid-template-columns: 50px repeat(5, 1fr) !important; font-size: 11px; }
   .pay-grid { grid-template-columns: 1fr !important; }
