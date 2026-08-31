@@ -25,6 +25,7 @@ import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
+import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import {
   resolveBarcode,
@@ -123,6 +124,18 @@ export function BillingSurface() {
           <button onClick={() => setErrorMsg(null)} aria-label="Dismiss" title="Dismiss">
             <X className="w-3.5 h-3.5" />
           </button>
+        </div>
+      )}
+
+      {/* Bill strip: who is selling (owner spec 10 — managers may reassign the
+          salesperson; everyone else is locked to themselves by the picker
+          itself, which is the SAME component the classic POS uses). */}
+      {!isComplete && (
+        <div className="px-3 pt-2 flex items-end gap-3">
+          <div className="min-w-[220px] max-w-[280px]">
+            <SalespersonPicker />
+          </div>
+          <div className="flex-1" />
         </div>
       )}
 
