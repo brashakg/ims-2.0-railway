@@ -278,10 +278,22 @@ class StrictCollection:
         self.docs: List[Dict[str, Any]] = [dict(d) for d in (docs or [])]
 
     # -- reads ------------------------------------------------------------
-    def find_one(self, filter=None, projection=None, **kwargs):
-        for d in self.docs:
-            if matches(d, filter):
-                return _project(d, projection)
+    def find_one(self, filter=None, projection=None, sort=None, **kwargs):
+        """``sort`` is HONOURED, not ignored.
+
+        This used to swallow ``sort`` silently, so production code doing the
+        very common ``find_one(flt, sort=[("ts", -1)])`` -- "give me the most
+        recent row" -- got the OLDEST matching document from the fake. A test
+        asserting on the latest row then passed while asserting the opposite
+        of what Mongo does: a lying double of exactly the kind this module
+        exists to prevent. Routed through the cursor so the sort rule has one
+        implementation.
+        """
+        cur = _Cursor(d for d in self.docs if matches(d, filter))
+        if sort:
+            cur = cur.sort(sort)
+        for d in cur.limit(1):
+            return _project(d, projection)
         return None
 
     def find(self, filter=None, projection=None, **kwargs):

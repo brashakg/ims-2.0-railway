@@ -221,6 +221,15 @@ export function JarvisPage() {
       regressions: Array<{ url: string; metric: string; current: number; baseline: number; delta: number }>;
     }>;
     latest: any;
+    // Most recent row PIXEL wrote, WHATEVER the outcome. A failed run is
+    // kind="run_failed" so it never appears in `audits` — this is the only
+    // field that can tell "key rejected" apart from "never ran".
+    last_outcome: {
+      ran_at?: string;
+      outcome?: 'ok' | 'no_credentials' | 'credentials_rejected' | 'all_calls_failed';
+      notes?: string;
+      next_step?: string;
+    } | null;
     deltas_vs_previous: Record<string, number>;
     pagespeed_ready: boolean;
     frontend_url: string;
@@ -1985,7 +1994,11 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         <span>PIXEL · UI/UX audits</span>
         {pixelAudits && (
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-4)' }}>
-            {pixelAudits.audits_total} audit{pixelAudits.audits_total === 1 ? '' : 's'} on record · {pixelAudits.pagespeed_ready ? 'PageSpeed ready' : 'PageSpeed key not set'}
+            {pixelAudits.audits_total} run{pixelAudits.audits_total === 1 ? '' : 's'} on record · {
+              pixelAudits.last_outcome?.outcome && pixelAudits.last_outcome.outcome !== 'ok'
+                ? `last run: ${pixelAudits.last_outcome.outcome.replace(/_/g, ' ')}`
+                : pixelAudits.pagespeed_ready ? 'PageSpeed key present' : 'PageSpeed key not set'
+            }
           </span>
         )}
         <button
@@ -2024,15 +2037,43 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         {!pixelLoading && (!pixelAudits || pixelAudits.audits.length === 0) && (
           <div style={{ color: 'var(--ink-4)', fontSize: 12.5, padding: 12 }}>
             <div style={{ marginBottom: 8 }}>No audits on record yet.</div>
-            {pixelAudits && !pixelAudits.pagespeed_ready && (
+            {/* A failed run is a RECORDED run — say what went wrong and what
+                to do about it. `pagespeed_ready` only means "a key string
+                exists", so it must never be the last word. */}
+            {pixelAudits?.last_outcome && pixelAudits.last_outcome.outcome !== 'ok' && (
+              <div style={{ fontSize: 11, color: 'var(--err)' }}>
+                <strong>
+                  {pixelAudits.last_outcome.outcome === 'credentials_rejected'
+                    ? 'Google rejected the PageSpeed API key.'
+                    : pixelAudits.last_outcome.outcome === 'no_credentials'
+                      ? 'No PageSpeed API key is set.'
+                      : 'Every PageSpeed call failed.'}
+                </strong>
+                {pixelAudits.last_outcome.notes && (
+                  <span style={{ color: 'var(--ink-3)' }}> {pixelAudits.last_outcome.notes}</span>
+                )}
+                {pixelAudits.last_outcome.next_step && (
+                  <div style={{ marginTop: 4, color: 'var(--ink-3)' }}>
+                    {pixelAudits.last_outcome.next_step}
+                  </div>
+                )}
+                {pixelAudits.last_outcome.ran_at && (
+                  <div style={{ marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-4)' }}>
+                    last attempt {new Date(pixelAudits.last_outcome.ran_at).toLocaleString('en-IN')}
+                  </div>
+                )}
+              </div>
+            )}
+            {pixelAudits && !pixelAudits.last_outcome && !pixelAudits.pagespeed_ready && (
               <div style={{ fontSize: 11, color: 'var(--warn)' }}>
                 PIXEL needs a Google PageSpeed API key - add it under Settings &rarr; Integrations &rarr; Google PageSpeed - to run real Lighthouse audits.
                 Once set, hit "Run audit now" or wait for the daily 2 AM cron.
               </div>
             )}
-            {pixelAudits && pixelAudits.pagespeed_ready && (
+            {pixelAudits && !pixelAudits.last_outcome && pixelAudits.pagespeed_ready && (
               <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>
-                PageSpeed key is configured. Hit "Run audit now" to trigger the first audit, or wait for the daily 2 AM cron.
+                A PageSpeed key is saved, but PIXEL has never recorded a run - so the key has never actually been tested.
+                Hit "Run audit now" to find out whether Google accepts it, or wait for the daily 2 AM cron.
               </div>
             )}
           </div>
