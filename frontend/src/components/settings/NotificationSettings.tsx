@@ -102,10 +102,12 @@ export function NotificationSettings() {
   // name + language + category). Loaded from the saved notification_templates
   // docs; edited in the preview pane; saved via the SAME PUT the toggle uses.
   const [waMappings, setWaMappings] = useState<
-    Record<string, { name: string; language: string; category: string }>
+    Record<string, { name: string; language: string; category: string; smsTemplateId: string }>
   >({});
-  const [waDraft, setWaDraft] = useState<{ name: string; language: string; category: string }>({
-    name: '', language: '', category: '',
+  const [waDraft, setWaDraft] = useState<{
+    name: string; language: string; category: string; smsTemplateId: string;
+  }>({
+    name: '', language: '', category: '', smsTemplateId: '',
   });
   const [waSaving, setWaSaving] = useState(false);
 
@@ -173,14 +175,18 @@ export function NotificationSettings() {
           rows.map((t: any) => [t.template_id ?? t.id, t])
         );
         // Overlay saved WhatsApp registry mappings (wa_* fields on the doc).
-        const mappings: Record<string, { name: string; language: string; category: string }> = {};
+        const mappings: Record<
+          string,
+          { name: string; language: string; category: string; smsTemplateId: string }
+        > = {};
         rows.forEach((t: any) => {
           const id = t.template_id ?? t.id;
-          if (id && (t.wa_template_name || t.wa_language || t.wa_category)) {
+          if (id && (t.wa_template_name || t.wa_language || t.wa_category || t.sms_template_id)) {
             mappings[id] = {
               name: t.wa_template_name ?? '',
               language: t.wa_language ?? '',
               category: t.wa_category ?? '',
+              smsTemplateId: t.sms_template_id ?? '',
             };
           }
         });
@@ -214,6 +220,7 @@ export function NotificationSettings() {
       name: saved?.name ?? '',
       language: saved?.language ?? '',
       category: saved?.category ?? '',
+      smsTemplateId: saved?.smsTemplateId ?? '',
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplate?.id, waMappings]);
@@ -236,6 +243,7 @@ export function NotificationSettings() {
         wa_template_name: waDraft.name.trim(),
         wa_language: waDraft.language.trim(),
         wa_category: waDraft.category,
+        sms_template_id: waDraft.smsTemplateId.trim(),
       });
       setWaMappings((prev) => ({ ...prev, [selectedTemplate.id]: { ...waDraft } }));
       toast.success('WhatsApp template mapping saved');
@@ -604,6 +612,25 @@ export function NotificationSettings() {
                             <option value="auth">auth</option>
                           </select>
                         </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          SMS fallback DLT template ID
+                        </label>
+                        <input
+                          type="text"
+                          value={waDraft.smsTemplateId}
+                          onChange={(e) =>
+                            setWaDraft((d) => ({ ...d, smsTemplateId: e.target.value }))
+                          }
+                          className="input-field w-full font-mono"
+                          placeholder="e.g. 1107170000000012345"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          When a WhatsApp send for this flow is reported FAILED,
+                          one SMS goes out under this DLT-approved template.
+                          Leave blank to disable SMS fallback for this flow.
+                        </p>
                       </div>
                       <button
                         onClick={handleSaveWaMapping}

@@ -1313,6 +1313,17 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/customers ---
     {"method": "GET", "path": "/api/v1/customers", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/customers", "allowed": "AUTHENTICATED"},
+    # Batch email validation over the customer list (MSG91, billed per
+    # address). ADMIN-only because each run SPENDS money once armed; the
+    # endpoint itself additionally refuses honestly while DISPATCH_MODE is
+    # dark. Roles are a strict subset of the module's existing write union
+    # (POST /customers is AUTHENTICATED), so this row broadens no capability
+    # grant (rbac capability-union gotcha).
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/validate-emails",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/customers/mobile/{mobile}",

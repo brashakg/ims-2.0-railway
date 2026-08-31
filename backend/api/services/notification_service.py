@@ -46,6 +46,24 @@ SHORTURL_FLOWS = frozenset(
 )
 
 
+# Utility-class flows that fall back to ONE DLT SMS when their WhatsApp send
+# is reported FAILED by the delivery-report webhook: the order-ready, recall
+# and workshop-ready classes. Deliberately NOT marketing flows (a failed
+# birthday blast stays failed) and NOT auth/OTP flows (they have their own
+# retry semantics). The fallback DLT template id per flow lives in the
+# template registry (notification_templates.resolve_sms_fallback), never env.
+SMS_FALLBACK_FLOWS = frozenset(
+    {
+        "ORDER_DELIVERED",  # order ready for pickup
+        "PRESCRIPTION_EXPIRY",  # recall class
+        "ANNUAL_CHECKUP_REMINDER",
+        "CL_REORDER_REMINDER",
+        "WORKSHOP_READY",  # workshop ready
+        "repair_ready",
+    }
+)
+
+
 def _dispatch_mode() -> str:
     """Current dispatch mode (off/test/live), read fresh so a runtime env change
     is reflected. Falls back to the provider module's value, else the env."""
@@ -119,6 +137,85 @@ def _default_consent_basis(category: str) -> str:
     return "marketing_consent"
 
 
+def queue_notification_row(
+    *,
+    store_id: str,
+    customer_id: str,
+    customer_phone: str,
+    customer_name: str,
+    template_id: str,
+    channel: str,
+    message: str,
+    category: str = "SERVICE",
+    triggered_by: str = "auto",
+    related_entity_type: str = None,
+    related_entity_id: str = None,
+    consent_basis: str = None,
+    extra: dict = None,
+) -> dict:
+    """Build + persist ONE notification_logs queue row (status PENDING).
+
+    THE one writer of the queue-row shape - send_notification (the async door
+    every flow queues through) and queue_sms_fallback (the WhatsApp-FAILED ->
+    SMS fallback) both call this, so the row shape cannot drift between them.
+    `extra` fields are $set verbatim (dlt_template_id, dedupe_ref,
+    customer_email, subject...). Sync + fail-soft; returns the row dict (with
+    `dispatched=False`); raises never - a storage error still returns the
+    built row so callers keep their honest PENDING contract.
+    """
+    mode = _dispatch_mode()
+    notification = {
+        "notification_id": f"NTF-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
+        "store_id": store_id,
+        "customer_id": customer_id,
+        "customer_phone": customer_phone,
+        "customer_name": customer_name,
+        "template_id": template_id,
+        "category": category,
+        "channel": channel,
+        "message": message,
+        "status": "PENDING",
+        "triggered_by": triggered_by,
+        "related_entity_type": related_entity_type,
+        "related_entity_id": related_entity_id,
+        "created_at": datetime.now().isoformat(),
+        "sent_at": None,
+        "delivered_at": None,
+        "failure_reason": None,
+        # --- DLT / TRAI per-message audit fields (additive) ---
+        "pe_id": DLT_PE_ID,
+        "consent_basis": consent_basis or _default_consent_basis(category),
+        "provider_msg_id": None,  # set by the drain/provider once dispatched
+        "delivery_status": "QUEUED",  # advances QUEUED->SENT->DELIVERED via DLR webhook
+        "dispatch_mode": mode,  # the mode in effect when queued
+    }
+    if extra:
+        notification.update(extra)
+
+    db = _get_db()
+    # NOTE: _get_db() returns a RAW pymongo Database on the happy path (Mongo up),
+    # and pymongo Database.__bool__ raises NotImplementedError -- so `if db:` would
+    # crash every outbound-comms call (BUG-032). Compare with None explicitly.
+    if db is not None:
+        try:
+            coll = db.get_collection("notification_logs")
+            coll.insert_one(notification)
+            logger.info(
+                "Notification queued (status=PENDING, mode=%s): %s -> %s (%s)",
+                mode,
+                template_id,
+                customer_phone,
+                channel,
+            )
+        except Exception as e:
+            logger.warning("Failed to log notification: %s", e)
+
+    result = dict(notification)
+    result.pop("_id", None)  # insert_one mutates the dict with an ObjectId
+    result["dispatched"] = False
+    return result
+
+
 async def send_notification(
     store_id: str,
     customer_id: str,
@@ -132,6 +229,8 @@ async def send_notification(
     related_entity_type: str = None,
     related_entity_id: str = None,
     consent_basis: str = None,
+    customer_email: str = None,
+    subject: str = None,
 ) -> dict:
     """
     Queue a customer notification (does NOT itself send -- see module docstring).
@@ -171,58 +270,141 @@ async def send_notification(
     # Build message from template
     message = populate_template(template_id, variables)
 
-    mode = _dispatch_mode()
+    # EMAIL-channel rows additionally carry the address + subject so the drain
+    # can dispatch them via the email transport; absent for the phone channels
+    # (row shape unchanged for every pre-existing caller).
+    extra = {}
+    if customer_email:
+        extra["customer_email"] = customer_email
+    if subject:
+        extra["subject"] = subject
 
-    # Create notification log entry. Status is PENDING (truthful: accepted +
-    # queued, not yet dispatched). The DLT audit block is additive.
-    notification = {
-        "notification_id": f"NTF-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
-        "store_id": store_id,
-        "customer_id": customer_id,
-        "customer_phone": customer_phone,
-        "customer_name": customer_name,
-        "template_id": template_id,
-        "category": category,
-        "channel": channel,
-        "message": message,
-        "status": "PENDING",
-        "triggered_by": triggered_by,
-        "related_entity_type": related_entity_type,
-        "related_entity_id": related_entity_id,
-        "created_at": datetime.now().isoformat(),
-        "sent_at": None,
-        "delivered_at": None,
-        "failure_reason": None,
-        # --- DLT / TRAI per-message audit fields (additive) ---
-        "pe_id": DLT_PE_ID,
-        "consent_basis": consent_basis or _default_consent_basis(category),
-        "provider_msg_id": None,  # set by the drain/provider once dispatched
-        "delivery_status": "QUEUED",  # advances QUEUED->SENT->DELIVERED via DLR webhook
-        "dispatch_mode": mode,  # the mode in effect when queued
-    }
+    # Persist the PENDING row via THE one queue-row writer.
+    return queue_notification_row(
+        store_id=store_id,
+        customer_id=customer_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        template_id=template_id,
+        channel=channel,
+        message=message,
+        category=category,
+        triggered_by=triggered_by,
+        related_entity_type=related_entity_type,
+        related_entity_id=related_entity_id,
+        consent_basis=consent_basis,
+        extra=extra or None,
+    )
 
-    # Persist to MongoDB
-    db = _get_db()
-    # NOTE: _get_db() returns a RAW pymongo Database on the happy path (Mongo up),
-    # and pymongo Database.__bool__ raises NotImplementedError -- so `if db:` would
-    # crash every outbound-comms call (BUG-032). Compare with None explicitly.
-    if db is not None:
+
+def queue_sms_fallback(provider_message_id: str, db=None) -> str:
+    """Queue ONE DLT SMS fallback for a WhatsApp send that MSG91 reported
+    FAILED. Called by message_events.apply_delivery_report when a `failed`
+    spine event is RECORDED (the spine's per-event dedupe already collapses
+    provider retries). Returns an honest verdict string:
+
+        "queued" | "duplicate" | "skipped:<reason>"
+
+    Guards, in order:
+      - the FAILED report must match a notification_logs row (the outbound
+        send stamped provider_msg_id) whose channel is WhatsApp;
+      - the flow must be utility-class (SMS_FALLBACK_FLOWS) - marketing and
+        auth flows never fan out to SMS;
+      - the flow must have an owner-mapped DLT template id in the template
+        registry (resolve_sms_fallback; no seed, no guessing) - unmapped
+        flows refuse honestly;
+      - ONE fallback per provider_message_id, ever: `dedupe_ref` is checked
+        AND backstopped by a unique partial index, so a re-recorded failure
+        can never fan out into multiple SMS.
+
+    DARK = NOTHING: with DISPATCH_MODE off no real send happens, so MSG91
+    never reports a failure and no event ever reaches this function.
+    Never raises.
+    """
+    pid = str(provider_message_id or "").strip()
+    if not pid:
+        return "skipped:no_provider_message_id"
+
+    if db is None:
+        db = _get_db()
+    if db is None:
+        return "skipped:storage_unavailable"
+
+    try:
+        coll = db.get_collection("notification_logs")
+        row = coll.find_one(
+            {"$or": [{"provider_msg_id": pid}, {"provider_id": pid}]}
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[SMS_FALLBACK] lookup failed: %s", e)
+        return "skipped:storage_unavailable"
+    if not row:
+        return "skipped:no_matching_send"
+    if str(row.get("channel") or "").strip().lower() != "whatsapp":
+        return "skipped:not_whatsapp"
+
+    flow_key = row.get("template_id")
+    if flow_key not in SMS_FALLBACK_FLOWS:
+        return "skipped:not_a_fallback_flow"
+
+    from api.services.notification_templates import resolve_sms_fallback
+
+    dlt_template_id = resolve_sms_fallback(flow_key)
+    if not dlt_template_id:
+        logger.info(
+            "[SMS_FALLBACK] flow %s has no sms_template_id mapped - not "
+            "queueing (map it under Settings -> Notifications -> Templates)",
+            flow_key,
+        )
+        return "skipped:no_sms_template"
+
+    phone = row.get("customer_phone") or row.get("phone") or ""
+    message = row.get("message") or ""
+    if not phone or not message:
+        return "skipped:missing_phone_or_message"
+
+    dedupe_ref = f"sms_fallback:{pid}"
+    try:
+        # Unique partial backstop so a multi-worker race cannot double-queue.
         try:
-            coll = db.get_collection("notification_logs")
-            coll.insert_one(notification)
-            logger.info(
-                "Notification queued (status=PENDING, mode=%s): %s -> %s (%s)",
-                mode,
-                template_id,
-                customer_phone,
-                channel,
+            coll.create_index(
+                "dedupe_ref",
+                unique=True,
+                partialFilterExpression={"dedupe_ref": {"$type": "string"}},
+                name="uniq_notification_dedupe_ref",
             )
-        except Exception as e:
-            logger.warning("Failed to log notification: %s", e)
+        except Exception:  # noqa: BLE001 - index ensure is best-effort
+            pass
+        if coll.find_one({"dedupe_ref": dedupe_ref}):
+            return "duplicate"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[SMS_FALLBACK] dedupe check failed: %s", e)
+        return "skipped:storage_unavailable"
 
-    # Honest, explicit signal to callers: this was queued, NOT sent. A copy with
-    # `dispatched=False` (no real customer contact has occurred yet).
-    result = dict(notification)
-    result.pop("_id", None)  # insert_one mutates the dict with an ObjectId
-    result["dispatched"] = False
-    return result
+    # queue_notification_row never raises; if the unique dedupe_ref index
+    # rejects a concurrent duplicate insert, the writer logs it and no second
+    # row exists - the ONE-fallback invariant holds regardless of the verdict.
+    queue_notification_row(
+        store_id=row.get("store_id"),
+        customer_id=row.get("customer_id"),
+        customer_phone=phone,
+        customer_name=row.get("customer_name") or "",
+        template_id=flow_key,
+        channel="SMS",
+        message=message,
+        category=row.get("category") or "SERVICE",
+        triggered_by="sms_fallback",
+        related_entity_type="notification",
+        related_entity_id=row.get("notification_id"),
+        consent_basis="transactional",
+        extra={
+            "dlt_template_id": dlt_template_id,
+            "dedupe_ref": dedupe_ref,
+        },
+    )
+    logger.info(
+        "[SMS_FALLBACK] queued ONE DLT SMS for flow %s (failed WhatsApp %s)",
+        flow_key,
+        pid,
+    )
+    return "queued"

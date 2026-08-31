@@ -370,6 +370,20 @@ def apply_delivery_report(
             url=url,
             db=db,
         )
+        # SMS fallback on failed WhatsApp (channel expansions): fires ONLY on
+        # a freshly RECORDED failure - the spine's (channel, pid, event)
+        # dedupe means a provider retry of the same failure resolves
+        # "duplicate" above and never re-enters here, so one failure can
+        # never fan out. All flow/channel/registry guards live inside
+        # queue_sms_fallback (the ONE fallback rule). Fail-soft.
+        if ev == "failed" and out["event_result"] == "recorded":
+            try:
+                from api.services.notification_service import queue_sms_fallback
+
+                out["sms_fallback"] = queue_sms_fallback(pid, db=db)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[MESSAGE_EVENTS] sms fallback hook failed: %s", exc)
+                out["sms_fallback"] = "skipped:hook_error"
     return out
 
 

@@ -190,4 +190,19 @@ async def notify_escalation(
     else:
         result["whatsapp"] = "no_phone"
 
+    # 3. Voice rung (channel expansions): ONE TTS call to the store manager
+    # for a P1 SYSTEM task that passed its ack window unacked. Every guard
+    # (policy default-off, P1+SYSTEM+ack-breach only, one-call-per-task
+    # atomic claim, DISPATCH_MODE dark = SIMULATED) lives in
+    # voice_escalation.maybe_voice_escalate - this is just the wiring at the
+    # single alert site both TASKMASTER and the /tasks endpoints route
+    # through. Fail-soft: a voice hiccup never breaks the escalation.
+    try:
+        from api.services.voice_escalation import maybe_voice_escalate
+
+        result["voice"] = await maybe_voice_escalate(task, reason)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[TASK_NOTIFY] voice rung failed: %s", e)
+        result["voice"] = "skipped:hook_error"
+
     return result
