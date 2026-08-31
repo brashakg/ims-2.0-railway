@@ -378,6 +378,13 @@ export interface Order {
   balanceDue: number;
   orderStatus: OrderStatus;
   paymentStatus: PaymentStatus;
+  /** Who the sale is CREDITED to. order_to_frontend maps salesperson_id ->
+   *  salespersonId (orders.py key_map); salesperson_name has no explicit
+   *  mapping, so the axios camel-aliaser supplies salespersonName beside it.
+   *  Both are optional: an order placed before the POS picker existed, or an
+   *  imported one, carries neither. */
+  salespersonId?: string;
+  salespersonName?: string;
   createdBy: string;
   /** Display name resolved server-side; absent when the id names nobody. */
   createdByName?: string;
