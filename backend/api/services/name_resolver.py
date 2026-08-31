@@ -168,3 +168,48 @@ def stamp_user_names(db, docs: Iterable, fields: Iterable[str]) -> None:
                 resolved = names.get(str(raw))
                 if resolved:
                     d[f + "_name"] = resolved
+
+
+def order_actor_id(order) -> str:
+    """Which user an ORDER's sale is CREDITED to (the id; name map is below).
+
+    orders.py stamps the POS salesperson picker onto ``salesperson_id``, with
+    ``salesperson_name`` denormalised beside it. ``sales_person_id`` is the
+    WALKOUTS spelling and an order has never carried it -- kept here only as a
+    harmless legacy fallback, mirroring walkouts.py's own reader, so the credit
+    rule answers the same wherever it is asked.
+
+    ``created_by`` is the person who BILLED the sale and is deliberately LAST:
+    reading it any earlier hands every staff report to the cashier. It stays as
+    the fallback so historical orders written before the picker existed keep
+    attributing to a real person instead of "Unknown".
+    """
+    if not isinstance(order, dict):
+        return "Unknown"
+    return str(
+        order.get("salesperson_id")
+        or order.get("sales_person_id")
+        or order.get("created_by")
+        or "Unknown"
+    )
+
+
+def order_actor_name_map(db, orders: Iterable) -> Dict[str, str]:
+    """Credited-actor id -> display name for a BATCH of order docs.
+
+    ONE users read for the whole batch (never N+1). The live users row wins;
+    the name denormalised on the order is the fallback, so a since-deleted
+    account still prints the person who sold. An id that resolves to neither is
+    simply absent -- the caller then prints the id, which stays traceable and is
+    never an invented name (same contract as ``stamp_user_names``).
+    """
+    rows = [o for o in orders if isinstance(o, dict)]
+    out = user_name_map(db, [order_actor_id(o) for o in rows])
+    for o in rows:
+        aid = order_actor_id(o)
+        if aid in out:
+            continue
+        stored = o.get("salesperson_name") or o.get("sales_person_name")
+        if stored:
+            out[aid] = str(stored)
+    return out
