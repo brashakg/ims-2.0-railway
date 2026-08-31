@@ -7,6 +7,7 @@ import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 const POSPage = lazy(() => import('../pages/pos/POSPage').then(m => ({ default: m.POSPage })));
 const FootfallPage = lazy(() => import('../pages/pos/FootfallPage').then(m => ({ default: m.FootfallPage })));
 const BillingSurface = lazy(() => import('../pages/pos/next/BillingSurface'));
+const DeliverySurface = lazy(() => import('../pages/pos/next/DeliverySurface'));
 
 export const posRoutes = (
   <>
@@ -32,6 +33,19 @@ export const posRoutes = (
           allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
         >
           <BillingSurface />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* POS Wave 4: delivery / pickup counter (owner spec 1-iii). Same role
+        gate as billing; HANDOVER_ROLES on the server is the real lock. */}
+    <Route
+      path="pos/delivery"
+      element={
+        <ProtectedRoute
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
+        >
+          <DeliverySurface />
         </ProtectedRoute>
       }
     />
