@@ -3,3 +3,5 @@ playwright-report/
 test-results/
 .auth/
 blob-report/
+discover-popups.log
+discover-popups.json
