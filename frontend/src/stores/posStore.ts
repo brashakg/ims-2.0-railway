@@ -74,6 +74,12 @@ export interface CartLineItem {
   // Optical linkage
   is_optical: boolean;
   linked_prescription_id?: string;
+  // PAIR LINKING (owner spec 4): a spectacle sale is a PAIR — one frame plus
+  // its lenses, each pair carrying its OWN Rx. Four Rx+frame orders for one
+  // customer must stay untangled on one bill, and the workshop must receive
+  // one job PER PAIR. `pair_id` groups the lines of one pair; lines with no
+  // pair_id are loose (accessories, or a lens awaiting "Link to frame").
+  pair_id?: string;
   lens_details?: {
     type: string;                // Single Vision / Bifocal / Progressive
     material: string;            // CR-39 / Polycarbonate / Hi-Index
@@ -209,6 +215,9 @@ export interface POSState {
   removeFromCart: (lineId: string) => void;
   updateQuantity: (lineId: string, qty: number) => void;
   applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
+  /** Group cart lines into a PAIR (frame + its lenses). Pass pairId=null to
+      unlink. The pair's Rx is whatever the member lines carry. */
+  setLinePair: (lineId: string, pairId: string | null) => void;
   updateItemNote: (lineId: string, note: string) => void;
   setCartNote: (note: string) => void;
 
@@ -443,6 +452,14 @@ export const usePOSStore = create<POSState>()(
             cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
           };
         });
+      },
+
+      setLinePair: (lineId: string, pairId: string | null) => {
+        set((state: POSState) => ({
+          cart: (state.cart || []).map((item: CartLineItem) =>
+            item.id === lineId ? { ...item, pair_id: pairId || undefined } : item
+          ),
+        }));
       },
 
       updateItemNote: (lineId: string, note: string) => {
