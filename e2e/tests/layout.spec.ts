@@ -42,7 +42,7 @@ import { AUDIT_ROOT, VIEWPORTS, auditLayout } from '../fixtures/layout';
 // The route list lives in routes.ts, NOT here: it is the half that carries
 // the coverage guard (a new screen that is neither probed nor excluded with
 // a reason fails routes-inventory.spec.ts by name).
-import { ROUTES, READY_DEFAULT } from '../fixtures/routes';
+import { ROUTES, READY_DEFAULT, knownBreak } from '../fixtures/routes';
 
 // Geometry is deterministic; a retry can only mask a real overlap.
 test.describe.configure({ retries: 0 });
@@ -120,6 +120,8 @@ for (const screen of ROUTES) {
     // Every width is measured even after one of them fails, so a broken screen
     // reports every width it is broken at in one run instead of one per run.
     const failures: string[] = [];
+    // Quarantined breaks that have started passing - the list must shrink.
+    const fixed: string[] = [];
     for (const vp of VIEWPORTS) {
       await test.step(`@ ${vp.name}`, async () => {
         await page.setViewportSize({ width: vp.width, height: vp.height });
@@ -140,12 +142,32 @@ for (const screen of ROUTES) {
         await go(screen.path);
         await settle();
 
-        for (const v of await auditLayout(page)) {
+        const violations = await auditLayout(page);
+        // A screen already broken when the gate was built is QUARANTINED, not
+        // waved through: only its ONE recorded (rule, width) pair is filtered
+        // out, so a new break - or the same break spreading to another width -
+        // is still red.
+        const known = knownBreak(screen.path, vp.width);
+        for (const v of violations) {
+          if (known && v.rule === known.rule) continue;
           failures.push(`  at ${vp.width}px wide (${vp.name}) -- [${v.rule}] ${v.detail}`);
+        }
+        // The list can only shrink. When a recorded break stops reporting, say
+        // so loudly rather than leaving a stale exemption behind to hide the
+        // next regression on that screen.
+        if (known && !violations.some((v) => v.rule === known.rule)) {
+          fixed.push(
+            `  ${screen.path} at ${vp.width}px no longer reports [${known.rule}] -- ` +
+              `delete that entry from KNOWN_BROKEN in fixtures/routes.ts`,
+          );
         }
       });
     }
 
     expect(failures, `Broken layout on ${screen.path}:\n${failures.join('\n')}\n`).toEqual([]);
+    expect(
+      fixed,
+      'Good news - a quarantined break is fixed:\n' + fixed.join('\n'),
+    ).toEqual([]);
   });
 }

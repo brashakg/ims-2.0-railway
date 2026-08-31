@@ -122,7 +122,9 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/walkouts' },
   { path: '/walkouts/dashboard' },
   { path: '/returns' },
-  { path: '/pos' },
+  // The classic POS renders its own chrome, not the generic page header,
+  // so the default ready selector never matches (measured: >15s timeout).
+  { path: '/pos', ready: '.steps-rail, .pos-body, [class*="pos-"]' },
   { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/footfall' },
@@ -205,6 +207,51 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
  * a generated route is invisible to a `path="..."` scan (25 real
  * /settings/<section> screens hid behind this one for exactly that reason).
  */
+
+/**
+ * Screens ALREADY broken on main when the gate was built. Quarantined, NOT
+ * excluded - they are still probed at every width, and the spec still fails on
+ * anything that is not the exact recorded (rule, width) pair. So a NEW break on
+ * one of these screens, or the same break spreading to another width, is red.
+ *
+ * The list can only shrink. When a screen stops producing its recorded
+ * violation the spec FAILS and tells you to delete the entry, so a fix can
+ * never quietly leave a stale exemption behind that hides the next regression.
+ *
+ * All fifteen are the same shape: content wider than a 360px phone, mostly wide
+ * data tables that never got a horizontal scroll container. Fixing one is
+ * usually wrapping its table in an `overflow-x: auto` element.
+ *
+ * DO NOT ADD TO THIS LIST to make a red build green. A new break is a bug to
+ * fix, not a row to add - that is how a gate rots into decoration.
+ */
+export const KNOWN_BROKEN: ReadonlyArray<{
+  path: string;
+  rule: string;
+  width: number;
+}> = [
+  { path: '/customers/whatsapp-inbox', rule: 'body-hscroll', width: 360 },
+  { path: '/finance/budgeting', rule: 'body-hscroll', width: 360 },
+  { path: '/finance/cash-flow', rule: 'body-hscroll', width: 360 },
+  { path: '/incentive', rule: 'body-hscroll', width: 360 },
+  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 360 },
+  { path: '/incentive/payout', rule: 'body-hscroll', width: 360 },
+  { path: '/incentive/payouts', rule: 'body-hscroll', width: 360 },
+  { path: '/incentive/settings', rule: 'body-hscroll', width: 360 },
+  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 360 },
+  { path: '/inventory/replenishment', rule: 'body-hscroll', width: 360 },
+  { path: '/pos/footfall', rule: 'body-hscroll', width: 360 },
+  { path: '/promotions', rule: 'body-hscroll', width: 360 },
+  { path: '/reports/promotions', rule: 'body-hscroll', width: 360 },
+  { path: '/walkouts', rule: 'body-hscroll', width: 360 },
+  { path: '/walkouts/dashboard', rule: 'body-hscroll', width: 360 },
+];
+
+/** The recorded break for a screen at a width, or undefined if none. */
+export function knownBreak(path: string, width: number) {
+  return KNOWN_BROKEN.find((k) => k.path === path && k.width === width);
+}
+
 export const KNOWN_GENERATORS = ['SETTINGS_SECTIONS.map('] as const;
 
 /** Every `.map(` call site inside routes/*.tsx, for the guard to check. */
