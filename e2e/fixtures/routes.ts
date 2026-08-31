@@ -209,84 +209,106 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
  */
 
 /**
- * Screens ALREADY broken on main when the gate was built, MEASURED in CI - not
- * guessed. Every triple below is a violation the probe really reported on an
- * unmodified main, so this list is evidence, not an opinion.
+ * Screens ALREADY broken on main when the gate was built. MEASURED across two
+ * full CI runs and unioned - not guessed, and not taken from a single run.
  *
- * Quarantined, NOT excluded. The screen is still probed at all 7 widths, and
- * only the exact (rule, width) triples below are filtered. A new rule, or the
- * same rule at another width, still fails. The break spreading is red.
+ * Quarantined, NOT excluded: the screen is still probed at all 7 widths and
+ * only the exact (rule, width) entries below are tolerated. A different rule,
+ * or the same rule at another width, still fails.
  *
- * The list can only SHRINK: when a recorded break stops reporting, the spec
+ * WHY 'too-wide' RATHER THAN THE RAW RULE NAMES. The two CI runs disagreed
+ * about WHICH rule fired for the same screen at the same width -
+ * 'body-hscroll' in one, 'past-right-edge' in the other - because they are
+ * two
+ * symptoms of one condition: content that does not fit the viewport. Whether
+ * the body ends up scrolling or an element merely pokes out depends on how far
+ * the table had rendered. Pinning the exact symptom made the gate flap, and a
+ * flapping required check gets switched off within a week. So the two are
+ * matched as ONE family here.
+ *
+ * 'overlap' and 'unreachable' are NOT in that family and stay strict - they are
+ * structurally different failures, and unlike a wide table you cannot scroll
+ * around them.
+ *
+ * Every entry is a PHONE width (360 / 390 / 430). Nothing fails at 768 or
+ * above: the tablet and desktop layouts are sound, and the outstanding work is
+ * squarely "these screens were never made to fit a phone". /settings/business
+ * is the one to fix first - overlapping controls, not just a wide table.
+ *
+ * The list can only SHRINK. When a recorded break stops reporting, the spec
  * FAILS and names the entry to delete, so a fix cannot leave a stale exemption
- * behind to hide the next regression on that screen.
- *
- * Every one is a PHONE width (360 / 390 / 430). Nothing here breaks at 768 or
- * above, which says the tablet and desktop layouts are sound and the work is
- * squarely "these screens were never made to fit a phone".
- *   body-hscroll / past-right-edge -> content wider than the screen, almost
- *     always a data table with no horizontal scroll container.
- *   overlap (/settings/business)   -> controls sitting ON TOP of each other.
- *     The worst of the set: unlike a wide table it cannot be scrolled around.
+ * behind to hide the next regression.
  *
  * DO NOT ADD TO THIS LIST to make a red build green. A new break is a bug to
  * fix, not a row to add - that is how a gate rots into decoration.
  */
+export const WIDTH_OVERFLOW_RULES = ['body-hscroll', 'past-right-edge'];
+
 export const KNOWN_BROKEN: ReadonlyArray<{
   path: string;
   rule: string;
   width: number;
 }> = [
-  { path: '/customers/whatsapp-inbox', rule: 'body-hscroll', width: 390 },
-  { path: '/finance/budgeting', rule: 'past-right-edge', width: 360 },
-  { path: '/incentive', rule: 'past-right-edge', width: 360 },
-  { path: '/incentive', rule: 'body-hscroll', width: 390 },
-  { path: '/incentive', rule: 'past-right-edge', width: 390 },
-  { path: '/incentive', rule: 'body-hscroll', width: 430 },
-  { path: '/incentive', rule: 'past-right-edge', width: 430 },
-  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 390 },
-  { path: '/incentive/leaderboard', rule: 'past-right-edge', width: 390 },
-  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 430 },
-  { path: '/incentive/leaderboard', rule: 'past-right-edge', width: 430 },
-  { path: '/incentive/payout', rule: 'past-right-edge', width: 360 },
-  { path: '/incentive/payout', rule: 'body-hscroll', width: 390 },
-  { path: '/incentive/payout', rule: 'past-right-edge', width: 390 },
-  { path: '/incentive/payout', rule: 'body-hscroll', width: 430 },
-  { path: '/incentive/payout', rule: 'past-right-edge', width: 430 },
-  { path: '/incentive/payouts', rule: 'past-right-edge', width: 360 },
-  { path: '/incentive/settings', rule: 'body-hscroll', width: 390 },
-  { path: '/incentive/settings', rule: 'body-hscroll', width: 430 },
-  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 360 },
-  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 390 },
-  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 390 },
-  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 430 },
-  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 430 },
-  { path: '/inventory/replenishment', rule: 'past-right-edge', width: 360 },
-  { path: '/inventory/replenishment', rule: 'body-hscroll', width: 390 },
-  { path: '/inventory/replenishment', rule: 'past-right-edge', width: 390 },
-  { path: '/pos/footfall', rule: 'past-right-edge', width: 360 },
-  { path: '/pos/footfall', rule: 'body-hscroll', width: 390 },
-  { path: '/pos/footfall', rule: 'past-right-edge', width: 390 },
-  { path: '/promotions', rule: 'past-right-edge', width: 360 },
-  { path: '/reports/promotions', rule: 'past-right-edge', width: 360 },
-  { path: '/reports/promotions', rule: 'body-hscroll', width: 390 },
-  { path: '/reports/promotions', rule: 'past-right-edge', width: 390 },
-  { path: '/reports/promotions', rule: 'body-hscroll', width: 430 },
+  { path: '/customers/whatsapp-inbox', rule: 'too-wide', width: 360 },
+  { path: '/customers/whatsapp-inbox', rule: 'too-wide', width: 390 },
+  { path: '/finance/budgeting', rule: 'too-wide', width: 360 },
+  { path: '/finance/cash-flow', rule: 'too-wide', width: 360 },
+  { path: '/incentive', rule: 'too-wide', width: 360 },
+  { path: '/incentive', rule: 'too-wide', width: 390 },
+  { path: '/incentive', rule: 'too-wide', width: 430 },
+  { path: '/incentive/leaderboard', rule: 'too-wide', width: 360 },
+  { path: '/incentive/leaderboard', rule: 'too-wide', width: 390 },
+  { path: '/incentive/leaderboard', rule: 'too-wide', width: 430 },
+  { path: '/incentive/payout', rule: 'too-wide', width: 360 },
+  { path: '/incentive/payout', rule: 'too-wide', width: 390 },
+  { path: '/incentive/payout', rule: 'too-wide', width: 430 },
+  { path: '/incentive/payouts', rule: 'too-wide', width: 360 },
+  { path: '/incentive/settings', rule: 'too-wide', width: 360 },
+  { path: '/incentive/settings', rule: 'too-wide', width: 390 },
+  { path: '/incentive/settings', rule: 'too-wide', width: 430 },
+  { path: '/inventory/power-grid', rule: 'too-wide', width: 360 },
+  { path: '/inventory/power-grid', rule: 'too-wide', width: 390 },
+  { path: '/inventory/power-grid', rule: 'too-wide', width: 430 },
+  { path: '/inventory/replenishment', rule: 'too-wide', width: 360 },
+  { path: '/inventory/replenishment', rule: 'too-wide', width: 390 },
+  { path: '/pos/footfall', rule: 'too-wide', width: 360 },
+  { path: '/pos/footfall', rule: 'too-wide', width: 390 },
+  { path: '/promotions', rule: 'too-wide', width: 360 },
+  { path: '/reports/promotions', rule: 'too-wide', width: 360 },
+  { path: '/reports/promotions', rule: 'too-wide', width: 390 },
+  { path: '/reports/promotions', rule: 'too-wide', width: 430 },
   { path: '/settings/business', rule: 'overlap', width: 360 },
   { path: '/settings/business', rule: 'overlap', width: 390 },
-  { path: '/walkouts', rule: 'past-right-edge', width: 360 },
-  { path: '/walkouts', rule: 'body-hscroll', width: 390 },
-  { path: '/walkouts', rule: 'past-right-edge', width: 390 },
-  { path: '/walkouts', rule: 'body-hscroll', width: 430 },
-  { path: '/walkouts', rule: 'past-right-edge', width: 430 },
-  { path: '/walkouts/dashboard', rule: 'past-right-edge', width: 360 },
+  { path: '/walkouts', rule: 'too-wide', width: 360 },
+  { path: '/walkouts', rule: 'too-wide', width: 390 },
+  { path: '/walkouts', rule: 'too-wide', width: 430 },
+  { path: '/walkouts/dashboard', rule: 'too-wide', width: 360 },
 ];
 
-/** Rules this screen is ALREADY known to break at this width. */
+/** True when this screen is already known to break this way at this width.
+ *  'too-wide' covers either width-overflow symptom; anything else is exact. */
+export function isKnownBreak(path: string, rule: string, width: number): boolean {
+  return KNOWN_BROKEN.some(
+    (k) =>
+      k.path === path &&
+      k.width === width &&
+      (k.rule === rule ||
+        (k.rule === 'too-wide' && WIDTH_OVERFLOW_RULES.includes(rule))),
+  );
+}
+
+/** Recorded breaks for a screen at a width, for the fixed-detector. */
 export function knownBreaksAt(path: string, width: number): string[] {
   return KNOWN_BROKEN.filter((k) => k.path === path && k.width === width).map(
     (k) => k.rule,
   );
+}
+
+/** Has this recorded break stopped reporting? */
+export function stillBroken(rule: string, observed: string[]): boolean {
+  return rule === 'too-wide'
+    ? observed.some((r) => WIDTH_OVERFLOW_RULES.includes(r))
+    : observed.includes(rule);
 }
 
 export const KNOWN_GENERATORS = ['SETTINGS_SECTIONS.map('] as const;
