@@ -1007,7 +1007,10 @@ def test_qc_check_runs_before_the_status_claim(
         calls.append("qc")
         return real_qc(order)
 
-    def spy_claim(repo, order_id, new_status, required_status, user_id):
+    # extra= is the opt-in payload the deliver door rides on the atomic
+    # claim (handover_record). A double MUST mirror the real signature or
+    # it is weaker than prod and hides the call it is spying on.
+    def spy_claim(repo, order_id, new_status, required_status, user_id, extra=None):
         calls.append(f"claim:{new_status}")
         repo.update_status(order_id, new_status, user_id)
         return True
@@ -1034,7 +1037,10 @@ def test_blocked_qc_never_reaches_the_status_claim(monkeypatch, endpoint, order_
     status is written that would then need unwinding."""
     calls: List[str] = []
 
-    def spy_claim(repo, order_id, new_status, required_status, user_id):
+    # extra= is the opt-in payload the deliver door rides on the atomic
+    # claim (handover_record). A double MUST mirror the real signature or
+    # it is weaker than prod and hides the call it is spying on.
+    def spy_claim(repo, order_id, new_status, required_status, user_id, extra=None):
         calls.append(f"claim:{new_status}")
         return True
 
