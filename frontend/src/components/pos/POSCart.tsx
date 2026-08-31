@@ -9,8 +9,21 @@
 import { ShoppingCart, X } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
 
+/** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
+    removed pair are reused, so labels stay small and stable. */
+export function nextPairId(cart: { pair_id?: string }[]): string {
+  const used = new Set(cart.map((i) => i.pair_id).filter(Boolean) as string[]);
+  let n = 1;
+  while (used.has(`Pair ${n}`)) n += 1;
+  return `Pair ${n}`;
+}
+
 export function CartSidebar() {
   const store = usePOSStore();
+  const opticalCount = (store.cart || []).filter((i) => i.is_optical).length;
+  const pairIds = Array.from(
+    new Set((store.cart || []).map((i) => i.pair_id).filter(Boolean) as string[])
+  ).sort();
   const subtotal = store.getSubtotal();
   const grand = store.getGrandTotal();
   const totalDiscount = store.getTotalDiscount();
@@ -198,6 +211,50 @@ export function CartSidebar() {
                 </span>
               </div>
             </div>
+            {/* PAIR LINKING (owner spec 4): one bill can carry several
+                Rx+frame PAIRS for the same customer. Shown only when the cart
+                actually holds more than one optical line — a single-pair sale
+                (the common case) sees no extra chrome. */}
+            {item.is_optical && opticalCount > 1 && (
+              <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {pairIds.map((pid) => (
+                  <button
+                    key={pid}
+                    type="button"
+                    onClick={() => store.setLinePair(item.id, item.pair_id === pid ? null : pid)}
+                    style={{
+                      minHeight: 30,
+                      padding: '0 10px',
+                      borderRadius: 6,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      border: '1px solid var(--line)',
+                      background: item.pair_id === pid ? 'var(--ink)' : 'var(--surface)',
+                      color: item.pair_id === pid ? '#fff' : 'var(--ink-2)',
+                    }}
+                  >
+                    {pid}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => store.setLinePair(item.id, nextPairId(store.cart || []))}
+                  style={{
+                    minHeight: 30,
+                    padding: '0 10px',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    border: '1px dashed var(--line-strong, var(--line))',
+                    background: 'transparent',
+                    color: 'var(--ink-3)',
+                  }}
+                >
+                  + New pair
+                </button>
+              </div>
+            )}
             {item.is_optical && (
               <input
                 placeholder="PD / Fitting / Tint notes…"
