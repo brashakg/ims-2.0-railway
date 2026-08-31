@@ -11,7 +11,7 @@ import { usePOSStore } from '../../stores/posStore';
 import { useAuth } from '../../context/AuthContext';
 import { adminStoreApi } from '../../services/api';
 
-export function SalespersonPicker() {
+export function SalespersonPicker({ compact = false }: { compact?: boolean } = {}) {
   const store = usePOSStore();
   const { user } = useAuth();
   const [people, setPeople] = useState<Array<{ id: string; name: string }>>([]);
@@ -75,6 +75,31 @@ export function SalespersonPicker() {
           {selfName} <span className="text-gray-400">(you)</span>
         </div>
       </div>
+    );
+  }
+
+  // Compact mode: a chip-sized select for the new one-surface POS bill strip
+  // (owner: the labelled block "takes up too much space"). Same data, same
+  // manager-tier rule — only the chrome differs.
+  if (compact) {
+    return (
+      <select
+        aria-label="Salesperson"
+        value={store.salesperson_id}
+        onChange={(e) => {
+          const p = people.find((x) => x.id === e.target.value);
+          store.setSalesperson(e.target.value, p?.name || '');
+        }}
+        className={
+          'h-9 max-w-[190px] rounded-lg border px-2 text-xs bg-white ' +
+          (store.salesperson_id ? 'border-gray-200 text-gray-900' : 'border-amber-300 text-amber-700')
+        }
+      >
+        <option value="">{loading ? 'Loading…' : 'Salesperson *'}</option>
+        {people.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
+      </select>
     );
   }
 

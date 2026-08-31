@@ -43,7 +43,7 @@ function Tile({
       onClick={onClick}
       title={hint}
       // 44px+ touch target, bordered (owner spec 11: no ghost buttons on iPad).
-      className="min-h-[92px] text-left rounded-xl border border-gray-200 bg-white px-3 py-2.5 hover:bg-gray-50 active:bg-gray-100 flex flex-col gap-1"
+      className="min-h-[68px] text-left rounded-xl border border-gray-200 bg-white px-3 py-2.5 hover:bg-gray-50 active:bg-gray-100 flex flex-col gap-1"
     >
       <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500">
         {title}
@@ -101,7 +101,7 @@ export function PosWidgets() {
   const points = store.customerLoyaltyPoints || 0;
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+    <div className="grid grid-cols-2 gap-2">
       {/* 1 — My day (salesperson scorecard) */}
       <Tile
         title="My day"
