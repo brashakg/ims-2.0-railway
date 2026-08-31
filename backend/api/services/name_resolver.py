@@ -209,7 +209,12 @@ def order_actor_name_map(db, orders: Iterable) -> Dict[str, str]:
         aid = order_actor_id(o)
         if aid in out:
             continue
+        # The denormalised name may ONLY label the id it actually belongs to.
+        # When the credited id fell through to created_by, salesperson_name (if
+        # any) describes somebody else -- using it would print a real person's
+        # name over another person's orders.
         stored = o.get("salesperson_name") or o.get("sales_person_name")
-        if stored:
+        salesperson = str(o.get("salesperson_id") or o.get("sales_person_id") or "")
+        if stored and salesperson == aid:
             out[aid] = str(stored)
     return out

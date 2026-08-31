@@ -349,13 +349,19 @@ def _anomalies(orders, date_from=None, date_to=None):
     return out["anomalies"]
 
 
+# Fixtures use `salesperson_id` because that is the key the create-order door
+# actually writes (orders.py). These fixtures previously used `sales_staff_id`,
+# a key NO production writer has ever set - so the leaderboards they exercised
+# bucketed every order to "unknown" and this file's agreement test passed
+# because both implementations were equally blind. The fixture must match the
+# real document or the test proves nothing.
 def _void(created_at, oid, staff="ZZ-S1"):
     return {
         "order_id": oid,
         "store_id": STORE,
         "status": "cancelled",
-        "sales_staff_id": staff,
-        "sales_staff_name": "ZZ Staff",
+        "salesperson_id": staff,
+        "salesperson_name": "ZZ Staff",
         "created_at": created_at,
         "total_amount": 1000.0,
     }
@@ -865,8 +871,8 @@ def test_staff_leaderboard_agrees_with_its_payroll_twin_at_ist_month_open():
             "order_id": "ZZ-O-JUL",
             "store_id": STORE,
             "status": "COMPLETED",
-            "sales_staff_id": "ZZ-S-JUL",
-            "sales_staff_name": "July Seller",
+            "salesperson_id": "ZZ-S-JUL",
+            "salesperson_name": "July Seller",
             "created_at": datetime(2026, 6, 30, 19, 0),  # 00:30 IST 1 July
             "total_amount": 9000.0,
             "items": [],
@@ -875,8 +881,8 @@ def test_staff_leaderboard_agrees_with_its_payroll_twin_at_ist_month_open():
             "order_id": "ZZ-O-JUN",
             "store_id": STORE,
             "status": "COMPLETED",
-            "sales_staff_id": "ZZ-S-JUN",
-            "sales_staff_name": "June Seller",
+            "salesperson_id": "ZZ-S-JUN",
+            "salesperson_name": "June Seller",
             "created_at": AFTERNOON,  # 16:30 IST 30 June
             "total_amount": 7000.0,
             "items": [],
@@ -894,8 +900,8 @@ def test_staff_leaderboard_afternoon_month_positive_control():
             "order_id": "ZZ-O-JUN",
             "store_id": STORE,
             "status": "COMPLETED",
-            "sales_staff_id": "ZZ-S-JUN",
-            "sales_staff_name": "June Seller",
+            "salesperson_id": "ZZ-S-JUN",
+            "salesperson_name": "June Seller",
             "created_at": datetime(2026, 6, 10, 11, 0),
             "total_amount": 7000.0,
             "items": [],

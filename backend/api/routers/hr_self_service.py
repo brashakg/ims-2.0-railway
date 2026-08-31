@@ -31,6 +31,7 @@ import logging
 
 from .auth import get_current_user
 from ..utils.ist import ist_date_str, ist_month_window_utc
+from ..services.name_resolver import order_actor_id
 
 logger = logging.getLogger(__name__)
 
@@ -357,12 +358,20 @@ async def my_commission(
         order_query = {
             "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "$or": [{"sales_staff_id": caller}, {"created_by": caller}],
+            # Superset pre-filter; order_actor_id below decides which field
+            # actually credits the sale (same single rule the manager ledger
+            # uses, so an employee's own page can never disagree with it).
+            "$or": [
+                {"salesperson_id": caller},
+                {"sales_person_id": caller},
+                {"created_by": caller},
+            ],
         }
         if store_id:
             order_query["store_id"] = store_id
 
         orders = list(db.get_collection("orders").find(order_query).limit(20000))
+        orders = [o for o in orders if order_actor_id(o) == caller]
         sales_count = len(orders)
         revenue = sum(
             float(o.get("total_amount") or o.get("grand_total") or 0) for o in orders
