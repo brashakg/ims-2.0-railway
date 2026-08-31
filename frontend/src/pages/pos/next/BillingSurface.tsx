@@ -26,6 +26,7 @@ import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
+import { PosWidgets } from './PosWidgets';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import {
   resolveBarcode,
@@ -114,7 +115,7 @@ export function BillingSurface() {
   const isComplete = store.current_step === 'complete';
 
   return (
-    <div className="h-[calc(100dvh-52px)] flex flex-col overflow-hidden bg-gray-50">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden bg-gray-50">
       <WalkoutComplianceBanner />
 
       {errorMsg && (
@@ -127,15 +128,19 @@ export function BillingSurface() {
         </div>
       )}
 
-      {/* Bill strip: who is selling (owner spec 10 — managers may reassign the
-          salesperson; everyone else is locked to themselves by the picker
-          itself, which is the SAME component the classic POS uses). */}
+      {/* Bill strip — slim context row. The salesperson lives here as a CHIP
+          (owner: the labelled field "takes up too much space"), not a form
+          block; the picker itself still enforces the manager-tier rule. */}
       {!isComplete && (
-        <div className="px-3 pt-2 flex items-end gap-3">
-          <div className="min-w-[220px] max-w-[280px]">
-            <SalespersonPicker />
-          </div>
+        <div className="px-3.5 pt-2 pb-1 flex items-center gap-2 shrink-0">
+          <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500">
+            Selling
+          </span>
+          <SalespersonPicker compact />
           <div className="flex-1" />
+          <span className="text-[11px] text-gray-500">
+            {(store.cart || []).length} item{(store.cart || []).length === 1 ? '' : 's'}
+          </span>
         </div>
       )}
 
@@ -144,67 +149,87 @@ export function BillingSurface() {
           <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction()} />
         </div>
       ) : (
-        <div className="flex-1 min-h-0 grid gap-3 p-3 grid-cols-1 lg:grid-cols-[minmax(320px,30fr)_minmax(300px,34fr)_minmax(320px,36fr)]">
-          {/* ── Left: who's buying + Rx (owner: this column is the BIG one) ── */}
-          <div className="min-h-0 overflow-y-auto space-y-3">
-            <CustomerCardWithLoyalty />
+        /* TWO columns, per the locked mockup (Main.dc.html): the left column
+           flexes and owns customer + Rx + product entry + the 2x2 widgets;
+           the right column is a fixed 430px cart + payment that stays visible
+           at all times. Nothing here may scroll the PAGE (spec 11b) — only
+           the cart list and the left column's own overflow scroll. */
+        <div className="flex-1 min-h-0 flex gap-3.5 px-3.5 pb-3.5">
+          {/* ── LEFT ── */}
+          <div className="flex-1 min-w-0 flex flex-col gap-3">
+            {/* Customer + Rx: the primary block */}
+            <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0">
+              {store.customer ? (
+                <CustomerCardWithLoyalty />
+              ) : (
+                <div className="min-h-[64px] flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">No customer yet</div>
+                    <div className="text-xs text-gray-500">
+                      Every bill needs a customer — search by phone or name.
+                    </div>
+                  </div>
+                  <span className="text-xs text-gray-400">Customer search lands next</span>
+                </div>
+              )}
 
-            {/* Rx SELECTOR BAR (owner spec 11c: "half baked, too complicated
-                — remake"). ONE Rx is shown — the one billing uses — behind a
-                single 44px bar. Tapping opens the EXISTING family/history
-                picker rather than a second Rx UI. */}
-            {store.customer && (
-              <button
-                type="button"
-                onClick={() => setRxPickerOpen(true)}
-                disabled={!store.customer?.id}
-                className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-gray-200 bg-white text-left flex items-center gap-3 disabled:opacity-50"
-              >
-                <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500 shrink-0">
-                  Rx
-                </span>
-                {store.prescription ? (
-                  <span className="flex-1 min-w-0 text-sm">
-                    <span className="font-medium">
-                      {store.patient?.name || store.customer?.name || 'On file'}
-                    </span>
-                    <span className="text-gray-500">
-                      {' · '}R {store.prescription.rightEye?.sphere ?? '—'}
-                      {' / '}L {store.prescription.leftEye?.sphere ?? '—'}
-                    </span>
+              {/* ONE Rx behind a single selector bar (spec 11c) */}
+              {store.customer && (
+                <button
+                  type="button"
+                  onClick={() => setRxPickerOpen(true)}
+                  className="mt-2.5 w-full min-h-[44px] px-3 rounded-lg border border-gray-200 bg-white text-left flex items-center gap-3"
+                >
+                  <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500 shrink-0">
+                    Rx
                   </span>
-                ) : (
-                  <span className="flex-1 text-sm text-gray-500">
-                    No prescription selected — tap to choose or add
-                  </span>
-                )}
-                <span className="text-xs text-blue-700 font-medium shrink-0">Change</span>
-              </button>
-            )}
-          </div>
+                  {store.prescription ? (
+                    <span className="flex-1 min-w-0 text-sm truncate">
+                      <span className="font-medium">
+                        {store.patient?.name || store.customer?.name || 'On file'}
+                      </span>
+                      <span className="text-gray-500">
+                        {' · '}R {store.prescription.rightEye?.sphere ?? '—'}
+                        {' / '}L {store.prescription.leftEye?.sphere ?? '—'}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="flex-1 text-sm text-gray-500">
+                      No prescription selected — tap to choose or add
+                    </span>
+                  )}
+                  <span className="text-xs text-blue-700 font-medium shrink-0">Change</span>
+                </button>
+              )}
+            </div>
 
-          {/* ── Center: always-armed scan + cart lines ── */}
-          <div className="min-h-0 flex flex-col gap-3">
-            <BarcodeScanner
-              onScan={handleScan}
-              placeholder="Scan barcode…"
-              autoFocus
-            />
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              <CartSidebar />
+            {/* Product entry: compact — one row of controls (owner spec 6) */}
+            <div className="shrink-0">
+              <BarcodeScanner onScan={handleScan} placeholder="Scan barcode or search products…" autoFocus />
+            </div>
+
+            {/* Breathing room today; the results strip + delivery row land here */}
+            <div className="flex-1 min-h-0" />
+
+            {/* Bottom 2x2 widgets (owner spec 8) */}
+            <div className="shrink-0">
+              <PosWidgets />
             </div>
           </div>
 
-          {/* ── Right: tenders + complete ── */}
-          <div className="min-h-0 flex flex-col gap-3">
-            <div className="flex-1 min-h-0 overflow-y-auto">
+          {/* ── RIGHT: cart + payment, always visible (430px per mockup) ── */}
+          <div className="w-[430px] shrink-0 min-h-0 grid gap-3 grid-rows-[minmax(0,1fr)_minmax(0,auto)_auto]">
+            <div className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
+              <CartSidebar />
+            </div>
+            <div className="min-h-0 overflow-y-auto">
               <StepPayment />
             </div>
             <button
               type="button"
               onClick={handleCompleteSale}
               disabled={store.is_processing || (store.cart || []).length === 0}
-              className="h-12 rounded-xl bg-gray-900 text-white font-semibold text-base disabled:opacity-40"
+              className="h-12 shrink-0 rounded-xl bg-gray-900 text-white font-semibold text-base disabled:opacity-40"
             >
               {store.is_processing ? 'Saving…' : 'Complete sale'}
             </button>
