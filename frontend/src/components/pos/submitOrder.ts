@@ -64,6 +64,27 @@ export async function submitPosOrder(
     return { ok: false, error: 'Payment incomplete. Add payments or enable "Advance payment only".' };
   }
 
+  // OVER-TENDER. Only under-payment was checked, so a bill whose total DROPPED
+  // after the tender was entered sailed through: the one-screen surfaces show
+  // the discount controls and the payment card at the same time, so applying a
+  // discount after taking the cash is a two-tap sequence. The order was then
+  // created at the NEW lower total, every addPayment below was refused by the
+  // server with "amount exceeds balance due", and the catch swallowed it - an
+  // order saved as fully OUTSTANDING with the cash physically in the drawer,
+  // surfacing at day-end as an unexplained surplus. Refuse BEFORE creating
+  // anything, so nothing is half-saved.
+  const overTendered = -store.getBalance();
+  if (overTendered > 0.01) {
+    return {
+      ok: false,
+      error:
+        `Tendered ₹${Math.round(store.getTotalPaid()).toLocaleString('en-IN')} is ` +
+        `₹${Math.round(overTendered).toLocaleString('en-IN')} more than the bill ` +
+        `total of ₹${Math.round(store.getGrandTotal()).toLocaleString('en-IN')}. ` +
+        `If a discount was applied after the payment, re-enter the payment.`,
+    };
+  }
+
   try {
     const result = await orderApi.createOrder({
       customer_id: store.customer?.id,
@@ -133,6 +154,7 @@ export async function submitPosOrder(
     // leg only — the customer handed one wad over once; attaching it to a
     // second cash leg would double the note-by-note ledger.
     let cashCapture: CashTenderCapture | null = store.cash_tender;
+    const unrecordedPayments: string[] = [];
     for (const p of (store.payments || [])) {
       // Skip the LOYALTY tender — it is a UI-only line that tracks the
       // rupee value of the deferred redeem; the actual ledger entry was
@@ -143,11 +165,21 @@ export async function submitPosOrder(
         if (p.method === 'CASH') cashCapture = null;
         await orderApi.addPayment(result.order_id, body as any);
       } catch {
-        // Don't block order — payment can be recorded later
+        // Still does not block the order - it exists, and a tender can be
+        // recorded against it later. But it is no longer SILENT: money taken
+        // at the counter that never reached the order is exactly what a
+        // day-end blind count cannot explain.
+        unrecordedPayments.push(`${p.method} ₹${Math.round(p.amount).toLocaleString('en-IN')}`);
       }
     }
     store.setCashTender(null);
     store.setOrderResult(result.order_id, result.order_number);
+    // Money taken at the counter that never reached the order is exactly what
+    // a day-end blind count cannot explain. Never return success silently.
+    const paymentWarning = unrecordedPayments.length
+      ? `Order saved, but ${unrecordedPayments.join(' and ')} did NOT record against it. `
+        + `Add the payment from the Orders screen before closing the till.`
+      : undefined;
 
     // Phase 6.8 — auto-create workshop job + prompt sales to fill
     // fitting details. Only fires for Rx orders that actually ship a
@@ -191,6 +223,7 @@ export async function submitPosOrder(
             ok: true,
             orderId: result.order_id,
             orderNumber: result.order_number,
+            warning: paymentWarning,
             fittingJobId: jobResp.job_id,
             fittingCoating: (lensItem?.lens_details?.coatings || []).join(', ') || '',
           };
@@ -205,14 +238,23 @@ export async function submitPosOrder(
           ok: true,
           orderId: result.order_id,
           orderNumber: result.order_number,
-          warning:
+          warning: [
+            paymentWarning,
             'Order saved, but workshop job auto-create failed — please add it manually from the Workshop page.',
+          ]
+            .filter(Boolean)
+            .join(' '),
         };
       }
     }
 
     store.setStep('complete');
-    return { ok: true, orderId: result.order_id, orderNumber: result.order_number };
+    return {
+      ok: true,
+      orderId: result.order_id,
+      orderNumber: result.order_number,
+      warning: paymentWarning,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };

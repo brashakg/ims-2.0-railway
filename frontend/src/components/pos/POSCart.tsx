@@ -7,7 +7,7 @@
 // the app after Phase 1.6 POS re-skin.
 
 import { ShoppingCart, X } from 'lucide-react';
-import { usePOSStore } from '../../stores/posStore';
+import { usePOSStore, type CartLineItem } from '../../stores/posStore';
 
 /** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
     removed pair are reused, so labels stay small and stable. */
@@ -18,7 +18,16 @@ export function nextPairId(cart: { pair_id?: string }[]): string {
   return `Pair ${n}`;
 }
 
-export function CartSidebar() {
+/** `onOpenDiscount` is OPTIONAL on purpose. The classic surface opens the
+ *  discount modal from its review step, so it passes nothing and its cart is
+ *  byte-identical to before. The new one-screen surfaces have no review step -
+ *  the cart IS the review - so they pass a handler and each line grows a
+ *  Discount control. */
+export function CartSidebar({
+  onOpenDiscount,
+}: {
+  onOpenDiscount?: (line: CartLineItem) => void;
+} = {}) {
   const store = usePOSStore();
   const opticalCount = (store.cart || []).filter((i) => i.is_optical).length;
   const pairIds = Array.from(
@@ -211,6 +220,60 @@ export function CartSidebar() {
                 </span>
               </div>
             </div>
+            {onOpenDiscount && (
+              <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* HQ-OFFER GUARD, mirroring the classic surface (POSLayout's
+                    review table). An item already discounted by HQ - offer_price
+                    below MRP - takes NO further store discount: the order-create
+                    door refuses it with a 403 for non-admins, and for an ADMIN it
+                    does NOT refuse, which would sell below the HQ floor. Either
+                    way the control must not be offerable. Without this the
+                    cashier quotes a price, takes the cash, and only then finds
+                    the sale cannot be saved. */}
+                {item.offer_price && item.offer_price < item.mrp ? (
+                  <span
+                    title="Already discounted by HQ (offer below MRP) — no further store discount"
+                    style={{
+                      minHeight: 32,
+                      padding: '0 10px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      borderRadius: 6,
+                      fontSize: 11,
+                      border: '1px solid var(--line)',
+                      background: 'var(--surface-2, #f4f4f2)',
+                      color: 'var(--ink-3)',
+                      cursor: 'not-allowed',
+                    }}
+                  >
+                    HQ offer — no discount
+                  </span>
+                ) : (
+                <button
+                  type="button"
+                  onClick={() => onOpenDiscount(item)}
+                  style={{
+                    minHeight: 32,
+                    padding: '0 10px',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    border: '1px solid var(--line)',
+                    background: 'var(--surface)',
+                    color: 'var(--ink-2)',
+                  }}
+                >
+                  {item.discount_percent > 0 ? `Discount ${item.discount_percent}%` : 'Discount'}
+                </button>
+                )}
+                {item.discount_percent > 0 && item.discount_reason && (
+                  <span style={{ fontSize: 11, color: 'var(--ink-3)' }} title={item.discount_reason}>
+                    {item.discount_reason.slice(0, 28)}
+                  </span>
+                )}
+              </div>
+            )}
             {/* PAIR LINKING (owner spec 4): one bill can carry several
                 Rx+frame PAIRS for the same customer. Shown only when the cart
                 actually holds more than one optical line — a single-pair sale

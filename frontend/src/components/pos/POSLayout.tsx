@@ -44,6 +44,7 @@ import { LensFittingFormModal } from './LensFittingFormModal';
 import type { LensFittingFormValue } from './LensFittingFormModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
+import { BillDiscountCard } from './BillDiscountCard';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
@@ -2330,7 +2331,8 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 // ============================================================================
 function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) => void }) {
   const store = usePOSStore();
-  const { user } = useAuth();
+  // `user` was only read by the bill-discount block, which now lives in
+  // BillDiscountCard (which reads the cap itself).
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
   // The store's numbers, not a second copy of the rule. `rates` maps a rate ->
@@ -2426,48 +2428,11 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
         </div>
       )}
 
-      {/* Phase 6.7 — Order-level discount. Stacks on top of per-item
-          discounts. Capped at the user's role discount cap. */}
-      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <label className="font-medium text-gray-900">Overall Discount</label>
-            <p className="text-xs text-gray-500">Applied to subtotal (after per-item discounts)</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              min={0}
-              max={user?.discountCap ?? 10}
-              step={0.5}
-              value={store.cart_discount_percent || 0}
-              onChange={(e) => {
-                const pct = Math.max(0, Math.min(user?.discountCap ?? 10, parseFloat(e.target.value) || 0));
-                store.setCartDiscount(pct);
-              }}
-              onFocus={(e) => e.target.select()}
-              className="w-20 px-2 py-1 border border-gray-300 rounded text-sm text-right text-gray-900"
-              placeholder="0"
-            />
-            <span className="text-sm text-gray-500">%</span>
-          </div>
-        </div>
-        {store.cart_discount_percent > 0 && (
-          <div className="pt-2 space-y-2 border-t border-gray-200">
-            <input
-              type="text"
-              value={store.cart_discount_reason || ''}
-              onChange={(e) => store.setCartDiscount(store.cart_discount_percent, e.target.value, store.cart_discount_approved_by || undefined)}
-              placeholder="Reason (loyal customer, damaged box, festival offer...)"
-              className="w-full px-2 py-1 border border-gray-300 rounded text-xs text-gray-900"
-            />
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-500">Max allowed: {user?.discountCap ?? 10}% (role cap)</span>
-              <span className="text-green-600 font-medium">-{fc(store.cart_discount_amount || 0)}</span>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Order-level discount. Stacks on top of per-item discounts and is
+          capped at the user's role cap. EXTRACTED to BillDiscountCard so the
+          new one-screen surfaces use the SAME control rather than growing a
+          second copy that could drift on caps or on the reason rule. */}
+      <BillDiscountCard />
 
       {/* Phase 6.7 — Delivery scheduling (all sale types, not just Rx orders).
           Stores collect pickup/delivery prefs at order time so Workshop + the

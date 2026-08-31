@@ -18,6 +18,41 @@ interface DiscountModalProps {
   initialReason?: string;
 }
 
+/** Map a POS cart line onto the modal's item shape.
+ *  ONE implementation: both the classic surface and the new one open the same
+ *  modal, and a second hand-rolled mapping is how the two would quietly start
+ *  passing different prices to the same cap check. */
+export function toDiscountItem(line: {
+  product_id: string;
+  name: string;
+  sku?: string;
+  unit_price: number;
+  quantity: number;
+  category?: string;
+  brand?: string;
+  discount_percent?: number;
+  discount_amount?: number;
+  offer_price?: number;
+}): CartItem {
+  return {
+    product_id: line.product_id,
+    // The modal renders `productName`. Writing `name` left the subtitle BLANK,
+    // so on a bill holding two same-priced frames nothing on screen said which
+    // line was being discounted - and the caps differ per brand.
+    productName: line.name,
+    name: line.name,
+    sku: line.sku,
+    unitPrice: line.unit_price,
+    quantity: line.quantity,
+    category: line.category,
+    brand: line.brand,
+    discountPercent: line.discount_percent,
+    // Without discountAmount the modal never renders "Remove discount".
+    discountAmount: line.discount_amount,
+    offerPrice: line.offer_price,
+  } as unknown as CartItem;
+}
+
 // Quick discount percentage options
 const QUICK_DISCOUNTS = [5, 10, 15, 20];
 
