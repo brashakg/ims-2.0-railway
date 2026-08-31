@@ -135,11 +135,14 @@ const POPUPS: ReadonlyArray<Popup> = [
  * these and forget to re-arm it.
  */
 const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string }> = [
-  {
-    name: 'pos add-customer',
-    widths: [390, 430],
-    why: 'The overlay is `fixed inset-0` but its containing block is `.pos-work` (689px tall at 390x844), not the viewport, while the panel is sized `max-h-[90dvh]` = 760px. Result: the modal header (with Close) and the Cancel / Create Customer row are cut off and unreachable. Screenshot-confirmed.',
-  },
+  // REMOVED: 'pos add-customer' at 390/430. It was recorded from a local run
+  // (overlay `fixed inset-0` whose containing block is `.pos-work`, 689px, while
+  // the panel is `max-h-[90dvh]` = 760px) but CI measures it CLEAN at all seven
+  // widths, and the gate said so rather than letting a stale entry sit here.
+  // The local finding is not dismissed - it is real and worth fixing - but a
+  // quarantine may only record what THIS suite observes, or it silently exempts
+  // a popup nothing is watching. With the entry gone this popup now blocks on
+  // any violation, which is the stronger position.
   {
     name: 'hr salary-config',
     widths: [768, 820],
