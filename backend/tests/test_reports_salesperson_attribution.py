@@ -26,13 +26,18 @@ os.environ.setdefault("MONGODB_URI", "")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from datetime import date, datetime, timedelta  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
 
 import api.routers.reports as reports  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 from strict_fakes import StrictDB  # noqa: E402
 
 STORE = "BV-TEST-01"
-TODAY = date.today()
+# BUG-104: the reports window on the IST BUSINESS DAY, so the fixture's "today"
+# must come from the IST clock too. `date.today()` is the box clock (UTC on CI),
+# which between 18:30 and 24:00 UTC names the PREVIOUS IST day - the seeded
+# orders would fall outside the window and the suite would fail only overnight.
+TODAY = ist_today()
 
 # Deliberately mirrors production: the seller has a full_name, the biller is the
 # SUPERADMIN whose only name is a username, and a retired account names nobody.
