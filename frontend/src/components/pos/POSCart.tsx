@@ -7,7 +7,7 @@
 // the app after Phase 1.6 POS re-skin.
 
 import { ShoppingCart, X } from 'lucide-react';
-import { usePOSStore } from '../../stores/posStore';
+import { usePOSStore, type CartLineItem } from '../../stores/posStore';
 
 /** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
     removed pair are reused, so labels stay small and stable. */
@@ -18,7 +18,16 @@ export function nextPairId(cart: { pair_id?: string }[]): string {
   return `Pair ${n}`;
 }
 
-export function CartSidebar() {
+/** `onOpenDiscount` is OPTIONAL on purpose. The classic surface opens the
+ *  discount modal from its review step, so it passes nothing and its cart is
+ *  byte-identical to before. The new one-screen surfaces have no review step -
+ *  the cart IS the review - so they pass a handler and each line grows a
+ *  Discount control. */
+export function CartSidebar({
+  onOpenDiscount,
+}: {
+  onOpenDiscount?: (line: CartLineItem) => void;
+} = {}) {
   const store = usePOSStore();
   const opticalCount = (store.cart || []).filter((i) => i.is_optical).length;
   const pairIds = Array.from(
@@ -211,6 +220,32 @@ export function CartSidebar() {
                 </span>
               </div>
             </div>
+            {onOpenDiscount && (
+              <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => onOpenDiscount(item)}
+                  style={{
+                    minHeight: 32,
+                    padding: '0 10px',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    border: '1px solid var(--line)',
+                    background: 'var(--surface)',
+                    color: 'var(--ink-2)',
+                  }}
+                >
+                  {item.discount_percent > 0 ? `Discount ${item.discount_percent}%` : 'Discount'}
+                </button>
+                {item.discount_percent > 0 && item.discount_reason && (
+                  <span style={{ fontSize: 11, color: 'var(--ink-3)' }} title={item.discount_reason}>
+                    {item.discount_reason.slice(0, 28)}
+                  </span>
+                )}
+              </div>
+            )}
             {/* PAIR LINKING (owner spec 4): one bill can carry several
                 Rx+frame PAIRS for the same customer. Shown only when the cart
                 actually holds more than one optical line — a single-pair sale

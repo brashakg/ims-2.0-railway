@@ -16,11 +16,13 @@
 import { useRef, useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
-import { usePOSStore } from '../../../stores/posStore';
+import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
+import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
+import { BillDiscountCard } from '../../../components/pos/BillDiscountCard';
 import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
@@ -44,6 +46,9 @@ export function BillingSurface() {
   const activeStoreId = user?.activeStoreId || store.store_id;
   const onlineStoreActive = useIsOnlineStore(activeStoreId);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // The cart line whose discount is being edited. The cart IS the review
+  // step on this surface, so the trigger lives on the line itself.
+  const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   // The finished sale, held so the completion screen can print and send
@@ -276,9 +281,13 @@ export function BillingSurface() {
           {/* ── RIGHT: cart + payment, always visible (430px per mockup) ── */}
           <div className="w-full lg:w-[430px] shrink-0 lg:min-h-0 flex flex-col lg:grid gap-3 lg:grid-rows-[minmax(0,1fr)_minmax(0,auto)_auto]">
             <div className="lg:min-h-0 lg:overflow-y-auto rounded-xl border border-gray-200 bg-white">
-              <CartSidebar />
+              <CartSidebar onOpenDiscount={setDiscountLine} />
             </div>
-            <div className="lg:min-h-0 lg:overflow-y-auto">
+            {/* Bill discount sits in the payment row rather than as a fourth
+                grid child - the row template is fixed at three, and a stray
+                child would auto-place and break the locked layout. */}
+            <div className="lg:min-h-0 lg:overflow-y-auto flex flex-col gap-3">
+              <BillDiscountCard />
               <StepPayment />
             </div>
             <button
@@ -309,6 +318,23 @@ export function BillingSurface() {
             setRxPickerOpen(false);
             setErrorMsg('Add a new prescription from the Clinical screen, then pick it here.');
           }}
+        />
+      )}
+
+      {/* Owner spec 3: item AND bill discounts together, each with a compulsory
+          reason when no offer applies, all under the role cap. The SAME modal
+          the classic surface opens - the cap check and the reason rule have one
+          implementation, not two. */}
+      {discountLine && (
+        <DiscountModal
+          item={toDiscountItem(discountLine)}
+          maxDiscountPercent={user?.discountCap ?? 10}
+          initialReason={discountLine.discount_reason || ''}
+          onApply={(pct, _amt, reason) => {
+            store.applyDiscount(discountLine.id, pct, reason);
+            setDiscountLine(null);
+          }}
+          onClose={() => setDiscountLine(null)}
         />
       )}
     </div>

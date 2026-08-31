@@ -32,12 +32,14 @@ import { useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, X, Package, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
-import { usePOSStore } from '../../../stores/posStore';
+import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
+import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
+import { BillDiscountCard } from '../../../components/pos/BillDiscountCard';
 import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
@@ -99,6 +101,9 @@ export function GeneralCounterSurface() {
   const activeStoreId = user?.activeStoreId || store.store_id;
   const onlineStoreActive = useIsOnlineStore(activeStoreId);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // The cart line whose discount is being edited. The cart IS the review
+  // step on this surface, so the trigger lives on the line itself.
+  const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
   const [homeDelivery, setHomeDelivery] = useState(false);
@@ -420,10 +425,11 @@ export function GeneralCounterSurface() {
                   counter is optical — CartSidebar renders them for optical
                   lines only, so the same component IS the plain cart. */}
               <div className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
-                <CartSidebar />
+                <CartSidebar onOpenDiscount={setDiscountLine} />
               </div>
 
-              <div className="min-h-0 overflow-y-auto">
+              <div className="min-h-0 overflow-y-auto flex flex-col gap-3">
+                <BillDiscountCard />
                 <StepPayment />
               </div>
 
@@ -480,6 +486,23 @@ export function GeneralCounterSurface() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Owner spec 3: item AND bill discounts together, each with a compulsory
+          reason when no offer applies, all under the role cap. The SAME modal
+          the classic surface opens - the cap check and the reason rule have one
+          implementation, not two. */}
+      {discountLine && (
+        <DiscountModal
+          item={toDiscountItem(discountLine)}
+          maxDiscountPercent={user?.discountCap ?? 10}
+          initialReason={discountLine.discount_reason || ''}
+          onApply={(pct, _amt, reason) => {
+            store.applyDiscount(discountLine.id, pct, reason);
+            setDiscountLine(null);
+          }}
+          onClose={() => setDiscountLine(null)}
+        />
       )}
     </div>
   );
