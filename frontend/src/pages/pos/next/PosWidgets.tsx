@@ -140,7 +140,7 @@ export function PosWidgets() {
       <Tile
         title="Outstanding &amp; dues"
         hint="Open this customer's account"
-        onClick={() => customerId && navigate(`/customers/360?id=${customerId}`)}
+        onClick={() => customerId && navigate(`/customers/${customerId}/360`)}
       >
         {!customerId ? (
           <Muted>Pick a customer to see dues</Muted>

@@ -22,20 +22,18 @@ import { AlertTriangle, X, PackageCheck } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { orderApi } from '../../../services/api/sales';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
+import type { Order } from '../../../types';
 
 const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
-interface LoadedOrder {
-  order_id: string;
-  order_number?: string;
-  customer_name?: string;
-  customer_phone?: string;
-  status?: string;
-  grand_total?: number;
-  balance_due?: number;
-  amount_paid?: number;
-  items?: Array<{ product_name?: string; quantity?: number }>;
-}
+// GET /orders/{id} runs order_to_frontend (backend orders.py:284), which RENAMES
+// the snake keys -- order_id -> id, balance_due -> balanceDue, status ->
+// orderStatus -- and the axios interceptor only ever adds camel aliases TO snake
+// keys, never the reverse (client.ts:337). So the wire shape here is camelCase.
+// Reuse the canonical Order type rather than restating its field names: a second
+// hand-written shape is exactly how the two halves drifted apart in the first
+// place. Partial<> because this screen only needs a handful of the fields.
+type LoadedOrder = Partial<Order> & { id: string };
 
 export function DeliverySurface() {
   const { user } = useAuth();
@@ -57,7 +55,7 @@ export function DeliverySurface() {
   const [method, setMethod] = useState<'CASH' | 'UPI' | 'CARD'>('CASH');
   const [approvalToken, setApprovalToken] = useState('');
 
-  const balance = Number(order?.balance_due || 0);
+  const balance = Number(order?.balanceDue || 0);
   const collectNum = Number(collect || 0);
   const shortfall = Math.max(0, Math.round((balance - collectNum) * 100) / 100);
 
@@ -79,16 +77,16 @@ export function DeliverySurface() {
         });
         const rows = list?.orders || list || [];
         doc = rows.find(
-          (o: any) => o.order_number === q || o.order_id === q,
+          (o: any) => o.orderNumber === q || o.id === q,
         );
       }
-      if (!doc?.order_id) {
+      if (!doc?.id) {
         setErrorMsg(`No order found for "${q}". Check the job card or order number.`);
         setOrder(null);
         return;
       }
       setOrder(doc);
-      setCollect(String(Math.max(0, Number(doc.balance_due || 0))));
+      setCollect(String(Math.max(0, Number(doc.balanceDue || 0))));
     } catch {
       setErrorMsg('Could not load that order. Try again.');
     }
@@ -112,7 +110,7 @@ export function DeliverySurface() {
       if (handoverNote.trim()) handover.notes = handoverNote.trim();
 
       await orderApi.deliverWithPayment(
-        order.order_id,
+        order.id,
         {
           payment: collectNum > 0 ? { method, amount: collectNum } : undefined,
           handover: Object.keys(handover).length ? (handover as any) : undefined,
@@ -122,7 +120,7 @@ export function DeliverySurface() {
       );
       idempotencyKeyRef.current = null;
       setOkMsg(
-        `Delivered — ${order.order_number || order.order_id}` +
+        `Delivered — ${order.orderNumber || order.id}` +
           (collectNum > 0 ? ` · collected ${money(collectNum)}` : '') +
           (shortfall > 0 ? ` · ${money(shortfall)} booked as outstanding` : ''),
       );
@@ -176,18 +174,18 @@ export function DeliverySurface() {
               <div className="flex items-baseline justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-gray-900 truncate">
-                    {order.customer_name || 'Customer'}
+                    {order.customerName || 'Customer'}
                   </div>
                   <div className="text-xs text-gray-500 truncate">
-                    {order.order_number || order.order_id} · {order.customer_phone || 'no phone'}
+                    {order.orderNumber || order.id} · {order.customerPhone || 'no phone'}
                   </div>
                 </div>
-                <span className="text-[11px] uppercase tracking-widest text-gray-500">{order.status}</span>
+                <span className="text-[11px] uppercase tracking-widest text-gray-500">{order.orderStatus}</span>
               </div>
               <ul className="mt-2 space-y-0.5">
                 {(order.items || []).slice(0, 4).map((it, i) => (
                   <li key={i} className="text-xs text-gray-600 truncate">
-                    {it.quantity ?? 1} × {it.product_name || 'Item'}
+                    {it.quantity ?? 1} × {it.productName || 'Item'}
                   </li>
                 ))}
               </ul>
@@ -239,7 +237,7 @@ export function DeliverySurface() {
             </div>
             {order && (
               <div className="mt-1 text-xs text-gray-500">
-                {money(Number(order.amount_paid || 0))} of {money(Number(order.grand_total || 0))} paid
+                {money(Number(order.amountPaid || 0))} of {money(Number(order.grandTotal || 0))} paid
               </div>
             )}
           </div>
