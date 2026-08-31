@@ -19,6 +19,8 @@ vi.mock('../../../context/AuthContext', () => ({
 import { usePOSStore } from '../../../stores/posStore';
 import { CartSidebar } from '../POSCart';
 import { BillDiscountCard } from '../BillDiscountCard';
+import { toDiscountItem } from '../DiscountModal';
+import { submitPosOrder } from '../submitOrder';
 
 const line = (id: string) => ({
   id,
@@ -82,6 +84,52 @@ describe('POS discount wiring', () => {
     });
     expect(screen.queryByText(/Required — at least 4 characters/)).toBeNull();
     expect(usePOSStore.getState().cart_discount_reason).toBe('festival offer');
+  });
+
+  // ── Findings from the money review ─────────────────────────────────────────
+
+  it('refuses to discount an item HQ has already discounted', () => {
+    // offer_price below MRP means HQ set the price. The order-create door
+    // refuses a further store discount with a 403 for non-admins, and does NOT
+    // refuse it for an ADMIN - which would sell below the HQ floor. Either way
+    // the control must not be offered, or the cashier quotes a price, takes the
+    // cash, and only then finds the sale cannot be saved.
+    usePOSStore.setState({
+      cart: [{ ...line('a'), mrp: 8990, unit_price: 7192, offer_price: 7192 } as any],
+    });
+    render(<CartSidebar onOpenDiscount={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /discount/i })).toBeNull();
+    expect(screen.getByText(/HQ offer/i)).toBeTruthy();
+  });
+
+  it('names the product in the discount modal payload', () => {
+    // The modal renders `productName`. The mapper used to write `name`, leaving
+    // the subtitle blank - on a bill with two same-priced frames nothing said
+    // which line was being discounted, and their caps differ by brand.
+    const mapped = toDiscountItem({ ...line('a'), name: 'Cartier Panthere' } as any) as any;
+    expect(mapped.productName).toBe('Cartier Panthere');
+  });
+
+  it('refuses an over-tender instead of saving an order with the cash missing', async () => {
+    // A discount applied AFTER the tender was entered leaves payments stale.
+    // Only under-payment used to be checked, so the order was created at the
+    // NEW lower total, the server refused every payment as "exceeds balance
+    // due", and the catch swallowed it: order fully outstanding, cash in the
+    // drawer, unexplained surplus at day-end.
+    usePOSStore.setState({
+      cart: [line('a')],
+      payments: [{ id: 'p1', method: 'CASH', amount: 10000 }] as any,
+      cart_discount_percent: 0,
+      cart_discount_amount: 0,
+    });
+    const store = usePOSStore.getState();
+    store.setCartDiscount(10, 'regular customer');
+    const after = usePOSStore.getState();
+    expect(after.getBalance()).toBeLessThan(0);
+
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-test');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/more than the bill total/i);
   });
 
   it('carries the reason through when the percent is edited afterwards', () => {

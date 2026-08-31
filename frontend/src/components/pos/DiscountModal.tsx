@@ -31,9 +31,15 @@ export function toDiscountItem(line: {
   category?: string;
   brand?: string;
   discount_percent?: number;
+  discount_amount?: number;
+  offer_price?: number;
 }): CartItem {
   return {
     product_id: line.product_id,
+    // The modal renders `productName`. Writing `name` left the subtitle BLANK,
+    // so on a bill holding two same-priced frames nothing on screen said which
+    // line was being discounted - and the caps differ per brand.
+    productName: line.name,
     name: line.name,
     sku: line.sku,
     unitPrice: line.unit_price,
@@ -41,6 +47,9 @@ export function toDiscountItem(line: {
     category: line.category,
     brand: line.brand,
     discountPercent: line.discount_percent,
+    // Without discountAmount the modal never renders "Remove discount".
+    discountAmount: line.discount_amount,
+    offerPrice: line.offer_price,
   } as unknown as CartItem;
 }
 
