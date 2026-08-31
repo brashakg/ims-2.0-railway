@@ -1313,26 +1313,6 @@
 /* Main column */
 .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .app-main > .page-body { flex: 1; min-height: 0; overflow: auto; }
-/* A page must be able to FILL its area. <main> and the page-transition wrapper
-   are auto-height blocks, so a screen asking for h-full/min-h-full had nothing
-   definite to stretch against: it stopped at its content height and left a
-   dead strip at the bottom (measured on /pos/new at 1180x820 - main 677px
-   inside a 716px page body). min-height, not height, so a page taller than the
-   area still grows and scrolls exactly as before. */
-.page-body > main { min-height: 100%; display: flex; flex-direction: column; }
-/* `flex: 1 0 auto` and not `min-height: 100%`: a percentage min-height cannot
-   resolve against a parent whose computed height is auto, so the wrapper kept
-   its content height (measured: main 716px, wrapper still 679px). Grow-but-
-   never-shrink means a page TALLER than the area is still never clipped. */
-.page-body > main > .ims-anim-page {
-  flex: 1 0 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-/* The page itself is the wrapper's only child; stretch it the same way so a
-   screen built as `h-full / flex-col` finally has something to fill. */
-.page-body > main > .ims-anim-page > * { flex: 1 0 auto; min-height: 0; }
 
 /* Top bar */
 .topbar {
