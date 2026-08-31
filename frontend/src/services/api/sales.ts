@@ -72,6 +72,32 @@ export const orderApi = {
     return response.data;
   },
 
+  // Collect the balance AND hand over in ONE counter action (owner spec 1:
+  // staff forget the second step, and the old deliver modal never even showed
+  // the balance). The backend DELEGATES to the same add_payment + deliver
+  // handlers, so every guard (over-tender, credit limit, QC gate, Rx hold,
+  // atomic claim, the credit-delivery manager gate) runs verbatim.
+  deliverWithPayment: async (
+    orderId: string,
+    body: {
+      payment?: { method: string; amount: number; reference?: string };
+      handover?: {
+        picked_up_by_name?: string;
+        picked_up_by_phone?: string;
+        fit_check_done?: boolean;
+        cleaned_and_cased?: boolean;
+        notes?: string;
+      };
+      approval_token?: string;
+    },
+    idempotencyKey?: string,
+  ) => {
+    const response = await api.post(`/orders/${orderId}/deliver-with-payment`, body, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    });
+    return response.data;
+  },
+
   // POS-11: the backend cancel endpoint reads `reason` as a query param
   // (reason: str = Query(..., min_length=10)), not from the request body.
   // Sending { reason } as a JSON body was silently ignored and the endpoint
