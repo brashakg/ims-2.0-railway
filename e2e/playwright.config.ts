@@ -38,7 +38,11 @@ if (/vercel\.app|railway\.app|bettervision\.in|wizopt|myshopify\.com/i.test(base
 /** Read-only specs: geometry probes that navigate and measure, nothing else.
  *  Name a new read-only spec `layout*.spec.ts` to land it in the parallel
  *  project; anything else falls into the serial one. */
-const READ_ONLY = /(^|[\/])layout[\w.-]*\.spec\.ts$/;
+// Read-only geometry specs: they navigate, open a popup and MEASURE. They
+// never write, so they can run many-at-once, unlike the specs that mutate
+// orders and store state. `popup-layout.spec.ts` belongs here too - it only
+// clicks openers that were vetted as non-destructive at discovery time.
+const READ_ONLY = /(^|[\/])(layout|popup)[\w.-]*\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './tests',
