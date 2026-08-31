@@ -1777,7 +1777,7 @@ export function InventoryPage() {
       {/* CSV Import Modal */}
       {showCSVImport && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl max-h-[80dvh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between p-5 border-b border-gray-200">
               <div className="flex items-center gap-3">
                 <Upload className="w-5 h-5 text-blue-600" />

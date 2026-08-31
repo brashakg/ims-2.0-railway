@@ -973,7 +973,7 @@ export default function ExpenseTracker() {
       {/* Add expense modal */}
       {showSubmitModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90dvh] overflow-y-auto">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Add expense</h2>
               <button onClick={() => setShowSubmitModal(false)} className="text-gray-500 hover:text-gray-700" aria-label="Close modal"><XIcon className="w-5 h-5" /></button>
@@ -1017,7 +1017,7 @@ export default function ExpenseTracker() {
           box, so a salary advance cannot be recorded here at all. */}
       {showAdvanceModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90dvh] overflow-y-auto">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Request an advance</h2>
               <button onClick={() => setShowAdvanceModal(false)} className="text-gray-500 hover:text-gray-700" aria-label="Close modal"><XIcon className="w-5 h-5" /></button>

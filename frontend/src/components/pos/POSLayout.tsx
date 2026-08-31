@@ -1081,7 +1081,7 @@ export function POSLayout() {
       )}
       {showNewPrescription && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90dvh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">New Prescription</h3>
               <button onClick={() => { setShowNewPrescription(false); setAxisPrompt(null); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded" aria-label="Close" title="Close"><X className="w-5 h-5" /></button>
@@ -1149,7 +1149,7 @@ export function POSLayout() {
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); }
           }}
         >
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto border border-gray-200">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90dvh] overflow-y-auto border border-gray-200">
             <div className="p-4 border-b border-gray-200 flex items-start gap-2">
               <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
               <div>
@@ -1311,7 +1311,7 @@ export function POSLayout() {
       )}
       {showRecallPanel && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[70dvh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">Held Bills ({getHeldBills().length})</h3>
               <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-100 rounded" aria-label="Close" title="Close"><X className="w-5 h-5" /></button>
@@ -2353,7 +2353,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       ) : viewMode === 'list' ? (
         /* COMPACT LIST VIEW */
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          <div className="divide-y divide-gray-100 max-h-[60vh] overflow-y-auto">
+          <div className="divide-y divide-gray-100 max-h-[60dvh] overflow-y-auto">
             {(products as any[]).map((product: any) => {
               const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
               const inCart = (store.cart || []).some(i => i.product_id === (product.product_id || product._id));

@@ -84,7 +84,7 @@ export function ImageLightbox({ images, startIndex = 0, alt, onClose }: ImageLig
         <img
           src={valid[index]}
           alt={alt || 'Product image'}
-          className="max-w-[92vw] max-h-[86vh] object-contain rounded-lg bg-white/5"
+          className="max-w-[92vw] max-h-[86dvh] object-contain rounded-lg bg-white/5"
         />
         <div className="text-white/80 text-sm flex items-center gap-3">
           {alt && <span className="truncate max-w-[60vw]">{alt}</span>}

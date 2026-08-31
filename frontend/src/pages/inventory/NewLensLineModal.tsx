@@ -165,7 +165,7 @@ export default function NewLensLineModal({ meta, onClose, onCreated }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90dvh] overflow-y-auto">
         <div className="flex items-center justify-between border-b border-line px-5 py-3 sticky top-0 bg-white z-10">
           <h2 className="text-base font-semibold text-ink flex items-center gap-2">
             <Plus className="w-4 h-4 text-bv" /> New lens line

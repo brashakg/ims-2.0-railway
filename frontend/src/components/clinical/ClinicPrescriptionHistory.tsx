@@ -738,7 +738,7 @@ export function ClinicPrescriptionHistory({
   // Panel mode: render inline (no scrim) so it can live inside a page tab.
   if (isPanel) {
     return (
-      <div className="card overflow-hidden flex flex-col max-h-[78vh]">
+      <div className="card overflow-hidden flex flex-col max-h-[78dvh]">
         {innerContent}
         {formOverlay}
       </div>
@@ -748,7 +748,7 @@ export function ClinicPrescriptionHistory({
   // Modal mode (default): the scrim + dialog overlay opened from a queue row.
   return (
     <div className="scrim modal-overlay">
-      <div className="dialog modal w-full max-w-3xl max-h-[92vh] flex flex-col">
+      <div className="dialog modal w-full max-w-3xl max-h-[92dvh] flex flex-col">
         {innerContent}
       </div>
       {formOverlay}

@@ -180,7 +180,7 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-      <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[92vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[92dvh] overflow-y-auto">
         <div className="p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
           <div className="flex items-center justify-between">
             <div>

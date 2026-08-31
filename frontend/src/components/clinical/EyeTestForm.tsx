@@ -294,7 +294,7 @@ export function EyeTestForm({
       />
     )}
     <div className="scrim modal-overlay">
-      <div className="dialog modal w-full max-w-6xl max-h-[95vh] flex flex-col">
+      <div className="dialog modal w-full max-w-6xl max-h-[95dvh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div className="flex items-center gap-4">

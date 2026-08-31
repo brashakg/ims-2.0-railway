@@ -275,7 +275,7 @@ export function SalarySetupPage() {
       {/* Create / Edit modal */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="card w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5">
+          <div className="card w-full max-w-2xl max-h-[90dvh] overflow-y-auto p-5">
             <h2 className="text-lg font-semibold mb-4">
               {editing ? `Edit salary — ${form.employee_id}` : 'Add salary config'}
             </h2>
