@@ -3352,10 +3352,16 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 
 /* ====== MOBILE BREAKPOINT (< 768px) ====== */
 @media (max-width: 767px), (max-height: 500px) and (orientation: landscape) {
-  /* 1. Collapse the left rail column from the grid */
+  /* 1. Collapse the left rail column from the grid.
+     ONE column, not `0 1fr`: at this width the rail is a POSITION:FIXED
+     drawer (rule 5 below), so it takes no grid cell — `main` is the only
+     in-flow child and auto-places into the FIRST column. With `0 1fr` that
+     first column is 0px and every page renders BLANK (regression 2026-08-31:
+     mobile.css used to override this to a single column as part of the
+     bottom-tab-bar block; deleting that block exposed it). */
   .app-shell {
     --rail-width: 0px;
-    grid-template-columns: 0 1fr;
+    grid-template-columns: 1fr;
   }
   .app-shell.rail-expanded { --rail-width: 0px; }
 
