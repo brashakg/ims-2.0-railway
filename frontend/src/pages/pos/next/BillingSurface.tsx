@@ -27,6 +27,7 @@ import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { PosWidgets } from './PosWidgets';
+import { CustomerSearchBar } from '../../../components/pos/CustomerSearchBar';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import {
   resolveBarcode,
@@ -162,14 +163,14 @@ export function BillingSurface() {
               {store.customer ? (
                 <CustomerCardWithLoyalty />
               ) : (
-                <div className="min-h-[64px] flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">No customer yet</div>
-                    <div className="text-xs text-gray-500">
-                      Every bill needs a customer — search by phone or name.
-                    </div>
+                <div>
+                  <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500 mb-1.5">
+                    Customer <span className="text-red-500">*</span>
                   </div>
-                  <span className="text-xs text-gray-400">Customer search lands next</span>
+                  <CustomerSearchBar store={store} />
+                  <div className="mt-1 text-[11px] text-gray-500">
+                    Every bill needs a customer — no anonymous sale on any counter.
+                  </div>
                 </div>
               )}
 

@@ -21,6 +21,7 @@ import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from 
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { submitPosOrder } from './submitOrder';
 import { SalespersonPicker } from './SalespersonPicker';
+import { selectCustomerHit } from './CustomerSearchBar';
 import { resolveBarcode, posPriceGuard, cartItemFromProduct } from './productIntake';
 import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, workshopApi } from '../../services/api';
@@ -1783,30 +1784,10 @@ function StepCustomer() {
                 );
               }}
               onSelect={(hit) => {
-                const c = hit.customer;
-                startTransition(() => {
-                  store.setCustomer({
-                    ...c,
-                    id: c.customer_id || c._id || c.id,
-                    name: c.name || c.customer_name || c.full_name || 'Customer',
-                    phone: c.phone || c.mobile || '',
-                  } as any);
-                  // BILL-TO-MEMBER P1: setCustomer resets patient to null. Set
-                  // the billed member AFTER.
-                  //  - a 'patient' hit IS a member -> bill to that member.
-                  //  - an 'account' hit -> default-select the account's Primary
-                  //    member so single-member accounts (the ~90% case) are one
-                  //    click; multi-member accounts still land on the Primary and
-                  //    the operator can switch via the member picker below.
-                  const cid = c.customer_id || c._id || c.id || '';
-                  if (hit.kind === 'patient' && hit.patient) {
-                    const p = hit.patient;
-                    store.setPatient(toPosPatient(p, cid) as any);
-                  } else {
-                    const primary = choosePrimaryPatient((c as any).patients);
-                    if (primary) store.setPatient(toPosPatient(primary, cid) as any);
-                  }
-                });
+                // BILL-TO-MEMBER P1 lives ONCE, in selectCustomerHit, so the
+                // classic and one-surface POS can never drift on which member
+                // an order bills to.
+                startTransition(() => selectCustomerHit(store, hit));
               }}
               getKey={(hit) => hit.key}
               placeholder="Search by phone number or name..."
