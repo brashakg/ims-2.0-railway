@@ -190,8 +190,13 @@ export function BillingSurface() {
         <div className="flex-1 lg:min-h-0 flex flex-col lg:flex-row gap-3.5 px-3.5 pb-3.5">
           {/* ── LEFT ── */}
           <div className="flex-1 min-w-0 flex flex-col gap-3 lg:min-h-0">
-            {/* Customer + Rx: the primary block */}
-            <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0">
+            {/* Customer + Rx: the primary block, and the one that TAKES THE
+                SLACK. The column used to hand its spare height to an empty
+                spacer purely to pin the widgets to the bottom, which read as a
+                dead band across the middle of the till. The widgets still sit
+                at the bottom - this card absorbs the same space - but now the
+                room goes to the thing the dispenser actually reads. */}
+            <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
               {store.customer ? (
                 <CustomerCardWithLoyalty />
               ) : (
@@ -206,32 +211,78 @@ export function BillingSurface() {
                 </div>
               )}
 
-              {/* ONE Rx behind a single selector bar (spec 11c) */}
+              {/* ONE Rx - the one billing uses - behind a single tap to change
+                  (spec 11c). It shows the FULL powers, not just sphere: a
+                  sphere-only line is unreadable as a prescription, and the
+                  dispenser has to open a modal to check the cylinder or the
+                  axis on every single bill. The column had dead space directly
+                  below this; the table uses it. */}
               {store.customer && (
                 <button
                   type="button"
                   onClick={() => setRxPickerOpen(true)}
-                  className="mt-2.5 w-full min-h-[44px] px-3 rounded-lg border border-gray-200 bg-white text-left flex items-center gap-3"
+                  className="mt-2.5 w-full rounded-lg border border-gray-200 bg-white text-left px-3 py-2.5 hover:bg-gray-50"
                 >
-                  <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500 shrink-0">
-                    Rx
-                  </span>
+                  <div className="flex items-center gap-3 min-h-[24px]">
+                    <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500 shrink-0">
+                      Rx
+                    </span>
+                    <span className="flex-1 min-w-0 text-sm truncate font-medium">
+                      {store.prescription
+                        ? store.patient?.name || store.customer?.name || 'On file'
+                        : ''}
+                    </span>
+                    <span className="text-xs text-blue-700 font-medium shrink-0">
+                      {store.prescription ? 'Change' : 'Choose or add'}
+                    </span>
+                  </div>
+
                   {store.prescription ? (
-                    <span className="flex-1 min-w-0 text-sm truncate">
-                      <span className="font-medium">
-                        {store.patient?.name || store.customer?.name || 'On file'}
-                      </span>
-                      <span className="text-gray-500">
-                        {' · '}R {store.prescription.rightEye?.sphere ?? '—'}
-                        {' / '}L {store.prescription.leftEye?.sphere ?? '—'}
-                      </span>
-                    </span>
+                    <table className="mt-2 w-full border-collapse tabular-nums">
+                      <thead>
+                        <tr>
+                          {['', 'SPH', 'CYL', 'AXIS', 'ADD', 'PD'].map((h) => (
+                            <th
+                              key={h}
+                              className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 text-right px-1.5 pb-1"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {([
+                          ['R', store.prescription.rightEye],
+                          ['L', store.prescription.leftEye],
+                        ] as const).map(([eye, p]) => (
+                          <tr key={eye} className="border-t border-gray-100">
+                            <td className="text-[11px] font-semibold text-gray-500 text-right px-1.5 py-1">
+                              {eye}
+                            </td>
+                            {/* A BLANK power is not the same as ZERO: plano is
+                                0.00 and must read as 0.00, while "not measured"
+                                must read as a dash. `?? '—'` keeps that apart -
+                                `|| '—'` would print a dash for a real 0. */}
+                            {[p?.sphere, p?.cylinder, p?.axis, p?.add, p?.pd].map(
+                              (v, i) => (
+                                <td
+                                  key={i}
+                                  className="text-xs text-gray-900 text-right px-1.5 py-1"
+                                >
+                                  {v ?? '—'}
+                                </td>
+                              ),
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   ) : (
-                    <span className="flex-1 text-sm text-gray-500">
+                    <div className="mt-1 text-sm text-gray-500">
                       No prescription selected — tap to choose or add
-                    </span>
+                    </div>
                   )}
-                  <span className="text-xs text-blue-700 font-medium shrink-0">Change</span>
                 </button>
               )}
             </div>
@@ -263,9 +314,9 @@ export function BillingSurface() {
               <DeliveryOptionsRow />
             </div>
 
-            {/* Breathing room on a locked screen; on a phone the column
-                simply flows, so no filler is inserted. */}
-            <div className="hidden lg:block flex-1 min-h-0" />
+            {/* No spacer any more - the customer + Rx card above grows into the
+                slack instead, so the widgets stay pinned to the bottom without
+                a band of dead air above them. */}
 
             {/* Bottom 2x2 widgets (owner spec 8) */}
             <div className="shrink-0">
