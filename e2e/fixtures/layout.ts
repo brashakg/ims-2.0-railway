@@ -153,7 +153,18 @@ export async function auditLayout(
       let reachable = false; // some ancestor can be scrolled to reveal it
       let inHScroller = false; // legitimately scrolls sideways (wide table)
       let n: Element | null = el.parentElement;
-      while (n) {
+      // Stop at the audit root, exactly as isFloating does. Walking past it
+      // borrowed clippers the element does not actually obey: a position:fixed
+      // popup is clipped only by ancestors in its CONTAINING-BLOCK chain, not
+      // by every overflow ancestor above it. Measured on the POS add-customer
+      // modal at 390x844 -- a Cancel button visible at y=720..756 was clipped
+      // to nothing by a `.pos-scroll` (193..680) that sits BELOW the overlay's
+      // containing block and therefore never clips it, and was reported
+      // "unreachable". Verdicts happened to survive (the containing-block
+      // ancestor was clipping too, so the answer was right for the wrong
+      // reason) but the detail text was a lie, and a full-height drawer whose
+      // containing block IS the viewport would have failed outright.
+      while (n && n !== root) {
         const cs = getComputedStyle(n);
         const clipsX = cs.overflowX !== 'visible';
         const clipsY = cs.overflowY !== 'visible';
