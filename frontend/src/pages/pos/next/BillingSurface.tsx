@@ -26,6 +26,7 @@ import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
+import { PosWidgets } from './PosWidgets';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import {
   resolveBarcode,
@@ -209,6 +210,14 @@ export function BillingSurface() {
               {store.is_processing ? 'Saving…' : 'Complete sale'}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Owner-picked widget strip (spec 8). Fixed height inside the locked
+          viewport so it can never push the register into a page scroll. */}
+      {!isComplete && (
+        <div className="px-3 pb-3 shrink-0">
+          <PosWidgets />
         </div>
       )}
 
