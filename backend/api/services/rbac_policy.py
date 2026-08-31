@@ -5006,6 +5006,11 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/orders/{order_id}/invoice",
         "allowed": "AUTHENTICATED",
     },
+    {
+        "method": "GET",
+        "path": "/api/v1/orders/{order_id}/invoice.pdf",
+        "allowed": "AUTHENTICATED",
+    },
     # #16: SUPERADMIN-only post-creation order/invoice edit. Catalogued
     # AUTHENTICATED here; the real gate is the in-function _require_superadmin
     # in orders.py (same pattern as cancel_order) -- keep the two in sync.
