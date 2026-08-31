@@ -57,55 +57,21 @@
      (bottom-bar / hamburger drawer) untouched. */
   .top-nav { display: none; }
 
-  /* Rail → bottom tab bar */
-  .app-shell {
-    display: grid;
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
-    height: 100vh; height: 100dvh;
-  }
-  .rail {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-around;
-    padding: 0 4px;
-    height: 60px;
-    border-top: 1px solid #2a2a28;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    grid-row: 2;
-  }
-  .rail::-webkit-scrollbar { display: none; }
-  .rail .brand,
-  .rail .rail-sep,
-  .rail .rail-spacer,
-  .rail .rail-avatar { display: none; } /* avatar moves to topbar */
-  .rail .rail-item {
-    flex: 1 0 56px; min-width: 56px; height: 48px; margin: 0;
-    border-radius: 8px;
-    flex-direction: column; gap: 3px;
-  }
-  .rail .rail-item.active::before {
-    left: 50%; top: -4px; bottom: auto; transform: translateX(-50%);
-    width: 24px; height: 3px; border-radius: 0 0 2px 2px;
-  }
-  .rail .rail-item::after {
-    content: attr(title);
-    font: 500 9.5px/1 var(--font-sans);
-    color: inherit;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-  /* Hide less-used items on phone — keep top 5: Hub, POS, Clinical, Tasks, Inventory */
-  .rail .rail-item[title="Reports"],
-  .rail .rail-item[title="Print"],
-  .rail .rail-item[title="Jarvis"],
-  .rail .rail-item[title="Store Setup"] {
-    display: none;
-  }
+  /* The BOTTOM TAB BAR is gone. The rail is now ONLY the hamburger DRAWER on
+     phones (desktop + tablet use the top menu), and its drawer styling lives
+     in index.css's ≤767 block. The tab-bar rules that used to sit here were
+     actively breaking that drawer and are deleted:
+       · .rail-item::after { content: attr(title) } printed EVERY label twice
+         ("Hub Hub") on top of the real .rail-label span;
+       · .rail-item[title="Reports"|"Print"|"Jarvis"|"Store Setup"]
+         { display: none } made those screens UNREACHABLE on a phone — they
+         were hidden to fit five icons into a tab bar that no longer exists;
+       · .active::before was positioned as a tab-bar underline and rendered as
+         a stray red dash floating above the active row.
+     Do not reintroduce them: check index.css `.rail.rail-mobile-open` first. */
 
-  /* Main column scrolls; rail is fixed at bottom via grid */
-  .main { grid-row: 1; min-height: 0; overflow: hidden; }
+  /* Main column scrolls; the drawer overlays it. */
+  .main { min-height: 0; overflow: hidden; }
 
   /* Top bar: simplified */
   .topbar {
@@ -321,7 +287,6 @@
 
 /* ─────────────────── Very small phones (≤ 360) ─────────────────── */
 @media (max-width: 360px) {
-  .rail .rail-item { min-width: 50px; flex: 1 0 50px; }
   .hub-hero h1 { font-size: 32px !important; }
   .topbar { padding: 0 8px; }
 }
