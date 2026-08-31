@@ -141,7 +141,7 @@ export function DeliverySurface() {
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col overflow-hidden bg-gray-50">
+    <div className="min-h-full lg:h-full lg:min-h-0 flex flex-col overflow-y-auto lg:overflow-hidden bg-gray-50">
       {(errorMsg || okMsg) && (
         <div
           className={
@@ -159,9 +159,9 @@ export function DeliverySurface() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 flex gap-3.5 p-3.5">
+      <div className="flex-1 lg:min-h-0 flex flex-col lg:flex-row gap-3.5 p-3.5">
         {/* LEFT: find the order + handover checks */}
-        <div className="flex-1 min-w-0 flex flex-col gap-3">
+        <div className="flex-1 min-w-0 flex flex-col gap-3 lg:min-h-0">
           <div className="shrink-0">
             <BarcodeScanner
               onScan={findOrder}
@@ -229,7 +229,7 @@ export function DeliverySurface() {
         </div>
 
         {/* RIGHT: money + hand over */}
-        <div className="w-[430px] shrink-0 min-h-0 flex flex-col gap-3">
+        <div className="w-full lg:w-[430px] shrink-0 lg:min-h-0 flex flex-col gap-3">
           <div className="rounded-xl border border-gray-200 bg-white p-4 shrink-0">
             <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">
               Balance due
@@ -290,7 +290,7 @@ export function DeliverySurface() {
             </div>
           )}
 
-          <div className="flex-1 min-h-0" />
+          <div className="hidden lg:block flex-1 min-h-0" />
 
           <button
             type="button"
