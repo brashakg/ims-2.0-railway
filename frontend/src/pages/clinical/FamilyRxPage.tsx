@@ -7,8 +7,9 @@
 // legacy/imported Rx whose patient isn't on the account land in "Unlinked
 // patient". Presentation only — reads GET /prescriptions/family/{customer_id}.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Users,
   User,
@@ -212,6 +213,13 @@ export function FamilyRxPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedCustomerName, setSelectedCustomerName] = useState<string>('');
+  // Deep link: /clinical/family-rx?customer=<id>. The POS "Family Rx" widget
+  // taps through with the customer already chosen on the bill, so making the
+  // cashier search for them a second time is the bug this closes. The name is
+  // left blank on purpose - getFamilyRx returns customer_name, and the header
+  // already prefers the server's value over this fallback.
+  const [searchParams] = useSearchParams();
+  const deepLinkCustomerId = searchParams.get('customer') || '';
 
   const loadFamily = async (customerId: string, fallbackName: string) => {
     if (!customerId) return;
@@ -230,6 +238,12 @@ export function FamilyRxPage() {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (deepLinkCustomerId) void loadFamily(deepLinkCustomerId, '');
+    // loadFamily is re-created every render; the id is the only real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkCustomerId]);
 
   return (
     <div className="space-y-4">
