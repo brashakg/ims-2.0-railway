@@ -671,6 +671,46 @@ class PaymentCreate(BaseModel):
         super().__init__(**data)
 
 
+def effective_line_discount_pct(
+    discount_percent: float, unit_price: float, mrp: float
+) -> float:
+    """How much a line is REALLY discounted, in percent of MRP.
+
+    An explicit ``discount_percent`` is not the whole story: a line can also
+    arrive already marked down, with unit_price below MRP and no percent set.
+    The cap has to see the larger of the two or it is trivially side-stepped by
+    editing the price instead of the percent.
+
+    ONE implementation, used by the per-line cap AND by the stacking cap below.
+    Two copies of this is how the two checks would start disagreeing about what
+    "discounted" means.
+    """
+    try:
+        pct = float(discount_percent or 0.0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    try:
+        up = float(unit_price or 0.0)
+        m = float(mrp or 0.0)
+    except (TypeError, ValueError):
+        return pct
+    if m > 0 and up < m - 1e-6:
+        pct = max(pct, (m - up) / m * 100.0)
+    return pct
+
+
+def combined_discount_pct(line_pct: float, cart_pct: float) -> float:
+    """Total discount a line actually carries once the BILL discount lands too.
+
+    The bill discount applies on top of the already-discounted line, so the two
+    MULTIPLY -- they do not add. 10% and 10% is 19%, not 20%. Capping each term
+    separately (which is what the two checks did before) let a 10%-capped user
+    reach 19%, and a 2%-capped Cartier line reach 3.96%.
+    """
+    keep = (1.0 - max(0.0, line_pct) / 100.0) * (1.0 - max(0.0, cart_pct) / 100.0)
+    return (1.0 - keep) * 100.0
+
+
 class SalespersonSplit(BaseModel):
     """One share of a two-way sales credit (owner spec 13, default 50/50).
 
@@ -2281,8 +2321,9 @@ async def create_order(
                     )
                 # Effective discount for the cap check (max of explicit + implied).
                 if _mrp and _up < _mrp - 1e-6:
-                    _implied = (_mrp - _up) / _mrp * 100.0
-                    _eff_disc = max(item.discount_percent, _implied)
+                    _eff_disc = effective_line_discount_pct(
+                        item.discount_percent, _up, _mrp
+                    )
                 from api.services.loyalty_engine import implied_ceiling_discount
 
                 _loyalty_eff = max(
@@ -2612,12 +2653,45 @@ async def create_order(
                 except Exception:
                     _prod = None
                 if _prod:
-                    cart_cap = min(
-                        cart_cap,
+                    _this_cap = min(
+                        user_discount_cap,
                         _line_discount_cap(
                             _prod.get("discount_category"), _prod.get("brand")
                         ),
                     )
+                    cart_cap = min(cart_cap, _this_cap)
+
+                    # STACKING CAP. The line cap and the cart cap were checked
+                    # INDEPENDENTLY and never against their product, so both
+                    # could sit exactly at the ceiling and the customer still
+                    # walked out with roughly twice it: 10% + 10% = 19% under a
+                    # 10% cap, and 2% + 2% = 3.96% on a Cartier line whose brand
+                    # cap is 2%. Proven with a 201 from this very route.
+                    #
+                    # A cap that two controls can each satisfy while their
+                    # product breaks it is not a cap. The bill discount lands on
+                    # an already-discounted line, so the terms MULTIPLY.
+                    _line_eff = effective_line_discount_pct(
+                        getattr(_it, "discount_percent", 0) or 0,
+                        getattr(_it, "unit_price", 0) or 0,
+                        _mrp_by_pid.get(_pid) or 0,
+                    )
+                    _combined = combined_discount_pct(
+                        _line_eff, cart_discount_percent
+                    )
+                    if _combined > _this_cap + 1e-9:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=(
+                                f"{getattr(_it, 'product_name', None) or _pid}: "
+                                f"a {_line_eff:.2f}% item discount and a "
+                                f"{cart_discount_percent}% bill discount together "
+                                f"come to {_combined:.2f}%, over the "
+                                f"{_this_cap}% allowed for this item "
+                                f"(role + category/brand caps). Lower one of "
+                                f"them, or get a manager's approval."
+                            ),
+                        )
             if cart_discount_percent > cart_cap + 1e-9:
                 raise HTTPException(
                     status_code=403,
