@@ -27,6 +27,7 @@ from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
+from ..services.name_resolver import order_actor_id, order_actor_name_map
 
 router = APIRouter()
 
@@ -172,6 +173,10 @@ async def discount_analysis(
     staff_map: dict = {}
     excessive: list = []
 
+    # ONE users read for the whole batch (never N+1); the credited-actor
+    # rule itself lives in name_resolver so this roster cannot drift from
+    # the staff reports or the commission screens.
+    _actor_names = order_actor_name_map(db, orders)
     for o in orders:
         disc_amt = float(o.get("discount_amount", 0) or 0)
         total_amt = float(o.get("total_amount", 0) or o.get("grand_total", 0) or 0)
@@ -183,8 +188,8 @@ async def discount_analysis(
         if disc_amt > 0:
             discount_pcts.append(disc_pct)
 
-        staff_id = o.get("sales_staff_id") or o.get("created_by") or "unknown"
-        staff_name = o.get("sales_staff_name") or o.get("created_by_name") or staff_id
+        staff_id = order_actor_id(o)
+        staff_name = _actor_names.get(staff_id) or staff_id
         if staff_id not in staff_map:
             staff_map[staff_id] = {
                 "name": staff_name,
@@ -956,9 +961,13 @@ async def staff_leaderboard(
     )
 
     staff_stats: dict = {}
+    # ONE users read for the whole batch (never N+1); the credited-actor
+    # rule itself lives in name_resolver so this roster cannot drift from
+    # the staff reports or the commission screens.
+    _actor_names = order_actor_name_map(db, orders)
     for o in orders:
-        sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
-        sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+        sid = order_actor_id(o)
+        sname = _actor_names.get(sid) or sid
         if sid not in staff_stats:
             staff_stats[sid] = {
                 "name": sname,
@@ -1203,9 +1212,13 @@ async def anomaly_detection(
     staff_discounts: dict = {}
     daily_orders: dict = {}
 
+    # ONE users read for the whole batch (never N+1); the credited-actor
+    # rule itself lives in name_resolver so this roster cannot drift from
+    # the staff reports or the commission screens.
+    _actor_names = order_actor_name_map(db, orders)
     for o in orders:
-        sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
-        sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+        sid = order_actor_id(o)
+        sname = _actor_names.get(sid) or sid
         status = (o.get("status", "") or "").lower()
         oid = o.get("order_id", str(o.get("_id", "")))
         # BUG-104, VALUE rule (+5:30). This is BOTH the "same day" grouping key

@@ -35,6 +35,7 @@ from ..dependencies import (
     get_db,
     validate_store_access,
 )
+from ..services.name_resolver import order_actor_id, order_actor_name_map
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ..services import cash_denominations as cash_denom
 from ..services import eod_tally as till_service
@@ -785,11 +786,16 @@ async def sales_by_salesperson(
         limit=0,
     )
 
-    # Group by salesperson
+    # Group by salesperson. The credit rule and the name lookup are shared with
+    # /staff/ranking below -- this report used to read `sales_person_id`, a key
+    # an order has never carried (it is the walkouts spelling), so it fell
+    # straight through to created_by and credited every sale to the biller,
+    # then printed that raw user id as the "name".
+    names = order_actor_name_map(get_db(), orders)
     by_person = {}
     for order in orders:
-        person = order.get("sales_person_id") or order.get("created_by") or "Unknown"
-        person_name = order.get("sales_person_name", person)
+        person = order_actor_id(order)
+        person_name = names.get(person) or person
         if person not in by_person:
             by_person[person] = {
                 "id": person,
@@ -1860,10 +1866,14 @@ async def staff_ranking(
         end_dt=to_dt,
     )
 
+    # Same credit rule + name lookup as /sales/by-salesperson above (shared, not
+    # copied -- two rosters that disagree on who sold is the defect this pair
+    # already shipped once).
+    names = order_actor_name_map(get_db(), orders)
     staff_data = {}
     for order in orders:
-        staff_id = order.get("sales_person_id") or order.get("created_by") or "Unknown"
-        staff_name = order.get("sales_person_name", staff_id)
+        staff_id = order_actor_id(order)
+        staff_name = names.get(staff_id) or staff_id
         if staff_id not in staff_data:
             staff_data[staff_id] = {
                 "staff_id": staff_id,

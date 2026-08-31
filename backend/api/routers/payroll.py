@@ -24,6 +24,7 @@ from ..dependencies import (
     can_access_store_scoped,
 )
 from ..utils.ist import now_ist, ist_day_start_utc, ist_date_str, ist_month_window_utc
+from ..services.name_resolver import order_actor_id, order_actor_name_map
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
@@ -2199,18 +2200,28 @@ async def get_commission_summary(
         if active_store:
             order_query["store_id"] = active_store
         if employee_id:
+            # Mongo cannot express the credited-actor PRECEDENCE without
+            # restating it, and a second copy of that rule is exactly the defect
+            # this sweep removes. So the query is a deliberate SUPERSET (any
+            # field naming the employee, indexable) and order_actor_id below is
+            # the single authority on which of them actually wins.
             order_query["$or"] = [
-                {"sales_staff_id": employee_id},
+                {"salesperson_id": employee_id},
+                {"sales_person_id": employee_id},
                 {"created_by": employee_id},
             ]
 
         orders = list(db.get_collection("orders").find(order_query).limit(50000))
+        if employee_id:
+            # Apply the canonical precedence the superset query could not.
+            orders = [o for o in orders if order_actor_id(o) == employee_id]
 
         # Aggregate by staff.
         staff_map: dict = {}
+        _actor_names = order_actor_name_map(db, orders)
         for o in orders:
-            sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
-            sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+            sid = order_actor_id(o)
+            sname = _actor_names.get(sid) or sid
             store = o.get("store_id", "")
             if sid not in staff_map:
                 staff_map[sid] = {
@@ -2328,9 +2339,10 @@ async def get_commission_leaderboard(
         orders = list(db.get_collection("orders").find(query).limit(50000))
 
         staff_map: dict = {}
+        _actor_names = order_actor_name_map(db, orders)
         for o in orders:
-            sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
-            sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+            sid = order_actor_id(o)
+            sname = _actor_names.get(sid) or sid
             if sid not in staff_map:
                 staff_map[sid] = {"name": sname, "sales_count": 0, "revenue": 0.0}
             staff_map[sid]["sales_count"] += 1
