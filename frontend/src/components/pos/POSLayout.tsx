@@ -18,10 +18,11 @@ import { useAuth } from '../../context/AuthContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { usePOSStore } from '../../stores/posStore';
 import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from '../../utils/categoryNormalize';
-import type { SaleType, POSStep, CartLineItem, CashTenderCapture } from '../../stores/posStore';
-import { buildPaymentBody } from './paymentBody';
+import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
+import { submitPosOrder } from './submitOrder';
+import { resolveBarcode, posPriceGuard, cartItemFromProduct } from './productIntake';
 import { useProducts } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi, loyaltyApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // POS Rx auto-attach (clinic initiative C5-A): owner-gated convenience. When the
@@ -133,19 +134,6 @@ function buildCondensedGroups(saleType: SaleType): FlowGroup[] {
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
   return `\u20B9${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
-}
-
-function mapCategory(cat: string): string {
-  // item_type vocabulary for the order payload (drives backend GST item_type-
-  // wins). Canonicalise the input first so EVERY category spelling (short code,
-  // plural, canonical) resolves; outputs are unchanged from the legacy map.
-  const canonical = canonicalCategory(cat);
-  const map: Record<string, string> = {
-    FRAME: 'FRAME', SUNGLASS: 'SUNGLASS', OPTICAL_LENS: 'LENS',
-    CONTACT_LENS: 'CONTACT_LENS', COLORED_CONTACT_LENS: 'CONTACT_LENS',
-    ACCESSORIES: 'ACCESSORY', WATCH: 'WATCH', SMARTWATCH: 'SMARTWATCH', SERVICES: 'SERVICE',
-  };
-  return map[canonical] || canonical || cat;
 }
 
 // Roles the backend actually lets create a prescription. MIRROR of the
@@ -597,22 +585,6 @@ export function POSLayout() {
 
   async function handleCreateOrder() {
     if (store.is_processing) return;
-
-    if (store.sale_type === 'prescription_order') {
-      const hasLens = (store.cart || []).some(i =>
-        canonicalCategory(i.category) === 'OPTICAL_LENS' || i.lens_details || i.is_optical
-      );
-      if (!hasLens) {
-        setErrorMsg('Prescription order requires at least one lens item. Add lenses or switch to Quick Sale.');
-        return;
-      }
-    }
-
-    if (store.getBalance() > 0.01 && !store.is_advance_payment) {
-      setErrorMsg('Payment incomplete. Add payments or enable "Advance payment only".');
-      return;
-    }
-
     setErrorMsg(null);
     store.setProcessing(true);
     // C-5: mint a key for this attempt if one isn't already in flight. A
@@ -625,153 +597,23 @@ export function POSLayout() {
           : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
     try {
-      const result = await orderApi.createOrder({
-        customer_id: store.customer?.id,
-        // BILL-TO-MEMBER P1: send the selected member so the order bills to a
-        // member, not the bare account. Omitted for walk-ins (the backend
-        // synthesizes a Primary for the synthetic account).
-        patient_id: store.patient?.id || undefined,
-        store_id: store.store_id,
-        order_type: store.sale_type,
-        salesperson_id: store.salesperson_id,
-        salesperson_name: store.salesperson_name,
-        visufit_id: store.visufit_id || undefined,
-        items: (store.cart || []).map(item => ({
-          item_type: mapCategory(item.category),
-          product_id: item.product_id,
-          product_name: item.name,
-          sku: item.sku,
-          brand: item.brand,
-          subbrand: item.subbrand,
-          category: item.category,
-          quantity: item.quantity,
-          unit_price: item.unit_price,
-          discount_percent: item.discount_percent,
-          discount_reason: item.discount_reason || undefined,
-          prescription_id: item.linked_prescription_id,
-          lens_details: item.lens_details,
-          item_note: item.item_note || undefined,
-        })),
-        notes: store.cart_note || undefined,
-        // Phase 6.7 — pass delivery + cart-discount fields through to backend
-        delivery_date: store.delivery_date || undefined,
-        delivery_time_slot: store.delivery_time_slot || undefined,
-        delivery_priority: store.delivery_priority || 'NORMAL',
-        cart_discount_percent: store.cart_discount_percent || 0,
-        cart_discount_amount: store.cart_discount_amount || 0,
-        cart_discount_reason: store.cart_discount_reason || undefined,
-        cart_discount_approved_by: store.cart_discount_approved_by || undefined,
-      } as any, idempotencyKeyRef.current || undefined);
-      if (result?.order_id) {
-        // C-5: success -> drop the key so the next order gets a fresh one.
-        idempotencyKeyRef.current = null;
-
-        // POS-3: loyalty points are only atomically debited AFTER the order
-        // is confirmed. Call /loyalty/redeem now with the real order_id so
-        // the ledger is linked. Fail-soft: if the redeem call fails the order
-        // is still finalized (staff can adjust manually); the pending intent
-        // is cleared regardless.
-        const pendingLoyalty = store.pendingLoyaltyRedeem;
-        if (pendingLoyalty && store.customer?.id) {
-          try {
-            await loyaltyApi.redeem({
-              customer_id: String(store.customer.id),
-              order_id: result.order_id,
-              points: pendingLoyalty.points,
-              order_value: pendingLoyalty.orderValue,
-            });
-          } catch {
-            // Non-fatal: order is created. Log for ops visibility.
-            // eslint-disable-next-line no-console
-            console.warn('[POS] Deferred loyalty redeem failed — points NOT debited; order still saved.');
-          }
-          store.clearPendingLoyaltyRedeem();
-        }
-
-        // The optional cash-accountability capture attaches to the FIRST cash
-        // leg only — the customer handed one wad over once; attaching it to a
-        // second cash leg would double the note-by-note ledger.
-        let cashCapture: CashTenderCapture | null = store.cash_tender;
-        for (const p of (store.payments || [])) {
-          // Skip the LOYALTY tender — it is a UI-only line that tracks the
-          // rupee value of the deferred redeem; the actual ledger entry was
-          // created by /loyalty/redeem above (or skipped on failure).
-          if (p.method === 'LOYALTY') continue;
-          try {
-            const body = buildPaymentBody(p, p.method === 'CASH' ? cashCapture : null);
-            if (p.method === 'CASH') cashCapture = null;
-            await orderApi.addPayment(result.order_id, body as any);
-          } catch {
-            // Don't block order — payment can be recorded later
-          }
-        }
-        store.setCashTender(null);
-        store.setOrderResult(result.order_id, result.order_number);
-
-        // Phase 6.8 — auto-create workshop job + prompt sales to fill
-        // fitting details. Only fires for Rx orders that actually ship a
-        // lens. Earlier code matched category==='RX_LENSES' which never
-        // matched the real catalog (categories are OPTICAL_LENS /
-        // SPECTACLE_LENS). We also no longer silently swallow errors.
-        const cartItems = store.cart || [];
-        const frameItem = cartItems.find(i => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category)));
-        const lensItem = cartItems.find(
-          i => canonicalCategory(i.category) === 'OPTICAL_LENS' || !!i.lens_details,
-        );
-        if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
-          try {
-            const expectedDate = new Date();
-            expectedDate.setDate(expectedDate.getDate() + 5);
-            const jobResp = await workshopApi.createJob({
-              order_id: result.order_id,
-              frame_details: frameItem ? {
-                product_id: frameItem.product_id,
-                name: frameItem.name,
-                sku: frameItem.sku,
-                brand: frameItem.brand,
-              } : {},
-              lens_details: lensItem?.lens_details || {
-                product_id: lensItem?.product_id,
-                name: lensItem?.name,
-              },
-              prescription_id: store.prescription.id || '',
-              fitting_instructions: cartItems
-                .filter(i => i.item_note)
-                .map(i => `${i.name}: ${i.item_note}`)
-                .join('; ') || undefined,
-              special_notes: store.cart_note || undefined,
-              expected_date: expectedDate.toISOString().split('T')[0],
-            });
-            // Open fitting-details modal with the new jobId — Complete step
-            // is advanced from the modal's onSave / onBack handlers.
-            if (jobResp?.job_id) {
-              setFittingJobId(jobResp.job_id);
-              setFittingCoating(
-                (lensItem?.lens_details?.coatings || []).join(', ') || '',
-              );
-              // Keep the POS in its current step; the modal overlays above
-              // and advances to 'complete' when resolved. Processing flag
-              // already turned off in `finally` below.
-              return;
-            }
-          } catch (e) {
-            // Non-fatal — the order IS created. Surface a warning so staff
-            // can manually create the workshop job / call IT if necessary.
-            // eslint-disable-next-line no-console
-            console.warn('[POS] Workshop job auto-create failed:', e);
-            setErrorMsg(
-              'Order saved, but workshop job auto-create failed — please add it manually from the Workshop page.',
-            );
-          }
-        }
-
-        store.setStep('complete');
-      } else {
-        setErrorMsg('Order created but no ID returned. Check order list.');
+      // ONE submit brain shared with the new one-surface POS (submitOrder.ts)
+      // — payload assembly, deferred loyalty redeem, tender recording and the
+      // workshop auto-create all live there. Never re-inline them here.
+      const res = await submitPosOrder(store, idempotencyKeyRef.current);
+      if (!res.ok) {
+        setErrorMsg(res.error || 'Failed to create order');
+        return;
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg('Failed to create order: ' + (msg || 'Network error'));
+      // C-5: success -> drop the key so the next order gets a fresh one.
+      idempotencyKeyRef.current = null;
+      if (res.warning) setErrorMsg(res.warning);
+      if (res.fittingJobId) {
+        setFittingJobId(res.fittingJobId);
+        setFittingCoating(res.fittingCoating || '');
+        // Keep the POS in its current step; the modal overlays above and
+        // advances to 'complete' when resolved.
+      }
     } finally {
       store.setProcessing(false);
     }
@@ -2379,49 +2221,15 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const categories = CATEGORY_BROWSE_OPTIONS.filter(o => POS_CHIP_VALUES.includes(o.value));
 
   const handleBarcodeScan = async (barcode: string) => {
-    const code = (barcode || '').trim();
-    if (!code) return;
-    // Resolve the EXACT physical unit by its intake barcode (GET
-    // /inventory/barcode/{code}), scoped to the active store. This is the real
-    // scan path -- the old code searched the product TEXT index (which never
-    // indexed the barcode field), so a genuine intake barcode matched nothing
-    // and was silently dumped into the search box (a Fail-Loudly violation).
-    try {
-      const hit = await inventoryApi.searchByBarcode(code, store.store_id || '');
-      // A foreign-store unit must NOT be quietly sold at this terminal.
-      if (hit?.cross_store) {
-        setBlockMsg(`Barcode ${code} belongs to another store's stock -- it cannot be sold here.`);
-        setTimeout(() => setBlockMsg(null), 6000);
-        return;
-      }
-      // Build a cart-ready product from the joined product master (the scan
-      // endpoint joins `products` onto the `stock_units` row); fall back to the
-      // unit's own fields if the join is absent.
-      const p = hit?.product || {};
-      const product = {
-        product_id: p.product_id || hit?.product_id,
-        name: p.name || p.model || hit?.product_name,
-        sku: p.sku || hit?.sku,
-        barcode: hit?.barcode || code,
-        brand: p.brand,
-        subbrand: p.subbrand || p.sub_brand,
-        category: p.category || hit?.category,
-        hsn_code: p.hsn_code || hit?.hsn_code,
-        mrp: p.mrp,
-        offer_price: p.offer_price ?? p.offerPrice,
-        image_url: p.image_url,
-      };
-      if (product.product_id) {
-        handleAddProduct(product);
-        return;
-      }
-      // Hit with no resolvable product -- loud-fail rather than swallow it.
-      setBlockMsg(`Barcode ${code} found but its product record is missing. Tell the manager.`);
-      setTimeout(() => setBlockMsg(null), 6000);
-    } catch {
-      // 404 (or any error) = this barcode is not in stock. Fail loudly; add
-      // NOTHING (do not dump the scanned value into the search box).
-      setBlockMsg(`Barcode ${code} not found in stock. Check the item or search by name.`);
+    // Shared intake brain (productIntake.ts) — scan resolution + fail-loud
+    // messaging live there, one copy for both POS surfaces.
+    const res = await resolveBarcode(store.store_id || '', barcode);
+    if (res.ok && res.product) {
+      handleAddProduct(res.product);
+      return;
+    }
+    if (res.message) {
+      setBlockMsg(res.message);
       setTimeout(() => setBlockMsg(null), 6000);
     }
   };
@@ -2442,28 +2250,17 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   } : null;
 
   const handleAddProduct = (product: any) => {
-    const mrp = product.mrp || 0;
-    const offerPrice = product.offer_price || product.offerPrice || mrp;
-    if (offerPrice > mrp && mrp > 0) {
-      setBlockMsg(`BLOCKED: ${product.name} -- Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
-      setTimeout(() => setBlockMsg(null), 6000);
-      return;
-    }
-    const finalPrice = offerPrice || mrp;
-    if (!finalPrice || finalPrice <= 0 || isNaN(finalPrice)) {
-      setBlockMsg(`BLOCKED: ${product.name} -- Invalid pricing (${fc(finalPrice)}). Contact HQ to fix.`);
+    // Shared MONEY guard (productIntake.ts): offer>MRP and zero/NaN pricing
+    // block at add time; the cart-line mapping is the shared one too.
+    const guard = posPriceGuard(product);
+    if (!guard.ok) {
+      setBlockMsg(guard.message || 'Blocked');
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
     setBlockMsg(null);
     startTransition(() => {
-      store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
-        // The product's stored HSN, so the tax invoice prints the code this
-        // product is registered under rather than deriving one from its
-        // category (see CartLineItem.hsn_code).
-        hsn_code: product.hsn_code,
-        unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
-        is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
+      store.addToCart(cartItemFromProduct(product, guard));
     });
   };
 
