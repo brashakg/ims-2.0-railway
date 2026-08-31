@@ -116,7 +116,7 @@ export function BillingSurface() {
   const isComplete = store.current_step === 'complete';
 
   return (
-    <div className="h-full min-h-0 flex flex-col overflow-hidden bg-gray-50">
+    <div className="min-h-full lg:h-full lg:min-h-0 flex flex-col overflow-y-auto lg:overflow-hidden bg-gray-50">
       <WalkoutComplianceBanner />
 
       {errorMsg && (
@@ -155,9 +155,9 @@ export function BillingSurface() {
            the right column is a fixed 430px cart + payment that stays visible
            at all times. Nothing here may scroll the PAGE (spec 11b) — only
            the cart list and the left column's own overflow scroll. */
-        <div className="flex-1 min-h-0 flex gap-3.5 px-3.5 pb-3.5">
+        <div className="flex-1 lg:min-h-0 flex flex-col lg:flex-row gap-3.5 px-3.5 pb-3.5">
           {/* ── LEFT ── */}
-          <div className="flex-1 min-w-0 flex flex-col gap-3">
+          <div className="flex-1 min-w-0 flex flex-col gap-3 lg:min-h-0">
             {/* Customer + Rx: the primary block */}
             <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0">
               {store.customer ? (
@@ -209,8 +209,9 @@ export function BillingSurface() {
               <BarcodeScanner onScan={handleScan} placeholder="Scan barcode or search products…" autoFocus />
             </div>
 
-            {/* Breathing room today; the results strip + delivery row land here */}
-            <div className="flex-1 min-h-0" />
+            {/* Breathing room on a locked screen; on a phone the column
+                simply flows, so no filler is inserted. */}
+            <div className="hidden lg:block flex-1 min-h-0" />
 
             {/* Bottom 2x2 widgets (owner spec 8) */}
             <div className="shrink-0">
@@ -219,11 +220,11 @@ export function BillingSurface() {
           </div>
 
           {/* ── RIGHT: cart + payment, always visible (430px per mockup) ── */}
-          <div className="w-[430px] shrink-0 min-h-0 grid gap-3 grid-rows-[minmax(0,1fr)_minmax(0,auto)_auto]">
-            <div className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
+          <div className="w-full lg:w-[430px] shrink-0 lg:min-h-0 flex flex-col lg:grid gap-3 lg:grid-rows-[minmax(0,1fr)_minmax(0,auto)_auto]">
+            <div className="lg:min-h-0 lg:overflow-y-auto rounded-xl border border-gray-200 bg-white">
               <CartSidebar />
             </div>
-            <div className="min-h-0 overflow-y-auto">
+            <div className="lg:min-h-0 lg:overflow-y-auto">
               <StepPayment />
             </div>
             <button
