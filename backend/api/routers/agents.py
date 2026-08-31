@@ -298,7 +298,13 @@ async def list_agents(user: dict = Depends(require_superadmin)):
                     "last_tick_at": _iso_or_none(heartbeat.get("last_tick_at")),
                     "heartbeat_status": heartbeat.get("last_tick_status"),
                     "last_status": config.get("last_status"),
-                    "last_error": config.get("last_error"),
+                    # An agent can tick without RAISING and still be broken --
+                    # PIXEL burned its whole life doing exactly that. When the
+                    # tick left no exception in agent_config, fall back to
+                    # whatever the agent's own health_check() reports, so a
+                    # self-diagnosed failure reaches the card instead of a
+                    # green tile with nothing under it.
+                    "last_error": config.get("last_error") or health.get("last_error"),
                     "run_count": int(config.get("run_count", 0) or 0),
                     "error_count": int(config.get("error_count", 0) or 0),
                     "avg_run_time_ms": float(config.get("avg_run_time_ms", 0) or 0),

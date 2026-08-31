@@ -3377,7 +3377,12 @@ async def jarvis_read_collection(
         "the JARVIS page's PIXEL card to render audit history. "
         "SUPERADMIN-only. If PIXEL has never run, returns an empty list "
         "and a `pagespeed_ready` flag indicating whether the API key is "
-        "provisioned."
+        "provisioned.\n\n"
+        "`last_outcome` is the most recent row PIXEL wrote WHATEVER its "
+        "outcome (ok | no_credentials | credentials_rejected | "
+        "all_calls_failed) -- `pagespeed_ready` only reports that a key "
+        "string exists, so it reads 'ready' for a key Google rejects. "
+        "Trust `last_outcome` over `pagespeed_ready`."
     ),
 )
 async def pixel_audit_history(
@@ -3400,11 +3405,24 @@ async def pixel_audit_history(
         return {
             "audits": [],
             "latest": None,
+            "last_outcome": None,
             "pagespeed_ready": pagespeed_ready,
             "frontend_url": frontend_url,
             "audits_total": 0,
             "as_of": datetime.now().isoformat(),
         }
+
+    # The most recent row of ANY kind. A failed run writes kind="run_failed",
+    # so it never shows up in the `audits` list below -- without this the
+    # screen would keep saying "no audits yet, key is configured" while PIXEL
+    # was recording credentials_rejected nightly.
+    try:
+        last_outcome = col.find_one(
+            {"agent_id": "pixel"}, {"_id": 0, "pages": 0}, sort=[("ran_at", -1)]
+        )
+    except Exception as e:
+        logger.warning("[JARVIS] pixel last_outcome read failed: %s", e)
+        last_outcome = None
 
     try:
         audits = list(
@@ -3439,6 +3457,7 @@ async def pixel_audit_history(
     return {
         "audits": audits,
         "latest": latest,
+        "last_outcome": last_outcome,
         "deltas_vs_previous": deltas,
         "pagespeed_ready": pagespeed_ready,
         "frontend_url": frontend_url,
