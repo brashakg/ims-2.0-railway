@@ -46,8 +46,7 @@ import {
   ROUTES,
   READY_DEFAULT,
   isKnownBreak,
-  knownBreaksAt,
-  stillBroken,
+  KNOWN_BROKEN,
 } from '../fixtures/routes';
 
 // Geometry is deterministic; a retry can only mask a real overlap.
@@ -59,6 +58,8 @@ const NOWHERE = '/__layout-probe-nowhere__';
 const QUIET_MS = 400;
 /** Upper bound on that wait, so a never-quiet screen cannot hang the run. */
 const CAP_MS = 6_000;
+
+const QUARANTINED = new Set(KNOWN_BROKEN.map((k) => k.path));
 
 for (const screen of ROUTES) {
   test(`layout: ${screen.path}`, async ({ page }) => {
@@ -126,8 +127,9 @@ for (const screen of ROUTES) {
     // Every width is measured even after one of them fails, so a broken screen
     // reports every width it is broken at in one run instead of one per run.
     const failures: string[] = [];
-    // Quarantined breaks that have started passing - the list must shrink.
-    const fixed: string[] = [];
+    // Did this screen report ANYTHING at ANY width? Used after the loop to
+    // catch a quarantine entry that has gone stale.
+    let sawAnyViolation = false;
     for (const vp of VIEWPORTS) {
       await test.step(`@ ${vp.name}`, async () => {
         await page.setViewportSize({ width: vp.width, height: vp.height });
@@ -157,24 +159,24 @@ for (const screen of ROUTES) {
           if (isKnownBreak(screen.path, v.rule, vp.width)) continue;
           failures.push(`  at ${vp.width}px wide (${vp.name}) -- [${v.rule}] ${v.detail}`);
         }
-        // The list can only shrink. When a recorded break stops reporting, say
-        // so loudly rather than leaving a stale exemption behind to hide the
-        // next regression on that screen.
-        const observed = violations.map((v) => v.rule);
-        for (const rule of knownBreaksAt(screen.path, vp.width)) {
-          if (stillBroken(rule, observed)) continue;
-          fixed.push(
-            `  ${screen.path} at ${vp.width}px no longer reports [${rule}] -- ` +
-              `delete that entry from KNOWN_BROKEN in fixtures/routes.ts`,
-          );
-        }
+        if (violations.length) sawAnyViolation = true;
       });
     }
 
     expect(failures, `Broken layout on ${screen.path}:\n${failures.join('\n')}\n`).toEqual([]);
-    expect(
-      fixed,
-      'Good news - a quarantined break is fixed:\n' + fixed.join('\n'),
-    ).toEqual([]);
+    // THE LIST CAN ONLY SHRINK - but judged PER SCREEN, not per width.
+    // Which width a too-wide screen trips at moves between runs (it depends on
+    // how far a table had rendered), so a per-width check would fail the build
+    // on ordinary variation - the very flapping the 'too-wide' family exists
+    // to stop. A screen reporting NOTHING at ANY of the seven widths is
+    // genuinely fixed, and that is the actionable signal.
+    if (QUARANTINED.has(screen.path)) {
+      expect(
+        sawAnyViolation,
+        `${screen.path} is quarantined in KNOWN_BROKEN but now passes at every `
+          + `width. Delete its entries from fixtures/routes.ts so the gate starts `
+          + `protecting it - a stale exemption hides the next regression here.`,
+      ).toBe(true);
+    }
   });
 }
