@@ -3361,7 +3361,16 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
      bottom-tab-bar block; deleting that block exposed it). */
   .app-shell {
     --rail-width: 0px;
+    /* ONE cell, both axes. At this width the top-nav is display:none and the
+       rail is a position:fixed drawer, so `.app-main` is the ONLY in-flow
+       child — it auto-places into the FIRST column and the FIRST row. The
+       desktop template (`0 1fr` / `auto minmax(0,1fr)`) therefore put it in a
+       0px column (blank page, fixed 2026-08-31) and then in the `auto` row,
+       which sizes to CONTENT: main measured 465px inside an 812px shell,
+       leaving dead space below and clipping every modal that caps itself
+       against the viewport. Measured before/after: 465px -> 812px. */
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr);
   }
   .app-shell.rail-expanded { --rail-width: 0px; }
 
