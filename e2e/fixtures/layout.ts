@@ -1,6 +1,7 @@
 /**
- * Layout probe — the ONE place the viewport list, the screen list and the
- * "is this screen broken" rules live.
+ * Layout probe — the ONE place the viewport list and the "is this screen
+ * broken" rules live. The SCREEN LIST lives in ./routes.ts (one rule, one
+ * implementation: the inventory and its completeness guard belong together).
  *
  * Why it exists: BUG-1 (POS surfaces locked to viewport height with a fixed
  * 430px right column at every width) shipped past a green suite because
@@ -34,15 +35,6 @@ export const VIEWPORTS = [
   { name: 'ipad-landscape 1180x820', width: 1180, height: 820 },
   { name: 'laptop 1440x900', width: 1440, height: 900 },
 ] as const;
-
-/** Screens under probe. Adding one is a single line.
- *  `ready` is a selector that only exists once the lazy route has painted. */
-export const SCREENS: ReadonlyArray<{ path: string; ready: string }> = [
-  { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
-  { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
-  { path: '/dashboard', ready: '#main-content :is(h1, h2, table, button)' },
-  { path: '/orders', ready: '#main-content :is(h1, h2, table, button)' },
-];
 
 export type Violation = {
   rule: 'doc-overflow' | 'body-hscroll' | 'overlap' | 'past-right-edge' | 'unreachable';
