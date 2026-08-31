@@ -59,7 +59,7 @@ export function EyeTestTokenPrint({ token, store, entity, onClose }: EyeTestToke
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[95vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[95dvh] overflow-y-auto">
         {/* Action Bar - hidden during print */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200 no-print">
           <h2 className="text-lg font-bold text-gray-900">Print Token</h2>

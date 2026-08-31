@@ -211,7 +211,7 @@ export function HandoffResponseModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[92vh] overflow-hidden flex flex-col">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[92dvh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 p-4 border-b border-gray-200 sticky top-0 bg-white z-10">
           <div className="min-w-0">
@@ -259,7 +259,7 @@ export function HandoffResponseModal({
                 <img
                   src={previewUrl}
                   alt={card.file.filename}
-                  className="max-w-full max-h-[68vh] object-contain bg-white border border-gray-200 rounded shadow-sm"
+                  className="max-w-full max-h-[68dvh] object-contain bg-white border border-gray-200 rounded shadow-sm"
                 />
               )
             )}

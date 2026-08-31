@@ -190,7 +190,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
 
       {showGSTInvoice && storeForInvoice && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90dvh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between no-print">
               <h3 className="font-semibold text-gray-900">GST Tax Invoice</h3>
               <button onClick={() => setShowGSTInvoice(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>

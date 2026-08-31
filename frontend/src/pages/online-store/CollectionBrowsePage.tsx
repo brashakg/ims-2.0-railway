@@ -130,7 +130,7 @@ export default function CollectionBrowsePage() {
           ) : collections.length === 0 ? (
             <div className="p-6 text-sm text-gray-400 text-center">No collections yet.</div>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-[70vh] overflow-auto">
+            <ul className="divide-y divide-gray-100 max-h-[70dvh] overflow-auto">
               {collections.map((c) => (
                 <li key={c.id || c.handle}>
                   <button

@@ -237,7 +237,7 @@ export function EstimatesPage() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[92vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[92dvh] overflow-y-auto">
             <div className="flex items-center justify-between p-5 border-b border-gray-200 sticky top-0 bg-white z-10">
               <h2 className="text-lg font-bold text-gray-900">Create Estimate</h2>
               <button onClick={() => setShowCreate(false)} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="Close">

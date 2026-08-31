@@ -962,7 +962,7 @@ const loadJobs = async () => {
       {/* Job Detail Modal */}
       {selectedJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90dvh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold text-gray-900">
@@ -1414,7 +1414,7 @@ const loadJobs = async () => {
       {/* CREATE JOB MODAL */}
       {showCreateJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85dvh] overflow-y-auto">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">Create Workshop Job from Order</h3>
               <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
@@ -1631,7 +1631,7 @@ function QcChecklistModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90dvh] overflow-y-auto">
         <div className="p-5 border-b border-gray-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ClipboardCheck className="w-5 h-5 text-bv-red-600" />
