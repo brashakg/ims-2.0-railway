@@ -934,6 +934,16 @@
   color: #e9e9e4;
   position: relative;
   z-index: 40;
+  /* GRID-ITEM MIN-SIZE TRAP: .top-nav is a grid item of .app-shell, and a
+     grid/flex item defaults to min-width:auto — it refuses to shrink below its
+     CONTENT. With every nav group rendered, that content is ~1366-1617px, so
+     the 1fr column STRETCHED to fit and the whole PAGE scrolled sideways at
+     iPad-landscape width (measured: nav 1617px inside a 1170px column, and
+     .top-nav-menu never scrolled because it was never squeezed). The sideways
+     scrollbar also stole 10px of height, which broke the POS "one screen, no
+     scrolling" rule. min-width:0 lets the column win; .top-nav-menu already
+     carries overflow-x:auto and scrolls its own items instead. */
+  min-width: 0;
 }
 .top-nav-brand {
   display: flex; align-items: center; gap: 10px;

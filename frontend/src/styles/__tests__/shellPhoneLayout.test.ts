@@ -11,6 +11,22 @@ import { join } from 'node:path';
 
 const css = readFileSync(join(__dirname, '..', '..', 'index.css'), 'utf8');
 
+describe('tablet / iPad shell layout', () => {
+  it('lets .top-nav shrink below its content so the PAGE never scrolls sideways', () => {
+    // .top-nav is a grid item of .app-shell. A grid item defaults to
+    // min-width:auto and refuses to shrink below its content, so with every
+    // nav group rendered the 1fr column stretched to ~1366-1617px and the
+    // whole page scrolled horizontally at iPad-landscape width — which also
+    // stole 10px of height and broke the POS "one screen, no scrolling" rule.
+    // .top-nav-menu already has overflow-x:auto; it only gets to use it once
+    // the nav itself is allowed to be narrower than its content.
+    const start = css.indexOf('.top-nav {');
+    expect(start).toBeGreaterThan(-1);
+    const rule = css.slice(start, css.indexOf('}', start));
+    expect(rule).toContain('min-width: 0;');
+  });
+});
+
 describe('phone shell layout', () => {
   it('gives .app-shell a single full-width column at <=767px', () => {
     const start = css.indexOf('@media (max-width: 767px), (max-height: 500px)');
