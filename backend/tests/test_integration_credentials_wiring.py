@@ -649,7 +649,10 @@ def test_pagespeed_key_saved_on_the_screen_reaches_the_request(monkeypatch, rec)
     monkeypatch.setattr(pixel.httpx, "AsyncClient", rec.client(body={}))
 
     assert pixel._is_pagespeed_available() is True
-    asyncio.run(pixel._audit_url("https://example.invalid/login"))
+    # PIXEL resolves the key ONCE per run and hands it to each call, so this
+    # asserts the same boundary: whatever _pagespeed_key() returns is what
+    # rides on the wire.
+    asyncio.run(pixel._audit_url("https://example.invalid/login", pixel._pagespeed_key()))
 
     assert ("key", "MARKER-PAGESPEED-KEY") in rec.calls[0]["params"]
 
