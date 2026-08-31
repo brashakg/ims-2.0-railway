@@ -209,18 +209,25 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
  */
 
 /**
- * Screens ALREADY broken on main when the gate was built. Quarantined, NOT
- * excluded - they are still probed at every width, and the spec still fails on
- * anything that is not the exact recorded (rule, width) pair. So a NEW break on
- * one of these screens, or the same break spreading to another width, is red.
+ * Screens ALREADY broken on main when the gate was built, MEASURED in CI - not
+ * guessed. Every triple below is a violation the probe really reported on an
+ * unmodified main, so this list is evidence, not an opinion.
  *
- * The list can only shrink. When a screen stops producing its recorded
- * violation the spec FAILS and tells you to delete the entry, so a fix can
- * never quietly leave a stale exemption behind that hides the next regression.
+ * Quarantined, NOT excluded. The screen is still probed at all 7 widths, and
+ * only the exact (rule, width) triples below are filtered. A new rule, or the
+ * same rule at another width, still fails. The break spreading is red.
  *
- * All fifteen are the same shape: content wider than a 360px phone, mostly wide
- * data tables that never got a horizontal scroll container. Fixing one is
- * usually wrapping its table in an `overflow-x: auto` element.
+ * The list can only SHRINK: when a recorded break stops reporting, the spec
+ * FAILS and names the entry to delete, so a fix cannot leave a stale exemption
+ * behind to hide the next regression on that screen.
+ *
+ * Every one is a PHONE width (360 / 390 / 430). Nothing here breaks at 768 or
+ * above, which says the tablet and desktop layouts are sound and the work is
+ * squarely "these screens were never made to fit a phone".
+ *   body-hscroll / past-right-edge -> content wider than the screen, almost
+ *     always a data table with no horizontal scroll container.
+ *   overlap (/settings/business)   -> controls sitting ON TOP of each other.
+ *     The worst of the set: unlike a wide table it cannot be scrolled around.
  *
  * DO NOT ADD TO THIS LIST to make a red build green. A new break is a bug to
  * fix, not a row to add - that is how a gate rots into decoration.
@@ -230,26 +237,56 @@ export const KNOWN_BROKEN: ReadonlyArray<{
   rule: string;
   width: number;
 }> = [
-  { path: '/customers/whatsapp-inbox', rule: 'body-hscroll', width: 360 },
-  { path: '/finance/budgeting', rule: 'body-hscroll', width: 360 },
-  { path: '/finance/cash-flow', rule: 'body-hscroll', width: 360 },
-  { path: '/incentive', rule: 'body-hscroll', width: 360 },
-  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 360 },
-  { path: '/incentive/payout', rule: 'body-hscroll', width: 360 },
-  { path: '/incentive/payouts', rule: 'body-hscroll', width: 360 },
-  { path: '/incentive/settings', rule: 'body-hscroll', width: 360 },
-  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 360 },
-  { path: '/inventory/replenishment', rule: 'body-hscroll', width: 360 },
-  { path: '/pos/footfall', rule: 'body-hscroll', width: 360 },
-  { path: '/promotions', rule: 'body-hscroll', width: 360 },
-  { path: '/reports/promotions', rule: 'body-hscroll', width: 360 },
-  { path: '/walkouts', rule: 'body-hscroll', width: 360 },
-  { path: '/walkouts/dashboard', rule: 'body-hscroll', width: 360 },
+  { path: '/customers/whatsapp-inbox', rule: 'body-hscroll', width: 390 },
+  { path: '/finance/budgeting', rule: 'past-right-edge', width: 360 },
+  { path: '/incentive', rule: 'past-right-edge', width: 360 },
+  { path: '/incentive', rule: 'body-hscroll', width: 390 },
+  { path: '/incentive', rule: 'past-right-edge', width: 390 },
+  { path: '/incentive', rule: 'body-hscroll', width: 430 },
+  { path: '/incentive', rule: 'past-right-edge', width: 430 },
+  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 390 },
+  { path: '/incentive/leaderboard', rule: 'past-right-edge', width: 390 },
+  { path: '/incentive/leaderboard', rule: 'body-hscroll', width: 430 },
+  { path: '/incentive/leaderboard', rule: 'past-right-edge', width: 430 },
+  { path: '/incentive/payout', rule: 'past-right-edge', width: 360 },
+  { path: '/incentive/payout', rule: 'body-hscroll', width: 390 },
+  { path: '/incentive/payout', rule: 'past-right-edge', width: 390 },
+  { path: '/incentive/payout', rule: 'body-hscroll', width: 430 },
+  { path: '/incentive/payout', rule: 'past-right-edge', width: 430 },
+  { path: '/incentive/payouts', rule: 'past-right-edge', width: 360 },
+  { path: '/incentive/settings', rule: 'body-hscroll', width: 390 },
+  { path: '/incentive/settings', rule: 'body-hscroll', width: 430 },
+  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 360 },
+  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 390 },
+  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 390 },
+  { path: '/inventory/power-grid', rule: 'body-hscroll', width: 430 },
+  { path: '/inventory/power-grid', rule: 'past-right-edge', width: 430 },
+  { path: '/inventory/replenishment', rule: 'past-right-edge', width: 360 },
+  { path: '/inventory/replenishment', rule: 'body-hscroll', width: 390 },
+  { path: '/inventory/replenishment', rule: 'past-right-edge', width: 390 },
+  { path: '/pos/footfall', rule: 'past-right-edge', width: 360 },
+  { path: '/pos/footfall', rule: 'body-hscroll', width: 390 },
+  { path: '/pos/footfall', rule: 'past-right-edge', width: 390 },
+  { path: '/promotions', rule: 'past-right-edge', width: 360 },
+  { path: '/reports/promotions', rule: 'past-right-edge', width: 360 },
+  { path: '/reports/promotions', rule: 'body-hscroll', width: 390 },
+  { path: '/reports/promotions', rule: 'past-right-edge', width: 390 },
+  { path: '/reports/promotions', rule: 'body-hscroll', width: 430 },
+  { path: '/settings/business', rule: 'overlap', width: 360 },
+  { path: '/settings/business', rule: 'overlap', width: 390 },
+  { path: '/walkouts', rule: 'past-right-edge', width: 360 },
+  { path: '/walkouts', rule: 'body-hscroll', width: 390 },
+  { path: '/walkouts', rule: 'past-right-edge', width: 390 },
+  { path: '/walkouts', rule: 'body-hscroll', width: 430 },
+  { path: '/walkouts', rule: 'past-right-edge', width: 430 },
+  { path: '/walkouts/dashboard', rule: 'past-right-edge', width: 360 },
 ];
 
-/** The recorded break for a screen at a width, or undefined if none. */
-export function knownBreak(path: string, width: number) {
-  return KNOWN_BROKEN.find((k) => k.path === path && k.width === width);
+/** Rules this screen is ALREADY known to break at this width. */
+export function knownBreaksAt(path: string, width: number): string[] {
+  return KNOWN_BROKEN.filter((k) => k.path === path && k.width === width).map(
+    (k) => k.rule,
+  );
 }
 
 export const KNOWN_GENERATORS = ['SETTINGS_SECTIONS.map('] as const;

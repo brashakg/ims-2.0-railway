@@ -42,7 +42,7 @@ import { AUDIT_ROOT, VIEWPORTS, auditLayout } from '../fixtures/layout';
 // The route list lives in routes.ts, NOT here: it is the half that carries
 // the coverage guard (a new screen that is neither probed nor excluded with
 // a reason fails routes-inventory.spec.ts by name).
-import { ROUTES, READY_DEFAULT, knownBreak } from '../fixtures/routes';
+import { ROUTES, READY_DEFAULT, knownBreaksAt } from '../fixtures/routes';
 
 // Geometry is deterministic; a retry can only mask a real overlap.
 test.describe.configure({ retries: 0 });
@@ -147,17 +147,18 @@ for (const screen of ROUTES) {
         // waved through: only its ONE recorded (rule, width) pair is filtered
         // out, so a new break - or the same break spreading to another width -
         // is still red.
-        const known = knownBreak(screen.path, vp.width);
+        const known = knownBreaksAt(screen.path, vp.width);
         for (const v of violations) {
-          if (known && v.rule === known.rule) continue;
+          if (known.includes(v.rule)) continue;
           failures.push(`  at ${vp.width}px wide (${vp.name}) -- [${v.rule}] ${v.detail}`);
         }
         // The list can only shrink. When a recorded break stops reporting, say
         // so loudly rather than leaving a stale exemption behind to hide the
         // next regression on that screen.
-        if (known && !violations.some((v) => v.rule === known.rule)) {
+        for (const rule of known) {
+          if (violations.some((v) => v.rule === rule)) continue;
           fixed.push(
-            `  ${screen.path} at ${vp.width}px no longer reports [${known.rule}] -- ` +
+            `  ${screen.path} at ${vp.width}px no longer reports [${rule}] -- ` +
               `delete that entry from KNOWN_BROKEN in fixtures/routes.ts`,
           );
         }
