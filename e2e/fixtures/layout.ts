@@ -162,17 +162,26 @@ export async function auditLayout(
       // ancestor was clipping too, so the answer was right for the wrong
       // reason) but the detail text was a lie, and a full-height drawer whose
       // containing block IS the viewport would have failed outright.
-      while (n && n !== root) {
+      // CLIPPING and REACHABILITY need DIFFERENT stopping rules, and conflating
+      // them produced 5,712 false `unreachable` reports in the first CI run -
+      // ordinary below-the-fold form fields on perfectly scrollable pages.
+      //   clipping   : only ancestors strictly INSIDE the audit root. A
+      //                position:fixed popup is not clipped by outer scrollers.
+      //   reachability: EVERY ancestor, root included, plus the document. The
+      //                page body is usually the thing that scrolls, so stopping
+      //                at it meant nothing was ever reachable.
+      while (n) {
         const cs = getComputedStyle(n);
         const clipsX = cs.overflowX !== 'visible';
         const clipsY = cs.overflowY !== 'visible';
+        const insideRoot = n !== root && root.contains(n);
         if (clipsX || clipsY) {
           const b = n.getBoundingClientRect();
-          if (clipsX) {
+          if (clipsX && insideRoot) {
             r.left = Math.max(r.left, b.left);
             r.right = Math.min(r.right, b.right);
           }
-          if (clipsY) {
+          if (clipsY && insideRoot) {
             r.top = Math.max(r.top, b.top);
             r.bottom = Math.min(r.bottom, b.bottom);
           }
@@ -184,12 +193,23 @@ export async function auditLayout(
             n.scrollHeight > n.clientHeight + 1;
           if (scrollsX || scrollsY) reachable = true;
           // Only a scroller strictly BELOW the audit root counts as deliberate.
-          if (scrollsX && n !== root && root.contains(n)) inHScroller = true;
+          if (scrollsX && insideRoot) inHScroller = true;
         }
         n = n.parentElement;
       }
-      if (de.scrollHeight > de.clientHeight + 1 || de.scrollWidth > de.clientWidth + 1)
-        reachable = true;
+      // TRAPPED vs merely OFF-SCREEN. Conflating these is what made this rule
+      // useless in one direction and catastrophic in the other: with a blanket
+      // "the document scrolls, so everything is reachable" fallback the rule
+      // never fired on a scrolling page, and without it every ordinary
+      // below-the-fold form field on a page whose body owns the scrollbar was
+      // reported unreachable (5,712 of them in one CI run).
+      //   trapped     = ANCESTOR CLIPPING alone collapsed the box, and nothing
+      //                 in that chain can scroll. No amount of scrolling helps.
+      //                 THAT is the bug worth failing a build for.
+      //   off-screen  = the box is fine, it just sits outside the viewport.
+      //                 Ordinary on any long page; never a violation, and not
+      //                 comparable for overlap either.
+      const trapped = (r.right - r.left <= 1 || r.bottom - r.top <= 1) && !reachable;
       const vis: Box = {
         left: Math.max(r.left, 0),
         top: Math.max(r.top, 0),
@@ -197,7 +217,7 @@ export async function auditLayout(
         bottom: Math.min(r.bottom, vh),
       };
       const gone = vis.right - vis.left <= 1 || vis.bottom - vis.top <= 1;
-      return { raw, vis, gone, reachable, inHScroller };
+      return { raw, vis, gone, trapped, inHScroller };
     };
 
     // ── 1b. the page body itself scrolls sideways ────────────────────────
@@ -225,18 +245,18 @@ export async function auditLayout(
       const m = measure(el);
 
       // ── 3. clipped away with no way to scroll to it ────────────────────
-      if (m.gone && !m.reachable) {
+      if (m.trapped) {
         out.push({
           rule: 'unreachable',
           detail: `${describe(el)} at y=${Math.round(raw.top)}..${Math.round(
             raw.bottom,
           )} x=${Math.round(raw.left)}..${Math.round(
             raw.right,
-          )} is clipped out of a ${vw}x${vh} viewport and nothing can scroll to it`,
+          )} is clipped away by an ancestor and nothing in that chain can scroll to it`,
         });
         continue;
       }
-      if (m.gone) continue; // off-screen but scrollable to: fine, and not comparable
+      if (m.gone) continue; // outside the viewport: ordinary, and not comparable
 
       // ── 4. sticking out past the right edge ────────────────────────────
       if (raw.right > vw + 1 && !m.inHScroller) {
