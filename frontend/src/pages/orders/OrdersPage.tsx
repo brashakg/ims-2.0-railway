@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi, storeApi } from '../../services/api';
+import { marketingApi } from '../../services/api/marketing';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
@@ -174,6 +175,9 @@ export function OrdersPage() {
   // Deliver confirmation modal state
   const [showDeliverModal, setShowDeliverModal] = useState(false);
   const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
+  // Credit-delivery gate (owner ruling): delivering with a balance due needs
+  // a manager, or a manager-approved token pasted here by other roles.
+  const [deliverToken, setDeliverToken] = useState('');
   const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
 
   // Build item #16 — post-creation order/invoice edit. Owner decision 2026-06-19:
@@ -439,6 +443,7 @@ export function OrdersPage() {
   // Open deliver confirmation modal
   const openDeliverModal = (order: Order) => {
     setDeliverOrder(order);
+    setDeliverToken('');
     setShowDeliverModal(true);
   };
 
@@ -448,7 +453,10 @@ export function OrdersPage() {
 
     setIsDeliveringOrder(true);
     try {
-      await orderApi.deliverOrder(deliverOrder.id);
+      await orderApi.deliverOrder(
+        deliverOrder.id,
+        deliverToken.trim() ? { approval_token: deliverToken.trim() } : undefined
+      );
       toast.success('Order marked as delivered');
       setShowDeliverModal(false);
       setDeliverOrder(null);
@@ -802,10 +810,49 @@ export function OrdersPage() {
                   customerPhone={selectedOrder.customerPhone}
                   status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'PROCESSING' | 'READY' | 'DELIVERED' | 'CANCELLED'}
                   createdAt={selectedOrder.createdAt}
-                  onSendNotification={(status, channel) => {
-                    toast.success(`${channel} notification sent for status: ${status}`);
+                  onSendNotification={async (status, channel) => {
+                    // Was a fake toast with NO API call — a silent lie to
+                    // staff. Queues through the audited MSG91 pipeline now.
+                    const template = (
+                      {
+                        CONFIRMED: 'ORDER_CONFIRMED',
+                        READY: 'ORDER_READY',
+                        DELIVERED: 'ORDER_DELIVERED',
+                      } as Record<string, string>
+                    )[status];
+                    if (!template) return;
+                    try {
+                      await marketingApi.sendNotification({
+                        customer_id: selectedOrder.customerId,
+                        customer_phone: selectedOrder.customerPhone || '',
+                        customer_name: selectedOrder.customerName,
+                        template_id: template,
+                        channel,
+                        variables: { order_number: selectedOrder.orderNumber },
+                        category: 'SERVICE',
+                      });
+                      toast.success(`${channel} notification queued for ${selectedOrder.customerName}`);
+                    } catch (err: any) {
+                      toast.error(err?.response?.data?.detail || 'Failed to queue notification');
+                    }
                   }}
                 />
+
+                {/* Thank-you + Google review link (separate send per owner spec) */}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await marketingApi.sendReviewRequest(selectedOrder.id);
+                      toast.success('Thank-you + review link queued on WhatsApp');
+                    } catch (err: any) {
+                      toast.error(err?.response?.data?.detail || 'Failed to send review request');
+                    }
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg px-3 py-2 transition-colors"
+                >
+                  Send thank-you + review link (WhatsApp)
+                </button>
 
                 {/* Shipping (Shiprocket) — book + track customer shipments */}
                 <OrderShippingCard
@@ -1060,7 +1107,31 @@ export function OrdersPage() {
                   <span className="text-sm text-gray-500">Grand Total:</span>
                   <span className="font-bold text-gray-900">{formatCurrency(deliverOrder.grandTotal || 0)}</span>
                 </div>
+                {(deliverOrder.balanceDue || 0) > 0 && (
+                  <div className="flex justify-between mt-1">
+                    <span className="text-sm font-medium text-red-600">Balance Due:</span>
+                    <span className="font-bold text-red-600">{formatCurrency(deliverOrder.balanceDue || 0)}</span>
+                  </div>
+                )}
               </div>
+
+              {/* Credit-delivery gate: a balance still due needs a manager */}
+              {(deliverOrder.balanceDue || 0) > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                  <p className="text-sm text-amber-800">
+                    <strong>{formatCurrency(deliverOrder.balanceDue || 0)} is still due.</strong>{' '}
+                    Collect it first (Record Payment), or deliver on credit — managers
+                    can deliver directly; other roles need a manager-approved token.
+                  </p>
+                  <input
+                    type="text"
+                    value={deliverToken}
+                    onChange={(e) => setDeliverToken(e.target.value)}
+                    placeholder="Manager approval token (if you are not a manager)"
+                    className="input-field text-sm"
+                  />
+                </div>
+              )}
 
               {/* Confirmation message */}
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">

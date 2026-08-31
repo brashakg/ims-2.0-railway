@@ -90,7 +90,13 @@ TEMPLATES = {
     "PRESCRIPTION_EXPIRY": "Hi {customer_name}, your prescription from {store_name} is expiring on {expiry_date}. Schedule your eye check-up today! Call us at {store_phone}.",
     "BIRTHDAY_WISH": "Happy Birthday {customer_name}! Wishing you a wonderful year ahead. Visit {store_name} for an exclusive birthday offer!",
     "ANNUAL_CHECKUP_REMINDER": "Hi {customer_name}, it's been a year since your last eye exam at {store_name}. Time for your annual check-up! Book now.",
-    "ORDER_DELIVERED": "Hi {customer_name}, your order {order_number} from {store_name} is ready for pickup!",
+    # The tracker offers manual sends for CONFIRMED / READY / DELIVERED —
+    # all three need a registered default or populate_template returns "".
+    # (The old ORDER_DELIVERED copy said "ready for pickup" — that message
+    # belongs to ORDER_READY.)
+    "ORDER_CONFIRMED": "Hi {customer_name}, your order {order_number} at {store_name} is confirmed. We will message you as soon as it is ready.",
+    "ORDER_READY": "Hi {customer_name}, your order {order_number} from {store_name} is ready for pickup!",
+    "ORDER_DELIVERED": "Hi {customer_name}, your order {order_number} from {store_name} has been delivered. Thank you for shopping with us!",
     "GOOGLE_REVIEW_REQUEST": "Hi {customer_name}, thank you for choosing {store_name}! We'd love your feedback. Please leave us a review: {review_link}",
     "WALKOUT_RECOVERY": "Hi {customer_name}, you recently visited {store_name} and tried {frame_names}. We'd love to help you find the perfect pair! Visit us again for a special {discount_percent}% offer. Valid till {validity_date}.",
     "REFERRAL_INVITE": "Hi {customer_name}, share the gift of clear vision! Give your friends and family this referral code: {referral_code}. They get {referee_reward} off their first purchase, and you earn {referrer_reward} in store credit!",

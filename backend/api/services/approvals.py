@@ -94,6 +94,12 @@ ACTION_TYPES: frozenset = frozenset({
     # another store. Self-approval is blocked because this is a MAKER_CHECKER
     # action (the requester cannot PIN-approve their own refund).
     "REFUND_APPROVAL_MATRIX",
+    # POS Wave 4 (owner ruling): delivering an order that still carries a
+    # balance_due is a credit decision — a non-manager needs a manager's
+    # PIN-approved token. amount=None -> "auto" tier (STORE_MANAGER+),
+    # single-use, store-bound, and context-bound to the exact order at
+    # consume-time (expected_context={"order_id": ...}).
+    "CREDIT_DELIVERY",
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).

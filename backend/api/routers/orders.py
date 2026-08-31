@@ -4767,8 +4767,81 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
     return {"order_id": order_id, "status": "READY"}
 
 
+class HandoverDetails(BaseModel):
+    """What the counter records at handover (owner spec: fit check, cleaning,
+    who collected). All optional — the door stays backward-compatible with
+    body-less callers."""
+
+    picked_up_by_name: Optional[str] = Field(None, max_length=120)
+    picked_up_by_phone: Optional[str] = Field(None, max_length=20)
+    fit_check_done: Optional[bool] = None
+    cleaned_and_cased: Optional[bool] = None
+    notes: Optional[str] = Field(None, max_length=300)
+
+
+class DeliverRequest(BaseModel):
+    handover: Optional[HandoverDetails] = None
+    # CREDIT_DELIVERY approval token — required when balance_due > 0 and the
+    # caller is not a manager (owner ruling: credit delivery is PIN-gated).
+    approval_token: Optional[str] = None
+
+
+_CREDIT_DELIVERY_MANAGER_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+)
+
+
+def _gate_credit_delivery(order: dict, body, current_user: dict) -> None:
+    """Owner ruling (POS Wave 4): handing goods over with money still owed is
+    a credit decision. A manager may take it directly; anyone else must carry
+    a manager's PIN-approved CREDIT_DELIVERY token, store-bound and bound to
+    THIS order. Raises 403 otherwise. PURE GATE — no money math."""
+    balance_due = float(order.get("balance_due") or 0.0)
+    if balance_due <= 0.01:
+        return
+    roles = current_user.get("roles", [])
+    if any(r in _CREDIT_DELIVERY_MANAGER_ROLES for r in roles):
+        return
+    token = ((body.approval_token if body else None) or "").strip()
+    if token:
+        try:
+            from ..services.approvals import ApprovalEngine
+
+            engine = ApprovalEngine(db=_get_db())
+            res = engine.consume_approval(
+                consumed_by=current_user.get("user_id") or "",
+                action_type="CREDIT_DELIVERY",
+                approval_token=token,
+                expected_store_id=order.get("store_id"),
+                expected_context={"order_id": order.get("order_id")},
+            )
+            if res.get("ok"):
+                return
+            logger.warning(
+                "[ORDERS] CREDIT_DELIVERY token refused for %s: %s",
+                order.get("order_id"), res.get("error"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ORDERS] CREDIT_DELIVERY consume failed: %s", exc)
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Rs {balance_due:,.2f} is still due on this order. Delivering "
+            f"with a balance needs a manager (or a manager-approved "
+            f"credit-delivery PIN token)."
+        ),
+    )
+
+
 @router.post("/{order_id}/deliver")
-async def deliver_order(order_id: str, current_user: dict = Depends(get_current_user)):
+async def deliver_order(
+    order_id: str,
+    body: Optional[DeliverRequest] = None,
+    current_user: dict = Depends(get_current_user),
+):
     """Deliver order to customer"""
     # RBAC: previously ANY authenticated role could deliver. HANDOVER_ROLES (not
     # POS_WRITE_ROLES) -- see its definition for why the front-desk CASHIER must
@@ -4817,6 +4890,28 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
                 detail="Order must have at least partial payment before delivery",
             )
 
+        # Owner ruling: balance still due -> manager, or a consumed
+        # CREDIT_DELIVERY token bound to this store + order.
+        _gate_credit_delivery(order, body, current_user)
+
+        # Handover record rides the atomic claim below (never stranded on a
+        # lost race). Only what the counter actually filled in is stored.
+        _claim_extra = None
+        if body is not None and body.handover is not None:
+            _h = {
+                k: v
+                for k, v in body.handover.model_dump().items()
+                if v is not None
+            }
+            if _h:
+                _claim_extra = {
+                    "handover_record": {
+                        **_h,
+                        "recorded_by": current_user.get("user_id"),
+                        "recorded_at": datetime.now().isoformat(),
+                    }
+                }
+
         # ATOMIC DELIVER CLAIM. update_status writes update_one({order_id}, ...)
         # with NO status precondition, and the window from the read above to
         # this write spans the store-access, Rx-hold, transition and payment
@@ -4829,7 +4924,8 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         # ONLINE store that feeds a Shopify oversell. Before, the unit stayed
         # correctly SOLD and only loyalty was wrong.
         if not _claim_order_status(
-            repo, order_id, "DELIVERED", "READY", current_user.get("user_id")
+            repo, order_id, "DELIVERED", "READY", current_user.get("user_id"),
+            extra=_claim_extra,
         ):
             raise HTTPException(
                 status_code=400,
@@ -4846,6 +4942,53 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
                 await trigger_nps_on_delivery(order, current_user)
             except Exception as _nps_exc:
                 logger.warning("[ORDERS] NPS auto-trigger failed (non-fatal): %s", _nps_exc)
+            # Owner ruling (mockup sign-off): auto-WhatsApp on completion —
+            # queue the ORDER_DELIVERED text (MEGAPHONE drains it; DISPATCH_MODE
+            # off = queued only). Fail-soft: a messaging failure must never
+            # block the handover.
+            try:
+                _cust_phone = order.get("customer_phone")
+                if not _cust_phone and order.get("customer_id"):
+                    _crepo = get_customer_repository()
+                    _cdoc = (
+                        _crepo.find_by_id(order.get("customer_id"))
+                        if _crepo is not None
+                        else None
+                    )
+                    _cust_phone = (_cdoc or {}).get("mobile") or (_cdoc or {}).get(
+                        "phone"
+                    )
+                if _cust_phone:
+                    from ..services.notification_service import (
+                        send_notification as _queue_notification,
+                    )
+                    from ..services.print_identity import load_store as _load_store
+
+                    _store_name = (
+                        (_load_store(order.get("store_id")) or {}).get("name")
+                        or "our store"
+                    )
+                    await _queue_notification(
+                        store_id=order.get("store_id") or "",
+                        customer_id=order.get("customer_id") or "",
+                        customer_phone=_cust_phone,
+                        customer_name=order.get("customer_name") or "Customer",
+                        template_id="ORDER_DELIVERED",
+                        channel="WHATSAPP",
+                        variables={
+                            "order_number": order.get("order_number") or order_id,
+                            "store_name": _store_name,
+                        },
+                        category="SERVICE",
+                        triggered_by=current_user.get("user_id") or "auto",
+                        related_entity_type="order",
+                        related_entity_id=order_id,
+                    )
+            except Exception as _ntf_exc:
+                logger.warning(
+                    "[ORDERS] delivered-notification queue failed (non-fatal): %s",
+                    _ntf_exc,
+                )
             return {
                 "order_id": order_id,
                 "status": "DELIVERED",
@@ -4855,6 +4998,50 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         raise HTTPException(status_code=500, detail="Failed to deliver order")
 
     return {"order_id": order_id, "status": "DELIVERED"}
+
+
+class DeliverWithPaymentRequest(BaseModel):
+    """One counter action: collect the balance (optionally) and hand over."""
+
+    payment: Optional[PaymentCreate] = None
+    handover: Optional[HandoverDetails] = None
+    approval_token: Optional[str] = None
+
+
+@router.post("/{order_id}/deliver-with-payment")
+async def deliver_with_payment(
+    order_id: str,
+    body: DeliverWithPaymentRequest,
+    current_user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    """Collect-and-deliver in ONE counter action (owner spec: staff forget
+    the second step; the deliver modal never even showed the balance).
+
+    DELEGATION, not duplication: this door CALLS the existing add_payment
+    and deliver_order handlers, so every guard both doors carry (IDOR,
+    idempotency, over-tender, credit-limit, voucher redeem, QC gate,
+    Rx hold, atomic claim, credit-delivery gate) runs verbatim — there is
+    no second implementation of either.
+
+    Deliberately non-atomic (map ruling): if the payment records but the
+    deliver claim then fails, the money stands on an undelivered order —
+    balance_due is already recomputed, staff just retries the deliver.
+    """
+    payment_result = None
+    if body.payment is not None:
+        payment_result = await add_payment(
+            order_id, body.payment, current_user, idempotency_key
+        )
+    deliver_result = await deliver_order(
+        order_id,
+        DeliverRequest(handover=body.handover, approval_token=body.approval_token),
+        current_user,
+    )
+    out = dict(deliver_result)
+    if payment_result is not None:
+        out["payment"] = payment_result
+    return out
 
 
 def _is_unit_tracked(stock_repo, product_id: str, store_id: Optional[str]) -> bool:
@@ -5109,7 +5296,7 @@ async def _release_lens_lines(
 
 
 def _claim_order_status(
-    repo, order_id: str, new_status: str, required_status, user_id
+    repo, order_id: str, new_status: str, required_status, user_id, extra=None
 ) -> bool:
     """Atomically move an order to `new_status` ONLY while its status is still
     one of `required_status`. Returns False when the precondition no longer
@@ -5140,6 +5327,11 @@ def _claim_order_status(
         "status_updated_at": now,
         "status_updated_by": user_id,
     }
+    if extra:
+        # Opt-in extra fields ride the SAME atomic write (e.g. the delivery
+        # handover_record) so a lost race can never strand them on a doc the
+        # claim did not win.
+        payload.update(extra)
     # update_status sets this and orders.py surfaces it; folding the write in
     # means we must carry it or silently drop it.
     if new_status == "DELIVERED":

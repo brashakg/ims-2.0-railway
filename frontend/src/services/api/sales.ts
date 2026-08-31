@@ -67,8 +67,8 @@ export const orderApi = {
     return response.data;
   },
 
-  deliverOrder: async (orderId: string) => {
-    const response = await api.post(`/orders/${orderId}/deliver`);
+  deliverOrder: async (orderId: string, body?: { approval_token?: string }) => {
+    const response = await api.post(`/orders/${orderId}/deliver`, body ?? {});
     return response.data;
   },
 

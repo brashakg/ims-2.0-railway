@@ -5002,6 +5002,11 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {
+        "method": "POST",
+        "path": "/api/v1/orders/{order_id}/deliver-with-payment",
+        "allowed": "AUTHENTICATED",
+    },
+    {
         "method": "GET",
         "path": "/api/v1/orders/{order_id}/invoice",
         "allowed": "AUTHENTICATED",
