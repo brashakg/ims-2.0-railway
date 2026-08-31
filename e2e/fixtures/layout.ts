@@ -22,9 +22,17 @@ import type { Page } from '@playwright/test';
 /** Widths every probed screen must survive. iPad landscape is the owner's
  *  POS register target (spec 11b); the phone is what BUG-1 broke. */
 export const VIEWPORTS = [
+  // Smallest phone still in real use - the width most layouts break at first.
+  { name: 'phone-small 360x780', width: 360, height: 780 },
   { name: 'phone 390x844', width: 390, height: 844 },
+  { name: 'phone-large 430x932', width: 430, height: 932 },
+  // 768 is the Tailwind md/lg hinge - the width where a two-column layout
+  // flips. BUG-1 lived exactly on such a hinge.
+  { name: 'tablet-small 768x1024', width: 768, height: 1024 },
   { name: 'ipad-portrait 820x1180', width: 820, height: 1180 },
+  // The owner's POS register target (spec 11b).
   { name: 'ipad-landscape 1180x820', width: 1180, height: 820 },
+  { name: 'laptop 1440x900', width: 1440, height: 900 },
 ] as const;
 
 /** Screens under probe. Adding one is a single line.
@@ -37,7 +45,7 @@ export const SCREENS: ReadonlyArray<{ path: string; ready: string }> = [
 ];
 
 export type Violation = {
-  rule: 'doc-overflow' | 'overlap' | 'past-right-edge' | 'unreachable';
+  rule: 'doc-overflow' | 'body-hscroll' | 'overlap' | 'past-right-edge' | 'unreachable';
   detail: string;
 };
 
@@ -51,8 +59,11 @@ export type Violation = {
  * here would be one rule with two implementations. Document overflow is the
  * one global check.
  */
-export async function auditLayout(page: Page): Promise<Violation[]> {
-  return page.evaluate(() => {
+export async function auditLayout(
+  page: Page,
+  opts: { rootSelector?: string } = {},
+): Promise<Violation[]> {
+  return page.evaluate((rootSelector: string) => {
     const out: { rule: Violation['rule']; detail: string }[] = [];
     const de = document.documentElement;
     const vw = de.clientWidth;
@@ -66,7 +77,7 @@ export async function auditLayout(page: Page): Promise<Violation[]> {
       });
     }
 
-    const root = document.querySelector('#main-content') ?? document.body;
+    const root = document.querySelector(rootSelector) ?? document.body;
 
     // Interactive controls only. Widening this to every text node multiplies
     // false positives for no extra signal: a broken column takes its controls
@@ -117,7 +128,10 @@ export async function auditLayout(page: Page): Promise<Violation[]> {
      *  on a healthy page. */
     const isFloating = (el: Element) => {
       let n: Element | null = el;
-      while (n && n !== de) {
+      // Stop AT the audit root. Walking to <html> meant that when the root is a
+      // dialog (which is itself fixed), every control inside it inherited
+      // "floating" and was skipped -- popups were invisible to this probe.
+      while (n && n !== root && n !== de) {
         const p = getComputedStyle(n).position;
         if (p === 'fixed' || p === 'sticky' || p === 'absolute') return true;
         n = n.parentElement;
@@ -160,7 +174,8 @@ export async function auditLayout(page: Page): Promise<Violation[]> {
             (cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
             n.scrollHeight > n.clientHeight + 1;
           if (scrollsX || scrollsY) reachable = true;
-          if (scrollsX) inHScroller = true;
+          // Only a scroller strictly BELOW the audit root counts as deliberate.
+          if (scrollsX && n !== root && root.contains(n)) inHScroller = true;
         }
         n = n.parentElement;
       }
@@ -175,6 +190,23 @@ export async function auditLayout(page: Page): Promise<Violation[]> {
       const gone = vis.right - vis.left <= 1 || vis.bottom - vis.top <= 1;
       return { raw, vis, gone, reachable, inHScroller };
     };
+
+    // ── 1b. the page body itself scrolls sideways ────────────────────────
+    // Wide content belongs in its OWN overflow-x container; the body scrolling
+    // horizontally means something simply does not fit the screen.
+    if (root instanceof HTMLElement && root.scrollWidth > root.clientWidth + 1) {
+      const widest = Array.from(root.querySelectorAll('*'))
+        .map((el) => ({ el, r: el.getBoundingClientRect() }))
+        .filter((x) => x.r.width > 2 && x.r.right > root.getBoundingClientRect().right + 1)
+        .sort((a, b) => b.r.right - a.r.right)[0];
+      out.push({
+        rule: 'body-hscroll',
+        detail:
+          `page body scrolls sideways: scrollWidth ${root.scrollWidth} > ` +
+          `clientWidth ${root.clientWidth}` +
+          (widest ? ` -- widest offender ${describe(widest.el)}` : ''),
+      });
+    }
 
     const nodes: { el: Element; m: ReturnType<typeof measure> }[] = [];
     for (const el of Array.from(root.querySelectorAll(SELECTOR))) {
@@ -227,5 +259,5 @@ export async function auditLayout(page: Page): Promise<Violation[]> {
       }
     }
     return out;
-  });
+  }, opts.rootSelector ?? '#main-content');
 }
