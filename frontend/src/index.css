@@ -3444,7 +3444,58 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
     background: transparent;
     box-shadow: none;
     padding: 0;
-    font-size: 14px;
+    font-size: 14.5px;
+  }
+
+  /* ── Phone drawer: light surface + touch density (owner 2026-08-31) ──
+     The dark rail is a desktop-era leftover; desktop and tablet now use the
+     top menu, so this drawer is the ONLY place the rail renders. Light keeps
+     it consistent with every other screen, and 44px rows are the thumb
+     target the iPad/phone rule asks for. */
+  .rail.rail-mobile-open {
+    width: 322px;
+    max-width: 86vw;
+    background: var(--surface, #fff);
+    color: var(--ink, #141413);
+    border-right: 1px solid var(--line, #ececea);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .rail.rail-mobile-open .brand { color: var(--ink); }
+  .rail.rail-mobile-open .rail-nav { padding: 6px 10px; }
+  .rail.rail-mobile-open .rail-item {
+    height: 44px;
+    padding: 0 12px;
+    border-radius: 10px;
+    color: var(--ink-2, #2a2a28);
+    margin-bottom: 1px;
+  }
+  .rail.rail-mobile-open .rail-item svg { color: var(--ink-3, #6b6b64); }
+  .rail.rail-mobile-open .rail-item:active { background: var(--bg-sunk, #f4f4f2); }
+  /* Active row = filled pill (same language as the Settings rail). The
+     tab-bar underline that used to mark it is deleted in mobile.css. */
+  .rail.rail-mobile-open .rail-item.active {
+    background: var(--ink, #141413);
+    color: #fff;
+    font-weight: 500;
+  }
+  .rail.rail-mobile-open .rail-item.active::before { display: none; }
+  .rail.rail-mobile-open .rail-item.active svg { color: #fff; }
+  /* Group headers: one tappable 40px line each */
+  .rail.rail-mobile-open .rail-group-title {
+    height: 40px;
+    padding: 0 12px;
+    margin-top: 4px;
+    border-radius: 9px;
+    color: var(--ink-3, #55554f);
+    font: 500 10px/1 var(--font-mono);
+    letter-spacing: .13em;
+  }
+  .rail.rail-mobile-open .rail-group-title:active { background: var(--bg-sunk, #f4f4f2); }
+  /* Account row sits at the thumb, on a hairline */
+  .rail.rail-mobile-open .rail-usermenu {
+    border-top: 1px solid var(--line, #ececea);
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: var(--surface, #fff);
   }
 }
 
