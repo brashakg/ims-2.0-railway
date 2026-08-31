@@ -8,6 +8,7 @@ const POSPage = lazy(() => import('../pages/pos/POSPage').then(m => ({ default: 
 const FootfallPage = lazy(() => import('../pages/pos/FootfallPage').then(m => ({ default: m.FootfallPage })));
 const BillingSurface = lazy(() => import('../pages/pos/next/BillingSurface'));
 const DeliverySurface = lazy(() => import('../pages/pos/next/DeliverySurface'));
+const GeneralCounterSurface = lazy(() => import('../pages/pos/next/GeneralCounterSurface'));
 
 export const posRoutes = (
   <>
@@ -19,6 +20,21 @@ export const posRoutes = (
           allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
         >
           <POSPage />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* POS Wave 4: the general (non-optical) counter - sunglasses, solutions,
+        accessories. No Rx panel and no workshop job; the same order API, GST
+        math and discount caps. Prompts back to /pos/new when the sale turns
+        out to be optical, so that route must stay. Same role gate as /pos. */}
+    <Route
+      path="pos/counter"
+      element={
+        <ProtectedRoute
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
+        >
+          <GeneralCounterSurface />
         </ProtectedRoute>
       }
     />

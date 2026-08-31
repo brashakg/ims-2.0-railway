@@ -122,6 +122,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/walkouts' },
   { path: '/walkouts/dashboard' },
   { path: '/returns' },
+  { path: '/pos/counter' },
   // The classic POS renders its own chrome, not the generic page header,
   // so the default ready selector never matches (measured: >15s timeout).
   { path: '/pos', ready: '.steps-rail, .pos-body, [class*="pos-"]' },

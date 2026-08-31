@@ -23,6 +23,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { orderApi } from '../../../services/api/sales';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import type { Order } from '../../../types';
+import DeliveryCompleteScreen from './DeliveryCompleteScreen';
 
 const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
@@ -41,6 +42,9 @@ export function DeliverySurface() {
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
+  // The handed-over order, held so the completion screen can print the
+  // final invoice and send the thank-you against it.
+  const [handedOver, setHandedOver] = useState<LoadedOrder | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
 
   // Handover checks — advisory only, name-stamped on the order.
@@ -124,6 +128,9 @@ export function DeliverySurface() {
           (collectNum > 0 ? ` · collected ${money(collectNum)}` : '') +
           (shortfall > 0 ? ` · ${money(shortfall)} booked as outstanding` : ''),
       );
+      // Hand over to the completion screen: final invoice, care card, and the
+      // delivered-thank-you the server has already queued.
+      setHandedOver(order);
       setOrder(null);
       setPickedUpBy('');
       setHandoverNote('');
@@ -157,6 +164,18 @@ export function DeliverySurface() {
         </div>
       )}
 
+      {handedOver ? (
+        <DeliveryCompleteScreen
+          orderId={handedOver.id}
+          orderNumber={handedOver.orderNumber}
+          salespersonId={handedOver.salespersonId}
+          salespersonName={handedOver.salespersonName}
+          onDone={() => {
+            setHandedOver(null);
+            setOkMsg(null);
+          }}
+        />
+      ) : (
       <div className="flex-1 lg:min-h-0 flex flex-col lg:flex-row gap-3.5 p-3.5">
         {/* LEFT: find the order + handover checks */}
         <div className="flex-1 min-w-0 flex flex-col gap-3 lg:min-h-0">
@@ -304,6 +323,7 @@ export function DeliverySurface() {
           </button>
         </div>
       </div>
+      )}
     </div>
   );
 }

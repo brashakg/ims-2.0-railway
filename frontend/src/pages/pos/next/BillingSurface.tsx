@@ -29,6 +29,9 @@ import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { PosWidgets } from './PosWidgets';
 import { CustomerSearchBar } from '../../../components/pos/CustomerSearchBar';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
+import SaleCompleteScreen from './SaleCompleteScreen';
+import ProductResultsStrip from './ProductResultsStrip';
+import DeliveryOptionsRow from './DeliveryOptionsRow';
 import {
   resolveBarcode,
   posPriceGuard,
@@ -42,6 +45,15 @@ export function BillingSurface() {
   const onlineStoreActive = useIsOnlineStore(activeStoreId);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  // The finished sale, held so the completion screen can print and send
+  // against it. Cleared by Done, which also resets the till for the next
+  // customer.
+  const [completed, setCompleted] = useState<{
+    orderId: string;
+    orderNumber?: string;
+    jobId?: string;
+  } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
 
   // ---- Guards (same rules as the classic surface; backend enforces both) --
@@ -105,9 +117,17 @@ export function BillingSurface() {
       }
       idempotencyKeyRef.current = null;
       if (res.warning) setErrorMsg(res.warning);
-      // Fitting-modal flow arrives with the Rx panel in Phase B; until then a
-      // workshop job created by the shared brain simply completes the sale.
-      if (res.fittingJobId) store.setStep('complete');
+      // EVERY successful sale lands on the completion screen now. Until this
+      // wiring, only a sale that happened to spawn a workshop job showed
+      // anything at all - a plain frame sale completed silently, leaving the
+      // counter with no invoice, no WhatsApp and no way back to a clean till.
+      if (res.orderId) {
+        setCompleted({
+          orderId: res.orderId,
+          orderNumber: res.orderNumber,
+          jobId: res.fittingJobId,
+        });
+      }
     } finally {
       store.setProcessing(false);
     }
@@ -145,7 +165,19 @@ export function BillingSurface() {
         </div>
       )}
 
-      {isComplete ? (
+      {completed ? (
+        <SaleCompleteScreen
+          orderId={completed.orderId}
+          orderNumber={completed.orderNumber}
+          jobId={completed.jobId}
+          salespersonId={store.salesperson_id}
+          salespersonName={store.salesperson_name}
+          onDone={() => {
+            setCompleted(null);
+            store.resetTransaction();
+          }}
+        />
+      ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
           <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction()} />
         </div>
@@ -206,7 +238,29 @@ export function BillingSurface() {
 
             {/* Product entry: compact — one row of controls (owner spec 6) */}
             <div className="shrink-0">
-              <BarcodeScanner onScan={handleScan} placeholder="Scan barcode or search products…" autoFocus />
+              <BarcodeScanner
+                onScan={handleScan}
+                onManualSearch={setProductQuery}
+                placeholder="Scan barcode or search products…"
+                autoFocus
+              />
+            </div>
+
+            {/* Typed search results. Adds the line itself through the shared
+                intake guard, and reports a money-guard refusal upward so this
+                surface keeps ONE error banner rather than growing a second. */}
+            <div className="min-w-0 shrink-0">
+              <ProductResultsStrip
+                storeId={activeStoreId}
+                query={productQuery}
+                onBlocked={setErrorMsg}
+                onPicked={() => setProductQuery('')}
+              />
+            </div>
+
+            {/* Delivery date / slot / priority + bill note (owner spec 7). */}
+            <div className="shrink-0">
+              <DeliveryOptionsRow />
             </div>
 
             {/* Breathing room on a locked screen; on a phone the column
