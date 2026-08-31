@@ -148,7 +148,8 @@ export async function auditLayout(
     const measure = (el: Element) => {
       const raw = el.getBoundingClientRect();
       const r: Box = { left: raw.left, top: raw.top, right: raw.right, bottom: raw.bottom };
-      let reachable = false; // some ancestor can be scrolled to reveal it
+      let ancestorScrolls = false; // a clipping ancestor can be scrolled
+      let inFixed = false; // inside a position:fixed subtree (a popup)
       let inHScroller = false; // legitimately scrolls sideways (wide table)
       let n: Element | null = el.parentElement;
       // Stop at the audit root, exactly as isFloating does. Walking past it
@@ -175,6 +176,7 @@ export async function auditLayout(
         const clipsX = cs.overflowX !== 'visible';
         const clipsY = cs.overflowY !== 'visible';
         const insideRoot = n !== root && root.contains(n);
+        if (cs.position === 'fixed') inFixed = true;
         if (clipsX || clipsY) {
           const b = n.getBoundingClientRect();
           if (clipsX && insideRoot) {
@@ -191,7 +193,7 @@ export async function auditLayout(
           const scrollsY =
             (cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
             n.scrollHeight > n.clientHeight + 1;
-          if (scrollsX || scrollsY) reachable = true;
+          if (scrollsX || scrollsY) ancestorScrolls = true;
           // Only a scroller strictly BELOW the audit root counts as deliberate.
           if (scrollsX && insideRoot) inHScroller = true;
         }
@@ -209,7 +211,20 @@ export async function auditLayout(
       //   off-screen  = the box is fine, it just sits outside the viewport.
       //                 Ordinary on any long page; never a violation, and not
       //                 comparable for overlap either.
-      const trapped = (r.right - r.left <= 1 || r.bottom - r.top <= 1) && !reachable;
+      // OUT OF REACH. Two different ways a box can vanish, and they are NOT
+      // rescued by the same scrolling:
+      //   clipped away by an ANCESTOR -> only a scroller in that same chain can
+      //     bring it back. Scrolling the page cannot. (zero-width column;
+      //     content behind overflow:hidden)
+      //   merely outside the VIEWPORT  -> an ancestor scroller OR the document
+      //     scrolling reveals it. Ordinary on any long page - this is where the
+      //     5,712 false reports came from, when a reachability bug hid the fact
+      //     that the page body owns the scrollbar.
+      // The document exception: scrolling never reveals anything inside a
+      // position:fixed subtree, because fixed content does not move with the
+      // page. That is the owner-reported salary-config modal - rows at
+      // y=-71..33 in a panel taller than the screen with no scroller of its own.
+      const goneByClip = r.right - r.left <= 1 || r.bottom - r.top <= 1;
       const vis: Box = {
         left: Math.max(r.left, 0),
         top: Math.max(r.top, 0),
@@ -217,7 +232,12 @@ export async function auditLayout(
         bottom: Math.min(r.bottom, vh),
       };
       const gone = vis.right - vis.left <= 1 || vis.bottom - vis.top <= 1;
-      return { raw, vis, gone, trapped, inHScroller };
+      const documentScrolls =
+        de.scrollHeight > de.clientHeight + 1 || de.scrollWidth > de.clientWidth + 1;
+      const outOfReach = goneByClip
+        ? !ancestorScrolls
+        : gone && !ancestorScrolls && !(documentScrolls && !inFixed);
+      return { raw, vis, gone, outOfReach, inHScroller };
     };
 
     // ── 1b. the page body itself scrolls sideways ────────────────────────
@@ -245,14 +265,14 @@ export async function auditLayout(
       const m = measure(el);
 
       // ── 3. clipped away with no way to scroll to it ────────────────────
-      if (m.trapped) {
+      if (m.outOfReach) {
         out.push({
           rule: 'unreachable',
           detail: `${describe(el)} at y=${Math.round(raw.top)}..${Math.round(
             raw.bottom,
           )} x=${Math.round(raw.left)}..${Math.round(
             raw.right,
-          )} is clipped away by an ancestor and nothing in that chain can scroll to it`,
+          )} has no visible area in a ${vw}x${vh} viewport and nothing can scroll to it`,
         });
         continue;
       }
