@@ -22,6 +22,12 @@ import type { Page } from '@playwright/test';
 
 /** Widths every probed screen must survive. iPad landscape is the owner's
  *  POS register target (spec 11b); the phone is what BUG-1 broke. */
+/** What "the page body" means to the audit. Exported so the spec's settle
+ *  logic watches exactly the subtree auditLayout will measure - two different
+ *  answers to "which element is the page" is how a probe ends up waiting on
+ *  one thing and measuring another. Pass a dialog selector to audit a POPUP. */
+export const AUDIT_ROOT = '#main-content';
+
 export const VIEWPORTS = [
   // Smallest phone still in real use - the width most layouts break at first.
   { name: 'phone-small 360x780', width: 360, height: 780 },
@@ -262,5 +268,5 @@ export async function auditLayout(
       }
     }
     return out;
-  }, opts.rootSelector ?? '#main-content');
+  }, opts.rootSelector ?? AUDIT_ROOT);
 }

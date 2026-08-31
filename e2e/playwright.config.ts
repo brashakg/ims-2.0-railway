@@ -8,8 +8,37 @@ import { defineConfig, devices } from '@playwright/test';
  * CI as http://localhost:4173 (a vite preview of the built SPA that proxies
  * /api -> the local uvicorn backend on :8000, so the whole suite is
  * same-origin and self-contained).
+ *
+ * TWO PROJECTS, TWO WORKER COUNTS
+ * -------------------------------
+ * The layout probe is READ-ONLY: it navigates, measures geometry, asserts.
+ * It never writes. The other specs DO write (orders, store switches) and
+ * share one seeded database, so they must stay serial. Playwright has no
+ * per-project `workers` setting (it is a global, config- or CLI-level knob),
+ * so CI runs this config TWICE in the same job — `--project=layout
+ * --workers=N` then `--project=stateful --workers=1`. Both steps live in the
+ * `e2e` job, so both still report into the single `e2e` check.
+ *
+ * Splitting by FILENAME is what keeps that honest: `stateful` is the
+ * complement of `layout`, so every spec file lands in exactly one project and
+ * a new file can never be silently dropped. A spec that does not match the
+ * read-only pattern falls into the SERIAL project — slower, never wrong.
  */
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:4173';
+
+// Hard stop: this suite logs in, creates orders and switches stores. Pointing
+// it at a deployed host would mutate real data. Refuse to start.
+if (/vercel\.app|railway\.app|bettervision\.in|wizopt|myshopify\.com/i.test(baseURL)) {
+  throw new Error(
+    `E2E_BASE_URL points at a deployed host (${baseURL}). This suite mutates ` +
+      `data and must only ever run against a local CI-seeded stack.`,
+  );
+}
+
+/** Read-only specs: geometry probes that navigate and measure, nothing else.
+ *  Name a new read-only spec `layout*.spec.ts` to land it in the parallel
+ *  project; anything else falls into the serial one. */
+const READ_ONLY = /(^|[\/])layout[\w.-]*\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './tests',
@@ -19,14 +48,15 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   fullyParallel: true,
   retries: process.env.CI ? 2 : 0,
-  // Keep workers modest in CI — the backend is a single uvicorn process and
-  // the suite mutates shared DB state (orders, store switches).
+  // Overridden per invocation from CI (see the two run steps in e2e.yml).
+  // Default stays 1 so an unqualified `npx playwright test` is always safe.
   workers: process.env.CI ? 1 : undefined,
   timeout: 60_000,
   expect: { timeout: 15_000 },
   reporter: [
     ['list'],
-    ['html', { open: 'never', outputFolder: 'playwright-report' }],
+    // Each invocation needs its own folder or the second overwrites the first.
+    ['html', { open: 'never', outputFolder: process.env.PW_HTML_DIR ?? 'playwright-report' }],
   ],
   use: {
     baseURL,
@@ -38,7 +68,29 @@ export default defineConfig({
   },
   projects: [
     {
-      name: 'chromium',
+      name: 'layout',
+      testMatch: READ_ONLY,
+      // One test now measures a screen at all seven widths, so it needs more
+      // than the 60s a single-assertion test gets. Worst case is 7 x the
+      // settle cap in layout.spec.ts plus the page load.
+      timeout: 120_000,
+      // Per-project outputDir so the two invocations cannot wipe each other's
+      // traces (Playwright clears the outputDir of the projects it runs).
+      outputDir: 'test-results/layout',
+      use: {
+        ...devices['Desktop Chrome'],
+        // Geometry is deterministic, so this spec runs with retries: 0 — which
+        // means `on-first-retry` would never produce a trace. Keep the trace,
+        // drop the video: a trace has the DOM + the screenshot, and recording
+        // video for every test in a many-hundred-test matrix is pure overhead.
+        trace: 'retain-on-failure',
+        video: 'off',
+      },
+    },
+    {
+      name: 'stateful',
+      testIgnore: READ_ONLY,
+      outputDir: 'test-results/stateful',
       use: { ...devices['Desktop Chrome'] },
     },
     // WebKit is opt-in (slower in CI, optional per the brief). Enable locally
