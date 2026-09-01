@@ -10,6 +10,7 @@
 // on top of CGST-compliant defaults at render time (see legalPrimitives.tsx).
 
 import { useRef } from 'react';
+import { stateFromGstin } from '../../constants/indianStates';
 import { Printer, Download } from 'lucide-react';
 import { calculateGST, calculateIGST } from '../../constants/gst';
 import { resolveGstRate, resolveHsn, isInclusivePricing } from '../../constants/gstRuntime';
@@ -85,8 +86,17 @@ export function GSTInvoice({
 
   // Inter-state (IGST) vs intra-state (CGST + SGST) routing.
   const storeState = store?.state?.toLowerCase?.()?.trim() || '';
-  const customerState = (order as any)?.customer_state?.toLowerCase?.()?.trim()
-    || (order as any)?.billing_address?.state?.toLowerCase?.()?.trim() || '';
+  // GSTIN FIRST, then the billing address, then the customer record - the same
+  // precedence the server uses (orders._customer_state_code), so the printed
+  // invoice and the tax the server records cannot disagree. A B2B customer
+  // entered with a GSTIN and no address is the common case, and reading the
+  // address alone got it wrong every time.
+  const customerState = (
+    stateFromGstin((order as any)?.customer_gstin)
+    || (order as any)?.customer_state
+    || (order as any)?.billing_address?.state
+    || ''
+  ).toLowerCase?.()?.trim?.() || '';
   const isInterState = !!(storeState && customerState && storeState !== customerState);
 
   // Order-level discount distribution (proportional across line items).

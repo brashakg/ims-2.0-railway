@@ -73,6 +73,14 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
     customerId: store.customer?.id || '',
     customerName: store.customer?.name || 'Walk-in',
     customerPhone: store.customer?.phone || '',
+    // PLACE OF SUPPLY. Without these the invoice had no customer state at all,
+    // so its inter-state test was false on 100% of bills and it could NEVER
+    // print IGST - while the server's PDF for the same order printed IGST
+    // correctly. The customer was handed a document naming the wrong tax heads
+    // on every out-of-state sale.
+    customer_gstin: (store.customer as { gstin?: string } | null)?.gstin || '',
+    customer_state: (store.customer as { state?: string } | null)?.state || '',
+    billing_address: (store.customer as { billing_address?: unknown } | null)?.billing_address,
     patientName: store.patient?.name,
     items: (store.cart || []).map(item => ({
       id: item.id,

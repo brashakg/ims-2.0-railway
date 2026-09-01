@@ -20,6 +20,7 @@
 // (GST verify state, the in-progress "add patient" row) is local to this body.
 
 import { useEffect, useState } from 'react';
+import { GST_STATE_BY_CODE } from '../../constants/indianStates';
 import {
   Plus,
   Trash2,
@@ -124,17 +125,14 @@ export function CustomerIdentityFields({
     if (isValid) {
       const stateCode = formData.gstNumber.substring(0, 2);
       const panNumber = formData.gstNumber.substring(2, 12);
-      const stateMap: Record<string, string> = {
-        '01': 'Jammu and Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
-        '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
-        '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
-        '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
-        '27': 'Maharashtra', '29': 'Karnataka', '33': 'Tamil Nadu',
-      };
+      // State from the GSTIN's first two digits, via the ONE shared map.
       patch({
         businessName: formData.businessName || `Business Entity (${formData.gstNumber.substring(2, 7)})`,
         panNumber,
-        state: formData.state || stateMap[stateCode] || 'Maharashtra',
+        // NEVER guess a state. An unrecognised code leaves the field alone
+        // for a human to pick: a blank state is a visible gap, a wrong one
+        // silently mis-files the tax.
+        state: formData.state || GST_STATE_BY_CODE[stateCode] || '',
       });
       setGstVerified(true);
     } else {
