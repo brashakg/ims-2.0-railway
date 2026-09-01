@@ -3187,6 +3187,134 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         except Exception:
             pass
 
+        # ------------------------------------------------------------------
+        # IN-STORE RETURNS as credit notes. THE REFUND ITSELF is the taxable
+        # event: goods came back, so the output tax on them reverses, and HOW
+        # the money went back is irrelevant to GST.
+        #
+        # This block exists because the CDNR source above is the STORE-CREDIT
+        # ledger, and a cash / UPI / card refund correctly writes NO store
+        # credit -- the customer got money, not a promise of money. So the tax
+        # reversal existed nowhere: measured on production, ALL 20 completed
+        # returns had no credit note and Rs 3,209.96 of output tax was still
+        # being declared on goods that had come back.
+        #
+        # The fix is NOT to mint store credit for a cash refund (that would
+        # hand the customer spendable money they never earned, on top of their
+        # cash). It is to read the tax event from where it is already recorded:
+        # `returns.gst_breakup`, stamped by the return door itself. No new tax
+        # arithmetic is introduced here.
+        try:
+            returns_col = db.get_collection("returns")
+            if returns_col is not None:
+                # A return that DID mint store credit is already in `cdnr` from
+                # the ledger pass; counting it twice would over-reverse the tax,
+                # which under-declares - worse than the bug being fixed.
+                seen_returns = set()
+                for _e in cdnr:
+                    for _f in ("refReference",):
+                        _v = str(_e.get(_f) or "")
+                        if _v:
+                            seen_returns.add(_v)
+                for _row in ledger_col.find(
+                    {"store_id": active_store, "type": "ISSUED"},
+                    {"ref": 1, "reason": 1},
+                ) if ledger_col is not None else []:
+                    for _f in ("ref", "reason"):
+                        _v = str(_row.get(_f) or "")
+                        for _tok in _v.replace(",", " ").split():
+                            if _tok.startswith("RET-"):
+                                seen_returns.add(_tok.strip(".:;"))
+
+                for ret in returns_col.find(
+                    {
+                        "store_id": active_store,
+                        "status": {"$in": ["COMPLETED", "completed"]},
+                    }
+                ):
+                    if not isinstance(ret, dict):
+                        continue
+                    rid = str(ret.get("return_id") or "")
+                    if rid and rid in seen_returns:
+                        continue
+                    gb = ret.get("gst_breakup") or {}
+                    if not isinstance(gb, dict):
+                        continue
+                    r_tax = round(float(gb.get("tax") or 0.0), 2)
+                    r_taxable = round(float(gb.get("taxable") or 0.0), 2)
+                    if r_tax <= 0 and r_taxable <= 0:
+                        continue
+
+                    # Period filter. `returns.created_at` is written by
+                    # BaseRepository as a real Date, unlike the ledger's ISO
+                    # string, so compare in the frame it is actually stored in.
+                    r_when = ret.get("created_at")
+                    try:
+                        if isinstance(r_when, str):
+                            if not (from_dt.isoformat() <= r_when < to_dt.isoformat()):
+                                continue
+                        elif r_when is not None:
+                            if not (from_dt <= r_when < to_dt):
+                                continue
+                        else:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+
+                    cust_id = str(ret.get("customer_id", ""))
+                    cust_info = cust_map.get(cust_id, {})
+                    cust_state = cust_info.get("state", "") or store_state
+                    is_inter = bool(
+                        store_state
+                        and cust_state
+                        and store_state.strip().lower() != cust_state.strip().lower()
+                    )
+                    if is_inter:
+                        r_cgst = r_sgst = 0.0
+                        r_igst = r_tax
+                    else:
+                        r_cgst = round(r_tax / 2, 2)
+                        r_sgst = round(r_tax - r_cgst, 2)
+                        r_igst = 0.0
+
+                    try:
+                        r_rate = int(round(float(gb.get("gst_rate")))) if gb.get("gst_rate") else 18
+                    except (TypeError, ValueError):
+                        r_rate = 18
+                    r_place = cust_state or store_state or "Unknown"
+
+                    cdnr.append(
+                        {
+                            "refReference": (rid or "RET")[:16],
+                            "creditNoteDate": (
+                                r_when[:10]
+                                if isinstance(r_when, str)
+                                else (
+                                    ist_date_str(r_when)
+                                    if r_when is not None
+                                    else month + "-01"
+                                )
+                            ),
+                            "customerId": cust_id,
+                            "customerName": cust_info.get("name", "")
+                            or str(ret.get("customer_name", "") or ""),
+                            "customerGSTIN": cust_info.get("gstin", ""),
+                            "customerState": r_place,
+                            "placeOfSupply": r_place,
+                            "grossValue": round(float(gb.get("gross") or 0.0), 2),
+                            "taxableValue": r_taxable,
+                            "cgst": r_cgst,
+                            "sgst": r_sgst,
+                            "igst": r_igst,
+                            "taxValue": r_tax,
+                            "hsnCode": "9004",
+                            "gstRate": r_rate,
+                            "sourceReturn": rid,
+                        }
+                    )
+        except Exception:
+            pass
+
     # Build HSN summary by aggregating sales and deducting credit notes
     for inv in b2b + b2cl:
         if not isinstance(inv, dict):
@@ -3687,6 +3815,163 @@ def _transfer_b2b_rows(bills):
     return rows, hsn_lines
 
 
+def _credit_note_totals(db, active_store, year, mon, last_day):
+    """(igst, cgst, sgst, taxable) of credit notes issued in the period.
+
+    GSTR-3B Table 3.1(a) is reported NET of credit notes: goods that came back
+    are not an outward supply. Nothing subtracted them, so the payable figure
+    the accountant reads - and re-types into the portal - was gross of every
+    refund. He paid tax on money he had handed back.
+
+    Reads BOTH sources, because neither alone is complete:
+      * credit_note_ledger - store-credit refunds, Shopify refunds, superadmin
+        credit notes. It is a STORE-CREDIT ledger, so a cash / UPI / card
+        refund is correctly absent from it.
+      * returns.gst_breakup - the tax event itself, present for every refund
+        whatever the tender. Measured on production: all 20 completed returns
+        had no ledger row, and Rs 3,209.96 of output tax was never reversed.
+    Deduped on return_id so a refund that DID mint store credit is counted
+    once; double-counting here would over-reverse and UNDER-declare, which is
+    worse than the bug being fixed. Fail-soft -> zeros.
+    """
+    igst = cgst = sgst = taxable = 0.0
+    if db is None:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        from_dt, to_dt = ist_month_window_utc(year, mon)
+    except Exception:  # noqa: BLE001
+        return 0.0, 0.0, 0.0, 0.0
+
+    seen_returns = set()
+
+    def _split(tax, is_inter):
+        if is_inter:
+            return round(tax, 2), 0.0, 0.0
+        c = round(tax / 2, 2)
+        return 0.0, c, round(tax - c, 2)
+
+    try:
+        ledger = db.get_collection("credit_note_ledger")
+    except Exception:  # noqa: BLE001
+        ledger = None
+    if ledger is not None:
+        try:
+            for row in ledger.find(
+                {
+                    "store_id": active_store,
+                    "type": "ISSUED",
+                    "created_at": {
+                        "$gte": from_dt.isoformat(),
+                        "$lt": to_dt.isoformat(),
+                    },
+                }
+            ):
+                for f in ("ref", "reason"):
+                    for tok in str(row.get(f) or "").replace(",", " ").split():
+                        if tok.startswith("RET-"):
+                            seen_returns.add(tok.strip(".:;"))
+                t = row.get("tax")
+                if t is None:
+                    gross = float(row.get("gross_refund") or 0.0)
+                    net = float(row.get("net_refund", row.get("amount", 0)) or 0.0)
+                    t = gross - net if gross > 0 else 0.0
+                t = round(float(t or 0.0), 2)
+                tv = row.get("taxable")
+                tv = round(float(tv if tv is not None else row.get("amount", 0) or 0.0), 2)
+                i, c, sg = _split(t, bool(row.get("interstate")))
+                igst += i
+                cgst += c
+                sgst += sg
+                taxable += tv
+        except Exception:  # noqa: BLE001
+            pass
+
+    # A refund must reverse the SAME head the sale was filed under. Deriving it
+    # afresh from the customer's state would re-answer a question the parent
+    # order already answered - and answer it differently for an online order,
+    # whose buyer record is minted stateless. So prefer the parent order's own
+    # `interstate` stamp, exactly as the CDNR rows and Table 3.1(a) do.
+    # Caught by mutation testing: hardcoding returns as intra-state reversed
+    # CGST/SGST on a sale that sat in IGST, leaving BOTH heads wrong.
+    order_inter: dict = {}
+    store_state = ""
+    try:
+        st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
+        store_state = str(st.get("state") or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        returns_col = db.get_collection("returns")
+    except Exception:  # noqa: BLE001
+        returns_col = None
+    if returns_col is not None:
+        try:
+            for ret in returns_col.find(
+                {
+                    "store_id": active_store,
+                    "status": {"$in": ["COMPLETED", "completed"]},
+                }
+            ):
+                rid = str(ret.get("return_id") or "")
+                if rid and rid in seen_returns:
+                    continue
+                when = ret.get("created_at")
+                try:
+                    if isinstance(when, str):
+                        if not (from_dt.isoformat() <= when < to_dt.isoformat()):
+                            continue
+                    elif when is not None:
+                        if not (from_dt <= when < to_dt):
+                            continue
+                    else:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                gb = ret.get("gst_breakup") or {}
+                if not isinstance(gb, dict):
+                    continue
+                t = round(float(gb.get("tax") or 0.0), 2)
+                tv = round(float(gb.get("taxable") or 0.0), 2)
+                if t <= 0 and tv <= 0:
+                    continue
+                oid = str(ret.get("order_id") or "")
+                if oid and oid not in order_inter:
+                    try:
+                        po = db.get_collection("orders").find_one(
+                            {"order_id": oid}, {"interstate": 1, "customer_id": 1}
+                        ) or {}
+                    except Exception:  # noqa: BLE001
+                        po = {}
+                    flag = po.get("interstate")
+                    if isinstance(flag, bool):
+                        order_inter[oid] = flag
+                    else:
+                        cs = ""
+                        try:
+                            cu = db.get_collection("customers").find_one(
+                                {"customer_id": str(ret.get("customer_id") or "")},
+                                {"state": 1},
+                            ) or {}
+                            cs = str(cu.get("state") or "")
+                        except Exception:  # noqa: BLE001
+                            cs = ""
+                        order_inter[oid] = bool(
+                            store_state
+                            and cs
+                            and store_state.strip().lower() != cs.strip().lower()
+                        )
+                i, c, sg = _split(t, order_inter.get(oid, False))
+                igst += i
+                cgst += c
+                sgst += sg
+                taxable += tv
+        except Exception:  # noqa: BLE001
+            pass
+
+    return round(igst, 2), round(cgst, 2), round(sgst, 2), round(taxable, 2)
+
+
 def _transfer_outward_totals(db, active_store, year, mon, last_day):
     """Sum (igst, cgst, sgst, taxable) of the sender-side transfer mirror bills
     for GSTR-3B Table 3.1(a). Sums the SAME header fields the receiver's ITC
@@ -3885,6 +4170,18 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         out_cgst += t_cgst
         out_sgst += t_sgst
         out_taxable += t_taxable
+
+        # Table 3.1(a) is NET of credit notes - goods that came back are not an
+        # outward supply. Clamped at zero: a month with more refunds than sales
+        # is a carry-forward question for the accountant, never a negative
+        # liability on this screen.
+        cn_igst, cn_cgst, cn_sgst, cn_taxable = _credit_note_totals(
+            db, active_store, year, mon, last_day
+        )
+        out_igst = max(0.0, out_igst - cn_igst)
+        out_cgst = max(0.0, out_cgst - cn_cgst)
+        out_sgst = max(0.0, out_sgst - cn_sgst)
+        out_taxable = max(0.0, out_taxable - cn_taxable)
 
         # BUG-138: ITC from recorded purchase invoices (vendor_bills), not the
         # qty-only `grns` collection that made ITC always 0 (-> GST over-paid).
