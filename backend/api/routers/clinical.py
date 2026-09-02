@@ -38,6 +38,7 @@ from ..dependencies import (
 from ..services import clinical_abuse as _abuse
 from ..services import conversion_analytics as _conversion
 from ..services.rx_print_values import first_present_rx_value, is_absent_rx_value
+from ..services.data_horizon import horizon_start_iso_date, later_iso_bound
 
 router = APIRouter()
 
@@ -1134,6 +1135,16 @@ async def get_tests(
             tests = test_repo.get_today_completed_tests(store_id)
         else:
             r_from, r_to = _resolve_test_date_range(range, from_date, to_date)
+            # 30-day browse horizon (owner ruling 2026-09-01). This door is a
+            # BROWSE -- it lists a whole store's exams -- so it is clamped for
+            # every role but ADMIN / SUPERADMIN. `range=all` (and an explicit
+            # `from=2020-01-01`) walked straight past the window otherwise,
+            # which made the clamp on the prescriptions door decorative: the
+            # same clinical history was one query param away. A named patient's
+            # full history stays available on the customer-scoped doors.
+            r_from = later_iso_bound(
+                r_from, horizon_start_iso_date(current_user)
+            )
             if r_from is None and r_to is None:
                 tests = test_repo.get_store_tests(store_id)
             else:

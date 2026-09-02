@@ -57,12 +57,52 @@ class PrescriptionRepository(BaseRepository):
             filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(to_date, datetime.max.time())
         return self.find_many(filter, sort=[("prescription_date", -1)])
     
-    def find_by_store(self, store_id: str, from_date: date = None, to_date: date = None) -> List[Dict]:
-        filter = {"store_id": store_id}
+    def find_by_store(
+        self,
+        store_id: str,
+        from_date: date = None,
+        to_date: date = None,
+        created_after: datetime = None,
+    ) -> List[Dict]:
+        """Prescriptions for a store, optionally windowed.
+
+        TWO DIFFERENT DATE FIELDS, deliberately, because they are stored in two
+        different TYPES:
+
+        `prescription_date` is the CLINICAL date (it can be back-dated), and the
+        create door writes it with `.isoformat()` -- a STRING. Bounding a string
+        field with a datetime matches NOTHING in Mongo: BSON brackets by type
+        and never compares the two. Verified against production: of 8 stored
+        prescriptions, prescription_date is `str` on 3 and MISSING on 5, and not
+        one is a datetime. So the caller's from/to window is matched in the
+        frame it is actually stored in, which is also the bug fix for a filter
+        that has silently returned nothing all along.
+
+        `created_after` bounds `created_at`, which BaseRepository writes as a
+        real BSON Date on 100% of rows. That is the field the 30-day browse
+        horizon uses: a security clamp must never hang off a field that is
+        absent on most documents, or it fails open on exactly the rows it was
+        meant to hide -- and never off one whose type makes it match nothing,
+        which would empty the screen instead.
+        """
+        filter: Dict = {"store_id": store_id}
+
+        # Clinical window, compared as STRINGS (the stored frame). ISO-8601 is
+        # lexicographically ordered, so a string compare is a correct date
+        # compare for this format.
         if from_date:
-            filter["prescription_date"] = {"$gte": datetime.combine(from_date, datetime.min.time())}
+            filter["prescription_date"] = {
+                "$gte": datetime.combine(from_date, datetime.min.time()).isoformat()
+            }
         if to_date:
-            filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(to_date, datetime.max.time())
+            filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(
+                to_date, datetime.max.time()
+            ).isoformat()
+
+        # Security horizon, on the reliably-typed field.
+        if created_after:
+            filter["created_at"] = {"$gte": created_after}
+
         return self.find_many(filter, sort=[("prescription_date", -1)])
     
     def find_valid(self, patient_id: str) -> List[Dict]:

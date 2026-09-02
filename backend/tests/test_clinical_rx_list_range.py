@@ -123,10 +123,15 @@ class _FakeRxRepo:
         return self._by_eye_test.get(eye_test_id)
 
     # -- used by prescriptions list --
-    def find_by_store(self, store_id, from_date=None, to_date=None):
+    def find_by_store(self, store_id, from_date=None, to_date=None,
+                      created_after=None):
+        # `created_after` is the 30-day browse horizon, bounding created_at.
+        # Honoured here rather than swallowed: a double that ignores a
+        # security argument reports the control working when it is not.
         out = [r for r in self._rx if r.get("store_id") == store_id]
-        # The real repo applies a datetime range on prescription_date; here the
-        # seeded dates are ISO strings sorted lexically, equivalent for the test.
+        # prescription_date is stored as an ISO STRING, and the real repo now
+        # bounds it as one (it used to send a datetime, which matched nothing).
+        # So this string compare mirrors production rather than approximating it.
         if from_date is not None:
             f = from_date.isoformat()
             out = [r for r in out if (r.get("prescription_date") or "") >= f]
@@ -134,6 +139,12 @@ class _FakeRxRepo:
             t = to_date.isoformat()
             out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]
         out.sort(key=lambda r: r.get("prescription_date") or "", reverse=True)
+        if created_after is not None:
+            out = [
+                r for r in out
+                if r.get("created_at") is not None
+                and r["created_at"] >= created_after
+            ]
         return out
 
     def find_by_customer(self, customer_id):
@@ -272,7 +283,12 @@ class TestClinicalTestsRange:
 
     def test_range_all_returns_whole_history(self, monkeypatch):
         repo = _FakeEyeTestRepo(_seed_tests())
-        client = _clinical_client(monkeypatch, test_repo=repo)
+        # Runs as ADMIN: the whole-history contract this asserts is now
+        # admin-only under the 30-day browse horizon (owner ruling
+        # 2026-09-01). The clamped-role behaviour is covered below.
+        client = _clinical_client(
+            monkeypatch, test_repo=repo, roles=("ADMIN",)
+        )
         resp = client.get("/clinical/tests", params={"store_id": "store-001", "range": "all"})
         assert resp.status_code == 200
         ids = sorted(t["id"] for t in resp.json()["tests"])
@@ -294,7 +310,12 @@ class TestClinicalTestsRange:
 
     def test_explicit_from_to_queries_range(self, monkeypatch):
         repo = _FakeEyeTestRepo(_seed_tests())
-        client = _clinical_client(monkeypatch, test_repo=repo)
+        # Runs as ADMIN: the whole-history contract this asserts is now
+        # admin-only under the 30-day browse horizon (owner ruling
+        # 2026-09-01). The clamped-role behaviour is covered below.
+        client = _clinical_client(
+            monkeypatch, test_repo=repo, roles=("ADMIN",)
+        )
         old = _days_before(200)
         resp = client.get(
             "/clinical/tests",
@@ -335,6 +356,26 @@ class TestClinicalTestsRange:
 # ============================================================================
 
 
+def _ago_dt(days: int):
+    """A real datetime `created_at` - the field the browse horizon bounds."""
+    from datetime import datetime, timedelta
+    return datetime.utcnow() - timedelta(days=days)
+
+
+def _ago(days: int) -> str:
+    """A prescription_date `days` ago, ISO. Relative on purpose: these fixtures
+    used hardcoded May-2026 dates, which the 30-day browse horizon (owner ruling
+    2026-09-01) correctly hides from the SALES_STAFF these tests run as. The
+    subject here is store scoping / date range / pagination, not the horizon -
+    that is covered directly in test_data_horizon.py."""
+    from datetime import datetime, timedelta
+    return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT10:00:00")
+
+
+def _ago_date(days: int) -> str:
+    from datetime import datetime, timedelta
+    return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+
 def _seed_rx():
     return [
         {
@@ -343,7 +384,8 @@ def _seed_rx():
             "customer_id": "cust-1",
             "patient_id": "pat-1",
             "rx_kind": "SPECTACLE",
-            "prescription_date": "2026-05-20T10:00:00",
+            "prescription_date": _ago(5),
+            "created_at": _ago_dt(5),
         },
         {
             "prescription_id": "rx-2",
@@ -351,14 +393,16 @@ def _seed_rx():
             "customer_id": "cust-2",
             "patient_id": "pat-2",
             "rx_kind": "SPECTACLE",
-            "prescription_date": "2026-05-10T10:00:00",
+            "prescription_date": _ago(20),
+            "created_at": _ago_dt(20),
         },
         {
             "prescription_id": "rx-other-store",
             "store_id": "store-999",
             "customer_id": "cust-3",
             "rx_kind": "SPECTACLE",
-            "prescription_date": "2026-05-15T10:00:00",
+            "prescription_date": _ago(12),
+            "created_at": _ago_dt(12),
         },
     ]
 
@@ -386,10 +430,10 @@ class TestPrescriptionList:
 
     def test_date_range_filters_server_side(self, monkeypatch):
         client = _rx_client(monkeypatch, rx_repo=_FakeRxRepo(_seed_rx()))
-        # Only rx-1 (2026-05-20) falls in [2026-05-15, 2026-05-31]; rx-2 is older.
+        # Only rx-1 (5 days ago) falls in the window; rx-2 (20 days ago) is older.
         resp = client.get(
             "/prescriptions",
-            params={"from_date": "2026-05-15", "to_date": "2026-05-31"},
+            params={"from_date": _ago_date(10), "to_date": _ago_date(0)},
         )
         assert resp.status_code == 200
         ids = [p["prescription_id"] for p in resp.json()["prescriptions"]]
@@ -423,3 +467,62 @@ class TestPrescriptionList:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# The 30-day browse horizon on GET /clinical/tests (owner ruling 2026-09-01)
+# ---------------------------------------------------------------------------
+# `range=all` was the way around the clamp on the prescriptions door: the same
+# clinical history, one query param away, on a route that already existed.
+
+
+def _tests_for_horizon():
+    """Two exams for one store: one inside the window, one at day 45."""
+    return _FakeEyeTestRepo([
+        {"eye_test_id": "ET-NEW", "store_id": "store-001", "status": "COMPLETED",
+         "test_date": _ago(3), "customer_name": "Recent Patient"},
+        {"eye_test_id": "ET-OLD", "store_id": "store-001", "status": "COMPLETED",
+         "test_date": _ago(45), "customer_name": "Old Patient"},
+    ])
+
+
+def _ids(resp):
+    body = resp.json()
+    rows = body.get("tests", body) if isinstance(body, dict) else body
+    return {r.get("eye_test_id") or r.get("eyeTestId") for r in rows}
+
+
+def test_range_all_is_clamped_to_30_days_for_staff(monkeypatch):
+    repo = _tests_for_horizon()
+    client = _clinical_client(monkeypatch, test_repo=repo, roles=("OPTOMETRIST",))
+    r = client.get("/clinical/tests", params={"store_id": "store-001", "range": "all"})
+    assert r.status_code == 200, r.text
+    got = _ids(r)
+    assert "ET-NEW" in got, got
+    assert "ET-OLD" not in got, (
+        "range=all handed an OPTOMETRIST a 45-day-old exam: the browse horizon "
+        "is bypassable by a query parameter"
+    )
+
+
+def test_an_explicit_from_date_cannot_widen_the_window(monkeypatch):
+    """`?from=2020-01-01` is the same bypass with different spelling."""
+    repo = _tests_for_horizon()
+    client = _clinical_client(monkeypatch, test_repo=repo, roles=("STORE_MANAGER",))
+    r = client.get(
+        "/clinical/tests",
+        params={"store_id": "store-001", "from": "2020-01-01"},
+    )
+    assert r.status_code == 200, r.text
+    assert "ET-OLD" not in _ids(r), "an explicit from_date walked past the horizon"
+
+
+def test_admin_still_sees_the_whole_clinical_history(monkeypatch):
+    """The negative control. Without it, a clamp that returned nothing at all
+    would pass every test above."""
+    repo = _tests_for_horizon()
+    client = _clinical_client(monkeypatch, test_repo=repo, roles=("ADMIN",))
+    r = client.get("/clinical/tests", params={"store_id": "store-001", "range": "all"})
+    assert r.status_code == 200, r.text
+    got = _ids(r)
+    assert {"ET-NEW", "ET-OLD"} <= got, got
