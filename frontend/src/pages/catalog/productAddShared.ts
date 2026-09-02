@@ -70,6 +70,30 @@ export interface CategoryField {
 // keeps the three entry doors in lockstep with the server's create-time
 // enforcement and removes the drift that previously let the FE and backend
 // disagree on which fields a category requires. Do NOT redefine these elsewhere.
+// Fields the SERVER re-cases on save (backend/api/services/product_master.py,
+// _CASE_CODE and _CASE_NAME). The Add-Product inputs show CAPS while you type
+// so nobody reaches for the shift key; the server decides the stored case.
+//
+// The uppercase styling is driven by THIS set and not by `type === 'text'`,
+// deliberately. An unclassified text field left uppercase in the UI but
+// untouched by the server would store SHOUTING permanently - the field list is
+// rewritten at runtime from the server registry, so unknown keys must degrade
+// to today's behaviour, never to capitals. Keep both sides in step: a field
+// added here without a matching entry in _CASE_CODE / _CASE_NAME is a bug.
+export const CAPS_ENTRY_FIELDS: ReadonlySet<string> = new Set([
+  // codes - stored upper-cased
+  'model_no', 'full_model_no', 'colour_code', 'color_code',
+  'serial_no', 'battery_size', 'upc', 'gtin', 'hsn_code',
+  // words - stored title-cased
+  'model_name', 'label', 'subbrand', 'brand_name',
+  'colour_name', 'frame_color', 'temple_color', 'lens_colour', 'dial_colour',
+  'belt_colour', 'body_colour', 'tint',
+  'frame_material', 'temple_material', 'lens_material',
+  'country_of_origin', 'generation', 'cl_series',
+  'audio_type', 'camera_type', 'connectivity', 'voice_assistant',
+  'add_on_1', 'add_on_2', 'add_on_3',
+]);
+
 export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
   // SG/FR field ORDER + labels are owner-locked (2026-07-04 catalog form
   // rework): identity block first (brand -> colour), then sizes, then style,

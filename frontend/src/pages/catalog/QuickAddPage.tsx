@@ -67,27 +67,28 @@ import {
 } from '../../services/api/catalog';
 import { hsnOptions } from '../../constants/gstRuntime';
 import {
+  CAPS_ENTRY_FIELDS,
   CATEGORIES,
-  getCategoryFields,
-  loadCategoryRegistry,
+  buildProductPayload,
+  catalogDocToFormValues,
   categoryName,
+  dictionaryErrorField,
+  formValuesToCatalogUpdate,
+  getCategoryFields,
+  hsnImpliesCategoryRate,
+  loadCategoryRegistry,
+  overlayChangedFormValues,
+  productToFormValues,
+  productToVariantFormValues,
+  promoteGapsToFormErrors,
+  resolveHsnGst,
+  type CategoryField,
+  type ProductDoc,
+  type ProductFormValues,
   validateProductForm,
   validateReviewForm,
-  buildProductPayload,
-  resolveHsnGst,
-  hsnImpliesCategoryRate,
-  productToFormValues,
-  catalogDocToFormValues,
-  formValuesToCatalogUpdate,
-  promoteGapsToFormErrors,
-  overlayChangedFormValues,
-  dictionaryErrorField,
-  productToVariantFormValues,
   variantFieldRule,
   variantFlaggedFormFields,
-  type CategoryField,
-  type ProductFormValues,
-  type ProductDoc,
 } from './productAddShared';
 import {
   readReviewQueue,
@@ -1624,8 +1625,16 @@ export function QuickAddPage() {
     // sizes stay amber-flagged until the operator confirms (touches) them.
     const isLocked = Boolean(variantCtx?.locked.has(field.name));
     const isFlagged = !isLocked && flaggedFields.has(field.name);
+    // CAPS while typing, on the fields the SERVER re-cases on save. This is a
+    // CSS transform only: e.target.value still carries exactly what was typed,
+    // so there is no controlled-input fight, no caret jump, no IME or paste
+    // breakage - and the server stays the sole authority on the stored case.
+    // Never applied to a select (the option match is exact, so an uppercased
+    // VALUE would render the dropdown blank while the form still saved).
+    const capsEntry = field.type === 'text' && CAPS_ENTRY_FIELDS.has(field.name);
     const fieldClass = clsx(
       'input-field w-full',
+      capsEntry && 'uppercase placeholder:normal-case',
       isFlagged && 'ring-1 ring-amber-400 bg-amber-50/60',
       isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
     );
