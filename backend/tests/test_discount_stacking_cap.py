@@ -126,3 +126,95 @@ def test_the_terms_multiply_they_do_not_add():
     assert effective_line_discount_pct(0, 9000.0, 10000.0) == pytest.approx(10.0)
     # The larger of the two wins; an explicit percent is not a way to hide it.
     assert effective_line_discount_pct(15, 9000.0, 10000.0) == pytest.approx(15.0)
+
+
+# --- the two holes the first fix left open --------------------------------
+#
+# The stacking cap landed on ONE door and skipped the biggest line. Both of
+# these returned 201 with the fix already in the tree.
+
+
+def test_a_lens_line_is_not_exempt_from_stacking(client, staff_headers, priced_orders):
+    """A lens line resolves to no product doc -- and was skipped ENTIRELY.
+
+    The cart-discount loop `continue`d on any `lens-` / `custom-` id, so the
+    stacking cap was enforced on the frame and not on the lens. In an optical
+    ticket the lens is usually the larger half of the money, which made the
+    exemption the cheaper way to buy the same 19%.
+    """
+    _seed_product(priced_orders, pid="FR-LENSPAIR", discount_category="MASS")
+    resp = _post(
+        client, staff_headers,
+        [{
+            "product_id": "lens-cl-monthly-1", "product_name": "Acuvue Monthly",
+            # A CONTACT lens: exempt from the hard Rx-required gate (owner
+            # ruling), so the probe reaches the discount check instead of
+            # stopping at 422. Same virtual-id branch, same money.
+            "item_type": "CONTACT_LENS", "category": "CONTACT_LENS", "quantity": 1,
+            "unit_price": 8000.0, "discount_percent": 10,
+            "discount_reason": "test: stacking probe on a lens",
+        }],
+        cart_discount_percent=10,
+        cart_discount_reason="test: stacking probe",
+    )
+    assert resp.status_code == 403, (
+        f"a LENS line stacked to 19% under a 10% cap and was ACCEPTED: "
+        f"{resp.status_code} grand_total={_grand_total(resp)}"
+    )
+
+
+def test_stacking_cannot_be_bypassed_by_adding_the_item_afterwards(
+    client, staff_headers, priced_orders
+):
+    """Set the bill discount, save the DRAFT, THEN add the discounted line.
+
+    POST /orders/{id}/items checked the line against its own cap and never
+    against the bill discount already sitting on the order, so the exact
+    combination create_order refuses was reachable in two calls instead of one.
+    """
+    pid = _seed_product(priced_orders, pid="FR-ADDLATER", discount_category="MASS")
+    from api.routers import orders as orders_module
+
+    orders_module.get_order_repository().create({
+        "order_id": "ORD-STACK-DRAFT", "store_id": "BV-TEST-01",
+        "customer_id": "cust-x", "status": "DRAFT", "items": [],
+        "cart_discount_percent": 10.0,
+        "cart_discount_reason": "test: bill discount set first",
+    })
+
+    resp = client.post(
+        "/api/v1/orders/ORD-STACK-DRAFT/items",
+        json=_item(pid, discount_percent=10),
+        headers=staff_headers,
+    )
+    assert resp.status_code == 403, (
+        f"added a 10% line to a DRAFT already carrying a 10% bill discount "
+        f"(=19% under a 10% cap) and it was ACCEPTED: {resp.status_code} "
+        f"{resp.text[:200]}"
+    )
+
+
+def test_the_add_door_still_accepts_a_line_that_stays_under_the_cap(
+    client, staff_headers, priced_orders
+):
+    """The negative control: 5% line + 4% bill = 8.8%, inside 10%. Must pass.
+
+    Without this, the test above would also pass with the add door blocking
+    every discounted line outright.
+    """
+    pid = _seed_product(priced_orders, pid="FR-ADDOK", discount_category="MASS")
+    from api.routers import orders as orders_module
+
+    orders_module.get_order_repository().create({
+        "order_id": "ORD-STACK-OK", "store_id": "BV-TEST-01",
+        "customer_id": "cust-x", "status": "DRAFT", "items": [],
+        "cart_discount_percent": 4.0,
+        "cart_discount_reason": "test: modest bill discount",
+    })
+
+    resp = client.post(
+        "/api/v1/orders/ORD-STACK-OK/items",
+        json=_item(pid, discount_percent=5),
+        headers=staff_headers,
+    )
+    assert resp.status_code == 200, resp.text
