@@ -1245,7 +1245,9 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/churn-risk/list",
-        "allowed": "AUTHENTICATED",
+        # Matches the /customers/segmentation screen gate. Was AUTHENTICATED
+        # while the route returned whole customer documents.
+        "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER"],
     },
     {
         "method": "GET",
