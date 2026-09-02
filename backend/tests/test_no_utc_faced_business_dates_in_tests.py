@@ -152,14 +152,6 @@ ALLOWED = {
         "test_stock_count_lifecycle.py",
         'bc = f"BC-{uuid.uuid4().hex[:10]}"',
     ): _HEX,
-    (
-        "test_clinical_rx_list_range.py",
-        'out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]',
-    ): (
-        "Fake-repo emulation: the in-memory stand-in reproduces the real "
-        "prescription repo's own lexical compare on the stored date string. It "
-        "seeds nothing; it imitates the code under test."
-    ),
     # -- validators that only care about past / today / future --------------
     (
         "test_customer_validation.py",
