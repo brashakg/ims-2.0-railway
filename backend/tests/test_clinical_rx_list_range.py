@@ -132,12 +132,19 @@ class _FakeRxRepo:
         # prescription_date is stored as an ISO STRING, and the real repo now
         # bounds it as one (it used to send a datetime, which matched nothing).
         # So this string compare mirrors production rather than approximating it.
+        # Mirrors the REAL bound (_clinical_date_filter): a bare from-day and
+        # an exclusive next-day upper, so both stored shapes -- bare
+        # 'YYYY-MM-DD' and full 'YYYY-MM-DDTHH:MM:SS' -- survive both edges. A
+        # double that bounds more loosely than production would report the
+        # boundary bug as fixed while it was live.
+        from datetime import timedelta as _td
+
         if from_date is not None:
             f = from_date.isoformat()
             out = [r for r in out if (r.get("prescription_date") or "") >= f]
         if to_date is not None:
-            t = to_date.isoformat()
-            out = [r for r in out if (r.get("prescription_date") or "")[:10] <= t]
+            t = (to_date + _td(days=1)).isoformat()
+            out = [r for r in out if (r.get("prescription_date") or "") < t]
         out.sort(key=lambda r: r.get("prescription_date") or "", reverse=True)
         if created_after is not None:
             out = [

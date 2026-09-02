@@ -149,11 +149,16 @@ def test_the_prescription_repo_clamps_created_at_not_the_clinical_date():
     body = src.split('"""')[-1]
     flat = " ".join(body.split())
     assert 'filter["created_at"] = {"$gte": created_after}' in flat, flat
-    # ... and the clinical window must compare in the frame it is STORED in.
-    assert ".isoformat()" in flat, (
-        "prescription_date is stored as an ISO string; a datetime bound there "
-        "matches nothing"
+    # ... and the clinical window must go through the ONE shared builder, which
+    # compares in the frame the field is STORED in. The string bound used to sit
+    # inline here; it now lives in _clinical_date_filter because the same rule
+    # was implemented three times and all three disagreed. Its own edge cases
+    # are pinned in test_prescription_date_window.py.
+    assert "_clinical_date_filter" in flat, (
+        "prescription_date is stored as an ISO string and the bound must come "
+        "from the shared builder; a datetime bound there matches nothing"
     )
+    assert "datetime.combine" not in flat, flat
 
 
 def test_the_orders_repo_bounds_a_real_date_field():

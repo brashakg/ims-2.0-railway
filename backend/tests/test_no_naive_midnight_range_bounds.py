@@ -226,36 +226,6 @@ ALLOWED = {
         "Same attendance business-day write convention, trailing-comma "
         "variant."
     ),
-    (
-        "database/repositories/prescription_repository.py",
-        'filter["prescription_date"] = {"$gte": datetime.combine(from_date, datetime.min.time())}',
-    ): (
-        "prescription_date is the operator-typed clinical business DATE "
-        "(the day of the eye test as written on the Rx), not a stored "
-        "instant -- calendar bounds are the correct frame. Appears twice "
-        "(find_by_optometrist + find_by_store); exact-line key matches both."
-    ),
-    (
-        "database/repositories/prescription_repository.py",
-        'filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(to_date, datetime.max.time())',
-    ): (
-        "Upper half of the prescription_date calendar bound; two "
-        "occurrences, same ruling."
-    ),
-    (
-        "database/repositories/prescription_repository.py",
-        '"$gte": datetime.combine(from_date, datetime.min.time()),',
-    ): (
-        "get_optometrist_stats: same prescription_date calendar bound "
-        "inside the aggregation $match."
-    ),
-    (
-        "database/repositories/prescription_repository.py",
-        '"$lte": datetime.combine(to_date, datetime.max.time())',
-    ): (
-        "Upper half of the get_optometrist_stats calendar bound over the "
-        "prescription_date business-date column -- same ruling as above."
-    ),
     # -----------------------------------------------------------------------
     # Round-4 widening survivors: .replace(day=1). The rule of thumb -- on an
     # IST calendar DATE feeding ist_day_start_utc it IS the BOUND rule; on a

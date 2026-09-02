@@ -48,13 +48,46 @@ class PrescriptionRepository(BaseRepository):
             sort=[("prescription_date", -1)]
         )
     
+    @staticmethod
+    def _clinical_date_filter(from_date, to_date) -> Dict:
+        """Bound ``prescription_date`` in the frame it is actually STORED in.
+
+        ONE implementation, used by every method that windows the clinical
+        date. It existed twice and the two copies disagreed: this one compared
+        strings and ``find_by_optometrist`` passed raw datetimes, which in Mongo
+        match NOTHING against a string field -- so an optometrist filtering
+        their own prescriptions by date silently got an empty list.
+
+        The field holds TWO string shapes and a bound has to match both:
+          * the create door writes a full ISO datetime with a real time
+            (``2026-06-18T12:05:26.552211`` -- verified on production), and
+          * marketing writes a bare ``YYYY-MM-DD``.
+
+        So neither bound carries a time component:
+          * lower is the plain from-day. A ``T00:00:00`` lower bound would drop
+            the bare-date rows ON the boundary day -- a shorter string that is a
+            prefix of a longer one sorts BEFORE it, so ``"2026-06-18"`` is NOT
+            ``>= "2026-06-18T00:00:00"``.
+          * upper is EXCLUSIVE at the next day. A ``$lte`` of the bare to-day
+            would drop every full-datetime row on the last day, because
+            ``"2026-06-18T12:05" > "2026-06-18"``.
+
+        ISO-8601 is lexicographically ordered, so a string compare is a correct
+        date compare for both shapes.
+        """
+        out: Dict = {}
+        if from_date:
+            out["$gte"] = from_date.isoformat()
+        if to_date:
+            out["$lt"] = (to_date + timedelta(days=1)).isoformat()
+        return out
+
     def find_by_optometrist(self, optometrist_id: str, from_date: date = None, 
                             to_date: date = None) -> List[Dict]:
         filter = {"optometrist_id": optometrist_id}
-        if from_date:
-            filter["prescription_date"] = {"$gte": datetime.combine(from_date, datetime.min.time())}
-        if to_date:
-            filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(to_date, datetime.max.time())
+        window = self._clinical_date_filter(from_date, to_date)
+        if window:
+            filter["prescription_date"] = window
         return self.find_many(filter, sort=[("prescription_date", -1)])
     
     def find_by_store(
@@ -87,17 +120,10 @@ class PrescriptionRepository(BaseRepository):
         """
         filter: Dict = {"store_id": store_id}
 
-        # Clinical window, compared as STRINGS (the stored frame). ISO-8601 is
-        # lexicographically ordered, so a string compare is a correct date
-        # compare for this format.
-        if from_date:
-            filter["prescription_date"] = {
-                "$gte": datetime.combine(from_date, datetime.min.time()).isoformat()
-            }
-        if to_date:
-            filter.setdefault("prescription_date", {})["$lte"] = datetime.combine(
-                to_date, datetime.max.time()
-            ).isoformat()
+        # Clinical window, in the stored frame. See _clinical_date_filter.
+        window = self._clinical_date_filter(from_date, to_date)
+        if window:
+            filter["prescription_date"] = window
 
         # Security horizon, on the reliably-typed field.
         if created_after:
@@ -136,10 +162,13 @@ class PrescriptionRepository(BaseRepository):
         pipeline = [
             {"$match": {
                 "optometrist_id": optometrist_id,
-                "prescription_date": {
-                    "$gte": datetime.combine(from_date, datetime.min.time()),
-                    "$lte": datetime.combine(to_date, datetime.max.time())
-                }
+                # THIRD copy of the same bound, same defect: raw datetimes at
+                # a STRING field match nothing in Mongo, so these stats have
+                # been aggregating an empty set. Shared builder, like the other
+                # two call sites.
+                "prescription_date": PrescriptionRepository._clinical_date_filter(
+                    from_date, to_date
+                )
             }},
             {"$group": {
                 "_id": None,
