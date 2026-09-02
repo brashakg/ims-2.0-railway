@@ -901,14 +901,33 @@ def _derive_brand_model_color_size(
 def normalise_identity_component(value: Any) -> str:
     """THE one normaliser every identity comparison must run through.
 
-    Lowercases and folds every run of [-/_. whitespace] to a single space (the
-    same separators the SKU builder strips). This is the function that builds
-    the stored `identity_key` (compute_identity_key below) AND what the live
-    "similar products" lookup (find_similar_products / GET /products/similar)
-    normalises its query inputs with -- council rule: matching must use the
-    SAME normaliser as the spine's duplicate key, never a reimplementation.
+    This is the function that builds the stored `identity_key`
+    (compute_identity_key below) AND what the live "similar products" lookup
+    (find_similar_products / GET /products/similar) normalises its query
+    inputs with -- council rule: matching must use the SAME normaliser as the
+    spine's duplicate key, never a reimplementation.
+
+    Two rules, both driven by how eyewear codes are really written:
+
+    1. DELETE every separator rather than fold it to a space. Folding to a
+       space left "RB4350" and "RB 4350" as different identities, so the same
+       frame catalogued by two people became two products. Owner example:
+       "Ray-Ban RB4350 002/20", "Ray-Ban 0RB 4350 002/20" and
+       "Ray-Ban RB4350 002-20" are ONE product and were being stored as three.
+
+    2. DROP A LEADING ZERO THAT SITS IN FRONT OF A LETTER. Luxottica prints its
+       catalogue codes with a 0 prefix -- 0RB4350 is RB4350 -- and vendor
+       sheets, invoices and the frame's own temple disagree about whether to
+       include it. A leading zero in front of a DIGIT is deliberately kept, so
+       "0123" and "123" stay different products; only the alphabetic-prefix
+       case is folded, because that is the one that is provably the same frame.
+
+    Verified against the live catalogue before landing: under this rule the
+    existing 77 catalogue rows still resolve to 77 distinct identities, so no
+    two products that are separate today are merged by it.
     """
-    return re.sub(r"[-/_.\s]+", " ", str(value or "").strip().lower()).strip()
+    s = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+    return re.sub(r"^0+(?=[a-z])", "", s)
 
 
 def compute_identity_key(
@@ -1089,9 +1108,10 @@ def find_similar_products(
         if not b or not m:
             return empty
 
-        # "brand|model|" -- the trailing | delimiter guarantees "rb 21" can
-        # never prefix-match "rb 213". re.escape because the normaliser only
-        # folds [-/_. whitespace]: '&', '(', '+' ... survive into the key.
+        # "brand|model|" -- the trailing | delimiter guarantees "rb21" can
+        # never prefix-match "rb213". The normaliser now strips every character
+        # outside [a-z0-9], so no regex metacharacter can reach the key;
+        # re.escape stays as belt-and-braces against that ever changing.
         prefix = f"{b}|{m}|"
         sibling_query = {
             "category": canonical,

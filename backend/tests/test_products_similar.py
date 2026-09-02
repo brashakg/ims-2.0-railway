@@ -179,7 +179,7 @@ def test_sibling_match_uses_the_same_normaliser():
 def test_query_normalisation_is_the_identity_component_function():
     # Guard the reuse itself: the module-level normaliser exists and IS what
     # compute_identity_key folds with (no second implementation).
-    assert pm.normalise_identity_component(" Ray-Ban ") == "ray ban"
+    assert pm.normalise_identity_component(" Ray-Ban ") == "rayban"
     assert pm.compute_identity_key("Ray-Ban", "RB 2140", "BLK") == "|".join(
         [
             pm.normalise_identity_component("Ray-Ban"),

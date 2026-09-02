@@ -77,7 +77,7 @@ def _source_frame():
             "model_no": "RB-2140",
             "colour_code": "BLK",
         },
-        "identity_key": "ray ban|rb 2140|blk",
+        "identity_key": "rayban|rb2140|blk",
         "mrp": 5000.0,
         "offer_price": 4500.0,
         "cost_price": 2000.0,
