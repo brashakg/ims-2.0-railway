@@ -201,7 +201,12 @@ export function BillingSurface() {
                 dead band across the middle of the till. The widgets still sit
                 at the bottom - this card absorbs the same space - but now the
                 room goes to the thing the dispenser actually reads. */}
-            <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
+            {/* Sizes to its CONTENT. It used to be lg:flex-1, which stretched
+                it to fill the column -- so once an Rx was picked, the leftover
+                height showed as an empty band under the power table. The
+                product results below take the free space instead, where more
+                rows are actually useful. */}
+            <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0 lg:max-h-[45%] lg:overflow-y-auto">
               {store.customer ? (
                 <CustomerCardWithLoyalty />
               ) : (
@@ -305,7 +310,12 @@ export function BillingSurface() {
             {/* Typed search results. Adds the line itself through the shared
                 intake guard, and reports a money-guard refusal upward so this
                 surface keeps ONE error banner rather than growing a second. */}
-            <div className="min-w-0 shrink-0">
+            {/* Takes the column's slack now that the Rx card sizes to its own
+                content: spare height here means MORE product rows visible,
+                which is the one thing on this column that gets better with
+                room. min-h-0 so it can shrink rather than push the widgets off
+                the bottom. */}
+            <div className="min-w-0 shrink-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
               <ProductResultsStrip
                 storeId={activeStoreId}
                 query={productQuery}
