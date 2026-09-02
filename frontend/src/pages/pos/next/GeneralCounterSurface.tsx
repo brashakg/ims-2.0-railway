@@ -36,6 +36,7 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
+import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -255,6 +256,7 @@ export function GeneralCounterSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
+          <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {cart.length} item{cart.length === 1 ? '' : 's'}
           </span>

@@ -19,6 +19,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
+import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -164,6 +165,7 @@ export function BillingSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
+          <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {(store.cart || []).length} item{(store.cart || []).length === 1 ? '' : 's'}
           </span>
