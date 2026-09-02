@@ -14,7 +14,13 @@ import { userSeesAllStores } from '../../utils/storeAccess';
 export function LoginPage() {
   const authContext = useContext(AuthContext);
   const login = authContext?.login;
-  const isLoading = authContext?.isLoading ?? false;
+  // `authContext.isLoading` only turns true once login() is CALLED - and the
+  // geolocation lookup below runs BEFORE that, for up to ten seconds. So the
+  // button stayed enabled and unspun while the page did nothing, and staff
+  // pressed Sign In again. This local flag covers the whole submit, geo
+  // included, so the button is busy from the first click.
+  const [submitting, setSubmitting] = useState(false);
+  const isLoading = (authContext?.isLoading ?? false) || submitting;
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -58,6 +64,7 @@ export function LoginPage() {
       return;
     }
 
+    setSubmitting(true);
     try {
       // Get geolocation for staff (geo-fenced login)
       let latitude: number | undefined;
@@ -68,7 +75,14 @@ export function LoginPage() {
           const position = await new Promise<GeolocationPosition>((resolve, reject) => {
             navigator.geolocation.getCurrentPosition(resolve, reject, {
               enableHighAccuracy: true,
-              timeout: 10000,
+              // Four seconds, and a recent fix is good enough. This is a
+              // store-fence check with a 500m radius, not navigation: a
+              // position from the last two minutes answers it exactly as well
+              // as a fresh one, and ten seconds of dead time on every login is
+              // paid by every member of staff, every shift. Failing the lookup
+              // is already handled - login proceeds without coordinates.
+              timeout: 4000,
+              maximumAge: 120000,
             });
           });
           latitude = position.coords.latitude;
@@ -125,6 +139,11 @@ export function LoginPage() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Login failed. Please try again.';
       setError(errorMsg);
+    } finally {
+      // Every exit path, or a rejected password leaves the button disabled
+      // forever and the only way back in is a page reload. On the success path
+      // this component is navigating away, so clearing it is a no-op.
+      setSubmitting(false);
     }
   };
 
@@ -190,6 +209,8 @@ export function LoginPage() {
                 className="input-field"
                 placeholder="Enter username or email"
                 autoComplete="username"
+                // Opened at the start of every shift; the caret belongs here.
+                autoFocus
                 disabled={isLoading}
                 aria-required="true"
                 aria-invalid={!username && error ? 'true' : 'false'}
