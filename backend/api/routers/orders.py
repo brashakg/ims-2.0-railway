@@ -711,6 +711,30 @@ def combined_discount_pct(line_pct: float, cart_pct: float) -> float:
     return (1.0 - keep) * 100.0
 
 
+def assert_stack_within_cap(
+    label: str, line_pct: float, cart_pct: float, cap: float
+) -> None:
+    """Raise 403 when a line discount and the bill discount MULTIPLY past ``cap``.
+
+    ONE implementation, called by every door that can change what a line or a
+    bill is discounted by. create_order checked the stack and
+    POST /{order_id}/items did not, so the cap was walked past simply by saving
+    the DRAFT with its bill discount first and adding the line afterwards.
+    """
+    combined = combined_discount_pct(line_pct, cart_pct)
+    if combined > cap + 1e-9:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"{label}: a {line_pct:.2f}% item discount and a "
+                f"{cart_pct}% bill discount together come to "
+                f"{combined:.2f}%, over the {cap}% allowed for this item "
+                f"(role + category/brand caps). Lower one of them, or get "
+                f"a manager's approval."
+            ),
+        )
+
+
 class SalespersonSplit(BaseModel):
     """One share of a two-way sales credit (owner spec 13, default 50/50).
 
@@ -1078,6 +1102,22 @@ async def list_orders(
     repo = get_order_repository()
     active_store = validate_store_access(store_id, current_user)
 
+    # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01). Everyone except ADMIN /
+    # SUPERADMIN sees only the last 30 days when BROWSING. Asking for ONE
+    # customer is a named lookup, not browsing, so `?customer_id=` lifts the
+    # window entirely - staff need the whole history of the person they are
+    # serving, and none of the business's.
+    #
+    # The clamp raises `from_date`; it never lowers it. Without that,
+    # `?from_date=2020-01-01` walks straight past the window and the rule is
+    # decorative.
+    from ..services.data_horizon import horizon_start
+
+    _horizon = horizon_start(current_user, customer_scoped=bool(customer_id))
+    if _horizon is not None:
+        _floor = _horizon.date()
+        from_date = max(from_date, _floor) if from_date else _floor
+
     if repo is not None:
         if customer_id:
             orders = repo.find_by_customer(customer_id, limit=limit)
@@ -1098,6 +1138,9 @@ async def list_orders(
             filter_dict = {}
             if status:
                 filter_dict["status"] = status.value
+            # This branch takes no from_date, so the horizon goes on the query.
+            if _horizon is not None:
+                filter_dict["created_at"] = {"$gte": _horizon}
             orders = repo.find_many(filter_dict, skip=skip, limit=limit)
 
         # Convert to frontend format (camelCase)
@@ -1173,6 +1216,58 @@ async def get_overdue_orders(
     return {"orders": []}
 
 
+def _query_names_one_customer(q: str, store_id: Optional[str]) -> bool:
+    """True when this search string identifies ONE customer -- the owner's
+    named-lookup exemption to the 30-day browse horizon.
+
+    Two conditions, both required:
+      1. the customer search resolves to exactly ONE record, and
+      2. the query really is that customer's name or number.
+
+    (2) is not redundant. "Resolved to one" is also true of a store with one
+    customer in it, or a matcher looser than we assume -- and then ANY string,
+    "ORD" included, is a named lookup and the window is gone. Verifying the
+    match against the returned record makes the exemption depend on the query
+    naming a person rather than on the size of the customer book.
+
+    Fail-CLOSED: any error means "not a named lookup". An exemption that opens
+    on an exception is not an exemption.
+    """
+    try:
+        needle = (q or "").strip().lower()
+        if len(needle) < 2:
+            return False
+        repo = get_customer_repository()
+        if repo is None:
+            return False
+        hits = repo.search_customers(q, store_id) or []
+        if len(hits) != 1:
+            return False
+        c = hits[0]
+        digits = "".join(ch for ch in needle if ch.isdigit())
+        for key in ("name", "mobile", "phone", "email"):
+            v = str(c.get(key) or "").lower()
+            if not v:
+                continue
+            if needle in v:
+                return True
+            if digits and len(digits) >= 6 and digits in "".join(
+                ch for ch in v if ch.isdigit()
+            ):
+                return True
+        # A family member (patients[].name / .mobile) names the account too.
+        for p in c.get("patients") or []:
+            if not isinstance(p, dict):
+                continue
+            for key in ("name", "mobile"):
+                v = str(p.get(key) or "").lower()
+                if v and needle in v:
+                    return True
+        return False
+    except Exception:  # noqa: BLE001 -- never let the exemption fail OPEN
+        return False
+
+
 @router.get("/search")
 async def search_orders(
     q: str = Query(..., min_length=2),
@@ -1184,7 +1279,21 @@ async def search_orders(
     active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
+        from ..services.data_horizon import drop_rows_before_horizon
+
         orders = repo.search_orders(q, active_store)
+        # 30-day browse horizon (owner ruling 2026-09-01), with the owner's
+        # named-lookup exemption. Searching "ORD" or a two-letter fragment is
+        # BROWSING and is clamped; a query that resolves to exactly ONE customer
+        # is the person the staff member is serving, and their whole history is
+        # exactly what the exemption is for. Resolving it -- rather than
+        # trusting the shape of the string -- is what stops a one-character
+        # search from becoming the way out of the window.
+        orders = drop_rows_before_horizon(
+            orders,
+            current_user,
+            customer_scoped=_query_names_one_customer(q, active_store),
+        )
         _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -2630,6 +2739,23 @@ async def create_order(
             for _it in order.items:
                 _pid = getattr(_it, "product_id", None)
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
+                    # A lens / custom line resolves to no product doc, so no
+                    # category or luxury-brand cap can tighten it -- but the ROLE
+                    # cap still applies, and a lens is MOST of an optical
+                    # ticket's money. Skipping the line outright (what this did)
+                    # enforced the stacking cap on the frame and not on the lens:
+                    # 10% on the lens + a 10% bill discount = 19% on the single
+                    # biggest line, under a 10% cap.
+                    assert_stack_within_cap(
+                        getattr(_it, "product_name", None) or _pid or "this line",
+                        effective_line_discount_pct(
+                            getattr(_it, "discount_percent", 0) or 0,
+                            getattr(_it, "unit_price", 0) or 0,
+                            _mrp_by_pid.get(_pid) or 0,
+                        ),
+                        cart_discount_percent,
+                        user_discount_cap,
+                    )
                     continue
                 # BUG-118: a cart-level discount on an HQ-discounted line is the
                 # same forbidden "further discount" (SYSTEM_INTENT s3) -- block it.
@@ -2671,27 +2797,16 @@ async def create_order(
                     # A cap that two controls can each satisfy while their
                     # product breaks it is not a cap. The bill discount lands on
                     # an already-discounted line, so the terms MULTIPLY.
-                    _line_eff = effective_line_discount_pct(
-                        getattr(_it, "discount_percent", 0) or 0,
-                        getattr(_it, "unit_price", 0) or 0,
-                        _mrp_by_pid.get(_pid) or 0,
+                    assert_stack_within_cap(
+                        getattr(_it, "product_name", None) or _pid,
+                        effective_line_discount_pct(
+                            getattr(_it, "discount_percent", 0) or 0,
+                            getattr(_it, "unit_price", 0) or 0,
+                            _mrp_by_pid.get(_pid) or 0,
+                        ),
+                        cart_discount_percent,
+                        _this_cap,
                     )
-                    _combined = combined_discount_pct(
-                        _line_eff, cart_discount_percent
-                    )
-                    if _combined > _this_cap + 1e-9:
-                        raise HTTPException(
-                            status_code=403,
-                            detail=(
-                                f"{getattr(_it, 'product_name', None) or _pid}: "
-                                f"a {_line_eff:.2f}% item discount and a "
-                                f"{cart_discount_percent}% bill discount together "
-                                f"come to {_combined:.2f}%, over the "
-                                f"{_this_cap}% allowed for this item "
-                                f"(role + category/brand caps). Lower one of "
-                                f"them, or get a manager's approval."
-                            ),
-                        )
             if cart_discount_percent > cart_cap + 1e-9:
                 raise HTTPException(
                     status_code=403,
@@ -4007,6 +4122,19 @@ async def add_order_item(
                 status_code=403,
                 detail=f"Discount {round(_eff_disc, 2)}% exceeds your limit of "
                 f"{_cap}%. Contact a manager for approval.",
+            )
+
+        # STACKING CAP -- parity with create_order, same shared raiser. The bill
+        # discount ALREADY on this DRAFT multiplies with the new line's own
+        # discount, so a line that clears its cap can still put the ticket over
+        # it. Without this, setting a 10% bill discount, saving, and THEN adding
+        # a 10% line was a 19% sale that neither cap saw.
+        if not _is_admin:
+            assert_stack_within_cap(
+                item.product_name or _pid or "this line",
+                _eff_disc,
+                float(order.get("cart_discount_percent") or 0.0),
+                _cap,
             )
 
         # Owner ruling 2026-08-30: same manual-discount-needs-a-reason rule

@@ -3211,6 +3211,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # the ledger pass; counting it twice would over-reverse the tax,
                 # which under-declares - worse than the bug being fixed.
                 seen_returns = set()
+                _cdnr_inter_cache: dict = {}
                 for _e in cdnr:
                     for _f in ("refReference",):
                         _v = str(_e.get(_f) or "")
@@ -3264,10 +3265,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     cust_id = str(ret.get("customer_id", ""))
                     cust_info = cust_map.get(cust_id, {})
                     cust_state = cust_info.get("state", "") or store_state
-                    is_inter = bool(
-                        store_state
-                        and cust_state
-                        and store_state.strip().lower() != cust_state.strip().lower()
+                    # Same resolver GSTR-3B Table 3.1(a) uses: the parent
+                    # order's stamp first, the customer's state only as the
+                    # fallback. Re-deriving it here is how the two returns
+                    # ended up reversing different heads for one refund.
+                    is_inter = _return_interstate_flag(
+                        db, ret, store_state, _cdnr_inter_cache,
+                        fallback_state=cust_info.get("state", "") or "",
                     )
                     if is_inter:
                         r_cgst = r_sgst = 0.0
@@ -3815,6 +3819,51 @@ def _transfer_b2b_rows(bills):
     return rows, hsn_lines
 
 
+def _return_interstate_flag(db, ret, store_state, cache, fallback_state=""):
+    """Is this refund an INTER-state reversal? One answer, used by both returns.
+
+    A refund must reverse the SAME head the sale was filed under, so the parent
+    order's own `interstate` stamp is the answer whenever it exists. Only when
+    the order carries no stamp do we derive it from the customer's state.
+
+    ONE implementation because there are two consumers -- GSTR-3B Table 3.1(a)
+    and the GSTR-1 CDNR rows -- and they disagreed: 3.1(a) preferred the order
+    stamp and CDNR always re-derived from the customer. An online buyer record
+    is minted stateless, so the same refund reversed IGST in 3B and CGST/SGST
+    in GSTR-1, and the two returns the accountant types could not reconcile.
+    `cache` is a per-report dict keyed by order_id.
+    """
+    oid = str(ret.get("order_id") or "")
+    if oid and oid in cache:
+        return cache[oid]
+    flag = None
+    if oid:
+        try:
+            po = db.get_collection("orders").find_one(
+                {"order_id": oid}, {"interstate": 1}
+            ) or {}
+            if isinstance(po.get("interstate"), bool):
+                flag = po["interstate"]
+        except Exception:  # noqa: BLE001
+            flag = None
+    if flag is None:
+        cs = fallback_state or ""
+        if not cs:
+            try:
+                cu = db.get_collection("customers").find_one(
+                    {"customer_id": str(ret.get("customer_id") or "")}, {"state": 1}
+                ) or {}
+                cs = str(cu.get("state") or "")
+            except Exception:  # noqa: BLE001
+                cs = ""
+        flag = bool(
+            store_state and cs and store_state.strip().lower() != cs.strip().lower()
+        )
+    if oid:
+        cache[oid] = flag
+    return flag
+
+
 def _credit_note_totals(db, active_store, year, mon, last_day):
     """(igst, cgst, sgst, taxable) of credit notes issued in the period.
 
@@ -3842,7 +3891,30 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     except Exception:  # noqa: BLE001
         return 0.0, 0.0, 0.0, 0.0
 
+    # Which returns already have a credit-note ledger row -- scanned WITHOUT a
+    # date window, deliberately.
+    #
+    # Building this set from the IN-WINDOW ledger rows only (what it did) meant
+    # a return whose ledger row landed in a different month was invisible to
+    # the dedup: the returns leg counted it in the month of the return, and the
+    # ledger leg counted it again in the month of the credit note. One refund,
+    # tax reversed twice, and an under-declaration - exactly the failure this
+    # function's dedup exists to prevent. A refund taken on the 31st whose
+    # store credit is minted the next morning is an ordinary shop event, not an
+    # edge case. Attribution follows the ledger row, which IS the credit note.
     seen_returns = set()
+    try:
+        _all_ledger = db.get_collection("credit_note_ledger")
+        if _all_ledger is not None:
+            for _row in _all_ledger.find(
+                {"store_id": active_store, "type": "ISSUED"}, {"ref": 1, "reason": 1}
+            ):
+                for _f in ("ref", "reason"):
+                    for _tok in str(_row.get(_f) or "").replace(",", " ").split():
+                        if _tok.startswith("RET-"):
+                            seen_returns.add(_tok.strip(".:;"))
+    except Exception:  # noqa: BLE001 -- dedup is best-effort, totals are not
+        pass
 
     def _split(tax, is_inter):
         if is_inter:
@@ -3935,33 +4007,9 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 tv = round(float(gb.get("taxable") or 0.0), 2)
                 if t <= 0 and tv <= 0:
                     continue
-                oid = str(ret.get("order_id") or "")
-                if oid and oid not in order_inter:
-                    try:
-                        po = db.get_collection("orders").find_one(
-                            {"order_id": oid}, {"interstate": 1, "customer_id": 1}
-                        ) or {}
-                    except Exception:  # noqa: BLE001
-                        po = {}
-                    flag = po.get("interstate")
-                    if isinstance(flag, bool):
-                        order_inter[oid] = flag
-                    else:
-                        cs = ""
-                        try:
-                            cu = db.get_collection("customers").find_one(
-                                {"customer_id": str(ret.get("customer_id") or "")},
-                                {"state": 1},
-                            ) or {}
-                            cs = str(cu.get("state") or "")
-                        except Exception:  # noqa: BLE001
-                            cs = ""
-                        order_inter[oid] = bool(
-                            store_state
-                            and cs
-                            and store_state.strip().lower() != cs.strip().lower()
-                        )
-                i, c, sg = _split(t, order_inter.get(oid, False))
+                i, c, sg = _split(
+                    t, _return_interstate_flag(db, ret, store_state, order_inter)
+                )
                 igst += i
                 cgst += c
                 sgst += sg

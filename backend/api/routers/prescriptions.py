@@ -964,17 +964,56 @@ async def list_prescriptions(
     repo = get_prescription_repository()
     active_store = store_id or current_user.get("active_store_id")
 
+    # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01). Everyone except ADMIN /
+    # SUPERADMIN browses only the last 30 days. Naming ONE patient or customer
+    # is a lookup, not browsing, so the whole Rx history of the person being
+    # served stays available - that is the point of the exemption.
+    #
+    # It bounds `created_at`, NOT the caller's `from_date`. An earlier version
+    # raised from_date and would have emptied this screen in production:
+    # from_date filters `prescription_date`, which the create door writes as an
+    # ISO STRING and which is MISSING on 5 of the 8 stored prescriptions, so a
+    # security clamp there matches nothing on most rows and hides the rest.
+    # `created_at` is a real BSON Date on 100% of rows.
+    from ..services.data_horizon import horizon_start
+
+    _horizon = horizon_start(
+        current_user, customer_scoped=bool(patient_id or customer_id)
+    )
+
     if repo is not None:
         if patient_id:
             prescriptions = repo.find_by_patient(patient_id)
         elif customer_id:
             prescriptions = repo.find_by_customer(customer_id)
         elif optometrist_id:
+            # Browsing by clinician is still browsing, not a named-customer
+            # lookup, so it is clamped like any other list.
             prescriptions = repo.find_by_optometrist(optometrist_id, from_date, to_date)
+            if _horizon is not None:
+                prescriptions = [
+                    p
+                    for p in prescriptions
+                    if isinstance(p.get("created_at"), datetime)
+                    and p["created_at"] >= _horizon
+                ]
         elif active_store:
-            prescriptions = repo.find_by_store(active_store, from_date, to_date)
+            prescriptions = repo.find_by_store(
+                active_store, from_date, to_date, created_after=_horizon
+            )
         else:
-            prescriptions = repo.find_many({}, skip=skip, limit=limit)
+            # ONE implementation of the clamp - apply_horizon, not a hand-rolled
+            # copy. (A previous version inlined it here, which made the module
+            # that preaches "one implementation" the third copy of the rule.)
+            from ..services.data_horizon import apply_horizon
+
+            _flt: dict = {}
+            apply_horizon(
+                _flt,
+                current_user,
+                customer_scoped=bool(patient_id or customer_id),
+            )
+            prescriptions = repo.find_many(_flt, skip=skip, limit=limit)
 
         if rx_kind is not None:
             prescriptions = [

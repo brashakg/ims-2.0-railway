@@ -1758,7 +1758,11 @@ async def create_catalog_product(
         "title": title,
         "category": product.category.value,
         "category_name": CATEGORY_NAMES.get(product.category),
-        "attributes": product.attributes,
+        # The NORMALISED attributes, not the raw pydantic ones. This document is
+        # what the storefront push reads, so persisting the raw values here sent
+        # typed-in-capitals text to bettervision.in while the billing spine held
+        # the clean copy -- one product, two spellings.
+        "attributes": (_spine or {}).get("attributes") or product.attributes,
         "description": product.description,
         "hsn_code": hsn_code,
         "gst_rate": gst_rate,
@@ -1921,6 +1925,13 @@ async def update_catalog_product(
         # match them (case-canonicalising). Fail-soft when no db.
         merged_attrs = {**(existing.get("attributes") or {}), **product.attributes}
         try:
+            # Case ONLY what this submit carries. The merged dict below
+            # holds every stored attribute, so casing that would rewrite
+            # values the owner had corrected by hand, on every save.
+            _typed = _pm.apply_field_casing(
+                product.attributes or {}, only=set((product.attributes or {}).keys())
+            )
+            product.attributes = _typed
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
             )
@@ -2766,7 +2777,7 @@ async def import_products(
             # single /catalog create. A row missing a required field is recorded
             # + skipped (per-row), never a batch abort.
             try:
-                _pm.build_canonical_product(
+                _row_spine = _pm.build_canonical_product(
                     {
                         "category": product.category.value,
                         "attributes": dict(product.attributes or {}),
@@ -2810,7 +2821,10 @@ async def import_products(
                 "title": title,
                 "category": product.category.value,
                 "category_name": CATEGORY_NAMES.get(product.category),
-                "attributes": product.attributes,
+                # Same fix as the single create: the import validated through
+                # build_canonical_product and then threw its result away, so an
+                # imported row kept the spreadsheet's own capitalisation.
+                "attributes": (_row_spine or {}).get("attributes") or product.attributes,
                 "description": product.description,
                 "hsn_code": hsn_code,
                 "gst_rate": gst_rate,

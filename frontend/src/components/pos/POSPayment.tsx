@@ -128,6 +128,8 @@ export function StepPayment() {
 
   // EMI state
   const [showEMIForm, setShowEMIForm] = useState(false);
+  const [showCredit, setShowCredit] = useState(false);
+  const [showVoucher, setShowVoucher] = useState(false);
   const [emiProvider, setEmiProvider] = useState('HDFC');
   const [emiTenure, setEmiTenure] = useState(12);
   const [emiDownPayment, setEmiDownPayment] = useState('');
@@ -212,39 +214,75 @@ export function StepPayment() {
 
       {/* Loyalty Points & Credit Billing Options */}
       {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
-        <div className="space-y-3">
+        <div className="space-y-2">
           <LoyaltyRedeemControl />
-          <CreditBillingOption />
-          <VoucherRedemption />
+          {/* Store credit and vouchers apply to a minority of bills but were
+              costing two full cards of till height on every single one. They
+              open on a tap and stay open once used, so a sale that needs them
+              is one click away and a sale that does not never sees them. */}
+          <div className="flex gap-2">
+            {([
+              ['credit', 'Store credit', showCredit, setShowCredit] as const,
+              ['voucher', 'Voucher / gift card', showVoucher, setShowVoucher] as const,
+            ]).map(([key, label, open, set]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => set(!open)}
+                aria-expanded={open}
+                className={`flex-1 px-3 py-2 rounded-lg border text-xs font-medium min-h-[40px] ${
+                  open
+                    ? 'border-bv-red-300 bg-bv-red-50 text-bv-red-700'
+                    : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {open ? `Hide ${label.toLowerCase()}` : label}
+              </button>
+            ))}
+          </div>
+          {showCredit && <CreditBillingOption />}
+          {showVoucher && <VoucherRedemption />}
         </div>
       )}
 
-      <div className="grid grid-cols-3 tablet:grid-cols-5 gap-2">
-        {methods.map(m => (
-          <button key={m.id} onClick={() => {
-            if (m.id === 'CASH') {
-              store.addPayment({ method: m.id, amount: Math.round((balance > 0 ? balance : total) * 100) / 100 });
-            } else if (m.id === 'EMI') {
-              setShowEMIForm(true);
-            } else {
-              setPayMethod(m.id);
-              setPayAmount(String(Math.round((balance > 0 ? balance : total) * 100) / 100));
-              setPayRef('');
-            }
-          }} disabled={balance <= 0}
-            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-200 text-gray-500' : 'border-gray-200 text-gray-700 hover:border-bv-red-300 hover:bg-bv-red-50'}`}>
-            <m.icon className="w-6 h-6" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
-          </button>
-        ))}
-      </div>
-
       {balance > 0 && (
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-700">Split payment</p>
-          <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>{m.label}</button>)}
+          {/* ONE payment card, not two. The 5-button grid above this said the
+              same thing in bigger type -- pick a tender -- and the only thing
+              it could do that this cannot was "full cash in one tap", which is
+              now the prefilled amount. Two controls for one decision is how a
+              till gets tall enough to scroll. */}
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium text-gray-700">Payment method</p>
+            <p className="text-xs text-gray-500">
+              Balance {'₹'}{Math.round(balance).toLocaleString('en-IN')}
+            </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            {methods.map(m => (
+              <button
+                key={m.id}
+                onClick={() => {
+                  if (m.id === 'EMI') { setShowEMIForm(true); return; }
+                  setShowEMIForm(false);
+                  setPayMethod(m.id);
+                  // Prefill the whole remaining balance: paying it off in full
+                  // is the common case, so it should be one more tap, not a
+                  // typed number. Editable for a genuine split.
+                  setPayAmount(String(Math.round(balance * 100) / 100));
+                  setPayRef('');
+                }}
+                className={`px-3 py-2 rounded-lg text-xs font-medium min-h-[40px] ${
+                  (m.id === 'EMI' ? showEMIForm : payMethod === m.id && !showEMIForm)
+                    ? 'bg-bv-red-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <div className={`flex gap-2 ${showEMIForm ? 'hidden' : ''}`}>
             <input type="number" min="1" max={balance} step="0.01" value={payAmount}
               onChange={(e) => setPayAmount(e.target.value)}
               onFocus={(e) => e.target.select()}

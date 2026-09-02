@@ -101,9 +101,14 @@ export class PosPage {
     return this.page.locator('p.text-4xl');
   }
 
-  /** Pay the whole balance in cash, then finalise the order. */
+  /** Pay the whole balance in cash, then finalise the order.
+   *
+   * The one-tap "Full Cash" button is gone: it duplicated the tender chips in
+   * the payment card, which now prefill the full remaining balance. Same two
+   * taps a cashier makes -- pick Cash, press Add. */
   async payFullCashAndComplete() {
-    await this.page.getByRole('button', { name: 'Full Cash', exact: true }).click();
+    await this.page.getByRole('button', { name: 'Cash', exact: true }).click();
+    await this.page.getByRole('button', { name: 'Add', exact: true }).click();
     await expect(
       this.page.getByText(/Payment complete/i)
     ).toBeVisible();

@@ -99,7 +99,7 @@ class LoginRateLimiter:
     def _cleanup(self, key: str, window_seconds: int):
         cutoff = time.time() - window_seconds
         self._attempts[key] = [
-            (ts, ok) for ts, ok in self._attempts[key] if ts > cutoff
+            row for row in self._attempts[key] if row[0] > cutoff
         ]
 
     def check(self, ip: str, username: str) -> Optional[str]:
@@ -120,11 +120,39 @@ class LoginRateLimiter:
             remaining = int(self._lockouts[user_key] - now)
             return f"Account temporarily locked. Try again in {remaining // 60 + 1} minutes."
 
-        # Check IP failures (5 in 15 min)
+        # Failures for THIS PERSON from THIS address (5 in 15 min).
+        #
+        # This used to count every failure from the address regardless of who
+        # made it -- and a whole shop shares ONE public address. Five mistyped
+        # passwords spread across three people at 10am therefore locked the
+        # ENTIRE SHOP out of the till for fifteen minutes, including staff who
+        # had not typed anything yet. That is a self-inflicted outage on a
+        # revenue-critical screen, and it made the lockout easier to trigger
+        # accidentally than deliberately.
+        #
+        # Per (address, person) keeps the real signal -- "this person keeps
+        # failing from this device" -- and gives every colleague their own
+        # budget.
+        pair_key = f"pair:{ip}|{username.lower().strip()}"
+        self._cleanup(pair_key, 900)
+        pair_failures = sum(1 for _, ok in self._attempts[pair_key] if not ok)
+        if pair_failures >= 5:
+            self._lockouts[pair_key] = now + 900  # 15 min lockout
+            return (
+                "Too many login attempts. Try again in 15 minutes."
+            )
+
+        # Address-wide backstop, on DISTINCT usernames rather than raw count.
+        # Credential stuffing is one address failing against MANY accounts; a
+        # busy shop is a handful of people failing against their own. Counting
+        # distinct usernames separates the two, so the backstop survives while
+        # the accidental shop-wide lockout cannot happen: a six-person shop can
+        # never reach eight distinct failed usernames, and a sprayer reaches it
+        # on the eighth account.
         self._cleanup(ip_key, 900)
-        ip_failures = sum(1 for _, ok in self._attempts[ip_key] if not ok)
-        if ip_failures >= 5:
-            self._lockouts[ip_key] = now + 900  # 15 min lockout
+        stuffed = {u for _, ok, u in self._ip_failures(ip_key) if not ok}
+        if len(stuffed) >= 8:
+            self._lockouts[ip_key] = now + 900
             return (
                 "Too many login attempts from this location. Try again in 15 minutes."
             )
@@ -138,16 +166,44 @@ class LoginRateLimiter:
 
         return None
 
+    def _ip_failures(self, ip_key: str):
+        """(ts, ok, username) rows on an address key.
+
+        The address key stores a third element so the backstop above can count
+        DISTINCT usernames. Rows written before this change carry only two
+        elements; they are read as an unknown username rather than crashing.
+        """
+        for row in self._attempts.get(ip_key, ()):
+            if len(row) == 3:
+                yield row
+            else:
+                ts, ok = row
+                yield ts, ok, ""
+
     def record(self, ip: str, username: str, success: bool):
         now = time.time()
+        uname = username.lower().strip()
         ip_key = f"ip:{ip}"
-        user_key = f"user:{username.lower().strip()}"
-        self._attempts[ip_key].append((now, success))
+        user_key = f"user:{uname}"
+        pair_key = f"pair:{ip}|{uname}"
+        self._attempts[ip_key].append((now, success, uname))
         self._attempts[user_key].append((now, success))
-        # On success, clear lockouts
+        self._attempts[pair_key].append((now, success))
+        # On success, clear the lockouts AND drop the recorded failures.
+        #
+        # Clearing the lock alone is not enough: the failure rows survive, so
+        # the very next check re-derives the same lockout and the shop stays
+        # shut despite somebody having just signed in successfully. The rows
+        # have to go with it.
+        #
+        # This does mean a valid credential resets the stuffing counter -- but
+        # an attacker who has landed a valid credential is already inside, so
+        # the counter has stopped mattering by then. Weighed against a shop
+        # that cannot bill until a timer expires, recoverability wins.
         if success:
-            self._lockouts.pop(ip_key, None)
-            self._lockouts.pop(user_key, None)
+            for k in (ip_key, user_key, pair_key):
+                self._lockouts.pop(k, None)
+                self._attempts[k] = [row for row in self._attempts[k] if row[1]]
 
 
 _login_limiter = LoginRateLimiter()
@@ -742,7 +798,9 @@ async def login(request: LoginRequest, req: Request = None):
     """
     Authenticate user and return JWT token.
     Accepts either username or email in the username field.
-    Rate-limited: 5 failed attempts per IP (15 min), 10 per username (30 min).
+    Rate-limited: 5 failures per person-per-address (15 min), 10 per username
+    (30 min), and an address is locked only after 8 DISTINCT usernames fail
+    from it (15 min) -- so one colleague's typos cannot lock out a shop.
     """
     # Rate limiting check
     client_ip = _client_ip(req)

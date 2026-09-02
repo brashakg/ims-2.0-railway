@@ -63,6 +63,7 @@ from .product_naming import (
     build_seo_description,
     build_seo_title,
     needs_name,
+    smart_title,
 )
 
 logger = logging.getLogger("ims.product_master")
@@ -764,6 +765,86 @@ def validate_attributes(category: Any, attributes: Dict[str, Any]) -> None:
             )
 
 
+# ============================================================================
+# Typed-in-capitals entry, stored in the right case (owner request 2026-09-02)
+# ============================================================================
+# Staff type everything on the Add-Product screen in capitals -- no shift key,
+# visually uniform -- and the server puts each value into its correct case.
+#
+# It cannot be one rule. A blanket title pass would store model number RB4350
+# as "Rb4350" and wreck colour code 002/20, so codes stay in capitals and only
+# real words are title-cased. Anything not named here is left EXACTLY as
+# received: the field registry is rewritten at runtime from the server
+# dictionary, so an unlisted key must degrade to today's behaviour, never to
+# a guess.
+
+# Identifiers. Upper-cased, punctuation preserved verbatim -- the SKU builder
+# keeps "/" and "-" in the colour segment, so touching separators here would
+# change the SKU minted for every new frame.
+_CASE_CODE = frozenset({
+    "model_no", "full_model_no", "colour_code", "color_code",
+    "serial_no", "battery_size", "upc", "gtin", "hsn_code",
+})
+
+# Words naming a thing. Title-cased through the ONE title-caser in
+# product_naming, which already protects digit-bearing tokens.
+_CASE_NAME = frozenset({
+    "model_name", "label", "subbrand", "brand_name",
+    "colour_name", "frame_color", "temple_color", "lens_colour", "dial_colour",
+    "belt_colour", "body_colour", "tint",
+    "frame_material", "temple_material", "lens_material",
+    "country_of_origin", "generation", "cl_series",
+    # `warranty` and `size` are deliberately absent: they are number-bearing
+    # phrases ("2 years", "54-18-145") where casing changes the stored value
+    # and buys nothing a reader wanted.
+    "audio_type", "camera_type", "connectivity", "voice_assistant",
+    "add_on_1", "add_on_2", "add_on_3",
+})
+
+# `sku` is deliberately in NEITHER set: build_sku already upper-cases what it
+# mints, so casing it here buys nothing and would stop a legacy lower-case
+# imported SKU from matching its product.
+
+
+def apply_field_casing(attributes: Any, *, only: Any = None) -> Dict[str, Any]:
+    """Case the product attributes a submit actually carries.
+
+    ``only`` is the set of keys THIS submit is changing. Both edit doors merge
+    the stored attribute bag with the patch before normalising, so casing the
+    merged dict would silently rewrite every value the owner had corrected by
+    hand, on every save. Passing the patch keys keeps the rule to what the
+    operator just typed. ``only=None`` (the create door) cases everything,
+    which is correct there because everything is new.
+
+    Values that are not strings, and keys in neither class, pass through
+    untouched.
+    """
+    out: Dict[str, Any] = dict(attributes or {})
+    for key, value in list(out.items()):
+        if only is not None and key not in only:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        # MIXED CASE IS INTENT. "Radar EV Path", "boAt", "ic! berlin" carry
+        # information no rule can reconstruct once it is gone, so a value that
+        # already contains both cases is left exactly as supplied. The rule
+        # fires only on all-capitals (what this feature is for) or all-lower
+        # (staff who never touch the shift key), where there is nothing to lose.
+        if any(c.islower() for c in value) and any(c.isupper() for c in value):
+            continue
+        if key in _CASE_CODE:
+            out[key] = " ".join(value.split()).upper()
+        elif key in _CASE_NAME:
+            text = " ".join(value.split())
+            # An ISO country code is two or three letters and must not become
+            # "Us" or "Cn". Any real country name is longer than three.
+            if key == "country_of_origin" and text.isalpha() and len(text) <= 3:
+                out[key] = text.upper()
+            else:
+                out[key] = smart_title(text)
+    return out
+
+
 def enforce_dictionary_values(
     category: Any, attributes: Dict[str, Any], *, db=None
 ) -> Dict[str, Any]:
@@ -901,14 +982,33 @@ def _derive_brand_model_color_size(
 def normalise_identity_component(value: Any) -> str:
     """THE one normaliser every identity comparison must run through.
 
-    Lowercases and folds every run of [-/_. whitespace] to a single space (the
-    same separators the SKU builder strips). This is the function that builds
-    the stored `identity_key` (compute_identity_key below) AND what the live
-    "similar products" lookup (find_similar_products / GET /products/similar)
-    normalises its query inputs with -- council rule: matching must use the
-    SAME normaliser as the spine's duplicate key, never a reimplementation.
+    This is the function that builds the stored `identity_key`
+    (compute_identity_key below) AND what the live "similar products" lookup
+    (find_similar_products / GET /products/similar) normalises its query
+    inputs with -- council rule: matching must use the SAME normaliser as the
+    spine's duplicate key, never a reimplementation.
+
+    Two rules, both driven by how eyewear codes are really written:
+
+    1. DELETE every separator rather than fold it to a space. Folding to a
+       space left "RB4350" and "RB 4350" as different identities, so the same
+       frame catalogued by two people became two products. Owner example:
+       "Ray-Ban RB4350 002/20", "Ray-Ban 0RB 4350 002/20" and
+       "Ray-Ban RB4350 002-20" are ONE product and were being stored as three.
+
+    2. DROP A LEADING ZERO THAT SITS IN FRONT OF A LETTER. Luxottica prints its
+       catalogue codes with a 0 prefix -- 0RB4350 is RB4350 -- and vendor
+       sheets, invoices and the frame's own temple disagree about whether to
+       include it. A leading zero in front of a DIGIT is deliberately kept, so
+       "0123" and "123" stay different products; only the alphabetic-prefix
+       case is folded, because that is the one that is provably the same frame.
+
+    Verified against the live catalogue before landing: under this rule the
+    existing 77 catalogue rows still resolve to 77 distinct identities, so no
+    two products that are separate today are merged by it.
     """
-    return re.sub(r"[-/_.\s]+", " ", str(value or "").strip().lower()).strip()
+    s = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+    return re.sub(r"^0+(?=[a-z])", "", s)
 
 
 def compute_identity_key(
@@ -1089,9 +1189,10 @@ def find_similar_products(
         if not b or not m:
             return empty
 
-        # "brand|model|" -- the trailing | delimiter guarantees "rb 21" can
-        # never prefix-match "rb 213". re.escape because the normaliser only
-        # folds [-/_. whitespace]: '&', '(', '+' ... survive into the key.
+        # "brand|model|" -- the trailing | delimiter guarantees "rb21" can
+        # never prefix-match "rb213". The normaliser now strips every character
+        # outside [a-z0-9], so no regex metacharacter can reach the key;
+        # re.escape stays as belt-and-braces against that ever changing.
         prefix = f"{b}|{m}|"
         sibling_query = {
             "category": canonical,
@@ -1301,6 +1402,11 @@ def normalise_payload(
     # field (Settings -> Catalog Dictionary / Brand Master), a present value
     # must match one of them; the match canonicalises casing. Fail-soft when
     # db is absent (unit tests / callers without a connection).
+    # Typed-in-capitals entry -> stored case. BEFORE the dictionary pass, never
+    # after: enforce_dictionary_values canonicalises brand/enum values to the
+    # owner's Settings spelling, and running the caser afterwards would turn
+    # its "boAt" back into "Boat". Case first, dictionary second, always.
+    attributes = apply_field_casing(attributes)
     attributes = enforce_dictionary_values(canonical, attributes or {}, db=db)
 
     # A bad public GTIN is worse than none -- reject it here, before it can be

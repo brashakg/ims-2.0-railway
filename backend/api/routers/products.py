@@ -3342,9 +3342,14 @@ async def update_product(
         # restamp below. An explicit value in the patch wins; existing keys are
         # preserved. Persisted as the full merged attributes dict.
         if "attributes" in update_data:
+            # Case ONLY the keys this submit carries, BEFORE the merge. Casing
+            # the merged bag would rewrite every stored attribute on every
+            # save, including ones the owner had corrected by hand.
+            _patch = update_data["attributes"] or {}
+            _patch = _pm.apply_field_casing(_patch, only=set(_patch.keys()))
             update_data["attributes"] = {
                 **(existing.get("attributes") or {}),
-                **(update_data["attributes"] or {}),
+                **_patch,
             }
             # Catalog Dictionary: the update path must enforce the same
             # owner-configured value lists as the create door (create runs it

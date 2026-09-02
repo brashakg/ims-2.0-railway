@@ -35,11 +35,48 @@ WHEN = datetime(2026, 6, 15, 6, 0)
 
 
 class _Coll:
+    """A double that HONOURS the filter it is given.
+
+    It used to return every doc for every query, which made it blind to the one
+    thing the credit-note code uses a filter for: the reporting month. A
+    date-window bug -- a ledger row read in the wrong period, or a dedup set
+    built from the wrong period -- was invisible to this whole file.
+    """
+
     def __init__(self, docs=None):
         self._docs = list(docs or [])
 
+    @staticmethod
+    def _matches(doc, flt):
+        for key, cond in (flt or {}).items():
+            if key in ("$or", "$and"):
+                continue
+            v = doc.get(key)
+            if isinstance(cond, dict):
+                if "$in" in cond and v not in cond["$in"]:
+                    return False
+                for op, bound in cond.items():
+                    if op == "$in":
+                        continue
+                    if v is None:
+                        return False
+                    try:
+                        if op == "$gte" and not v >= bound:
+                            return False
+                        if op == "$gt" and not v > bound:
+                            return False
+                        if op == "$lt" and not v < bound:
+                            return False
+                        if op == "$lte" and not v <= bound:
+                            return False
+                    except TypeError:
+                        return False
+            elif v != cond:
+                return False
+        return True
+
     def find(self, flt=None, projection=None):
-        return iter(list(self._docs))
+        return iter([d for d in self._docs if self._matches(d, flt)])
 
     def find_one(self, flt=None, projection=None):
         return self._docs[0] if self._docs else None
@@ -184,3 +221,52 @@ def test_an_interstate_sale_with_no_refund_keeps_its_IGST(monkeypatch):
     monkeypatch.setattr(r, "_get_raw_db", lambda: db)
     rep = r._compute_gstr3b("2026-06", "S1")
     assert rep["outwardTaxableSupplies"]["integratedTax"] == 1800.0
+
+
+# ---------------------------------------------------------------------------
+# The dedup has to span months, because a refund and its credit note can
+# ---------------------------------------------------------------------------
+
+
+def test_a_refund_whose_credit_note_lands_next_month_reverses_once(monkeypatch):
+    """Refund taken 30 June, store credit minted 1 July. ONE reversal, total.
+
+    The dedup set was built from the ledger rows INSIDE the reporting month, so
+    in June the ledger row (dated July) was invisible and the returns leg
+    counted the refund; in July the ledger leg counted it again. One refund,
+    tax reversed twice, and the accountant under-declares. A refund taken on
+    the last evening of a month whose credit note is issued next morning is an
+    ordinary shop event.
+    """
+    rid = "RET-260630-EOM001"
+    ret = dict(_cash_return(rid=rid))
+    ret["created_at"] = datetime(2026, 6, 30, 12, 0)
+    ledger_row = {
+        "store_id": "S1", "type": "ISSUED",
+        "created_at": datetime(2026, 7, 1, 6, 0).isoformat(),
+        "reason": f"Credit note for return {rid}", "ref": rid,
+        "tax": 1800.0, "taxable": 10000.0, "amount": 10000.0,
+        "gross_refund": 11800.0, "net_refund": 10000.0, "customer_id": "C1",
+    }
+
+    # A 5,000-tax sale in each month, so neither month's figure is clamped at
+    # zero -- a clamp would hide a double reversal.
+    june_sale = _order(tax=5000.0, gross=32777.78)
+    july_sale = dict(_order(tax=5000.0, gross=32777.78))
+    july_sale["order_id"] = "O2"
+    july_sale["created_at"] = datetime(2026, 7, 10, 6, 0)
+
+    june = _DB(orders=[june_sale], returns=[ret], credit_note_ledger=[ledger_row])
+    monkeypatch.setattr(r, "_get_raw_db", lambda: june)
+    june_out = _outward(r._compute_gstr3b("2026-06", "S1"))
+
+    july = _DB(orders=[june_sale, july_sale],
+               returns=[ret], credit_note_ledger=[ledger_row])
+    monkeypatch.setattr(r, "_get_raw_db", lambda: july)
+    july_out = _outward(r._compute_gstr3b("2026-07", "S1"))
+
+    reversed_total = round((5000.0 - june_out) + (5000.0 - july_out), 2)
+    assert reversed_total == 1800.0, (
+        f"one 1,800 refund reversed {reversed_total} of output tax across the "
+        f"month boundary (June left {june_out}, July left {july_out})"
+    )

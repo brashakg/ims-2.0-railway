@@ -745,12 +745,17 @@ def _resolve_closing_user(
         return None, None
     if not order:
         return None, None
-    uid = (
-        order.get("sales_person_id")
-        or order.get("salesperson_id")
-        or order.get("created_by")
-    )
-    if not uid:
+    # ONE credit rule, imported -- not a second copy of the same three field
+    # names. This copy read them in the OPPOSITE precedence to the canonical
+    # resolver (sales_person_id before salesperson_id), so an order carrying
+    # both spellings would credit one person on the walkout report and a
+    # different person everywhere else, with nothing to make the disagreement
+    # visible. Deleting the copy is the fix; syncing it would just restart the
+    # drift.
+    from api.services.name_resolver import order_actor_id
+
+    uid = order_actor_id(order)
+    if not uid or uid == "Unknown":
         return None, None
     return uid, (_resolve_sales_person_name(uid) or uid)
 

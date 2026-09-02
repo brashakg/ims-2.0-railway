@@ -186,29 +186,126 @@ def _first(*values: Any) -> str:
     return ""
 
 
+# Tokens that are NOT words and must survive a title pass untouched. Length is
+# not a usable proxy: "RED" and "USA" are both three letters and only one of
+# them is a word, so the set is explicit. Sizes live here too -- XXL would
+# otherwise come back "Xxl".
+_ACRONYMS = frozenset({
+    # places
+    "USA", "UK", "UAE", "PRC", "IND", "EU", "US", "IT", "CN", "JP", "DE", "FR",
+    "VN", "TH", "KR", "TW", "MY", "ID", "PH", "BD", "LK", "NP",
+    # optical + materials
+    "UV", "PC", "TR", "CR", "AR", "HC", "HMC", "SHMC", "EMI", "PD", "SPH",
+    "CYL", "ADD", "BC", "DIA", "OD", "OS", "OU", "RX", "CT", "MG", "ML",
+    # sizes
+    "XS", "XL", "XXL", "XXXL",
+    # roman numerals that appear in model names
+    "II", "III", "IV", "VI", "VII", "VIII", "IX",
+    # commerce
+    "MRP", "GST", "HSN", "SKU", "UPC", "GTIN", "EAN", "QC", "OEM", "ODM",
+})
+
+# Spellings a plain title pass gets wrong. Keyed on the lowercase letters-and-
+# digits form so one row catches every separator spelling ("RAY-BAN", "RAY BAN",
+# "RayBan"). Deliberately STATIC: seeding this from the database at runtime
+# would make the module's title-caser impure and make a generated product name
+# depend on which brands happen to be configured.
+_EXACT_CASE = {
+    "rayban": "Ray-Ban",
+    "boat": "boAt",
+    "bauschlomb": "Bausch & Lomb",
+    "johnjacobs": "John Jacobs",
+    "vincentchase": "Vincent Chase",
+    "icberlin": "ic! berlin",
+    "oneill": "O'Neill",
+    "mcq": "McQ",
+}
+
+# Lowercased mid-phrase only, never first or last.
+_SMALL_WORDS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on",
+    "or", "the", "to", "with",
+})
+
+_SEP_SPLIT = re.compile(r"([^0-9A-Za-z]+)")
+
+
+def _case_segment(seg: str, *, digit_token: bool) -> str:
+    """Case ONE alphanumeric run inside a token.
+
+    In a token that carries a digit somewhere, a short run is almost always a
+    code prefix ("RB" in RB-4350, "G" in G-15, "CR" in CR-39) and must survive
+    verbatim, while a long run is a word ("BLACK" in BLACK/002). Four characters
+    is the boundary: no eyewear model prefix is that long and no colour word is
+    shorter. In a token with NO digit the acronym set decides instead, because
+    there length tells you nothing -- "RED" and "USA" are both three letters.
+    """
+    if not seg or not seg.isalpha():
+        return seg
+    if digit_token:
+        return seg.capitalize() if len(seg) >= 4 else seg
+    if seg.upper() in _ACRONYMS:
+        return seg.upper()
+    return seg.capitalize()
+
+
 def _title_token(token: str) -> str:
     """Title-case one whitespace-free token.
 
-    A token carrying a digit (model number RB3025, size 52, colour code) is
-    returned VERBATIM so casing never mangles it. Otherwise each hyphen segment
-    is capitalised ("ray-ban" -> "Ray-Ban", "MEN'S" -> "Men's").
+    A model number, colour code or measurement must never be mangled, so a
+    token containing a digit is cased run-by-run under the rule in
+    _case_segment rather than word-wise: "RB-4350" survives, "CR-39" survives,
+    and "BLACK/002" still becomes "Black/002" instead of staying in capitals.
+    Separators are preserved exactly as typed -- "002/20" must not become
+    "002-20", because the SKU builder keeps those characters.
     """
     if not token:
         return token
-    if any(ch.isdigit() for ch in token):
-        return token
-    return "-".join(part.capitalize() for part in token.split("-"))
+    exact = _EXACT_CASE.get(re.sub(r"[^a-z0-9]+", "", token.lower()))
+    if exact:
+        return exact
+    digit_token = any(ch.isdigit() for ch in token)
+    parts = [p for p in _SEP_SPLIT.split(token) if p != ""]
+    out = []
+    for i, part in enumerate(parts):
+        if _SEP_SPLIT.fullmatch(part):
+            out.append(part)
+            continue
+        # A short run straight after an apostrophe is a possessive or a
+        # contraction, not a new word: "WOMEN'S" is "Women's", never "Women'S".
+        prev = parts[i - 1] if i else ""
+        if i and prev and prev[-1] in "'’" and part.isalpha() and len(part) <= 2:
+            out.append(part.lower())
+            continue
+        out.append(_case_segment(part, digit_token=digit_token))
+    return "".join(out)
 
 
 def _smart_title(text: str) -> str:
     """Title-case a full string word-by-word, preserving the ' - ' separator
-    and any digit-bearing tokens."""
-    out = []
-    for word in text.split(" "):
-        if not word:
-            continue
-        out.append(word if word == "-" else _title_token(word))
+    and any digit-bearing tokens.
+
+    A whole-string exception is tried first so a multi-word brand written in
+    capitals ("VINCENT CHASE") is recognised before it is split into tokens
+    that individually mean nothing.
+    """
+    exact = _EXACT_CASE.get(re.sub(r"[^a-z0-9]+", "", str(text or "").lower()))
+    if exact:
+        return exact
+    words = [w for w in str(text or "").split(" ") if w]
+    out = [w if w == "-" else _title_token(w) for w in words]
+    # Small words go lowercase in the middle of a phrase, never at either end,
+    # and never if the token was matched as an acronym or a code.
+    for i in range(1, len(out) - 1):
+        w = out[i]
+        if w.isalpha() and w.upper() not in _ACRONYMS and w.lower() in _SMALL_WORDS:
+            out[i] = w.lower()
     return " ".join(out)
+
+
+def smart_title(text: str) -> str:
+    """Public name for the ONE title-caser. See _smart_title."""
+    return _smart_title(text)
 
 
 def _clamp(text: str, limit: int) -> str:
