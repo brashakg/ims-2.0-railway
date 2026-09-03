@@ -162,7 +162,7 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) -- through the existing /ready + /deliver doors; a HOME-DELIVERY counter bill is deliberately NOT stamped (parcel still on the packing desk) | **DONE** |
 | Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **DONE** |
 | Reverse split: adding a family member whose number is already a customer -- BLOCK + link-existing (owner 09-04) | **WIP** |
-| Legacy till retirement - inventory DONE: **cannot retire yet**. 3 gaps on the new billing screen (Rx sale creates no workshop job; no deposit-only sale; no clear-customer). All in build. Visufit ID + lens suggestions DROPPED by owner. 8 legacy-vehicle tests to re-point. | **BLOCKED on build** |
+| Legacy till RETIRED: /pos redirects to /pos/new (query kept), POSLayout deleted, 8 legacy-vehicle tests re-pointed, a recorded-axis-0 bug caught on the new picker. Follow-ups: Playwright specs re-pointing (WIP); POSReceipt.tsx orphaned; PIXEL audit list still names /pos (follows redirect) | **DONE** |
 
 Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
 customers; 0 duplicate top-level numbers; an early probe said 9 family members also exist as their own
