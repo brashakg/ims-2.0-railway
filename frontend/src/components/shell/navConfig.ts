@@ -126,7 +126,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // self check-in card. requireRoles mirrors the /attendance route gate.
       { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // Salary is ADMIN/SUPERADMIN only (owner ruling 2026-08-10, no accountant
+      // carve-out). The ROUTE was narrowed to match the endpoints behind it;
+      // this row has to follow or three roles keep seeing a menu item that
+      // now bounces them at the router.
+      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
     ],

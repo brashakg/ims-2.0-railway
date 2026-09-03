@@ -288,14 +288,17 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     bgColor: 'bg-indigo-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
-      { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
-      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'] },
+      { id: 'hr-attendance', label: 'Attendance', path: '/hr/today' },
+      { id: 'hr-leaves', label: 'Leave Management', path: '/hr/leave' },
+      // Salary screen -> SUPERADMIN + ADMIN only (owner ruling 2026-08-10).
+      // This row used to offer it to AREA_MANAGER and ACCOUNTANT, who then met
+      // a backend 403: a menu item that always refused.
+      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll', roles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'hr-tasks', label: 'Tasks Dashboard', path: '/tasks/dashboard' },
       { id: 'hr-checklists', label: 'Daily Checklists', path: '/tasks/checklists' },
       { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'hr-leaderboard', label: 'Staff Leaderboard', path: '/hr?tab=leaderboard', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'hr-leaderboard', label: 'Staff Leaderboard', path: '/hr/leaderboard', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'hr-eye-camps', label: 'Eye Camps', path: '/hr?tab=eye-camps', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
     ],
   },
