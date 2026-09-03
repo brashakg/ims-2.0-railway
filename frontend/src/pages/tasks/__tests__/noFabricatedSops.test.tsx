@@ -20,6 +20,10 @@ vi.mock('../../../services/api', () => ({
     seedDefaultSops: vi.fn(),
   },
 }));
+// The page's staff hook (useStoreStaff) imports this module directly.
+vi.mock('../../../services/api/stores', () => ({
+  adminStoreApi: { getStoreUsers: vi.fn(async () => ({ users: [] })) },
+}));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'USR-1', activeStoreId: 'BV-PUN-01', roles: ['STORE_MANAGER'] } }),
 }));

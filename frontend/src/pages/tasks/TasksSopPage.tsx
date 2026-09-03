@@ -16,10 +16,12 @@
 
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Edit, Eye, ListChecks, Loader2, Plus } from 'lucide-react';
+import { AlertTriangle, Edit, Eye, ListChecks, Loader2, Plus, UserPlus, X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
+import { tasksApi } from '../../services/api';
 import { SopEditorModal, type SopTemplateForm } from '../../components/tasks/SopEditorModal';
-import { useSopTemplates, type SopTemplate } from './tasksQueries';
+import { useSopTemplates, useStoreStaff, type SopTemplate, type StaffMember } from './tasksQueries';
 
 function toForm(sop: SopTemplate): SopTemplateForm {
   return {
@@ -35,7 +37,9 @@ function toForm(sop: SopTemplate): SopTemplateForm {
       warning: s.warning,
     })),
     assigned_roles: sop.assignedRoles,
-    assigned_users: [],
+    // Pass the stored people through. Hardcoding [] here made every
+    // edit-save in the editor modal WIPE the SOP's named assignees.
+    assigned_users: sop.assignedUsers,
   };
 }
 
@@ -43,8 +47,14 @@ export function TasksSopPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const sopsQ = useSopTemplates(user?.activeStoreId);
+  // The active store's people, so SOPs are assigned to NAMES (Sameer,
+  // Rupesh...), not just job titles (owner 2026-09-03).
+  const staffQ = useStoreStaff(user?.activeStoreId);
+  const staff = staffQ.data ?? [];
+  const nameOf = (id: string) => staff.find((s) => s.userId === id)?.name || id;
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<SopTemplateForm | null>(null);
+  const [assigning, setAssigning] = useState<SopTemplate | null>(null);
   const [search, setSearch] = useState('');
 
   const openEditor = (sop: SopTemplate | null) => {
@@ -147,14 +157,38 @@ export function TasksSopPage() {
                 </div>
               </div>
 
+              {sop.assignedUsers.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-xs text-gray-600 mb-1.5">Assigned to</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {sop.assignedUsers.map((id) => (
+                      <span
+                        key={id}
+                        className="px-2.5 py-1 bg-bv-red-100 text-bv-red-700 text-xs font-medium rounded-full"
+                      >
+                        {nameOf(id)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center justify-between pt-3 border-t border-gray-200">
                 <div className="text-xs text-gray-500">
                   {sop.lastUpdated ? `Updated: ${new Date(sop.lastUpdated).toLocaleDateString()}` : 'Never updated'}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setAssigning(sop)}
+                    className="min-h-[44px] px-3 hover:bg-gray-100 rounded-lg transition-colors inline-flex items-center gap-1.5 text-sm font-medium text-gray-700"
+                    aria-label="Assign people"
+                    title="Assign this SOP to named staff"
+                  >
+                    <UserPlus className="w-4 h-4 text-gray-600" /> Assign
+                  </button>
                   <button
                     onClick={() => openEditor(sop)}
-                    className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="min-h-[44px] min-w-[44px] flex items-center justify-center hover:bg-gray-100 rounded-lg transition-colors"
                     aria-label="View SOP"
                     title="View SOP"
                   >
@@ -162,7 +196,7 @@ export function TasksSopPage() {
                   </button>
                   <button
                     onClick={() => openEditor(sop)}
-                    className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="min-h-[44px] min-w-[44px] flex items-center justify-center hover:bg-gray-100 rounded-lg transition-colors"
                     aria-label="Edit SOP"
                     title="Edit SOP"
                   >
@@ -184,6 +218,144 @@ export function TasksSopPage() {
         initial={editing}
         onSaved={() => queryClient.invalidateQueries({ queryKey: ['tasks', 'sop-templates'] })}
       />
+
+      {assigning && (
+        <AssignPeopleModal
+          sop={assigning}
+          staff={staff}
+          staffPending={staffQ.isPending && !!user?.activeStoreId}
+          onClose={() => setAssigning(null)}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: ['tasks', 'sop-templates'] })}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Assign an SOP to PEOPLE by name (owner 2026-09-03: "instead of assigning it
+// to store manager, cashier, optom, assign it to individuals like sameer,
+// rupesh"). Role assignment stays available in the SOP editor - existing SOPs
+// persist assigned_roles, so removing roles would lose data - but this is the
+// primary door now. Saves via the purpose-built /sop-templates/{id}/assign
+// endpoint; roles are sent back UNCHANGED so the server can never read an
+// omitted field as "clear the roles".
+// ============================================================================
+function AssignPeopleModal({
+  sop,
+  staff,
+  staffPending,
+  onClose,
+  onSaved,
+}: {
+  sop: SopTemplate;
+  staff: StaffMember[];
+  staffPending: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [selected, setSelected] = useState<string[]>(sop.assignedUsers);
+  const [saving, setSaving] = useState(false);
+
+  // A stored assignee who is no longer on this store's active list (left, or
+  // transferred) must stay VISIBLE so they can be unassigned - otherwise
+  // saving would silently drop them. Shown by id since the name is unknown.
+  const ghosts = sop.assignedUsers.filter((id) => !staff.some((s) => s.userId === id));
+  const rows: StaffMember[] = [...staff, ...ghosts.map((id) => ({ userId: id, name: id }))];
+
+  const toggle = (id: string) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await tasksApi.assignSop(sop.id, {
+        assigned_roles: sop.assignedRoles,
+        assigned_users: selected,
+      });
+      toast.success('Assignment saved');
+      onSaved();
+      onClose();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[SOP] assign failed:', e);
+      toast.error('Could not save assignment');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl w-full max-w-md max-h-[85dvh] overflow-hidden flex flex-col shadow-2xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Assign people</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Who is responsible for &ldquo;{sop.title}&rdquo;
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center hover:bg-gray-100 rounded text-gray-500"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-3 py-2">
+          {staffPending ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+            </div>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-gray-500 text-center py-8">
+              No active staff found for this store.
+            </p>
+          ) : (
+            rows.map((person) => (
+              <label
+                key={person.userId}
+                className="flex items-center gap-3 min-h-[44px] px-2 rounded-lg hover:bg-gray-50 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.includes(person.userId)}
+                  onChange={() => toggle(person.userId)}
+                  className="w-5 h-5 accent-[var(--bv-red-600,#dc2626)] flex-shrink-0"
+                  aria-label={person.name}
+                />
+                <span className="text-sm font-medium text-gray-900">{person.name}</span>
+                {person.role && (
+                  <span className="ml-auto text-xs text-gray-500">
+                    {person.role.replace(/_/g, ' ')}
+                  </span>
+                )}
+              </label>
+            ))
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-200 bg-gray-50">
+          <button
+            onClick={onClose}
+            disabled={saving}
+            className="min-h-[44px] px-4 rounded text-sm font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={saving || (rows.length === 0 && selected.length === 0)}
+            className="min-h-[44px] px-5 rounded text-sm font-semibold bg-bv-red-600 text-white hover:bg-bv-red-700 disabled:opacity-50 inline-flex items-center gap-2"
+          >
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+            Save assignment
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

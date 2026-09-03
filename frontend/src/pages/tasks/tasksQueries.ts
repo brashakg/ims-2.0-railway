@@ -30,6 +30,8 @@
 
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { tasksApi } from '../../services/api';
+// Direct module import, not the barrel (TS2614 trap noted in project memory).
+import { adminStoreApi } from '../../services/api/stores';
 import type { SopChecklist } from '../../services/api/hr';
 
 /** Backend canonical priority. The whole module speaks P0-P4 now; the legacy
@@ -205,6 +207,9 @@ export interface SopTemplate {
   frequency: string;
   estimatedTime: number;
   assignedRoles: string[];
+  /** User ids of NAMED people this SOP is assigned to (owner 2026-09-03:
+   *  "assign it to individuals like sameer, rupesh", not just job titles). */
+  assignedUsers: string[];
   createdDate: string;
   lastUpdated: string;
   steps: { id: string; stepNumber: number; instruction: string; warning?: string }[];
@@ -233,6 +238,9 @@ export function useSopTemplates(storeId: string | undefined) {
         frequency: t.frequency,
         estimatedTime: t.estimated_time,
         assignedRoles: t.assigned_roles || [],
+        // Dropping this here is what made the SOP editor WIPE per-person
+        // assignments on every edit-save (toForm hardcoded []).
+        assignedUsers: t.assigned_users || [],
         createdDate: t.created_at?.slice(0, 10) || '',
         lastUpdated: t.updated_at?.slice(0, 10) || '',
         steps: (t.steps || []).map((s) => ({
@@ -242,6 +250,37 @@ export function useSopTemplates(storeId: string | undefined) {
           warning: s.warning,
         })),
       }));
+    },
+  });
+}
+
+/** One selectable person on the active store's staff. */
+export interface StaffMember {
+  userId: string;
+  name: string;
+  role?: string;
+}
+
+/**
+ * Active staff of ONE store, so work can be assigned to people BY NAME.
+ * REUSES adminStoreApi.getStoreUsers - the same client NewTaskModal,
+ * SalespersonPicker and WalkoutIntake already call - never a second
+ * staff-listing endpoint (one rule, two implementations).
+ */
+export function useStoreStaff(storeId: string | undefined) {
+  return useQuery({
+    queryKey: ['store-staff', storeId ?? 'none'] as const,
+    enabled: !!storeId,
+    queryFn: async (): Promise<StaffMember[]> => {
+      const resp: any = await adminStoreApi.getStoreUsers(storeId as string, { activeOnly: true });
+      const list = resp?.users || resp || [];
+      return (Array.isArray(list) ? list : [])
+        .map((u: any): StaffMember => ({
+          userId: u.user_id || u.id || '',
+          name: u.name || u.full_name || u.username || u.user_id || '',
+          role: Array.isArray(u.roles) ? u.roles[0] : u.role,
+        }))
+        .filter((s) => s.userId);
     },
   });
 }
