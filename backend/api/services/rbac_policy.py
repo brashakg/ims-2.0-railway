@@ -2022,10 +2022,18 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {
-        # Session list reveals expected/variance -> manager/finance read roles.
+        # Session list: manager/finance see the full figures. Cashier roles may
+        # list too -- without it they cannot FIND the shared drawer they must
+        # count (owner ruling 2026-09-03: cashiers count and submit; the
+        # manager reviews the variance AFTER submission). Their rows are
+        # blind-redacted at the data layer (redact_for_cashier -- no expected
+        # figure on the wire pre-lock).
         "method": "GET",
         "path": "/api/v1/till/sessions",
         "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
             "STORE_MANAGER",
             "AREA_MANAGER",
             "ADMIN",

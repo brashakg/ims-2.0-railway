@@ -99,6 +99,14 @@ class CartLine:
     discount_category: Optional[str] = None
     item_type: Optional[str] = None
     cost_at_sale: Optional[float] = None
+    # Cap-clamp inputs (order-create stamps these from the product master):
+    # the catalog MRP per unit -- the base every discount cap is DEFINED on --
+    # and the line's rupee total AFTER the manual per-line discount, BEFORE
+    # any promo, so the clamp can grant only the cap headroom that REMAINS.
+    # Both optional: absent values fall back to unit_price (a smaller-or-
+    # equal base, so the clamp only ever tightens, never loosens).
+    mrp: Optional[float] = None
+    line_total: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -456,6 +464,14 @@ def cart_line_from_item(item: Dict[str, object], index: int) -> CartLine:
             if item.get("cost_at_sale") is not None
             else None
         ),
+        mrp=(
+            _safe_price(item.get("mrp")) if item.get("mrp") is not None else None
+        ),
+        line_total=(
+            _safe_price(item.get("item_total"))
+            if item.get("item_total") is not None
+            else None
+        ),
     )
 
 
@@ -536,12 +552,31 @@ def _clamp_to_caps(
     lines: List[CartLine], result: PromoResult
 ) -> Tuple[float, Dict[str, float]]:
     """Clamp the engine's per-line allocation of the total promo discount so NO
-    line is discounted beyond its category / luxury-brand cap (pricing_caps).
-    Returns (capped_total, per_line_capped_discount).
+    line ends up discounted beyond its category / luxury-brand cap
+    (pricing_caps). Returns (capped_total, per_line_capped_discount).
 
     The pure engine already clamps the cart total to the subtotal but does not
     know category/brand caps. This is the F11/F12 OUTER hardlock: the supreme
-    authority a promo can never breach (DECISIONS + F11 business rules)."""
+    authority a promo can never breach (DECISIONS + F11 business rules).
+
+    Two rules this clamp enforces exactly (audit fix, 2026-09-03):
+
+      * The cap tier is the product's DISCOUNT CATEGORY (MASS/PREMIUM/LUXURY/
+        SERVICE/NON_DISCOUNTABLE), read from ``ln.discount_category`` alone.
+        It used to fall back to the MERCHANDISING ``category`` label
+        ("FRAME"...), which pricing_caps cannot recognise -> every live line
+        clamped at the MASS 15% default, including 0%-cap NON_DISCOUNTABLE
+        and 5%-cap LUXURY lines. A missing tier still defaults to MASS
+        (inside pricing_caps) -- same posture as the manual-discount door.
+
+      * The cap is measured on the price it is DEFINED on -- MRP -- and the
+        promo receives only the cap headroom REMAINING after the discount the
+        line already carries (manual per-line discount / typed-below-MRP
+        price / HQ offer markdown). It used to grant a fresh full cap% of the
+        pre-discount line value ON TOP of a line already discounted to its
+        cap -- doubling the giveaway. With no MRP/line_total supplied
+        (pure-engine callers, POS preview), base = pre-promo line value and
+        headroom = full cap: byte-identical to the old behaviour."""
     per_line = allocate_discount(lines, result.total_discount)
     capped: Dict[str, float] = {}
     total = 0.0
@@ -551,12 +586,17 @@ def _clamp_to_caps(
         if ln is None or disc <= 0:
             capped[line_id] = 0.0
             continue
-        line_value = _safe_price(ln.unit_price) * max(0, int(ln.quantity))
-        cap_pct = effective_discount_cap(
-            ln.discount_category or ln.category, ln.brand
-        )
-        max_disc = round(line_value * cap_pct / 100.0, 2)
-        allowed = min(disc, max_disc)
+        qty = max(0, int(ln.quantity))
+        line_value = _safe_price(ln.unit_price) * qty
+        # The base the cap is defined on: MRP x qty; unknown MRP -> the
+        # pre-promo line value (smaller or equal, so only ever tighter).
+        base = (ln.mrp * qty) if (ln.mrp and ln.mrp > 0) else line_value
+        # Rupees of discount ALREADY on the line vs that base.
+        pre_total = ln.line_total if ln.line_total is not None else line_value
+        already = max(0.0, base - pre_total)
+        cap_pct = effective_discount_cap(ln.discount_category, ln.brand)
+        headroom = max(0.0, round(base * cap_pct / 100.0 - already, 2))
+        allowed = min(disc, headroom)
         capped[line_id] = round(allowed, 2)
         total += allowed
     return round(total, 2), capped

@@ -735,6 +735,203 @@ def assert_stack_within_cap(
         )
 
 
+def _enforce_line_pricing(
+    item, product, *, is_admin: bool, role_cap: float
+) -> dict:
+    """THE per-line price-integrity + discount-cap gate.
+
+    ONE implementation, shared by create_order and POST /{order_id}/items.
+    It existed twice and the copies had drifted: the add-item door resolved
+    the product with a narrower lookup (so every guard here silently no-op'd
+    for SKU/_id/catalog references) and re-implemented
+    effective_line_discount_pct inline. Never fork this again -- a rule
+    written twice is how the caps stop agreeing.
+
+    ``item``    -- an OrderItemCreate (both doors use the same model).
+    ``product`` -- the doc from _resolve_billable_product (None for virtual
+                   lines, or when no product repo is available).
+
+    Enforces (BUG-119/BUG-118 + SYSTEM_INTENT discount matrix):
+      * unit_price <= catalog ceiling (offer_price when HQ-discounted,
+        else MRP)                                           -> 400
+      * unit_price >= cost on priced lines                  -> 400
+      * NO further store discount on an HQ-discounted item
+        (offer < MRP), non-admin                            -> 403
+      * effective discount (explicit %, or implied by a unit_price under
+        MRP -- effective_line_discount_pct) <= min(role cap, category cap,
+        luxury-brand cap), non-admin                        -> 403
+      * owner ruling 2026-08-30: any manual discount (explicit % OR a typed
+        price below the catalog ceiling) carries a written reason
+        (>= 4 chars)                                        -> 400
+
+    Returns a dict consumed by both doors:
+      eff_disc      -- effective discount % for the cap math
+      loyalty_eff   -- loyalty-engine effective discount (vs the ceiling)
+      below_ceiling -- typed unit_price under the catalog price
+      cap           -- the tightened cap (ALWAYS computed; the stacking
+                       check needs it even when the line discount is 0)
+      cost / mrp / offer -- normalised catalog snapshot (None when unknown)
+    """
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f
+
+    pid = item.product_id or ""
+    is_real = bool(pid) and not pid.startswith(_VIRTUAL_PID_PREFIXES)
+    eff_disc = item.discount_percent
+    loyalty_eff = float(item.discount_percent or 0.0)
+    below_ceiling = False
+    mrp = offer = cost = None
+
+    if is_real and product:
+        m = _num(product.get("mrp"))
+        mrp = m if (m is not None and m > 0) else None
+        o = _num(product.get("offer_price"))
+        offer = o if (o is not None and o > 0) else None
+        cost = _num(product.get("cost_price"))
+        up = item.unit_price
+        hq_discounted = bool(offer and mrp and offer < mrp)
+        ceiling = offer if hq_discounted else mrp
+        below_ceiling = bool(ceiling and up < ceiling - 1e-6)
+        if ceiling and up > ceiling + 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unit_price Rs{up} exceeds the catalog "
+                    f"{'offer price' if hq_discounted else 'MRP'} "
+                    f"Rs{ceiling} for {item.product_name or pid}."
+                ),
+            )
+        # Cost floor: never sell a PRICED line below cost. A Rs0 line is a
+        # free / 100%-discount item gated by the approval requirement (C-4),
+        # so it is exempt here.
+        if cost and cost > 0 and up > 1e-6 and up < cost - 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unit_price Rs{up} is below cost Rs{cost} for "
+                    f"{item.product_name or pid}. Contact a manager."
+                ),
+            )
+        # BUG-118 (SYSTEM_INTENT s3): an HQ-discounted item (offer<MRP) sells
+        # at exactly offer_price -- no further store discount. A lower
+        # unit_price OR any explicit discount_percent is a further discount.
+        if not is_admin and hq_discounted and (
+            item.discount_percent > 0 or up < offer - 1e-6
+        ):
+            logger.warning(
+                "[ORDERS] BUG-118 blocked further discount on HQ-discounted %s",
+                pid,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"{item.product_name or pid} is already discounted by HQ "
+                    f"(offer Rs{offer} < MRP Rs{mrp}); no further store "
+                    f"discount is allowed. Contact an administrator to override."
+                ),
+            )
+        # Effective discount for the cap check (max of explicit + implied).
+        if mrp and up < mrp - 1e-6:
+            eff_disc = effective_line_discount_pct(item.discount_percent, up, mrp)
+        from api.services.loyalty_engine import implied_ceiling_discount
+
+        loyalty_eff = max(loyalty_eff, implied_ceiling_discount(up, mrp, offer))
+
+    # Category + luxury-brand cap. ALWAYS computed (not only when a discount
+    # is present): the stacking check downstream measures a 0%-discount line
+    # against a bill discount too.
+    cap = role_cap
+    if is_real:
+        if product:
+            try:
+                from api.services.pricing_caps import (
+                    effective_discount_cap as product_discount_cap,
+                )
+
+                cap = min(
+                    role_cap,
+                    product_discount_cap(
+                        product.get("discount_category"), product.get("brand")
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                # FAIL-CLOSED on the cap-TIGHTENING path: a thrown resolver
+                # must never widen the discount back to the loose role cap.
+                # Tighten from the strongest signal left on the payload -- its
+                # brand (pure, DB-free). A plain/MASS line keeps the role cap.
+                try:
+                    from api.services.pricing_caps import (
+                        brand_cap_for as _luxury_brand_cap,
+                    )
+
+                    bcap = _luxury_brand_cap(item.brand)
+                    if bcap is not None:
+                        cap = min(cap, bcap)
+                except Exception:  # noqa: BLE001
+                    pass  # even the pure fallback failed: do not loosen
+        else:
+            # No product doc for a real pid: only reachable when no product
+            # repo exists (mock/DB-less mode) -- _resolve_billable_product
+            # refuses unresolvable pids outright otherwise. Same payload-brand
+            # fail-closed floor as above.
+            try:
+                from api.services.pricing_caps import (
+                    brand_cap_for as _luxury_brand_cap,
+                )
+
+                bcap = _luxury_brand_cap(item.brand)
+                if bcap is not None:
+                    cap = min(cap, bcap)
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not is_admin and eff_disc > cap + 1e-9:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Discount {round(eff_disc, 2)}% on "
+                f"{item.product_name or pid or 'this line'} (explicit discount "
+                f"and/or unit price below MRP) exceeds your limit of {cap}%. "
+                f"Contact a manager for approval."
+            ),
+        )
+
+    # Owner ruling 2026-08-30: a MANUAL discount always carries a written
+    # reason -- whether given as a discount_percent OR by typing a unit_price
+    # under the catalog price. Selling AT the catalog offer/MRP is not a
+    # manual discount; promo-engine discounts ride applied_promos.
+    if (item.discount_percent or 0) > 0 or below_ceiling:
+        if len(str(item.discount_reason or "").strip()) < 4:
+            why = (
+                "price is below the current catalog price"
+                if not (item.discount_percent or 0) > 0
+                else "manual discount with no offer applied"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"A discount reason (at least 4 characters) is required "
+                    f"for {item.product_name or item.product_id} — {why}. "
+                    f"Use the item's Discount button to add the reason."
+                ),
+            )
+
+    return {
+        "eff_disc": eff_disc,
+        "loyalty_eff": loyalty_eff,
+        "below_ceiling": below_ceiling,
+        "cap": cap,
+        "cost": cost,
+        "mrp": mrp,
+        "offer": offer,
+    }
+
+
 class SalespersonSplit(BaseModel):
     """One share of a two-way sales credit (owner spec 13, default 50/50).
 
@@ -1554,6 +1751,50 @@ def _canonical_pid(product_repo, pid: str) -> str:
     return str(doc.get("id") or doc.get("product_id") or pid)
 
 
+def _resolve_billable_product(product_repo, pid: str, product_name: str = ""):
+    """THE product resolution for a billing door -- create_order AND
+    POST /{order_id}/items. One lookup, one refusal policy:
+
+      * empty pids and virtual lines (custom-/lens-/lens-sug-) -> None
+        (no product doc; the payload prices itself, role cap still applies);
+      * a pid that resolves from the `products` spine (by product_id, sku,
+        or _id -- the tolerant _resolve_product_doc) -> the doc;
+      * a pid that does NOT resolve -> 400. Never silently bill an unknown
+        product: the add-item door used to fail OPEN here, appending the line
+        with the MRP ceiling, cost floor, HQ-offer rule, category/brand cap
+        and reason requirement ALL silently skipped;
+      * a pid that resolves ONLY from catalog_products -> 400 (no billing
+        spine row; the same refusal create_order has always made -- the
+        add-item door billed these outright).
+
+    The add-item door previously resolved with a NARROWER lookup
+    (find_by_id only), so a product referenced by SKU or Mongo _id missed
+    every guard. That copy is deleted; both doors resolve HERE.
+    """
+    if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
+        return None
+    product = _resolve_product_doc(product_repo, pid)
+    if product is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product not found: {pid} ({product_name or 'unknown'})",
+        )
+    # Products-convergence (3): billing requires the `products` SPINE. A
+    # product that resolves ONLY from catalog_products is not a governed
+    # billing master -- fail LOUD instead of silently billing off the catalog
+    # (the path the discount-cap could not fully enforce).
+    if product.get("_resolved_from") == "catalog_products":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{product_name or pid} exists only in the catalog "
+                f"and has no billing master record. Re-save it via "
+                f"Catalog / Add Product before selling it."
+            ),
+        )
+    return product
+
+
 def _get_catalog_collection():
     """Return the `catalog_products` Mongo collection, or None if the DB is
     unavailable. Mirrors catalog.py's accessor; module-level + import-light so
@@ -2157,35 +2398,22 @@ async def create_order(
     # POS lens configurator ("lens-*"), lens suggestion helper
     # ("lens-sug-*"), and manual custom items ("custom-*").
     product_repo = get_product_repository()
+    # ONE resolution per product for the whole create: existence + refusal
+    # policy live in _resolve_billable_product (shared with the add-item
+    # door), and every later consumer (price snapshot, per-line cap gate,
+    # cart-discount stacking, promo-tier stamp) reads THIS dict instead of
+    # re-querying -- re-resolving in four places is how the copies drifted.
+    _pdoc_by_pid: Dict[str, dict] = {}
     if product_repo is not None:
         for item in order.items:
             pid = item.product_id or ""
-            if not pid:
+            if not pid or pid in _pdoc_by_pid:
                 continue
-            if pid.startswith(("custom-", "lens-", "lens-sug-")):
-                continue
-            product = _resolve_product_doc(product_repo, pid)
-            if product is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Product not found: {pid} ({item.product_name or 'unknown'})",
-                )
-            # Products-convergence ③: billing requires the `products` SPINE. A
-            # product that resolves ONLY from catalog_products (no spine row) is
-            # not a governed billing master -- fail LOUD instead of silently
-            # billing off the catalog (the path the discount-cap could not fully
-            # enforce). Post step-10 the catalog door writes the spine, so this
-            # only fires for a legacy un-converged catalog-only product; re-save
-            # it via Catalog/Add Product to mint its spine row.
-            if product.get("_resolved_from") == "catalog_products":
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"{item.product_name or pid} exists only in the catalog "
-                        f"and has no billing master record. Re-save it via "
-                        f"Catalog / Add Product before selling it."
-                    ),
-                )
+            doc = _resolve_billable_product(
+                product_repo, pid, item.product_name or ""
+            )
+            if doc is not None:
+                _pdoc_by_pid[pid] = doc
 
     # BUG-005 / BUG-006 (patient-safety): validate every line's clinical Rx
     # powers (range / 0.25 grid / whole-axis / cyl-requires-axis) and require a
@@ -2362,27 +2590,16 @@ async def create_order(
                 return None
 
         try:
-            if product_repo is not None:
-                _seen_pids: set = set()
-                for it in order.items:
-                    pid = it.product_id or ""
-                    if not pid or pid in _seen_pids:
-                        continue
-                    if pid.startswith(("custom-", "lens-", "lens-sug-")):
-                        continue
-                    _seen_pids.add(pid)
-                    pdoc = _resolve_product_doc(product_repo, pid)
-                    if not pdoc:
-                        continue
-                    c = _num_or_none(pdoc.get("cost_price"))
-                    if c is not None:
-                        _cost_by_pid[pid] = c
-                    m = _num_or_none(pdoc.get("mrp"))
-                    if m is not None and m > 0:
-                        _mrp_by_pid[pid] = m
-                    o = _num_or_none(pdoc.get("offer_price"))
-                    if o is not None and o > 0:
-                        _offer_by_pid[pid] = o
+            for pid, pdoc in _pdoc_by_pid.items():
+                c = _num_or_none(pdoc.get("cost_price"))
+                if c is not None:
+                    _cost_by_pid[pid] = c
+                m = _num_or_none(pdoc.get("mrp"))
+                if m is not None and m > 0:
+                    _mrp_by_pid[pid] = m
+                o = _num_or_none(pdoc.get("offer_price"))
+                if o is not None and o > 0:
+                    _offer_by_pid[pid] = o
         except Exception:
             # Pricing snapshot is fail-soft -- never block order create.
             _cost_by_pid, _mrp_by_pid, _offer_by_pid = {}, {}, {}
@@ -2419,186 +2636,21 @@ async def create_order(
         for item in order.items:
             item_total = item.unit_price * item.quantity
 
-            # ---- BUG-119/BUG-118: server-side price integrity (non-virtual) ----
-            # Enforce the catalog MRP/offer ceiling, a cost floor, and the
-            # "no further discount on an HQ-discounted item" rule. `_eff_disc` is
-            # the effective discount = the LARGER of the explicit discount_percent
-            # and the discount implied by unit_price vs MRP, so a low unit_price is
-            # capped exactly like an explicit discount and cannot bypass the cap.
+            # ---- Per-line price integrity + discount caps (SHARED gate) ----
+            # BUG-119/BUG-118 ceiling / cost floor / HQ-offer rule / role +
+            # category + luxury-brand cap / reason requirement all live in
+            # _enforce_line_pricing, THE one implementation shared with the
+            # POST /{order_id}/items door (they were written twice and drifted:
+            # the add-item copy resolved products narrowly, so SKU/_id/catalog
+            # references skipped every guard).
             _pid = item.product_id or ""
-            _eff_disc = item.discount_percent
-            # Loyalty-effective discount: explicit + implied vs the CEILING
-            # (offer if HQ-discounted else MRP), so an at-offer sale stays 0
-            # but a typed-below-shelf price counts as the discount it is.
-            # Consumed by loyalty_engine's >=5% earn gate; must be reset every
-            # iteration (the _ceiling vars below persist across loop turns).
-            _loyalty_eff = float(item.discount_percent or 0.0)
-            _below_ceiling = False  # typed unit_price under the catalog price
-            if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
-                _mrp = _mrp_by_pid.get(_pid)
-                _offer = _offer_by_pid.get(_pid)
-                _cost = _cost_by_pid.get(_pid)
-                _up = item.unit_price
-                _hq_discounted = bool(_offer and _mrp and _offer < _mrp)
-                _ceiling = _offer if _hq_discounted else _mrp
-                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
-                if _ceiling and _up > _ceiling + 1e-6:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"unit_price Rs{_up} exceeds the catalog "
-                            f"{'offer price' if _hq_discounted else 'MRP'} "
-                            f"Rs{_ceiling} for {item.product_name or _pid}."
-                        ),
-                    )
-                # Cost floor: never sell a PRICED line below cost. A Rs0 line is a
-                # free / 100%-discount item gated by the approval requirement (C-4),
-                # so it is exempt here.
-                if _cost and _cost > 0 and _up > 1e-6 and _up < _cost - 1e-6:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"unit_price Rs{_up} is below cost Rs{_cost} for "
-                            f"{item.product_name or _pid}. Contact a manager."
-                        ),
-                    )
-                # BUG-118 (SYSTEM_INTENT s3): an HQ-discounted item (offer<MRP)
-                # sells at exactly offer_price -- no further store discount. A lower
-                # unit_price OR any explicit discount_percent is a further discount.
-                if not is_admin and _hq_discounted and (
-                    item.discount_percent > 0 or _up < _offer - 1e-6
-                ):
-                    logger.warning(
-                        "[ORDERS] BUG-118 blocked further discount on HQ-discounted %s by %s",
-                        _pid, current_user.get("user_id"),
-                    )
-                    raise HTTPException(
-                        status_code=403,
-                        detail=(
-                            f"{item.product_name or _pid} is already discounted by HQ "
-                            f"(offer Rs{_offer} < MRP Rs{_mrp}); no further store "
-                            f"discount is allowed. Contact an administrator to override."
-                        ),
-                    )
-                # Effective discount for the cap check (max of explicit + implied).
-                if _mrp and _up < _mrp - 1e-6:
-                    _eff_disc = effective_line_discount_pct(
-                        item.discount_percent, _up, _mrp
-                    )
-                from api.services.loyalty_engine import implied_ceiling_discount
-
-                _loyalty_eff = max(
-                    _loyalty_eff, implied_ceiling_discount(_up, _mrp, _offer)
-                )
-
-            # Enforce discount cap (admins bypass) -- against the EFFECTIVE discount
-            effective_cap = user_discount_cap
-            if not is_admin and _eff_disc > 0:
-                # Look up category cap for this product — read from the
-                # products collection (same fix as the existence-check
-                # above; the original code hit stock_units and always
-                # returned None, leaving effective_cap = user's full cap).
-                try:
-                    pr = get_product_repository()
-                    if (
-                        item.product_id
-                        and not item.product_id.startswith(
-                            ("custom-", "lens-", "lens-sug-")
-                        )
-                    ):
-                        # Products-convergence: resolve via the SAME path
-                        # order-create used for existence (spine first, then the
-                        # catalog_products fallback) so a catalog-only product's
-                        # discount_category + brand are also cap-enforced. The
-                        # old pr.find_by_id() hit only the spine -> None for a
-                        # catalog-only product -> the cap silently no-op'd (a
-                        # luxury item could take the full role cap).
-                        product = _resolve_product_doc(pr, item.product_id)
-                        if product:
-                            # Canonical category + luxury-brand cap (SYSTEM_INTENT
-                            # discount matrix). Pass the real discount_category
-                            # (NOT product `category`, which is an item-type, not a
-                            # discount tier); pricing_caps defaults unknown/missing
-                            # to MASS and applies the lower luxury brand cap.
-                            from api.services.pricing_caps import (
-                                effective_discount_cap as product_discount_cap,
-                            )
-
-                            cat_brand_cap = product_discount_cap(
-                                product.get("discount_category"),
-                                product.get("brand"),
-                            )
-                            effective_cap = min(user_discount_cap, cat_brand_cap)
-                except Exception:
-                    # FAIL-CLOSED on the cap-TIGHTENING path (council go-live
-                    # blocker, ruling sec.1). A thrown product/category resolver
-                    # must NEVER widen the allowed discount back to the loose
-                    # user/role cap -- that silently dropped the 2-5% luxury
-                    # brand floor and let a Cartier/Gucci frame take the full
-                    # role cap (live compliance under-enforcement).
-                    #
-                    # We cannot re-read the DB here (it just threw), so we
-                    # tighten using the STRONGEST signal still on the line-item
-                    # payload itself: its brand. brand_cap_for() is a pure,
-                    # DB-free luxury-brand lookup. If the line names a luxury
-                    # brand, its (low) cap is applied as a floor even though the
-                    # DB lookup failed -> the luxury floor cannot vanish on a
-                    # resolver error.
-                    #
-                    # DELIBERATELY NOT over-corrected: a plain/MASS line (no
-                    # luxury brand on the payload) returns None from
-                    # brand_cap_for(), so effective_cap stays at the normal
-                    # user/role cap and an ordinary legitimate sale is NOT
-                    # blocked. "We couldn't determine the tier" only tightens
-                    # when there is a concrete luxury signal; it never invents a
-                    # cap that blocks a plain item.
-                    try:
-                        from api.services.pricing_caps import (
-                            brand_cap_for as _luxury_brand_cap,
-                        )
-
-                        _bcap = _luxury_brand_cap(item.brand)
-                        if _bcap is not None:
-                            effective_cap = min(effective_cap, _bcap)
-                    except Exception:
-                        # Even the pure fallback failed: do not loosen. Leave
-                        # effective_cap as-is (the user/role cap) so a normal
-                        # sale still goes through, but never widened.
-                        pass
-
-                if _eff_disc > effective_cap + 1e-9:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"Discount {round(_eff_disc, 2)}% on {item.product_name or item.product_id} "
-                        f"(explicit discount and/or unit price below MRP) exceeds your limit of "
-                        f"{effective_cap}%. Contact a manager for approval.",
-                    )
-
-            # Owner ruling 2026-08-30: a MANUAL discount always carries a
-            # written reason — whether given as a discount_percent OR by
-            # typing a unit_price under the catalog price (the adversarial
-            # review's "type the price instead of the %" bypass). Selling AT
-            # the catalog offer/MRP is not a manual discount; promo-engine
-            # discounts ride applied_promos — neither trips this guard. The
-            # C-4 zero-total gate below additionally demands an APPROVER for
-            # 100% discounts. Minimum 4 characters ("." is not a reason —
-            # matches the superadmin-edit reason floor).
-            if (item.discount_percent or 0) > 0 or _below_ceiling:
-                if len(str(item.discount_reason or "").strip()) < 4:
-                    _why = (
-                        "price is below the current catalog price"
-                        if not (item.discount_percent or 0) > 0
-                        else "manual discount with no offer applied"
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"A discount reason (at least 4 characters) is "
-                            f"required for {item.product_name or item.product_id} "
-                            f"— {_why}. Use the item's Discount button to add "
-                            f"the reason."
-                        ),
-                    )
+            _line_gate = _enforce_line_pricing(
+                item,
+                _pdoc_by_pid.get(_pid),
+                is_admin=is_admin,
+                role_cap=user_discount_cap,
+            )
+            _loyalty_eff = _line_gate["loyalty_eff"]
 
             discount_amount = item_total * (item.discount_percent / 100)
             item_subtotal = item_total - discount_amount
@@ -2706,6 +2758,7 @@ async def create_order(
                     "tagged_at": datetime.now().isoformat(),
                 }
 
+            _pdoc = _pdoc_by_pid.get(item.product_id or "") or {}
             items_data.append(
                 {
                     "item_id": str(uuid.uuid4()),
@@ -2713,9 +2766,24 @@ async def create_order(
                     "product_id": _canon_by_pid.get(item.product_id or "") or item.product_id,
                     "product_name": item.product_name,
                     "sku": item.sku,
-                    "brand": item.brand,
+                    # The product MASTER's brand wins over the client echo --
+                    # the luxury-brand cap (promo clamp included) reads this
+                    # field, and a spoofed/blank client brand must not dodge
+                    # the Cartier/Gucci floor. Client value kept when the
+                    # master has none (virtual lines etc.).
+                    "brand": _pdoc.get("brand") or item.brand,
                     "subbrand": item.subbrand,
                     "category": item.category,
+                    # The DISCOUNT TIER (MASS/PREMIUM/LUXURY/SERVICE/
+                    # NON_DISCOUNTABLE) from the product master. The promo
+                    # engine's cap clamp reads this field; it was never
+                    # stamped, so the clamp fell back to the merchandising
+                    # `category` label and every line clamped at the MASS 15%
+                    # default -- including 0%-cap NON_DISCOUNTABLE lines.
+                    "discount_category": _pdoc.get("discount_category"),
+                    # Catalog MRP at sale time: the base every discount cap is
+                    # measured on (promo clamp headroom math reads it).
+                    "mrp": _mrp_by_pid.get(item.product_id or ""),
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
                     "discount_percent": item.discount_percent,
@@ -2787,7 +2855,6 @@ async def create_order(
                 effective_discount_cap as _line_discount_cap,
             )
 
-            _cap_repo = get_product_repository()
             for _it in order.items:
                 _pid = getattr(_it, "product_id", None)
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
@@ -2823,13 +2890,10 @@ async def create_order(
                             f"administrator to override."
                         ),
                     )
-                try:
-                    # Products-convergence: spine-first, catalog-fallback resolve
-                    # so a catalog-only product is cap-enforced at cart level too
-                    # (was _cap_repo.find_by_id -> spine only -> None -> no cap).
-                    _prod = _resolve_product_doc(_cap_repo, _pid)
-                except Exception:
-                    _prod = None
+                # The ONE resolution made at the top of create (same docs the
+                # per-line gate used) -- never re-query here, a second lookup
+                # is how this loop and the per-line cap started disagreeing.
+                _prod = _pdoc_by_pid.get(_pid)
                 if _prod:
                     _this_cap = min(
                         user_discount_cap,
@@ -4039,34 +4103,39 @@ async def add_order_item(
                 status_code=400, detail="Can only add items to DRAFT orders"
             )
 
+        # ONE product resolution for this door, via THE shared billing
+        # resolver (_resolve_billable_product) -- the same lookup + refusal
+        # policy create_order uses. This door previously resolved narrowly
+        # (find_by_id only), so a product referenced by SKU or Mongo _id
+        # missed and the MRP ceiling, cost floor, HQ-offer rule, category/
+        # brand caps and reason requirement ALL silently no-op'd -- and a
+        # catalog-only product create_order refuses was billed outright.
+        _pid = item.product_id or ""
+        _pr = get_product_repository()
+        product = (
+            _resolve_billable_product(_pr, _pid, item.product_name or "")
+            if _pr is not None
+            else None
+        )
+
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT
         # order. Validation only -- no pricing/GST change. Uses the order's
         # customer so an expired / cross-customer / missing Rx is caught here too.
-        #
-        # SECURITY (Rx-item_type spoof): resolve the PRODUCT MASTER so the
-        # Rx-required decision keys off the product's canonical item_type /
-        # category, not the client-supplied item_type. Virtual/unresolvable
-        # lines have no product doc -> the client value is the fallback.
-        _rx_product_doc = None
-        _rx_pid = (item.product_id or "")
-        if _rx_pid and not _rx_pid.startswith(("custom-", "lens-", "lens-sug-")):
-            try:
-                _rx_product_doc = _resolve_product_doc(
-                    get_product_repository(), _rx_pid
-                )
-            except Exception:  # noqa: BLE001 -- resolution is best-effort
-                _rx_product_doc = None
+        # SECURITY (Rx-item_type spoof): the resolved PRODUCT MASTER keys the
+        # Rx-required decision off the canonical item_type / category, not the
+        # client-supplied item_type; virtual lines have no doc -> client fallback.
         _validate_order_line_rx(
             item,
             order.get("customer_id") or order.get("customerId") or "",
             current_user,
-            product_doc=_rx_product_doc,
+            product_doc=product,
         )
 
-        # Enforce role + category + luxury-brand discount cap on items added to a
-        # DRAFT order. This path previously checked ONLY the role cap (a bypass of
-        # the category/brand caps); now consistent with create_order's per-item gate.
+        # Per-line price integrity + discount caps: THE shared gate
+        # (_enforce_line_pricing), identical to create_order's. Ceiling /
+        # cost floor / HQ-offer rule / role+category+luxury-brand cap /
+        # reason requirement -- one implementation, never forked again.
         from api.services.role_caps import effective_discount_cap
 
         _role_cap = effective_discount_cap(
@@ -4075,106 +4144,16 @@ async def add_order_item(
         _is_admin = any(
             r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
         )
-        _cap = _role_cap
-        _eff_disc = item.discount_percent
-        # Mirror of create_order's loyalty-effective discount (branch-drift
-        # defence) — explicit + implied vs the offer/MRP ceiling.
-        _loyalty_eff = float(item.discount_percent or 0.0)
-        _below_ceiling = False  # typed unit_price under the catalog price
-        _pid = item.product_id or ""
+        _line_gate = _enforce_line_pricing(
+            item, product, is_admin=_is_admin, role_cap=_role_cap
+        )
+        _cap = _line_gate["cap"]
+        _eff_disc = _line_gate["eff_disc"]
+        _loyalty_eff = _line_gate["loyalty_eff"]
         # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
         # cost_at_sale below and fed to the floor pass. None (virtual id /
-        # missing product / no cost_price) keeps the line fail-open.
-        _cost = None
-        if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
-            try:
-                pr = get_product_repository()
-                product = pr.find_by_id(_pid) if pr is not None else None
-            except Exception:
-                product = None
-            if product:
-                def _n(v):
-                    try:
-                        return float(v)
-                    except (TypeError, ValueError):
-                        return None
-
-                _mrp = _n(product.get("mrp"))
-                _offer = _n(product.get("offer_price"))
-                _cost = _n(product.get("cost_price"))
-                _up = item.unit_price
-                _hq = bool(_offer and _mrp and _offer < _mrp)
-                _ceiling = _offer if _hq else (_mrp if (_mrp and _mrp > 0) else None)
-                _below_ceiling = bool(_ceiling and _up < _ceiling - 1e-6)
-                if _ceiling and _up > _ceiling + 1e-6:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"unit_price Rs{_up} exceeds the catalog "
-                        f"{'offer price' if _hq else 'MRP'} Rs{_ceiling} "
-                        f"for {item.product_name or _pid}.",
-                    )
-                if _cost and _cost > 0 and _up > 1e-6 and _up < _cost - 1e-6:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"unit_price Rs{_up} is below cost Rs{_cost} for "
-                        f"{item.product_name or _pid}. Contact a manager.",
-                    )
-                if not _is_admin and _hq and (
-                    item.discount_percent > 0 or _up < _offer - 1e-6
-                ):
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"{item.product_name or _pid} is already discounted by "
-                        f"HQ (offer Rs{_offer} < MRP Rs{_mrp}); no further store "
-                        f"discount is allowed. Contact an administrator to override.",
-                    )
-                if _mrp and _mrp > 0 and _up < _mrp - 1e-6:
-                    _eff_disc = max(item.discount_percent, (_mrp - _up) / _mrp * 100.0)
-                from api.services.loyalty_engine import implied_ceiling_discount
-
-                _loyalty_eff = max(
-                    _loyalty_eff, implied_ceiling_discount(_up, _mrp, _offer)
-                )
-                from api.services.pricing_caps import (
-                    effective_discount_cap as product_discount_cap,
-                )
-
-                _cap = min(
-                    _role_cap,
-                    product_discount_cap(
-                        product.get("discount_category"), product.get("brand")
-                    ),
-                )
-            else:
-                # FAIL-CLOSED on the cap-TIGHTENING path (mirror create_order
-                # ~line 1443). The product/category resolver returned nothing
-                # (it threw, or the id wasn't found), so the category/luxury-brand
-                # tightening above was skipped and _cap would silently stay at the
-                # loose role cap -- dropping the 2-5% luxury brand floor and
-                # letting a Cartier/Gucci frame take the full role cap when added
-                # to a DRAFT order. We cannot re-read the DB (it just failed), so
-                # we tighten using the STRONGEST signal still on the line payload:
-                # its brand. brand_cap_for() is a pure, DB-free luxury-brand
-                # lookup -- a named luxury brand keeps its low floor even on a
-                # resolver error. DELIBERATELY NOT over-corrected: a plain/MASS
-                # line (no luxury brand -> brand_cap_for returns None) keeps the
-                # normal role cap, so an ordinary add is NOT blocked.
-                try:
-                    from api.services.pricing_caps import (
-                        brand_cap_for as _luxury_brand_cap,
-                    )
-
-                    _bcap = _luxury_brand_cap(item.brand)
-                    if _bcap is not None:
-                        _cap = min(_cap, _bcap)
-                except Exception:
-                    pass  # even the pure fallback failed: do not loosen
-        if not _is_admin and _eff_disc > _cap + 1e-9:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Discount {round(_eff_disc, 2)}% exceeds your limit of "
-                f"{_cap}%. Contact a manager for approval.",
-            )
+        # no product repo / no cost_price) keeps the line fail-open.
+        _cost = _line_gate["cost"]
 
         # STACKING CAP -- parity with create_order, same shared raiser. The bill
         # discount ALREADY on this DRAFT multiplies with the new line's own
@@ -4189,25 +4168,8 @@ async def add_order_item(
                 _cap,
             )
 
-        # Owner ruling 2026-08-30: same manual-discount-needs-a-reason rule
-        # as create_order (explicit % OR a typed unit_price under the catalog
-        # ceiling; min 4 chars). This path duplicates the create guards —
-        # keeping them in lockstep is the branch-drift defence.
-        if (item.discount_percent or 0) > 0 or _below_ceiling:
-            if len(str(item.discount_reason or "").strip()) < 4:
-                _why = (
-                    "price is below the current catalog price"
-                    if not (item.discount_percent or 0) > 0
-                    else "manual discount with no offer applied"
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"A discount reason (at least 4 characters) is required "
-                        f"for {item.product_name or item.product_id} — {_why}. "
-                        f"Use the item's Discount button to add the reason."
-                    ),
-                )
+        # (The manual-discount-needs-a-reason rule now lives in the shared
+        # _enforce_line_pricing gate above -- one copy, no more lockstep.)
 
         # Calculate item totals
         item_total = item.unit_price * item.quantity
@@ -4223,6 +4185,13 @@ async def add_order_item(
             # create does (None when unknown -> floor fails open on this line).
             "product_name": item.product_name,
             "cost_at_sale": _cost,
+            # Parity with create_order's line stamps: the master's brand (the
+            # luxury-cap key), the master's discount TIER, and the catalog MRP
+            # at sale time. Deliberately still NOT `category` (GST resolution,
+            # see the F15 note below).
+            "brand": (product or {}).get("brand") or getattr(item, "brand", None),
+            "discount_category": (product or {}).get("discount_category"),
+            "mrp": _line_gate["mrp"],
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "discount_percent": item.discount_percent,
@@ -5140,56 +5109,6 @@ class DeliverRequest(BaseModel):
     approval_token: Optional[str] = None
 
 
-_CREDIT_DELIVERY_MANAGER_ROLES = (
-    "SUPERADMIN",
-    "ADMIN",
-    "AREA_MANAGER",
-    "STORE_MANAGER",
-)
-
-
-def _gate_credit_delivery(order: dict, body, current_user: dict) -> None:
-    """Owner ruling (POS Wave 4): handing goods over with money still owed is
-    a credit decision. A manager may take it directly; anyone else must carry
-    a manager's PIN-approved CREDIT_DELIVERY token, store-bound and bound to
-    THIS order. Raises 403 otherwise. PURE GATE — no money math."""
-    balance_due = float(order.get("balance_due") or 0.0)
-    if balance_due <= 0.01:
-        return
-    roles = current_user.get("roles", [])
-    if any(r in _CREDIT_DELIVERY_MANAGER_ROLES for r in roles):
-        return
-    token = ((body.approval_token if body else None) or "").strip()
-    if token:
-        try:
-            from ..services.approvals import ApprovalEngine
-
-            engine = ApprovalEngine(db=_get_db())
-            res = engine.consume_approval(
-                consumed_by=current_user.get("user_id") or "",
-                action_type="CREDIT_DELIVERY",
-                approval_token=token,
-                expected_store_id=order.get("store_id"),
-                expected_context={"order_id": order.get("order_id")},
-            )
-            if res.get("ok"):
-                return
-            logger.warning(
-                "[ORDERS] CREDIT_DELIVERY token refused for %s: %s",
-                order.get("order_id"), res.get("error"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ORDERS] CREDIT_DELIVERY consume failed: %s", exc)
-    raise HTTPException(
-        status_code=403,
-        detail=(
-            f"Rs {balance_due:,.2f} is still due on this order. Delivering "
-            f"with a balance needs a manager (or a manager-approved "
-            f"credit-delivery PIN token)."
-        ),
-    )
-
-
 @router.post("/{order_id}/deliver")
 async def deliver_order(
     order_id: str,
@@ -5236,17 +5155,21 @@ async def deliver_order(
 
         assert_linked_job_qc_cleared(order)
 
-        # Check payment status (allow partial for B2B customers)
-        payment_status = order.get("payment_status", "UNPAID")
-        if payment_status == "UNPAID":
-            raise HTTPException(
-                status_code=400,
-                detail="Order must have at least partial payment before delivery",
-            )
+        # Money side of the handover -- ONE implementation, shared with the
+        # workshop / labels / lab-scan DELIVERED doors and non-COD shipping
+        # (services.delivery_gate): UNPAID -> 400; balance still due -> a
+        # manager, or a consumed CREDIT_DELIVERY token bound to this store and
+        # this order. Those four doors used to let goods leave with no money
+        # check at all, so the rule lives in one place now rather than being
+        # re-typed per door and drifting.
+        from ..services.delivery_gate import assert_handover_payment
 
-        # Owner ruling: balance still due -> manager, or a consumed
-        # CREDIT_DELIVERY token bound to this store + order.
-        _gate_credit_delivery(order, body, current_user)
+        assert_handover_payment(
+            order,
+            approval_token=(body.approval_token if body else None),
+            current_user=current_user,
+            db=_get_db(),
+        )
 
         # Handover record rides the atomic claim below (never stranded on a
         # lost race). Only what the counter actually filled in is stored.
