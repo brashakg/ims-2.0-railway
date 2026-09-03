@@ -1236,7 +1236,9 @@ async def update_customer(
                 )
                 for p in current_patients
             }
-            for p in incoming:
+            # (submitted index, row) for the rows that will actually be appended.
+            to_add = []
+            for idx, p in enumerate(incoming):
                 # `p` is a dict (PatientCreate dumped)
                 name = (p.get("name") or "").strip()
                 mobile = (p.get("mobile") or "").strip()
@@ -1246,24 +1248,40 @@ async def update_customer(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                current_patients.append(
-                    {
-                        "patient_id": str(uuid.uuid4()),
-                        "name": name,
-                        "mobile": mobile or None,
-                        "dob": (
-                            p["dob"].isoformat()
-                            if isinstance(p.get("dob"), date)
-                            else p.get("dob")
-                        ),
-                        "anniversary": (
-                            p["anniversary"].isoformat()
-                            if isinstance(p.get("anniversary"), date)
-                            else p.get("anniversary")
-                        ),
-                        "relation": p.get("relation") or "Other",
-                    }
+                to_add.append(
+                    (
+                        idx,
+                        {
+                            "patient_id": str(uuid.uuid4()),
+                            "name": name,
+                            "mobile": mobile or None,
+                            "dob": (
+                                p["dob"].isoformat()
+                                if isinstance(p.get("dob"), date)
+                                else p.get("dob")
+                            ),
+                            "anniversary": (
+                                p["anniversary"].isoformat()
+                                if isinstance(p.get("anniversary"), date)
+                                else p.get("anniversary")
+                            ),
+                            "relation": p.get("relation") or "Other",
+                        },
+                    )
                 )
+            # REVERSE family-member guard (owner ruling 2026-09-04): a row being
+            # ADDED must not carry a number that is already someone's own account
+            # -- same rule as the create door and POST .../patients; this account
+            # exempt (the holder's Self row). Only rows actually being appended
+            # are checked, so the clinical per-visit re-send of an existing
+            # member never trips on a legacy split. All-or-nothing: one bad row
+            # appends none.
+            from ..services.customer_service import own_account_conflict
+
+            own = own_account_conflict(repo, to_add, exclude_customer_id=customer_id)
+            if own:
+                raise HTTPException(status_code=409, detail=own)
+            current_patients.extend(row for _, row in to_add)
             update_data["patients"] = current_patients
 
         # Keep the structured billing_address and the flat top-level address
@@ -1352,6 +1370,15 @@ async def add_patient(
             ),
             "relation": patient.relation or "Family",
         }
+
+        # REVERSE family-member guard: the number must not already be someone's
+        # own account (same rule as the create door's patients[] and the PUT
+        # append; this account exempt -- the holder's Self row).
+        from ..services.customer_service import own_account_conflict
+
+        own = own_account_conflict(repo, [(0, patient_data)], exclude_customer_id=customer_id)
+        if own:
+            raise HTTPException(status_code=409, detail=own)
 
         if repo.add_patient(customer_id, patient_data):
             _audit_customer(

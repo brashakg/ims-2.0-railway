@@ -8,12 +8,21 @@ WHY
 ---
 Customer identity is mobile-primary. A person can be recorded as a FAMILY
 MEMBER (customers.patients[].mobile) on someone else's account AND as their
-own top-level customer (customers.mobile / .phone) -- the create door only
-ever checked the top-level number. Each such split scatters one person's
-prescriptions and purchase history across two records, and Rx reminders run
-off that history. The guard (owner ruling 2026-09-04) now refuses new splits;
-this script lists the EXISTING ones so the owner can decide per case
-(promote / merge / leave). It never merges or edits anything.
+own top-level customer (customers.mobile / .phone). It happened from BOTH
+sides: the create door only ever checked the top-level number (forward), and
+the member-adding doors never checked it at all (reverse). Each such split
+scatters one person's prescriptions and purchase history across two records,
+and Rx reminders run off that history. Both directions are now refused (owner
+ruling 2026-09-04); this script lists the EXISTING ones so the owner can decide
+per case (promote / merge / leave). It never merges or edits anything.
+
+DIRECTION
+---------
+A split is the same data state whichever door made it, and member rows carry
+no timestamp, so the direction is only PROVABLE one way: when the own account
+was created BEFORE the family account existed, the member row can only have
+been added afterwards -> REVERSE. Everything else is reported as UNKNOWN,
+never guessed.
 
 PRIVACY
 -------
@@ -58,18 +67,30 @@ def resolve_mongo_uri(explicit: Optional[str]) -> Optional[str]:
     return f"mongodb://{cred}{host}:{port}/?authSource={auth_source}"
 
 
+def _stamp(v) -> str:
+    """created_at as a comparable ISO string ('' when absent). Docs carry it as
+    an ISO string or a datetime depending on which door wrote them."""
+    if v is None:
+        return ""
+    return v.isoformat() if hasattr(v, "isoformat") else str(v)
+
+
 def find_splits(customers) -> List[Dict[str, str]]:
-    """One row per (account holding the member, member, own account).
+    """One row per (account holding the member, member, own account), with
+    ``direction`` = REVERSE when provable (own account created before the
+    family account), else UNKNOWN.
 
     Pure function over a collection handle so it can be run against an
     in-memory double. Two projected scans; fine for a few thousand docs."""
     own_by_mobile: Dict[str, str] = {}
+    created_at: Dict[str, str] = {}
     for d in customers.find(
-        {}, {"customer_id": 1, "mobile": 1, "phone": 1, "_id": 0}
+        {}, {"customer_id": 1, "mobile": 1, "phone": 1, "created_at": 1, "_id": 0}
     ):
         cid = str(d.get("customer_id") or "")
         if not cid:
             continue
+        created_at[cid] = _stamp(d.get("created_at"))
         for key in ("mobile", "phone"):
             m = d.get(key)
             if isinstance(m, str) and m.strip():
@@ -89,11 +110,15 @@ def find_splits(customers) -> List[Dict[str, str]]:
                 continue
             own_id = own_by_mobile.get(m.strip())
             if own_id and own_id != holder_id:
+                own_at, holder_at = created_at.get(own_id, ""), created_at.get(holder_id, "")
                 rows.append(
                     {
                         "holder_customer_id": holder_id,
                         "patient_id": str(p.get("patient_id") or "<no patient_id>"),
                         "own_customer_id": own_id,
+                        "direction": (
+                            "REVERSE" if own_at and holder_at and own_at < holder_at else "UNKNOWN"
+                        ),
                     }
                 )
     return rows
@@ -104,9 +129,17 @@ def print_report(rows: List[Dict[str, str]]) -> None:
     print(f"  splits found: {len(rows)}")
     if not rows:
         return
-    print("  holder_customer_id | patient_id | own_customer_id")
+    reverse = sum(1 for r in rows if r["direction"] == "REVERSE")
+    print(
+        f"  of which provably REVERSE (own account predates the family account): "
+        f"{reverse}; direction unknown: {len(rows) - reverse}"
+    )
+    print("  holder_customer_id | patient_id | own_customer_id | direction")
     for r in rows:
-        print(f"  {r['holder_customer_id']} | {r['patient_id']} | {r['own_customer_id']}")
+        print(
+            f"  {r['holder_customer_id']} | {r['patient_id']} | {r['own_customer_id']}"
+            f" | {r['direction']}"
+        )
     print(
         "\n  Per case the owner decides: promote (moves the member's Rx/eye tests to"
         " the own account -- only possible once the own account is gone), merge,"

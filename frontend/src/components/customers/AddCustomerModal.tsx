@@ -11,8 +11,10 @@ import { useNavigate } from 'react-router-dom';
 import { useDebounce } from '../../hooks/useDebounce';
 import { customerApi } from '../../services/api';
 import {
+  FAMILY_MEMBER_CONFLICT_CODE,
   familyMemberConflictFrom,
-  type FamilyMemberConflict,
+  ownAccountConflictFrom,
+  type CustomerConflict,
   type SelectableCustomer,
 } from '../../services/api/customers';
 import { X, Loader2, Search } from 'lucide-react';
@@ -55,8 +57,10 @@ export function AddCustomerModal({
 }: AddCustomerModalProps) {
   const navigate = useNavigate();
   const [formData, setFormData] = useState<CustomerFormData>(emptyCustomerFormData());
-  // Family-member guard: the 409 body from a refused create, while the popup is up.
-  const [conflict, setConflict] = useState<FamilyMemberConflict | null>(null);
+  // One-person-one-record guard: the 409 body from a refused create, while the
+  // popup is up -- either direction (the number belongs to a family member
+  // elsewhere, or a patients[] row here is someone's own account).
+  const [conflict, setConflict] = useState<CustomerConflict | null>(null);
   const [conflictBusy, setConflictBusy] = useState(false);
   const [conflictError, setConflictError] = useState<string | null>(null);
 
@@ -187,12 +191,12 @@ export function AddCustomerModal({
       await onSave(sanitizedFormData);
       onClose();
     } catch (err) {
-      // Everything else is the parent's to report. The family-member 409 is
-      // ours: it needs a decision, not a toast.
-      const familyConflict = familyMemberConflictFrom(err);
-      if (familyConflict) {
+      // Everything else is the parent's to report. The one-person-one-record
+      // 409s are ours: they need a decision, not a toast.
+      const found = familyMemberConflictFrom(err) ?? ownAccountConflictFrom(err);
+      if (found) {
         setConflictError(null);
-        setConflict(familyConflict);
+        setConflict(found);
       }
     } finally {
       setIsSaving(false);
@@ -212,7 +216,7 @@ export function AddCustomerModal({
   };
 
   const handlePromote = async () => {
-    if (!conflict) return;
+    if (!conflict || conflict.code !== FAMILY_MEMBER_CONFLICT_CODE) return;
     setConflictBusy(true);
     setConflictError(null);
     try {
@@ -230,7 +234,11 @@ export function AddCustomerModal({
   const handleOpenExisting = async () => {
     if (!conflict) return;
     if (!onSelectExisting) {
-      resolveConflictWith({ customer_id: conflict.customer_id, name: conflict.account_holder_name, patients: [] });
+      const name =
+        conflict.code === FAMILY_MEMBER_CONFLICT_CODE
+          ? conflict.account_holder_name
+          : conflict.customer_name;
+      resolveConflictWith({ customer_id: conflict.customer_id, name, patients: [] });
       return;
     }
     setConflictBusy(true);

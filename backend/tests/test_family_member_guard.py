@@ -494,7 +494,13 @@ def test_split_report_lists_ids_only(capsys):
 
     rows = mod.find_splits(coll)
     assert rows == [
-        {"holder_customer_id": HOLDER_ID, "patient_id": DAUGHTER_PID, "own_customer_id": "cust-split"}
+        {
+            "holder_customer_id": HOLDER_ID,
+            "patient_id": DAUGHTER_PID,
+            "own_customer_id": "cust-split",
+            # No created_at on either side: the direction is never guessed.
+            "direction": "UNKNOWN",
+        }
     ]
     mod.print_report(rows)
     out = capsys.readouterr().out

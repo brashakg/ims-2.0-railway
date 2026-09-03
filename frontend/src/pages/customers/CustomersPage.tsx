@@ -40,6 +40,8 @@ import {
 } from '../../utils/patientFromCustomer';
 import { AddCustomerModal } from '../../components/customers/AddCustomerModal';
 import { EditCustomerModal, CUSTOMER_EDIT_ROLES } from '../../components/customers/EditCustomerModal';
+import { FamilyMemberConflictModal } from '../../components/customers/FamilyMemberConflictModal';
+import { ownAccountConflictFrom, type OwnAccountConflict } from '../../services/api/customers';
 import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
@@ -129,6 +131,9 @@ export function CustomersPage() {
   const [showAddPatientModal, setShowAddPatientModal] = useState(false);
   const [patientForm, setPatientForm] = useState({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
   const [isAddingPatient, setIsAddingPatient] = useState(false);
+  // Reverse split (owner ruling 2026-09-04): the add was refused because the
+  // number is already someone's OWN account. A decision popup, not a toast.
+  const [patientConflict, setPatientConflict] = useState<OwnAccountConflict | null>(null);
 
   // Reset page when filters change
   useEffect(() => {
@@ -389,7 +394,14 @@ export function CustomersPage() {
       if (updated) {
         setSelectedCustomer(updated);
       }
-    } catch {
+    } catch (e) {
+      // The number is already this person's own account: one person, one
+      // record. Offer to open that account instead of a dead-end toast.
+      const own = ownAccountConflictFrom(e);
+      if (own) {
+        setPatientConflict(own);
+        return;
+      }
       toast.error('Failed to add customer');
     } finally {
       setIsAddingPatient(false);
@@ -735,7 +747,7 @@ export function CustomersPage() {
             <Bell className="w-4 h-4" />
           </button>
           <button
-            onClick={() => navigate('/pos')}
+            onClick={() => navigate('/pos/new')}
             className="p-2 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
             title="New Order"
             aria-label="New Order"
@@ -1169,6 +1181,20 @@ export function CustomersPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {patientConflict && (
+        <FamilyMemberConflictModal
+          conflict={patientConflict}
+          busy={false}
+          onOpenExisting={() => {
+            const id = patientConflict.customer_id;
+            setPatientConflict(null);
+            setShowAddPatientModal(false);
+            navigate(`/customers/${id}`);
+          }}
+          onCancel={() => setPatientConflict(null)}
+        />
       )}
 
       {/* Edit Customer Modal — the ONE shared implementation (also opened

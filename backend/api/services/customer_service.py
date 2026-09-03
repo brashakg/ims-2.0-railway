@@ -52,12 +52,25 @@ POST /customers used to carry its own copy of find-or-create; it now calls
 this function (``strict=True``, ``doc=<its full record>``) so the guard cannot
 be bypassed by any door.
 
+THE REVERSE SPLIT (owner ruling 2026-09-04: "block it the same way")
+--------------------------------------------------------------------
+The same person can also end up in two places from the OTHER side: a family
+member added to an account with a number that is already a top-level customer
+in their own right. ``own_account_conflict`` is that one rule; every door that
+adds a member row applies it -- the create door's ``patients[]`` (here, in
+``ensure_customer``), PUT /customers/{id} patients-append and
+POST /customers/{id}/patients (in the router). Refusal is a 409 whose body
+names the existing account + the offending row (code MOBILE_IS_OWN_ACCOUNT).
+The account's own number is exempt (the holder's Self row, a child recorded
+under the parent's phone) -- that is one record, not two.
+
 PUBLIC API
 ----------
     ensure_customer(db, *, mobile, name=None, store_id=None, source,
                     doc=None, strict=False, **extra)
         -> (customer_id: Optional[str], created: bool)
     family_member_conflict(repo, mobile, exclude_customer_id=None) -> Optional[dict]
+    own_account_conflict(repo, members, exclude_customer_id=None) -> Optional[dict]
     promote_patient(db, repo, parent, patient_id) -> dict
     CustomerConflict (exception; ``.detail`` is the 409 body)
 
@@ -146,6 +159,50 @@ def family_member_conflict(repo, mobile: str, exclude_customer_id: Optional[str]
         "patient_name": member_name,
         "relation": member.get("relation"),
     }
+
+
+OWN_ACCOUNT_CODE = "MOBILE_IS_OWN_ACCOUNT"
+
+
+def own_account_conflict(repo, members, exclude_customer_id: Optional[str] = None):
+    """THE reverse family-member rule. ``members`` are the rows being ADDED to
+    an account as ``(index, row)`` pairs in the order the caller submitted
+    them. Returns the 409 body for the first row whose mobile is already a
+    TOP-LEVEL customer's own number (other than ``exclude_customer_id``, the
+    account being edited), else None.
+
+    Exempt: the account's own number. The holder's Self row, and a child
+    recorded under the parent's phone, are one record, not two. On a create
+    there is no id to exclude and none is needed: ``ensure_customer`` has
+    already refused a taken holder number before this runs, so a Self row can
+    only carry a free one. The body carries only what the UI needs to act --
+    the existing customer's id + name and the offending row's index + name --
+    never the customer's record."""
+    for index, member in members:
+        if not member:
+            continue
+        mobile = member.get("mobile")
+        if not mobile:
+            continue
+        try:
+            other = repo.find_by_mobile(mobile)
+        except Exception:  # noqa: BLE001 -- fail-soft read, like find_by_mobile
+            logger.debug("[ENSURE_CUSTOMER] find_by_mobile failed", exc_info=True)
+            continue
+        if not other or not other.get("customer_id"):
+            continue
+        if exclude_customer_id and other.get("customer_id") == exclude_customer_id:
+            continue
+        other_name = other.get("name") or "an existing customer"
+        return {
+            "code": OWN_ACCOUNT_CODE,
+            "message": f"This number is already {other_name}'s own account",
+            "customer_id": other.get("customer_id"),
+            "customer_name": other_name,
+            "patient_index": index,
+            "patient_name": member.get("name") or "this family member",
+        }
+    return None
 
 
 def _get_repo(db=None):
@@ -366,6 +423,15 @@ def ensure_customer(
         if strict:
             raise CustomerConflict(family)
         return (family["customer_id"], False)
+
+    # --- REVERSE GUARD: a member row on the NEW record must not be someone's own
+    # account (same rule as the edit doors). Runs AFTER the top-level dedup, so
+    # the holder's own Self row can only carry a free number. Only the strict
+    # door ever passes a doc.
+    if strict and doc:
+        own = own_account_conflict(repo, enumerate(doc.get("patients") or []))
+        if own:
+            raise CustomerConflict(own)
 
     # --- validate any provided email/gstin/dob (raises on bad value) ---------------
     validated_extra = _validate_extras(extra)

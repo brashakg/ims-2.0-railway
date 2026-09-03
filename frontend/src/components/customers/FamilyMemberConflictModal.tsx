@@ -1,20 +1,30 @@
 // ============================================================================
-// IMS 2.0 - Family-member conflict popup
+// IMS 2.0 - One-person-one-record popup (both directions)
 // ============================================================================
-// Shown by AddCustomerModal when POST /customers is refused because the number
-// already belongs to a FAMILY MEMBER on someone else's account (owner ruling
-// 2026-09-04: one person, one record). Two 44px actions so the counter is
-// never stuck: PROMOTE the member to their own account (their Rx and eye tests
-// move with them), or OPEN the account that already holds them.
+// Owner ruling 2026-09-04: a person is never in two places. ONE component, two
+// shapes, told apart by the 409 body's `code`:
+//   * MOBILE_BELONGS_TO_FAMILY_MEMBER -- a create was refused because the number
+//     already belongs to a FAMILY MEMBER on someone else's account. Actions:
+//     PROMOTE the member to their own account (their Rx and eye tests move with
+//     them), or OPEN the account that already holds them.
+//   * MOBILE_IS_OWN_ACCOUNT -- a family member was refused because the number
+//     is already a top-level customer's OWN account. Action: OPEN that account
+//     (bill or examine them there; no copy is made -- a "link" row cannot be
+//     truthful while orders/Rx are keyed by the account they were captured on).
+// Every action is a 44px target so the counter is never stuck.
 
 import { Loader2 } from 'lucide-react';
-import type { FamilyMemberConflict } from '../../services/api/customers';
+import {
+  FAMILY_MEMBER_CONFLICT_CODE,
+  type CustomerConflict,
+} from '../../services/api/customers';
 
 interface FamilyMemberConflictModalProps {
-  conflict: FamilyMemberConflict;
+  conflict: CustomerConflict;
   busy: boolean;
   error?: string | null;
-  onPromote: () => void;
+  /** Forward shape only; ignored for the own-account shape. */
+  onPromote?: () => void;
   onOpenExisting: () => void;
   onCancel: () => void;
 }
@@ -27,8 +37,10 @@ export function FamilyMemberConflictModal({
   onOpenExisting,
   onCancel,
 }: FamilyMemberConflictModalProps) {
-  const holder = conflict.account_holder_name || 'an existing customer';
-  const member = conflict.patient_name || 'a family member';
+  const forward = conflict.code === FAMILY_MEMBER_CONFLICT_CODE;
+  const title = forward
+    ? 'This number is already on a family account'
+    : `This number is already ${conflict.customer_name || 'an existing customer'}'s own account`;
   return (
     <div
       className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4"
@@ -38,40 +50,64 @@ export function FamilyMemberConflictModal({
     >
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5">
         <h3 id="family-member-conflict-title" className="text-lg font-semibold text-gray-900">
-          This number is already on a family account
+          {title}
         </h3>
-        <p className="mt-2 text-sm text-gray-700">
-          This number belongs to <span className="font-semibold">{member}</span>
-          {conflict.relation ? ` (${conflict.relation})` : ''}, a family member on{' '}
-          <span className="font-semibold">{holder}</span>&rsquo;s account.
-        </p>
-        <p className="mt-1 text-xs text-gray-500">
-          One person, one record: a second account is not created. Move them to their own
-          account (their prescriptions and eye tests move too), or continue on the existing
-          account.
-        </p>
+        {forward ? (
+          <>
+            <p className="mt-2 text-sm text-gray-700">
+              This number belongs to{' '}
+              <span className="font-semibold">{conflict.patient_name || 'a family member'}</span>
+              {conflict.relation ? ` (${conflict.relation})` : ''}, a family member on{' '}
+              <span className="font-semibold">
+                {conflict.account_holder_name || 'an existing customer'}
+              </span>
+              &rsquo;s account.
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              One person, one record: a second account is not created. Move them to their own
+              account (their prescriptions and eye tests move too), or continue on the existing
+              account.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="mt-2 text-sm text-gray-700">
+              <span className="font-semibold">{conflict.patient_name || 'This family member'}</span>{' '}
+              was not added:{' '}
+              <span className="font-semibold">{conflict.customer_name || 'an existing customer'}</span>{' '}
+              already has their own account with this number.
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              One person, one record: bill or examine them on their own account instead of adding
+              a copy here.
+            </p>
+          </>
+        )}
         {error && (
           <p role="alert" className="mt-3 text-sm text-red-600">
             {error}
           </p>
         )}
         <div className="mt-4 flex flex-col sm:flex-row gap-2">
-          <button
-            type="button"
-            onClick={onPromote}
-            disabled={busy}
-            className="btn-primary min-h-[44px] flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-            Promote to own account
-          </button>
+          {forward && (
+            <button
+              type="button"
+              onClick={onPromote}
+              disabled={busy || !onPromote}
+              className="btn-primary min-h-[44px] flex-1 flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+              Promote to own account
+            </button>
+          )}
           <button
             type="button"
             onClick={onOpenExisting}
             disabled={busy}
-            className="btn-outline min-h-[44px] flex-1 disabled:opacity-50"
+            className={`${forward ? 'btn-outline' : 'btn-primary'} min-h-[44px] flex-1 flex items-center justify-center gap-2 disabled:opacity-50`}
           >
-            Open existing account
+            {!forward && busy && <Loader2 className="w-4 h-4 animate-spin" />}
+            {forward ? 'Open existing account' : 'Open their account'}
           </button>
         </div>
         <button

@@ -50,19 +50,61 @@ export interface PromotedCustomer extends SelectableCustomer {
   carried: Record<string, number>;
 }
 
-/** Pull the family-member 409 out of a rejected create, or null. Reads the
- *  ApiError the client throws (`.detail`) and a raw axios error alike. */
-export function familyMemberConflictFrom(err: unknown): FamilyMemberConflict | null {
+// ── The REVERSE split (owner ruling 2026-09-04: "block it the same way") ────
+// Adding a FAMILY MEMBER with a number that is already a top-level customer's
+// own is refused (409) by every member-adding door: POST /customers with
+// patients[], PUT /customers/{id} patients-append, POST /customers/{id}/patients.
+// The body names the person's own account and the offending row; the popup
+// offers to OPEN that account (one person, one record -- no copy is made).
+export const OWN_ACCOUNT_CONFLICT_CODE = 'MOBILE_IS_OWN_ACCOUNT';
+
+export interface OwnAccountConflict {
+  code: typeof OWN_ACCOUNT_CONFLICT_CODE;
+  message: string;
+  /** The person's own account. */
+  customer_id: string;
+  customer_name: string;
+  /** Position of the offending row in the submitted patients[] (0 for a single add). */
+  patient_index: number;
+  patient_name: string;
+}
+
+/** Either direction of the one-person-one-record rule, as a 409 body. */
+export type CustomerConflict = FamilyMemberConflict | OwnAccountConflict;
+
+/** The structured `detail` of a rejected request, from the ApiError the client
+ *  throws (`.detail`) or a raw axios error alike; undefined when not an object. */
+function conflictDetailFrom(err: unknown): Record<string, unknown> | undefined {
   const e = err as { detail?: unknown; response?: { data?: { detail?: unknown } } } | null;
-  const detail = (e?.detail ?? e?.response?.data?.detail) as Partial<FamilyMemberConflict> | undefined;
+  const detail = e?.detail ?? e?.response?.data?.detail;
+  return detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : undefined;
+}
+
+/** Pull the family-member 409 out of a rejected create, or null. */
+export function familyMemberConflictFrom(err: unknown): FamilyMemberConflict | null {
+  const detail = conflictDetailFrom(err) as Partial<FamilyMemberConflict> | undefined;
   if (
     detail &&
-    typeof detail === 'object' &&
     detail.code === FAMILY_MEMBER_CONFLICT_CODE &&
     typeof detail.customer_id === 'string' &&
     typeof detail.patient_id === 'string'
   ) {
     return detail as FamilyMemberConflict;
+  }
+  return null;
+}
+
+/** Pull the reverse-split 409 (a member row that is someone's own account) out
+ *  of a rejected create / update / add-patient, or null. */
+export function ownAccountConflictFrom(err: unknown): OwnAccountConflict | null {
+  const detail = conflictDetailFrom(err) as Partial<OwnAccountConflict> | undefined;
+  if (
+    detail &&
+    detail.code === OWN_ACCOUNT_CONFLICT_CODE &&
+    typeof detail.customer_id === 'string' &&
+    typeof detail.patient_name === 'string'
+  ) {
+    return detail as OwnAccountConflict;
   }
   return null;
 }
