@@ -41,12 +41,6 @@ export const READY_DEFAULT = '#main-content :is(h1, h2, table, button, input)';
  * green in CI.
  */
 export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
-  {
-    path: '/reports',
-    reason:
-      'redirect-only: the index route maps the legacy ?tab= values onto ' +
-      '/reports/<section>. Every section it can land on is probed above.',
-  },
   { path: '/approvals' },
   { path: '/approvals/mine' },
   { path: '/returns/approvals' },
@@ -199,6 +193,12 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
  * is excluded for RBAC — every role gate in the app admits this user.
  */
 export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
+  {
+    path: '/reports',
+    reason:
+      'redirect-only: the index route maps the legacy ?tab= values onto ' +
+      '/reports/<section>. Every section it can land on is probed above.',
+  },
   { path: '/finance', reason: 'redirect-only: Navigate to /finance/dashboard, which is covered' },
   { path: '/cash-flow', reason: 'redirect-only: Navigate to /finance/cash-flow, which is covered' },
   { path: '/catalog/autopilot', reason: 'redirect-only: Autopilot was deleted (PR #1042); Navigate to /catalog/add' },
