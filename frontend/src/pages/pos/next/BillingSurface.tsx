@@ -146,6 +146,19 @@ export function BillingSurface() {
           jobId: res.fittingJobId,
         });
       }
+    } catch (e: any) {
+      // Same silent-failure shape the general counter was reported with: a
+      // `try/finally` and no `catch` means anything that THROWS escapes as an
+      // unhandled rejection, the spinner clears, and the till looks like the
+      // button did nothing. submitPosOrder returns its refusals rather than
+      // throwing, so what reaches here is the unexpected kind -- the kind that
+      // must never be silent on a screen that takes money.
+      const detail = e?.response?.data?.detail;
+      setErrorMsg(
+        typeof detail === 'string'
+          ? detail
+          : `Could not complete the sale: ${e?.message || 'unexpected error'}. Nothing was charged.`,
+      );
     } finally {
       store.setProcessing(false);
     }

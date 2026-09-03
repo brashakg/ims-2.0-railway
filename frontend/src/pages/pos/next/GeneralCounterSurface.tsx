@@ -205,6 +205,20 @@ export function GeneralCounterSurface() {
       if (res.warning) setErrorMsg(res.warning);
       // No fitting job can arise here (no Rx), so the shared brain has already
       // set the 'complete' step itself.
+    } catch (e: any) {
+      // WITHOUT THIS the handler was `try { } finally { }` with no catch, so
+      // anything that THREW escaped as an unhandled rejection: the spinner
+      // cleared, no message appeared, and the operator saw a button that did
+      // nothing at all. Owner, on the live screen: "complete sale button on
+      // general counter not doing anything". submitPosOrder returns its
+      // refusals rather than throwing, so what lands here is the unexpected
+      // kind -- which is exactly the kind that must never be silent at a till.
+      const detail = e?.response?.data?.detail;
+      setErrorMsg(
+        typeof detail === 'string'
+          ? detail
+          : `Could not complete the sale: ${e?.message || 'unexpected error'}. Nothing was charged.`,
+      );
     } finally {
       store.setProcessing(false);
     }
