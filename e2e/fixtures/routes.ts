@@ -183,8 +183,11 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/go-live' },
   { path: '/jarvis' },
   { path: '/admin/activity-log' },
-  { path: '/tasks' },
+  { path: '/tasks/mine' },
+  { path: '/tasks/team' },
   { path: '/tasks/checklists' },
+  { path: '/tasks/sops' },
+  { path: '/tasks/performance' },
   { path: '/my-work' },
   { path: '/attendance' },
   { path: '/workshop' },];
@@ -214,6 +217,18 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
     reason:
       'redirect-only: a JARVIS card linked this address, which never existed and 404d. ' +
       'Navigate to /hr/today.',
+  },
+  {
+    path: '/tasks',
+    reason:
+      'redirect-only: the index Navigates to /tasks/mine, the one section every ' +
+      'role can open. All five sections are probed above.',
+  },
+  {
+    path: '/tasks/dashboard',
+    reason:
+      'redirect-only: the HR module launcher links this address, which never ' +
+      'existed as a route and 404d. Navigate to /tasks/mine.',
   },
   {
     path: '/reports',

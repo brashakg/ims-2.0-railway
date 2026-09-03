@@ -8,6 +8,7 @@
 // requireRoles, the same module gating in both places.
 
 import { moduleForPath } from '../../context/ModuleContext';
+import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
 import type { IconName } from './Icon';
 import type { UserRole } from '../../types';
 
@@ -127,7 +128,12 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Operations',
     items: [
-      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // Tasks: gate IMPORTED from the route's own list, never re-typed here.
+      // It used to be re-typed, and the copy was five roles narrower than the
+      // route - so sales staff, cashiers, optometrists and workshop staff, who
+      // do most of the tasks, had no Tasks link at all and could only reach
+      // their own queue by typing the address.
+      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks/mine', icon: 'check', requireRoles: TASK_MODULE_ROLES },
       // E4: PIN-gated approval inbox. requireRoles mirrors the /approvals
       // ProtectedRoute gate (the approver set; ACCOUNTANT is inbox read-only).
       { id: 'approvals', label: 'Approvals', to: '/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },

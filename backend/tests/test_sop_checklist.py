@@ -5,13 +5,13 @@ Pure tests of services.sop_checklist -- the merge/progress/toggle logic that
 backs daily SOP-checklist completion tracking. No DB.
 """
 
+import io
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 from api.services.sop_checklist import (  # noqa: E402
-    DEFAULT_SOP_TEMPLATES,
     apply_item_toggle,
     completion_status,
     default_template_steps,
@@ -131,10 +131,31 @@ def test_default_template_steps_numbering():
     assert steps[1]["warning"] is None
 
 
-def test_default_sop_templates_are_well_formed():
-    assert len(DEFAULT_SOP_TEMPLATES) == 3
-    titles = {t["title"] for t in DEFAULT_SOP_TEMPLATES}
-    assert titles == {"Opening Checklist", "Closing Checklist", "Stock Count"}
-    for t in DEFAULT_SOP_TEMPLATES:
-        assert t["frequency"] == "DAILY"
-        assert len(t["steps"]) >= 3
+def test_no_built_in_sop_templates_exist_any_more():
+    """The inverse of the test that used to live here.
+
+    There WAS a built-in starter set, and it was not a harmless placeholder:
+    the daily generator fell back to it when a store had configured nothing, so
+    a shop was ISSUED REAL TASKS from invented procedure - verify a Rs 5,000
+    opening float, retain Rs 5,000 overnight, collect a minimum 50% advance.
+    Figures nobody at this company chose, given to staff as the company's rules,
+    and indistinguishable from policy the owner wrote.
+
+    Owner ruling 2026-09-03: delete them. An empty checklist is honest; a
+    fabricated one is worse than none. This test fails if anyone reintroduces a
+    default set."""
+    import api.services.sop_checklist as mod
+
+    assert not hasattr(mod, "DEFAULT_SOP_TEMPLATES"), (
+        "a built-in SOP template set is back - staff cannot tell invented "
+        "procedure from the store's own"
+    )
+    # Scan CODE, not comments. The note recording WHY these were deleted has
+    # to quote the figures it deleted, and a comment is never issued to a
+    # member of staff - only a template string can be.
+    src = io.open(mod.__file__, encoding="utf-8").read()
+    code = "\n".join(
+        ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+    )
+    for invented in ("5,000", "5000", "starting float", "minimum 50%"):
+        assert invented not in code, f"fabricated SOP figure {invented!r} is back"

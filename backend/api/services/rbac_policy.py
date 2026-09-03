@@ -6267,11 +6267,6 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
-        "method": "POST",
-        "path": "/api/v1/tasks/sop-templates/seed-defaults",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
-    },
-    {
         "method": "DELETE",
         "path": "/api/v1/tasks/sop-templates/{template_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],

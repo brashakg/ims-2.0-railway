@@ -47,7 +47,6 @@ from ..services.task_sla import (
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.sop_checklist import (
-    DEFAULT_SOP_TEMPLATES,
     apply_item_toggle,
     completion_status,
     default_template_steps,
@@ -1055,14 +1054,26 @@ async def auto_generate_daily_tasks(
             )
             if repo.create(task_data):
                 generated_count += 1
-    else:
-        # No templates configured yet -> built-in starter set.
-        for tdef in DEFAULT_SOP_TEMPLATES:
-            task_data = _make_task(
-                tdef["title"], tdef["description"], tdef["category"], tdef["steps"]
-            )
-            if repo.create(task_data):
-                generated_count += 1
+    elif not templates:
+        # NO TEMPLATES CONFIGURED -> GENERATE NOTHING.
+        #
+        # This used to fall back to a built-in starter set, which meant a shop
+        # that had never written an SOP was ISSUED REAL DAILY TASKS from
+        # invented procedure - "verify the starting float is Rs 5,000",
+        # "retain Rs 5,000 overnight", "collect a minimum 50% advance". Not a
+        # placeholder on a screen: actual work, assigned to actual staff, in
+        # figures nobody at this company chose.
+        #
+        # An empty checklist is honest. A fabricated one is worse than none,
+        # because staff cannot tell it from policy the owner wrote.
+        return {
+            "generated": 0,
+            "message": (
+                "No SOP templates are configured for this store, so no daily "
+                "tasks were generated. Add the store's real procedures under "
+                "Tasks > SOPs."
+            ),
+        }
 
     return {
         "generated": generated_count,
@@ -2116,54 +2127,20 @@ async def toggle_sop_checklist_item(
     }
 
 
-@router.post("/sop-templates/seed-defaults")
-async def seed_default_sop_templates(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Create the starter daily SOP templates (opening / closing / stock-count)
-    for a store if they don't already exist. SUPERADMIN / ADMIN / STORE_MANAGER."""
-    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
-    if not (set(current_user.get("roles", [])) & allowed):
-        raise HTTPException(status_code=403, detail="Not authorized to seed SOPs")
-    col = _sop_collection()
-    if col is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
-
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    now = datetime.now()
-    created = 0
-    for tdef in DEFAULT_SOP_TEMPLATES:
-        if col.find_one({"title": tdef["title"], "store_id": active_store}):
-            continue  # already seeded for this store
-        col.insert_one(
-            {
-                "template_id": f"SOP-{uuid.uuid4().hex[:8].upper()}",
-                "title": tdef["title"],
-                "description": tdef["description"],
-                "category": tdef["category"],
-                "frequency": tdef["frequency"],
-                "estimated_time": tdef["estimated_time"],
-                "steps": default_template_steps(tdef["steps"]),
-                "assigned_roles": [],
-                "assigned_users": [],
-                "store_id": active_store,
-                "is_active": True,
-                "created_by": current_user.get("user_id"),
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        created += 1
-    return {
-        "created": created,
-        "store_id": active_store,
-        "message": f"Seeded {created} starter SOP template(s)",
-    }
-
-
+# REMOVED: POST /sop-templates/seed-defaults.
+#
+# It wrote four INVENTED procedures into the live database and the shop had no
+# way to tell them from policy somebody actually wrote - including a cash
+# routine instructing staff to verify a Rs 5,000 opening float and retain
+# Rs 5,000 overnight, and an order procedure demanding a 50% advance. Numbers
+# nobody at this company chose, presented to staff as the company's rules.
+#
+# Owner ruling 2026-09-03: delete them, show an honest empty state, and let a
+# manager write the real ones at /tasks/sops. The frontend button is gone; this
+# removes the door behind it, because a live endpoint that seeds fiction is one
+# curl away from doing it again.
 # ============================================================================
-# Catch-all parametric routes — registered LAST so they do not shadow
+# Catch-all parametric routes - registered LAST so they do not shadow
 # any specific path above (`/summary`, `/checklists`, `/sop-templates`,
 # `/auto-generate`, etc.). FastAPI resolves routes in registration order.
 # ============================================================================
@@ -2171,7 +2148,7 @@ router.add_api_route("/{task_id}", get_task, methods=["GET"])
 
 
 # ============================================================================
-# Action aliases — match what the frontend's `tasksApi` already calls
+# Action aliases - match what the frontend's `tasksApi` already calls
 # ============================================================================
 # `PUT /tasks/{id}` was 404'ing because only PATCH is decorated above.
 # `POST /tasks/{id}/start` and `/reassign` likewise didn't exist.

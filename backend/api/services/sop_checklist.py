@@ -88,55 +88,17 @@ def completion_status(progress: Dict[str, int]) -> str:
 # Starter daily SOP templates seeded on demand (opening / closing / stock
 # count) so a fresh store has usable checklists out of the box. Mirrors the
 # old hard-coded frontend DEFAULT_CHECKLISTS, now persisted + editable.
-DEFAULT_SOP_TEMPLATES: List[Dict[str, Any]] = [
-    {
-        "title": "Opening Checklist",
-        "description": "Daily store opening routine.",
-        "category": "Operations",
-        "frequency": "DAILY",
-        "estimated_time": 15,
-        "steps": [
-            "Disarm security system",
-            "Turn on all lights and AC",
-            "Check cash register float (Rs 5,000)",
-            "Clean all display cases and mirrors",
-            "Boot up POS system",
-            "Verify network connectivity",
-            "Check top 10 SKU stock levels",
-        ],
-    },
-    {
-        "title": "Closing Checklist",
-        "description": "Daily store closing routine.",
-        "category": "Operations",
-        "frequency": "DAILY",
-        "estimated_time": 20,
-        "steps": [
-            "Count cash in register (by denomination)",
-            "Reconcile all payment methods",
-            "Update daily sales",
-            "Prepare bank deposit bag",
-            "Lock cash in safe (retain Rs 5,000)",
-            "Clean entire store",
-            "Send WhatsApp report to owner",
-            "Set security system",
-        ],
-    },
-    {
-        "title": "Stock Count",
-        "description": "Daily stock reconciliation.",
-        "category": "Operations",
-        "frequency": "DAILY",
-        "estimated_time": 30,
-        "steps": [
-            "Count frames in display",
-            "Count lenses in inventory",
-            "Check expiry dates",
-            "Flag low stock items",
-            "Update stock report in system",
-        ],
-    },
-]
+# DEFAULT_SOP_TEMPLATES removed (owner ruling 2026-09-03).
+#
+# Four fabricated procedures with invented figures - a Rs 5,000 float, a
+# Rs 100 variance threshold, a 50% minimum advance - that were written into the
+# database as if they were this company's policy. A staff member reading them
+# had no way to know they were a placeholder.
+#
+# Nothing replaces them here. The real procedures are written by a manager at
+# /tasks/sops, and until they are, the checklist shows an empty state saying so.
+_SOP_TEMPLATES_DELIBERATELY_ABSENT = True
+
 
 
 def default_template_steps(items: List[str]) -> List[Dict[str, Any]]:
