@@ -161,7 +161,9 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Cashiers + sales staff: full customer edit incl. phone + GSTIN, from both tills | **DONE** |
 | Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) -- through the existing /ready + /deliver doors; a HOME-DELIVERY counter bill is deliberately NOT stamped (parcel still on the packing desk) | **DONE** |
 | Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **DONE** |
-| Reverse split: adding a family member whose number is already a customer -- BLOCK + link-existing (owner 09-04) | **WIP** |
+| Reverse split: adding a family member whose number is already a customer -- BLOCKED at all 3 doors; link-existing NOT built (cannot be truthful: POS Rx gate + clinical readers key on customer id); popup opens their own account | **DONE** |
+| Member-on-two-accounts (child on both parents') -- neither guard blocks it | **needs ruling** |
+| Member rows minted in 3 places with drifting `relation` defaults and no `created_at` | **TODO** (one-rule-two-implementations) |
 | Legacy till RETIRED: /pos redirects to /pos/new (query kept), POSLayout deleted, 8 legacy-vehicle tests re-pointed, a recorded-axis-0 bug caught on the new picker. Follow-ups: Playwright specs re-pointing (WIP); POSReceipt.tsx orphaned; PIXEL audit list still names /pos (follows redirect) | **DONE** |
 
 Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
