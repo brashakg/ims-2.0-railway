@@ -41,12 +41,6 @@ export const READY_DEFAULT = '#main-content :is(h1, h2, table, button, input)';
  * green in CI.
  */
 export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
-  {
-    path: '/reports',
-    reason:
-      'redirect-only: the index route maps the legacy ?tab= values onto ' +
-      '/reports/<section>. Every section it can land on is probed above.',
-  },
   { path: '/approvals' },
   { path: '/approvals/mine' },
   { path: '/returns/approvals' },
