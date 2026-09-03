@@ -198,6 +198,24 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
  */
 export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   {
+    path: '/hr',
+    reason: 'redirect-only: index maps the legacy ?tab= onto /hr/<section>, all probed above.',
+  },
+  {
+    path: '/hr/monthly-summary',
+    reason: 'redirect-only: retired tab, Navigate to /attendance which shows a superset.',
+  },
+  {
+    path: '/hr/self-service',
+    reason: 'redirect-only: retired duplicate of /my-work, Navigate there.',
+  },
+  {
+    path: '/hr/attendance',
+    reason:
+      'redirect-only: a JARVIS card linked this address, which never existed and 404d. ' +
+      'Navigate to /hr/today.',
+  },
+  {
     path: '/reports',
     reason:
       'redirect-only: the index route maps the legacy ?tab= values onto ' +
