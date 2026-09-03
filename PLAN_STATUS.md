@@ -114,6 +114,43 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 | `find_overdue` binds a datetime against `expected_delivery`, stored as a string, so **`/orders/overdue/list` returns nothing in production** | Found while verifying the delivery work; fixing it properly means settling that field's storage shape first |
 | The 30-day clamp on the customer list | Owner chose "clamp on last activity" — no last-activity field exists yet |
 
+## 4d. The money-path audit (2026-09-03) - 20 raised, 8 killed, 12 confirmed
+
+Five independent lenses swept POS -> payment -> delivery -> invoice; every
+finding was then attacked by three separate refuters, majority required to kill.
+A completeness critic then asked what all five had missed.
+
+| Confirmed finding | Status |
+|---|---|
+| Refused handover charged the customer TWICE (delivery counter) | **DONE** |
+| Goods left unpaid via the pickup scan, workshop status, courier booking - and a 4th, lab-routing | **DONE** - one shared gate, four doors |
+| Credit note reversed under the wrong tax head; GSTR-1 and 3B disagreed | **DONE** |
+| Credit note booked under the cashier's store -> one refund, two GSTINs | **DONE** |
+| In-store return backed out GST at one dominant rate | **DONE** - exact per-line engine, copy deleted |
+| Discount caps silently no-opped on add-item-to-order | **DONE** |
+| Promo clamp read a merchandising label, not the discount tier | **DONE** |
+| Loyalty points burned AND the customer still billed | **DONE** |
+| Fabricated invoice number on printed paper | **DONE** - legacy invoice retired |
+| Cashiers could not submit the blind day-end count | **DONE** |
+| Store credit issued with no way to spend it | **WIP** |
+| Cancelling an order with an advance has no door to return the cash | **TODO** |
+
+## 4e. POS surfaces - owner review 2026-09-03
+
+"Complete sale" on the general counter did nothing: `try/finally` with no
+`catch`, so anything that threw vanished silently. **DONE**, both surfaces, and
+that screen had NO tests at all before today.
+
+An evidence-backed comparison found the counter is not a different design - it
+is billing minus four capabilities, plus a legitimately re-shaped browse grid
+whose card was re-typed and has drifted five ways. The cart is genuinely ONE
+shared component; it only looks different because counter carts never hold
+optical lines. **WIP**: all four gaps, the shared product card, 44px cart
+controls, per-sale receipt choice, and customer edit at the till.
+
+**Retiring the legacy till** (owner: "retire old pos") - **WIP**, salvage
+inventory first. Nothing is deleted until it is proven replaced.
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
