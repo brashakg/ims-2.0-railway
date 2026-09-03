@@ -20,7 +20,7 @@ Routes (mirrors rbac_policy POLICY):
   POST /till/sessions/{id}/blind-submit   submit blind count (cashier/manager+)
   POST /till/sessions/{id}/lock           reveal variance + soft-lock (manager+)
   POST /till/sessions/{id}/reopen         release the soft-lock (reopen roles)
-  GET  /till/sessions                     list sessions (manager+/finance)
+  GET  /till/sessions                     list sessions (cashiers see redacted rows)
   GET  /till/sessions/{id}                one session (cashier sees redacted)
   GET  /till/sessions/{id}/zread          full Z-Read report (manager+/finance)
 
@@ -322,9 +322,15 @@ async def list_till_sessions(
     limit: int = Query(50, ge=1, le=200),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Session history for a store, newest first. Manager/finance roles (the
-    expected/variance figures are visible). Store-scoped."""
-    if not (_roles(current_user) & _TILL_READ_ROLES):
+    """Session history for a store, newest first. Manager/finance roles see the
+    full figures. CASHIER-ONLY callers may list too -- without this door they
+    can never FIND the shared drawer they are meant to count, and the blind
+    count the owner ruled to BE the day-end is unreachable by the people who
+    count it (owner ruling 2026-09-03: cashiers count and submit; the manager
+    reviews the variance AFTER submission). Their rows are blind-redacted at
+    the DATA layer via ``redact_for_cashier`` -- the expected figure is off the
+    WIRE, not merely off the screen. Store-scoped."""
+    if not (_roles(current_user) & (_TILL_READ_ROLES | _TILL_OPERATE_ROLES)):
         raise HTTPException(status_code=403, detail="not permitted to view till sessions")
     scoped = validate_store_access(store_id, current_user)
     if not scoped:
@@ -332,6 +338,8 @@ async def list_till_sessions(
     rows = till.list_sessions(
         _get_db(), store_id=scoped, session_date=date, status=status, limit=limit
     )
+    if _is_cashier_only(current_user):
+        rows = [till.redact_for_cashier(r) for r in rows]
     return {"sessions": rows}
 
 

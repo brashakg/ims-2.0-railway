@@ -111,20 +111,21 @@ export default function BlindEodTallyPage() {
     }
     setLoading(true);
     try {
-      // Managers can list (reveals figures); cashiers cannot -- fall through to
-      // their own active session via a 403-tolerant call.
-      if (isManager) {
-        const rows = await tillApi.list({ store_id: storeId, limit: 30 });
-        setSessions(rows);
-      } else {
-        setSessions([]);
-      }
+      // ONE list door for every role. The SERVER blind-redacts cashier-only
+      // callers at the data layer (no expected/variance on the wire pre-lock),
+      // so a cashier can FIND the shared drawer and submit their count -- the
+      // owner ruled the blind count IS the day-end, and cashiers count and
+      // submit while the manager reviews the variance AFTER submission
+      // (2026-09-03). The old non-manager branch handed back [] and made the
+      // Submit Count panel unreachable by the very people who count.
+      const rows = await tillApi.list({ store_id: storeId, limit: 30 });
+      setSessions(rows);
     } catch {
       setSessions([]);
     } finally {
       setLoading(false);
     }
-  }, [storeId, isManager]);
+  }, [storeId]);
 
   useEffect(() => {
     void load();
