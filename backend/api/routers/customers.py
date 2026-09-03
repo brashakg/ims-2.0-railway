@@ -130,12 +130,52 @@ from ..services.phone import normalize_indian_mobile
 
 
 def _customer_store_id(doc):
-    """The store a customer belongs to for object-level scope checks. Mirrors
-    the list query, which matches home_store_id (legacy/seed) OR
-    preferred_store_id (TechCherry import); store_id is a last-resort fallback."""
+    """The store a customer belongs to, for object-level scope checks.
+
+    Reads EVERY key a customer can be homed on, because the write doors do not
+    agree: customer_service._build_skeleton deliberately stamps home_store_id,
+    preferred_store_id, primary_store_id AND store_ids together, its docstring
+    recording that a skeleton homed only on primary_store_id was invisible to
+    the native lists (the walkout bug). can_access_store_scoped treats an
+    UNRESOLVED store as out of scope for every store-level role, so a key
+    missing from this list is not a loose check - it is a customer their own
+    shop can no longer open.
+
+    Measured on production before widening: all 779 customers resolve on the
+    first three keys alone (768 carry store_id), so this changes nothing today.
+    It is here so that a row written through the other path later cannot
+    silently disappear.
+    """
     if not isinstance(doc, dict):
         return None
-    return doc.get("home_store_id") or doc.get("preferred_store_id") or doc.get("store_id")
+    direct = (
+        doc.get("home_store_id")
+        or doc.get("preferred_store_id")
+        or doc.get("store_id")
+        or doc.get("primary_store_id")
+    )
+    if direct:
+        return direct
+    ids = doc.get("store_ids")
+    return ids[0] if isinstance(ids, list) and ids else None
+
+
+def customer_in_scope(doc, current_user) -> bool:
+    """THE store-ownership rule for a customer record.
+
+    Do NOT re-implement this check inline. It was copied wrong repeatedly
+    before it was single-sourced, and an audit of this file found THIRTEEN of
+    nineteen per-customer doors with no ownership check at all - four of them
+    moving money. The asymmetry that gave it away: reading the store-credit
+    LEDGER was scoped, while adding, issuing and redeeming credit against it
+    were not.
+
+    Note that resolvers elsewhere (crm.query_customers_by_store,
+    prescriptions, customer_repository.search_customers) still read their own
+    key subsets for LIST queries. Those are query filters, not object-level
+    permission checks; this predicate is the one that answers "may this user
+    touch THIS customer"."""
+    return can_access_store_scoped(_customer_store_id(doc), current_user)
 
 
 def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
@@ -151,7 +191,7 @@ def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
     doc = repo.find_by_id(customer_id) if repo is not None else None
     if not doc:
         raise HTTPException(status_code=404, detail="Customer not found")
-    if not can_access_store_scoped(_customer_store_id(doc), current_user):
+    if not customer_in_scope(doc, current_user):
         if write:
             raise HTTPException(
                 status_code=403, detail="No access to this customer's store"
@@ -1022,7 +1062,11 @@ async def search_customer_by_phone(
     # find_by_mobile ORs phone+mobile; the partial search must too, since
     # TechCherry-imported docs carry the number under `phone`.
     exact = repo.find_by_mobile(digits)
-    if exact:
+    # Same object-level store scope as GET /customers/mobile/{mobile}: an
+    # out-of-scope hit is treated as no hit (it falls through to the partial
+    # search, which is filtered too), so a store user cannot pull another
+    # store's customer -- name, phone, balances -- by typing a number.
+    if exact and customer_in_scope(exact, current_user):
         _annotate_customer_matches([exact], digits)
         return {"customers": [exact], "customer": exact}
 
@@ -1032,7 +1076,12 @@ async def search_customer_by_phone(
     # sub-docs only ever store `mobile`; top-level `phone` is the TechCherry
     # import field.)
     matches = _annotate_customer_matches(
-        repo.search(digits, ["mobile", "phone", "patients.mobile"]), digits
+        [
+            c
+            for c in repo.search(digits, ["mobile", "phone", "patients.mobile"])
+            if customer_in_scope(c, current_user)
+        ],
+        digits,
     )
     return {
         "customers": matches,
@@ -1052,9 +1101,7 @@ async def get_customer_by_mobile(
         customer = repo.find_by_mobile(mobile)
         # Object-level store scope: an out-of-scope match falls through to 404
         # so a store user can't enumerate another store's customers by phone.
-        if customer and can_access_store_scoped(
-            _customer_store_id(customer), current_user
-        ):
+        if customer and customer_in_scope(customer, current_user):
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")
@@ -1489,8 +1536,14 @@ async def get_customer_prescriptions(
     customer_id: str = Path(..., description="Customer ID"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get prescriptions for a customer"""
-    # This will be implemented when we connect PrescriptionRepository
+    """Get prescriptions for a customer.
+
+    STUB - it has never been connected to PrescriptionRepository and always
+    returns an empty list. Deliberately NOT store-scoped: it reads nothing, so
+    a scope check here would be dead code that reads like protection. Wire the
+    repository in and the check comes with it (see _scoped_customer_or_404).
+    The real prescription doors live in routers/prescriptions.py and are
+    already scoped."""
     return {"prescriptions": []}
 
 
@@ -1504,9 +1557,9 @@ async def add_loyalty_points(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        # Loyalty points redeem against real money, so the same object-level
+        # scope as the rest of the customer's record applies.
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         if repo.add_loyalty_points(customer_id, points):
             return {
@@ -1529,9 +1582,10 @@ async def add_store_credit(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        # Store credit is MONEY. Reading this customer's ledger was already
+        # store-scoped while writing rupees into it was not, which is how a
+        # manager at one shop could credit another shop's customer.
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         if repo.add_store_credit(customer_id, amount):
             return {
@@ -1599,9 +1653,9 @@ def _post_credit_entry(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    existing = repo.find_by_id(customer_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    # Covers BOTH /store-credit/issue and /store-credit/redeem, which delegate
+    # here - one fix, two doors, and no chance of the two drifting apart.
+    existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
     et = (entry_type or "").upper()
 
@@ -1965,8 +2019,9 @@ async def get_consent_ledger(
     their store's customers; ADMIN can view all.
     """
     repo = get_customer_repository()
-    if repo is not None and repo.find_by_id(customer_id) is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    if repo is not None:
+        # Consent is a legal record about a person; the id alone is not authority.
+        _scoped_customer_or_404(customer_id, current_user, write=True)
 
     coll = _consent_ledger_coll()
     entries = []
@@ -2002,8 +2057,9 @@ async def grant_consent(
     - Any authenticated operator can record consent (needed at point of sale).
     """
     repo = get_customer_repository()
-    if repo is not None and repo.find_by_id(customer_id) is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    if repo is not None:
+        # Consent is a legal record about a person; the id alone is not authority.
+        _scoped_customer_or_404(customer_id, current_user, write=True)
 
     entry = _append_consent_event(
         customer_id,
@@ -2058,7 +2114,9 @@ async def withdraw_consent(
       withdrawn; `data_consent` stays True for the remaining consented purposes.
     """
     repo = get_customer_repository()
-    customer = repo.find_by_id(customer_id) if repo is not None else None
+    customer = (
+        _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
+    )
     if repo is not None and customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -2185,7 +2243,7 @@ async def set_customer_tags(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    customer = repo.find_by_id(customer_id)
+    customer = _scoped_customer_or_404(customer_id, current_user, write=True)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -2225,8 +2283,7 @@ async def suggest_customer_tag(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    if not repo.find_by_id(customer_id):
-        raise HTTPException(status_code=404, detail="Customer not found")
+    _scoped_customer_or_404(customer_id, current_user, write=True)
 
     cleaned = _clean_tag(body.tag)
     if not cleaned:
@@ -2279,6 +2336,9 @@ async def list_tag_suggestions(
     current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
 ):
     """List PENDING tag suggestions for a customer (STORE_MANAGER+)."""
+    # A tag can carry PII (a phone number, a note about the person), so the
+    # suggestions on a customer are as store-scoped as the customer.
+    _scoped_customer_or_404(customer_id, current_user)
     sug_coll = _tag_suggestions_coll()
     if sug_coll is None:
         return {"customer_id": customer_id, "suggestions": []}
@@ -2300,6 +2360,7 @@ async def approve_tag_suggestion(
     """Approve a pending suggestion: mark it approved (single-doc update) then
     add the tag to customers.tags via $addToSet (idempotent single-doc update).
     Two sequential single-document writes -- no cross-collection transaction."""
+    _scoped_customer_or_404(customer_id, current_user, write=True)
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -2341,6 +2402,7 @@ async def reject_tag_suggestion(
 ):
     """Reject a pending suggestion (single-doc update). The tag never lands on
     the customer record."""
+    _scoped_customer_or_404(customer_id, current_user, write=True)
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
