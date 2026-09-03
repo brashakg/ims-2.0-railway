@@ -75,8 +75,19 @@ export const orderApi = {
     return response.data;
   },
 
-  addPayment: async (orderId: string, payment: Partial<import('../../types').Payment>) => {
-    const response = await api.post(`/orders/${orderId}/payments`, payment);
+  // `idempotencyKey` is NOT optional decoration: without it a retried leg is
+  // recorded TWICE, because the server only dedupes when the header is present
+  // (orders.py add_payment skips the replay guard on an empty key). Pass a key
+  // that is stable for the leg, so re-sending the same tender is a replay and
+  // a genuinely new tender is a new payment.
+  addPayment: async (
+    orderId: string,
+    payment: Partial<import('../../types').Payment>,
+    idempotencyKey?: string,
+  ) => {
+    const response = await api.post(`/orders/${orderId}/payments`, payment, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    });
     return response.data;
   },
 

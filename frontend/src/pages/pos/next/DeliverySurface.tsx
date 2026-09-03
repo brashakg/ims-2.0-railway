@@ -60,7 +60,7 @@ export function DeliverySurface() {
   // The handed-over order, held so the completion screen can print the
   // final invoice and send the thank-you against it.
   const [handedOver, setHandedOver] = useState<LoadedOrder | null>(null);
-  const idempotencyKeyRef = useRef<string | null>(null);
+  const handoverSessionRef = useRef<string | null>(null);
   // WHICH legs of the current attempt already REACHED the server, keyed by the
   // leg itself. A retry after a mid-split failure skips exactly those: money
   // collected once must never be posted twice because a later leg's call
@@ -124,7 +124,7 @@ export function DeliverySurface() {
     setCashTender(null);
     setApprovalToken('');
     postedLegsRef.current = new Set();
-    idempotencyKeyRef.current = null;
+    handoverSessionRef.current = null;
   };
 
   const findOrder = async (ref: string) => {
@@ -184,8 +184,13 @@ export function DeliverySurface() {
     if (!order || busy) return;
     setBusy(true);
     setErrorMsg(null);
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
+    // A HANDOVER SESSION id, not the delivery key. The key itself is derived
+    // per attempt from the leg that rides the deliver door (see below): a
+    // single key reused across attempts whose LAST LEG had changed matched the
+    // previous attempt's payment on the server and swallowed the new money
+    // entirely - cash in the drawer with no payment row against it.
+    if (!handoverSessionRef.current) {
+      handoverSessionRef.current =
         typeof crypto !== 'undefined' && crypto.randomUUID
           ? crypto.randomUUID()
           : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -222,10 +227,23 @@ export function DeliverySurface() {
       // does on nearly every handover.
       for (const leg of legs.slice(0, -1)) {
         if (postedLegsRef.current.has(leg.key)) continue;
-        await orderApi.addPayment(order.id, leg.body as any);
+        // Keyed on the LEG, so a re-send of the same tender is a server-side
+        // replay rather than a second payment row. postedLegsRef alone was not
+        // enough: the leg that rode the deliver door was never recorded in it,
+        // so a retry posted that money a second time through this loop.
+        await orderApi.addPayment(
+          order.id,
+          leg.body as any,
+          `${handoverSessionRef.current}:${leg.key}`,
+        );
         postedLegsRef.current.add(leg.key);
       }
-      const lastLeg = legs.length ? legs[legs.length - 1].body : undefined;
+      const last = legs.length ? legs[legs.length - 1] : undefined;
+      const lastLeg = last?.body;
+      // The delivery key CHANGES when the last leg changes. Reusing one key
+      // across attempts made the server match the earlier attempt's payment
+      // and record nothing for the new tender.
+      const deliverKey = `${handoverSessionRef.current}:${last?.key ?? 'no-tender'}`;
 
       await orderApi.deliverWithPayment(
         order.id,
@@ -237,7 +255,7 @@ export function DeliverySurface() {
           handover: Object.keys(handover).length ? (handover as any) : undefined,
           approval_token: approvalToken.trim() || undefined,
         },
-        idempotencyKeyRef.current || undefined,
+        deliverKey,
       );
       setOkMsg(
         `Delivered — ${order.orderNumber || order.id}` +
@@ -259,7 +277,35 @@ export function DeliverySurface() {
       // white-screens the counter, so anything that is not a plain string
       // falls back to the generic line.
       const detail = err?.response?.data?.detail;
-      setErrorMsg(typeof detail === 'string' ? detail : 'Could not complete the handover.');
+      const reason = typeof detail === 'string' ? detail : 'Could not complete the handover.';
+
+      // RESYNC, because the deliver door is not atomic: it records the payment
+      // and THEN runs the credit gate, so a refusal can leave money already
+      // banked against this order. The screen's balance is then stale and too
+      // HIGH, and the honest-looking next step -- take the rest and press again
+      // -- is what double-charged the customer. The server is the authority on
+      // what has been paid, so re-read it and clear the pending tender: any leg
+      // that landed is now inside amountPaid, and the operator enters only what
+      // is genuinely still owed.
+      try {
+        const fresh: any = await orderApi.getOrder(order.id);
+        if (fresh?.id) {
+          const wasDue = balance;
+          const nowDue = Number(fresh.balanceDue || 0);
+          setOrder(fresh);
+          resetTender();
+          setErrorMsg(
+            nowDue < wasDue
+              ? `${reason} ${money(wasDue - nowDue)} was recorded before it stopped; ` +
+                `${money(nowDue)} is still due. Re-enter only the outstanding amount.`
+              : reason,
+          );
+          return;
+        }
+      } catch {
+        /* the re-read failed too; fall through to the plain refusal below */
+      }
+      setErrorMsg(reason);
     } finally {
       setBusy(false);
     }
