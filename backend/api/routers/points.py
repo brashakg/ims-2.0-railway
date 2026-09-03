@@ -13,6 +13,11 @@ RBAC:
   - SUPERADMIN / STORE_MANAGER: soft-delete a row (with reason +
     audit)
   - SUPERADMIN: PATCH /settings/eligibility
+  - READS of other people's figures (leaderboard / mtd / daily list /
+    staff history): ADMIN + SUPERADMIN only. Everyone else -- store and
+    area managers included -- receives their OWN row plus their rank
+    among the field, never a colleague's row (owner ruling 2026-09-03;
+    see _viewer_visibility below).
 
 Mounted at /api/v1/incentive/points (singular `incentive`) — note
 the existing /api/v1/incentives router (sales targets/kickers) is a
@@ -58,6 +63,7 @@ from api.services.leaderboard_display import (
     leaderboard_config_defaults,
     titles_catalog,
 )
+from api.services.salary_visibility import is_salary_admin
 from api.utils.ist import ist_today
 
 logger = logging.getLogger(__name__)
@@ -92,6 +98,41 @@ def _resolve_store(current_user: dict, override: Optional[str]) -> str:
     if not store:
         raise HTTPException(status_code=400, detail="No active store on this session")
     return store
+
+
+# ============================================================================
+# OWNER RULING 2026-09-03, verbatim: "only admins and superadmins see all,
+# rest all including managers see their own only."
+#
+# Every read below that carries per-person figures (leaderboard, mtd, the
+# daily list, staff history) therefore ships a non-admin ONLY their own row,
+# plus where they stand ("4th of 11" via rank + total_participants) -- never
+# another named person's numbers. This is deliberately stricter than the old
+# manager carve-out and matches the standing salary rule, whose predicate
+# (services/salary_visibility.is_salary_admin) is the ONE definition of who
+# sees all. Do not fork that role tuple here or anywhere else.
+# ============================================================================
+
+
+def _viewer_visibility(current_user: dict) -> tuple:
+    """('all', None) for ADMIN/SUPERADMIN; ('self', user_id) for everyone else.
+
+    FAIL CLOSED: a self-only session with no user_id gets 403 -- every
+    self-only read keys on user_id, and an unidentifiable session must never
+    fall through to the whole board (same guard as kicker_rollup)."""
+    if is_salary_admin(current_user):
+        return "all", None
+    uid = current_user.get("user_id")
+    if not uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "We could not tell which staff account you are signed in as, "
+                "so we cannot show your figures. Please sign in again, or ask "
+                "an administrator."
+            ),
+        )
+    return "self", uid
 
 
 # F33 -- leaderboard scope widening. org/area visibility is a management
@@ -515,21 +556,27 @@ async def list_daily(
     date: Optional[str] = Query(None, description="ISO date, defaults to today"),
     store_id: Optional[str] = Query(None),
 ):
-    """All rows for one (store, date). Excludes soft-deleted."""
+    """All rows for one (store, date) for ADMIN/SUPERADMIN; everyone else
+    (managers included) gets ONLY their own row -- owner ruling 2026-09-03.
+    The narrowing happens in the QUERY, not by filtering an assembled list,
+    so a self-only response never even loads a colleague's row. Excludes
+    soft-deleted."""
     store = _resolve_store(current_user, store_id)
+    visibility, uid = _viewer_visibility(current_user)
+    date_str = date or ist_today().isoformat()
     repo = _points_repo()
     if repo is None:
-        return {
-            "items": [],
-            "store_id": store,
-            "date_str": date or ist_today().isoformat(),
-        }
-    date_str = date or ist_today().isoformat()
-    rows = repo.list_by_date(store, date_str)
+        rows: List[Dict] = []
+    elif visibility == "all":
+        rows = repo.list_by_date(store, date_str)
+    else:
+        own = repo.find_by_date_and_staff(store, date_str, uid)
+        rows = [own] if own else []
     return {
         "items": [_serialize(r) for r in rows],
         "store_id": store,
         "date_str": date_str,
+        "visibility": visibility,
     }
 
 
@@ -640,12 +687,23 @@ async def get_mtd(
 
     F33: rows are decorated with tier/title/badges/rank_delta and the
     junior-role rupee strip. `scope=area|org` (managers only) widens the
-    board beyond the caller's store."""
+    board beyond the caller's store.
+
+    Owner ruling 2026-09-03: ADMIN/SUPERADMIN receive every row; everyone
+    else (managers included) receives ONLY their own row, ranked against
+    the full field (total_participants carries the field size)."""
+    visibility, uid = _viewer_visibility(current_user)
     stores = _resolve_scope_stores(current_user, scope, store_id)
     store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
     if repo is None:
-        return {"store_id": store, "scope": scope, "items": []}
+        return {
+            "store_id": store,
+            "scope": scope,
+            "items": [],
+            "visibility": visibility,
+            "total_participants": 0,
+        }
     now = ist_today()
     yr = year or now.year
     mo = month or now.month
@@ -671,6 +729,11 @@ async def get_mtd(
     period_days = elapsed if elapsed > 0 else None
 
     items = _decorate_items(items, current_user, prev_ranks, period_days)
+    total_participants = len(items)
+    if visibility == "self":
+        # Rank/tier/badges were computed against the FULL field above, so the
+        # caller still learns "4th of 11" -- without the other ten rows.
+        items = [r for r in items if r.get("staff_id") == uid]
     return {
         "store_id": store,
         "scope": scope,
@@ -679,6 +742,8 @@ async def get_mtd(
         "date_from": date_from,
         "date_to": date_to,
         "items": items,
+        "visibility": visibility,
+        "total_participants": total_participants,
     }
 
 
@@ -693,12 +758,23 @@ async def get_leaderboard(
 
     F33: rows are decorated with tier/title/badges/rank_delta and the
     junior-role rupee strip. `scope=area|org` (managers only) widens the
-    board beyond the caller's store."""
+    board beyond the caller's store.
+
+    Owner ruling 2026-09-03: ADMIN/SUPERADMIN receive every row; everyone
+    else (managers included) receives ONLY their own row, ranked against
+    the full field (total_participants carries the field size)."""
+    visibility, uid = _viewer_visibility(current_user)
     stores = _resolve_scope_stores(current_user, scope, store_id)
     store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
     if repo is None:
-        return {"store_id": store, "scope": scope, "items": []}
+        return {
+            "store_id": store,
+            "scope": scope,
+            "items": [],
+            "visibility": visibility,
+            "total_participants": 0,
+        }
     today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     date_to = today.isoformat()
@@ -711,6 +787,11 @@ async def get_leaderboard(
     prev_ranks = _prev_rank_map(repo, stores, prev_from, prev_to)
 
     items = _decorate_items(items, current_user, prev_ranks, days)
+    total_participants = len(items)
+    if visibility == "self":
+        # Rank/tier/badges were computed against the FULL field above, so the
+        # caller still learns "4th of 11" -- without the other ten rows.
+        items = [r for r in items if r.get("staff_id") == uid]
     return {
         "store_id": store,
         "scope": scope,
@@ -718,6 +799,8 @@ async def get_leaderboard(
         "date_from": date_from,
         "date_to": date_to,
         "items": items,
+        "visibility": visibility,
+        "total_participants": total_participants,
     }
 
 
@@ -823,7 +906,19 @@ async def staff_history(
     store_id: Optional[str] = Query(None),
 ):
     """All points_log rows for one staff in a date range. Defaults to
-    the current month."""
+    the current month.
+
+    Owner ruling 2026-09-03: ADMIN/SUPERADMIN may read anyone's history;
+    everyone else (managers included) may read ONLY their own."""
+    visibility, uid = _viewer_visibility(current_user)
+    if visibility == "self" and staff_id != uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "You can see your own points history only. Colleague "
+                "scorecards are restricted to administrators."
+            ),
+        )
     store = _resolve_store(current_user, store_id)
     repo = _points_repo()
     if repo is None:

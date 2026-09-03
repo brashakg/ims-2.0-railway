@@ -97,6 +97,9 @@ export function DailyScorecardPage() {
   // when today's footfall is incomplete (conversion auto-fill would otherwise
   // be blocked at save time).
   const [footfallStatus, setFootfallStatus] = useState<WalkinStatusResponse | null>(null);
+  // Owner ruling 2026-09-03: the server sends non-admins (managers included)
+  // only their OWN saved row — colleague figures never reach this page's JSON.
+  const [dayVisibility, setDayVisibility] = useState<'all' | 'self'>('all');
 
   const isToday = useMemo(
     () => date === new Date().toISOString().slice(0, 10),
@@ -132,9 +135,13 @@ export function DailyScorecardPage() {
     try {
       const [s, dayList] = await Promise.all([
         incentiveApi.getSettings(),
-        incentiveApi.listDaily(date),
+        incentiveApi.listDaily(date) as Promise<
+          Awaited<ReturnType<typeof incentiveApi.listDaily>> &
+          { visibility?: 'all' | 'self' }
+        >,
       ]);
       setSettings(s);
+      setDayVisibility(dayList.visibility === 'self' ? 'self' : 'all');
       const map: Record<string, PointsLog> = {};
       for (const row of dayList.items) map[row.staff_id] = row;
       setSavedByStaff(map);
@@ -291,6 +298,22 @@ export function DailyScorecardPage() {
       {error && (
         <div className="card p-3 bg-amber-50 border border-amber-200 text-sm text-amber-800 inline-flex items-center gap-2">
           <AlertCircle className="w-4 h-4" /> {error}
+        </div>
+      )}
+
+      {/* Owner ruling 2026-09-03 — a manager can still ENTER scores for the
+          whole team, but saved colleague rows are admin-only, so they show as
+          "Pending" here even after saving (a re-save is refused as a
+          duplicate). */}
+      {dayVisibility === 'self' && canEditAny && (
+        <div className="card p-3 border border-gray-200 bg-gray-50 text-sm text-gray-700 flex items-center gap-3">
+          <AlertCircle className="w-4 h-4 text-gray-500 shrink-0" />
+          <span>
+            You can enter and save scores for the whole team, but only your own
+            saved row is shown — colleague figures are visible to administrators
+            only. An already-saved staff row will report &quot;Already
+            logged&quot; if saved again.
+          </span>
         </div>
       )}
 

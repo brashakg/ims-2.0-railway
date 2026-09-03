@@ -378,7 +378,7 @@ def test_leaderboard_rows_are_decorated(client, patched_points):
     _seed_log(patched_points, "BV-TEST-01", "user-b", "2026-06-10", total=60)
     resp = client.get(
         "/api/v1/incentive/points/leaderboard",
-        headers=_headers(["STORE_MANAGER"], "mgr-1"),
+        headers=_headers(["ADMIN"], "mgr-1"),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -439,8 +439,13 @@ def test_scope_area_uses_callers_stores(client, patched_points):
     _seed_log(patched_points, "BV-TEST-01", "user-a", "2026-06-10", total=90)
     _seed_log(patched_points, "BV-TEST-02", "user-b", "2026-06-10", total=70)
     _seed_log(patched_points, "WO-TEST-09", "user-c", "2026-06-10", total=50)
+    # Owner ruling 2026-09-03: only ADMIN/SUPERADMIN see the whole board;
+    # everyone else, managers included, sees their own row. This test is
+    # about the BOARD (decoration / ranking / store scope), so it needs a
+    # viewer entitled to see it. The self-only rule itself is pinned in
+    # test_incentive_self_only.py.
     hdrs = _headers(
-        ["AREA_MANAGER"], "am-1", store_ids=["BV-TEST-01", "BV-TEST-02"]
+        ["ADMIN"], "am-1", store_ids=["BV-TEST-01", "BV-TEST-02"]
     )
     resp = client.get(
         "/api/v1/incentive/points/leaderboard?scope=area", headers=hdrs
@@ -460,7 +465,7 @@ def test_leaderboard_rank_delta_from_previous_window(client, patched_points):
     _seed_log(patched_points, "BV-TEST-01", "user-b", "2026-06-10", total=60)
     resp = client.get(
         "/api/v1/incentive/points/leaderboard",
-        headers=_headers(["STORE_MANAGER"], "mgr-1"),
+        headers=_headers(["ADMIN"], "mgr-1"),
     )
     items = resp.json()["items"]
     by_staff = {i["staff_id"]: i for i in items}

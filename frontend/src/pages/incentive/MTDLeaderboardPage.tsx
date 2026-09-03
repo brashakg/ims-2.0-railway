@@ -10,6 +10,12 @@
 // rank-delta arrows, and a scope toggle (store/area/org) for managers.
 // All presentation fields are SERVER-computed; junior roles never receive
 // rupee fields (server-side strip).
+//
+// OWNER RULING 2026-09-03: only ADMIN/SUPERADMIN receive the full board.
+// Everyone else — store and area managers included — receives ONLY their
+// own row plus their rank among the field ("4th of 11"). Enforced on the
+// SERVER (points.py); this page just renders whichever shape arrives
+// (response.visibility: 'all' | 'self').
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -72,13 +78,20 @@ export function MTDLeaderboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const [scope, setScope] = useState<LeaderboardScope>('store');
+  // Owner ruling 2026-09-03: the server sends non-admins their own row only.
+  const [visibility, setVisibility] = useState<'all' | 'self'>('all');
+  const [totalParticipants, setTotalParticipants] = useState(0);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const resp = await incentiveApi.getLeaderboard(days, undefined, scope);
+      const resp = (await incentiveApi.getLeaderboard(days, undefined, scope)) as
+        Awaited<ReturnType<typeof incentiveApi.getLeaderboard>> &
+        { visibility?: 'all' | 'self'; total_participants?: number };
       setItems(resp.items || []);
+      setVisibility(resp.visibility === 'self' ? 'self' : 'all');
+      setTotalParticipants(resp.total_participants ?? (resp.items || []).length);
     } catch (e: any) {
       const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
       setError(typeof msg === 'string' ? msg : 'Failed to load');
@@ -89,7 +102,9 @@ export function MTDLeaderboardPage() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const podium = items.slice(0, 3);
+  // Self-only viewers get one row (theirs) — that is a standing, not a podium.
+  const podium = visibility === 'self' ? [] : items.slice(0, 3);
+  const ownRow = visibility === 'self' ? items[0] : undefined;
 
   return (
     <div className="p-6 space-y-4">
@@ -151,6 +166,34 @@ export function MTDLeaderboardPage() {
       {error && (
         <div className="card p-3 bg-amber-50 border border-amber-200 text-sm text-amber-800 inline-flex items-center gap-2">
           <AlertCircle className="w-4 h-4" /> {error}
+        </div>
+      )}
+
+      {/* Owner ruling 2026-09-03 — non-admins see their own standing only */}
+      {visibility === 'self' && !loading && (
+        <div className="card p-4 border border-gray-200">
+          {ownRow ? (
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-2xl font-bold text-gray-900">
+                #{ownRow.rank}
+              </span>
+              <span className="text-sm text-gray-600">
+                of {totalParticipants} in this window
+              </span>
+              <span className="text-sm text-gray-500">
+                — avg {ownRow.avg.total.toFixed(1)} over {ownRow.days_logged}d
+              </span>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">
+              You have no scorecard entries in this window
+              {totalParticipants > 0 ? ` (${totalParticipants} on the board)` : ''}.
+            </div>
+          )}
+          <p className="text-xs text-gray-400 mt-1">
+            You see your own figures and rank only. The full board is visible to
+            administrators.
+          </p>
         </div>
       )}
 
