@@ -7,8 +7,11 @@
 // is reflected in balance_due / change calculations.
 //
 // POS-3 FIX: The actual /loyalty/redeem call (which atomically debits
-// points) is deferred to POSLayout.handleCreateOrder() AFTER the order
+// points) is deferred to submitOrder.ts (submitPosOrder) AFTER the order
 // is confirmed. This prevents points being burned on a failed order.
+// submitPosOrder then records the LOYALTY tender ON the order with the
+// redeem response's numbers — the line added here is the on-screen
+// balance placeholder, not the recorded leg.
 //
 // Fail-soft: if the account fetch fails or validation fails, the control
 // just shows the error and keeps the rest of the payment step usable.

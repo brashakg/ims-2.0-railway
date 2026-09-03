@@ -14,6 +14,8 @@ import {
   CheckCircle, X, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
+// Direct module import, not the barrel (TS2614 gotcha).
+import { customerApi } from '../../services/api/customers';
 import { usePOSStore, type CashTenderCapture, type PaymentEntry } from '../../stores/posStore';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
@@ -30,6 +32,141 @@ const EMI_ANNUAL_RATE_PERCENT_FALLBACK = 12;
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
   return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+// The store-credit tender. The SERVER does the actual spend: when the leg is
+// posted to POST /orders/{id}/payments with method=STORE_CREDIT, orders.
+// add_payment calls customers.redeem_store_credit_atomic against the ORDER's
+// customer_id -- atomically (guarded conditional decrement, the voucher
+// mechanism), never against a customer id from the request body. Adding the
+// leg here moves NO money; an abandoned or failed sale burns nothing.
+// posStore's PaymentEntry.method union is owned by another change and gains
+// 'STORE_CREDIT' as a one-word edit; this cast keeps the file compiling both
+// before and after it.
+const STORE_CREDIT_METHOD = 'STORE_CREDIT' as unknown as PaymentEntry['method'];
+
+// ============================================================================
+// Store-credit redemption (the missing SPEND side of refund credit notes)
+// ============================================================================
+// Refunds ISSUE store credit and the till DISPLAYS the balance, but until this
+// control there was no tender to SPEND it -- the liability sat on the books
+// forever. The balance shown is the server's scoped read (the ledger GET
+// 404s a customer outside the operator's store), and it is fail-CLOSED: an
+// unreadable balance is Rs 0 spendable, never a guess.
+function StoreCreditRedeemControl({
+  customerId,
+  balanceDue,
+  payments,
+  addPayment,
+  removePayment,
+}: {
+  customerId: string;
+  /** Remaining unpaid amount on the bill/order — the hard cap on the leg. */
+  balanceDue: number;
+  payments: PaymentEntry[];
+  addPayment: (p: Omit<PaymentEntry, 'timestamp'>) => void;
+  removePayment: (index: number) => void;
+}) {
+  const [available, setAvailable] = useState<number | null>(null);
+  const [amount, setAmount] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setAvailable(null);
+    customerApi
+      .getStoreCreditLedger(customerId)
+      .then((d) => { if (alive) setAvailable(Math.max(0, Number(d?.balance) || 0)); })
+      .catch(() => { if (alive) setAvailable(0); }); // fail-closed
+    return () => { alive = false; };
+  }, [customerId]);
+
+  const appliedIdx = (payments || []).findIndex((p) => (p.method as string) === 'STORE_CREDIT');
+  const applied = appliedIdx >= 0 ? payments[appliedIdx] : null;
+  // Never more than the credit, never more than what the bill still owes.
+  // The server re-enforces BOTH (atomic balance guard + balance_due cap);
+  // this clamp just keeps the operator honest before submit.
+  const cap = Math.round(Math.min(available ?? 0, Math.max(0, balanceDue)) * 100) / 100;
+
+  const handleApply = () => {
+    const a = Math.round((parseFloat(amount) || cap) * 100) / 100;
+    if (!a || a <= 0) return;
+    if (available === null) return; // balance not loaded yet
+    if (a > available + 0.001) {
+      setError(`Only ${fc(available)} of store credit is available.`);
+      return;
+    }
+    if (a > balanceDue + 0.001) {
+      setError(`Only ${fc(balanceDue)} is still due on this bill.`);
+      return;
+    }
+    addPayment({ method: STORE_CREDIT_METHOD, amount: a, reference: 'Store credit' });
+    setAmount('');
+    setError(null);
+  };
+
+  return (
+    <div className="border-2 border-emerald-200 rounded-lg p-4 bg-emerald-50 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="font-semibold text-gray-900">Store credit</p>
+        <p className="text-sm text-gray-600">
+          Available:{' '}
+          <span className="font-semibold text-emerald-700">
+            {available === null ? '…' : fc(available)}
+          </span>
+        </p>
+      </div>
+      {applied ? (
+        <div className="bg-white rounded-lg p-3 border border-emerald-100 flex items-center justify-between">
+          <div>
+            <p className="text-sm text-gray-600">Applied to this bill</p>
+            <p className="text-lg font-bold text-emerald-700">{fc(applied.amount)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => removePayment(appliedIdx)}
+            className="px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium text-red-600 border border-red-300 bg-white hover:bg-red-50"
+          >
+            Remove
+          </button>
+        </div>
+      ) : available !== null && available <= 0 ? (
+        <p className="text-sm text-gray-500">This customer has no store credit.</p>
+      ) : (
+        <div className="flex gap-2">
+          <input
+            type="number"
+            min="1"
+            step="0.01"
+            value={amount}
+            onChange={(e) => { setAmount(e.target.value); setError(null); }}
+            onFocus={(e) => e.target.select()}
+            placeholder={cap > 0 ? `Amount (max ${fc(cap)})` : 'Amount'}
+            className="flex-1 px-3 py-2 min-h-[44px] border border-gray-300 rounded-lg text-sm text-gray-900"
+          />
+          <button
+            type="button"
+            onClick={handleApply}
+            disabled={available === null || cap <= 0}
+            className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold ${
+              available === null || cap <= 0
+                ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                : 'bg-bv-red-600 text-white hover:bg-bv-red-700'
+            }`}
+          >
+            Apply
+          </button>
+        </div>
+      )}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {!applied && (
+        <p className="text-xs text-gray-500">
+          The credit is deducted from the customer's balance only when the sale
+          completes — cancelling this bill burns nothing.
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ============================================================================
@@ -137,12 +274,17 @@ function CashChangeCalculator({
 // real till (split tender, per-leg reference, EMI, the leg list, the cash
 // denomination capture) is then the SAME code on all three surfaces.
 //
-// What target mode deliberately does NOT render: loyalty / store credit /
-// voucher. Those three read `store.customer` and `store.getGrandTotal()` and
-// park their intent ON THE CART for submitOrder to consume — so on a non-cart
-// surface they would spend the wrong customer's points against the wrong
-// amount and leak into the next sale at the till. They stay cart-only until
-// they grow a target of their own.
+// What target mode deliberately does NOT render: loyalty / khata / voucher.
+// Those read `store.customer` and `store.getGrandTotal()` and park their
+// intent ON THE CART for submitOrder to consume — so on a non-cart surface
+// they would spend the wrong customer's points against the wrong amount and
+// leak into the next sale at the till. They stay cart-only until they grow a
+// target of their own. STORE CREDIT is the one tender with a target seam:
+// pass `customerId` (the ORDER's customer, from the server-loaded order — not
+// the cart) and the control renders against the target's due; omit it and
+// store credit stays hidden on that surface. The server redeems against the
+// ORDER's customer either way, so a wrong/forged id cannot spend someone
+// else's credit — the id here only scopes the balance DISPLAY.
 export interface PaymentTarget {
   /** What is owed on the thing being paid — an existing order's balance_due. */
   due: number;
@@ -153,6 +295,10 @@ export interface PaymentTarget {
   setCashTender?: (capture: CashTenderCapture | null) => void;
   /** Store whose EMI rate applies. Defaults to the cart's store. */
   storeId?: string;
+  /** The ORDER's customer. Present -> the store-credit tender renders on this
+      surface. Absent (the delivery counter today) -> store credit is hidden,
+      so a cart-bound balance can never be spent against another bill. */
+  customerId?: string;
 }
 
 // ============================================================================
@@ -183,6 +329,7 @@ export function StepPayment({ target }: { target?: PaymentTarget } = {}) {
   const [showEMIForm, setShowEMIForm] = useState(false);
   const [showCredit, setShowCredit] = useState(false);
   const [showVoucher, setShowVoucher] = useState(false);
+  const [showStoreCredit, setShowStoreCredit] = useState(false);
   const [emiProvider, setEmiProvider] = useState('HDFC');
   const [emiTenure, setEmiTenure] = useState(12);
   const [emiDownPayment, setEmiDownPayment] = useState('');
@@ -278,7 +425,11 @@ export function StepPayment({ target }: { target?: PaymentTarget } = {}) {
               is one click away and a sale that does not never sees them. */}
           <div className="flex gap-2">
             {([
-              ['credit', 'Store credit', showCredit, setShowCredit] as const,
+              // 'Store credit' used to (mis)label the khata card — the till
+              // SHOWED a store-credit button while opening the pay-later
+              // option, with no way to actually spend the credit balance.
+              ['storecredit', 'Store credit', showStoreCredit, setShowStoreCredit] as const,
+              ['credit', 'Credit (khata)', showCredit, setShowCredit] as const,
               ['voucher', 'Voucher / gift card', showVoucher, setShowVoucher] as const,
             ]).map(([key, label, open, set]) => (
               <button
@@ -296,9 +447,33 @@ export function StepPayment({ target }: { target?: PaymentTarget } = {}) {
               </button>
             ))}
           </div>
+          {showStoreCredit && (
+            <StoreCreditRedeemControl
+              customerId={String(store.customer.id)}
+              balanceDue={Math.max(0, balance)}
+              payments={payments}
+              addPayment={addPayment}
+              removePayment={removePayment}
+            />
+          )}
           {showCredit && <CreditBillingOption />}
           {showVoucher && <VoucherRedemption />}
         </div>
+      )}
+
+      {/* Store credit on a TARGET surface (an existing order's balance) — only
+          when the owning surface hands in the ORDER's customer. See the
+          PaymentTarget doc: without customerId this renders nothing, so the
+          delivery counter cannot paper over a manager-gated shortfall with a
+          cart-bound balance. */}
+      {target && target.customerId && balance > 0 && (
+        <StoreCreditRedeemControl
+          customerId={target.customerId}
+          balanceDue={Math.max(0, balance)}
+          payments={payments}
+          addPayment={addPayment}
+          removePayment={removePayment}
+        />
       )}
 
       {balance > 0 && (

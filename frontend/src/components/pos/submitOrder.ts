@@ -129,23 +129,46 @@ export async function submitPosOrder(
     }
 
     // POS-3: loyalty points are only atomically debited AFTER the order
-    // is confirmed. Call /loyalty/redeem now with the real order_id so
-    // the ledger is linked. Fail-soft: if the redeem call fails the order
-    // is still finalized (staff can adjust manually); the pending intent
-    // is cleared regardless.
+    // is confirmed (a failed order create burns nothing). /loyalty/redeem
+    // runs now with the real order_id so the ledger is linked; the server's
+    // guarded find_one_and_update is THE one burn path — never re-implement
+    // it client-side. BURN FIRST, TENDER SECOND: the redeem response is the
+    // only authority on what the burn was actually worth (the server may cap
+    // points to balance / order value), and the LOYALTY tender recorded on
+    // the order below copies its numbers exactly. Recording the tender first
+    // would bank rupees against a burn that can still refuse or shrink —
+    // the same class as the delivery-door bug (payment recorded, action
+    // refused). If the redeem fails, NO LOYALTY leg is posted: the points
+    // are untouched and the order truthfully shows that amount still due,
+    // surfaced as a loud warning — never silently.
     const pendingLoyalty = store.pendingLoyaltyRedeem;
+    let loyaltyLeg: { amount: number; reference: string } | null = null;
+    let loyaltyWarning: string | undefined;
     if (pendingLoyalty && store.customer?.id) {
       try {
-        await loyaltyApi.redeem({
+        const redeemed = await loyaltyApi.redeem({
           customer_id: String(store.customer.id),
           order_id: result.order_id,
           points: pendingLoyalty.points,
           order_value: pendingLoyalty.orderValue,
         });
+        loyaltyLeg = {
+          amount: redeemed.rupee_value,
+          reference: `${redeemed.redeemed_points}pts txn ${redeemed.txn_id}`,
+        };
+        const shortfall =
+          Math.round((pendingLoyalty.rupeeValue - redeemed.rupee_value) * 100) / 100;
+        if (shortfall > 0.01) {
+          loyaltyWarning =
+            `Loyalty redemption was capped at ₹${Math.round(redeemed.rupee_value).toLocaleString('en-IN')} ` +
+            `(₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} was applied on screen) — ` +
+            `collect the remaining ₹${Math.round(shortfall).toLocaleString('en-IN')} before closing the bill.`;
+        }
       } catch {
-        // Non-fatal: order is created. Log for ops visibility.
-        // eslint-disable-next-line no-console
-        console.warn('[POS] Deferred loyalty redeem failed — points NOT debited; order still saved.');
+        loyaltyWarning =
+          `Loyalty redeem failed — points were NOT debited, and ` +
+          `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
+          `Collect it another way, or re-apply the points from the Orders screen.`;
       }
       store.clearPendingLoyaltyRedeem();
     }
@@ -156,30 +179,54 @@ export async function submitPosOrder(
     let cashCapture: CashTenderCapture | null = store.cash_tender;
     const unrecordedPayments: string[] = [];
     for (const p of (store.payments || [])) {
-      // Skip the LOYALTY tender — it is a UI-only line that tracks the
-      // rupee value of the deferred redeem; the actual ledger entry was
-      // created by /loyalty/redeem above (or skipped on failure).
-      if (p.method === 'LOYALTY') continue;
+      // The LOYALTY tender IS posted to the order. The points were burned by
+      // /loyalty/redeem above — but that call only debits the loyalty account
+      // and writes the loyalty ledger; it never touches the ORDER, so an
+      // order that skips this leg bills the customer the same rupees again
+      // (points burned AND full amount owing). The leg carries the redeem
+      // response's amount, never the UI line's: only the server knows what
+      // the burn was actually worth after caps. No successful burn -> no leg
+      // (warned via loyaltyWarning above, or as unrecorded below).
+      let leg = p;
+      if (p.method === 'LOYALTY') {
+        if (!loyaltyLeg) {
+          if (!loyaltyWarning) {
+            // A LOYALTY line with no burn behind it (state drift): nothing
+            // was debited, so nothing may be recorded — but never silently.
+            unrecordedPayments.push(`LOYALTY ₹${Math.round(p.amount).toLocaleString('en-IN')}`);
+          }
+          continue;
+        }
+        leg = { ...p, amount: loyaltyLeg.amount, reference: loyaltyLeg.reference };
+        loyaltyLeg = null; // one burn backs at most one recorded leg
+      }
       try {
-        const body = buildPaymentBody(p, p.method === 'CASH' ? cashCapture : null);
-        if (p.method === 'CASH') cashCapture = null;
+        const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
+        if (leg.method === 'CASH') cashCapture = null;
         await orderApi.addPayment(result.order_id, body as any);
       } catch {
         // Still does not block the order - it exists, and a tender can be
         // recorded against it later. But it is no longer SILENT: money taken
         // at the counter that never reached the order is exactly what a
-        // day-end blind count cannot explain.
-        unrecordedPayments.push(`${p.method} ₹${Math.round(p.amount).toLocaleString('en-IN')}`);
+        // day-end blind count cannot explain. (For a LOYALTY leg the points
+        // ARE burned and the REDEEM ledger row is linked to this order_id,
+        // so staff can record the tender from the Orders screen.)
+        unrecordedPayments.push(`${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}`);
       }
     }
     store.setCashTender(null);
     store.setOrderResult(result.order_id, result.order_number);
     // Money taken at the counter that never reached the order is exactly what
     // a day-end blind count cannot explain. Never return success silently.
-    const paymentWarning = unrecordedPayments.length
-      ? `Order saved, but ${unrecordedPayments.join(' and ')} did NOT record against it. `
-        + `Add the payment from the Orders screen before closing the till.`
-      : undefined;
+    const warningParts: string[] = [];
+    if (unrecordedPayments.length) {
+      warningParts.push(
+        `Order saved, but ${unrecordedPayments.join(' and ')} did NOT record against it. `
+          + `Add the payment from the Orders screen before closing the till.`,
+      );
+    }
+    if (loyaltyWarning) warningParts.push(loyaltyWarning);
+    const paymentWarning = warningParts.length ? warningParts.join(' ') : undefined;
 
     // Phase 6.8 — auto-create workshop job + prompt sales to fill
     // fitting details. Only fires for Rx orders that actually ship a
