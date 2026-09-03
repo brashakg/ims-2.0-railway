@@ -144,6 +144,12 @@ WA_TEMPLATE_SEED: dict = {
     "BIRTHDAY_WISH": {"template_name": "BIRTHDAY_WISH", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name"]},
     "ANNUAL_CHECKUP_REMINDER": {"template_name": "ANNUAL_CHECKUP_REMINDER", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name"]},
     "ORDER_DELIVERED": {"template_name": "ORDER_DELIVERED", "language": "en", "category": "utility", "variables": ["customer_name", "order_number", "store_name"]},
+    # The optical till's "WhatsApp order receipt" queues this flow key at SALE
+    # completion, but the key had no seed row -- so the drain refused it as an
+    # unmapped flow in EVERY dispatch mode and the button could never work.
+    # Same shape as ORDER_DELIVERED; the owner maps the real approved template
+    # name in Settings > Notifications > Templates before arming dispatch.
+    "ORDER_CONFIRMED": {"template_name": "ORDER_CONFIRMED", "language": "en", "category": "utility", "variables": ["customer_name", "order_number", "store_name"]},
     "GOOGLE_REVIEW_REQUEST": {"template_name": "GOOGLE_REVIEW_REQUEST", "language": "en", "category": "utility", "variables": ["customer_name", "store_name", "review_link"]},
     "WALKOUT_RECOVERY": {"template_name": "WALKOUT_RECOVERY", "language": "en", "category": "marketing", "variables": ["customer_name", "store_name", "frame_names", "discount_percent", "validity_date"]},
     "REFERRAL_INVITE": {"template_name": "REFERRAL_INVITE", "language": "en", "category": "marketing", "variables": ["customer_name", "referral_code", "referee_reward", "referrer_reward"]},

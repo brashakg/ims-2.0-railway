@@ -296,8 +296,10 @@ export interface PaymentTarget {
   /** Store whose EMI rate applies. Defaults to the cart's store. */
   storeId?: string;
   /** The ORDER's customer. Present -> the store-credit tender renders on this
-      surface. Absent (the delivery counter today) -> store credit is hidden,
-      so a cart-bound balance can never be spent against another bill. */
+      surface (the delivery counter passes it, owner 2026-09-04). Absent ->
+      store credit is hidden, so a cart-bound balance can never be spent
+      against another bill. The server debits the ORDER's customer whatever id
+      is sent; this only scopes the balance the till displays. */
   customerId?: string;
 }
 
