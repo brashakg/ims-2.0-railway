@@ -2,11 +2,16 @@
 // POS line-item notes — ONE note box, ALWAYS sent (owner ruling 2026-08-21)
 // ============================================================================
 // Before this fix the cart line had TWO note fields: POSCart wrote `notes`
-// (via updateItemNote) and the Review step wrote `item_note` (via a second
-// setter), but the order payload sent ONLY `item_note` — a note typed on the
-// cart screen was SILENTLY LOST from the order. These tests type into the
-// REAL inputs on both screens and assert the createOrder PAYLOAD (not a log,
-// not store internals alone) carries the note.
+// (via updateItemNote) and the classic Review step wrote `item_note` (via a
+// second setter), but the order payload sent ONLY `item_note` — a note typed
+// on the cart screen was SILENTLY LOST from the order. These tests type into
+// the REAL input and assert the createOrder PAYLOAD (not a log, not store
+// internals alone) carries the note.
+//
+// The till is BillingSurface (the legacy wizard was retired 2026-09-04); its
+// cart IS the review, so there is exactly one note box and the second-editor
+// half of the bug cannot recur. The two cases that typed into the wizard's
+// Review-screen box retired with it (owner ruling 2026-09-04).
 
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -34,7 +39,11 @@ const MOCK_USER = {
   storeIds: ['BV-BOK-01'],
   discountCap: 20,
 };
-const MOCK_AUTH = { user: MOCK_USER };
+const MOCK_AUTH = {
+  user: MOCK_USER,
+  // CustomerCardWithLoyalty gates its edit door on hasRole.
+  hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
+};
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => MOCK_AUTH,
 }));
@@ -72,6 +81,29 @@ vi.mock('../../../services/api', () => {
   };
 });
 
+// Leaves of the surface that fetch through DIRECT module imports, not the
+// barrel: loyalty (customer card + loyalty tender), customers (search bar +
+// store-credit tender), handoffs (Rx picker). Inert -- none is under test.
+vi.mock('../../../services/api/loyalty', () => ({
+  loyaltyApi: {
+    getAccount: () => Promise.resolve({
+      account: { balance_points: 0, tier: 'BRONZE' }, settings: {}, expiring_soon_points: 0,
+    }),
+  },
+}));
+vi.mock('../../../services/api/customers', () => ({
+  customerApi: {
+    getCustomers: () => Promise.resolve([]),
+    getCustomer: () => Promise.resolve(null),
+    createCustomer: () => Promise.resolve({}),
+    getStoreCreditLedger: () => Promise.resolve({ balance: 0 }),
+  },
+  customersApi: {},
+}));
+vi.mock('../../../services/api/handoffs', () => ({
+  handoffsApi: { listClinicalInbox: () => Promise.resolve({ handoffs: [] }) },
+}));
+
 vi.mock('../../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
@@ -81,8 +113,12 @@ vi.mock('../../../services/api/settings', () => ({
   policiesApi: { getOne: () => Promise.resolve({ value: 12 }) },
 }));
 
+// Off-assertion strips that fetch through modules the barrel mock does not cover.
+vi.mock('../../../pages/pos/next/PosWidgets', () => ({ PosWidgets: () => null }));
+vi.mock('../../../pages/pos/next/SaleCompleteScreen', () => ({ default: () => null }));
+
 import { MemoryRouter } from 'react-router-dom';
-import { POSLayout } from '../POSLayout';
+import { BillingSurface } from '../../../pages/pos/next/BillingSurface';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 
@@ -90,7 +126,7 @@ function renderPOS() {
   return render(
     <MemoryRouter>
       <ToastProvider>
-        <POSLayout />
+        <BillingSurface />
       </ToastProvider>
     </MemoryRouter>,
   );
@@ -111,15 +147,14 @@ function seedSaleWithOpticalItem() {
   });
 }
 
-/** Pay the bill in full and click the real "Complete order" button; returns
+/** Pay the bill in full and click the real "Complete sale" button; returns
  *  the captured createOrder payload. */
 async function completeOrder() {
   act(() => {
     const s = usePOSStore.getState();
     s.addPayment({ method: 'CASH', amount: s.getGrandTotal() });
-    s.setStep('payment');
   });
-  const btn = await screen.findByRole('button', { name: /Complete order/i });
+  const btn = await screen.findByRole('button', { name: /Complete sale/i });
   expect(btn).toBeEnabled();
   fireEvent.click(btn);
   await waitFor(() => expect(createOrderMock).toHaveBeenCalledTimes(1));
@@ -127,7 +162,6 @@ async function completeOrder() {
 }
 
 const cartNoteInput = () => screen.getByPlaceholderText('PD / Fitting / Tint notes…') as HTMLInputElement;
-const reviewNoteInput = () => screen.getByPlaceholderText('Item notes (PD, fitting, tint, coating...)') as HTMLInputElement;
 
 beforeEach(() => {
   localStorage.clear();
@@ -138,7 +172,6 @@ beforeEach(() => {
 describe('one line-item note box, always sent', () => {
   it('REQUIREMENT (the lost-note bug): a note typed on the CART screen is in the createOrder payload as item_note', async () => {
     seedSaleWithOpticalItem();
-    act(() => usePOSStore.getState().setStep('products'));
     renderPOS();
 
     fireEvent.change(cartNoteInput(), { target: { value: 'PD 62 · tint grey' } });
@@ -148,42 +181,8 @@ describe('one line-item note box, always sent', () => {
     expect(body.items[0].item_note).toBe('PD 62 · tint grey');
   });
 
-  it('REQUIREMENT: a note typed on the REVIEW screen is in the createOrder payload as item_note', async () => {
-    seedSaleWithOpticalItem();
-    act(() => usePOSStore.getState().setStep('payment')); // merged Pay & Review
-    renderPOS();
-
-    fireEvent.change(reviewNoteInput(), { target: { value: 'fit low bridge' } });
-    fireEvent.blur(reviewNoteInput()); // review editor commits on blur
-
-    const body = await completeOrder();
-    expect(body.items[0].item_note).toBe('fit low bridge');
-  });
-
-  it('REQUIREMENT (one source of truth): cart note then review edit -> the review edit wins, BOTH screens show it, payload carries it', async () => {
-    seedSaleWithOpticalItem();
-    act(() => usePOSStore.getState().setStep('products'));
-    renderPOS();
-
-    // Type on the cart screen…
-    fireEvent.change(cartNoteInput(), { target: { value: 'PD 62' } });
-    // …move to Review: the SAME note is visible there (not a blank twin field).
-    act(() => usePOSStore.getState().setStep('payment'));
-    expect(reviewNoteInput().value).toBe('PD 62');
-    // Edit it on Review…
-    fireEvent.change(reviewNoteInput(), { target: { value: 'PD 62 · edited at review' } });
-    fireEvent.blur(reviewNoteInput());
-    // …and the cart screen now shows the review edit too.
-    act(() => usePOSStore.getState().setStep('products'));
-    expect(cartNoteInput().value).toBe('PD 62 · edited at review');
-
-    const body = await completeOrder();
-    expect(body.items[0].item_note).toBe('PD 62 · edited at review');
-  });
-
   it('no note -> item_note is absent from the wire payload (no undefined/null churn)', async () => {
     seedSaleWithOpticalItem();
-    act(() => usePOSStore.getState().setStep('payment'));
     renderPOS();
 
     const body = await completeOrder();

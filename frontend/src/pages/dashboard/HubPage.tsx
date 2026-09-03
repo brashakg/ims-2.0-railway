@@ -298,7 +298,7 @@ export default function HubPage() {
     : [
         {
           id: 'pos',
-          to: '/pos',
+          to: '/pos/new',
           title: 'POS',
           eyebrow: 'Checkout',
           desc: 'Guided checkout with Rx intake, split payments, hold & recall, overall discount, and printable invoice + workshop handoff.',

@@ -1,40 +1,26 @@
 // ============================================================================
-// POS route-resolution guard (legacy-till retirement gate, 2026-09-03/04)
+// POS route-resolution guard (legacy-till retirement, 2026-09-03/04)
 // ============================================================================
 // Four shops bill on /pos. The owner called "retire old pos" on 2026-09-03.
-// The salvage audit (routes/posRoutes.tsx comment has the summary) found the
-// legacy till (components/pos/POSLayout.tsx) is still the ONLY surface that can:
-//
-//  (a) ring a prescription_order -- the sale type submitOrder.ts keys the
-//      workshop-job auto-create and the "Rx order needs a lens" rule on
-//      (submitOrder.ts: `store.sale_type === 'prescription_order'`). Only
-//      POSLayout calls setSaleType('prescription_order'); BillingSurface never
-//      sets sale_type and GeneralCounterSurface forces 'quick_sale'.
-//  (b) take a DEPOSIT (is_advance_payment: pay part now, balance at delivery).
-//      submitOrder.ts refuses a partly-paid bill unless that flag is set, and
-//      only POSLayout's review panel sets it. The delivery counter exists to
-//      collect exactly that balance, so retiring /pos today removes the way
-//      to create the order it collects on.
-//  (c) change / clear a picked customer mid-bill (no setCustomer(null) door on
-//      the new surfaces; with an empty cart "Hold bill" is disabled, so a
-//      wrong pick can only be cleared by reloading the page).
-//
-// Until those land on the new surfaces, /pos must keep resolving to POSLayout,
-// and the three replacement routes must keep resolving too.
+// The salvage audit found three capabilities only the legacy wizard till had
+// (ring a prescription_order, take a deposit, clear a picked customer); all
+// three landed on BillingSurface (pages/pos/next/__tests__/
+// billingSurfaceRetirementGaps.test.tsx pins each), so /pos now REDIRECTS to
+// /pos/new. The address must keep working forever: staff have it bookmarked,
+// and walkouts/ResultPanel deep-links it with ?customer_id&walkout_id&
+// return_to -- nothing reads those yet, but the redirect must not drop them.
 //
 // What each failure means:
-//  - "/pos still mounts the LEGACY till" fails if the route is dropped (staff
-//    bookmarks 404) OR if it is repointed at a new surface before the gaps
-//    close (a premature retirement that silently removes deposit-taking and
-//    workshop-job creation from the shops).
+//  - "/pos redirects" fails if the route is dropped (staff bookmarks 404), if
+//    /pos renders a surface IN PLACE instead of redirecting (two addresses for
+//    one till), or if the redirect loses the query string (the walkout
+//    hand-off silently loses its ids).
 //  - the /pos/new | /pos/counter | /pos/delivery cases fail if a replacement
 //    address stops resolving.
 //  - the "REPLACED capabilities" cases fail if a capability the audit marked
 //    REPLACED (customer create, hold/recall, walk-in/walkout, bill note,
 //    delivery date, counter handover) stops being reachable on the surface
 //    that replaced it -- i.e. the retirement's own precondition regresses.
-// When the owner calls the real switch, retarget the first case to assert the
-// redirect instead -- do not delete the file; the addresses must work forever.
 
 import { Suspense } from 'react';
 import { render, screen, act } from '@testing-library/react';
@@ -57,13 +43,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // --- Mocks (before importing the routes) ------------------------------------
 
-// Authenticated SUPERADMIN with NO active store on the USER. The legacy till
-// reads the store from the user only, so /pos always renders its cheap
-// "no store" guard branch. The new surfaces fall back to posStore.store_id,
-// which the reachability cases set -- so they mount the full register
-// without a network (every fetch a customer-less mount makes is mocked
-// below). Stable reference -- a fresh object per render would loop
-// POSLayout's [user] effect.
+// Authenticated SUPERADMIN with NO active store on the USER. The surfaces fall
+// back to posStore.store_id, which the reachability cases set -- so they mount
+// the full register without a network (every fetch a customer-less mount
+// makes is mocked below); with it empty they render their cheap no-store
+// guard branch. Stable reference so no [user] effect loops.
 const MOCK_USER = {
   id: 'u1',
   name: 'Guard User',
@@ -113,7 +97,7 @@ vi.mock('../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
 
-import { MemoryRouter, Routes } from 'react-router-dom';
+import { MemoryRouter, Routes, useLocation } from 'react-router-dom';
 import { posRoutes } from '../posRoutes';
 import { usePOSStore } from '../../stores/posStore';
 import { ToastProvider } from '../../context/ToastContext';
@@ -122,10 +106,17 @@ import { ToastProvider } from '../../context/ToastContext';
 // take more than the 1s default query timeout on a loaded machine.
 const FIND = { timeout: 20000 };
 
+/** Where the router actually ended up -- pathname + search, as one string. */
+function LocationProbe() {
+  const { pathname, search } = useLocation();
+  return <div data-testid="location">{pathname + search}</div>;
+}
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
+        <LocationProbe />
         <Suspense fallback={<div data-testid="lazy-loading" />}>
           <Routes>{posRoutes}</Routes>
         </Suspense>
@@ -138,21 +129,25 @@ beforeEach(() => {
   localStorage.clear();
   act(() => {
     usePOSStore.getState().resetTransaction();
-    // The new surfaces fall back to store.store_id when the user has no active
+    // The surfaces fall back to store.store_id when the user has no active
     // store -- force it empty so every surface takes its no-store guard branch.
     usePOSStore.getState().setStoreId('');
   });
 });
 
 describe('POS routes keep resolving (retirement gate)', () => {
-  it('/pos still mounts the LEGACY till (POSLayout), not a redirect or a new surface', async () => {
-    renderAt('/pos');
-    // This exact copy exists ONLY in POSLayout's no-store panel. BillingSurface
-    // and GeneralCounterSurface print "Pick one from the header before
-    // billing." instead -- so pointing /pos at either of them fails here.
+  it('/pos redirects to /pos/new with the query string intact', async () => {
+    // The exact deep-link walkouts/ResultPanel builds.
+    const query = '?customer_id=c1&walkout_id=w1&return_to=%2Fwalkouts%2Fw1';
+    renderAt(`/pos${query}`);
+    // This copy exists ONLY in BillingSurface's / GeneralCounterSurface's
+    // no-store panel, so the redirect LANDED on the new till rather than
+    // rendering something in place.
     expect(
-      await screen.findByText(/POS requires an active store to process transactions/, undefined, FIND),
+      await screen.findByText(/Pick one from the header before billing/, undefined, FIND),
     ).toBeInTheDocument();
+    // ...at the new address, with every query parameter still attached.
+    expect(screen.getByTestId('location').textContent).toBe(`/pos/new${query}`);
   }, 30000);
 
   it('/pos/new resolves (BillingSurface)', async () => {
@@ -160,6 +155,7 @@ describe('POS routes keep resolving (retirement gate)', () => {
     expect(
       await screen.findByText(/Pick one from the header before billing/, undefined, FIND),
     ).toBeInTheDocument();
+    expect(screen.getByTestId('location').textContent).toBe('/pos/new');
   }, 30000);
 
   it('/pos/counter resolves (GeneralCounterSurface)', async () => {

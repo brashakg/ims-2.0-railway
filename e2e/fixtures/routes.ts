@@ -145,9 +145,6 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/walkouts/dashboard' },
   { path: '/returns' },
   { path: '/pos/counter' },
-  // The classic POS renders its own chrome, not the generic page header,
-  // so the default ready selector never matches (measured: >15s timeout).
-  { path: '/pos', ready: '.steps-rail, .pos-body, [class*="pos-"]' },
   { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/footfall' },
@@ -259,6 +256,13 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
       'redirect-only: the index maps the legacy ?tab= values onto '
       + '/inventory/<section> and lands on /inventory/stock. All seventeen '
       + 'sections are probed above.',
+  },
+  {
+    path: '/pos',
+    reason:
+      'redirect-only: the legacy wizard till (POSLayout) was retired on the owner '
+      + 'instruction "retire old pos" (2026-09-03/04). Navigate to /pos/new, probed '
+      + 'above, with the query string preserved for the walkouts deep-link.',
   },
   {
     path: '/tasks',

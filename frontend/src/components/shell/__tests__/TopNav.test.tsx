@@ -77,30 +77,30 @@ describe('TopNav group dropdowns (tap/click)', () => {
     expect(trigger('Sales floor')).toBeInTheDocument();
     // ...but no dropdown menu / menuitems are open initially.
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: /POS/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Billing$/i })).not.toBeInTheDocument();
   });
 
   it('(b) clicking a group trigger shows that group\'s items — the tap path', async () => {
     const user = userEvent.setup();
     renderTopNav();
 
-    expect(screen.queryByRole('menuitem', { name: /POS/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Billing$/i })).not.toBeInTheDocument();
 
     // CLICK (not hover) — this is the exact interaction that was dead on prod.
     await user.click(trigger('Sales floor'));
 
     const menu = screen.getByRole('menu', { name: /Sales floor/i });
     expect(menu).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: /POS/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /^Billing$/i })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /Orders/i })).toBeInTheDocument();
     expect(trigger('Sales floor')).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('(b-bare) a raw fireEvent.click opens the dropdown (proves no hover needed)', () => {
     renderTopNav();
-    expect(screen.queryByRole('menuitem', { name: /POS/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Billing$/i })).not.toBeInTheDocument();
     fireEvent.click(trigger('Sales floor'));
-    expect(screen.getByRole('menuitem', { name: /POS/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /^Billing$/i })).toBeInTheDocument();
   });
 
   it('(c) clicking the same trigger again hides the items', async () => {
@@ -108,10 +108,10 @@ describe('TopNav group dropdowns (tap/click)', () => {
     renderTopNav();
 
     await user.click(trigger('Sales floor'));
-    expect(screen.getByRole('menuitem', { name: /POS/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /^Billing$/i })).toBeInTheDocument();
 
     await user.click(trigger('Sales floor'));
-    expect(screen.queryByRole('menuitem', { name: /POS/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Billing$/i })).not.toBeInTheDocument();
     expect(trigger('Sales floor')).toHaveAttribute('aria-expanded', 'false');
   });
 
@@ -120,11 +120,11 @@ describe('TopNav group dropdowns (tap/click)', () => {
     renderTopNav();
 
     await user.click(trigger('Sales floor'));
-    expect(screen.getByRole('menuitem', { name: /POS/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /^Billing$/i })).toBeInTheDocument();
 
     // Switch to "Stock & supply" — first group's items vanish, second's appear.
     await user.click(trigger('Stock & supply'));
-    expect(screen.queryByRole('menuitem', { name: /POS/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /^Billing$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /Inventory/i })).toBeInTheDocument();
   });
 

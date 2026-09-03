@@ -111,7 +111,6 @@ export async function submitPosOrder(
       order_type: store.sale_type,
       salesperson_id: store.salesperson_id,
       salesperson_name: store.salesperson_name,
-      visufit_id: store.visufit_id || undefined,
       items: (store.cart || []).map((item: any) => ({
         item_type: mapCategory(item.category),
         product_id: item.product_id,

@@ -1,7 +1,8 @@
 // ============================================================================
 // PATIENT SAFETY: a blank power must not leave the counter as a "0"
 // ============================================================================
-// SITE 1 of the blank-vs-zero conflation. POSLayout built the create payload as
+// SITE 1 of the blank-vs-zero conflation. The till used to build the create
+// payload as
 //
 //     sph: String(rxData.sph_od || 0), cyl: ..., add: ...
 //
@@ -10,12 +11,14 @@
 // needs no reading add. Nobody made that claim. (`pd` on the very same line
 // already did the right thing: `String(rxData.pd_od || '')`.)
 //
-// This file does NOT stub PrescriptionForm. It drives the real inputs the way a
-// staff member does and asserts on what `prescriptionApi.createPrescription`
-// actually receives -- the wire bytes -- plus the local echo POSLayout writes
-// into the POS store for the Rx panel to read back. A helper-level test of
-// `powerOrNull` alone (utils/__tests__/rxPowerValue.test.ts) proves the parser;
-// only this proves POS still calls it.
+// This file does NOT stub PrescriptionForm. It drives the real inputs on the
+// REAL till -- BillingSurface (the legacy wizard was retired 2026-09-04): Rx
+// card -> picker -> "Create New Prescription" -> NewPrescriptionAtTill -- and
+// asserts on what `prescriptionApi.createPrescription` actually receives (the
+// wire bytes) plus the local echo the till writes into the POS store for the
+// Rx panel to read back. A helper-level test of `powerOrNull` alone
+// (utils/__tests__/rxPowerValue.test.ts) proves the parser; only this proves
+// the till still calls it.
 //
 // BOTH EYES, EVERY FIELD. The axis fix last round shipped with the left eye
 // unpinned, so per-eye asymmetry is the specific failure this file watches for.
@@ -47,13 +50,12 @@ const MOCK_USER = {
   storeIds: ['BV-BOK-01'],
   discountCap: 20,
 };
-vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({
-    user: MOCK_USER,
-    // CustomerCardWithLoyalty (inside POSLayout) gates its edit door on hasRole.
-    hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
-  }),
-}));
+const MOCK_AUTH = {
+  user: MOCK_USER,
+  // CustomerCardWithLoyalty gates its edit door on hasRole.
+  hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
+};
+vi.mock('../../../context/AuthContext', () => ({ useAuth: () => MOCK_AUTH }));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
@@ -76,7 +78,11 @@ vi.mock('../../../services/api', () => {
     orderApi: { createOrder: noop, addPayment: noop },
     prescriptionApi: {
       getPrescriptions: () => Promise.resolve({ prescriptions: [] }),
+      // The Rx picker lists the account's family; empty -> its "Create New
+      // Prescription" door, which is how the real form is reached.
+      getFamilyRx: () => Promise.resolve({ members: [] }),
       createPrescription: H.createPrescription,
+      uploadPrescriptionPhoto: noop,
     },
     workshopApi: { createJob: noop, updateFittingDetails: noop },
     adminStoreApi: { listStores: noop, getStoreUsers: () => Promise.resolve([]), getStaff: () => Promise.resolve([]) },
@@ -86,17 +92,48 @@ vi.mock('../../../services/api', () => {
   };
 });
 
+// Leaves of the surface that fetch through DIRECT module imports, not the
+// barrel: loyalty (customer card + loyalty tender), customers (search bar +
+// store-credit tender), handoffs (Rx picker). Inert -- none is under test.
+vi.mock('../../../services/api/loyalty', () => ({
+  loyaltyApi: {
+    getAccount: () => Promise.resolve({
+      account: { balance_points: 0, tier: 'BRONZE' }, settings: {}, expiring_soon_points: 0,
+    }),
+  },
+}));
+vi.mock('../../../services/api/customers', () => ({
+  customerApi: {
+    getCustomers: () => Promise.resolve([]),
+    getCustomer: () => Promise.resolve(null),
+    createCustomer: () => Promise.resolve({}),
+    getStoreCreditLedger: () => Promise.resolve({ balance: 0 }),
+  },
+  customersApi: {},
+}));
+vi.mock('../../../services/api/handoffs', () => ({
+  handoffsApi: { listClinicalInbox: () => Promise.resolve({ handoffs: [] }) },
+}));
+
 vi.mock('../../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
 
+vi.mock('../../../services/api/settings', () => ({
+  policiesApi: { getOne: () => Promise.resolve({ value: 12 }) },
+}));
+
+// Off-assertion strips that fetch through modules the barrel mock does not cover.
+vi.mock('../../../pages/pos/next/PosWidgets', () => ({ PosWidgets: () => null }));
+vi.mock('../../../pages/pos/next/SaleCompleteScreen', () => ({ default: () => null }));
+
 import { MemoryRouter } from 'react-router-dom';
-import { POSLayout } from '../POSLayout';
+import { BillingSurface } from '../../../pages/pos/next/BillingSurface';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 
-// Mounting the REAL PrescriptionForm inside the real POSLayout is expensive,
-// and this box is shared with other crews. Generous waits on purpose: a slow
+// Mounting the REAL PrescriptionForm inside the real till is expensive, and
+// this box is shared with other crews. Generous waits on purpose: a slow
 // machine must never be reported as a missing safety behaviour.
 const SLOW = 20000;
 
@@ -104,18 +141,17 @@ function renderPOS() {
   return render(
     <MemoryRouter>
       <ToastProvider>
-        <POSLayout />
+        <BillingSurface />
       </ToastProvider>
     </MemoryRouter>,
   );
 }
 
 /**
- * Open the REAL New Prescription form, as a staff member would.
- *
- * The await before opening the form is load-bearing: the Rx step fetches the
- * customer's prescriptions in an effect, and a promise settling AFTER the form
- * mounts remounts it and wipes the typed values.
+ * Open the REAL New Prescription form, as a staff member would: tap the Rx
+ * card, then the picker's "Create New Prescription" door. The picker offers
+ * that door only after its family fetch settles, so the form mounts after the
+ * fetch and no late re-render wipes the typed values.
  */
 async function openRealRxForm() {
   act(() => {
@@ -123,14 +159,12 @@ async function openRealRxForm() {
     s.resetTransaction();
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
-    s.setSaleType('prescription_order');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
   });
   renderPOS();
-  act(() => usePOSStore.getState().setStep('products'));
-  fireEvent.click(screen.getByRole('button', { name: 'Use last exam' }));
-  await screen.findByText(/No prescriptions found/, {}, { timeout: SLOW });
-  fireEvent.click(screen.getByText('New Prescription'));
+  fireEvent.click(await screen.findByRole('button', { name: /Choose or add/ }, { timeout: SLOW }));
+  fireEvent.click(await screen.findByRole('button', { name: /Create New Prescription/ }, { timeout: SLOW }));
+  await screen.findByText('New Prescription', {}, { timeout: SLOW });
 }
 
 /** RxPowerInput normalises on blur, so type then blur like a real user. */
@@ -203,7 +237,7 @@ describe('a BLANK power is never persisted as a claim of zero', () => {
   }, SLOW);
 
   it('echoes a blank power into the POS store as null, not as a fabricated 0', async () => {
-    // The local echo POSLayout writes for the Rx panel to read back carried
+    // The local echo the till writes for the Rx panel to read back carried
     // BOTH halves of the bug: `sph || 0` invented a plano for a blank while
     // `cyl || null` / `add || null` deleted a recorded one.
     await openRealRxForm();

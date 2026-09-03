@@ -355,7 +355,12 @@ export function PrescriptionSelectModal({
                             </div>
                             <div>
                               <span className="text-gray-500 text-xs">AXIS</span>
-                              <p className="font-medium">{rightEye.axis || '-'}</p>
+                              {/* `??`, never `||`: an axis recorded as 0 is a
+                                  real meridian and must read as 0. `|| '-'`
+                                  printed it as "not recorded" -- the same
+                                  zero-vs-blank defect this repo has fixed
+                                  three times on the old till. */}
+                              <p className="font-medium">{rightEye.axis ?? '-'}</p>
                             </div>
                             {/* NEVER `{rightEye.add && (`: a recorded ADD of 0
                                 is a finding the optician must see, and `0 &&`
@@ -384,7 +389,8 @@ export function PrescriptionSelectModal({
                             </div>
                             <div>
                               <span className="text-gray-500 text-xs">AXIS</span>
-                              <p className="font-medium">{leftEye.axis || '-'}</p>
+                              {/* Same rule on the LEFT eye -- see the note above. */}
+                              <p className="font-medium">{leftEye.axis ?? '-'}</p>
                             </div>
                             {/* Same rule on the LEFT eye -- see the note above. */}
                             {hasRecordedPower(leftEye.add) && (
