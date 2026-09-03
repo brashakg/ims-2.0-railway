@@ -352,10 +352,12 @@ async def get_customer_lifecycle_phase(
 
 @router.get("/customers/segment/rfm", response_model=List[CustomerSegmentResponse])
 async def get_rfm_segmentation(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(
+        require_roles("SUPERADMIN", "ADMIN", "STORE_MANAGER")
+    ),
 ):
     """
-    RFM (Recency, Frequency, Monetary) segmentation of all customers.
+    RFM (Recency, Frequency, Monetary) segmentation of customers.
 
     **Segments:**
     - Champions: Recent, frequent, high spenders
@@ -363,9 +365,30 @@ async def get_rfm_segmentation(
     - Big Spenders: High lifetime value
     - At Risk: Were regular, now declining engagement
     - Lost: No activity in 12+ months
+
+    MANAGER-ONLY and STORE-SCOPED. The response carries no personal data -- it
+    is counts and an average lifetime value per segment -- but that is the
+    business's own numbers, and this door was AUTHENTICATED, so any signed-in
+    cashier could read the company's average customer value. It also called
+    query_all_customers() with no store filter, so a single-store manager was
+    served every store's customers; the churn endpoint immediately above it has
+    always scoped by store. ADMIN and SUPERADMIN keep the company-wide view.
     """
     try:
-        all_customers = db.query_all_customers()
+        store_id = current_user.get("active_store_id")
+        roles = current_user.get("roles", []) or []
+        sees_all = any(r in ("SUPERADMIN", "ADMIN") for r in roles)
+        if not sees_all and store_id and hasattr(db, "query_customers_by_store"):
+            all_customers = db.query_customers_by_store(store_id)
+        else:
+            all_customers = db.query_all_customers()
+            if not sees_all and store_id:
+                all_customers = [
+                    c
+                    for c in all_customers
+                    if store_id
+                    in (c.get("store_ids", []) + [c.get("primary_store_id", "")])
+                ]
         segments = _perform_rfm_segmentation(all_customers)
         return segments
     except Exception as e:

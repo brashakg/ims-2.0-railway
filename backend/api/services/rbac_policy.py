@@ -1252,7 +1252,9 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/segment/rfm",
-        "allowed": "AUTHENTICATED",
+        # Matches the /customers/segmentation screen gate. Was AUTHENTICATED
+        # while the route published company-wide average customer value.
+        "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER"],
     },
     {
         "method": "GET",

@@ -109,20 +109,37 @@ def test_the_policy_registry_agrees_with_the_route():
     assert set(allowed) == {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}, allowed
 
 
-def test_the_rfm_report_is_flagged_not_fixed_here():
-    """GET /crm/customers/segment/rfm has the same AUTHENTICATED shape and loads
-    the whole customer collection. It is a separate decision (it publishes
-    average customer value, which is business data rather than personal data),
-    so this test records that it is KNOWN and still open rather than letting it
-    pass unnoticed. Delete this test when that door is dealt with."""
+def test_the_rfm_report_is_gated_too():
+    """Same AUTHENTICATED shape, different payload: RFM carries no personal
+    data, only counts and an average lifetime value per segment. That is still
+    the business's own numbers being handed to any signed-in cashier, so it
+    gets the same gate as the screen that renders it."""
     from api.services import rbac_policy
 
     rows = [
         r for r in rbac_policy.POLICY
         if r.get("path") == "/api/v1/crm/customers/segment/rfm"
     ]
-    assert rows, "the RFM row vanished - re-check what replaced it"
-    assert rows[0]["allowed"] == "AUTHENTICATED", (
-        "the RFM door changed. If it was tightened deliberately, update or "
-        "delete this reminder test."
+    assert len(rows) == 1, rows
+    assert rows[0]["allowed"] != "AUTHENTICATED"
+    assert set(rows[0]["allowed"]) == {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+
+
+def test_the_rfm_report_is_store_scoped_for_a_store_manager():
+    """It called query_all_customers() with no filter, so a single-store
+    manager was served every store's customers -- while the churn endpoint
+    immediately above it has always scoped by store. ADMIN and SUPERADMIN keep
+    the company-wide view on purpose."""
+    import inspect
+
+    src = inspect.getsource(crm.get_rfm_segmentation)
+    body = " ".join(
+        line for line in src.splitlines() if not line.strip().startswith("#")
+    )
+    assert "require_roles(" in body, "RFM is not role-gated"
+    assert "query_customers_by_store" in body, (
+        "RFM still loads every store's customers for every caller"
+    )
+    assert "SUPERADMIN" in body and "ADMIN" in body, (
+        "the company-wide carve-out for ADMIN/SUPERADMIN is missing"
     )
