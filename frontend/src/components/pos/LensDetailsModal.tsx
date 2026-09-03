@@ -550,3 +550,40 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
 }
 
 export default LensDetailsModal;
+
+
+/** Put a made-to-order lens on the bill.
+ *
+ * A lens the customer needs GROUND is not a catalogue product: there is no SKU
+ * to scan, so without this door those orders simply cannot be rung up.
+ *
+ * ONE builder, called by both tills, because the line it produces carries
+ * decisions the rest of the system depends on:
+ *   * quantity 2 - a prescription lens is sold as a PAIR. Booking one would
+ *     halve the price and send a single lens to the lab.
+ *   * a `lens-` product id and RX-CUSTOM sku, which is how the pricing caps and
+ *     the identity rules recognise a virtual, non-catalogue line.
+ *   * linked_prescription_id, without which the Rx gate refuses the order, and
+ *   * lens_details, which is what makes the order need a workshop job at all
+ *     (orders.py::_order_needs_fitting reads it).
+ */
+export function addManualLensToCart(store: any, details: any) {
+  const stamp = Date.now();
+  store.addToCart({
+    product_id: `lens-${stamp}`,
+    name: `${details.lensCategory} - ${details.indexLabel}`,
+    sku: `RX-CUSTOM-${stamp}`,
+    category: 'RX_LENSES',
+    unit_price: details.totalPrice || 0,
+    mrp: details.totalPrice || 0,
+    quantity: 2,
+    is_optical: true,
+    linked_prescription_id: store.prescription?.id,
+    lens_details: {
+      type: details.lensCategory,
+      material: details.indexLabel,
+      index: details.indexId,
+      coatings: [details.coatingLabel].filter(Boolean),
+    },
+  });
+}

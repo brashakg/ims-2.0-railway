@@ -15,6 +15,7 @@ import { AutoSearch } from '../common/AutoSearch';
 import { customerApi } from '../../services/api/customers';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 import { choosePrimaryPatient, toPosPatient } from '../../utils/patientFromCustomer';
+import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 
 /** Apply a search hit to the POS store, honouring BILL-TO-MEMBER P1:
  *  - a 'patient' hit IS a member -> bill to that member;
@@ -38,6 +39,45 @@ export function selectCustomerHit(store: any, hit: CustomerSearchHit) {
     if (primary) store.setPatient(toPosPatient(primary, cid));
   }
 }
+
+/** Create a brand-new customer and put them straight on the bill.
+ *
+ * The CREATE half of the same rule, and it lives here for the same reason the
+ * select half does: it carries BILL-TO-MEMBER P1 (an order bills a MEMBER, so
+ * the server-returned Primary is auto-selected), and it must build the payload
+ * through the ONE shared builder so a customer created at the till is
+ * byte-identical to one created on the Customers page or at Clinical intake -
+ * including dob, anniversary and consents, which an earlier hand-rolled POS
+ * payload silently dropped.
+ *
+ * Called by BOTH tills. A first-time customer could not be billed on the new
+ * POS at all before this: the assistant had to leave the counter, register them
+ * on the Customers screen, and come back.
+ */
+export async function createAndSelectCustomer(
+  store: any,
+  customerData: CustomerFormData,
+): Promise<void> {
+  const payload = buildCustomerCreatePayload(customerData);
+  const r: any = await customerApi.createCustomer(payload as any);
+  const custId = r?.customer_id || r?.id || `new-${Date.now()}`;
+  // Carry the server-returned patients[] (incl. the auto-seeded Primary, with
+  // real patient_ids + is_primary) so the member picker can render the family.
+  const returnedPatients = Array.isArray(r?.patients) ? r.patients : [];
+  store.setCustomer({
+    id: custId,
+    name: customerData.fullName,
+    phone: customerData.mobileNumber,
+    email: customerData.email,
+    customerType: customerData.customerType,
+    patients: returnedPatients,
+  } as any);
+  const primary = choosePrimaryPatient(returnedPatients);
+  if (primary) {
+    store.setPatient(toPosPatient(primary, custId) as any);
+  }
+}
+
 
 export function CustomerSearchBar({ store }: { store: any }) {
   return (

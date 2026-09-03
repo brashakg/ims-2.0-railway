@@ -20,6 +20,9 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
+import { useHeldBills } from '../../../components/pos/useHeldBills';
+import { addManualLensToCart, LensDetailsModal } from '../../../components/pos/LensDetailsModal';
+import { NewPrescriptionAtTill } from '../../../components/pos/NewPrescriptionAtTill';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -28,9 +31,10 @@ import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
+import { AddCustomerModal } from '../../../components/customers/AddCustomerModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { PosWidgets } from './PosWidgets';
-import { CustomerSearchBar } from '../../../components/pos/CustomerSearchBar';
+import { CustomerSearchBar, createAndSelectCustomer } from '../../../components/pos/CustomerSearchBar';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import SaleCompleteScreen from './SaleCompleteScreen';
 import ProductResultsStrip from './ProductResultsStrip';
@@ -51,6 +55,14 @@ export function BillingSurface() {
   // step on this surface, so the trigger lives on the line itself.
   const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
+  const [addCustomerOpen, setAddCustomerOpen] = useState(false);
+  const [recallOpen, setRecallOpen] = useState(false);
+  const [lensModalOpen, setLensModalOpen] = useState(false);
+  const [newRxOpen, setNewRxOpen] = useState(false);
+  // Hold / recall, shared with the classic till. The store ALSO parks a cart
+  // automatically when the screen idles, so without this the new POS could
+  // strand that work with no way to bring it back.
+  const held = useHeldBills(store, user?.id || '');
   const [productQuery, setProductQuery] = useState('');
   // The finished sale, held so the completion screen can print and send
   // against it. Cleared by Done, which also resets the till for the next
@@ -165,6 +177,31 @@ export function BillingSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => {
+              if ((store.cart || []).length === 0) return;
+              held.holdCurrentBill();
+            }}
+            disabled={(store.cart || []).length === 0}
+            title="Put this bill aside and serve the next customer"
+            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+          >
+            Hold bill
+          </button>
+          <button
+            type="button"
+            onClick={() => setRecallOpen(true)}
+            title="Bring back a bill you put aside"
+            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Held
+            {held.heldBills.length > 0 && (
+              <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold">
+                {held.heldBills.length}
+              </span>
+            )}
+          </button>
           <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {(store.cart || []).length} item{(store.cart || []).length === 1 ? '' : 's'}
@@ -217,8 +254,21 @@ export function BillingSurface() {
                     Customer <span className="text-red-500">*</span>
                   </div>
                   <CustomerSearchBar store={store} />
-                  <div className="mt-1 text-[11px] text-gray-500">
-                    Every bill needs a customer — no anonymous sale on any counter.
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <span className="text-[11px] text-gray-500 flex-1">
+                      Every bill needs a customer — no anonymous sale on any counter.
+                    </span>
+                    {/* A first-time customer could not be billed here AT ALL:
+                        the assistant had to leave the till, register them on
+                        the Customers screen and come back. Same modal and same
+                        shared creator the classic POS uses. */}
+                    <button
+                      type="button"
+                      onClick={() => setAddCustomerOpen(true)}
+                      className="shrink-0 min-h-[32px] px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      + New customer
+                    </button>
                   </div>
                 </div>
               )}
@@ -300,13 +350,29 @@ export function BillingSurface() {
             </div>
 
             {/* Product entry: compact — one row of controls (owner spec 6) */}
-            <div className="shrink-0">
-              <BarcodeScanner
-                onScan={handleScan}
-                onManualSearch={setProductQuery}
-                placeholder="Scan barcode or search products…"
-                autoFocus
-              />
+            <div className="shrink-0 flex gap-2">
+              <div className="flex-1 min-w-0">
+                <BarcodeScanner
+                  onScan={handleScan}
+                  onManualSearch={setProductQuery}
+                  placeholder="Scan barcode or search products…"
+                  autoFocus
+                />
+              </div>
+              {/* A made-to-order lens has no barcode to scan. The classic till
+                  gated this on sale_type === 'prescription_order'; this surface
+                  never sets sale_type, and a linked Rx is the real requirement
+                  anyway - the order is refused without one. */}
+              {store.prescription && (
+                <button
+                  type="button"
+                  onClick={() => setLensModalOpen(true)}
+                  title="Add a made-to-order lens that has no barcode"
+                  className="shrink-0 min-h-[40px] px-3 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 text-xs font-medium hover:bg-purple-100"
+                >
+                  + Lens
+                </button>
+              )}
             </div>
 
             {/* Typed search results. Adds the line itself through the shared
@@ -365,6 +431,78 @@ export function BillingSurface() {
         </div>
       )}
 
+      <NewPrescriptionAtTill
+        isOpen={newRxOpen}
+        onClose={() => setNewRxOpen(false)}
+        store={store}
+      />
+
+      {lensModalOpen && (
+        <LensDetailsModal
+          onClose={() => setLensModalOpen(false)}
+          onSave={(details: any) => {
+            addManualLensToCart(store, details);
+            setLensModalOpen(false);
+          }}
+        />
+      )}
+
+      {recallOpen && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => setRecallOpen(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[80dvh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-3.5 border-b border-gray-200 flex items-center gap-3">
+              <h2 className="text-base font-semibold flex-1">Held bills</h2>
+              <button onClick={() => setRecallOpen(false)} aria-label="Close" className="text-gray-500 hover:text-gray-900">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {held.heldBills.length === 0 ? (
+              <div className="p-6 text-center text-sm text-gray-500">
+                Nothing on hold. Use <span className="font-medium text-gray-700">Hold bill</span> to
+                put the current sale aside without losing it.
+              </div>
+            ) : (
+              <div className="p-3 space-y-2">
+                {held.heldBills.map((b) => (
+                  <div key={b.id} className="flex items-center gap-3 rounded-xl border border-gray-200 p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium truncate">{b.customer || 'No customer'}</div>
+                      <div className="text-[11px] text-gray-500">
+                        {b.items} item{b.items === 1 ? '' : 's'} · {'₹'}{Math.round(b.total || 0).toLocaleString('en-IN')}
+                        {b.auto ? ' · parked automatically' : ''}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { held.discardBill(b.id); }}
+                      className="min-h-[36px] px-2.5 rounded-lg border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={() => { if (held.recallBill(b.id)) setRecallOpen(false); }}
+                      className="min-h-[36px] px-3 rounded-lg bg-gray-900 text-white text-[11px] font-semibold"
+                    >
+                      Recall
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Mounted unconditionally: the whole point is to reach it when there
+          is NO customer on the bill yet. It renders nothing while closed. */}
+      <AddCustomerModal
+        isOpen={addCustomerOpen}
+        onClose={() => setAddCustomerOpen(false)}
+        onSave={async (data) => {
+          await createAndSelectCustomer(store, data);
+          setAddCustomerOpen(false);
+        }}
+      />
+
       {rxPickerOpen && store.customer?.id && (
         <PrescriptionSelectModal
           customerId={String(store.customer.id)}
@@ -376,10 +514,12 @@ export function BillingSurface() {
             setRxPickerOpen(false);
           }}
           onCreateNew={() => {
-            // Capture-new lands with the Rx scenarios panel; until then the
-            // clinic/classic Rx form remains the create door.
+            // A customer arriving with a paper Rx from an outside doctor used
+            // to be told to go to the Clinical screen and come back, with the
+            // bill abandoned behind them. Same capture form the classic till
+            // uses, including the axis prompt.
             setRxPickerOpen(false);
-            setErrorMsg('Add a new prescription from the Clinical screen, then pick it here.');
+            setNewRxOpen(true);
           }}
         />
       )}
