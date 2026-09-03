@@ -159,7 +159,7 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Two find-or-create implementations collapsed into one; race on the unique index returns 409 not 500 | **WIP** |
 | Email-only web buyers wrote `mobile: ""` (indexed; 2nd one becomes a phantom customer) | **WIP** |
 | Cashiers + sales staff: full customer edit incl. phone + GSTIN, from both tills | **WIP** |
-| Legacy till retirement - salvage inventory first | **WIP** |
+| Legacy till retirement - inventory DONE: **cannot retire yet**. 3 gaps on the new billing screen (Rx sale creates no workshop job; no deposit-only sale; no clear-customer). All in build. Visufit ID + lens suggestions DROPPED by owner. 8 legacy-vehicle tests to re-point. | **BLOCKED on build** |
 
 Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
 customers; 0 duplicate top-level numbers; 9 family members also exist as their own
