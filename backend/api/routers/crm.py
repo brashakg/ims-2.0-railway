@@ -27,6 +27,11 @@ from ..dependencies import (
 )
 from ..services.task_triggers import create_system_task
 
+# Customer store-ownership + the credit-role set are single-sourced in the
+# customers router; import them rather than re-deriving the rule here (this
+# file previously had neither on the 360 and loyalty doors).
+from .customers import _CREDIT_ROLES, customer_in_scope
+
 router = APIRouter()
 
 
@@ -259,6 +264,12 @@ async def get_customer_360(
         # Fetch customer from database
         customer = db.query_customer(customer_id)
         if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        # Object-level store scope. The 360 payload is this customer's whole
+        # life -- lifetime value, order history, prescriptions, loyalty -- so
+        # an out-of-scope read is a 404 (same as GET /customers/{id}): we do
+        # not even confirm the id exists in another store.
+        if not customer_in_scope(customer, current_user):
             raise HTTPException(status_code=404, detail="Customer not found")
 
         # Fetch orders and calculate stats
@@ -1657,16 +1668,26 @@ async def get_customer_return_risk(
 async def add_loyalty_points(
     customer_id: str = Path(..., description="Customer ID"),
     request: AddLoyaltyPointsRequest = Body(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
 ):
-    """Add loyalty points to customer account"""
+    """Add loyalty points to customer account.
+
+    Points redeem against real money, so this door carries the SAME gate as its
+    twin POST /customers/{id}/loyalty/add: credit roles only, and the customer
+    must belong to a store the caller owns.
+    """
     try:
         repo = get_customer_repository()
         if not repo:
             raise HTTPException(status_code=500, detail="Database connection failed")
 
-        if not repo.find_by_id(customer_id):
+        customer = repo.find_by_id(customer_id)
+        if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
+        if not customer_in_scope(customer, current_user):
+            raise HTTPException(
+                status_code=403, detail="No access to this customer's store"
+            )
 
         updated_customer = repo.increment_loyalty_points(customer_id, request.points)
         if updated_customer is None:

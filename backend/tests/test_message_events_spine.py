@@ -34,6 +34,7 @@ import sys
 from typing import Any, Dict, List
 
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -582,6 +583,12 @@ def test_customer_360_carries_the_message_timeline(spine, monkeypatch):
                 "customer_id": cid,
                 "name": "ZZ Customer",
                 "mobile": "9812345678",
+                # The customer has to be HOMED somewhere now: Customer 360 is
+                # store-scoped, so a record belonging to no shop is reachable
+                # by nobody. It used to hand the full 360 payload - lifetime
+                # value, orders, prescriptions, loyalty - to any signed-in user
+                # who could guess an id.
+                "store_id": "ZZ-STORE-1",
                 "created_at": "2026-01-01T00:00:00",
             }
 
@@ -595,12 +602,33 @@ def test_customer_360_carries_the_message_timeline(spine, monkeypatch):
             return []
 
     monkeypatch.setattr(crm, "db", _Stub())
+    owner = {
+        "user_id": "u1",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["ZZ-STORE-1"],
+        "active_store_id": "ZZ-STORE-1",
+    }
     out = asyncio.run(
-        crm.get_customer_360(customer_id="CUST-ZZ-1", current_user={"user_id": "u1"})
+        crm.get_customer_360(customer_id="CUST-ZZ-1", current_user=owner)
     )
     timeline = out["message_timeline"]
     assert [e["provider_message_id"] for e in timeline] == ["REQ-ZZ-T2", "REQ-ZZ-T1"]
     assert timeline[0]["event"] == "clicked"
+
+    # ...and the door is STORE-SCOPED. A manager from another shop guessing the
+    # same id gets nothing. Without this the assertions above would pass just as
+    # happily with the ownership check deleted.
+    stranger = {
+        "user_id": "u2",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["ZZ-OTHER-STORE"],
+        "active_store_id": "ZZ-OTHER-STORE",
+    }
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(
+            crm.get_customer_360(customer_id="CUST-ZZ-1", current_user=stranger)
+        )
+    assert refused.value.status_code == 404
 
 
 def test_preflight_reports_failure_counts_honestly(spine):
