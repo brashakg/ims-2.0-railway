@@ -138,7 +138,13 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/purchase/grn' },
   { path: '/purchase/receive' },
   { path: '/purchase/recon-console' },
-  { path: '/reports' },
+  { path: '/reports/sales' },
+  { path: '/reports/inventory' },
+  { path: '/reports/customers' },
+  { path: '/reports/gst' },
+  { path: '/reports/forecast' },
+  { path: '/reports/gstr1' },
+  { path: '/reports/gstr3b' },
   { path: '/reports/blueprint' },
   { path: '/reports/day-end' },
   { path: '/reports/outstanding' },
@@ -187,6 +193,12 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
  * is excluded for RBAC — every role gate in the app admits this user.
  */
 export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
+  {
+    path: '/reports',
+    reason:
+      'redirect-only: the index route maps the legacy ?tab= values onto ' +
+      '/reports/<section>. Every section it can land on is probed above.',
+  },
   { path: '/finance', reason: 'redirect-only: Navigate to /finance/dashboard, which is covered' },
   { path: '/cash-flow', reason: 'redirect-only: Navigate to /finance/cash-flow, which is covered' },
   { path: '/catalog/autopilot', reason: 'redirect-only: Autopilot was deleted (PR #1042); Navigate to /catalog/add' },

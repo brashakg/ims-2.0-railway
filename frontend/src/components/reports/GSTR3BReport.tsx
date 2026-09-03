@@ -208,7 +208,7 @@ export function GSTR3BReport() {
           </div>
 
           {reportData && (
-            <div className="ml-auto flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 tablet:ml-auto">
               <button onClick={downloadJSON} className="btn-outline text-sm flex items-center gap-2">
                 <Download className="w-4 h-4" />
                 Download JSON
