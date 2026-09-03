@@ -61,12 +61,12 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 
 | Module | What was wrong | Status |
 |---|---|---|
-| **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **PR #1086** (in CI) |
+| **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **MERGED #1086** |
 | **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** (in CI) |
 | **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **DONE** |
 | **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** |
-| **Clinical** | 5 hidden tabs, two rival prescription doors | **TODO** — plan ready |
-| **Inventory** | 19 sections in one file, 3 in the menu | **TODO** — designed |
+| **Clinical** | 5 hidden tabs, two rival prescription doors | **DONE** — weaker Rx door deleted |
+| **Inventory** | 19 sections in one file, 3 in the menu | **DONE** — 17 real pages |
 | **Catalog** | Mostly split already; needs the review queue + photo work | **TODO** — designed |
 
 ---
@@ -77,7 +77,7 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 |---|---|---|
 | Churn-risk list returned 500 **complete customer records** to any signed-in user | High | **DONE** |
 | RFM report published company-wide average customer value to any signed-in user | Medium | **DONE** |
-| **13 of 19 customer doors trusted an id as authority — 4 moved money** | High | **PR #1087** (in CI) |
+| **13 of 19 customer doors trusted an id as authority — 4 moved money** | High | **MERGED #1089** |
 | Login limiter locked out a **whole shop** on five typos across three people | High | **DONE** |
 | Two IP readers, one spoofable and one returning a constant | Medium | **DONE** |
 | Salary screens reachable by 3 roles the endpoints refuse | Medium | **PR #1088** (in CI) |
@@ -101,10 +101,8 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 
 | Work | State |
 |---|---|
-| **Clinical** split — 5 hidden tabs, two rival prescription doors | plan ready |
-| **Inventory** split — 19 sections in one file, 3 in the menu | designed |
 | **Catalog** — review queue + the photo work | designed |
-| **Staff sign-in gate** — store wifi or within 50m; ADMIN/SUPERADMIN never gated; SUPERADMIN approves a device from his phone | spec ready |
+| **Staff sign-in gate** — approved devices (WebAuthn passkeys); ADMIN/SUPERADMIN never gated | **BUILT, shipped OFF** — owner arms it |
 | Three screens each re-map the store's staff list their own way (`NewTaskModal`, `SalespersonPicker`, the new `useStoreStaff`) | small follow-up |
 
 ## 4c. Found and NOT fixed — recorded so they are not lost
