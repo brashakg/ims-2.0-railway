@@ -396,8 +396,10 @@ export function GSTR1Report() {
             />
           </div>
 
+          {/* Wraps on a phone: three rigid buttons pushed the page 52px wider
+              than a 360px screen, so the whole report scrolled sideways. */}
           {reportData && (
-            <div className="ml-auto flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 tablet:ml-auto">
               <button onClick={downloadJSON} className="btn-outline text-sm flex items-center gap-2">
                 <Download className="w-4 h-4" />
                 Download JSON
@@ -487,10 +489,10 @@ export function GSTR1Report() {
 
       {/* Section Tabs */}
       <div className="card">
-        <div className="flex border-b border-gray-200">
+        <div className="flex border-b border-gray-200 overflow-x-auto">
           <button
             onClick={() => setActiveSection('b2b')}
-            className={`px-4 py-3 font-medium text-sm transition-colors ${
+            className={`shrink-0 whitespace-nowrap px-4 py-3 font-medium text-sm transition-colors ${
               activeSection === 'b2b'
                 ? 'border-b-2 border-purple-600 text-purple-600'
                 : 'text-gray-600 hover:text-gray-900'
@@ -501,7 +503,7 @@ export function GSTR1Report() {
           </button>
           <button
             onClick={() => setActiveSection('b2cl')}
-            className={`px-4 py-3 font-medium text-sm transition-colors ${
+            className={`shrink-0 whitespace-nowrap px-4 py-3 font-medium text-sm transition-colors ${
               activeSection === 'b2cl'
                 ? 'border-b-2 border-purple-600 text-purple-600'
                 : 'text-gray-600 hover:text-gray-900'
@@ -512,7 +514,7 @@ export function GSTR1Report() {
           </button>
           <button
             onClick={() => setActiveSection('b2cs')}
-            className={`px-4 py-3 font-medium text-sm transition-colors ${
+            className={`shrink-0 whitespace-nowrap px-4 py-3 font-medium text-sm transition-colors ${
               activeSection === 'b2cs'
                 ? 'border-b-2 border-purple-600 text-purple-600'
                 : 'text-gray-600 hover:text-gray-900'
