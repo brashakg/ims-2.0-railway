@@ -779,28 +779,18 @@ async def create_customer(
     repo = get_customer_repository()
 
     if repo is not None:
-        # Duplicate-number guard. find_by_mobile matches an existing active
-        # customer whose `mobile` OR `phone` equals the new number (the number
-        # is the customer's identity; TechCherry-imported docs carry it under
-        # `phone`, natively-created docs under `mobile`). Checking both fields
-        # here -- and writing BOTH `mobile` and `phone` below -- prevents the
-        # split-AR duplicate accounts the UNIQUE `mobile` index alone could miss.
-        existing = repo.find_by_mobile(customer.mobile)
-        if existing is not None:
-            raise HTTPException(
-                status_code=409, detail="Customer with this mobile already exists"
-            )
-
-        # Check if email already exists (when provided)
-        if customer.email:
-            existing_email = repo.find_by_email(customer.email)
-            if existing_email is not None:
-                raise HTTPException(
-                    status_code=409, detail="Customer with this email already exists"
-                )
+        # Dedup + create live in ONE place: services.customer_service.ensure_customer
+        # (strict=True below). It refuses a top-level duplicate mobile/email, a
+        # number that is already someone's FAMILY MEMBER (owner ruling 2026-09-04),
+        # and a race-lost insert -- each as a 409, never a 500. This router used
+        # to carry its own copy of that logic; a second copy is how every drift
+        # bug in this repo started.
 
         # Prepare customer data
         customer_data = {
+            # Minted here (the repo keeps a supplied id) so this dict IS the
+            # created record after the insert, whatever repo double is bound.
+            "customer_id": str(uuid.uuid4()),
             "customer_type": customer.customer_type,
             "name": customer.name,
             "mobile": customer.mobile,
@@ -874,7 +864,22 @@ async def create_customer(
         if stamp:
             customer_data["email_validation"] = stamp
 
-        created = repo.create(customer_data)
+        from ..services.customer_service import CustomerConflict, ensure_customer
+
+        try:
+            created_id, _ = ensure_customer(
+                None,
+                mobile=customer.mobile,
+                name=customer.name,
+                store_id=current_user.get("active_store_id"),
+                source="POS",
+                doc=customer_data,
+                strict=True,
+                repo=repo,
+            )
+        except CustomerConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.detail)
+        created = customer_data if created_id else None
         if created:
             _audit_customer(
                 "CUSTOMER_CREATED",
@@ -1197,6 +1202,17 @@ async def update_customer(
                     status_code=409,
                     detail="Another customer already uses this mobile number",
                 )
+            # ...nor with a FAMILY MEMBER on another account (same rule, same
+            # implementation as the create door -- an edit must not open the
+            # side door the create door closed). Own account excluded: the
+            # holder's Self row carries their own number.
+            from ..services.customer_service import family_member_conflict
+
+            family = family_member_conflict(
+                repo, new_mobile_for_dup, exclude_customer_id=customer_id
+            )
+            if family:
+                raise HTTPException(status_code=409, detail=family)
 
         # B2B-requires-GSTIN on the MERGED state: enforce presence using the
         # effective customer_type + gstin after this edit is applied, so you
@@ -1353,6 +1369,77 @@ async def add_patient(
         raise HTTPException(status_code=500, detail="Failed to add patient")
 
     return {"patient_id": str(uuid.uuid4())}
+
+
+@router.post("/{customer_id}/patients/{patient_id}/promote", status_code=201)
+async def promote_patient_to_own_account(
+    customer_id: str = Path(..., description="Account the family member is on"),
+    patient_id: str = Path(..., description="Family member (patients[].patient_id)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Promote a family member to their OWN top-level customer account.
+
+    The counterpart of the family-member guard on POST /customers: when a
+    create is refused because the number already belongs to a family member,
+    staff press Promote here instead of being stuck at the counter. Carries the
+    member's prescriptions + eye tests (re-pointed at the new account; the
+    patient_id stays the same) and removes the row from the parent account.
+    Orders are NOT moved (a bill stays with the account that paid). Same gate as
+    creating a customer; store-scoped like every customer write."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Customer database unavailable")
+    parent = _scoped_customer_or_404(customer_id, current_user, write=True)
+
+    from ..dependencies import get_db
+    from ..services.customer_service import CustomerConflict, promote_patient
+
+    try:
+        promoted = promote_patient(get_db(), repo, parent, patient_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CustomerConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTE_INCOMPLETE",
+                "customer_id": getattr(exc, "customer_id", None),
+                "message": str(exc),
+            },
+        )
+
+    new_id = promoted.get("customer_id")
+    _audit_customer(
+        "CUSTOMER_PROMOTED",
+        new_id,
+        current_user,
+        detail={
+            "from_customer_id": customer_id,
+            "patient_id": patient_id,
+            "carried": promoted.get("carried"),
+        },
+    )
+    _audit_customer(
+        "CUSTOMER_PATIENT_PROMOTED_OUT",
+        customer_id,
+        current_user,
+        detail={"patient_id": patient_id, "to_customer_id": new_id},
+    )
+    return {
+        "customer_id": new_id,
+        "name": promoted.get("name"),
+        "mobile": promoted.get("mobile"),
+        "phone": promoted.get("phone"),
+        "customer_type": promoted.get("customer_type"),
+        "patients": promoted.get("patients", []),
+        "primary_patient_id": promoted.get("primary_patient_id"),
+        "promoted_from": promoted.get("promoted_from"),
+        "carried": promoted.get("carried", {}),
+    }
 
 
 @router.get("/{customer_id}/orders")

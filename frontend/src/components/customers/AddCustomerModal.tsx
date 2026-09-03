@@ -7,10 +7,17 @@
 // the header, the "search first" dedup box, submit validation, and the footer.
 
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDebounce } from '../../hooks/useDebounce';
 import { customerApi } from '../../services/api';
+import {
+  familyMemberConflictFrom,
+  type FamilyMemberConflict,
+  type SelectableCustomer,
+} from '../../services/api/customers';
 import { X, Loader2, Search } from 'lucide-react';
 import { CustomerIdentityFields } from './CustomerIdentityFields';
+import { FamilyMemberConflictModal } from './FamilyMemberConflictModal';
 import {
   emptyCustomerFormData,
   type CustomerFormData,
@@ -25,15 +32,33 @@ export type { CustomerFormData, PatientFormData };
 interface AddCustomerModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Creates the customer. MUST let a rejected create propagate (rethrow): the
+   *  family-member 409 is read off the rejection to show the promote / open
+   *  popup. A caller that swallows the error hides the popup. */
   onSave: (customer: CustomerFormData) => Promise<void>;
   /** Phase 6.13 — optional pre-fill when the user lands here from the
    *  "Customer not found" fallback in the Clinical search modal. If the
    *  string is all-digits we assume phone, otherwise name. */
   initialName?: string;
+  /** Family-member conflict resolved (member promoted, or the existing account
+   *  chosen): the caller puts this customer on the bill so the sale continues.
+   *  Absent -> the modal navigates to /customers/<id> instead. */
+  onSelectExisting?: (customer: SelectableCustomer) => void;
 }
 
-export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCustomerModalProps) {
+export function AddCustomerModal({
+  isOpen,
+  onClose,
+  onSave,
+  initialName,
+  onSelectExisting,
+}: AddCustomerModalProps) {
+  const navigate = useNavigate();
   const [formData, setFormData] = useState<CustomerFormData>(emptyCustomerFormData());
+  // Family-member guard: the 409 body from a refused create, while the popup is up.
+  const [conflict, setConflict] = useState<FamilyMemberConflict | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const [conflictError, setConflictError] = useState<string | null>(null);
 
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
   const [mobileError, setMobileError] = useState<string | null>(null);
@@ -71,6 +96,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       setGstVerified(null);
       setMobileError(null);
       setIsSaving(false);
+      setConflict(null);
+      setConflictError(null);
       // Pull the current consent wording (fail-soft).
       customerApi.getConsentText?.()
         .then((r) => {
@@ -159,10 +186,62 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     try {
       await onSave(sanitizedFormData);
       onClose();
-    } catch {
-      // Error handling done in parent
+    } catch (err) {
+      // Everything else is the parent's to report. The family-member 409 is
+      // ours: it needs a decision, not a toast.
+      const familyConflict = familyMemberConflictFrom(err);
+      if (familyConflict) {
+        setConflictError(null);
+        setConflict(familyConflict);
+      }
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  // The conflict is resolved to ONE customer (promoted, or the existing
+  // account). A till hands it to the bill; anywhere else we open the account.
+  const resolveConflictWith = (customer: SelectableCustomer) => {
+    setConflict(null);
+    if (onSelectExisting) {
+      onSelectExisting(customer);
+    } else {
+      navigate(`/customers/${customer.customer_id}`);
+    }
+    onClose();
+  };
+
+  const handlePromote = async () => {
+    if (!conflict) return;
+    setConflictBusy(true);
+    setConflictError(null);
+    try {
+      const promoted = await customerApi.promotePatient(conflict.customer_id, conflict.patient_id);
+      resolveConflictWith(promoted);
+    } catch (e) {
+      setConflictError(
+        (e as { message?: string })?.message || 'Could not move this family member to their own account',
+      );
+    } finally {
+      setConflictBusy(false);
+    }
+  };
+
+  const handleOpenExisting = async () => {
+    if (!conflict) return;
+    if (!onSelectExisting) {
+      resolveConflictWith({ customer_id: conflict.customer_id, name: conflict.account_holder_name, patients: [] });
+      return;
+    }
+    setConflictBusy(true);
+    setConflictError(null);
+    try {
+      const existing = (await customerApi.getCustomer(conflict.customer_id)) as SelectableCustomer;
+      resolveConflictWith(existing);
+    } catch (e) {
+      setConflictError((e as { message?: string })?.message || 'Could not open the existing account');
+    } finally {
+      setConflictBusy(false);
     }
   };
 
@@ -256,6 +335,17 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
           </button>
         </div>
       </div>
+
+      {conflict && (
+        <FamilyMemberConflictModal
+          conflict={conflict}
+          busy={conflictBusy}
+          error={conflictError}
+          onPromote={handlePromote}
+          onOpenExisting={handleOpenExisting}
+          onCancel={() => setConflict(null)}
+        />
+      )}
     </div>
   );
 }

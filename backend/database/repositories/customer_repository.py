@@ -25,8 +25,24 @@ class CustomerRepository(BaseRepository):
         # number resolves both data sources.
         return self.find_one({"$or": [{"phone": mobile}, {"mobile": mobile}]})
     
+    def find_by_patient_mobile(self, mobile: str) -> Optional[Dict]:
+        """The account that carries `mobile` as a FAMILY MEMBER's number
+        (patients[].mobile). The mobile-primary identity rule: a number that
+        already belongs to someone's family member is that person -- creating a
+        second top-level customer with it would split their Rx/purchase history."""
+        return self.find_one({"patients.mobile": mobile})
+
     def find_by_email(self, email: str) -> Optional[Dict]:
         return self.find_one({"email": email})
+
+    def pull_patient(self, customer_id: str, patient_id: str) -> bool:
+        """Remove ONE family member row from an account (promote-to-own-account).
+        Returns True only when a row was actually removed."""
+        res = self.collection.update_one(
+            {"customer_id": customer_id},
+            {"$pull": {"patients": {"patient_id": patient_id}}},
+        )
+        return bool(getattr(res, "modified_count", 0))
     
     def find_by_gstin(self, gstin: str) -> Optional[Dict]:
         return self.find_one({"gstin": gstin})

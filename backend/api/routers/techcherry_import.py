@@ -299,18 +299,10 @@ def _map_customer(
     phone = _normalise_phone(row.get("phone") or row.get("Mobile") or row.get("Phone"))
     if not phone and not name:
         return None
-    return {
+    doc = {
         "customer_id": phone or name.replace(" ", "_").lower()[:40],
         "name": name,
         "phone": phone,
-        # Normalize-on-write: the number is the customer's IDENTITY. TechCherry
-        # legacy rows only carry it under `phone`, but the UNIQUE (sparse) index
-        # is on `mobile`, so an import that left `mobile` absent would be exempt
-        # from the index and could create duplicate accounts (split AR). Mirror
-        # the number into `mobile` so the existing unique index actually enforces
-        # one account per number across both natively-created + imported docs.
-        # `None` (no phone) stays absent so the sparse index still exempts it.
-        "mobile": phone or None,
         "email": (row.get("email") or row.get("Email") or "").strip(),
         "address": (row.get("address") or row.get("Address") or "").strip(),
         "city": (row.get("city") or row.get("City") or "").strip(),
@@ -321,6 +313,15 @@ def _map_customer(
         "source": source,
         "techcherry_imported_at": datetime.now(timezone.utc),
     }
+    # Normalize-on-write: the number is the customer's IDENTITY. TechCherry
+    # legacy rows only carry it under `phone`, but the UNIQUE (sparse) index is
+    # on `mobile`, so mirror the number there so one-account-per-number holds
+    # across imported + native docs. A phoneless row gets NO `mobile` key at
+    # all: a sparse index still indexes an explicit null, so writing
+    # `mobile: None` made the SECOND phoneless row collide with the first.
+    if phone:
+        doc["mobile"] = phone
+    return doc
 
 
 def _map_order(

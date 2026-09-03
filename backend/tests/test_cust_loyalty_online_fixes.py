@@ -59,14 +59,15 @@ class TestCustomerMobilePhoneDedup:
         assert doc["mobile"] == "9876543210"
 
     def test_map_customer_no_phone_leaves_mobile_absent(self):
-        """A name-only row (no number) keeps `mobile` None so the SPARSE unique
-        index still exempts it (many such rows must not collide on a null key)."""
+        """A name-only row (no number) carries NO `mobile` key so the SPARSE
+        unique index exempts it. A sparse index still indexes an explicit null:
+        `mobile: None` made every second phoneless row collide on the null key."""
         from api.routers.techcherry_import import _map_customer
 
         doc = _map_customer({"Name": "Walk In"}, "BV-PUN-01", "techcherry")
         assert doc is not None
         assert doc["phone"] == ""
-        assert doc["mobile"] is None
+        assert "mobile" not in doc
 
     @pytest.mark.asyncio
     async def test_create_customer_rejects_duplicate_number_under_phone(self, monkeypatch):

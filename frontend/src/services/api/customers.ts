@@ -4,6 +4,69 @@
 
 import api from './client';
 
+// ── Family-member guard (owner ruling 2026-09-04: "block it outright") ──────
+// Customer identity is mobile-primary. POST /customers REFUSES (409) a number
+// that already belongs to a FAMILY MEMBER on someone else's account, so one
+// person never ends up as two records. The 409 body is this shape; the
+// AddCustomerModal turns it into the promote / open-existing popup.
+export const FAMILY_MEMBER_CONFLICT_CODE = 'MOBILE_BELONGS_TO_FAMILY_MEMBER';
+
+export interface FamilyMemberConflict {
+  code: typeof FAMILY_MEMBER_CONFLICT_CODE;
+  message: string;
+  /** The account that holds the person as a family member. */
+  customer_id: string;
+  account_holder_name: string;
+  patient_id: string;
+  patient_name: string;
+  relation?: string | null;
+}
+
+/** A customer a caller can put straight on a bill: the common subset of what
+ *  the promote door returns and what GET /customers/{id} returns. */
+export interface SelectableCustomer {
+  customer_id: string;
+  name: string;
+  mobile?: string | null;
+  phone?: string | null;
+  customer_type?: string;
+  patients: Array<{
+    patient_id: string;
+    name: string;
+    mobile?: string | null;
+    relation?: string | null;
+    is_primary?: boolean;
+  }>;
+  primary_patient_id?: string | null;
+}
+
+/** What POST /customers/{id}/patients/{pid}/promote returns: the family member
+ *  as their OWN top-level customer (same patient_id, Rx/eye tests carried). */
+export interface PromotedCustomer extends SelectableCustomer {
+  mobile: string;
+  phone: string;
+  promoted_from: { customer_id: string; patient_id: string; at: string };
+  /** Records re-pointed at the new account, per collection. */
+  carried: Record<string, number>;
+}
+
+/** Pull the family-member 409 out of a rejected create, or null. Reads the
+ *  ApiError the client throws (`.detail`) and a raw axios error alike. */
+export function familyMemberConflictFrom(err: unknown): FamilyMemberConflict | null {
+  const e = err as { detail?: unknown; response?: { data?: { detail?: unknown } } } | null;
+  const detail = (e?.detail ?? e?.response?.data?.detail) as Partial<FamilyMemberConflict> | undefined;
+  if (
+    detail &&
+    typeof detail === 'object' &&
+    detail.code === FAMILY_MEMBER_CONFLICT_CODE &&
+    typeof detail.customer_id === 'string' &&
+    typeof detail.patient_id === 'string'
+  ) {
+    return detail as FamilyMemberConflict;
+  }
+  return null;
+}
+
 export const customerApi = {
   getCustomers: async (params?: { search?: string; page?: number; pageSize?: number; storeId?: string; limit?: number; skip?: number; channel?: string; customer_type?: string; exclude_marketing?: boolean }) => {
     // Convert camelCase storeId → snake_case store_id for the FastAPI Query.
@@ -63,6 +126,13 @@ export const customerApi = {
   addPatient: async (customerId: string, patient: Partial<import('../../types').Patient>) => {
     const response = await api.post(`/customers/${customerId}/patients`, patient);
     return response.data;
+  },
+
+  // Promote a family member OUT of `customerId` into their own top-level
+  // account (the counterpart of the family-member 409 on createCustomer).
+  promotePatient: async (customerId: string, patientId: string): Promise<PromotedCustomer> => {
+    const response = await api.post(`/customers/${customerId}/patients/${patientId}/promote`);
+    return response.data as PromotedCustomer;
   },
 
   // DPDP data-consent wording (editable under Marketing). The add-customer form

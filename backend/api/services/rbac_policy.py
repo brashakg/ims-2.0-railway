@@ -1440,6 +1440,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/customers/{customer_id}/patients",
         "allowed": "AUTHENTICATED",
     },
+    # Promote a family member to their own account (family-member guard
+    # counterpart). Whoever can create a customer can promote one; the handler
+    # is store-scoped via _scoped_customer_or_404(write=True). AUTHENTICATED is
+    # the module's existing create gate, so this row broadens no grant-union.
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/{customer_id}/patients/{patient_id}/promote",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/customers/{customer_id}/prescriptions",

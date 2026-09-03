@@ -58,14 +58,45 @@ _QUERY_OPS = {
 
 
 def _get_path(doc: Dict[str, Any], key: str):
-    """Dotted-path lookup, mirroring Mongo's dotted field access."""
+    """Dotted-path lookup, mirroring Mongo's dotted field access.
+
+    An ARRAY met mid-path fans out: ``patients.mobile`` on a doc whose
+    ``patients`` is a list of subdocuments yields the list of every element's
+    ``mobile`` (elements lacking it are skipped), exactly the set Mongo tests a
+    query value against. This used to return _MISSING the moment a list was
+    hit, so ``{"patients.mobile": x}`` matched NOTHING -- a fake that is blind
+    to precisely the family-member lookup a test would be trying to prove.
+    """
     cur: Any = doc
-    for part in key.split("."):
+    parts = key.split(".")
+    for i, part in enumerate(parts):
+        if isinstance(cur, list):
+            if part.isdigit():
+                raise UnsupportedMongoFeature(
+                    "positional array index in query path (%r) is not implemented" % key
+                )
+            rest = ".".join(parts[i:])
+            found = []
+            for el in cur:
+                if isinstance(el, dict):
+                    v = _get_path(el, rest)
+                    if v is not _MISSING:
+                        found.extend(v if isinstance(v, list) else [v])
+            return found if found else _MISSING
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
         else:
             return _MISSING
     return cur
+
+
+def _eq(actual, expected) -> bool:
+    """Mongo equality: a scalar query value matches an ARRAY field when any
+    element equals it (``{"tags": "VIP"}`` / ``{"patients.mobile": "98..."}``);
+    an array query value must equal the array itself."""
+    if isinstance(actual, list) and not isinstance(expected, list):
+        return expected in actual
+    return actual == expected
 
 
 def _set_path(doc: Dict[str, Any], key: str, value) -> None:
@@ -141,26 +172,29 @@ def _match_ops(actual, spec: Dict[str, Any]) -> bool:
         if op == "$options":
             continue  # handled with $regex
         if op == "$eq":
-            if actual_val != val:
+            if not _eq(actual_val, val):
                 return False
         elif op == "$ne":
-            if actual_val == val:
+            if _eq(actual_val, val):
                 return False
         elif op in ("$gt", "$gte", "$lt", "$lte"):
             if not _cmp_ok(actual, op, val):
                 return False
         elif op == "$in":
-            if actual_val not in list(val):
+            if not any(_eq(actual_val, v) for v in list(val)):
                 return False
         elif op == "$nin":
-            if actual_val in list(val):
+            if any(_eq(actual_val, v) for v in list(val)):
                 return False
         elif op == "$exists":
             if bool(val) != (actual is not _MISSING):
                 return False
         elif op == "$regex":
             flags = re.IGNORECASE if "i" in (spec.get("$options") or "") else 0
-            if not isinstance(actual_val, str) or not re.search(val, actual_val, flags):
+            candidates = actual_val if isinstance(actual_val, list) else [actual_val]
+            if not any(
+                isinstance(c, str) and re.search(val, c, flags) for c in candidates
+            ):
                 return False
         elif op == "$not":
             if _match_ops(actual, val):
@@ -194,7 +228,7 @@ def matches(doc: Dict[str, Any], flt: Optional[Dict[str, Any]]) -> bool:
             if not _match_ops(actual, expected):
                 return False
         else:
-            if (None if actual is _MISSING else actual) != expected:
+            if not _eq(None if actual is _MISSING else actual, expected):
                 return False
     return True
 
@@ -357,9 +391,19 @@ class StrictCollection:
         for k, v in (update.get("$pull") or {}).items():
             arr = _get_path(doc, k)
             if isinstance(arr, list):
-                # Match each element under a plain key: a DOTTED k would send
-                # _get_path hunting for a subdocument that isn't there.
-                _set_path(doc, k, [x for x in arr if not matches({"_v": x}, {"_v": v})])
+                # Mongo applies a DOCUMENT condition to each array element as a
+                # query ("$pull: {patients: {patient_id: X}}" removes every
+                # element whose patient_id is X, whatever other fields it
+                # carries). A scalar condition is plain equality. The old
+                # whole-element equality never matched a real member row (they
+                # carry name/mobile/relation too), so a $pull silently removed
+                # nothing and a test asserting removal proved nothing.
+                def _pulled(x, cond=v):
+                    if isinstance(cond, dict) and isinstance(x, dict):
+                        return matches(x, cond)
+                    return matches({"_v": x}, {"_v": cond})
+
+                _set_path(doc, k, [x for x in arr if not _pulled(x)])
 
     def update_one(self, filter, update, upsert=False, **kwargs):
         for d in self.docs:
