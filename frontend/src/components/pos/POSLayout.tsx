@@ -52,6 +52,7 @@ import { choosePrimaryPatient, toPosPatient, sortMembersPrimaryFirst } from '../
 import { AddCustomerModal } from '../customers/AddCustomerModal';
 import type { CustomerFormData } from '../../utils/customerPayload';
 import { createAndSelectCustomer } from './CustomerSearchBar';
+import { useHeldBills } from './useHeldBills';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 // PATIENT SAFETY: the axis is never fabricated at POS. See utils/rxAxisEntry.
@@ -257,62 +258,25 @@ export function POSLayout() {
   // see or recall the previous user's parked cart. Legacy bills with no held_by
   // are treated as NOT the current user's (hidden) to avoid cross-user leaks.
   const currentUserId = user?.id || '';
-  const [heldBillsCache, setHeldBillsCache] = useState<Array<{ id: string; customer: string; items: number; total: number; heldAt: string; held_by?: string | null; store_id?: string | null; auto?: boolean; reason?: string; state: any }>>([]);
-  const refreshHeldBills = useCallback(() => {
-    try {
-      const all = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
-      const mine = (Array.isArray(all) ? all : []).filter(
-        (b: any) => b && b.held_by && b.held_by === currentUserId,
-      );
-      setHeldBillsCache(mine);
-    } catch { setHeldBillsCache([]); }
-  }, [currentUserId]);
-  useEffect(() => { refreshHeldBills(); }, [refreshHeldBills]);
-  // Only the current user's bills are ever exposed to the UI.
+  // ONE implementation, shared with the new till (useHeldBills). This was ~50
+  // lines here of localStorage juggling plus the per-user scoping that keeps
+  // one cashier from recalling another's parked cart on a shared terminal -
+  // exactly the kind of rule that drifts once it exists twice.
+  const {
+    heldBills: heldBillsCache,
+    holdCurrentBill: holdBillShared,
+    recallBill: recallBillShared,
+    discardBill: deleteHeldBill,
+  } = useHeldBills(store, currentUserId);
   const getHeldBills = useCallback(() => heldBillsCache, [heldBillsCache]);
 
   const holdCurrentBill = () => {
-    // Single code path with the idle auto-park: the store builds + tags the
-    // snapshot (held_by = current user, store_id, auto=false) and pushes it to
-    // ims-held-bills. Manual hold then resets the transaction + dismisses UI.
-    store.parkCurrentSale({ heldBy: currentUserId });
-    refreshHeldBills();
-    store.resetTransaction();
+    holdBillShared();
     setHoldConfirm(false);
   };
 
   const recallBill = (billId: string) => {
-    // Recall only from the current user's bills (getHeldBills is pre-filtered),
-    // so a cashier can never recall another user's parked cart.
-    const bills = getHeldBills();
-    const bill = bills.find(b => b.id === billId);
-    if (!bill) return;
-    // Atomic REPLACE (not a per-item merge into the current cart). Restores the
-    // cart verbatim plus the cart-level discount + delivery fields, and lands on
-    // the review step when there are items — all handled inside the store.
-    store.restoreHeldSale(bill.state);
-    // Remove ONLY the recalled bill from the full persisted list; leave other
-    // users' parked carts untouched.
-    try {
-      const all = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
-      const next = (Array.isArray(all) ? all : []).filter((b: any) => b?.id !== billId);
-      localStorage.setItem('ims-held-bills', JSON.stringify(next));
-    } catch { /* ignore */ }
-    refreshHeldBills();
-    setShowRecallPanel(false);
-  };
-
-  const deleteHeldBill = (billId: string) => {
-    // Delete only the current user's own bill. Confirm ownership against the
-    // filtered cache before touching the persisted list so we never prune
-    // another cashier's parked cart.
-    if (!getHeldBills().some(b => b.id === billId)) return;
-    try {
-      const all = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
-      const next = (Array.isArray(all) ? all : []).filter((b: any) => b?.id !== billId);
-      localStorage.setItem('ims-held-bills', JSON.stringify(next));
-    } catch { /* ignore */ }
-    refreshHeldBills();
+    if (recallBillShared(billId)) setShowRecallPanel(false);
   };
 
   // Safe reset: clear zustand + all local state

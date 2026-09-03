@@ -20,6 +20,7 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
+import { useHeldBills } from '../../../components/pos/useHeldBills';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -53,6 +54,11 @@ export function BillingSurface() {
   const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
   const [addCustomerOpen, setAddCustomerOpen] = useState(false);
+  const [recallOpen, setRecallOpen] = useState(false);
+  // Hold / recall, shared with the classic till. The store ALSO parks a cart
+  // automatically when the screen idles, so without this the new POS could
+  // strand that work with no way to bring it back.
+  const held = useHeldBills(store, user?.id || '');
   const [productQuery, setProductQuery] = useState('');
   // The finished sale, held so the completion screen can print and send
   // against it. Cleared by Done, which also resets the till for the next
@@ -167,6 +173,31 @@ export function BillingSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => {
+              if ((store.cart || []).length === 0) return;
+              held.holdCurrentBill();
+            }}
+            disabled={(store.cart || []).length === 0}
+            title="Put this bill aside and serve the next customer"
+            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+          >
+            Hold bill
+          </button>
+          <button
+            type="button"
+            onClick={() => setRecallOpen(true)}
+            title="Bring back a bill you put aside"
+            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Held
+            {held.heldBills.length > 0 && (
+              <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold">
+                {held.heldBills.length}
+              </span>
+            )}
+          </button>
           <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {(store.cart || []).length} item{(store.cart || []).length === 1 ? '' : 's'}
@@ -376,6 +407,51 @@ export function BillingSurface() {
             >
               {store.is_processing ? 'Saving…' : 'Complete sale'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {recallOpen && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => setRecallOpen(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[80dvh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-3.5 border-b border-gray-200 flex items-center gap-3">
+              <h2 className="text-base font-semibold flex-1">Held bills</h2>
+              <button onClick={() => setRecallOpen(false)} aria-label="Close" className="text-gray-500 hover:text-gray-900">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {held.heldBills.length === 0 ? (
+              <div className="p-6 text-center text-sm text-gray-500">
+                Nothing on hold. Use <span className="font-medium text-gray-700">Hold bill</span> to
+                put the current sale aside without losing it.
+              </div>
+            ) : (
+              <div className="p-3 space-y-2">
+                {held.heldBills.map((b) => (
+                  <div key={b.id} className="flex items-center gap-3 rounded-xl border border-gray-200 p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium truncate">{b.customer || 'No customer'}</div>
+                      <div className="text-[11px] text-gray-500">
+                        {b.items} item{b.items === 1 ? '' : 's'} · {'₹'}{Math.round(b.total || 0).toLocaleString('en-IN')}
+                        {b.auto ? ' · parked automatically' : ''}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { held.discardBill(b.id); }}
+                      className="min-h-[36px] px-2.5 rounded-lg border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={() => { if (held.recallBill(b.id)) setRecallOpen(false); }}
+                      className="min-h-[36px] px-3 rounded-lg bg-gray-900 text-white text-[11px] font-semibold"
+                    >
+                      Recall
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
