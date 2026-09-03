@@ -1,6 +1,6 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-09-03**. This file is the single place to see what is done, what
+Updated **2026-09-03**, after the PR stack was rebased onto main. This file is the single place to see what is done, what
 is in flight, and what is waiting on a decision. Claude keeps it current; if it
 disagrees with reality, the file is wrong and should be fixed.
 
@@ -17,11 +17,11 @@ rather than duplicating it, so both tills now run the same code.
 
 | # | Blocker | Status |
 |---|---|---|
-| 1 | New screens in no menu — reachable only by typing the address | **PR #1085** |
-| 2 | A first-time customer could not be billed at all | **PR #1085** |
-| 3 | Hold / recall a bill (the till auto-parks on idle — that work was unrecoverable) | **PR #1085** |
-| 4 | Made-to-order lens could not be rung up (no barcode to scan) | **PR #1085** |
-| 5 | Paper prescription could not be entered at the till | **PR #1085** |
+| 1 | New screens in no menu — reachable only by typing the address | **MERGED #1085** |
+| 2 | A first-time customer could not be billed at all | **MERGED #1085** |
+| 3 | Hold / recall a bill (the till auto-parks on idle — that work was unrecoverable) | **MERGED #1085** |
+| 4 | Made-to-order lens could not be rung up (no barcode to scan) | **MERGED #1085** |
+| 5 | Paper prescription could not be entered at the till | **MERGED #1085** |
 
 **Two reported blockers were checked and disproved** — no code was written for
 them: the workshop job is created from the *items* and is `sale_type`-agnostic;
@@ -61,8 +61,8 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 
 | Module | What was wrong | Status |
 |---|---|---|
-| **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **PR #1086** |
-| **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** |
+| **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **PR #1086** (in CI) |
+| **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** (in CI) |
 | **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **DONE** |
 | **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** |
 | **Clinical** | 5 hidden tabs, two rival prescription doors | **TODO** — plan ready |
@@ -77,10 +77,10 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 |---|---|---|
 | Churn-risk list returned 500 **complete customer records** to any signed-in user | High | **DONE** |
 | RFM report published company-wide average customer value to any signed-in user | Medium | **DONE** |
-| **13 of 19 customer doors trusted an id as authority — 4 moved money** | High | **PR #1087** |
+| **13 of 19 customer doors trusted an id as authority — 4 moved money** | High | **PR #1087** (in CI) |
 | Login limiter locked out a **whole shop** on five typos across three people | High | **DONE** |
 | Two IP readers, one spoofable and one returning a constant | Medium | **DONE** |
-| Salary screens reachable by 3 roles the endpoints refuse | Medium | **PR #1088** |
+| Salary screens reachable by 3 roles the endpoints refuse | Medium | **PR #1088** (in CI) |
 
 ---
 
@@ -96,6 +96,23 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 | A refund spanning a month boundary reversed tax **twice** | **DONE** |
 
 ---
+
+## 4b. Still to build (nothing is blocked on a decision)
+
+| Work | State |
+|---|---|
+| **Clinical** split — 5 hidden tabs, two rival prescription doors | plan ready |
+| **Inventory** split — 19 sections in one file, 3 in the menu | designed |
+| **Catalog** — review queue + the photo work | designed |
+| **Staff sign-in gate** — store wifi or within 50m; ADMIN/SUPERADMIN never gated; SUPERADMIN approves a device from his phone | spec ready |
+| Three screens each re-map the store's staff list their own way (`NewTaskModal`, `SalespersonPicker`, the new `useStoreStaff`) | small follow-up |
+
+## 4c. Found and NOT fixed — recorded so they are not lost
+
+| Finding | Why it is still open |
+|---|---|
+| `find_overdue` binds a datetime against `expected_delivery`, stored as a string, so **`/orders/overdue/list` returns nothing in production** | Found while verifying the delivery work; fixing it properly means settling that field's storage shape first |
+| The 30-day clamp on the customer list | Owner chose "clamp on last activity" — no last-activity field exists yet |
 
 ## 5. Waiting on the owner
 
