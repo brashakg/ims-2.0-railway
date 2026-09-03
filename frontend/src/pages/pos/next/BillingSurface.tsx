@@ -28,9 +28,10 @@ import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSelectModal';
+import { AddCustomerModal } from '../../../components/customers/AddCustomerModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { PosWidgets } from './PosWidgets';
-import { CustomerSearchBar } from '../../../components/pos/CustomerSearchBar';
+import { CustomerSearchBar, createAndSelectCustomer } from '../../../components/pos/CustomerSearchBar';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import SaleCompleteScreen from './SaleCompleteScreen';
 import ProductResultsStrip from './ProductResultsStrip';
@@ -51,6 +52,7 @@ export function BillingSurface() {
   // step on this surface, so the trigger lives on the line itself.
   const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
+  const [addCustomerOpen, setAddCustomerOpen] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   // The finished sale, held so the completion screen can print and send
   // against it. Cleared by Done, which also resets the till for the next
@@ -217,8 +219,21 @@ export function BillingSurface() {
                     Customer <span className="text-red-500">*</span>
                   </div>
                   <CustomerSearchBar store={store} />
-                  <div className="mt-1 text-[11px] text-gray-500">
-                    Every bill needs a customer — no anonymous sale on any counter.
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <span className="text-[11px] text-gray-500 flex-1">
+                      Every bill needs a customer — no anonymous sale on any counter.
+                    </span>
+                    {/* A first-time customer could not be billed here AT ALL:
+                        the assistant had to leave the till, register them on
+                        the Customers screen and come back. Same modal and same
+                        shared creator the classic POS uses. */}
+                    <button
+                      type="button"
+                      onClick={() => setAddCustomerOpen(true)}
+                      className="shrink-0 min-h-[32px] px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      + New customer
+                    </button>
                   </div>
                 </div>
               )}
@@ -364,6 +379,17 @@ export function BillingSurface() {
           </div>
         </div>
       )}
+
+      {/* Mounted unconditionally: the whole point is to reach it when there
+          is NO customer on the bill yet. It renders nothing while closed. */}
+      <AddCustomerModal
+        isOpen={addCustomerOpen}
+        onClose={() => setAddCustomerOpen(false)}
+        onSave={async (data) => {
+          await createAndSelectCustomer(store, data);
+          setAddCustomerOpen(false);
+        }}
+      />
 
       {rxPickerOpen && store.customer?.id && (
         <PrescriptionSelectModal

@@ -50,7 +50,8 @@ import { AutoSearch } from '../common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 import { choosePrimaryPatient, toPosPatient, sortMembersPrimaryFirst } from '../../utils/patientFromCustomer';
 import { AddCustomerModal } from '../customers/AddCustomerModal';
-import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
+import type { CustomerFormData } from '../../utils/customerPayload';
+import { createAndSelectCustomer } from './CustomerSearchBar';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 // PATIENT SAFETY: the axis is never fabricated at POS. See utils/rxAxisEntry.
@@ -1626,33 +1627,12 @@ function StepCustomer() {
   const store = usePOSStore();
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
 
+  // ONE implementation, shared with the new till (createAndSelectCustomer in
+  // CustomerSearchBar). This used to be 22 lines of payload-building and
+  // member-selection here; a second copy on the new POS is exactly how the two
+  // surfaces would start creating different customer records.
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
-    // ONE shared builder maps the form onto the canonical CustomerCreate payload
-    // (same as the Customers page + Clinical intake) so every door produces the
-    // identical record — incl. dob / anniversary / consents that were dropped here
-    // before.
-    const payload = buildCustomerCreatePayload(customerData);
-    const r = await customerApi.createCustomer(payload as any);
-    const custId = r?.customer_id || r?.id || `new-${Date.now()}`;
-    // Carry the server-returned patients[] (incl. the auto-seeded Primary, with
-    // real patient_ids + is_primary) onto the selected customer so MemberSelect
-    // can render the family + the Primary auto-selects.
-    const returnedPatients = Array.isArray(r?.patients) ? r.patients : [];
-    store.setCustomer({
-      id: custId,
-      name: customerData.fullName,
-      phone: customerData.mobileNumber,
-      email: customerData.email,
-      customerType: customerData.customerType,
-      patients: returnedPatients,
-    } as any);
-    // BILL-TO-MEMBER P1: default-select the Primary (account holder) member so a
-    // single-member new account is one click; MemberSelect lets multi-member
-    // families switch.
-    const primary = choosePrimaryPatient(returnedPatients);
-    if (primary) {
-      store.setPatient(toPosPatient(primary, custId) as any);
-    }
+    await createAndSelectCustomer(store, customerData);
     setShowAddCustomerModal(false);
   };
 

@@ -44,6 +44,14 @@ export const NAV_GROUPS: NavGroup[] = [
     // in App.tsx, so a role never sees a nav link that lands it on /unauthorized.
     items: [
       { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      // The redesigned till, alongside the classic one during changeover. The
+      // three surfaces existed and worked but appeared in NO menu, so the only
+      // way to reach them was to type the address - which is not a changeover
+      // plan. requireRoles mirrors each route's own allowedRoles in
+      // posRoutes.tsx exactly, per this file's rule.
+      { id: 'pos-new', label: 'Billing (new)', to: '/pos/new', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'pos-counter', label: 'General Counter', to: '/pos/counter', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'pos-delivery', label: 'Delivery Counter', to: '/pos/delivery', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       // F39: NBA daily call list — ranked customers to phone today (in-app only).
       { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
