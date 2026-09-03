@@ -149,6 +149,22 @@ controls, per-sale receipt choice, and customer edit at the till.
 **Retiring the legacy till** (owner: "retire old pos") - **WIP**, salvage
 inventory first. Nothing is deleted until it is proven replaced.
 
+## 4f. Owner rulings 2026-09-04 - in build
+
+| Decision | Status |
+|---|---|
+| Counter ALWAYS mints the tax invoice; per-sale receipt chooser dropped (no numberless receipt exists) | **WIP** |
+| Store credit enabled at the delivery counter | **WIP** |
+| Family-member number at create: BLOCK, with promote-to-own-account / open-existing popup | **WIP** |
+| Two find-or-create implementations collapsed into one; race on the unique index returns 409 not 500 | **WIP** |
+| Email-only web buyers wrote `mobile: ""` (indexed; 2nd one becomes a phantom customer) | **WIP** |
+| Cashiers + sales staff: full customer edit incl. phone + GSTIN, from both tills | **WIP** |
+| Legacy till retirement - salvage inventory first | **WIP** |
+
+Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
+customers; 0 duplicate top-level numbers; 9 family members also exist as their own
+customer; 1 null + 1 empty mobile (one row away from an index collision).
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
