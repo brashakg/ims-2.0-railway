@@ -61,6 +61,24 @@ export const customerRoutes = (
       }
     />
 
+    {/* CRM: Customer profile — the bookmarkable/shareable address for ONE
+        customer. Renders the same Customer360Dashboard as the /360 form (it
+        already keys entirely off :customerId), so /customers/:customerId/360
+        keeps working for every existing bookmark and in-app link. Role gate is
+        the /360 gate, character-for-character.
+        Static children (/customers/segmentation, /loyalty, /nba, ...) still win
+        over this: React Router ranks a literal segment above a dynamic one. */}
+    <Route
+      path="customers/:customerId"
+      element={
+        <ProtectedRoute
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
+        >
+          <Customer360Dashboard />
+        </ProtectedRoute>
+      }
+    />
+
     {/* CRM: Customer Segmentation */}
     <Route
       path="customers/segmentation"

@@ -1,73 +1,27 @@
 // ============================================================================
-// IMS 2.0 - Module Context
-// Manages active module state for dynamic sidebar navigation
+// IMS 2.0 - Module keys + per-user module gating
+// ============================================================================
+// This file used to ALSO hold MODULE_CONFIGS: an eleven-module sidebar registry
+// (~90 rows, including a fifteen-item CRM sidebar) that nothing ever rendered.
+// The app's one nav registry is components/shell/navConfig.ts (TopNav + Rail);
+// MODULE_CONFIGS was a second registry that could only ever drift away from it,
+// and had: it still linked /reports?tab=churn, /customers?tab=recalls and other
+// addresses the split-out pages replaced. Deleted 2026-09-02 rather than
+// "reconciled" — syncing two copies of one rule is how they drift again.
+// Anything genuinely missing from the menu belongs in navConfig.ts.
+//
+// What survives here is the part with live callers: the canonical module keys
+// and the path -> module lookup used by ProtectedRoute, navConfig, the command
+// palette and the admin Module Access grid.
 // ============================================================================
 
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-import type { UserRole } from '../types';
-import { useAuth } from './AuthContext';
-import {
-  ShoppingCart, Eye, Package, Users, Truck, DollarSign,
-  Users2, BarChart3, Settings, Wrench,
-  type LucideIcon,
-} from 'lucide-react';
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export type ModuleId =
-  | 'dashboard'
-  | 'pos'
-  | 'clinic'
-  | 'inventory'
-  | 'customers'
-  | 'vendors'
-  | 'workshop'
-  | 'hr'
-  | 'reports'
-  | 'finance'
-  | 'settings';
-
-export interface SidebarItem {
-  id: string;
-  label: string;
-  path: string;
-  icon?: LucideIcon;
-  roles?: UserRole[]; // If set, only these roles see this item. If omitted, all roles with module access see it.
-}
-
-export interface ModuleConfig {
-  id: ModuleId;
-  title: string;
-  subtitle: string;
-  icon: LucideIcon;
-  color: string;
-  bgColor: string;
-  allowedRoles: UserRole[];
-  sidebarItems: SidebarItem[];
-}
-
-interface ModuleContextType {
-  activeModule: ModuleId | null;
-  setActiveModule: (module: ModuleId | null) => void;
-  getModuleConfig: (moduleId: ModuleId) => ModuleConfig | undefined;
-  getModulesForRole: (role: UserRole) => ModuleConfig[];
-  /** Map a route path to the canonical module key that owns it (or null when
-   *  the path belongs to no gateable module -- dashboard, settings, print,
-   *  jarvis, etc., which must never be deny-able). Used by ProtectedRoute and
-   *  the Rail to apply the per-user deny-only module override at the route +
-   *  nav level. Matches by longest path prefix. */
-  moduleForPath: (path: string) => ModuleKey | null;
-  isModuleActive: boolean;
-  goToDashboard: () => void;
-}
+import type { ReactNode } from 'react';
 
 // ============================================================================
 // Canonical module keys -- the SINGLE source of truth shared by SettingsAuth
 // (the admin checkboxes), the Rail nav, and ProtectedRoute. A per-user
 // `module_access` map (deny-only override on top of the role) is keyed on
-// EXACTLY these strings. They mirror the gateable MODULE_CONFIGS group ids.
+// EXACTLY these strings.
 //
 // `settings` is deliberately NOT gateable: an admin must never be able to lock
 // a user (or themselves) out of User Management, which is the only place to
@@ -118,8 +72,7 @@ export const MODULE_ACCESS_OPTIONS: { key: ModuleKey; label: string }[] = [
 //    denying `pos` also removes order views (acceptable: no POS => no orders).
 //  - /customers/campaigns (Marketing) sits under the `customers` module, so
 //    denying `customers` also hides Marketing -- correct, it's a CRM feature.
-//  - /catalog* is part of the Inventory module (Add Product / pricing live
-//    there in MODULE_CONFIGS).
+//  - /catalog* is part of the Inventory module (Add Product / pricing).
 const PATH_MODULE_PREFIXES: { prefix: string; key: ModuleKey }[] = [
   { prefix: '/pos', key: 'pos' },
   { prefix: '/orders', key: 'pos' },
@@ -159,284 +112,10 @@ export function moduleForPath(path: string): ModuleKey | null {
   return best ? best.key : null;
 }
 
-// ============================================================================
-// Module Configurations
-// ============================================================================
-
-export const MODULE_CONFIGS: ModuleConfig[] = [
-  {
-    id: 'pos',
-    title: 'Point of Sale',
-    subtitle: 'Orders, Deliveries, Workshop',
-    icon: ShoppingCart,
-    color: 'text-red-600',
-    bgColor: 'bg-red-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
-    sidebarItems: [
-      { id: 'pos-new', label: 'New Sale', path: '/pos' },
-      { id: 'pos-orders', label: 'All Orders', path: '/orders' },
-      { id: 'pos-estimates', label: 'Estimates / Quotations', path: '/estimates', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
-      { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
-      { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
-      { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
-      { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER'] },
-      // Footfall Tracking — N3 manual walk-in capture + auto conversion %. The
-      // page (pages/pos/FootfallPage) + backend (walkouts.py) shipped, so the
-      // nav item is live. Route is registered at /pos/footfall (App.tsx).
-      { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST'] },
-    ],
-  },
-  {
-    id: 'clinic',
-    title: 'Eye Clinic',
-    subtitle: 'Testing, Prescription, Contact Lens',
-    icon: Eye,
-    color: 'text-purple-600',
-    bgColor: 'bg-purple-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'],
-    sidebarItems: [
-      { id: 'clinic-queue', label: 'Patient Queue', path: '/clinical' },
-      { id: 'clinic-history', label: 'Test History', path: '/clinical/history' },
-      { id: 'clinic-prescriptions', label: 'Prescriptions', path: '/prescriptions' },
-      { id: 'clinic-family-rx', label: 'Family Rx', path: '/clinical/family-rx' },
-    ],
-  },
-  {
-    id: 'inventory',
-    title: 'Inventory & Stock',
-    subtitle: 'Stock, Transfers, Barcode',
-    icon: Package,
-    color: 'text-green-600',
-    bgColor: 'bg-green-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'],
-    sidebarItems: [
-      { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
-      { id: 'inv-catalog', label: 'Add Product', path: '/catalog/add', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-      { id: 'inv-buydesk', label: 'Buy Desk', path: '/catalog/buy-desk', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=low-stock' },
-      { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
-      { id: 'inv-audit', label: 'Stock Audit', path: '/inventory/audit', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'inv-opening', label: 'Opening Stock Import', path: '/inventory/opening-stock', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
-    ],
-  },
-  {
-    id: 'customers',
-    title: 'Customers (CRM)',
-    subtitle: 'Customer Management, Loyalty',
-    icon: Users,
-    color: 'text-orange-600',
-    bgColor: 'bg-orange-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
-    sidebarItems: [
-      { id: 'crm-all', label: 'All Customers', path: '/customers' },
-      { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
-      { id: 'crm-360', label: 'Customer 360', path: '/customers/360', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-family-wallet', label: 'Family Wallet', path: '/customers/family-wallet', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER'] },
-      { id: 'crm-cl-refill', label: 'CL Refill Due', path: '/customers/cl-refill', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'OPTOMETRIST'] },
-      { id: 'crm-reactivation', label: 'Win-back List', path: '/customers/reactivation', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
-      { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
-      { id: 'crm-follow-ups', label: 'Follow-ups', path: '/customers/follow-ups' },
-      { id: 'crm-loyalty-tiers', label: 'Loyalty Tiers', path: '/customers/loyalty?tab=tiers', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'crm-cl-subscriptions', label: 'CL Subscriptions', path: '/customers?tab=cl-subscriptions', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-    ],
-  },
-  {
-    id: 'workshop',
-    title: 'Workshop',
-    subtitle: 'Lens Fitting & Job Orders',
-    icon: Wrench,
-    color: 'text-amber-600',
-    bgColor: 'bg-amber-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'],
-    sidebarItems: [
-      { id: 'ws-jobs', label: 'All Jobs', path: '/workshop' },
-      { id: 'ws-orders', label: 'Order Pipeline', path: '/orders?status=PROCESSING' },
-    ],
-  },
-  {
-    id: 'vendors',
-    title: 'Supply Chain & Procurement',
-    subtitle: 'Purchase Orders, Vendors, GRN, Replenishment',
-    icon: Truck,
-    color: 'text-cyan-600',
-    bgColor: 'bg-cyan-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
-    sidebarItems: [
-      // Purchase Orders + Vendors land on the real Purchase Management module
-      // (its POs / Suppliers tabs). The former /purchase/orders and
-      // /purchase/vendors pages were dead-duplicate stubs and were retired.
-      { id: 'supply-po', label: 'Purchase Orders', path: '/purchase/orders' },
-      { id: 'supply-vendor', label: 'Vendor Management', path: '/purchase/suppliers' },
-      { id: 'supply-grn', label: 'Goods Receipt Notes', path: '/purchase/grn' },
-      { id: 'supply-replenish', label: 'Stock Replenishment', path: '/inventory/replenishment' },
-      { id: 'supply-audit', label: 'Stock Audit', path: '/inventory/audit' },
-    ],
-  },
-  {
-    id: 'hr',
-    title: 'HR & Employees',
-    subtitle: 'Attendance, Leaves, Tasks, Payroll, Incentives',
-    icon: Users2,
-    color: 'text-indigo-600',
-    bgColor: 'bg-indigo-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
-    sidebarItems: [
-      { id: 'hr-attendance', label: 'Attendance', path: '/hr/today' },
-      { id: 'hr-leaves', label: 'Leave Management', path: '/hr/leave' },
-      // Salary screen -> SUPERADMIN + ADMIN only (owner ruling 2026-08-10).
-      // This row used to offer it to AREA_MANAGER and ACCOUNTANT, who then met
-      // a backend 403: a menu item that always refused.
-      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'hr-tasks', label: 'Tasks Dashboard', path: '/tasks/dashboard' },
-      { id: 'hr-checklists', label: 'Daily Checklists', path: '/tasks/checklists' },
-      { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'hr-leaderboard', label: 'Staff Leaderboard', path: '/hr/leaderboard', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'hr-eye-camps', label: 'Eye Camps', path: '/hr?tab=eye-camps', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-    ],
-  },
-  {
-    id: 'reports',
-    title: 'Reports & Analytics',
-    subtitle: 'Sales, Stock, GST Reports',
-    icon: BarChart3,
-    color: 'text-blue-600',
-    bgColor: 'bg-blue-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
-    sidebarItems: [
-      { id: 'rpt-dashboard', label: 'Analytics Dashboard', path: '/reports' },
-      { id: 'rpt-dayend', label: 'Day-End Closing', path: '/reports/day-end' },
-      { id: 'rpt-outstanding', label: 'Outstanding Payments', path: '/reports/outstanding' },
-      { id: 'rpt-sales', label: 'Sales Reports', path: '/reports?tab=sales' },
-      { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports?tab=inventory' },
-      { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
-      { id: 'rpt-forecast', label: 'Demand Forecast', path: '/reports?tab=forecast' },
-      { id: 'rpt-orders', label: 'Orders Overview', path: '/orders' },
-      { id: 'rpt-discount', label: 'Discount Analysis', path: '/reports?tab=discount-analysis', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'rpt-deadstock', label: 'Dead Stock', path: '/reports?tab=dead-stock', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
-      { id: 'rpt-demand', label: 'Demand Forecast', path: '/reports?tab=demand', roles: ['SUPERADMIN'] },
-      { id: 'rpt-churn', label: 'Churn Prediction', path: '/reports?tab=churn', roles: ['SUPERADMIN'] },
-      { id: 'rpt-anomaly', label: 'Anomaly Detection', path: '/reports?tab=anomaly', roles: ['SUPERADMIN'] },
-      { id: 'rpt-vendor-margins', label: 'Vendor Margins', path: '/reports?tab=vendor-margins', roles: ['SUPERADMIN'] },
-    ],
-  },
-  {
-    id: 'finance',
-    title: 'Finance & Expenses',
-    subtitle: 'Expense Tracking, Approvals',
-    icon: DollarSign,
-    color: 'text-emerald-600',
-    bgColor: 'bg-emerald-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
-    sidebarItems: [
-      { id: 'fin-dashboard', label: 'Finance Dashboard', path: '/finance/dashboard' },
-      { id: 'fin-budgeting', label: 'Budgeting (Planned vs Actual)', path: '/finance/budgeting', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'fin-expenses', label: 'Expense Tracker', path: '/finance/expenses' },
-      { id: 'fin-pending', label: 'Pending Approval', path: '/finance/expenses?tab=pending-approval' },
-      { id: 'fin-summary', label: 'Category Summary', path: '/finance/expenses?tab=summary' },
-    ],
-  },
-  {
-    id: 'settings',
-    title: 'Settings & Admin',
-    subtitle: 'Company, Branches, Users',
-    icon: Settings,
-    color: 'text-gray-600',
-    bgColor: 'bg-gray-100',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'],
-    sidebarItems: [
-      { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-golive', label: 'Go-Live Readiness', path: '/go-live', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-profile', label: 'My Profile', path: '/settings/profile' },
-      { id: 'set-business', label: 'Business Profile', path: '/settings/business', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-stores', label: 'Store Management', path: '/organization', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-users', label: 'User Management', path: '/settings/users', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'set-categories', label: 'Categories & Brands', path: '/settings/categories', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-      { id: 'set-discounts', label: 'Discount Rules', path: '/settings/discounts', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
-      { id: 'set-tax', label: 'Tax & Invoice', path: '/settings/tax-invoice', roles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-      { id: 'set-integrations', label: 'Integrations', path: '/settings/integrations', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-approvals', label: 'Approval Workflows', path: '/settings/approvals', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-audit', label: 'Audit Log', path: '/settings/audit-logs', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-system', label: 'System Settings', path: '/settings/system', roles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'set-jarvis', label: 'AI Intelligence', path: '/jarvis', roles: ['SUPERADMIN', 'ADMIN'] },
-    ],
-  },
-];
-
-// ============================================================================
-// Context
-// ============================================================================
-
-const ModuleContext = createContext<ModuleContextType | undefined>(undefined);
-
-// ============================================================================
-// Provider
-// ============================================================================
-
+/** Kept only because App.tsx mounts it. The provider carried the deleted
+ *  sidebar registry and had no remaining consumers (nothing called useModule),
+ *  so it is now a pass-through; drop the wrapper from App.tsx when that file is
+ *  next in scope. */
 export function ModuleProvider({ children }: { children: ReactNode }) {
-  const [activeModule, setActiveModuleState] = useState<ModuleId | null>(null);
-  // Per-user deny-only module gate. AuthProvider wraps ModuleProvider (App.tsx),
-  // so this is always available here.
-  const { hasModuleAccess } = useAuth();
-
-  const setActiveModule = useCallback((module: ModuleId | null) => {
-    setActiveModuleState(module);
-  }, []);
-
-  const getModuleConfig = useCallback((moduleId: ModuleId): ModuleConfig | undefined => {
-    return MODULE_CONFIGS.find(m => m.id === moduleId);
-  }, []);
-
-  // Visible module groups = role-allowed AND not denied for this user. The role
-  // filter runs FIRST and is the ceiling; hasModuleAccess can only further
-  // remove a group (deny-only), never add one the role lacks -- so there's no
-  // privilege-escalation path. A MODULE_CONFIGS id that isn't a gateable
-  // MODULE_KEY (e.g. `settings`) is never denied (hasModuleAccess returns true).
-  const getModulesForRole = useCallback((role: UserRole): ModuleConfig[] => {
-    return MODULE_CONFIGS.filter(m =>
-      (m.allowedRoles.includes(role) || role === 'SUPERADMIN') &&
-      hasModuleAccess(m.id)
-    );
-  }, [hasModuleAccess]);
-
-  const goToDashboard = useCallback(() => {
-    setActiveModuleState(null);
-  }, []);
-
-  const value: ModuleContextType = {
-    activeModule,
-    setActiveModule,
-    getModuleConfig,
-    getModulesForRole,
-    moduleForPath,
-    isModuleActive: activeModule !== null,
-    goToDashboard,
-  };
-
-  return (
-    <ModuleContext.Provider value={value}>
-      {children}
-    </ModuleContext.Provider>
-  );
+  return <>{children}</>;
 }
-
-// ============================================================================
-// Hook
-// ============================================================================
-
-export function useModule() {
-  const context = useContext(ModuleContext);
-  if (!context) {
-    throw new Error('useModule must be used within a ModuleProvider');
-  }
-  return context;
-}
-
-export default ModuleContext;

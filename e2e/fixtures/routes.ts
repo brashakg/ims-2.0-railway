@@ -230,6 +230,7 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/settings', reason: 'redirect-only: index route Navigates to /settings/profile, which is covered' },
   { path: '/settings/entities', reason: 'redirect-only: Navigate to /organization, which is covered' },
   { path: '/customers/:customerId/360', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
+  { path: '/customers/:customerId', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/customers/:customerId/loyalty', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
