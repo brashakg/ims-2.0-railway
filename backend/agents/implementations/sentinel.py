@@ -391,7 +391,7 @@ class SentinelAgent(JarvisAgent):
         """
         result: Dict[str, Any] = {"status": "unknown"}
         url = os.getenv(
-            "FRONTEND_BASE_URL", "https://ims-2-0-railway.vercel.app"
+            "FRONTEND_BASE_URL", "https://app.uniparallel.com"
         ).rstrip("/")
         start = time.time()
         try:
