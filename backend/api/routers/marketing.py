@@ -44,6 +44,11 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
 
 from ..dependencies import get_db as _dep_get_db
 from ..dependencies import validate_store_access
+from ..services.data_horizon import (
+    horizon_start,
+    horizon_start_iso_date,
+    later_iso_bound,
+)
 from ..services.notification_service import send_notification, populate_template
 from ..utils.ist import ist_date_str
 
@@ -67,6 +72,35 @@ def _get_db():
         return get_db().db
     except Exception:
         return _dep_get_db()
+
+
+def _created_at_horizon(current_user: dict) -> Optional[dict]:
+    """The 30-day browse clamp (owner ruling 2026-09-01) as a Mongo clause on
+    ``created_at``, or None when the caller is ADMIN / SUPERADMIN.
+
+    TWO shapes, because these collections carry two. Every send / referral /
+    NPS / walk-in writer stores ``created_at`` as an ISO STRING
+    (services/notification_service.py:187 - the one queue-row writer every
+    send path funnels through; services/nps_trigger.py:112; and :661, :895,
+    :1085 in this file). ONE legacy writer does not: crm.py:718 stamps
+    ``notification_logs.created_at`` with a real ``datetime`` on its
+    vip_winback row.
+
+    BSON brackets by type and never compares the two, so a single bound is
+    wrong in one direction or the other: a string bound alone would hide every
+    vip_winback row for ever - recent ones included - and a datetime bound
+    alone would empty the log entirely. Bounding BOTH shapes narrows both and
+    hides neither.
+    """
+    iso = horizon_start_iso_date(current_user)
+    if iso is None:
+        return None
+    return {
+        "$or": [
+            {"created_at": {"$gte": iso}},
+            {"created_at": {"$gte": horizon_start(current_user)}},
+        ]
+    }
 
 
 # ============================================================================
@@ -339,6 +373,14 @@ async def get_notification_logs(
         query["template_id"] = template_id
     if status:
         query["status"] = status
+
+    # 30-day browse horizon. The send log is pure HISTORY BROWSE - who we
+    # messaged, when, and with what - and nobody works this list; there is no
+    # open/closed split to preserve. `total` here is the length of the page,
+    # so clamping the query clamps the count with it.
+    _clamp = _created_at_horizon(current_user)
+    if _clamp:
+        query.update(_clamp)
 
     coll = db.get_collection("notification_logs")
     logs = list(coll.find(query).sort("created_at", -1).limit(limit))
@@ -705,6 +747,17 @@ async def get_referrals(
     if status:
         query["status"] = status
 
+    # 30-day browse horizon. Clamped WHOLE, not split open-vs-closed like the
+    # follow-up queue: an INVITED referral is an outstanding offer, not work in
+    # hand - no due date, no assignee, and the only action on it
+    # (POST /referrals/{id}/redeem) is reached by the code the customer
+    # presents, never by scrolling this list. What the list actually is, is the
+    # referrer leaderboard the FE builds from it (ReferralTracker.tsx) - names,
+    # phones and reward totals, i.e. the customer book.
+    _clamp = _created_at_horizon(current_user)
+    if _clamp:
+        query.update(_clamp)
+
     coll = db.get_collection("referrals")
     refs = list(coll.find(query).sort("created_at", -1).limit(limit))
     for r in refs:
@@ -1005,9 +1058,15 @@ async def get_nps_dashboard(
         }
 
     coll = db.get_collection("nps_responses")
-    all_surveys = list(
-        coll.find({"store_id": active_store}).sort("created_at", -1).limit(200)
-    )
+    # 30-day browse horizon. Every number below is derived from this one fetch,
+    # so clamping it clamps the TOTALS too (total_surveys / total_responses /
+    # nps_score). Clamping only the 20 rows on show would have left the counts
+    # reporting the size of the history they were hiding.
+    _nps_query = {"store_id": active_store}
+    _clamp = _created_at_horizon(current_user)
+    if _clamp:
+        _nps_query.update(_clamp)
+    all_surveys = list(coll.find(_nps_query).sort("created_at", -1).limit(200))
 
     responded = [s for s in all_surveys if s.get("score") is not None]
     scores = [s["score"] for s in responded]
@@ -1128,6 +1187,23 @@ async def get_walkins(
             query["created_at"]["$lte"] = date_to
         else:
             query["created_at"] = {"$gte": query["created_at"], "$lte": date_to}
+
+    # 30-day browse horizon. The walk-in register is a LOG - the day's visitor
+    # is actioned through the follow-up this door's POST sibling creates, not
+    # by re-reading the register - so it is a browse and is clamped.
+    # The LATER bound wins: without that, ?date_from=2020-01-01 walked straight
+    # past the window and the clamp was decorative. A caller asking for a
+    # NARROWER range keeps its own bound.
+    # TYPE: `created_at` is an ISO string, and this collection has exactly one
+    # writer (create_walkin, :1085 in this file) - so an ISO bound, never a
+    # datetime.
+    _horizon = horizon_start_iso_date(current_user)
+    if _horizon:
+        _existing = query.get("created_at")
+        if isinstance(_existing, dict):
+            _existing["$gte"] = later_iso_bound(_existing.get("$gte"), _horizon)
+        else:
+            query["created_at"] = {"$gte": _horizon}
 
     coll = db.get_collection("walkins")
     walkins = list(coll.find(query).sort("created_at", -1).limit(limit))

@@ -39,6 +39,13 @@ from ..services.rx_validation import (
 )
 from ..services import cash_denominations as cash_denom
 
+# The named-lookup exemption verifier (the owner's carve-out from the 30-day
+# browse horizon) lives in api.services.data_horizon -- ONE implementation,
+# shared with the customer list's search branch. It was defined here first; a
+# second copy drifting is how an exemption becomes a bypass on one screen and
+# not the other.
+from ..services.data_horizon import query_names_one_customer
+
 
 def _get_db():
     """Raw MongoDB handle, or None when unavailable (mock / no-DB mode)."""
@@ -1216,58 +1223,6 @@ async def get_overdue_orders(
     return {"orders": []}
 
 
-def _query_names_one_customer(q: str, store_id: Optional[str]) -> bool:
-    """True when this search string identifies ONE customer -- the owner's
-    named-lookup exemption to the 30-day browse horizon.
-
-    Two conditions, both required:
-      1. the customer search resolves to exactly ONE record, and
-      2. the query really is that customer's name or number.
-
-    (2) is not redundant. "Resolved to one" is also true of a store with one
-    customer in it, or a matcher looser than we assume -- and then ANY string,
-    "ORD" included, is a named lookup and the window is gone. Verifying the
-    match against the returned record makes the exemption depend on the query
-    naming a person rather than on the size of the customer book.
-
-    Fail-CLOSED: any error means "not a named lookup". An exemption that opens
-    on an exception is not an exemption.
-    """
-    try:
-        needle = (q or "").strip().lower()
-        if len(needle) < 2:
-            return False
-        repo = get_customer_repository()
-        if repo is None:
-            return False
-        hits = repo.search_customers(q, store_id) or []
-        if len(hits) != 1:
-            return False
-        c = hits[0]
-        digits = "".join(ch for ch in needle if ch.isdigit())
-        for key in ("name", "mobile", "phone", "email"):
-            v = str(c.get(key) or "").lower()
-            if not v:
-                continue
-            if needle in v:
-                return True
-            if digits and len(digits) >= 6 and digits in "".join(
-                ch for ch in v if ch.isdigit()
-            ):
-                return True
-        # A family member (patients[].name / .mobile) names the account too.
-        for p in c.get("patients") or []:
-            if not isinstance(p, dict):
-                continue
-            for key in ("name", "mobile"):
-                v = str(p.get(key) or "").lower()
-                if v and needle in v:
-                    return True
-        return False
-    except Exception:  # noqa: BLE001 -- never let the exemption fail OPEN
-        return False
-
-
 @router.get("/search")
 async def search_orders(
     q: str = Query(..., min_length=2),
@@ -1292,7 +1247,9 @@ async def search_orders(
         orders = drop_rows_before_horizon(
             orders,
             current_user,
-            customer_scoped=_query_names_one_customer(q, active_store),
+            customer_scoped=query_names_one_customer(
+                q, active_store, repo=get_customer_repository()
+            ),
         )
         _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]

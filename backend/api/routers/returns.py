@@ -54,6 +54,10 @@ from ..dependencies import (
 )
 from ..services import cash_denominations as cash_denom
 from ..services import restock_engine
+# The ONE 30-day browse-horizon implementation (owner ruling 2026-09-01). The
+# ISO-STRING variant, because `returns.created_at` is a string - see the clamp
+# in list_returns for where that was verified.
+from ..services.data_horizon import horizon_start_iso_date
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
 from ..services.tender_routing import canonicalize_tender
@@ -3466,6 +3470,30 @@ async def list_returns(
         query["store_id"] = effective_store
     if return_type:
         query["return_type"] = return_type
+
+    # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01). This door is a pure
+    # BROWSE - a whole store's return history, every row carrying a customer
+    # name and a refund amount - so every role except ADMIN / SUPERADMIN is
+    # clamped to the last 30 days. AREA_MANAGER is "HQ" for STORE scope above
+    # but is NOT unrestricted here; the two questions are separate.
+    #
+    # No named-lookup exemption applies: this door takes no customer_id and no
+    # search term, so there is nothing here that resolves to ONE customer. One
+    # customer's full return history is reached through the customer-scoped
+    # doors, never by widening this list.
+    #
+    # TYPE: `created_at` on a return doc is an ISO STRING, not a BSON date -
+    # create_return stamps `datetime.now().isoformat()`, and the two other
+    # writers (services/shopify_refund.py, services/shopify_ingest.py) also
+    # stamp `.isoformat()`. So the bound MUST come from horizon_start_iso_date;
+    # a datetime bound brackets by BSON type, matches NOTHING, and would blank
+    # the returns screen for every staff member instead of narrowing it.
+    #
+    # Set on `query` BEFORE the count: clamping only the page would leave
+    # `total` reporting the size of the book the rows are hiding.
+    _horizon = horizon_start_iso_date(current_user)
+    if _horizon is not None:
+        query["created_at"] = {"$gte": _horizon}
 
     try:
         total = coll.count_documents(query)

@@ -163,3 +163,69 @@ def drop_rows_before_horizon(
             continue
         out.append(r)
     return out
+
+
+def query_names_one_customer(
+    q: str, store_id: Optional[str], *, repo: Any = None
+) -> bool:
+    """True when this search string identifies ONE customer -- the owner's
+    named-lookup exemption to the 30-day browse horizon.
+
+    Two conditions, both required:
+      1. the customer search resolves to exactly ONE record, and
+      2. the query really is that customer's name or number.
+
+    (2) is not redundant. "Resolved to one" is also true of a store with one
+    customer in it, or a matcher looser than we assume -- and then ANY string,
+    "ORD" included, is a named lookup and the window is gone. Verifying the
+    match against the returned record makes the exemption depend on the query
+    naming a person rather than on the size of the customer book.
+
+    Fail-CLOSED: any error means "not a named lookup". An exemption that opens
+    on an exception is not an exemption.
+
+    ONE implementation, imported by every door that searches (orders search,
+    the customer list's search branch). It lives here rather than in a router
+    because two copies of this predicate drifting is how the exemption silently
+    becomes a bypass on one screen and not the other.
+
+    ``repo`` lets a door hand in the CustomerRepository it already holds -
+    both callers have one, and passing it keeps the lookup on the caller's
+    own repository handle. Omitted, it is resolved from api.dependencies.
+    """
+    try:
+        needle = (q or "").strip().lower()
+        if len(needle) < 2:
+            return False
+        if repo is None:
+            from api.dependencies import get_customer_repository
+
+            repo = get_customer_repository()
+        if repo is None:
+            return False
+        hits = repo.search_customers(q, store_id) or []
+        if len(hits) != 1:
+            return False
+        c = hits[0]
+        digits = "".join(ch for ch in needle if ch.isdigit())
+        for key in ("name", "mobile", "phone", "email"):
+            v = str(c.get(key) or "").lower()
+            if not v:
+                continue
+            if needle in v:
+                return True
+            if digits and len(digits) >= 6 and digits in "".join(
+                ch for ch in v if ch.isdigit()
+            ):
+                return True
+        # A family member (patients[].name / .mobile) names the account too.
+        for p in c.get("patients") or []:
+            if not isinstance(p, dict):
+                continue
+            for key in ("name", "mobile"):
+                v = str(p.get(key) or "").lower()
+                if v and needle in v:
+                    return True
+        return False
+    except Exception:  # noqa: BLE001 -- never let the exemption fail OPEN
+        return False

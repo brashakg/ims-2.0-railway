@@ -128,6 +128,14 @@ from ..dependencies import (
 )
 from ..services.phone import normalize_indian_mobile
 
+# The 30-day browse horizon (owner ruling 2026-09-01) and its named-lookup
+# exemption. ONE shared implementation - never a second copy here.
+from ..services.data_horizon import (
+    apply_horizon,
+    drop_rows_before_horizon,
+    query_names_one_customer,
+)
+
 
 def _customer_store_id(doc):
     """The store a customer belongs to for object-level scope checks. Mirrors
@@ -731,6 +739,22 @@ async def list_customers(
         elif sub_clauses:
             filter_dict.update(sub_clauses[0])
 
+        # 30-day browse horizon (owner ruling 2026-09-01). THE customer book is
+        # this list, and it pages -- the biggest exfiltration surface in the app.
+        # Clamped HERE, before the search/browse branch splits, so the one filter
+        # feeds BOTH the rows (find_many) and the total (repo.count): a clamped
+        # page beside an unclamped total still leaks the size of the book the
+        # rows are hiding.
+        #
+        # `created_at` is a real BSON Date on every customer, not an ISO string:
+        # BaseRepository.create() stamps datetime.now() via _add_timestamps
+        # (backend/database/repositories/base_repository.py:45-50, called at :100)
+        # and BOTH customer write doors go through it -- POST /customers
+        # (customers.py, repo.create(customer_data)) and the online/walkout
+        # minter customer_service.ensure_customer (repo.create(skeleton); the
+        # ISO string that skeleton carries is OVERWRITTEN by _add_timestamps).
+        apply_horizon(filter_dict, current_user)
+
         # If search provided, use search method (also respects store filter).
         # The search path can't compose the $and, so the channel tag is applied
         # post-hoc to the search results to keep segregation consistent.
@@ -747,6 +771,19 @@ async def list_customers(
                     if str(r.get("contact_tier") or "").upper() != "MARKETING"
                 ]
             customers = _annotate_customer_matches(rows, search)
+            # The owner's exemption: a search that NAMES one customer returns
+            # that person's whole record with no date limit. A two-letter
+            # fragment matching many people is still BROWSING and stays
+            # clamped -- otherwise the search box is the way out of the window.
+            # `total` below is len(customers) on this path, so dropping here
+            # narrows the count with the rows.
+            customers = drop_rows_before_horizon(
+                customers,
+                current_user,
+                customer_scoped=query_names_one_customer(
+                    search, effective_store, repo=repo
+                ),
+            )
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 

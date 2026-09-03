@@ -17,6 +17,7 @@ import uuid
 
 from .auth import get_current_user
 from ..dependencies import get_db as _dep_get_db, validate_store_access
+from ..services.data_horizon import horizon_start_iso_date
 from ..utils.dates import to_date_str
 
 router = APIRouter()
@@ -208,6 +209,40 @@ async def list_follow_ups(
             date_query["$lte"] = date_to
         if date_query:
             query["scheduled_date"] = date_query
+
+    # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01).
+    #
+    # This door serves a MIXED list - the FollowUpDashboard calls it with no
+    # status filter and renders open work and closed history in one table - so
+    # it is clamped ROW BY ROW on status, not wholesale:
+    #
+    #   * PENDING rows are the store's WORK QUEUE and are NEVER hidden. A
+    #     follow-up 40 days overdue is work still in hand; hiding it would
+    #     delete a live feature and quietly drop exactly the customers who most
+    #     need chasing. `scheduled_date` is therefore NOT clamped either.
+    #   * CLOSED rows (completed / skipped) are HISTORY BROWSE. They are kept
+    #     only while their COMPLETION is inside the window - so work closed
+    #     yesterday on a two-year-old reminder stays visible, and the book of
+    #     everyone ever called does not.
+    #
+    # STORED TYPES, verified in the write paths (not assumed): `created_at` and
+    # `completed_at` are ISO STRINGS on every writer of this collection -
+    # create at :267 below, the complete door at :317, crm.py:889/952/1148,
+    # marketing.py:966/1088, megaphone.py:317/415/523. The bound is therefore
+    # an ISO string; a datetime bound would type-bracket against a string field
+    # and match NOTHING, emptying the screen instead of narrowing it.
+    # ONE writer differs - whatsapp_intents.py:288 stores created_at as a real
+    # datetime. Those rows are always status="pending", so the first clause
+    # keeps them whatever their type; once closed they carry an ISO
+    # `completed_at` written by the doors above, which the second clause reads.
+    # Neither shape can be silently dropped.
+    horizon = horizon_start_iso_date(current_user)
+    if horizon:
+        query["$or"] = [
+            {"status": "pending"},
+            {"completed_at": {"$gte": horizon}},
+            {"created_at": {"$gte": horizon}},
+        ]
 
     # Fetch follow-ups, sorted by scheduled_date (due soonest first)
     follow_ups = list(collection.find(query).sort("scheduled_date", 1))
@@ -592,6 +627,11 @@ async def get_follow_up_summary(
         {"store_id": store_id, "status": "pending", "scheduled_date": {"$lt": today}}
     )
 
+    # The four counts above are all PENDING work - the size of the queue, not
+    # the customer book - so the browse horizon does not touch them (see the
+    # list door). This one counts CLOSED rows and is already bounded to 30 days,
+    # which IS the horizon; test_horizon_followups.py holds that equality as a
+    # tripwire, so widening this window without clamping it turns the test red.
     month_ago = (date.today() - timedelta(days=30)).isoformat()
     completed_this_month = collection.count_documents(
         {
