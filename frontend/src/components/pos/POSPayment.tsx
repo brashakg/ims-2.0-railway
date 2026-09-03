@@ -14,7 +14,7 @@ import {
   CheckCircle, X, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
-import { usePOSStore } from '../../stores/posStore';
+import { usePOSStore, type CashTenderCapture, type PaymentEntry } from '../../stores/posStore';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
 import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
@@ -48,8 +48,16 @@ function fc(amount: number | undefined | null): string {
 // against a 28,000 cash leg is 1,000 CHANGE. Telling a cashier to collect
 // another 11,590 that has already been paid by card and UPI is the worst
 // possible direction for this error to point.
-function CashChangeCalculator({ cashDue }: { cashDue: number }) {
-  const setCashTender = usePOSStore((s) => s.setCashTender);
+function CashChangeCalculator({
+  cashDue,
+  onCapture,
+}: {
+  cashDue: number;
+  /** Where the capture goes when this till is not billing the cart. */
+  onCapture?: (capture: CashTenderCapture | null) => void;
+}) {
+  const storeSetCashTender = usePOSStore((s) => s.setCashTender);
+  const setCashTender = onCapture ?? storeSetCashTender;
   const [cashTendered, setCashTendered] = useState('');
   const [noteRows, setNoteRows] = useState<DenomRow[]>(blankDenoms());
   const [showNotes, setShowNotes] = useState(false);
@@ -118,13 +126,58 @@ function CashChangeCalculator({ cashDue }: { cashDue: number }) {
 }
 
 // ============================================================================
+// PaymentTarget — the seam that lets a NON-CART surface reuse this till
+// ============================================================================
+// Pass nothing and every line below behaves EXACTLY as the two live tills
+// (/pos/new, /pos/counter) already render it: the cart is the target.
+//
+// The delivery counter is not a fresh sale — it collects the BALANCE of an
+// order that already exists on the server — so it hands in its own due figure
+// and its own payment list instead of the cart's. Everything that makes this a
+// real till (split tender, per-leg reference, EMI, the leg list, the cash
+// denomination capture) is then the SAME code on all three surfaces.
+//
+// What target mode deliberately does NOT render: loyalty / store credit /
+// voucher. Those three read `store.customer` and `store.getGrandTotal()` and
+// park their intent ON THE CART for submitOrder to consume — so on a non-cart
+// surface they would spend the wrong customer's points against the wrong
+// amount and leak into the next sale at the till. They stay cart-only until
+// they grow a target of their own.
+export interface PaymentTarget {
+  /** What is owed on the thing being paid — an existing order's balance_due. */
+  due: number;
+  payments: PaymentEntry[];
+  addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => void;
+  removePayment: (index: number) => void;
+  /** Where the note-by-note cash capture goes. Omitted -> not recorded. */
+  setCashTender?: (capture: CashTenderCapture | null) => void;
+  /** Store whose EMI rate applies. Defaults to the cart's store. */
+  storeId?: string;
+}
+
+// ============================================================================
 // StepPayment
 // ============================================================================
-export function StepPayment() {
+export function StepPayment({ target }: { target?: PaymentTarget } = {}) {
   const store = usePOSStore();
-  const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = Math.round((total - paid) * 100) / 100;
+  const payments = target ? target.payments : store.payments;
+  const addPayment = target ? target.addPayment : store.addPayment;
+  const removePayment = target ? target.removePayment : store.removePayment;
+  const total = target ? target.due : store.getGrandTotal();
+  // Same arithmetic as the store's getTotalPaid — a plain sum of the legs.
+  const paid = target
+    ? (target.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0)
+    : store.getTotalPaid();
+  const balance = Math.round((total - paid) * 100) / 100;
+  const storeId = target?.storeId || store.store_id;
   const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI'>('CASH');
-  const [payAmount, setPayAmount] = useState(''); const [payRef, setPayRef] = useState('');
+  // Target mode opens with the amount due already typed in: at the delivery
+  // counter "collect the balance" is the common case, and the method row —
+  // which is what prefills in cart mode — already sits on CASH.
+  const [payAmount, setPayAmount] = useState(
+    target ? String(Math.round(target.due * 100) / 100) : '',
+  );
+  const [payRef, setPayRef] = useState('');
 
   // EMI state
   const [showEMIForm, setShowEMIForm] = useState(false);
@@ -145,16 +198,16 @@ export function StepPayment() {
   const [emiAnnualRatePct, setEmiAnnualRatePct] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
-    if (!store.store_id) return () => { alive = false; };
+    if (!storeId) return () => { alive = false; };
     storeApi
-      .getStore(store.store_id)
+      .getStore(storeId)
       .then((detail: { emi_annual_rate_percent?: number }) => {
         const v = Number(detail?.emi_annual_rate_percent);
         if (alive && Number.isFinite(v)) setEmiAnnualRatePct(v);
       })
       .catch(() => { /* keep fallback -- it mirrors the registry default */ });
     return () => { alive = false; };
-  }, [store.store_id]);
+  }, [storeId]);
   const annualRatePct = emiAnnualRatePct ?? EMI_ANNUAL_RATE_PERCENT_FALLBACK;
 
   const emiProviders = ['HDFC', 'ICICI', 'AXIS', 'ADITYA BIRLA', 'BAJAJ', 'INDIABULLS'];
@@ -178,7 +231,7 @@ export function StepPayment() {
     const monthlyRate = annualRatePct / 100 / 12;
     const monthlyEMI = calculateEMI(emiBalance, monthlyRate, emiTenure);
     const processingFee = (emiBalance * 0.02);
-    store.addPayment({
+    addPayment({
       method: 'EMI',
       amount: downPayment,
       reference: emiProvider,
@@ -203,17 +256,20 @@ export function StepPayment() {
 
   return (
     <div className="w-full max-w-2xl mx-auto space-y-4">
-      <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
+      {/* The owning surface prints the headline figure in target mode (the
+          delivery counter shows the ORDER's balance, with what is already
+          paid against the order total), so this card would only repeat it. */}
+      {!target && <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
         <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
         <p className="figure text-4xl text-gray-900">{'₹'}{Math.round(total).toLocaleString('en-IN')}</p>
         {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
           <span className="figure text-green-600">Paid: {'₹'}{Math.round(paid).toLocaleString('en-IN')}</span>
           <span className={balance > 0 ? 'figure text-red-600' : 'figure text-green-600'}>Balance: {'₹'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
-      </div>
+      </div>}
 
-      {/* Loyalty Points & Credit Billing Options */}
-      {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
+      {/* Loyalty Points & Credit Billing Options — CART ONLY, see PaymentTarget */}
+      {!target && store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
         <div className="space-y-2">
           <LoyaltyRedeemControl />
           {/* Store credit and vouchers apply to a minority of bills but were
@@ -293,7 +349,7 @@ export function StepPayment() {
               if (!a || a <= 0) return;
               if (a > balance + 0.01) { setPayAmount(String(Math.ceil(balance * 100) / 100)); return; }
               if (payMethod !== 'CASH' && !payRef.trim()) return; // Require ref for non-cash
-              store.addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
+              addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
               setPayAmount(''); setPayRef('');
             }}
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
@@ -345,8 +401,8 @@ export function StepPayment() {
         </div>
       )}
 
-      {(store.payments || []).length > 0 && <div className="space-y-2">
-        {(store.payments || []).map((p, i) => (
+      {(payments || []).length > 0 && <div className="space-y-2">
+        {(payments || []).map((p, i) => (
           <div key={i} className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -358,7 +414,7 @@ export function StepPayment() {
                 <span className="font-semibold text-gray-900">
                   {'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}
                 </span>
-                <button onClick={() => store.removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button>
+                <button onClick={() => removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button>
               </div>
             </div>
             {/* POS-2: show EMI financed balance + monthly installment below the down-payment row */}
@@ -376,11 +432,12 @@ export function StepPayment() {
           to the CASH LEG: on a split bill the other tenders are already
           settled, so comparing the notes on the counter against the WHOLE bill
           reports a shortfall that does not exist. */}
-      {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
+      {(payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
         <CashChangeCalculator
+          onCapture={target?.setCashTender}
           cashDue={
             Math.round(
-              (store.payments || [])
+              (payments || [])
                 .filter((p) => p.method === 'CASH')
                 .reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100,
             ) / 100
@@ -388,7 +445,7 @@ export function StepPayment() {
         />
       )}
 
-      {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
+      {!target && balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
     </div>
   );
 }

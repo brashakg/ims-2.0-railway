@@ -1165,14 +1165,66 @@ async def list_orders(
 @router.get("/pending/delivery")
 async def get_pending_deliveries(
     store_id: Optional[str] = Query(None),
+    q: Optional[str] = Query(
+        None, description="Order number, customer name or phone"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get orders pending delivery"""
+    """The delivery counter's queue: orders waiting to be collected.
+
+    SEARCH (owner 2026-09-02: "let users search through customer name and phone
+    number too"). The counter could previously only find a job by its number.
+    ``?q=`` searches the SAME queue through ``repo.search_orders`` -- the exact
+    matcher GET /orders/search uses over order_number / customer_name /
+    customer_phone -- and keeps only the rows still awaiting collection. No
+    second matcher, and the "awaiting collection" predicate comes from the
+    repository constant rather than a re-typed "READY".
+
+    30-DAY BROWSE HORIZON (owner ruling 2026-09-01; owner 2026-09-02: "let
+    users search through 30 days pending delivery data, except admin and
+    superadmin"). Clamped on ``created_at``, which is a real BSON date -- it is
+    written by BaseRepository._add_timestamps (datetime.now()), reached from
+    this door's own writer OrderRepository.create_unique. That matters: the
+    sibling field ``expected_delivery`` is stored as an ISO *string*
+    (orders.py, order create: ``expected_delivery.isoformat()``), so a datetime
+    bound against it would match nothing -- which is exactly why the clamp is
+    NOT on the promised date.
+
+    Why clamping the queue does not strand work in hand: a pair uncollected for
+    40 days is the row staff most need, and both ways of reaching it stay open.
+    Scanning the job card reads GET /orders/{order_id}, a single-record lookup
+    with no window at all; typing the customer's name or number here resolves to
+    ONE customer and lifts the window entirely through the SAME
+    ``_query_names_one_customer`` exemption GET /orders/search uses. What the
+    horizon removes is the unbounded BROWSE -- scrolling the whole shelf's
+    history -- which is the exfiltration surface the rule exists for. ADMIN and
+    SUPERADMIN keep the full queue (is_unrestricted).
+    """
     repo = get_order_repository()
     active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
-        orders = repo.find_ready_for_delivery(active_store)
+        from ..services.data_horizon import drop_rows_before_horizon
+
+        needle = (q or "").strip()
+        if needle:
+            orders = [
+                o
+                for o in (repo.search_orders(needle, active_store) or [])
+                if o.get("status") == repo.READY_FOR_DELIVERY_STATUS
+            ]
+            # A fuzzy fragment ("ra", "ORD") is still BROWSING and stays
+            # clamped. Resolving the query to one customer -- rather than
+            # trusting the shape of the string -- is what stops a one-character
+            # search from becoming the way out of the window.
+            customer_scoped = _query_names_one_customer(needle, active_store)
+        else:
+            orders = repo.find_ready_for_delivery(active_store)
+            customer_scoped = False
+
+        orders = drop_rows_before_horizon(
+            orders, current_user, customer_scoped=customer_scoped
+        )
         _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -5069,6 +5121,16 @@ class HandoverDetails(BaseModel):
     fit_check_done: Optional[bool] = None
     cleaned_and_cased: Optional[bool] = None
     notes: Optional[str] = Field(None, max_length=300)
+    # STAFF side of the handover (owner 2026-09-02: "who is giving delivery to
+    # the customer should also be logged"). Deliberately NOT the same thing as
+    # picked_up_by_*, which is the CUSTOMER side -- who walked out with the bag.
+    # One order can have both: delivered_by = Priya, picked_up_by = the
+    # customer's brother. Left free rather than forced to the caller so the
+    # counter can name the colleague who actually fitted and handed over;
+    # `recorded_by` on the stored record is always the authenticated actor, so
+    # the audit trail does not depend on what the client claimed here.
+    delivered_by_id: Optional[str] = Field(None, max_length=64)
+    delivered_by_name: Optional[str] = Field(None, max_length=120)
 
 
 class DeliverRequest(BaseModel):
@@ -5196,6 +5258,20 @@ async def deliver_order(
                 if v is not None
             }
             if _h:
+                # Never leave "who handed this over" blank once a handover was
+                # recorded: fall back to the signed-in actor. (A body-less
+                # /deliver records no handover_record at all -- its actor is
+                # already on status_updated_by / status_history.)
+                for _k, _fallback in (
+                    ("delivered_by_id", current_user.get("user_id")),
+                    (
+                        "delivered_by_name",
+                        current_user.get("full_name")
+                        or current_user.get("username"),
+                    ),
+                ):
+                    if not _h.get(_k) and _fallback:
+                        _h[_k] = _fallback
                 _claim_extra = {
                     "handover_record": {
                         **_h,

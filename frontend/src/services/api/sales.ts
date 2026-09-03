@@ -33,6 +33,24 @@ export const orderApi = {
     return response.data;
   },
 
+  // The delivery counter's queue: orders awaiting collection, newest first.
+  // `q` searches the SAME queue by order number, customer name or phone --
+  // the counter could previously only find a job by its number, so a customer
+  // who had lost their job card could not be served without one.
+  //
+  // The 30-day browse horizon is applied SERVER-side (ADMIN/SUPERADMIN exempt),
+  // and naming one customer lifts it for that customer. Nothing here may try
+  // to widen it: the window is not a UI concern.
+  getPendingDelivery: async (params?: { storeId?: string; q?: string }) => {
+    const response = await api.get('/orders/pending/delivery', {
+      params: {
+        ...(params?.storeId ? { store_id: params.storeId } : {}),
+        ...(params?.q ? { q: params.q } : {}),
+      },
+    });
+    return response.data;
+  },
+
   // C-5 (DELTA 3): optional `idempotencyKey` -> sent as the `Idempotency-Key`
   // request header so a double-clicked / retried "Pay now" reuses the key and
   // the backend returns the SAME order instead of creating a duplicate.
