@@ -96,7 +96,31 @@ export const orderApi = {
     return response.data;
   },
 
-  deliverOrder: async (orderId: string, body?: { approval_token?: string }) => {
+  // CONFIRMED -> READY through the server's own door (rx-hold, QC gate, atomic
+  // claim). The general counter takes a paid quick sale through it on the way
+  // to /deliver, which refuses anything not READY.
+  markReady: async (orderId: string) => {
+    const response = await api.post(`/orders/${orderId}/ready`);
+    return response.data;
+  },
+
+  deliverOrder: async (
+    orderId: string,
+    body?: {
+      approval_token?: string;
+      // Server HandoverDetails. delivered_by_* is the STAFF side (who handed
+      // over); picked_up_by_* is the customer side.
+      handover?: {
+        picked_up_by_name?: string;
+        picked_up_by_phone?: string;
+        fit_check_done?: boolean;
+        cleaned_and_cased?: boolean;
+        notes?: string;
+        delivered_by_id?: string;
+        delivered_by_name?: string;
+      };
+    },
+  ) => {
     const response = await api.post(`/orders/${orderId}/deliver`, body ?? {});
     return response.data;
   },

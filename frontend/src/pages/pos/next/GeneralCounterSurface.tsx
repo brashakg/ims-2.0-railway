@@ -56,6 +56,7 @@ import { PosWidgets } from './PosWidgets';
 import { CounterCompleteScreen } from './SaleCompleteScreen';
 import { ProductCard, productIdOf, MAX_PRODUCT_RESULTS } from './ProductResultsStrip';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
+import { orderApi } from '../../../services/api/sales';
 import {
   resolveBarcode,
   posPriceGuard,
@@ -122,6 +123,8 @@ export function GeneralCounterSurface() {
     orderId: string;
     orderNumber?: string;
     jobId?: string;
+    /** The server took the sale to DELIVERED (see handleCompleteSale). */
+    delivered?: boolean;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
 
@@ -217,7 +220,42 @@ export function GeneralCounterSurface() {
         return;
       }
       idempotencyKeyRef.current = null;
-      if (res.warning) setErrorMsg(res.warning);
+      // Owner ruling 2026-09-04: a completed take-away counter sale IS the
+      // handover -- the goods leave with the customer and the tax invoice is
+      // issued -- so it ends DELIVERED with the CASHIER (the signed-in user,
+      // not the bill's salesperson) logged as the person who handed over.
+      // Through the server's existing doors only: the paid sale sits at
+      // CONFIRMED, /ready takes it to READY (rx-hold + QC gate + atomic
+      // claim), /deliver runs the money gate + the same holds + the atomic
+      // DELIVERED claim and persists the handover record. A home-delivery
+      // bill is NOT handed over here -- the packing desk still has it -- so
+      // it stays in the delivery queue for the dispatch door.
+      // A failure here is LOUD but never un-completes the sale: the money is
+      // recorded and the customer has the goods; the order simply waits in
+      // the delivery queue to be marked from the Orders screen.
+      let delivered = false;
+      let handoverWarning: string | undefined;
+      if (res.orderId && !homeDelivery) {
+        try {
+          await orderApi.markReady(res.orderId);
+          const out = await orderApi.deliverOrder(res.orderId, {
+            handover: {
+              delivered_by_id: user?.id,
+              delivered_by_name: user?.name,
+            },
+          });
+          delivered = out?.status === 'DELIVERED';
+          if (!delivered) throw new Error(`server answered ${out?.status || 'unknown'}`);
+        } catch (e: any) {
+          const detail = typeof e?.detail === 'string' ? e.detail : e?.message;
+          handoverWarning =
+            `Sale ${res.orderNumber || res.orderId} is saved and paid, but it could NOT be ` +
+            `marked delivered${detail ? `: ${detail}` : ''}. ` +
+            'Mark it delivered from the Orders screen so the handover is on record.';
+        }
+      }
+      const notices = [res.warning, handoverWarning].filter(Boolean);
+      if (notices.length) setErrorMsg(notices.join(' '));
       // Land on the good completion screen (server-read totals, PDF, sends,
       // scorecard) -- the same one BillingSurface shows, in its COUNTER stage:
       // the tax invoice is the primary print (owner 2026-09-04: the counter
@@ -229,6 +267,7 @@ export function GeneralCounterSurface() {
           orderId: res.orderId,
           orderNumber: res.orderNumber,
           jobId: res.fittingJobId,
+          delivered,
         });
       }
     } catch (e: any) {
@@ -312,6 +351,7 @@ export function GeneralCounterSurface() {
           orderId={completed.orderId}
           orderNumber={completed.orderNumber}
           jobId={completed.jobId}
+          delivered={completed.delivered}
           salespersonId={store.salesperson_id}
           salespersonName={store.salesperson_name}
           onDone={() => {

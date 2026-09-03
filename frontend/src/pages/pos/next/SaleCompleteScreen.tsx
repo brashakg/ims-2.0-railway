@@ -1,12 +1,14 @@
 // ============================================================================
 // IMS 2.0 - POS sale-completion screen (Wave 4, owner spec 12)
 // ============================================================================
-// Shown straight after Complete-sale. On the OPTICAL till the customer
-// document at SALE time is an "ORDER RECEIPT" -- the words "final tax invoice"
-// belong to delivery (owner ruling) -- while the GENERAL COUNTER always issues
-// the tax invoice, because there the goods leave with the customer and the
-// sale IS the handover (owner ruling 2026-09-04: no per-sale choice). The
-// wording lives in ONE stage table below; the delivery twin
+// Shown straight after Complete-sale. Every stage prints through the ONE
+// statutory door (GET /orders/{id}/invoice.pdf), which mints the FY-consecutive
+// serial on first hit -- so every stage SAYS "tax invoice" (owner ruling
+// 2026-09-04: the optical till mints the serial at the sale; nobody is told
+// they are printing a receipt while a serial is being minted). The GENERAL
+// COUNTER's sale is also the handover (goods leave with the customer); the
+// DELIVERY stage prints the final copy. The wording lives in ONE stage table
+// below; the delivery twin
 // (DeliveryCompleteScreen.tsx) and the counter (CounterCompleteScreen, this
 // file) reuse this same component with stage="DELIVERY" / "COUNTER". Copies
 // of a completion screen would drift; there is exactly one implementation.
@@ -123,15 +125,19 @@ type SendState = 'idle' | 'sending' | 'sent' | 'failed';
 // door queues ORDER_DELIVERED itself (orders.py, "auto-WhatsApp on completion"),
 // so at delivery the manual button must admit the message already went and
 // offer a resend. Nothing is auto-queued at SALE time today, so the sale screen
-// must NOT claim it was -- flip this to true the day an auto order-receipt send
-// is added server-side.
+// must NOT claim it was -- flip this to true the day an auto invoice send is
+// added server-side. The COUNTER stage's value is per-sale: the counter passes
+// `delivered` when its sale went through the deliver door (which queues the
+// text), and the table's false stands when that step failed.
 // ---------------------------------------------------------------------------
 
 const STAGE = {
+  // Owner ruling 2026-09-04 ("mint at the sale"): the primary print opens the
+  // invoice door and mints the serial, so it is labelled as what it is.
   SALE: {
     title: 'Sale complete',
-    docName: 'Order receipt',
-    printDocLabel: 'Order receipt (A4)',
+    docName: 'Tax invoice',
+    printDocLabel: 'Tax invoice (A4)',
     secondPrintLabel: 'Workshop job card',
     docTemplate: 'ORDER_CONFIRMED',
     doneLabel: 'Start next bill',
@@ -140,9 +146,7 @@ const STAGE = {
   // Owner ruling 2026-09-04: the general counter ALWAYS issues the tax
   // invoice -- the goods leave with the customer, so the sale IS the handover
   // -- through the ONE statutory door (GET /orders/{id}/invoice.pdf, which
-  // mints the FY serial). No per-sale chooser, no "order receipt" label.
-  // autoSent stays false: only the deliver door queues ORDER_DELIVERED, and a
-  // counter sale goes through order-create, which queues nothing.
+  // mints the FY serial). No per-sale chooser.
   // ORDER_DELIVERED is the registered document template that says what
   // actually happened here (the customer has the goods).
   COUNTER: {
@@ -420,6 +424,10 @@ export interface CompletionScreenProps {
   fittingCoating?: string;
   salespersonId?: string;
   salespersonName?: string;
+  /** The sale went through the deliver door (general counter take-away),
+   *  which queues the ORDER_DELIVERED text itself -- so the manual send must
+   *  admit it already went, exactly as the DELIVERY stage does. */
+  delivered?: boolean;
   /** Clear the till and go again. Omit to hide the button. */
   onDone?: () => void;
 }
@@ -432,10 +440,12 @@ export function CompletionScreen({
   fittingCoating,
   salespersonId,
   salespersonName,
+  delivered,
   onDone,
 }: CompletionScreenProps) {
   const { user } = useAuth();
   const cfg = STAGE[stage];
+  const autoSent = cfg.autoSent || !!delivered;
 
   const [order, setOrder] = useState<OrderView | null>(null);
   const [identity, setIdentity] = useState<StoreIdentity | null>(null);
@@ -684,7 +694,7 @@ export function CompletionScreen({
             <SendButton
               label={`WhatsApp ${cfg.docName.toLowerCase()}`}
               // Owner rule: never pretend a message was not already sent.
-              note={cfg.autoSent ? 'Sent automatically - Resend' : undefined}
+              note={autoSent ? 'Sent automatically - Resend' : undefined}
               state={sends.wa_doc}
               disabled={!phone}
               title={phone ? undefined : 'This customer has no phone number on file.'}

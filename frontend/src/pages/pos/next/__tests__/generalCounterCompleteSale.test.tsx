@@ -51,6 +51,16 @@ vi.mock('../../../../components/pos/submitOrder', () => ({
   submitPosOrder: (...a: unknown[]) => submitPosOrder(...a),
 }));
 
+// The hand-over doors a take-away sale goes through after the submit (owner
+// 2026-09-04). Exercised in generalCounterHandsOver.test.tsx; here they just
+// answer so nothing reaches the network.
+vi.mock('../../../../services/api/sales', () => ({
+  orderApi: {
+    markReady: vi.fn().mockResolvedValue({ status: 'READY' }),
+    deliverOrder: vi.fn().mockResolvedValue({ status: 'DELIVERED' }),
+  },
+}));
+
 // MUTABLE: the browse-grid test hands the counter a product list; every
 // checkout test leaves it empty. Reset in beforeEach.
 let productRows: unknown[] = [];
