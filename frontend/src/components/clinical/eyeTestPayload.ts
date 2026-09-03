@@ -253,7 +253,19 @@ export function eyeTestWriteBody(data: EyeTestData): EyeTestWriteBody {
       vduUsage: data.vduUsage || undefined,
       // Final Rx: signed strings, sign intact end-to-end.
       ...finalRxPayload(data.finalRx),
-      notes: data.chiefComplaint || '',
+      // `notes` carries the optometrist's FINAL RX REMARKS, because that is
+      // what the backend stores it as: complete_test writes
+      // `"remarks": data.notes` onto the prescription, and the Rx card prints
+      // that. It used to be set to the chief complaint, so three things went
+      // wrong at once - the remarks the optometrist typed were never sent, the
+      // Remarks box refilled from `notes` on reopening and showed the chief
+      // complaint back (which reads as saved), and the patient's PRINTED
+      // prescription carried "blurred distance vision" where the clinical
+      // advice belonged.
+      //
+      // The chief complaint is not lost: it is sent on its own `chiefComplaint`
+      // field above and stored as `chief_complaint` on the test record.
+      notes: data.finalRx?.remarks || '',
       // C6-B: also persist the structured exam findings the form already
       // collects (chief complaint + per-eye aided VA from the Final Rx) into
       // the test record's `clinical_findings` block, so they're queryable

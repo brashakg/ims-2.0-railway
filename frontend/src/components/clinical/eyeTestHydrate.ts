@@ -206,7 +206,11 @@ export function hydrateFinalRx(raw: unknown): FinalRxData {
     ipd: s(p.ipd),
     lensType: s(p.lensRecommendation ?? p.lens_recommendation),
     nextCheckup: s(p.nextCheckup ?? p.next_checkup),
-    remarks: s(p.notes ?? p.remarks),
+    // `remarks` FIRST. Reading `notes` first is what put the chief complaint
+    // in the Remarks box on every reopened exam - and made the loss invisible,
+    // because the box was never empty. `notes` stays as the fallback so exams
+    // saved before the fix still show whatever they stored.
+    remarks: s(p.remarks ?? p.notes),
   };
 }
 
