@@ -155,6 +155,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'percent', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // Accountant GST cross-check: GSTR-1/3B vs books side-by-side + sign-off.
       { id: 'gst-cross-check', label: 'GST Cross-Check', to: '/finance/gst-cross-check', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // GSTR-1 and GSTR-3B were POP-UPS inside a scrolling reports page. The
+      // accountant TYPES these figures into the GST portal by hand, so they are
+      // now full pages he can bookmark and read a number off without fighting
+      // two nested scrollbars. requireRoles mirrors the route gate.
+      { id: 'gstr1', label: 'GSTR-1', to: '/reports/gstr1', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'gstr3b', label: 'GSTR-3B', to: '/reports/gstr3b', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Online refunds: Shopify refunds -> proposed GST credit notes awaiting
       // accountant confirmation. The /online-store/refund-reviews route already
       // admits ACCOUNTANT, but the "Online Store" nav item does not -- this gives
