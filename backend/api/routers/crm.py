@@ -352,10 +352,12 @@ async def get_customer_lifecycle_phase(
 
 @router.get("/customers/segment/rfm", response_model=List[CustomerSegmentResponse])
 async def get_rfm_segmentation(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(
+        require_roles("SUPERADMIN", "ADMIN", "STORE_MANAGER")
+    ),
 ):
     """
-    RFM (Recency, Frequency, Monetary) segmentation of all customers.
+    RFM (Recency, Frequency, Monetary) segmentation of customers.
 
     **Segments:**
     - Champions: Recent, frequent, high spenders
@@ -363,9 +365,30 @@ async def get_rfm_segmentation(
     - Big Spenders: High lifetime value
     - At Risk: Were regular, now declining engagement
     - Lost: No activity in 12+ months
+
+    MANAGER-ONLY and STORE-SCOPED. The response carries no personal data -- it
+    is counts and an average lifetime value per segment -- but that is the
+    business's own numbers, and this door was AUTHENTICATED, so any signed-in
+    cashier could read the company's average customer value. It also called
+    query_all_customers() with no store filter, so a single-store manager was
+    served every store's customers; the churn endpoint immediately above it has
+    always scoped by store. ADMIN and SUPERADMIN keep the company-wide view.
     """
     try:
-        all_customers = db.query_all_customers()
+        store_id = current_user.get("active_store_id")
+        roles = current_user.get("roles", []) or []
+        sees_all = any(r in ("SUPERADMIN", "ADMIN") for r in roles)
+        if not sees_all and store_id and hasattr(db, "query_customers_by_store"):
+            all_customers = db.query_customers_by_store(store_id)
+        else:
+            all_customers = db.query_all_customers()
+            if not sees_all and store_id:
+                all_customers = [
+                    c
+                    for c in all_customers
+                    if store_id
+                    in (c.get("store_ids", []) + [c.get("primary_store_id", "")])
+                ]
         segments = _perform_rfm_segmentation(all_customers)
         return segments
     except Exception as e:
@@ -463,10 +486,21 @@ async def get_customer_prescriptions(
 async def get_churn_risk_customers(
     risk_level: Literal["high", "medium", "low"] = Query("high"),
     limit: int = Query(50, ge=1, le=500),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(
+        require_roles("SUPERADMIN", "ADMIN", "STORE_MANAGER")
+    ),
 ):
     """
     Get list of customers at risk of churning based on engagement metrics.
+
+    MANAGER-ONLY, and projected. This door used to be AUTHENTICATED while the
+    only screen that calls it (/customers/segmentation) was gated to
+    SUPERADMIN / ADMIN / STORE_MANAGER -- gated on the page, not on the server.
+    Any signed-in cashier could ask for limit=500 and receive five hundred
+    COMPLETE customer documents, because the helper returned {**customer}:
+    address, credit limit, GSTIN, store credit, family members. The role gate
+    now matches the screen, and the response carries only the fields the
+    churn list actually renders.
 
     **Risk Levels:**
     - high: No purchases in 6+ months, was previously active
@@ -2092,6 +2126,33 @@ def _perform_rfm_segmentation(customers: list) -> list:
     ]
 
 
+# Exactly what the churn panel renders, and nothing else. Spreading the whole
+# customer document was how a contact list became a data export: address,
+# credit limit, GSTIN, store-credit balance and the family members all rode
+# along on every row. Adding a field here is a deliberate act.
+_CHURN_ROW_FIELDS = (
+    "customer_id",
+    "name",
+    "phone",
+    "mobile",
+    "email",
+    "loyalty_points",
+    "total_purchases",
+    "last_order_date",
+    "last_purchase_date",
+    "created_at",
+)
+
+
+def _churn_row(customer: dict, risk_level: str, days, count) -> dict:
+    """One churn-list row: the rendered fields plus the three annotations."""
+    row = {k: customer.get(k) for k in _CHURN_ROW_FIELDS if k in customer}
+    row["churn_risk_level"] = risk_level
+    row["days_since_last_purchase"] = days
+    row["total_orders"] = count
+    return row
+
+
 def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
     """Identify customers at risk of churning using real recency-based signals.
 
@@ -2169,14 +2230,7 @@ def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
             continue
         in_band = days >= lo and (hi is None or days <= hi)
         if in_band:
-            at_risk.append(
-                {
-                    **customer,
-                    "churn_risk_level": risk_level,
-                    "days_since_last_purchase": days,
-                    "total_orders": count,
-                }
-            )
+            at_risk.append(_churn_row(customer, risk_level, days, count))
     return at_risk
 
 
