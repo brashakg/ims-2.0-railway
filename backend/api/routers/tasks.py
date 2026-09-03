@@ -993,8 +993,14 @@ async def auto_generate_daily_tasks(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Auto-generate today's daily tasks from persisted DAILY SOP templates for
-    the store. Falls back to the built-in starter set when none are configured."""
+    """Issue today's daily tasks from this store's DAILY SOP templates.
+
+    One task PER NAMED PERSON on each template (owner ruling 2026-09-03), not
+    one task for whoever pressed the button. Roles on a template resolve to the
+    people holding them in this store. Nothing is generated when the store has
+    configured no templates - a fabricated checklist is worse than none.
+    Re-running on the same day tops up what is missing rather than duplicating.
+    """
     repo = get_task_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
@@ -1021,8 +1027,50 @@ async def auto_generate_daily_tasks(
 
     now = datetime.now()
     generated_count = 0
+    unassigned: list = []
 
-    def _make_task(title, description, category, items, template_id=None):
+    # ------------------------------------------------------------------
+    # WHO the SOP is actually for
+    # ------------------------------------------------------------------
+    # Owner ruling 2026-09-03: "instead of assigning it to store manager,
+    # Cashier, optom, assign it to individuals like sameer, rupesh and so".
+    #
+    # Every generated task used to be assigned to WHOEVER PRESSED THE BUTTON,
+    # no matter what the template said. So the manager who ran the morning
+    # generate received the cashier's cash-drawer SOP, the optometrist's
+    # room-prep SOP and every other one - and nobody else on the floor
+    # received anything at all. The template's `assigned_users` field was
+    # written by the editor and read by NOTHING.
+    #
+    # A role on a template is resolved to the PEOPLE holding it in this store,
+    # so an SOP set to CASHIER becomes Sameer's task and Rupesh's task, by
+    # name. A task is always somebody's; a job title cannot do the work.
+    user_repo = get_user_repository()
+
+    def _assignees(tpl: dict) -> list:
+        """User ids this template's daily task belongs to, deduped, in order."""
+        ids: list = []
+        seen = set()
+
+        def _add(uid):
+            if uid and uid not in seen:
+                seen.add(uid)
+                ids.append(uid)
+
+        for uid in tpl.get("assigned_users") or []:
+            _add(uid)
+        # Roles resolve to the named people holding them IN THIS STORE. A role
+        # is a way of naming a group of people, never an assignee itself.
+        if user_repo is not None:
+            for role in tpl.get("assigned_roles") or []:
+                try:
+                    for u in user_repo.find_by_role(role, active_store) or []:
+                        _add(u.get("user_id") or u.get("id"))
+                except Exception:
+                    continue
+        return ids
+
+    def _make_task(title, description, category, items, template_id=None, assignee=None):
         return {
             "task_id": generate_task_id(),
             "title": title,
@@ -1031,7 +1079,7 @@ async def auto_generate_daily_tasks(
             "priority": "P2",
             "status": "OPEN",
             "source": "SOP",
-            "assigned_to": current_user.get("user_id"),
+            "assigned_to": assignee or current_user.get("user_id"),
             "assigned_by": current_user.get("user_id"),
             "store_id": active_store,
             "due_at": now + timedelta(days=1),
@@ -1043,17 +1091,49 @@ async def auto_generate_daily_tasks(
         }
 
     if templates:
+        # What today already issued. Without this, pressing "generate" a second
+        # time hands every member of staff a duplicate of every SOP - a hazard
+        # the old code got away with only because it issued ONE task per
+        # template, to one person.
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        issued_today = set()
+        try:
+            for t in repo.find_many(
+                {
+                    "store_id": active_store,
+                    "source": "SOP",
+                    "created_at": {
+                        "$gte": day_start,
+                        "$lt": day_start + timedelta(days=1),
+                    },
+                }
+            ):
+                issued_today.add((t.get("sop_template_id"), t.get("assigned_to")))
+        except Exception:
+            issued_today = set()
+
         for tpl in templates:
             items = [s.get("instruction") for s in (tpl.get("steps") or [])]
-            task_data = _make_task(
-                tpl.get("title") or "Daily SOP",
-                tpl.get("description") or "Daily SOP checklist",
-                tpl.get("category"),
-                items,
-                template_id=tpl.get("template_id"),
-            )
-            if repo.create(task_data):
-                generated_count += 1
+            people = _assignees(tpl)
+            if not people:
+                # Nobody has been given this procedure. Still issue it, so the
+                # work does not silently stop happening, but name the template
+                # in the response so a manager can assign it to a real person.
+                unassigned.append(tpl.get("title") or tpl.get("template_id"))
+                people = [current_user.get("user_id")]
+            for uid in people:
+                if (tpl.get("template_id"), uid) in issued_today:
+                    continue
+                task_data = _make_task(
+                    tpl.get("title") or "Daily SOP",
+                    tpl.get("description") or "Daily SOP checklist",
+                    tpl.get("category"),
+                    items,
+                    template_id=tpl.get("template_id"),
+                    assignee=uid,
+                )
+                if repo.create(task_data):
+                    generated_count += 1
     elif not templates:
         # NO TEMPLATES CONFIGURED -> GENERATE NOTHING.
         #
@@ -1075,9 +1155,19 @@ async def auto_generate_daily_tasks(
             ),
         }
 
+    message = f"Generated {generated_count} daily task(s) from SOP templates"
+    if unassigned:
+        # Named, not counted: a manager has to open each one and put a person
+        # on it. Saying "3 templates have no assignee" is not actionable.
+        message += (
+            ". These have nobody assigned, so they went to you - "
+            "give each one a person under Tasks > SOPs: "
+            + ", ".join(unassigned)
+        )
     return {
         "generated": generated_count,
-        "message": f"Generated {generated_count} daily task(s) from SOP templates",
+        "unassigned_templates": unassigned,
+        "message": message,
     }
 
 

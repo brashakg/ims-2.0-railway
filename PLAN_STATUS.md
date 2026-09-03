@@ -30,16 +30,27 @@ and `is_advance_payment` never reaches the server, so part-payment already works
 ### Delivery counter (owner review of the live screen, 2026-09-03)
 | Item | Status |
 |---|---|
-| Split payment + credit-delivery options missing | **WIP** |
-| Match the POS design language | **WIP** |
-| Log which salesperson handed the goods over | **WIP** |
-| 30-day window on pending deliveries (admin/superadmin exempt) | **WIP** |
-| Search by customer name and phone, not just job card | **WIP** |
+| Split payment + credit-delivery options missing | **DONE** |
+| Match the POS design language | **DONE** |
+| Log which salesperson handed the goods over | **DONE** |
+| 30-day window on pending deliveries (admin/superadmin exempt) | **DONE** |
+| Search by customer name and phone, not just job card | **DONE** |
 
-Root cause of the first three: the delivery screen hand-rolls its own three-button
-payment UI instead of rendering the shared `StepPayment` the other two tills use.
-Reusing it restores split tender, credit, vouchers, loyalty, EMI and cash
-denominations — and the design language — in one move.
+Root cause of the first three: the delivery screen hand-rolled its own
+three-button payment UI instead of rendering the shared `StepPayment` the other
+two tills use. That copy is deleted; reusing the real one restored split tender,
+credit, vouchers, loyalty, EMI and cash denominations — and the design language —
+in one move, and every guard now runs verbatim instead of in a weaker
+transcription.
+
+The search used to fetch the newest twenty orders of any status and match the
+number exactly, client-side — so a customer who had lost their job card could not
+be served. It now searches the delivery queue by number, name or phone; several
+matches are chosen from, never guessed.
+
+**Found while verifying, not fixed:** `find_overdue` binds a datetime against
+`expected_delivery`, which is stored as a string, so `/orders/overdue/list` has
+been returning nothing in production.
 
 ---
 
@@ -52,8 +63,8 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 |---|---|---|
 | **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **PR #1086** |
 | **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** |
-| **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **WIP** |
-| **Customers** | 10 finished screens in no menu; no address for a customer profile | **TODO** |
+| **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **DONE** |
+| **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** |
 | **Clinical** | 5 hidden tabs, two rival prescription doors | **TODO** — plan ready |
 | **Inventory** | 19 sections in one file, 3 in the menu | **TODO** — designed |
 | **Catalog** | Mostly split already; needs the review queue + photo work | **TODO** — designed |
@@ -113,3 +124,8 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
   ADMIN and SUPERADMIN never device-gated, no off-site path.
 - **Catalog entry**: type in capitals, server stores the right case. Codes stay
   uppercase; a value already mixed-case is never rewritten.
+- **Tasks and SOPs go to a PERSON, not a job title** (owner, 2026-09-03). A role
+  on an SOP template resolves to the people holding it in that store, so
+  "Cashier" becomes Sameer's task and Rupesh's task by name. Every generated
+  task used to go to whoever pressed the button, and the template's assignee
+  list was read by nothing.
