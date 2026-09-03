@@ -9,6 +9,11 @@
 
 import { moduleForPath } from '../../context/ModuleContext';
 import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
+import {
+  INVENTORY_MODULE_ROLES,
+  INVENTORY_MANAGE_ROLES,
+  POWER_GRID_ROLES,
+} from '../../pages/inventory/inventoryRoles';
 import type { IconName } from './Icon';
 import type { UserRole } from '../../types';
 
@@ -85,9 +90,18 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Stock & supply',
     items: [
-      { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'] },
-      { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'OPTOMETRIST'] },
-      { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      // Inventory gates are IMPORTED from the module's own list, never
+      // re-typed. Three of these screens were finished work nobody could
+      // reach: Stock count, Replenishment and Opening stock had real routes,
+      // no menu entry and no in-app link, so the only way in was to type the
+      // address. The module's seventeen sections live behind the Inventory
+      // entry, which now lands on the stock ledger.
+      { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'replenishment', label: 'Replenishment', to: '/inventory/replenishment', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: POWER_GRID_ROLES },
+      { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Buy Desk — the one-screen catalog -> purchase landing. The page + route
       // shipped earlier but only ModuleContext's sidebar knew about it; this

@@ -2246,9 +2246,11 @@ async def list_stock_counts(
             if status:
                 query["status"] = status
             counts = list(collection.find(query).sort("created_at", -1).limit(50))
-            # Sanitize ObjectId
+            # Sanitize ObjectId; and an OPEN session's row must not ship the
+            # opening snapshot (blind count -- see _withhold_expected_while_open).
             for c in counts:
                 c.pop("_id", None)
+                _withhold_expected_while_open(c)
             return {"counts": counts}
         except Exception as e:
             logger.warning(f"stock_count list error: {e}")
@@ -2345,9 +2347,11 @@ async def start_stock_count(
         except Exception as e:
             logger.warning(f"stock_count create error: {e}")
 
-    # Remove _id if present
+    # Remove _id if present. The stored doc above keeps the snapshot; the
+    # RESPONSE goes to the person about to count, so it is blind (the strip
+    # runs after insert_one, which serialized its own copy).
     count_doc.pop("_id", None)
-    return count_doc
+    return _withhold_expected_while_open(count_doc)
 
 
 def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
@@ -2614,6 +2618,31 @@ def _expected_lines(db, count_doc: dict) -> List[dict]:
         )
     lines.sort(key=lambda ln: (ln["product_name"] or "", ln["sku"] or ""))
     return lines
+
+
+def _withhold_expected_while_open(count_doc: dict) -> dict:
+    """OWNER RULING 2026-08-25: a BLIND count is THE day-end.
+
+    While a session is still ``in_progress`` its RESPONSE must not carry what
+    the books expect -- not as a column, and not in the body one devtools tab
+    away (this repo has shipped that leak twice before). Withheld here, at the
+    source, for EVERY reader of an open session: blindness is decided by
+    SESSION STATUS alone, deliberately role-blind, because a manager who is
+    also the counter would otherwise defeat the control through their own
+    screen. The moment the session leaves ``in_progress`` (complete /
+    reconcile) the expected figures and variances flow again -- that
+    comparison is the whole value of counting.
+
+    Mutates and returns the response dict; the stored document keeps its
+    snapshot untouched (callers strip AFTER persistence / on read copies).
+    """
+    if count_doc.get("status") != "in_progress":
+        return count_doc
+    count_doc.pop("system_quantities", None)
+    count_doc.pop("system_unit_fingerprints", None)
+    for line in count_doc.get("expected_lines") or []:
+        line.pop("system_quantity", None)
+    return count_doc
 
 
 def _load_open_count(db, count_id: str, current_user: dict) -> dict:
@@ -2996,9 +3025,10 @@ async def get_stock_count(
         count_doc.pop("_id", None)
         # The sheet the counter works from: what this session expects to find,
         # so a style whose last unit has walked (no label left to scan) still
-        # has a line to write a zero against.
+        # has a line to write a zero against. While the session is OPEN the
+        # lines carry NO system_quantity -- the count is blind until submitted.
         count_doc["expected_lines"] = _expected_lines(db, count_doc)
-        return count_doc
+        return _withhold_expected_while_open(count_doc)
     except HTTPException:
         raise
     except Exception as e:
@@ -4098,16 +4128,12 @@ async def scan_barcode_for_count(
             product_name = "Unknown"
             sku = ""
 
-        # Inside a session the comparison is against that session's OPENING
-        # snapshot, not against live stock, so the variance the counter is
-        # shown is the same number completion will report. A product missing
-        # from the snapshot had nothing on hand when the count opened, so 0.
-        recorded = False
-        items_counted = None
+        # Recording onto an OPEN session: the count is BLIND (owner ruling
+        # 2026-08-25). The scan door must not echo what the books expect --
+        # no system count, no variance, no "you matched" tell. The comparison
+        # against the opening snapshot happens at /complete, after the
+        # answers are in.
         if count_doc is not None:
-            system_count = int(
-                (count_doc.get("system_quantities") or {}).get(product_id, 0)
-            )
             items_counted = _upsert_count_item(
                 db,
                 count_doc,
@@ -4118,8 +4144,20 @@ async def scan_barcode_for_count(
                 notes=request.notes,
                 user_id=current_user.get("user_id", ""),
             )
-            recorded = True
+            return {
+                "barcode": request.barcode,
+                "product_id": product_id,
+                "product_name": product_name,
+                "sku": sku,
+                "physical_count": request.physical_count,
+                "notes": request.notes,
+                "count_id": request.count_id,
+                "recorded": True,
+                "items_counted": items_counted,
+            }
 
+        # No session: a plain stock lookup against LIVE on-hand (nothing is
+        # recorded), same information as the inventory dashboard.
         variance = request.physical_count - system_count
 
         return {
@@ -4133,8 +4171,8 @@ async def scan_barcode_for_count(
             "variance_percent": round((variance / max(system_count, 1)) * 100, 2),
             "notes": request.notes,
             "count_id": request.count_id,
-            "recorded": recorded,
-            "items_counted": items_counted,
+            "recorded": False,
+            "items_counted": None,
         }
 
     except HTTPException:

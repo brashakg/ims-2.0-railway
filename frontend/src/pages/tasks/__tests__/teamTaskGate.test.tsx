@@ -24,6 +24,23 @@ vi.mock('../../../context/AuthContext', () => ({
 }));
 vi.mock('../../../components/tasks/NewTaskModal', () => ({ NewTaskModal: () => null }));
 
+// TasksLayout warms the section chunks on idle (`void import('./TasksMinePage')`
+// and friends) so switching sections is instant. That is a real feature and is
+// left alone -- but in jsdom there is no requestIdleCallback, so the fallback
+// timer fires those dynamic imports AFTER this test has finished and vitest has
+// torn the environment down. The imports then fail to load and vitest reports
+// unhandled errors, which fail the whole run with every test still passing.
+//
+// Stubbing the five modules makes each import() resolve from the mock registry
+// instead of the loader, so nothing is in flight at teardown. Nothing is lost:
+// this file asserts on the NAV the layout renders, and with no <Routes> around
+// it the section pages never render anyway.
+vi.mock('../TasksMinePage', () => ({ TasksMinePage: () => null }));
+vi.mock('../TasksChecklistPage', () => ({ TasksChecklistPage: () => null }));
+vi.mock('../TasksTeamPage', () => ({ TasksTeamPage: () => null }));
+vi.mock('../TasksSopPage', () => ({ TasksSopPage: () => null }));
+vi.mock('../TasksPerformancePage', () => ({ TasksPerformancePage: () => null }));
+
 import { TasksLayout } from '../TasksLayout';
 import { TEAM_TASK_ROLES, TASK_MODULE_ROLES, canSeeTeamTasks } from '../taskRoles';
 

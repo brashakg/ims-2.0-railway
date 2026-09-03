@@ -337,13 +337,28 @@ class TestStartStockCountEndpointCategory:
         app.dependency_overrides[get_current_user] = _fake_user
         monkeypatch.setattr(inv, "get_product_repository", lambda: product_repo)
         monkeypatch.setattr(inv, "get_stock_repository", lambda: stock_repo)
-        # No raw DB persistence needed -- the endpoint returns the count_doc.
-        monkeypatch.setattr(inv, "_get_db", lambda: None)
+
+        # The RESPONSE of /stock-count/start is BLIND (an open session never
+        # ships its opening snapshot -- owner ruling 2026-08-25), so the
+        # snapshot content is verified on the PERSISTED document instead.
+        # Copy at insert time, like real pymongo serializing to BSON, so the
+        # handler's post-insert response strip cannot touch the stored doc.
+        inserted: list = []
+
+        class _CaptureColl:
+            def insert_one(self, doc):
+                inserted.append(dict(doc))
+
+        class _CaptureDB:
+            def get_collection(self, name):
+                return _CaptureColl()
+
+        monkeypatch.setattr(inv, "_get_db", lambda: _CaptureDB())
         # validate_store_access(None, user) -> caller's active store.
         monkeypatch.setattr(
             inv, "validate_store_access", lambda store, user: "BV-TEST-01"
         )
-        return TestClient(app)
+        return TestClient(app), inserted
 
     def test_endpoint_scopes_aggregation_to_resolved_product_ids(self, monkeypatch):
         """POST /stock-count/start?category=FRAME must build an aggregation
@@ -362,14 +377,15 @@ class TestStartStockCountEndpointCategory:
                     return [{"product_id": "p1"}, {"product_id": "p2"}]
                 return []
 
-        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        client, inserted = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
         resp = client.post(
             "/api/v1/inventory/stock-count/start", json={"category": "FRAME"}
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        # The handler counted only the FRAME products.
-        assert body["system_quantities"] == {"p1": 4, "p2": 1}
+        # The handler counted only the FRAME products (persisted snapshot;
+        # the response itself is blind and must not carry it).
+        assert "system_quantities" not in resp.json()
+        assert inserted[0]["system_quantities"] == {"p1": 4, "p2": 1}
         # And it did so by scoping on product_id, NOT a raw category filter.
         assert captured, "the real handler must run the aggregation"
         match = captured[0][0]["$match"]
@@ -390,12 +406,12 @@ class TestStartStockCountEndpointCategory:
             def find_many(self, filt, limit=5000):
                 return []  # no products in this category
 
-        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        client, inserted = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
         resp = client.post(
             "/api/v1/inventory/stock-count/start", json={"category": "NOPE"}
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["system_quantities"] == {}
+        assert inserted[0]["system_quantities"] == {}
         assert aggregate_calls == []  # aggregation skipped, not run store-wide
 
     def test_endpoint_no_category_counts_whole_store(self, monkeypatch):
@@ -412,10 +428,10 @@ class TestStartStockCountEndpointCategory:
             def find_many(self, filt, limit=5000):  # pragma: no cover - unused
                 raise AssertionError("product lookup must not run without category")
 
-        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        client, inserted = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
         resp = client.post("/api/v1/inventory/stock-count/start", json={})
         assert resp.status_code == 200, resp.text
-        assert resp.json()["system_quantities"] == {"p9": 7}
+        assert inserted[0]["system_quantities"] == {"p9": 7}
         match = captured[0][0]["$match"]
         assert "product_id" not in match
         assert "category" not in match
