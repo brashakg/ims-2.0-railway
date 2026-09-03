@@ -36,8 +36,8 @@ const POS_AUTO_ATTACH_SINGLE_RX =
   import.meta.env.VITE_POS_AUTO_ATTACH_SINGLE_RX === 'true';
 
 // Import orphaned components
-import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
+import { NewPrescriptionAtTill } from './NewPrescriptionAtTill';
 import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { addManualLensToCart, LensDetailsModal } from './LensDetailsModal';
 import { LensFittingFormModal } from './LensFittingFormModal';
@@ -56,22 +56,12 @@ import { useHeldBills } from './useHeldBills';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 // PATIENT SAFETY: the axis is never fabricated at POS. See utils/rxAxisEntry.
-import {
-  axisOrNull,
-  axisPromptReason,
-  axisSourceFor,
-  eyesNeedingCounterAxis,
-  validateCounterAxis,
-  EYE_LABEL,
-  type EyeKey,
-} from '../../utils/rxAxisEntry';
+import { axisOrNull } from '../../utils/rxAxisEntry';
 // PATIENT SAFETY: a blank power is not a recorded 0, in EITHER direction.
 // See utils/rxPowerValue.
 import {
   firstRecordedPower,
   formatPowerOrDash,
-  powerNumberOrNull,
-  powerOrNull,
 } from '../../utils/rxPowerValue';
 
 import { useToast } from '../../context/ToastContext';
@@ -153,7 +143,8 @@ function fc(amount: number | undefined | null): string {
 // the other therefore fails a test that names the other side, instead of
 // quietly telling a cashier they may save a prescription -- or telling an
 // optometrist they may not.
-export const RX_SAVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] as const;
+// Re-exported from the component that enforces it (see NewPrescriptionAtTill).
+export { RX_SAVE_ROLES } from './NewPrescriptionAtTill';
 
 // ----------------------------------------------------------------------------
 // PATIENT SAFETY: pending counter axis entry
@@ -162,16 +153,6 @@ export const RX_SAVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRI
 // missing, and what has been typed so far. While this is set the save is
 // BLOCKED: the modal cannot be dismissed onto the save path, and there is no
 // numeric fallback behind it. See utils/rxAxisEntry for the rules.
-interface AxisPromptState {
-  /** The flat form data as PrescriptionForm emitted it -- saved verbatim. */
-  rxData: any;
-  /** Eyes that carry a cylinder but no axis. */
-  eyes: EyeKey[];
-  /** What the staff member has typed, per eye. */
-  values: Record<EyeKey, string>;
-  /** Per-eye validation problem, or null. */
-  errors: Record<EyeKey, string | null>;
-}
 
 // ============================================================================
 // Main POS Layout
@@ -197,6 +178,9 @@ export function POSLayout() {
 
   const [showPrescriptionModal, setShowPrescriptionModal] = useState(false);
   const [showNewPrescription, setShowNewPrescription] = useState(false);
+  // Mirrors the axis prompt inside NewPrescriptionAtTill so the keyboard map
+  // below stays inert while that blocking clinical prompt is open.
+  const [axisPromptOpen, setAxisPromptOpen] = useState(false);
   const [showLensModal, setShowLensModal] = useState(false);
   const [discountItem, setDiscountItem] = useState<CartLineItem | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
@@ -210,7 +194,6 @@ export function POSLayout() {
   // instead of being saved, and an unmissable prompt asks the counter for the
   // axis. Nothing reaches the server until it is supplied -- POS never invents
   // one. `null` = no prompt pending. See utils/rxAxisEntry.
-  const [axisPrompt, setAxisPrompt] = useState<AxisPromptState | null>(null);
   // Off-canvas cart drawer (tablet/phone <=1024px). Desktop keeps the inline
   // cart column; this only governs the slide-over + scrim on narrow widths.
   const [cartOpen, setCartOpen] = useState(false);
@@ -412,7 +395,7 @@ export function POSLayout() {
       // goBack() and walked the sale back a step mid-prompt, and a barcode
       // scanner's trailing Enter reached goNext(). Neither may happen while a
       // blocking clinical prompt is up.
-      if (axisPrompt) return;
+      if (axisPromptOpen) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       // F2 jumps to the group that renders the products catalog; F9 to the
@@ -439,7 +422,7 @@ export function POSLayout() {
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [(store.cart || []).length, isComplete, isFinalInputGroup, currentGroupIndex, flowGroups, goToGroup, goNext, goBack, canProceed, axisPrompt]);
+  }, [(store.cart || []).length, isComplete, isFinalInputGroup, currentGroupIndex, flowGroups, goToGroup, goNext, goBack, canProceed, axisPromptOpen]);
 
   // --------------------------------------------------------------------------
   // Save a counter-captured prescription
@@ -449,107 +432,10 @@ export function POSLayout() {
   // on this path -- a blank axis travels as an explicit null (JSON.stringify
   // drops `undefined`, and the backend reads a dropped key as "not sent"), and a
   // recorded axis of 0 is passed through exactly as recorded.
-  async function saveNewPrescription(rxData: any, counterAxisEyes: EyeKey[]) {
-    setErrorMsg(null);
-    try {
-      const isOptometrist = user?.roles?.includes('OPTOMETRIST');
-      const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
-      // Provenance is stamped PER EYE as `axis_source`, never into `remarks`:
-      // remarks is published to the OTP-gated customer portal and printed on the
-      // patient's Rx card, and no staff screen renders it. See rxAxisEntry.
-      const result = await prescriptionApi.createPrescription({
-        patient_id: store.patient?.id || store.customer?.id,
-        customer_id: store.customer?.id,
-        source,
-        optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
-        validity_months: 12,
-        // `powerOrNull`, never `String(x || 0)`: an empty SPH / CYL / ADD box
-        // used to leave the counter as the string "0", asserting that this
-        // patient needs no correction / has no astigmatism / needs no reading
-        // add. A blank now travels as null (EyeData declares these Optional),
-        // and a recorded 0 is preserved exactly. `pd` keeps its own shape --
-        // a PD of 0mm is anatomically impossible, so truthiness is safe there.
-        right_eye: { sph: powerOrNull(rxData.sph_od), cyl: powerOrNull(rxData.cyl_od), axis: axisOrNull(rxData.axis_od), add: powerOrNull(rxData.add_od), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined, axis_source: axisSourceFor('od', counterAxisEyes) },
-        left_eye: { sph: powerOrNull(rxData.sph_os), cyl: powerOrNull(rxData.cyl_os), axis: axisOrNull(rxData.axis_os), add: powerOrNull(rxData.add_os), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined, axis_source: axisSourceFor('os', counterAxisEyes) },
-        ipd: rxData.ipd || undefined,
-        lens_recommendation: rxData.lens_type || undefined,
-        next_checkup: rxData.next_checkup || undefined,
-        // First-class field (backend persists it); the remarks copy stays so
-        // the printed Rx card keeps showing the doctor until the card reads
-        // doctor_name directly.
-        doctor_name: rxData.doctor_name || undefined,
-        remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
-      } as any);
+  // saveNewPrescription + confirmAxisPrompt now live in NewPrescriptionAtTill,
+  // with the patient-safety reasoning they carry. Both tills render that one
+  // component instead of holding a copy each.
 
-      if (result?.prescription_id && rxData.photo_file) {
-        // Fail-soft: the Rx photo is evidence, not a gate — a failed upload
-        // must never lose the sale.
-        try {
-          await prescriptionApi.uploadPrescriptionPhoto(
-            result.prescription_id,
-            rxData.photo_file
-          );
-        } catch {
-          toast.warning('Prescription saved, but the photo upload failed — retry from the Rx card.');
-        }
-      }
-
-      if (result?.prescription_id) {
-        store.setPrescription({
-          id: result.prescription_id,
-          patientId: store.patient?.id || '',
-          customerId: store.customer?.id || '',
-          storeId: store.store_id,
-          testDate: new Date().toISOString(),
-          // Same rule on the local echo the Rx panel reads back: this line
-          // carried BOTH halves of the bug at once -- `sph || 0` invented a
-          // plano for a blank, while `cyl || null` and `add || null` deleted a
-          // recorded one. `pd` keeps truthiness: a PD of 0mm is impossible.
-          rightEye: { sphere: powerNumberOrNull(rxData.sph_od), cylinder: powerNumberOrNull(rxData.cyl_od), axis: axisOrNull(rxData.axis_od), add: powerNumberOrNull(rxData.add_od), pd: rxData.pd_od || 0 },
-          leftEye: { sphere: powerNumberOrNull(rxData.sph_os), cylinder: powerNumberOrNull(rxData.cyl_os), axis: axisOrNull(rxData.axis_os), add: powerNumberOrNull(rxData.add_os), pd: rxData.pd_os || 0 },
-          status: 'COMPLETED',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        } as Prescription);
-        setErrorMsg(null);
-        setShowNewPrescription(false);
-      } else {
-        setErrorMsg('Prescription saved but no ID returned. Try selecting from existing prescriptions.');
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(msg || 'Network error -- check your connection and try again');
-    }
-  }
-
-  // Confirm the counter-entered axis. Every prompted eye must hold a valid whole
-  // degree (1-180) before anything is saved; a bad entry re-renders the prompt
-  // with the problem and saves nothing.
-  function confirmAxisPrompt() {
-    if (!axisPrompt) return;
-    const errors: Record<EyeKey, string | null> = { od: null, os: null };
-    const accepted: Partial<Record<EyeKey, number>> = {};
-    let ok = true;
-    for (const eye of axisPrompt.eyes) {
-      const { value, error } = validateCounterAxis(axisPrompt.values[eye], eye);
-      if (error !== null || value === null) {
-        errors[eye] = error;
-        ok = false;
-      } else {
-        accepted[eye] = value;
-      }
-    }
-    if (!ok) {
-      setAxisPrompt({ ...axisPrompt, errors });
-      return;
-    }
-    const merged = { ...axisPrompt.rxData };
-    if (accepted.od !== undefined) merged.axis_od = accepted.od;
-    if (accepted.os !== undefined) merged.axis_os = accepted.os;
-    const eyes = axisPrompt.eyes;
-    setAxisPrompt(null);
-    void saveNewPrescription(merged, eyes);
-  }
 
   async function handleCreateOrder() {
     if (store.is_processing) return;
@@ -1047,53 +933,12 @@ export function POSLayout() {
           onCreateNew={() => { setShowPrescriptionModal(false); setShowNewPrescription(true); }}
           onClose={() => setShowPrescriptionModal(false)} />
       )}
-      {showNewPrescription && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90dvh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-              <h3 className="font-semibold text-gray-900">New Prescription</h3>
-              <button onClick={() => { setShowNewPrescription(false); setAxisPrompt(null); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded" aria-label="Close" title="Close"><X className="w-5 h-5" /></button>
-            </div>
-            {errorMsg && (
-              <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                <div><p className="font-medium">Failed to save prescription</p><p className="text-xs mt-0.5">{errorMsg}</p></div>
-                <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600" aria-label="Dismiss error" title="Dismiss error"><X className="w-4 h-4" /></button>
-              </div>
-            )}
-            <div className="p-4">
-              <PrescriptionForm
-                allowContactLens={false}
-                // PATIENT SAFETY: hand the "cylinder but no axis" case to the
-                // blocking prompt below instead of rejecting it with a transient
-                // toast. Without this the modal is unreachable -- the form's own
-                // validateEyePair returns before onSubmit ever fires -- and the
-                // owner chose a prompt over a hard block deliberately.
-                deferAxisPrompt
-                onSubmit={async (rxData) => {
-                  setErrorMsg(null);
-                  // PATIENT SAFETY: a cylinder with no axis cannot be ground.
-                  // Park the Rx and ask the counter for the axis -- POS never
-                  // invents one. An axis of 0 is a real reading: it counts as
-                  // present and never lands here.
-                  const needsAxis = eyesNeedingCounterAxis(rxData);
-                  if (needsAxis.length > 0) {
-                    setAxisPrompt({
-                      rxData,
-                      eyes: needsAxis,
-                      values: { od: '', os: '' },
-                      errors: { od: null, os: null },
-                    });
-                    return;
-                  }
-                  await saveNewPrescription(rxData, []);
-                }}
-                onCancel={() => { setShowNewPrescription(false); setAxisPrompt(null); setErrorMsg(null); }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
+      <NewPrescriptionAtTill
+        isOpen={showNewPrescription}
+        onClose={() => setShowNewPrescription(false)}
+        store={store}
+        onAxisPromptChange={setAxisPromptOpen}
+      />
       {/* PATIENT SAFETY: axis required before this prescription can be saved.
           Deliberately un-dismissable -- no backdrop click, no close X, and the
           wizard's global key map is switched off while it is open (see the
@@ -1104,98 +949,6 @@ export function POSLayout() {
           The only ways out are a valid axis or going back to the prescription
           (which saves NOTHING). z-[60] sits above the New Prescription overlay
           (z-50) it was launched from. */}
-      {axisPrompt && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4"
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="axis-prompt-title"
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.preventDefault();
-            // Escape is swallowed here as well as at the window handler, so the
-            // dialog is inert even if it is ever rendered outside POSLayout.
-            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); }
-          }}
-        >
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90dvh] overflow-y-auto border border-gray-200">
-            <div className="p-4 border-b border-gray-200 flex items-start gap-2">
-              <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-              <div>
-                <h3 id="axis-prompt-title" className="font-semibold text-gray-900">Axis needed before this prescription can be saved</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Anyone at the counter can type it in. Check the prescription the customer brought, or ask the optometrist.
-                </p>
-              </div>
-            </div>
-            {/* Truthful about who can actually SAVE. create_prescription
-                (routers/prescriptions.py) 403s every role outside
-                SUPERADMIN / ADMIN / STORE_MANAGER / OPTOMETRIST, and the New
-                Prescription entry has no role gate -- so a cashier could fill
-                this in and hit a 403 with the sale stranded, the exact stall the
-                prompt exists to avoid. We tell them BEFORE they type rather than
-                widening a clinical write door. The server stays the only gate;
-                this list mirrors it and must be updated with it. */}
-            {!RX_SAVE_ROLES.some((r) => user?.roles?.includes(r as any)) && (
-              <div className="mx-4 mt-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-800">
-                You can enter the axis here, but saving a new prescription needs a manager or optometrist. Ask one to finish it, or attach an existing prescription instead.
-              </div>
-            )}
-            <div className="p-4 space-y-4">
-              {axisPrompt.eyes.map((eye) => (
-                <div key={eye}>
-                  <p className="text-sm text-gray-700 mb-2">
-                    {axisPromptReason(eye, eye === 'od' ? axisPrompt.rxData?.cyl_od : axisPrompt.rxData?.cyl_os)}
-                  </p>
-                  <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor={`axis-prompt-${eye}`}>
-                    {EYE_LABEL[eye]} axis (whole degrees, 1 to 180)
-                  </label>
-                  <input
-                    id={`axis-prompt-${eye}`}
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    // Focus lands in the FIRST axis box, not on the barcode
-                    // field behind the scrim -- otherwise a scanner burst is
-                    // typed invisibly into the product search while a clinical
-                    // prompt is up.
-                    autoFocus={eye === axisPrompt.eyes[0]}
-                    placeholder="e.g. 90"
-                    aria-label={`${EYE_LABEL[eye]} axis`}
-                    aria-invalid={axisPrompt.errors[eye] ? true : undefined}
-                    value={axisPrompt.values[eye]}
-                    onChange={(e) => setAxisPrompt((prev) => (prev ? {
-                      ...prev,
-                      values: { ...prev.values, [eye]: e.target.value },
-                      errors: { ...prev.errors, [eye]: null },
-                    } : prev))}
-                    className="input-field text-center text-sm"
-                  />
-                  {axisPrompt.errors[eye] && (
-                    <p className="mt-1 text-xs text-red-600">{axisPrompt.errors[eye]}</p>
-                  )}
-                </div>
-              ))}
-              <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 text-xs text-amber-800">
-                This axis will be recorded as entered at the counter, not measured by an optometrist. If you are not sure of it, go back and send the customer for an eye test instead of guessing.
-              </div>
-              <div className="flex gap-2 pt-1">
-                <button
-                  onClick={() => setAxisPrompt(null)}
-                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-100"
-                >
-                  Back to the prescription
-                </button>
-                <button
-                  onClick={confirmAxisPrompt}
-                  className="flex-1 px-4 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700"
-                >
-                  Save axis and continue
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
       {showLensModal && (
         <LensDetailsModal onClose={() => setShowLensModal(false)}
           onSave={(details) => {

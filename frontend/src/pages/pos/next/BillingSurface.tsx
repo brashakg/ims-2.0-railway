@@ -22,6 +22,7 @@ import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBa
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { useHeldBills } from '../../../components/pos/useHeldBills';
 import { addManualLensToCart, LensDetailsModal } from '../../../components/pos/LensDetailsModal';
+import { NewPrescriptionAtTill } from '../../../components/pos/NewPrescriptionAtTill';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -57,6 +58,7 @@ export function BillingSurface() {
   const [addCustomerOpen, setAddCustomerOpen] = useState(false);
   const [recallOpen, setRecallOpen] = useState(false);
   const [lensModalOpen, setLensModalOpen] = useState(false);
+  const [newRxOpen, setNewRxOpen] = useState(false);
   // Hold / recall, shared with the classic till. The store ALSO parks a cart
   // automatically when the screen idles, so without this the new POS could
   // strand that work with no way to bring it back.
@@ -429,6 +431,12 @@ export function BillingSurface() {
         </div>
       )}
 
+      <NewPrescriptionAtTill
+        isOpen={newRxOpen}
+        onClose={() => setNewRxOpen(false)}
+        store={store}
+      />
+
       {lensModalOpen && (
         <LensDetailsModal
           onClose={() => setLensModalOpen(false)}
@@ -506,10 +514,12 @@ export function BillingSurface() {
             setRxPickerOpen(false);
           }}
           onCreateNew={() => {
-            // Capture-new lands with the Rx scenarios panel; until then the
-            // clinic/classic Rx form remains the create door.
+            // A customer arriving with a paper Rx from an outside doctor used
+            // to be told to go to the Clinical screen and come back, with the
+            // bill abandoned behind them. Same capture form the classic till
+            // uses, including the axis prompt.
             setRxPickerOpen(false);
-            setErrorMsg('Add a new prescription from the Clinical screen, then pick it here.');
+            setNewRxOpen(true);
           }}
         />
       )}
