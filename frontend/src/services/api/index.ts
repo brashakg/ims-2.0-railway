@@ -162,6 +162,10 @@ export type {
 export { entitiesApi } from './entities';
 export type { Entity, GstinEntry, PtRegistration } from './entities';
 
+// Login-device gate (approved-device sign-in; DARK behind DEVICE_GATE_MODE)
+export { devicesApi } from './devices';
+export type { LoginDevice, DeviceListResponse, DeviceStatus } from './devices';
+
 // Payroll config (Structured-CTC salary master + Professional Tax slabs)
 export { payrollApi, grossOf } from './payroll';
 export type { SalaryConfig, PtSlab, OtherAllowance } from './payroll';

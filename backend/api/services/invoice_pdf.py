@@ -24,7 +24,14 @@ import io
 from typing import Any, Dict, List, Optional
 
 from .print_identity import resolve_issuing_identity
-from .print_legal import amount_in_words, declarations, format_date
+from .print_legal import (
+    amount_in_words,
+    copy_marker_block,
+    declarations,
+    einvoice_qr_block,
+    format_date,
+    statutory_footer,
+)
 
 
 def _esc(text: Any) -> str:
@@ -77,6 +84,45 @@ def build_invoice_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+def build_hsn_summary_rows(
+    order: Dict[str, Any], interstate: bool
+) -> List[Dict[str, Any]]:
+    """Rule 46 / GSTR-1 HSN-wise consolidated summary rows.
+
+    Aggregates the order's PERSISTED per-line statutory values (taxable_value,
+    tax_amount stamped at create) by (hsn_code, gst_rate). Tax is NEVER
+    recomputed from the rate here -- sums of stored values only -- and the
+    CGST/SGST/IGST split of each group's tax uses the SAME shared
+    gst_rates.split_gst the JSON invoice door uses (one-rule-one-
+    implementation: the invariant cgst + sgst == tax holds exactly).
+    Pure + separately testable.
+    """
+    from .gst_rates import split_gst
+
+    groups: Dict[Any, Dict[str, Any]] = {}
+    for it in order.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        hsn = str(it.get("hsn_code") or "").strip() or "-"
+        rate = _f(it.get("gst_rate"))
+        key = (hsn, round(rate, 2))
+        row = groups.setdefault(
+            key,
+            {"hsn": hsn, "rate": round(rate, 2), "qty": 0.0,
+             "taxable": 0.0, "tax": 0.0},
+        )
+        row["qty"] += _f(it.get("quantity"), 1.0)
+        row["taxable"] = round(row["taxable"] + _f(it.get("taxable_value")), 2)
+        row["tax"] = round(row["tax"] + _f(it.get("tax_amount")), 2)
+
+    out: List[Dict[str, Any]] = []
+    for row in sorted(groups.values(), key=lambda r: (r["hsn"], r["rate"])):
+        cgst, sgst, igst = split_gst(row["tax"], interstate)
+        row["cgst"], row["sgst"], row["igst"] = cgst, sgst, igst
+        out.append(row)
+    return out
 
 
 def build_invoice_pdf(
@@ -143,6 +189,23 @@ def build_invoice_pdf(
     story: List[Any] = []
     hairline = colors.HexColor("#B8B8B4")
 
+    # ---- Rule 48 copy marker (the customer's copy is the ORIGINAL) ----
+    marker = copy_marker_block("ORIGINAL", mode="rule_48").get("active") or ""
+    if marker:
+        story.append(
+            Paragraph(
+                marker,
+                ParagraphStyle(
+                    "marker",
+                    fontName="Helvetica",
+                    fontSize=7.5,
+                    leading=9,
+                    alignment=2,  # right
+                ),
+            )
+        )
+        story.append(Spacer(1, 1.5 * mm))
+
     # ---- Header: issuing identity + document title ----
     head_left = [
         Paragraph(_esc(legal_name), styles["h1"]),
@@ -170,6 +233,9 @@ def build_invoice_pdf(
     meta_rows.append(
         ["Supply Type", "Inter-state (IGST)" if payload.get("interstate") else "Intra-state (CGST+SGST)"]
     )
+    # Rule 46(p): whether tax is payable on reverse charge. A POS retail sale
+    # is never an RCM supply (same fixed "No" the FE buildLegalHeader prints).
+    meta_rows.append(["Reverse Charge", "No"])
     meta_tbl = Table(
         [[Paragraph(_esc(k), styles["cellb"]), Paragraph(_esc(v), styles["cell"])] for k, v in meta_rows],
         colWidths=[28 * mm, 52 * mm],
@@ -193,6 +259,47 @@ def build_invoice_pdf(
     head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story.append(head)
     story.append(Spacer(1, 4 * mm))
+
+    # ---- GST e-invoice block (IRN + Ack + signed QR), only when the order
+    # carries an IRN. Fail-soft: a bad/missing QR image never blocks the PDF.
+    einv = einvoice_qr_block(order)
+    if einv.get("present"):
+        einv_left = [
+            Paragraph(_esc(f"IRN: {einv.get('irn')}"), styles["small"]),
+        ]
+        if einv.get("ack_no"):
+            einv_left.append(
+                Paragraph(_esc(f"Ack No: {einv.get('ack_no')}"), styles["small"])
+            )
+        if einv.get("ack_date"):
+            einv_left.append(
+                Paragraph(_esc(f"Ack Date: {einv.get('ack_date')}"), styles["small"])
+            )
+        einv_right: Any = ""
+        qr_uri = str(einv.get("qr_data_uri") or "")
+        if qr_uri.startswith("data:image/png;base64,"):
+            try:
+                import base64
+
+                from reportlab.platypus import Image as RLImage
+
+                png = base64.b64decode(qr_uri.split(",", 1)[1])
+                einv_right = RLImage(io.BytesIO(png), width=24 * mm, height=24 * mm)
+            except Exception:  # noqa: BLE001 - QR render is best-effort
+                einv_right = ""
+        einv_tbl = Table([[einv_left, einv_right]], colWidths=[152 * mm, 30 * mm])
+        einv_tbl.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("BOX", (0, 0), (-1, -1), 0.4, hairline),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+            )
+        )
+        story.append(einv_tbl)
+        story.append(Spacer(1, 3 * mm))
 
     # ---- Bill-to ----
     cust_lines = [Paragraph("Bill To", styles["cellb"])]
@@ -286,6 +393,52 @@ def build_invoice_pdf(
         story.append(ttbl)
         story.append(Spacer(1, 3 * mm))
 
+    # ---- HSN-wise consolidated tax summary (Rule 46 / GSTR-1 staging) ----
+    hsn_rows = build_hsn_summary_rows(order, bool(payload.get("interstate")))
+    if hsn_rows:
+        interstate = bool(payload.get("interstate"))
+        if interstate:
+            hheader = ["HSN/SAC", "Qty", "GST %", "Taxable", "IGST", "Total Tax"]
+        else:
+            hheader = ["HSN/SAC", "Qty", "GST %", "Taxable", "CGST", "SGST", "Total Tax"]
+        hdata: List[List[Any]] = [[Paragraph(h, styles["cellb"]) for h in hheader]]
+        for r in hsn_rows:
+            row = [
+                Paragraph(_esc(r["hsn"]), styles["cell"]),
+                Paragraph("{:g}".format(r["qty"]), styles["cell"]),
+                Paragraph("{:g}".format(r["rate"]), styles["cell"]),
+                Paragraph(_rs(r["taxable"]), styles["cell"]),
+            ]
+            if interstate:
+                row.append(Paragraph(_rs(r["igst"]), styles["cell"]))
+            else:
+                row.append(Paragraph(_rs(r["cgst"]), styles["cell"]))
+                row.append(Paragraph(_rs(r["sgst"]), styles["cell"]))
+            row.append(Paragraph(_rs(r["tax"]), styles["cell"]))
+            hdata.append(row)
+        widths = (
+            [24 * mm, 12 * mm, 14 * mm, 30 * mm, 26 * mm, 26 * mm]
+            if interstate
+            else [24 * mm, 12 * mm, 14 * mm, 30 * mm, 24 * mm, 24 * mm, 26 * mm]
+        )
+        htbl = Table(hdata, colWidths=widths)
+        htbl.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.4, hairline),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F2F2F0")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+            )
+        )
+        story.append(
+            Paragraph("HSN-wise tax summary", styles["cellb"])
+        )
+        story.append(Spacer(1, 1 * mm))
+        story.append(htbl)
+        story.append(Spacer(1, 3 * mm))
+
     # ---- Totals ----
     totals: List[List[str]] = []
     cart_disc = _f(order.get("cart_discount_amount"))
@@ -347,6 +500,21 @@ def build_invoice_pdf(
     story.append(Spacer(1, 8 * mm))
     story.append(
         Paragraph(_esc(signatory or "Authorised Signatory"), styles["small"])
+    )
+
+    # ---- Statutory footer (Sec. 31 / Rule 46 reference + retention) ----
+    try:
+        retain = int(overrides.get("retention_years") or 7)
+    except (TypeError, ValueError):
+        retain = 7
+    footer_line = statutory_footer("tax_invoice", retain)
+    story.append(Spacer(1, 6 * mm))
+    story.append(Paragraph(_esc(footer_line), styles["small"]))
+    story.append(
+        Paragraph(
+            "System-generated document. No signature required if digitally issued.",
+            styles["small"],
+        )
     )
 
     doc.build(story)
