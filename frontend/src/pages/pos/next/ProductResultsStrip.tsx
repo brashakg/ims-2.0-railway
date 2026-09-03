@@ -20,6 +20,14 @@
 // and the classic POS call, so all three doors price a line identically.
 // Search is the existing useProducts query hook with the same key the classic
 // surface uses, so browsing here costs no extra network trip.
+//
+// THE CARD IS SHARED. The general counter's browse grid re-typed this card's
+// internals and they drifted five ways (id fallback missing `id`, a second
+// offer-price read, a re-typed stock chain, no low-stock badge, no result
+// cap). <ProductCard> below is now the ONE implementation - the strip renders
+// it layout="strip", the counter layout="grid". Each surface keeps its own
+// SURROUNDING layout (one scrolling row here, a category grid there); the
+// card's data reads, badges and disabled states exist once.
 
 import { Package } from 'lucide-react';
 import { usePOSStore } from '../../../stores/posStore';
@@ -40,11 +48,148 @@ interface ProductResultsStripProps {
 
 const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
+/** Result cap, shared by every surface that renders product cards. A capped
+    list must SAY it is capped (the grid shows a narrow-the-search hint) so
+    stock is never silently hidden. */
+export const MAX_PRODUCT_RESULTS = 24;
+
 /** The product list spells on-hand quantity three ways depending on which
     join served the row. null means "this row carries no stock figure at all"
     - never read that as zero, or every unjoined product looks out of stock. */
-function stockOf(p: any): number | null {
+export function stockOf(p: any): number | null {
   return p.stock ?? p.quantity ?? p.stock_available ?? null;
+}
+
+/** ONE spelling chain for the row's id. Includes plain `id` because the axios
+    aliaser camelises snake_case ADDITIVELY but a row that arrives with only
+    `id` (e.g. an order-shaped join) has no product_id/_id at all - reading
+    just those showed a false "not in cart" on such rows. */
+export function productIdOf(p: any): string | undefined {
+  return p.product_id || p._id || p.id;
+}
+
+export type ProductCardLayout = 'strip' | 'grid';
+
+/**
+ * The one POS product card. Every read here mirrors the intake brain:
+ * the offer chain is the SAME spelling chain posPriceGuard uses
+ * (offer_price || offerPrice || mrp - productIntake.ts), so the price on the
+ * card is the price the cart line will carry.
+ */
+export function ProductCard({
+  product,
+  layout,
+  onPick,
+}: {
+  product: any;
+  layout: ProductCardLayout;
+  onPick: () => void;
+}) {
+  const store = usePOSStore();
+  const id = productIdOf(product);
+  const mrp = product.mrp || 0;
+  const offer = product.offer_price || product.offerPrice || mrp;
+  const stock = stockOf(product);
+  // Owner ruling 2026-08-25: oversell = BLOCK. A row that reports zero on
+  // hand cannot be billed here; a row with no figure is not blocked.
+  const outOfStock = stock !== null && stock <= 0;
+  const lowStock = stock !== null && stock > 0 && stock <= 3;
+  const inCart = (store.cart || []).some((i) => i.product_id === id);
+
+  const stockBadge =
+    stock !== null ? (
+      <span
+        className={`text-[9px] px-1 py-0.5 rounded font-medium shrink-0 ${
+          outOfStock
+            ? 'bg-red-100 text-red-600'
+            : lowStock
+              ? 'bg-amber-100 text-amber-700'
+              : 'bg-gray-100 text-gray-600'
+        }`}
+      >
+        {outOfStock ? 'Out' : lowStock ? `${stock} left` : stock}
+      </span>
+    ) : null;
+
+  const title = `${product.name || ''} ${product.sku ? `· ${product.sku}` : ''}`;
+  const name = product.name || product.model || 'Item';
+  const secondLine = [product.brand, product.sku].filter(Boolean).join(' · ');
+
+  if (layout === 'grid') {
+    return (
+      <button
+        type="button"
+        onClick={onPick}
+        disabled={inCart || outOfStock}
+        title={title}
+        className={
+          'min-h-[44px] text-left rounded-xl border p-2 flex flex-col gap-1 disabled:cursor-not-allowed ' +
+          (outOfStock
+            ? 'border-gray-200 bg-gray-50 opacity-50'
+            : inCart
+              ? 'border-green-300 bg-green-50'
+              : 'border-gray-200 bg-white hover:bg-gray-50 active:bg-gray-100')
+        }
+      >
+        <div className="relative h-20 rounded-lg bg-gray-50 flex items-center justify-center overflow-hidden">
+          {product.image_url ? (
+            <img src={product.image_url} alt="" className="h-full w-full object-contain" />
+          ) : (
+            <Package className="w-6 h-6 text-gray-400" />
+          )}
+          {stockBadge && <span className="absolute top-1 right-1">{stockBadge}</span>}
+        </div>
+        <span className="text-xs font-medium text-gray-900 line-clamp-2">{name}</span>
+        <span className="text-[11px] text-gray-500 truncate">{secondLine}</span>
+        <span className="text-sm font-semibold text-gray-900">
+          {money(offer)}
+          {offer < mrp && (
+            <span className="ml-1 text-[11px] font-normal text-gray-500 line-through">
+              {money(mrp)}
+            </span>
+          )}
+        </span>
+        {outOfStock && <span className="text-[11px] text-red-600">Out of stock</span>}
+        {inCart && !outOfStock && <span className="text-[11px] text-green-700">In cart</span>}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      disabled={inCart || outOfStock}
+      title={title}
+      className={`w-[152px] min-h-[92px] shrink-0 rounded-xl border px-2.5 py-2 text-left flex flex-col gap-1 ${
+        outOfStock
+          ? 'border-red-200 bg-red-50 opacity-60 cursor-not-allowed'
+          : inCart
+            ? 'border-green-300 bg-green-50 opacity-70'
+            : 'border-gray-200 bg-white hover:bg-gray-50 active:bg-gray-100'
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <div className="w-8 h-8 shrink-0 flex items-center justify-center">
+          {product.image_url ? (
+            <img src={product.image_url} alt="" className="h-8 w-auto object-contain" />
+          ) : (
+            <Package className="w-4 h-4 text-gray-500" />
+          )}
+        </div>
+        {stockBadge && <span className="ml-auto">{stockBadge}</span>}
+      </div>
+      <span className="text-xs font-semibold text-gray-900 truncate">{name}</span>
+      <span className="text-[10px] text-gray-500 truncate">{secondLine}</span>
+      <span className="mt-auto flex items-baseline gap-1.5">
+        <span className="text-sm font-bold text-gray-900">{money(offer)}</span>
+        {offer < mrp && (
+          <span className="text-[10px] text-gray-500 line-through">{money(mrp)}</span>
+        )}
+        {inCart && <span className="ml-auto text-[9px] text-green-700">In cart</span>}
+      </span>
+    </button>
+  );
 }
 
 export function ProductResultsStrip({
@@ -87,7 +232,7 @@ export function ProductResultsStrip({
     );
   }
 
-  const rows = (products as any[]).slice(0, 24);
+  const rows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
 
   if (rows.length === 0) {
     return (
@@ -102,68 +247,14 @@ export function ProductResultsStrip({
 
   return (
     <div className={rowClass}>
-      {rows.map((product) => {
-        const productId = product.product_id || product._id || product.id;
-        const mrp = product.mrp || 0;
-        const offer = product.offer_price || mrp;
-        const stock = stockOf(product);
-        // Owner ruling 2026-08-25: oversell = BLOCK. A row that reports zero
-        // on hand cannot be billed here; a row with no figure is not blocked.
-        const outOfStock = stock !== null && stock <= 0;
-        const lowStock = stock !== null && stock > 0 && stock <= 3;
-        const inCart = (store.cart || []).some((i) => i.product_id === productId);
-
-        return (
-          <button
-            key={productId}
-            type="button"
-            onClick={() => handlePick(product)}
-            disabled={inCart || outOfStock}
-            title={`${product.name || ''} ${product.sku ? `· ${product.sku}` : ''}`}
-            className={`w-[152px] min-h-[92px] shrink-0 rounded-xl border px-2.5 py-2 text-left flex flex-col gap-1 ${
-              outOfStock
-                ? 'border-red-200 bg-red-50 opacity-60 cursor-not-allowed'
-                : inCart
-                  ? 'border-green-300 bg-green-50 opacity-70'
-                  : 'border-gray-200 bg-white hover:bg-gray-50 active:bg-gray-100'
-            }`}
-          >
-            <div className="flex items-start gap-2">
-              <div className="w-8 h-8 shrink-0 flex items-center justify-center">
-                {product.image_url ? (
-                  <img src={product.image_url} alt="" className="h-8 w-auto object-contain" />
-                ) : (
-                  <Package className="w-4 h-4 text-gray-500" />
-                )}
-              </div>
-              {stock !== null && (
-                <span
-                  className={`ml-auto text-[9px] px-1 py-0.5 rounded font-medium shrink-0 ${
-                    outOfStock
-                      ? 'bg-red-100 text-red-600'
-                      : lowStock
-                        ? 'bg-amber-100 text-amber-700'
-                        : 'bg-gray-100 text-gray-600'
-                  }`}
-                >
-                  {outOfStock ? 'Out' : lowStock ? `${stock} left` : stock}
-                </span>
-              )}
-            </div>
-            <span className="text-xs font-semibold text-gray-900 truncate">{product.name}</span>
-            <span className="text-[10px] text-gray-500 truncate">
-              {[product.brand, product.sku].filter(Boolean).join(' · ')}
-            </span>
-            <span className="mt-auto flex items-baseline gap-1.5">
-              <span className="text-sm font-bold text-gray-900">{money(offer)}</span>
-              {offer < mrp && (
-                <span className="text-[10px] text-gray-500 line-through">{money(mrp)}</span>
-              )}
-              {inCart && <span className="ml-auto text-[9px] text-green-700">In cart</span>}
-            </span>
-          </button>
-        );
-      })}
+      {rows.map((product) => (
+        <ProductCard
+          key={productIdOf(product) || product.sku}
+          product={product}
+          layout="strip"
+          onPick={() => handlePick(product)}
+        />
+      ))}
     </div>
   );
 }

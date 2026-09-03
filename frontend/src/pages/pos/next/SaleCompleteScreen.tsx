@@ -1,12 +1,15 @@
 // ============================================================================
 // IMS 2.0 - POS sale-completion screen (Wave 4, owner spec 12)
 // ============================================================================
-// Shown straight after Complete-sale. At SALE time the customer document is an
-// "ORDER RECEIPT" -- the words "final tax invoice" belong to delivery only
-// (owner ruling), so the wording lives in ONE stage table below and the
-// delivery twin (DeliveryCompleteScreen.tsx) reuses this same component with
-// stage="DELIVERY". Two copies of a completion screen would drift; there is
-// exactly one implementation here.
+// Shown straight after Complete-sale. On the OPTICAL till the customer
+// document at SALE time is an "ORDER RECEIPT" -- the words "final tax invoice"
+// belong to delivery (owner ruling) -- while the GENERAL COUNTER always issues
+// the tax invoice, because there the goods leave with the customer and the
+// sale IS the handover (owner ruling 2026-09-04: no per-sale choice). The
+// wording lives in ONE stage table below; the delivery twin
+// (DeliveryCompleteScreen.tsx) and the counter (CounterCompleteScreen, this
+// file) reuse this same component with stage="DELIVERY" / "COUNTER". Copies
+// of a completion screen would drift; there is exactly one implementation.
 //
 // This screen owns NO money logic: every rupee shown is read back from
 // GET /orders/{id} (the server's grand_total / amount_paid / balance_due /
@@ -36,6 +39,7 @@ import {
   ChevronRight,
   PackageCheck,
   Printer,
+  Ruler,
   X,
 } from 'lucide-react';
 import api from '../../../services/api/client';
@@ -48,6 +52,10 @@ import {
   type StoreIdentity,
 } from '../../../components/print/storeIdentity';
 import { WorkshopJobCardPrint } from '../../../components/print/WorkshopJobCardPrint';
+import {
+  LensFittingFormModal,
+  type LensFittingFormValue,
+} from '../../../components/pos/LensFittingFormModal';
 import { inr } from '../../../components/print/legalPrimitives';
 import { istDayString } from '../../../utils/datetime';
 import { useAuth } from '../../../context/AuthContext';
@@ -103,7 +111,7 @@ interface JobView {
   createdAt?: string;
 }
 
-export type CompletionStage = 'SALE' | 'DELIVERY';
+export type CompletionStage = 'SALE' | 'COUNTER' | 'DELIVERY';
 
 type SendKey = 'wa_doc' | 'wa_thanks' | 'sms_doc' | 'sms_thanks';
 type SendState = 'idle' | 'sending' | 'sent' | 'failed';
@@ -126,6 +134,23 @@ const STAGE = {
     printDocLabel: 'Order receipt (A4)',
     secondPrintLabel: 'Workshop job card',
     docTemplate: 'ORDER_CONFIRMED',
+    doneLabel: 'Start next bill',
+    autoSent: false,
+  },
+  // Owner ruling 2026-09-04: the general counter ALWAYS issues the tax
+  // invoice -- the goods leave with the customer, so the sale IS the handover
+  // -- through the ONE statutory door (GET /orders/{id}/invoice.pdf, which
+  // mints the FY serial). No per-sale chooser, no "order receipt" label.
+  // autoSent stays false: only the deliver door queues ORDER_DELIVERED, and a
+  // counter sale goes through order-create, which queues nothing.
+  // ORDER_DELIVERED is the registered document template that says what
+  // actually happened here (the customer has the goods).
+  COUNTER: {
+    title: 'Sale complete',
+    docName: 'Tax invoice',
+    printDocLabel: 'Tax invoice (A4)',
+    secondPrintLabel: 'Workshop job card',
+    docTemplate: 'ORDER_DELIVERED',
     doneLabel: 'Start next bill',
     autoSent: false,
   },
@@ -388,8 +413,11 @@ export interface CompletionScreenProps {
   /** Optional -- only saves a flash of the id before the order loads. */
   orderNumber?: string;
   stage: CompletionStage;
-  /** Workshop job spawned by this order; enables the job-card print. */
+  /** Workshop job spawned by this order; enables the job-card print and the
+   *  fitting-details handoff. */
   jobId?: string;
+  /** Coating already chosen on the lens line; pre-fills the fitting form. */
+  fittingCoating?: string;
   salespersonId?: string;
   salespersonName?: string;
   /** Clear the till and go again. Omit to hide the button. */
@@ -401,6 +429,7 @@ export function CompletionScreen({
   orderNumber,
   stage,
   jobId,
+  fittingCoating,
   salespersonId,
   salespersonName,
   onDone,
@@ -412,6 +441,13 @@ export function CompletionScreen({
   const [identity, setIdentity] = useState<StoreIdentity | null>(null);
   const [job, setJob] = useState<JobView | null>(null);
   const [jobCardOpen, setJobCardOpen] = useState(false);
+  // Sales -> Workshop fitting handoff. The classic till opened this modal
+  // BEFORE its completion step; here it is one tap on this screen, because the
+  // measurements (seg height, fitting height) need the customer wearing the
+  // frame -- which only ever happens at the till, never in the workshop.
+  const [fittingOpen, setFittingOpen] = useState(false);
+  const [fittingSaving, setFittingSaving] = useState(false);
+  const [fittingSaved, setFittingSaved] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sends, setSends] = useState<Record<SendKey, SendState>>({
     wa_doc: 'idle',
@@ -535,10 +571,10 @@ export function CompletionScreen({
         {/* LEFT: what just happened */}
         <div className="flex-1 min-w-0 lg:min-h-0 flex flex-col gap-3">
           <div className="shrink-0 rounded-xl border border-green-200 bg-green-50 p-4 flex items-start gap-3">
-            {stage === 'SALE' ? (
-              <CheckCircle2 className="w-6 h-6 text-green-700 shrink-0 mt-0.5" />
-            ) : (
+            {stage === 'DELIVERY' ? (
               <PackageCheck className="w-6 h-6 text-green-700 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-6 h-6 text-green-700 shrink-0 mt-0.5" />
             )}
             <div className="min-w-0">
               <div className="text-lg font-semibold text-green-900">{cfg.title}</div>
@@ -602,26 +638,43 @@ export function CompletionScreen({
               Print
             </div>
             <div className="flex gap-2">
+              {/* The server has exactly ONE A4 document door
+                  (GET /orders/{id}/invoice.pdf); every stage prints through
+                  it and only the LABEL differs, per the stage table. */}
               <PrintButton label={cfg.printDocLabel} primary onClick={openDocumentPdf} />
-              {stage === 'SALE' ? (
-                // The job card only exists when the order spawned a workshop job.
-                jobId ? (
-                  <PrintButton
-                    label={cfg.secondPrintLabel}
-                    disabled={!job}
-                    title={job ? undefined : 'Loading the workshop job...'}
-                    onClick={() => setJobCardOpen(true)}
-                  />
-                ) : null
-              ) : (
+              {stage === 'DELIVERY' ? (
                 <PrintButton
                   label={cfg.secondPrintLabel}
                   disabled
                   title="No care & warranty card template exists yet - needs to be built before this can print."
                   onClick={() => undefined}
                 />
-              )}
+              ) : jobId ? (
+                // The job card only exists when the order spawned a workshop job.
+                <PrintButton
+                  label={cfg.secondPrintLabel}
+                  disabled={!job}
+                  title={job ? undefined : 'Loading the workshop job...'}
+                  onClick={() => setJobCardOpen(true)}
+                />
+              ) : null}
             </div>
+            {/* Fitting details for the workshop job. Until they are confirmed
+                (here, or from the Workshop job's "Confirm fitting details")
+                the lab cannot start, finish or QC the job and the handover
+                gate refuses the order. */}
+            {stage !== 'DELIVERY' && jobId && (
+              <button
+                type="button"
+                onClick={() => setFittingOpen(true)}
+                disabled={fittingSaved}
+                title="Fitting measurements for the workshop job -- the lab cannot start it until these are confirmed"
+                className="mt-2 w-full min-h-[44px] px-3 rounded-lg border border-purple-200 bg-purple-50 text-purple-800 text-sm font-medium flex items-center justify-center gap-2 hover:bg-purple-100 disabled:opacity-60"
+              >
+                <Ruler className="w-4 h-4 shrink-0" />
+                {fittingSaved ? 'Fitting details saved' : 'Fitting details for the workshop'}
+              </button>
+            )}
           </div>
 
           <div className="shrink-0 rounded-xl border border-gray-200 bg-white p-3 space-y-2">
@@ -685,6 +738,31 @@ export function CompletionScreen({
         </div>
       </div>
 
+      {fittingOpen && jobId && (
+        <LensFittingFormModal
+          prefilledCoating={fittingCoating}
+          isSaving={fittingSaving}
+          onSave={async (v: LensFittingFormValue) => {
+            setFittingSaving(true);
+            try {
+              await workshopApi.updateFittingDetails(jobId, v);
+              setFittingSaved(true);
+              setFittingOpen(false);
+            } catch (err: any) {
+              // Keep the modal open so the dispenser can retry; the order and
+              // the job already exist, so nothing is at risk but the details.
+              setErrorMsg(
+                err?.response?.data?.detail ||
+                  'Could not save the fitting details. Try again, or confirm them from the Workshop job.',
+              );
+            } finally {
+              setFittingSaving(false);
+            }
+          }}
+          onBack={() => setFittingOpen(false)}
+        />
+      )}
+
       {jobCardOpen && job && identity && (
         <WorkshopJobCardPrint
           job={{
@@ -724,6 +802,13 @@ export function SaleCompleteScreen(
   props: Omit<CompletionScreenProps, 'stage'>,
 ) {
   return <CompletionScreen {...props} stage="SALE" />;
+}
+
+/** The general counter's completion: same screen, tax-invoice stage. */
+export function CounterCompleteScreen(
+  props: Omit<CompletionScreenProps, 'stage'>,
+) {
+  return <CompletionScreen {...props} stage="COUNTER" />;
 }
 
 export default SaleCompleteScreen;

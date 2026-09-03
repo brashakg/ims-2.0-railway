@@ -42,6 +42,21 @@ export interface SubmitPosOrderResult {
   error?: string;
 }
 
+/** The cart lines a workshop job is built from. ONE predicate: the job
+ *  creator below and BillingSurface's sale_type derivation both read it, so
+ *  "does this sale need the lab" can never be answered two ways. */
+export function workshopItemsOf(cart: any[]): { frameItem?: any; lensItem?: any } {
+  const items = cart || [];
+  return {
+    frameItem: items.find((i: any) =>
+      ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category)),
+    ),
+    lensItem: items.find(
+      (i: any) => canonicalCategory(i.category) === 'OPTICAL_LENS' || !!i.lens_details,
+    ),
+  };
+}
+
 /** `store` is the bound posStore instance (usePOSStore()). Validations run
     here too so both surfaces refuse identically. */
 export async function submitPosOrder(
@@ -234,10 +249,7 @@ export async function submitPosOrder(
     // matched the real catalog (categories are OPTICAL_LENS /
     // SPECTACLE_LENS). We also no longer silently swallow errors.
     const cartItems = store.cart || [];
-    const frameItem = cartItems.find((i: any) => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category)));
-    const lensItem = cartItems.find(
-      (i: any) => canonicalCategory(i.category) === 'OPTICAL_LENS' || !!i.lens_details,
-    );
+    const { frameItem, lensItem } = workshopItemsOf(cartItems);
     if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
       try {
         const expectedDate = new Date();

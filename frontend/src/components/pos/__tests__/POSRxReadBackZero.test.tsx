@@ -46,7 +46,11 @@ const MOCK_USER = {
   id: 'u1', name: 'Asha Kumari', roles: ['STORE_MANAGER'], activeRole: 'STORE_MANAGER',
   activeStoreId: 'BV-BOK-01', storeIds: ['BV-BOK-01'], discountCap: 20,
 };
-const MOCK_AUTH = { user: MOCK_USER };
+const MOCK_AUTH = {
+  user: MOCK_USER,
+  // CustomerCardWithLoyalty (inside POSLayout) gates its edit door on hasRole.
+  hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
+};
 vi.mock('../../../context/AuthContext', () => ({ useAuth: () => MOCK_AUTH }));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({

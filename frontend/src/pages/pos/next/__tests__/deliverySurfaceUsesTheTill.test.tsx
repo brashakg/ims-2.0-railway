@@ -17,7 +17,9 @@
 //      the keys the backend half of this change persists.
 //
 // Reverting the screen to its own three-button block fails 1 and 3; adding a
-// cart-bound tender (store credit / loyalty / voucher) to the counter fails 2.
+// cart-bound tender (loyalty / voucher / khata) to the counter fails 2. Store
+// credit is the one tender with a target seam and is owner-enabled here
+// (2026-09-04) -- see deliverySurfaceStoreCredit.test.tsx.
 
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -171,10 +173,9 @@ describe('the delivery counter runs the shared POS till', () => {
     await waitFor(() => expect(deliverWithPayment).toHaveBeenCalledTimes(1));
     expect(deliverWithPayment.mock.calls[0][1].approval_token).toBe('TKN-9');
 
-    // ...and the richer surface hands the counter NO tender that would zero
-    // the shortfall client-side while the server balance stays owing. Store
-    // credit / loyalty / voucher are cart-bound and stay off this screen.
-    expect(screen.queryByText('Store credit')).toBeNull();
+    // ...and the richer surface hands the counter NO cart-bound tender that
+    // would zero the shortfall client-side while the server balance stays
+    // owing. Loyalty / voucher / khata read the CART and stay off this screen.
     expect(screen.queryByText('Voucher / gift card')).toBeNull();
     expect(screen.queryByRole('button', { name: 'CREDIT' })).toBeNull();
   });

@@ -47,7 +47,13 @@ const MOCK_USER = {
   storeIds: ['BV-BOK-01'],
   discountCap: 20,
 };
-vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({ user: MOCK_USER }) }));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: MOCK_USER,
+    // CustomerCardWithLoyalty (inside POSLayout) gates its edit door on hasRole.
+    hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
+  }),
+}));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),

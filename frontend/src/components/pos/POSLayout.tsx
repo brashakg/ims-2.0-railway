@@ -1512,6 +1512,23 @@ function StepCustomer() {
         isOpen={showAddCustomerModal}
         onClose={() => setShowAddCustomerModal(false)}
         onSave={handleSaveCustomer}
+        // A create refused because the number belongs to a family member on
+        // another account offers PROMOTE / OPEN-existing inside the modal and
+        // hands the resulting customer back here, so the sale continues on the
+        // till instead of leaving for /customers/<id>. Same member rule as a
+        // search pick (selectCustomerHit), never a second copy of it.
+        onSelectExisting={(c: any) => {
+          const name = c?.name || c?.customer_name || c?.full_name || 'Customer';
+          selectCustomerHit(store, {
+            kind: 'account',
+            customer: c,
+            accountName: name,
+            displayName: name,
+            phone: c?.phone || c?.mobile || '',
+            key: String(c?.customer_id || c?._id || c?.id || name),
+          });
+          setShowAddCustomerModal(false);
+        }}
       />
     </div>
   );

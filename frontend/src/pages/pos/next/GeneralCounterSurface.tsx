@@ -30,13 +30,14 @@
 
 import { useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, X, Package, Glasses, ShoppingBag, Home } from 'lucide-react';
+import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
+import { HeldBillsControls } from '../../../components/pos/HeldBillsControls';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -45,8 +46,15 @@ import { StepPayment } from '../../../components/pos/POSPayment';
 import { StepComplete } from '../../../components/pos/POSInvoice';
 import { BarcodeScanner } from '../../../components/pos/BarcodeScanner';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
-import { CustomerSearchBar } from '../../../components/pos/CustomerSearchBar';
+import { AddCustomerModal } from '../../../components/customers/AddCustomerModal';
+import {
+  CustomerSearchBar,
+  createAndSelectCustomer,
+  selectCustomerHit,
+} from '../../../components/pos/CustomerSearchBar';
 import { PosWidgets } from './PosWidgets';
+import { CounterCompleteScreen } from './SaleCompleteScreen';
+import { ProductCard, productIdOf, MAX_PRODUCT_RESULTS } from './ProductResultsStrip';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import {
   resolveBarcode,
@@ -55,8 +63,6 @@ import {
 } from '../../../components/pos/productIntake';
 import { CATEGORY_BROWSE_OPTIONS } from '../../../utils/categoryNormalize';
 import { istDayString } from '../../../utils/datetime';
-
-const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
 // What this counter sells (owner spec 1-ii). Values are the canonical spine
 // categories and the labels come from the ONE shared browse vocabulary, so a
@@ -108,6 +114,15 @@ export function GeneralCounterSurface() {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
   const [homeDelivery, setHomeDelivery] = useState(false);
+  const [addCustomerOpen, setAddCustomerOpen] = useState(false);
+  // The finished sale, held so the completion screen can print and send
+  // against it (same wiring as BillingSurface). Cleared by Done, which also
+  // resets the till for the next customer.
+  const [completed, setCompleted] = useState<{
+    orderId: string;
+    orderNumber?: string;
+    jobId?: string;
+  } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
 
   const { data: products = [], isLoading } = useProducts({
@@ -203,8 +218,19 @@ export function GeneralCounterSurface() {
       }
       idempotencyKeyRef.current = null;
       if (res.warning) setErrorMsg(res.warning);
-      // No fitting job can arise here (no Rx), so the shared brain has already
-      // set the 'complete' step itself.
+      // Land on the good completion screen (server-read totals, PDF, sends,
+      // scorecard) -- the same one BillingSurface shows, in its COUNTER stage:
+      // the tax invoice is the primary print (owner 2026-09-04: the counter
+      // always issues the tax invoice). The legacy StepComplete recomputed the
+      // bill in the browser and offered none of that; it remains only as the
+      // reload fallback below.
+      if (res.orderId) {
+        setCompleted({
+          orderId: res.orderId,
+          orderNumber: res.orderNumber,
+          jobId: res.fittingJobId,
+        });
+      }
     } catch (e: any) {
       // WITHOUT THIS the handler was `try { } finally { }` with no catch, so
       // anything that THREW escaped as an unhandled rejection: the spinner
@@ -270,6 +296,10 @@ export function GeneralCounterSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
+          {/* Hold / recall, shared with the billing surface. The store parks a
+              cart automatically when the screen idles on EVERY surface, so
+              without this a cart parked here was unrecoverable from here. */}
+          <HeldBillsControls />
           <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {cart.length} item{cart.length === 1 ? '' : 's'}
@@ -277,7 +307,19 @@ export function GeneralCounterSurface() {
         </div>
       )}
 
-      {isComplete ? (
+      {completed ? (
+        <CounterCompleteScreen
+          orderId={completed.orderId}
+          orderNumber={completed.orderNumber}
+          jobId={completed.jobId}
+          salespersonId={store.salesperson_id}
+          salespersonName={store.salesperson_name}
+          onDone={() => {
+            setCompleted(null);
+            store.resetTransaction();
+          }}
+        />
+      ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
           <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction()} />
         </div>
@@ -288,15 +330,29 @@ export function GeneralCounterSurface() {
               height the Rx block used to hold. */}
           <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0">
             {store.customer ? (
-              <CustomerCardWithLoyalty />
+              /* Change = clear the pick; a wrong pick could otherwise only be
+                 undone by reloading the page. */
+              <CustomerCardWithLoyalty onChange={() => store.setCustomer(null)} />
             ) : (
               <div>
                 <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500 mb-1.5">
                   Customer <span className="text-red-500">*</span>
                 </div>
                 <CustomerSearchBar store={store} />
-                <div className="mt-1 text-[11px] text-gray-500">
-                  Every bill needs a customer — no anonymous sale on any counter.
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="text-[11px] text-gray-500 flex-1">
+                    Every bill needs a customer — no anonymous sale on any counter.
+                  </span>
+                  {/* Same modal and same shared creator (createAndSelectCustomer)
+                      the billing surface uses -- a first-time customer could not
+                      be billed on this counter at all before this. */}
+                  <button
+                    type="button"
+                    onClick={() => setAddCustomerOpen(true)}
+                    className="shrink-0 min-h-[44px] px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    + New customer
+                  </button>
                 </div>
               </div>
             )}
@@ -366,67 +422,30 @@ export function GeneralCounterSurface() {
                       : 'Pick a category, or scan the item to start the bill.'}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-2">
-                    {(products as any[]).map((product: any) => {
-                      const id = product.product_id || product._id;
-                      const mrp = product.mrp || 0;
-                      const offer = product.offer_price ?? product.offerPrice ?? mrp;
-                      const inCart = cart.some((i) => i.product_id === id);
-                      // Unknown stock (null) stays sellable; a KNOWN zero does
-                      // not — owner ruling: oversell = BLOCK.
-                      const stock =
-                        product.stock ?? product.quantity ?? product.stock_available ?? null;
-                      const outOfStock = stock !== null && stock <= 0;
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          onClick={() => addProduct(product)}
-                          disabled={inCart || outOfStock}
-                          className={
-                            'min-h-[44px] text-left rounded-xl border p-2 flex flex-col gap-1 disabled:cursor-not-allowed ' +
-                            (outOfStock
-                              ? 'border-gray-200 bg-gray-50 opacity-50'
-                              : inCart
-                                ? 'border-green-300 bg-green-50'
-                                : 'border-gray-200 bg-white hover:bg-gray-50 active:bg-gray-100')
-                          }
-                        >
-                          <div className="h-20 rounded-lg bg-gray-50 flex items-center justify-center overflow-hidden">
-                            {product.image_url ? (
-                              <img
-                                src={product.image_url}
-                                alt=""
-                                className="h-full w-full object-contain"
-                              />
-                            ) : (
-                              <Package className="w-6 h-6 text-gray-400" />
-                            )}
-                          </div>
-                          <span className="text-xs font-medium text-gray-900 line-clamp-2">
-                            {product.name || product.model || 'Item'}
-                          </span>
-                          <span className="text-[11px] text-gray-500 truncate">
-                            {product.brand || product.sku || ''}
-                          </span>
-                          <span className="text-sm font-semibold text-gray-900">
-                            {money(offer || mrp)}
-                            {offer < mrp && (
-                              <span className="ml-1 text-[11px] font-normal text-gray-500 line-through">
-                                {money(mrp)}
-                              </span>
-                            )}
-                          </span>
-                          {outOfStock && (
-                            <span className="text-[11px] text-red-600">Out of stock</span>
-                          )}
-                          {inCart && !outOfStock && (
-                            <span className="text-[11px] text-green-700">In cart</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <>
+                    {/* The card itself (id/offer/stock reads, badges, disabled
+                        states) is ProductResultsStrip's <ProductCard> -- ONE
+                        implementation for both tills. Only the surrounding
+                        grid layout belongs to this surface. */}
+                    <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-2">
+                      {(products as any[])
+                        .slice(0, MAX_PRODUCT_RESULTS)
+                        .map((product: any) => (
+                          <ProductCard
+                            key={productIdOf(product) || product.sku}
+                            product={product}
+                            layout="grid"
+                            onPick={() => addProduct(product)}
+                          />
+                        ))}
+                    </div>
+                    {(products as any[]).length > MAX_PRODUCT_RESULTS && (
+                      <p className="mt-2 text-center text-[11px] text-gray-500">
+                        Showing the first {MAX_PRODUCT_RESULTS} — narrow the
+                        search or pick a category to see the rest.
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -489,6 +508,19 @@ export function GeneralCounterSurface() {
                     tagged for the packing desk.
                   </p>
                 )}
+                {/* cart_note is the SAME bill-level note field the billing
+                    surface writes (DeliveryOptionsRow) and this counter's own
+                    submit already tags for a home delivery
+                    (withFulfilmentTag) -- staff just had no box to type one. */}
+                <input
+                  type="text"
+                  aria-label="Note for this bill"
+                  title="Note for this bill"
+                  value={store.cart_note || ''}
+                  onChange={(e) => store.setCartNote(e.target.value)}
+                  placeholder="Quick note (gift wrap, call before delivery…)"
+                  className="mt-2 w-full min-h-[44px] px-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                />
               </div>
 
               <button
@@ -503,6 +535,32 @@ export function GeneralCounterSurface() {
           </div>
         </div>
       )}
+
+      {/* Mounted unconditionally: the whole point is to reach it when there
+          is NO customer on the bill yet. It renders nothing while closed. */}
+      <AddCustomerModal
+        isOpen={addCustomerOpen}
+        onClose={() => setAddCustomerOpen(false)}
+        onSave={async (data) => {
+          await createAndSelectCustomer(store, data);
+          setAddCustomerOpen(false);
+        }}
+        /* The number belongs to a family member on another account: the modal
+           offers promote-to-own-account / open-existing and hands back the
+           resulting customer here, so the SALE CONTINUES on this till instead
+           of navigating away to /customers. Same selector the search bar uses. */
+        onSelectExisting={(c: any) => {
+          selectCustomerHit(store, {
+            kind: 'account',
+            customer: c,
+            accountName: c?.name || '',
+            displayName: c?.name || '',
+            phone: c?.phone || c?.mobile || '',
+            key: String(c?.id || c?.customer_id || ''),
+          });
+          setAddCustomerOpen(false);
+        }}
+      />
 
       {/* Owner spec 3: item AND bill discounts together, each with a compulsory
           reason when no offer applies, all under the role cap. The SAME modal

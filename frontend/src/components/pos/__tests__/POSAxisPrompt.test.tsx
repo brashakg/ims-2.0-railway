@@ -68,7 +68,12 @@ const MOCK_USER = {
 };
 // MUTABLE on purpose: the role-truth banner can only be tested by rendering as
 // a role that CANNOT save. Reset in beforeEach so no test leaks its role.
-const MOCK_AUTH: { user: any } = { user: MOCK_USER };
+// hasRole reads the CURRENT mock user: CustomerCardWithLoyalty (inside
+// POSLayout) gates its edit door on it, so the double must carry it.
+const MOCK_AUTH: { user: any; hasRole: (r: string | string[]) => boolean } = {
+  user: MOCK_USER,
+  hasRole: (r) => [r].flat().some((x) => MOCK_AUTH.user.roles.includes(x)),
+};
 /** Render the rest of this test as `roles`. Must be called BEFORE renderPOS. */
 function signInAs(roles: string[]) {
   MOCK_AUTH.user = { ...MOCK_USER, roles, activeRole: roles[0] };

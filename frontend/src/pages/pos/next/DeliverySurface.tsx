@@ -117,6 +117,12 @@ export function DeliverySurface() {
     removePayment: (i) => setPayments((list) => list.filter((_, idx) => idx !== i)),
     setCashTender,
     storeId: order?.storeId || user?.activeStoreId,
+    // Owner 2026-09-04 ("yes, enable it"): the ORDER's customer, so the
+    // store-credit tender renders against this handover's balance. camelCase
+    // is the wire shape order_to_frontend emits (deliverySurfaceWireShape).
+    // The server redeems against the order's customer whatever id is sent;
+    // this only scopes the balance the till displays.
+    customerId: order?.customerId,
   };
 
   const resetTender = () => {

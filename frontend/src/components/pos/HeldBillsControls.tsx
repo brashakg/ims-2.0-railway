@@ -51,6 +51,23 @@ export function HeldBillsControls() {
           </span>
         )}
       </button>
+      {/* A direct way out of a wrong bill. Without it "start over" was
+          Hold -> Held -> Discard, three taps through a modal. The native
+          confirm is the guard: a mis-tap here would lose a sale. */}
+      <button
+        type="button"
+        onClick={() => {
+          if ((store.cart || []).length === 0) return;
+          if (window.confirm('Discard this bill? Items and payments entered so far will be lost.')) {
+            store.resetTransaction();
+          }
+        }}
+        disabled={(store.cart || []).length === 0}
+        title="Throw this bill away and start a new one"
+        className="inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+      >
+        Discard bill
+      </button>
 
       {recallOpen && (
         <div
