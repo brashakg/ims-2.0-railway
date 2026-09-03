@@ -106,7 +106,9 @@ export interface CartLineItem {
 }
 
 export interface PaymentEntry {
-  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER' | 'GIFT_VOUCHER' | 'LOYALTY';
+  // STORE_CREDIT is a real tender, not a discount: the server redeems it
+  // atomically against the ORDER's customer when the payment is recorded.
+  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER' | 'GIFT_VOUCHER' | 'LOYALTY' | 'STORE_CREDIT';
   amount: number;
   reference?: string;            // UPI ref, card last 4, voucher code, etc.
   timestamp: string;

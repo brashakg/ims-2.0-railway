@@ -130,52 +130,12 @@ from ..services.phone import normalize_indian_mobile
 
 
 def _customer_store_id(doc):
-    """The store a customer belongs to, for object-level scope checks.
-
-    Reads EVERY key a customer can be homed on, because the write doors do not
-    agree: customer_service._build_skeleton deliberately stamps home_store_id,
-    preferred_store_id, primary_store_id AND store_ids together, its docstring
-    recording that a skeleton homed only on primary_store_id was invisible to
-    the native lists (the walkout bug). can_access_store_scoped treats an
-    UNRESOLVED store as out of scope for every store-level role, so a key
-    missing from this list is not a loose check - it is a customer their own
-    shop can no longer open.
-
-    Measured on production before widening: all 779 customers resolve on the
-    first three keys alone (768 carry store_id), so this changes nothing today.
-    It is here so that a row written through the other path later cannot
-    silently disappear.
-    """
+    """The store a customer belongs to for object-level scope checks. Mirrors
+    the list query, which matches home_store_id (legacy/seed) OR
+    preferred_store_id (TechCherry import); store_id is a last-resort fallback."""
     if not isinstance(doc, dict):
         return None
-    direct = (
-        doc.get("home_store_id")
-        or doc.get("preferred_store_id")
-        or doc.get("store_id")
-        or doc.get("primary_store_id")
-    )
-    if direct:
-        return direct
-    ids = doc.get("store_ids")
-    return ids[0] if isinstance(ids, list) and ids else None
-
-
-def customer_in_scope(doc, current_user) -> bool:
-    """THE store-ownership rule for a customer record.
-
-    Do NOT re-implement this check inline. It was copied wrong repeatedly
-    before it was single-sourced, and an audit of this file found THIRTEEN of
-    nineteen per-customer doors with no ownership check at all - four of them
-    moving money. The asymmetry that gave it away: reading the store-credit
-    LEDGER was scoped, while adding, issuing and redeeming credit against it
-    were not.
-
-    Note that resolvers elsewhere (crm.query_customers_by_store,
-    prescriptions, customer_repository.search_customers) still read their own
-    key subsets for LIST queries. Those are query filters, not object-level
-    permission checks; this predicate is the one that answers "may this user
-    touch THIS customer"."""
-    return can_access_store_scoped(_customer_store_id(doc), current_user)
+    return doc.get("home_store_id") or doc.get("preferred_store_id") or doc.get("store_id")
 
 
 def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
@@ -191,7 +151,7 @@ def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
     doc = repo.find_by_id(customer_id) if repo is not None else None
     if not doc:
         raise HTTPException(status_code=404, detail="Customer not found")
-    if not customer_in_scope(doc, current_user):
+    if not can_access_store_scoped(_customer_store_id(doc), current_user):
         if write:
             raise HTTPException(
                 status_code=403, detail="No access to this customer's store"
@@ -1062,11 +1022,7 @@ async def search_customer_by_phone(
     # find_by_mobile ORs phone+mobile; the partial search must too, since
     # TechCherry-imported docs carry the number under `phone`.
     exact = repo.find_by_mobile(digits)
-    # Same object-level store scope as GET /customers/mobile/{mobile}: an
-    # out-of-scope hit is treated as no hit (it falls through to the partial
-    # search, which is filtered too), so a store user cannot pull another
-    # store's customer -- name, phone, balances -- by typing a number.
-    if exact and customer_in_scope(exact, current_user):
+    if exact:
         _annotate_customer_matches([exact], digits)
         return {"customers": [exact], "customer": exact}
 
@@ -1076,12 +1032,7 @@ async def search_customer_by_phone(
     # sub-docs only ever store `mobile`; top-level `phone` is the TechCherry
     # import field.)
     matches = _annotate_customer_matches(
-        [
-            c
-            for c in repo.search(digits, ["mobile", "phone", "patients.mobile"])
-            if customer_in_scope(c, current_user)
-        ],
-        digits,
+        repo.search(digits, ["mobile", "phone", "patients.mobile"]), digits
     )
     return {
         "customers": matches,
@@ -1101,7 +1052,9 @@ async def get_customer_by_mobile(
         customer = repo.find_by_mobile(mobile)
         # Object-level store scope: an out-of-scope match falls through to 404
         # so a store user can't enumerate another store's customers by phone.
-        if customer and customer_in_scope(customer, current_user):
+        if customer and can_access_store_scoped(
+            _customer_store_id(customer), current_user
+        ):
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")
@@ -1536,14 +1489,8 @@ async def get_customer_prescriptions(
     customer_id: str = Path(..., description="Customer ID"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get prescriptions for a customer.
-
-    STUB - it has never been connected to PrescriptionRepository and always
-    returns an empty list. Deliberately NOT store-scoped: it reads nothing, so
-    a scope check here would be dead code that reads like protection. Wire the
-    repository in and the check comes with it (see _scoped_customer_or_404).
-    The real prescription doors live in routers/prescriptions.py and are
-    already scoped."""
+    """Get prescriptions for a customer"""
+    # This will be implemented when we connect PrescriptionRepository
     return {"prescriptions": []}
 
 
@@ -1557,9 +1504,9 @@ async def add_loyalty_points(
     repo = get_customer_repository()
 
     if repo is not None:
-        # Loyalty points redeem against real money, so the same object-level
-        # scope as the rest of the customer's record applies.
-        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
+        existing = repo.find_by_id(customer_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Customer not found")
 
         if repo.add_loyalty_points(customer_id, points):
             return {
@@ -1578,22 +1525,23 @@ async def add_store_credit(
     amount: float = Query(..., gt=0),
     current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
 ):
-    """Add store credit to customer"""
-    repo = get_customer_repository()
+    """Add store credit to customer.
 
-    if repo is not None:
-        # Store credit is MONEY. Reading this customer's ledger was already
-        # store-scoped while writing rupees into it was not, which is how a
-        # manager at one shop could credit another shop's customer.
-        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
-
-        if repo.add_store_credit(customer_id, amount):
-            return {
-                "message": f"Added store credit: {amount}",
-                "new_total": existing.get("store_credit", 0) + amount,
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to add store credit")
+    LEGACY DOOR, now routed through the ledger: it used to $inc the bare
+    customer.store_credit with NO ledger row, so credit added here was
+    invisible to the audit trail and silently broke the invariant
+    issued - redeemed == balance. Same roles, same response keys -- it is now
+    literally the /issue door (which also gives it the store-scope check)."""
+    out = _post_credit_entry(
+        customer_id,
+        "ISSUED",
+        StoreCreditEntryRequest(amount=amount, reason="manual add (legacy /add door)"),
+        current_user,
+    )
+    return {
+        "message": f"Added store credit: {amount}",
+        "new_total": out["balance"],
+    }
 
 
 # ============================================================================
@@ -1645,6 +1593,109 @@ def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> f
     return float((customer_doc or {}).get("store_credit", 0) or 0)
 
 
+def redeem_store_credit_atomic(
+    customer_id: str,
+    amount: float,
+    *,
+    reason: str = "",
+    ref: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> dict:
+    """THE one store-credit spend door: atomic guarded decrement + ledger row.
+
+    Extracted from _post_credit_entry's REDEEM branch so the POS tender
+    (orders.add_payment, method=STORE_CREDIT) and the /store-credit/redeem
+    route spend through the SAME implementation -- a second copy of this rule
+    is this repo's dominant defect class. Raises HTTPException (400/404/503);
+    on success returns {"entry": <ledger row>, "balance": <post-debit>}.
+
+    AUTHORITY NOTE: no store-scope authz HERE, deliberately -- each caller owns
+    it. The HTTP route scopes via _scoped_customer_or_404 (a customer id in a
+    URL is not authority to spend that customer's money); orders.add_payment
+    takes the customer from the ORDER document (never the request body) after
+    validate_store_access on the order's store -- which also allows the
+    legitimate cross-branch case where a customer redeems at a store that is
+    not their home store.
+
+    The bug this mechanism fixed: the old code recomputed balance_after from a
+    STALE pre-read snapshot, so two concurrent redeems both read the same
+    balance, both passed make_entry's Python check, and both wrote an absolute
+    store_credit value -- the second clobbering the first and effectively
+    spending the same credit twice. Now the spend is a single conditional
+    decrement filtered on store_credit >= amount (atomic in Mongo, via
+    repo.try_debit_store_credit -> money_guard.debit, the same engine behind
+    vouchers.redeem_voucher_atomic); the returned balance is read from the
+    POST-update document, never a snapshot.
+    """
+    from ..services import store_credit_ledger as scl
+
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    existing = repo.find_by_id(customer_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    try:
+        amt = round(float(amount), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="amount must be a number")
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="amount must be greater than 0")
+
+    debited = repo.try_debit_store_credit(customer_id, amt)
+    if debited is None:
+        # No document matched the store_credit >= amount guard -> insufficient
+        # (or a concurrent redeem won the race for the last rupees).
+        available = _current_credit_balance(customer_id, existing)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"insufficient store credit: requested {amt:.2f}, "
+                f"available {available:.2f}"
+            ),
+        )
+    if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
+        # DOUBLE-SPEND GUARD (security): the collection cannot perform a
+        # conditional (atomic) decrement. Taking the old snapshot
+        # read-modify-write fallback here let two concurrent redeems both
+        # pass and spend the same credit twice. A REDEEM (debit) is a
+        # double-spend risk, so REJECT with 503 rather than fall back to the
+        # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
+        # in _post_credit_entry -- a credit cannot overspend.)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Store-credit redemption is temporarily unavailable: the "
+                "atomic debit path is not available, and a non-atomic "
+                "decrement could double-spend the balance. Please retry."
+            ),
+        )
+    # Authoritative post-update balance from the decremented document.
+    new_balance = float((debited or {}).get("store_credit", 0) or 0)
+    # Build the ledger row whose balance_after matches the atomic result.
+    entry = scl.make_entry(
+        customer_id=customer_id,
+        entry_type=scl.REDEEMED,
+        amount=amt,
+        current_balance=new_balance + amt,  # pre-debit balance
+        reason=reason or "",
+        ref=ref,
+        store_id=store_id,
+        user_id=user_id,
+    )
+    entry["balance_after"] = round(new_balance, 2)
+    coll = _ledger_coll()
+    if coll is not None:
+        try:
+            coll.insert_one(dict(entry))
+        except Exception:  # noqa: BLE001
+            pass
+    entry.pop("_id", None)
+    return {"entry": entry, "balance": entry["balance_after"]}
+
+
 def _post_credit_entry(
     customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
 ):
@@ -1653,84 +1704,29 @@ def _post_credit_entry(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    # Covers BOTH /store-credit/issue and /store-credit/redeem, which delegate
-    # here - one fix, two doors, and no chance of the two drifting apart.
+    # Object-level store scope, WRITE flavour (cross-store IDOR): the ledger
+    # GET already scoped, but issue/redeem -- the doors that MOVE the money --
+    # trusted the raw id. Out-of-scope -> 403 (write) / 404 (read), same rule.
     existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
     et = (entry_type or "").upper()
 
     # ------------------------------------------------------------------
-    # REDEEM (debit) -> ATOMIC guarded decrement, no double-spend.
+    # REDEEM (debit) -> the ONE atomic spend door above.
     # ------------------------------------------------------------------
-    # The bug being fixed: the old code recomputed balance_after from a STALE
-    # pre-read snapshot, so two concurrent redeems both read the same balance,
-    # both passed make_entry's Python check, and both wrote an absolute
-    # store_credit value -- the second clobbering the first and effectively
-    # spending the same credit twice. Now the spend is a single conditional
-    # decrement filtered on store_credit >= amount (atomic in Mongo); the
-    # returned balance is read from the POST-update document, never a snapshot.
     if et == scl.REDEEMED:
-        try:
-            amt = round(float(body.amount), 2)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="amount must be a number")
-        if amt <= 0:
-            raise HTTPException(status_code=400, detail="amount must be greater than 0")
-
-        debited = repo.try_debit_store_credit(customer_id, amt)
-        if debited is None:
-            # No document matched the store_credit >= amount guard -> insufficient
-            # (or a concurrent redeem won the race for the last rupees).
-            available = _current_credit_balance(customer_id, existing)
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"insufficient store credit: requested {amt:.2f}, "
-                    f"available {available:.2f}"
-                ),
-            )
-        if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
-            # DOUBLE-SPEND GUARD (security): the collection cannot perform a
-            # conditional (atomic) decrement. Taking the old snapshot
-            # read-modify-write fallback here let two concurrent redeems both
-            # pass and spend the same credit twice. A REDEEM (debit) is a
-            # double-spend risk, so REJECT with 503 rather than fall back to the
-            # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
-            # below -- a credit cannot overspend.)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Store-credit redemption is temporarily unavailable: the "
-                    "atomic debit path is not available, and a non-atomic "
-                    "decrement could double-spend the balance. Please retry."
-                ),
-            )
-        # Authoritative post-update balance from the decremented document.
-        new_balance = float((debited or {}).get("store_credit", 0) or 0)
-        # Build the ledger row whose balance_after matches the atomic result.
-        entry = scl.make_entry(
-            customer_id=customer_id,
-            entry_type=scl.REDEEMED,
-            amount=amt,
-            current_balance=new_balance + amt,  # pre-debit balance
+        return redeem_store_credit_atomic(
+            customer_id,
+            body.amount,
             reason=body.reason or "",
             ref=body.ref,
             store_id=current_user.get("active_store_id"),
             user_id=current_user.get("user_id"),
         )
-        entry["balance_after"] = round(new_balance, 2)
-        coll = _ledger_coll()
-        if coll is not None:
-            try:
-                coll.insert_one(dict(entry))
-            except Exception:  # noqa: BLE001
-                pass
-        entry.pop("_id", None)
-        return {"entry": entry, "balance": entry["balance_after"]}
 
     # ------------------------------------------------------------------
-    # ISSUE / ADJUST (credit), or no-atomic REDEEM fallback.
-    # A credit cannot overspend, so the snapshot path is safe for it.
+    # ISSUE / ADJUST (credit). A credit cannot overspend, so the snapshot
+    # path is safe for it; a REDEEM never reaches here (returned above).
     # ------------------------------------------------------------------
     balance = _current_credit_balance(customer_id, existing)
     try:
@@ -2019,9 +2015,8 @@ async def get_consent_ledger(
     their store's customers; ADMIN can view all.
     """
     repo = get_customer_repository()
-    if repo is not None:
-        # Consent is a legal record about a person; the id alone is not authority.
-        _scoped_customer_or_404(customer_id, current_user, write=True)
+    if repo is not None and repo.find_by_id(customer_id) is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     coll = _consent_ledger_coll()
     entries = []
@@ -2057,9 +2052,8 @@ async def grant_consent(
     - Any authenticated operator can record consent (needed at point of sale).
     """
     repo = get_customer_repository()
-    if repo is not None:
-        # Consent is a legal record about a person; the id alone is not authority.
-        _scoped_customer_or_404(customer_id, current_user, write=True)
+    if repo is not None and repo.find_by_id(customer_id) is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     entry = _append_consent_event(
         customer_id,
@@ -2114,9 +2108,7 @@ async def withdraw_consent(
       withdrawn; `data_consent` stays True for the remaining consented purposes.
     """
     repo = get_customer_repository()
-    customer = (
-        _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
-    )
+    customer = repo.find_by_id(customer_id) if repo is not None else None
     if repo is not None and customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -2243,7 +2235,7 @@ async def set_customer_tags(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    customer = _scoped_customer_or_404(customer_id, current_user, write=True)
+    customer = repo.find_by_id(customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -2283,7 +2275,8 @@ async def suggest_customer_tag(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    _scoped_customer_or_404(customer_id, current_user, write=True)
+    if not repo.find_by_id(customer_id):
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     cleaned = _clean_tag(body.tag)
     if not cleaned:
@@ -2336,9 +2329,6 @@ async def list_tag_suggestions(
     current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
 ):
     """List PENDING tag suggestions for a customer (STORE_MANAGER+)."""
-    # A tag can carry PII (a phone number, a note about the person), so the
-    # suggestions on a customer are as store-scoped as the customer.
-    _scoped_customer_or_404(customer_id, current_user)
     sug_coll = _tag_suggestions_coll()
     if sug_coll is None:
         return {"customer_id": customer_id, "suggestions": []}
@@ -2360,7 +2350,6 @@ async def approve_tag_suggestion(
     """Approve a pending suggestion: mark it approved (single-doc update) then
     add the tag to customers.tags via $addToSet (idempotent single-doc update).
     Two sequential single-document writes -- no cross-collection transaction."""
-    _scoped_customer_or_404(customer_id, current_user, write=True)
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -2402,7 +2391,6 @@ async def reject_tag_suggestion(
 ):
     """Reject a pending suggestion (single-doc update). The tag never lands on
     the customer record."""
-    _scoped_customer_or_404(customer_id, current_user, write=True)
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")

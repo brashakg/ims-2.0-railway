@@ -555,6 +555,14 @@ class PaymentMethod(str, Enum):
     # swallowed, so the customer's points were burned yet the order still showed
     # that amount as owing (a double charge).
     LOYALTY = "LOYALTY"
+    # Store-credit redemption. The spend happens server-side in
+    # add_payment via customers.redeem_store_credit_atomic (an atomic
+    # guarded decrement plus a credit_note_ledger row, ref=order_id),
+    # always against the ORDER's customer -- never a customer id taken
+    # from the request body. Every refund in this app ISSUES store credit
+    # and the till DISPLAYS the balance; until this member existed there
+    # was no way to spend it, so the liability had no discharge door.
+    STORE_CREDIT = "STORE_CREDIT"
 
 
 class OrderItemCreate(BaseModel):
@@ -4868,6 +4876,33 @@ async def add_payment(
                 raise HTTPException(
                     status_code=400, detail=f"Voucher: {result.get('reason')}"
                 )
+
+        # Store credit: REDEEM atomically BEFORE recording the payment -- the
+        # same shape and the same single implementation the /store-credit/redeem
+        # route uses. The customer comes from the ORDER, so a request body
+        # cannot spend somebody else's credit. Raises 400 (insufficient, or a
+        # walk-in with no account) or 503 (no atomic path available); nothing is
+        # recorded on failure. Debit-before-record is deliberate: the reverse
+        # can mint a payment row backed by nothing, which is undetectable, while
+        # this direction leaves a ledger row carrying ref=order_id, so a spend
+        # that failed to record is still provable.
+        if payment.method == PaymentMethod.STORE_CREDIT:
+            credit_customer_id = str(order.get("customer_id") or "")
+            if not credit_customer_id or credit_customer_id.startswith("walkin-"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Store credit: this order has no customer account to redeem from",
+                )
+            from .customers import redeem_store_credit_atomic
+
+            redeem_store_credit_atomic(
+                credit_customer_id,
+                payment.amount,
+                reason=f"Redeemed at POS against order {order_id}",
+                ref=order_id,
+                store_id=current_user.get("active_store_id"),
+                user_id=current_user.get("user_id"),
+            )
 
         # EMI validation and interest calculation
         emi_details = None
