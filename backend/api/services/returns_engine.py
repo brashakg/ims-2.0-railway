@@ -199,34 +199,16 @@ def exchange_settlement(
     }
 
 
-def dominant_gst_rate(items: List[Dict[str, Any]]) -> float:
-    """The GST rate carrying the most gross value across the returned lines.
-
-    Used to pick a single rate for the credit-note GST back-out when the return
-    spans lines. Ties + empty -> 0.0. Defensive: never raises on bad input.
-    """
-    by_rate: Dict[float, float] = {}
-    for it in items or []:
-        try:
-            qty = _coerce_qty(it.get("return_qty", it.get("quantity")), "qty")
-            gross_unit = gross_unit_price(it.get("unit_price"), it.get("gst_rate"))
-            rate = _coerce_rate(it.get("gst_rate"))
-        except ValueError:
-            continue
-        by_rate[rate] = round(by_rate.get(rate, 0.0) + qty * gross_unit, 2)
-    if not by_rate:
-        return 0.0
-    return max(by_rate, key=lambda r: by_rate[r])
-
-
 def gst_breakup_lines(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """EXACT per-line GST back-out for a credit note that spans MIXED GST rates.
 
-    ``dominant_gst_rate`` + ``gst_breakup`` back one single rate out of the whole
-    gross -- wrong when a return mixes rates (e.g. an 18% frame + a 5% lens),
-    where it under/over-states the tax by hundreds of rupees. This backs the tax
-    out of EACH line at ITS OWN rate and aggregates, so the credit-note tax equals
-    the sum of the original line taxes (a true reversal).
+    Backing ONE dominant rate out of the whole gross (the deleted
+    ``dominant_gst_rate`` approximation) was wrong when a return mixes rates
+    (e.g. an 18% frame + a 5% lens), where it under/over-states the tax by
+    hundreds of rupees. This backs the tax out of EACH line at ITS OWN rate and
+    aggregates, so the credit-note tax equals the sum of the original line
+    taxes (a true reversal). It is THE credit-note back-out for every path --
+    in-store and online alike.
 
     For each line: line_gross = return_qty * unit_price (the GST-INCLUSIVE gross
     billed), then ``gst_breakup(line_gross, line_rate)`` splits it. Returns

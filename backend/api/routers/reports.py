@@ -3075,6 +3075,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     # CDNR (Credit/Debit Notes Register) and HSN summary
     cdnr: list = []
     hsn_by_rate: dict = {}
+    # Per-report order->interstate cache, shared by the ledger pass and the
+    # in-store returns pass so one refund can never resolve two heads.
+    _cdnr_inter_cache: dict = {}
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
@@ -3121,21 +3124,35 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         else:
                             cn_taxable = round(net_refund, 2)
 
+                        # Legacy rows booked under the CASHIER's store (not
+                        # the order's) belong to the sale store's GSTR-1 --
+                        # its in-store-returns pass reports them there.
+                        # Reporting them here too filed one credit note under
+                        # two GSTINs.
+                        _ret_doc = _ledger_row_return_doc(db, entry)
+                        if _cn_foreign_store(_ret_doc, active_store):
+                            continue
+
                         # Split CGST/SGST vs IGST: prefer the head stamped from
                         # the PARENT order at booking time (`interstate`, bool
                         # -- online refunds carry it so the credit note reverses
                         # under the same head the sale filed under, OS-008 CDNR
-                        # leg); the state compare stays the fallback for legacy
-                        # rows without the stamp.
+                        # leg); for legacy rows without the stamp resolve via
+                        # the SAME _return_interstate_flag the GSTR-3B leg and
+                        # the in-store pass use (parent-order stamp first,
+                        # customer state as the last fallback) so the two
+                        # returns can never reverse different heads for one
+                        # refund.
                         entry_interstate = entry.get("interstate")
                         if isinstance(entry_interstate, bool):
                             is_inter = entry_interstate
                         else:
-                            is_inter = bool(
-                                store_state
-                                and cust_state
-                                and store_state.strip().lower()
-                                != cust_state.strip().lower()
+                            is_inter = _return_interstate_flag(
+                                db,
+                                _ret_doc or {"customer_id": cust_id},
+                                store_state,
+                                _cdnr_inter_cache,
+                                fallback_state=cust_info.get("state", "") or "",
                             )
                         if is_inter:
                             cn_igst = round(cn_tax, 2)
@@ -3154,14 +3171,16 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             entry.get("created_at")
                         ) or (month + "-01")
 
-                        # Credit notes carry the items' HSN/rate. Prefer the rate
-                        # stamped on the ledger row (Shopify refund + in-store
-                        # credit note stamp gst_rate); else the 18% default.
+                        # Credit notes carry the items' HSN/rate. Prefer the
+                        # rate stamped on the ledger row (Shopify refund +
+                        # in-store credit note stamp gst_rate); a legacy row
+                        # without one derives it from its own tax/taxable --
+                        # NEVER a fabricated 18% that raided the wrong HSN
+                        # bucket.
                         cn_hsn = "9004"
-                        try:
-                            cn_rate = int(round(float(entry.get("gst_rate")))) if entry.get("gst_rate") else 18
-                        except (TypeError, ValueError):
-                            cn_rate = 18
+                        cn_rate = _cn_bucket_rate(
+                            entry.get("gst_rate"), cn_tax, cn_taxable
+                        )
                         cn_place = cust_state or store_state or "Unknown"
 
                         cn_entry = {
@@ -3210,8 +3229,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # A return that DID mint store credit is already in `cdnr` from
                 # the ledger pass; counting it twice would over-reverse the tax,
                 # which under-declares - worse than the bug being fixed.
+                # (_cdnr_inter_cache is shared with the ledger pass above.)
                 seen_returns = set()
-                _cdnr_inter_cache: dict = {}
                 for _e in cdnr:
                     for _f in ("refReference",):
                         _v = str(_e.get(_f) or "")
@@ -3281,10 +3300,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         r_sgst = round(r_tax - r_cgst, 2)
                         r_igst = 0.0
 
-                    try:
-                        r_rate = int(round(float(gb.get("gst_rate")))) if gb.get("gst_rate") else 18
-                    except (TypeError, ValueError):
-                        r_rate = 18
+                    r_rate = _cn_bucket_rate(gb.get("gst_rate"), r_tax, r_taxable)
                     r_place = cust_state or store_state or "Unknown"
 
                     cdnr.append(
@@ -3864,6 +3880,71 @@ def _return_interstate_flag(db, ret, store_state, cache, fallback_state=""):
     return flag
 
 
+def _ledger_row_return_doc(db, row):
+    """The returns doc a credit-note ledger row was minted for, or None.
+
+    The row's ref/reason carry the RET- id the note was issued against -- the
+    same tokens both dedup scans already read. ONE lookup rule shared by the
+    GSTR-1 CDNR pass and the GSTR-3B credit-note leg, so the two returns can
+    never attribute the same note differently. Fail-soft -> None (manual /
+    superadmin notes carry no RET- ref and stay attributed where booked).
+    """
+    for f in ("ref", "reason"):
+        for tok in str(row.get(f) or "").replace(",", " ").split():
+            if not tok.startswith("RET-"):
+                continue
+            try:
+                ret = db.get_collection("returns").find_one(
+                    {"return_id": tok.strip(".:;")}
+                )
+            except Exception:  # noqa: BLE001
+                ret = None
+            if isinstance(ret, dict):
+                return ret
+    return None
+
+
+def _cn_foreign_store(ret_doc, active_store) -> bool:
+    """True when a ledger row's return belongs to a DIFFERENT store's GSTIN.
+
+    Legacy rows were booked under the CASHIER's store while the return doc
+    carries the ORDER's store, so the store-scoped dedup missed them and one
+    refund reversed output tax under two GSTINs. The sale store's report owns
+    the reversal (its returns leg counts the return doc); the booking store
+    must skip the row. New rows are booked under the order's store, so this
+    only bites the legacy mismatches -- no stored row is ever rewritten.
+    """
+    if not isinstance(ret_doc, dict):
+        return False
+    ret_store = str(ret_doc.get("store_id") or "")
+    return bool(ret_store) and ret_store != str(active_store)
+
+
+def _cn_bucket_rate(explicit_rate, tax, taxable) -> int:
+    """GST rate for a credit-note row WITHOUT fabricating one.
+
+    The stamped rate wins. A legacy row with no usable stamp derives the rate
+    from its own tax/taxable (the note's arithmetic truth). When nothing can
+    be derived the row files at 0 -- the old blanket 18% default subtracted a
+    5% optical credit note from the 18% HSN bucket, understating declared 18%
+    turnover (and overstating 5%).
+    """
+    try:
+        r = float(explicit_rate)
+    except (TypeError, ValueError):
+        r = 0.0
+    if r > 0:
+        return int(round(r))
+    try:
+        t = float(tax or 0.0)
+        tv = float(taxable or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    if t > 0 and tv > 0:
+        return int(round(t / tv * 100.0))
+    return 0
+
+
 def _credit_note_totals(db, active_store, year, mon, last_day):
     """(igst, cgst, sgst, taxable) of credit notes issued in the period.
 
@@ -3922,6 +4003,20 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
         c = round(tax / 2, 2)
         return 0.0, c, round(tax - c, 2)
 
+    # ONE head-resolver state for BOTH legs (parent-order stamp first, customer
+    # state as the fallback -- _return_interstate_flag). The ledger leg used to
+    # hardcode intra-state for any row without a bool `interstate` stamp,
+    # reversing CGST/SGST on a sale that was filed -- and stays, in GSTR-1 --
+    # under IGST: the entity kept paying IGST on goods that came back, and the
+    # max(0, ...) clamp downstream swallowed the CGST/SGST over-reversal.
+    order_inter: dict = {}
+    store_state = ""
+    try:
+        st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
+        store_state = str(st.get("state") or "")
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         ledger = db.get_collection("credit_note_ledger")
     except Exception:  # noqa: BLE001
@@ -3950,7 +4045,22 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 t = round(float(t or 0.0), 2)
                 tv = row.get("taxable")
                 tv = round(float(tv if tv is not None else row.get("amount", 0) or 0.0), 2)
-                i, c, sg = _split(t, bool(row.get("interstate")))
+                ret_doc = _ledger_row_return_doc(db, row)
+                if _cn_foreign_store(ret_doc, active_store):
+                    # Legacy cashier-store booking: the sale store's report
+                    # owns this reversal (its returns leg counts the return
+                    # doc). Counting it here too reversed one refund under
+                    # two GSTINs.
+                    continue
+                inter = row.get("interstate")
+                if not isinstance(inter, bool):
+                    inter = _return_interstate_flag(
+                        db,
+                        ret_doc or {"customer_id": row.get("customer_id")},
+                        store_state,
+                        order_inter,
+                    )
+                i, c, sg = _split(t, inter)
                 igst += i
                 cgst += c
                 sgst += sg
@@ -3965,14 +4075,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # `interstate` stamp, exactly as the CDNR rows and Table 3.1(a) do.
     # Caught by mutation testing: hardcoding returns as intra-state reversed
     # CGST/SGST on a sale that sat in IGST, leaving BOTH heads wrong.
-    order_inter: dict = {}
-    store_state = ""
-    try:
-        st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
-        store_state = str(st.get("state") or "")
-    except Exception:  # noqa: BLE001
-        pass
-
+    # (`order_inter` + `store_state` are shared with the ledger leg above.)
     try:
         returns_col = db.get_collection("returns")
     except Exception:  # noqa: BLE001
@@ -4140,6 +4243,16 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     rcm_sgst = 0.0
     rcm_taxable = 0.0
 
+    # Credit-note totals + the per-head excess the zero-clamp would otherwise
+    # swallow SILENTLY (filled below when a DB is present).
+    cn_igst = cn_cgst = cn_sgst = cn_taxable = 0.0
+    cn_carry = {
+        "integratedTax": 0.0,
+        "centralTax": 0.0,
+        "stateTax": 0.0,
+        "taxableValue": 0.0,
+    }
+
     store_gstin = ""
     store_legal_name = ""
     store_state = ""
@@ -4222,10 +4335,33 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         # Table 3.1(a) is NET of credit notes - goods that came back are not an
         # outward supply. Clamped at zero: a month with more refunds than sales
         # is a carry-forward question for the accountant, never a negative
-        # liability on this screen.
+        # liability on this screen. But the clamp must never be SILENT -- it
+        # once swallowed a credit note reversing CGST/SGST on a sale that was
+        # filed under IGST, so the wrong-head error showed nowhere while the
+        # entity paid IGST on refunded goods. Whatever each head cannot absorb
+        # is reported in `creditNoteCarryForward` (and logged) for the
+        # accountant to carry into the next period's return.
         cn_igst, cn_cgst, cn_sgst, cn_taxable = _credit_note_totals(
             db, active_store, year, mon, last_day
         )
+        cn_carry = {
+            "integratedTax": round(max(0.0, cn_igst - out_igst), 2),
+            "centralTax": round(max(0.0, cn_cgst - out_cgst), 2),
+            "stateTax": round(max(0.0, cn_sgst - out_sgst), 2),
+            "taxableValue": round(max(0.0, cn_taxable - out_taxable), 2),
+        }
+        if any(v > 0 for v in cn_carry.values()):
+            logger.warning(
+                "[GSTR-3B] %s %s: credit notes exceed outward tax on a head "
+                "(carry-forward IGST %.2f / CGST %.2f / SGST %.2f); the excess "
+                "is NOT netted on this screen - either a wrong-head credit "
+                "note, or a refund-heavy month to carry forward.",
+                active_store,
+                month,
+                cn_carry["integratedTax"],
+                cn_carry["centralTax"],
+                cn_carry["stateTax"],
+            )
         out_igst = max(0.0, out_igst - cn_igst)
         out_cgst = max(0.0, out_cgst - cn_cgst)
         out_sgst = max(0.0, out_sgst - cn_sgst)
@@ -4272,6 +4408,18 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(out_sgst),
             "cess": 0.0,
         },
+        # What Table 3.1(a) was netted BY (credit notes issued in the period),
+        # and the per-head excess the zero-clamp could not absorb. A non-zero
+        # carry-forward is the accountant's cue: either a wrong-head credit
+        # note, or a refund-heavy month whose excess reversal must be carried
+        # into the next period -- it is never silently discarded.
+        "creditNotes": {
+            "integratedTax": _r(cn_igst),
+            "centralTax": _r(cn_cgst),
+            "stateTax": _r(cn_sgst),
+            "taxableValue": _r(cn_taxable),
+        },
+        "creditNoteCarryForward": cn_carry,
         # Table 3.1(d): inward supplies liable to reverse charge -- the buyer's
         # own GST liability on RCM purchases (NEW-GST-RCM).
         "inwardSuppliesReverseChargeValue": _r(rcm_taxable),
