@@ -159,8 +159,8 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Two find-or-create implementations collapsed into one; race on the unique index returns 409 not 500 | **DONE** |
 | Email-only web buyers wrote `mobile: ""` (indexed; 2nd one becomes a phantom customer) | **DONE** |
 | Cashiers + sales staff: full customer edit incl. phone + GSTIN, from both tills | **DONE** |
-| Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) | **WIP** |
-| Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **WIP** |
+| Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) -- through the existing /ready + /deliver doors; a HOME-DELIVERY counter bill is deliberately NOT stamped (parcel still on the packing desk) | **DONE** |
+| Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **DONE** |
 | Reverse split: adding a family member whose number is already a customer -- BLOCK + link-existing (owner 09-04) | **WIP** |
 | Legacy till retirement - inventory DONE: **cannot retire yet**. 3 gaps on the new billing screen (Rx sale creates no workshop job; no deposit-only sale; no clear-customer). All in build. Visufit ID + lens suggestions DROPPED by owner. 8 legacy-vehicle tests to re-point. | **BLOCKED on build** |
 
