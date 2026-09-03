@@ -23,15 +23,23 @@ All endpoints are fail-soft: no DB / no records => a valid empty-but-shaped
 payload, never a 500.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime
 from calendar import monthrange
 import logging
 
 from .auth import get_current_user
+from ..dependencies import get_leave_repository
 from ..utils.ist import ist_date_str, ist_month_window_utc
 from ..services.name_resolver import order_actor_id
+
+# The ONE leave-apply door lives in hr.py (validation, overlap 409, F26
+# fast-path approval request, manager bell). It is self-pinned (employee taken
+# from current_user, never the body) but unreachable by floor staff because
+# hr_router is mounted behind the _FINANCE_ROLES gate. /me/leaves POST below
+# DELEGATES to it -- no second implementation of the apply rule.
+from .hr import LeaveCreate, apply_leave as _hr_apply_leave
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +264,67 @@ async def my_leaves(
     except Exception as e:
         logger.error("Self leaves read failed: %s", e)
         return empty
+
+
+@router.post("/me/leaves", status_code=201)
+async def apply_my_leave(
+    leave: LeaveCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Apply for leave as the requesting employee (ANY authenticated role).
+
+    Pure delegation to hr.apply_leave -- the one apply door -- so the
+    validation (leave_type whitelist, date order, 1-year backdate cap), the
+    overlap-409 rule, the F26 fast-path approval request and the manager bell
+    all stay in ONE place. This route exists only because hr_router is mounted
+    behind the finance-role gate, which 403s floor staff on POST /hr/leaves.
+    Self-pinned: apply_leave takes the employee from current_user, and
+    LeaveCreate has no employee_id field, so a caller cannot file for a
+    colleague.
+    """
+    return await _hr_apply_leave(leave, current_user)
+
+
+@router.post("/me/leaves/{leave_id}/cancel")
+async def cancel_my_leave(
+    leave_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cancel the caller's OWN still-PENDING leave request.
+
+    Self-scoped: a leave that does not exist and a leave belonging to a
+    colleague return the SAME 404, so ids cannot be probed. Only a PENDING
+    leave can be cancelled -- a decided (APPROVED/REJECTED) request is a
+    manager's record, not the applicant's to erase. A fast-path (F26) leave's
+    open approval request is NOT force-expired here: approve/approve-remote
+    re-check status == PENDING before stamping, so actioning a cancelled
+    leave's request fails cleanly, and the request TTLs out on its own.
+
+    This is a WRITE, so unlike the /me reads it fails LOUD (503) when the
+    leave store is unavailable rather than pretending success.
+    """
+    caller = _caller_id(current_user)
+    repo = get_leave_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Leave store unavailable")
+
+    leave = repo.find_by_id(leave_id)
+    if not leave or not caller or leave.get("employee_id") != caller:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+    if leave.get("status") != "PENDING":
+        raise HTTPException(
+            status_code=400, detail="Only a pending leave request can be cancelled"
+        )
+
+    repo.update(
+        leave_id,
+        {
+            "status": "CANCELLED",
+            "cancelled_by": caller,
+            "cancelled_at": datetime.now().isoformat(),
+        },
+    )
+    return {"message": "Leave request cancelled", "leave_id": leave_id, "status": "CANCELLED"}
 
 
 # ============================================================================
