@@ -21,6 +21,7 @@ import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { useHeldBills } from '../../../components/pos/useHeldBills';
+import { addManualLensToCart, LensDetailsModal } from '../../../components/pos/LensDetailsModal';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -55,6 +56,7 @@ export function BillingSurface() {
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
   const [addCustomerOpen, setAddCustomerOpen] = useState(false);
   const [recallOpen, setRecallOpen] = useState(false);
+  const [lensModalOpen, setLensModalOpen] = useState(false);
   // Hold / recall, shared with the classic till. The store ALSO parks a cart
   // automatically when the screen idles, so without this the new POS could
   // strand that work with no way to bring it back.
@@ -346,13 +348,29 @@ export function BillingSurface() {
             </div>
 
             {/* Product entry: compact — one row of controls (owner spec 6) */}
-            <div className="shrink-0">
-              <BarcodeScanner
-                onScan={handleScan}
-                onManualSearch={setProductQuery}
-                placeholder="Scan barcode or search products…"
-                autoFocus
-              />
+            <div className="shrink-0 flex gap-2">
+              <div className="flex-1 min-w-0">
+                <BarcodeScanner
+                  onScan={handleScan}
+                  onManualSearch={setProductQuery}
+                  placeholder="Scan barcode or search products…"
+                  autoFocus
+                />
+              </div>
+              {/* A made-to-order lens has no barcode to scan. The classic till
+                  gated this on sale_type === 'prescription_order'; this surface
+                  never sets sale_type, and a linked Rx is the real requirement
+                  anyway - the order is refused without one. */}
+              {store.prescription && (
+                <button
+                  type="button"
+                  onClick={() => setLensModalOpen(true)}
+                  title="Add a made-to-order lens that has no barcode"
+                  className="shrink-0 min-h-[40px] px-3 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 text-xs font-medium hover:bg-purple-100"
+                >
+                  + Lens
+                </button>
+              )}
             </div>
 
             {/* Typed search results. Adds the line itself through the shared
@@ -409,6 +427,16 @@ export function BillingSurface() {
             </button>
           </div>
         </div>
+      )}
+
+      {lensModalOpen && (
+        <LensDetailsModal
+          onClose={() => setLensModalOpen(false)}
+          onSave={(details: any) => {
+            addManualLensToCart(store, details);
+            setLensModalOpen(false);
+          }}
+        />
       )}
 
       {recallOpen && (

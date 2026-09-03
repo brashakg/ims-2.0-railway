@@ -39,7 +39,7 @@ const POS_AUTO_ATTACH_SINGLE_RX =
 import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
 import { PrescriptionSelectModal } from './PrescriptionSelectModal';
-import { LensDetailsModal } from './LensDetailsModal';
+import { addManualLensToCart, LensDetailsModal } from './LensDetailsModal';
 import { LensFittingFormModal } from './LensFittingFormModal';
 import type { LensFittingFormValue } from './LensFittingFormModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
@@ -1199,9 +1199,7 @@ export function POSLayout() {
       {showLensModal && (
         <LensDetailsModal onClose={() => setShowLensModal(false)}
           onSave={(details) => {
-            store.addToCart({ product_id: `lens-${Date.now()}`, name: `${details.lensCategory} - ${details.indexLabel}`, sku: `RX-CUSTOM-${Date.now()}`,
-              category: 'RX_LENSES', unit_price: details.totalPrice || 0, mrp: details.totalPrice || 0, quantity: 2, is_optical: true,
-              linked_prescription_id: store.prescription?.id, lens_details: { type: details.lensCategory, material: details.indexLabel, index: details.indexId, coatings: [details.coatingLabel].filter(Boolean) } });
+            addManualLensToCart(store, details);
             setShowLensModal(false);
           }} />
       )}
