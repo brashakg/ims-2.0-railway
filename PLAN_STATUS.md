@@ -165,8 +165,8 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Legacy till retirement - inventory DONE: **cannot retire yet**. 3 gaps on the new billing screen (Rx sale creates no workshop job; no deposit-only sale; no clear-customer). All in build. Visufit ID + lens suggestions DROPPED by owner. 8 legacy-vehicle tests to re-point. | **BLOCKED on build** |
 
 Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
-customers; 0 duplicate top-level numbers; 9 family members also exist as their own
-customer; 1 null + 1 empty mobile (one row away from an index collision).
+customers; 0 duplicate top-level numbers; an early probe said 9 family members also exist as their own
+customer, but it counted holders' own Self rows -- the committed report finds 0 real splits; 1 null + 1 empty mobile (one row away from an index collision).
 
 ## 5. Waiting on the owner
 
