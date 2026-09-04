@@ -73,6 +73,7 @@ import {
   catalogDocToFormValues,
   categoryName,
   dictionaryErrorField,
+  fieldLabelFor,
   formValuesToCatalogUpdate,
   getCategoryFields,
   hsnImpliesCategoryRate,
@@ -99,6 +100,13 @@ import { SimilarProductsHint } from './SimilarProductsHint';
 import clsx from 'clsx';
 
 type SectionId = 'identity' | 'pricing' | 'inventory';
+
+// Which accordion a validator key lives in. The discount tier sits in Pricing,
+// so a discount_category error must open Pricing (not Identity) or the inline
+// error would stay hidden. Everything else the validator names is Identity.
+const PRICING_ERROR_KEYS: ReadonlySet<string> = new Set(['mrp', 'offer_price', 'discount_category']);
+const sectionOfError = (key: string): SectionId =>
+  PRICING_ERROR_KEYS.has(key) ? 'pricing' : 'identity';
 
 // The page's edit target, discriminated by which collection it edits:
 //   kind='spine'   — /catalog/add?edit=<id>: EDIT-IN-PLACE of a billing
@@ -428,6 +436,20 @@ export function QuickAddPage() {
     }, 120);
   }, []);
 
+  // "Still missing" chip / section count -> the field itself. Opens the
+  // accordion (and the Advanced row for the HSN) first, because a closed
+  // section is unmounted and there would be nothing to scroll to.
+  const jumpToField = useCallback((name: string) => {
+    setOpenSections((s) => ({ ...s, [sectionOfError(name)]: true }));
+    if (name === 'hsn_code') setShowAdvanced(true);
+    window.setTimeout(() => {
+      const el = document.getElementById(`qa-field-${name}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.focus({ preventScroll: true });
+    }, 120);
+  }, []);
+
   // Drop a field's amber "confirm" flag once the operator touches it.
   const clearFlag = useCallback((name: string) => {
     setFlaggedFields((prev) => {
@@ -691,16 +713,15 @@ export function QuickAddPage() {
       const newErrors = validateProductForm(values);
       setErrors(newErrors);
       if (Object.keys(newErrors).length > 0) {
-        // Make sure the section holding the first error is open. The discount
-        // tier lives in the Pricing section, so a discount_category error must
-        // open Pricing (not Identity) or the inline error would stay hidden.
-        const pricingKeys = new Set(['mrp', 'offer_price', 'discount_category']);
-        if (Object.keys(newErrors).some((k) => pricingKeys.has(k))) {
-          setOpenSections((s) => ({ ...s, pricing: true }));
-        }
-        if (newErrors.category || Object.keys(newErrors).some((k) => !pricingKeys.has(k))) {
-          setOpenSections((s) => ({ ...s, identity: true }));
-        }
+        // Make sure every section holding an error is open (a closed section
+        // is unmounted, so its inline error would stay hidden).
+        const keys = Object.keys(newErrors);
+        setOpenSections((s) => ({
+          ...s,
+          ...(keys.some((k) => sectionOfError(k) === 'pricing') ? { pricing: true } : {}),
+          ...(keys.some((k) => sectionOfError(k) === 'identity') ? { identity: true } : {}),
+        }));
+        if (newErrors.hsn_code) setShowAdvanced(true);
         toast.error('Please fix the highlighted fields.');
         return;
       }
@@ -1114,20 +1135,32 @@ export function QuickAddPage() {
   const reviewGapView = useMemo(() => {
     if (!reviewDry || reviewDry.ok) return { chips: [] as Array<{ key: string; label: string; title: string }>, other: [] as string[] };
     const { errors: mapped, other } = promoteGapsToFormErrors(reviewDry.gaps, selectedCategory);
-    const FORM_LEVEL_LABELS: Record<string, string> = {
-      mrp: 'MRP',
-      offer_price: 'Offer price',
-      category: 'Category',
-    };
-    const fieldLabel = (name: string) =>
-      FORM_LEVEL_LABELS[name] ||
-      getCategoryFields(selectedCategory).find((f) => f.name === name)?.label ||
-      name.replace(/_/g, ' ');
     return {
-      chips: Object.entries(mapped).map(([f, msg]) => ({ key: f, label: fieldLabel(f), title: msg })),
+      chips: Object.entries(mapped).map(([f, msg]) => ({
+        key: f,
+        label: fieldLabelFor(selectedCategory, f),
+        title: msg,
+      })),
       other,
     };
   }, [reviewDry, selectedCategory]);
+
+  // What the validator would refuse RIGHT NOW (create / edit modes only --
+  // review mode has its own lenient validator and the dry-run gap chips).
+  // Feeds the "Still missing" row and the per-section "N to fix" counts, so
+  // the list is the validator's own, never a second one. Inline red messages
+  // stay submit-driven (`errors`) -- nobody wants 27 red lines while typing.
+  // registryReady is a dependency so the set updates when the server's
+  // required flags arrive.
+  const liveErrors = useMemo(() => {
+    void registryReady; // re-run once the server's required flags arrive
+    return isReviewMode ? {} : validateProductForm(currentValues());
+  }, [isReviewMode, currentValues, registryReady]);
+  const sectionIssues = useMemo(() => {
+    const n: Record<SectionId, number> = { identity: 0, pricing: 0, inventory: 0 };
+    Object.keys(liveErrors).forEach((k) => { n[sectionOfError(k)] += 1; });
+    return n;
+  }, [liveErrors]);
 
   // Keyboard-first, remapped per mode:
   //   create/spine: Ctrl+Enter = Save, Ctrl+Shift+Enter = Save + New,
@@ -1644,22 +1677,8 @@ export function QuickAddPage() {
       <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor={fieldId}>
         {field.label}
         {field.required && <span className="text-red-500 ml-1">*</span>}
-        {isLocked && (
-          <span
-            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
-            title={`Shared with ${variantCtx?.sourceLabel || 'the model'} — exit variant mode to change`}
-          >
-            <Lock className="w-2.5 h-2.5" /> model
-          </span>
-        )}
-        {isFlagged && (
-          <span
-            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
-            title="Copied from the sibling — confirm or edit"
-          >
-            confirm
-          </span>
-        )}
+        {isLocked && <LockChip text="locked · same as the model" />}
+        {isFlagged && <ConfirmChip />}
       </label>
       {field.type === 'select' ? (
         <select
@@ -1773,14 +1792,7 @@ export function QuickAddPage() {
     <div>
       <label className="block text-xs font-medium text-gray-700 mb-1">
         Weight (g)
-        {flaggedFields.has('weight') && (
-          <span
-            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
-            title="Copied from the sibling — confirm or edit"
-          >
-            confirm
-          </span>
-        )}
+        {flaggedFields.has('weight') && <ConfirmChip />}
       </label>
       <input
         type="number"
@@ -1797,10 +1809,10 @@ export function QuickAddPage() {
   );
 
   return (
-    // Page-scoped ~10% density pass: the arbitrary variants shrink every
-    // .input-field (36px -> 32px, 13px -> 12.5px) and the page h1 (32 -> 28px)
-    // on THIS page only — no global CSS edits.
-    <div className="inv-body [&_.input-field]:h-8 [&_.input-field]:text-[12.5px] [&_.inv-head_h1]:!text-[28px]">
+    // Controls keep the app-wide .input-field height: the page-scoped rule
+    // that shrank every field to 32px (h-8) is gone -- this is filled on the
+    // shop iPad. Only the h1 keeps its page-scoped size (32 -> 28px).
+    <div className="inv-body [&_.inv-head_h1]:!text-[28px]">
       {/* Editorial header (mode toggle is rendered by the route shell) */}
       <div className="inv-head">
         <div>
@@ -1836,7 +1848,9 @@ export function QuickAddPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* Wraps at tablet width: the account chip and the Templates button
+            drop to a second line instead of squeezing the title. */}
+        <div className="flex flex-wrap items-center justify-end gap-3">
           {/* Accountability cue: whose account this create/edit is recorded
               under (several staff catalogue on shared machines). */}
           {(user?.name || user?.email) && (
@@ -2103,6 +2117,7 @@ export function QuickAddPage() {
             icon={<Tag className="w-5 h-5" />}
             subtitle="Category, brand, model & specs"
             open={openSections.identity}
+            issues={sectionIssues.identity}
             onToggle={toggleSection}
           >
             {/* Category picker (locked in variant mode — a sibling variant is
@@ -2115,24 +2130,17 @@ export function QuickAddPage() {
             <div className="mb-5">
               <label className="block text-xs font-medium text-gray-700 mb-2">
                 Category <span className="text-red-500">*</span>
-                {variantCtx && (
-                  <span
-                    className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
-                    title="A variant keeps its model's category — exit variant mode to change"
-                  >
-                    <Lock className="w-2.5 h-2.5" /> model
-                  </span>
-                )}
-                {editMode?.kind === 'spine' && (
-                  <span
-                    className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
-                    title="Category is locked while editing — use Clone as new SKU to re-categorise"
-                  >
-                    <Lock className="w-2.5 h-2.5" /> locked
-                  </span>
-                )}
+                {variantCtx && <LockChip text="locked · same as the model" />}
+                {editMode?.kind === 'spine' && <LockChip text="locked while editing" />}
               </label>
-              <div className="grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-2">
+              {/* id + tabIndex: the "Still missing: Category" chip lands here.
+                  Tiles carry a floor height so a two-line name (Colour Contact
+                  Lens at tablet width) cannot leave a ragged row. */}
+              <div
+                id="qa-field-category"
+                tabIndex={-1}
+                className="grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-2 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-bv"
+              >
                 {CATEGORIES.map((c) => (
                   <button
                     key={c.code}
@@ -2143,7 +2151,7 @@ export function QuickAddPage() {
                     }
                     onClick={() => setSelectedCategory(c.code)}
                     className={clsx(
-                      'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-center transition-all',
+                      'flex flex-col items-center justify-center gap-1 px-2 py-2 min-h-[72px] rounded-lg border text-center transition-all',
                       selectedCategory === c.code
                         ? 'border-bv bg-bv-50 ring-1 ring-bv'
                         : 'border-gray-200 hover:border-gray-300',
@@ -2338,17 +2346,26 @@ export function QuickAddPage() {
                   >
                     <ChevronDown className={clsx('w-4 h-4 transition-transform', showAdvanced && 'rotate-180')} />
                     {isEyewear ? 'Advanced — HSN & GST' : 'Advanced — HSN, GST & weight'}
-                    <span className="ml-1 text-xs text-gray-400">(auto-filled from category)</span>
+                    {/* The row itself says when the required HSN is missing,
+                        so "auto-filled" never reads as "nothing to do here". */}
+                    {liveErrors.hsn_code ? (
+                      <span className="ml-1 inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">
+                        HSN Code required
+                      </span>
+                    ) : (
+                      <span className="ml-1 text-xs text-gray-400">(auto-filled from category)</span>
+                    )}
                   </button>
 
                   {showAdvanced && (
                     <div className="mt-3 space-y-3">
                       <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                         <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                          <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-hsn_code">
                             HSN Code <span className="text-red-500">*</span>
                           </label>
                           <select
+                            id="qa-field-hsn_code"
                             title="HSN Code"
                             value={hsnCode}
                             onChange={(e) => {
@@ -2374,32 +2391,37 @@ export function QuickAddPage() {
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>
-                          <p className="text-xs text-gray-500 mt-1">
-                            {isReviewMode
-                              ? 'Leave untouched to auto-derive from the category on save'
-                              : 'Auto-selected based on category'}
-                          </p>
+                          {errors.hsn_code ? (
+                            <p className="text-red-500 text-xs mt-1">{errors.hsn_code}</p>
+                          ) : (
+                            <p className="text-xs text-gray-500 mt-1">
+                              {isReviewMode
+                                ? 'Leave untouched to auto-derive from the category on save'
+                                : 'Auto-selected based on category'}
+                            </p>
+                          )}
                         </div>
                         <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">GST Rate (%)</label>
-                          {/* The HSN decides the rate, and the SERVER reads the
-                              HSN -- the save derives gst_rate from hsn_code
-                              (product_master.normalise_payload). So the moment
-                              this HSN is not the one this category implies, this
-                              box stops naming a number it cannot stand behind
-                              rather than showing the category's rate as if the
-                              HSN had agreed to it. */}
-                          <input
-                            type="text"
-                            title="GST rate - settled from the HSN when the product is saved"
-                            value={hsnMatchesCategory ? `${gstRate}%` : 'Set from the HSN on save'}
-                            readOnly
-                            className="input-field w-full bg-gray-50 cursor-not-allowed"
-                          />
-                          <p className="text-xs text-gray-500 mt-1">
-                            {hsnMatchesCategory
-                              ? 'Settled from the HSN when you save'
-                              : `Settled from HSN ${hsnCode} when you save`}
+                          <span className="block text-xs font-medium text-gray-700 mb-1">GST Rate</span>
+                          {/* Plain text, not a read-only box: nothing here is
+                              typed. The HSN decides the rate, and the SERVER
+                              reads the HSN -- the save derives gst_rate from
+                              hsn_code (product_master.normalise_payload). So
+                              the moment this HSN is not the one this category
+                              implies, the number goes and only the promise
+                              stays. The value still posts (gst_rate). */}
+                          <p
+                            className="flex min-h-9 flex-wrap items-center gap-2 text-sm"
+                            data-testid="qa-gst-rate"
+                          >
+                            {hsnMatchesCategory && (
+                              <span className="text-base font-semibold text-gray-900">{gstRate}%</span>
+                            )}
+                            <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+                              {hsnMatchesCategory
+                                ? 'settled from the HSN on save'
+                                : `settled from HSN ${hsnCode} on save`}
+                            </span>
                           </p>
                         </div>
                         {/* SG/FR render Weight inline in the attribute grid
@@ -2421,24 +2443,19 @@ export function QuickAddPage() {
             icon={<IndianRupee className="w-5 h-5" />}
             subtitle="MRP, offer & cost (discount band auto-derives from Brand Master)"
             open={openSections.pricing}
+            issues={sectionIssues.pricing}
             onToggle={toggleSection}
           >
             <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
+                <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-mrp">
                   MRP <span className="text-red-500">*</span>
-                  {flaggedFields.has('mrp') && (
-                    <span
-                      className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
-                      title="Copied from the sibling variant — confirm or edit"
-                    >
-                      confirm
-                    </span>
-                  )}
+                  {flaggedFields.has('mrp') && <ConfirmChip />}
                 </label>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                   <input
+                    id="qa-field-mrp"
                     type="number"
                     value={mrp}
                     onChange={(e) => { setMrp(e.target.value); clearFlag('mrp'); }}
@@ -2453,20 +2470,14 @@ export function QuickAddPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
+                <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-offer_price">
                   Offer Price
-                  {flaggedFields.has('offer_price') && (
-                    <span
-                      className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
-                      title="Copied from the sibling variant — confirm or edit"
-                    >
-                      confirm
-                    </span>
-                  )}
+                  {flaggedFields.has('offer_price') && <ConfirmChip />}
                 </label>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                   <input
+                    id="qa-field-offer_price"
                     type="number"
                     value={offerPrice}
                     onChange={(e) => { setOfferPrice(e.target.value); clearFlag('offer_price'); }}
@@ -2487,14 +2498,7 @@ export function QuickAddPage() {
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">
                     Cost Price
-                    {flaggedFields.has('cost_price') && (
-                      <span
-                        className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
-                        title="Copied from the sibling variant — confirm or edit"
-                      >
-                        confirm
-                      </span>
-                    )}
+                    {flaggedFields.has('cost_price') && <ConfirmChip />}
                   </label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
@@ -2534,16 +2538,28 @@ export function QuickAddPage() {
                 : 'Reorder level (stock, SKU & barcode are automatic)'
             }
             open={openSections.inventory}
+            issues={sectionIssues.inventory}
             onToggle={toggleSection}
           >
             {/* Reorder level is a SPINE setting — an imported doc has none
                 until approval creates the billing row, so it's suppressed in
                 review mode. */}
-            {!isReviewMode && (
-              <div className="grid grid-cols-1 tablet:grid-cols-3 desktop:grid-cols-4 gap-3">
+            {isReviewMode ? (
+              <p className="text-xs text-gray-500 mt-2">
+                Stock and reorder settings come after approval — approving creates the sellable
+                billing product; stock then arrives via Goods Receipt (GRN).
+              </p>
+            ) : (
+              // Action-first: the one sentence you can act on leads, and the
+              // explainer sits BESIDE the lone input instead of under three
+              // empty columns.
+              <div className="grid grid-cols-1 tablet:grid-cols-[minmax(0,1fr)_minmax(0,3fr)] gap-3 tablet:gap-4 items-start">
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Reorder Level</label>
+                  <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-reorder_level">
+                    Reorder Level
+                  </label>
                   <input
+                    id="qa-field-reorder_level"
                     type="number"
                     title="Reorder Level"
                     placeholder="5"
@@ -2553,22 +2569,15 @@ export function QuickAddPage() {
                     min="0"
                   />
                 </div>
+                <p className="text-xs text-gray-600 tablet:pt-5">
+                  <span className="font-semibold text-gray-800">
+                    Set the reorder level and you&apos;ll be alerted when stock falls below it.
+                  </span>{' '}
+                  Stock is added via Goods Receipt (GRN), not here. The SKU is assigned when the
+                  product is created and the internal barcode at goods receipt — neither is typed.
+                </p>
               </div>
             )}
-            <p className="text-xs text-gray-500 mt-2">
-              {isReviewMode ? (
-                <>
-                  Stock and reorder settings come after approval — approving creates the sellable
-                  billing product; stock then arrives via Goods Receipt (GRN).
-                </>
-              ) : (
-                <>
-                  Stock is added via Goods Receipt (GRN), not at product-create time. The SKU is auto-assigned when the
-                  product is created and our internal barcode is generated at goods receipt — neither is entered here.
-                  Set the reorder level and you&apos;ll be alerted when stock falls below it.
-                </>
-              )}
-            </p>
 
             {/* Product images — real upload (durably stored + served by the
                 backend; the create payload sends the resulting URLs). */}
@@ -2646,14 +2655,17 @@ export function QuickAddPage() {
                         className="w-full h-full object-cover"
                         onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.3'; }}
                       />
+                      {/* Both photo controls are real 40px tap targets: they
+                          were the two smallest things on the page, and one of
+                          them is destructive. */}
                       <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); removeImage(url); }}
                         aria-label="Remove image"
                         title="Remove image"
-                        className="absolute top-1 right-1 p-1 rounded-full bg-white/90 text-gray-600 hover:text-red-600 shadow"
+                        className="absolute top-1 right-1 inline-flex min-h-10 min-w-10 items-center justify-center rounded-full bg-white/90 text-gray-600 hover:text-red-600 shadow"
                       >
-                        <X className="w-3.5 h-3.5" />
+                        <X className="w-4 h-4" />
                       </button>
                       <button
                         type="button"
@@ -2661,7 +2673,7 @@ export function QuickAddPage() {
                         disabled={isEditing}
                         aria-label="Remove background"
                         title="Remove background (clean up + resize)"
-                        className="absolute bottom-1 left-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                        className="absolute bottom-1 left-1 inline-flex min-h-10 items-center gap-1 px-2.5 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         {isEditing ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -2680,18 +2692,20 @@ export function QuickAddPage() {
 
           {/* ONLINE — compact, always-visible strip. IMS pushes to Shopify
               directly via the Online Store module; these create-time flags set
-              whether the new product is staged for online, so keep them muted and
-              minimal, no accordion / no extra click. Hidden in review mode:
-              the imported doc's real online status shows read-only in the
+              whether the new product is staged for online. Normal contrast: the
+              switch deciding whether a product reaches the website must not be
+              the faintest control on the page, and the POS switch says in words
+              what it waits on. No accordion / no extra click. Hidden in review
+              mode: the imported doc's real online status shows read-only in the
               banner, and these create-time flags aren't part of the review PUT. */}
           {!isReviewMode && (
-          <div className="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-2.5">
+          <div className="rounded-lg border border-gray-200 bg-white px-4 py-3">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-              <span className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
-                <Globe className="w-3.5 h-3.5" />
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                <Globe className="w-4 h-4 text-bv" />
                 Online
               </span>
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex min-h-10 items-center gap-2 cursor-pointer">
                 <span className="relative inline-flex items-center">
                   <input
                     type="checkbox"
@@ -2701,11 +2715,11 @@ export function QuickAddPage() {
                     onChange={(e) => setSyncToShopify(e.target.checked)}
                     className="sr-only peer"
                   />
-                  <span className="w-8 h-4 bg-gray-200 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-bv"></span>
+                  <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv"></span>
                 </span>
-                <span className="text-xs text-gray-500">Sync to Shopify</span>
+                <span className="text-sm text-gray-800">Sync to Shopify</span>
               </label>
-              <label className={clsx('flex items-center gap-2', syncToShopify ? 'cursor-pointer' : 'cursor-not-allowed opacity-50')}>
+              <label className={clsx('flex min-h-10 items-center gap-2', syncToShopify ? 'cursor-pointer' : 'cursor-not-allowed')}>
                 <span className="relative inline-flex items-center">
                   <input
                     type="checkbox"
@@ -2716,17 +2730,29 @@ export function QuickAddPage() {
                     onChange={(e) => setPublishPOS(e.target.checked)}
                     className="sr-only peer"
                   />
-                  <span className="w-8 h-4 bg-gray-200 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-bv"></span>
+                  <span className={clsx(
+                    "w-9 h-5 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv",
+                    syncToShopify ? 'bg-gray-300' : 'bg-gray-200'
+                  )}></span>
                 </span>
-                <span className="text-xs text-gray-500">Publish to Shopify POS</span>
+                <span className={clsx('text-sm', syncToShopify ? 'text-gray-800' : 'text-gray-500')}>
+                  Publish to Shopify POS
+                </span>
+                {!syncToShopify && (
+                  <span className="text-xs text-gray-500">— turn on Sync to Shopify first</span>
+                )}
               </label>
             </div>
             {syncToShopify && (
               <div className="mt-2.5">
+                <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-shopify-tags">
+                  Shopify tags
+                </label>
                 <input
+                  id="qa-shopify-tags"
                   type="text"
-                  className="input-field w-full !py-1.5 text-xs"
-                  placeholder="Add Shopify tags — type a tag, press Enter or comma"
+                  className="input-field w-full"
+                  placeholder="Type a tag, press Enter or comma"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ',') {
                       e.preventDefault();
@@ -2780,11 +2806,13 @@ export function QuickAddPage() {
                 value={attributes.model_no || attributes.model_name || '—'}
               />
               {/* Remaining filled category attributes (parity with the Guided
-                  wizard's review, which listed every filled attribute). */}
+                  wizard's review, which listed every filled attribute), named
+                  by the registry label the form itself uses -- never a raw key
+                  beside a curated one. */}
               {Object.entries(attributes)
                 .filter(([k, v]) => v && !['brand_name', 'model_no', 'model_name'].includes(k))
                 .map(([k, v]) => (
-                  <ReviewRow key={k} label={k.replace(/_/g, ' ')} value={v} />
+                  <ReviewRow key={k} label={fieldLabelFor(selectedCategory, k)} value={v} />
                 ))}
               <ReviewRow label="MRP" value={mrp ? `₹${mrp}` : '—'} />
               <ReviewRow
@@ -2874,6 +2902,27 @@ export function QuickAddPage() {
               Save + New
             </button>
           )}
+          {/* What the validator would still refuse -- its own list, live. Save
+              stays enabled; each chip jumps to (and opens) its field. */}
+          {Object.keys(liveErrors).length > 0 && (
+            <span
+              className="flex flex-wrap items-center gap-1.5 text-xs text-gray-600"
+              data-testid="qa-still-missing"
+            >
+              Still missing:
+              {Object.keys(liveErrors).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => jumpToField(k)}
+                  className="inline-flex min-h-8 items-center rounded-full bg-red-50 px-2.5 text-[11px] font-medium text-red-700 hover:bg-red-100"
+                >
+                  {fieldLabelFor(selectedCategory, k)}
+                </button>
+              ))}
+              <span className="text-gray-400">— tap one to jump to it</span>
+            </span>
+          )}
           <span className="ml-auto hidden tablet:flex items-center gap-4 text-xs text-gray-500">
             <Keyboard className="w-4 h-4" />
             <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> Save</span>
@@ -2906,13 +2955,16 @@ export function QuickAddPage() {
 // focus after one character. Hoisted + fed state via props, the identity is
 // stable and typing keeps focus.
 function Section({
-  id, title, icon, subtitle, open, onToggle, children,
+  id, title, icon, subtitle, open, issues = 0, onToggle, children,
 }: {
   id: SectionId;
   title: string;
   icon: React.ReactNode;
   subtitle?: string;
   open: boolean;
+  /** Validator errors inside this section -- shown on the header so a closed
+   *  (unmounted) section cannot hide them. */
+  issues?: number;
   onToggle: (id: SectionId) => void;
   children: React.ReactNode;
 }) {
@@ -2921,19 +2973,29 @@ function Section({
       <button
         type="button"
         onClick={() => onToggle(id)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
         aria-expanded={open ? "true" : "false"}
       >
-        <span className="flex items-center gap-3">
+        <span className="flex items-center gap-3 min-w-0">
           <span className="text-bv">{icon}</span>
-          <span>
+          <span className="min-w-0">
             <span className="block text-[15px] font-semibold text-gray-900">{title}</span>
             {subtitle && <span className="block text-xs text-gray-500">{subtitle}</span>}
           </span>
         </span>
-        <ChevronDown
-          className={clsx('w-5 h-5 text-gray-400 transition-transform', open && 'rotate-180')}
-        />
+        <span className="flex items-center gap-2 shrink-0">
+          {issues > 0 && (
+            <span
+              className="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700"
+              data-testid={`qa-section-issues-${id}`}
+            >
+              {issues} to fix
+            </span>
+          )}
+          <ChevronDown
+            className={clsx('w-5 h-5 text-gray-400 transition-transform', open && 'rotate-180')}
+          />
+        </span>
       </button>
       {open && <div className="px-4 pb-4 pt-1 border-t border-gray-100">{children}</div>}
     </div>
@@ -3099,6 +3161,23 @@ function ReviewQueueBar({
         </button>
       </div>
     </div>
+  );
+}
+
+// Label chips with their meaning in WORDS. The shop iPad has no hover, so a
+// tooltip-only explanation left a locked field looking broken.
+function LockChip({ text }: { text: string }) {
+  return (
+    <span className="ml-2 inline-flex items-center gap-1 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle">
+      <Lock className="w-2.5 h-2.5" /> {text}
+    </span>
+  );
+}
+function ConfirmChip() {
+  return (
+    <span className="ml-2 inline-flex items-center px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle">
+      copied — confirm or edit
+    </span>
   );
 }
 
