@@ -1,6 +1,6 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-09-03**, after the PR stack was rebased onto main. This file is the single place to see what is done, what
+Updated **2026-09-04**. PR #1088 (`feat/hr-split`, 45 commits) is REBASED onto main and PUSHED; CI running. Rebase damage found and repaired before push: main's customer ownership predicate, the 5-key store resolver and NINE scoped customer doors had been lost in the replay. This file is the single place to see what is done, what
 is in flight, and what is waiting on a decision. Claude keeps it current; if it
 disagrees with reality, the file is wrong and should be fixed.
 
@@ -62,7 +62,7 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 | Module | What was wrong | Status |
 |---|---|---|
 | **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **MERGED #1086** |
-| **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** (in CI) |
+| **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **PR #1088** (rebased, pushed, in CI) |
 | **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **DONE** |
 | **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** |
 | **Clinical** | 5 hidden tabs, two rival prescription doors | **DONE** — weaker Rx door deleted |
@@ -169,6 +169,20 @@ inventory first. Nothing is deleted until it is proven replaced.
 Production check 2026-09-04 (read-only): `customers.mobile` unique index EXISTS; 779
 customers; 0 duplicate top-level numbers; an early probe said 9 family members also exist as their own
 customer, but it counted holders' own Self rows -- the committed report finds 0 real splits; 1 null + 1 empty mobile (one row away from an index collision).
+
+## 4g. Found, not fixed (this wave) - recorded so they are not lost
+
+| Finding | Where | Why open |
+|---|---|---|
+| Repair-portal DELIVERED is unbilled BY DESIGN | `repair_portal.py` | revisit before repairs carry charges at go-live |
+| COD booking sends `sub_total = grand_total`, not `balance_due` (over-collects on a partly-paid COD) | `services/shiprocket.py` | out of the unpaid-goods agent's scope |
+| lab-routing scan reply lacks a PAYMENT_DUE sentence (blocks correctly, says only the code) | `services/lab_routing.py` | cosmetic |
+| `find_overdue` datetime vs string `expected_delivery` -> `/orders/overdue/list` empty in prod | `order_repository.py` | needs the field's storage shape settled |
+| Optical SALE-stage WhatsApp `ORDER_CONFIRMED` now seeded; owner must map the real approved template name before arming | `notification_templates.py` | owner paperwork (DLT) |
+| `POSReceipt.tsx` orphaned after the till retirement; `calculateGST`/`calculateIGST` in `constants/gst.ts` have zero callers | frontend | salvage look before delete |
+| PIXEL audit list still names `/pos` (follows the redirect) | `agents/implementations/pixel.py:107` | harmless |
+| Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | next branch, with the household block |
+| `GET /incentive/points/settings/eligibility` reveals per-person commission weight/bonus % to any authenticated user | `points.py` | owner call (percentages, not rupees) |
 
 ## 5. Waiting on the owner
 
