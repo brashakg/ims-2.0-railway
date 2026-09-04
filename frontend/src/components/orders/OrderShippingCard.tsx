@@ -5,6 +5,13 @@
 // booked for the order and offers a "Book shipment" action + per-shipment
 // tracking refresh. Bookings are SIMULATED server-side unless DISPATCH_MODE=live
 // and Shiprocket creds are configured, so this is always safe to click.
+//
+// COURIER PAYMENT. This card used to post {order_id, store_id} only, which the
+// server reads as Prepaid - and Prepaid on an order with nothing paid is a hard
+// refusal, so a web COD order (imported UNPAID, the whole bill still owed) could
+// not be shipped from the product at all. The choice is now explicit, and it
+// defaults to COD exactly in that case. On COD the courier collects the
+// BALANCE, so the card states the figure before anyone books.
 
 import { useCallback, useEffect, useState } from 'react';
 import { Truck, Package, RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
@@ -15,7 +22,20 @@ interface OrderShippingCardProps {
   orderId: string;
   orderNumber: string;
   storeId?: string;
+  /** What the order still owes - what a COD courier will collect. */
+  balanceDue?: number;
+  /** UNPAID / PARTIAL / PAID ... - drives the default choice. */
+  paymentStatus?: string;
 }
+
+type CourierPayment = 'COD' | 'Prepaid';
+
+const money = (amount: number) =>
+  new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Math.round(amount || 0));
 
 function statusChipClasses(status?: string | null): string {
   const s = (status || '').toUpperCase();
@@ -31,12 +51,30 @@ function statusChipClasses(status?: string | null): string {
   return 'text-blue-700 bg-blue-50 border-blue-200';
 }
 
-export function OrderShippingCard({ orderId, orderNumber, storeId }: OrderShippingCardProps) {
+export function OrderShippingCard({
+  orderId,
+  orderNumber,
+  storeId,
+  balanceDue = 0,
+  paymentStatus,
+}: OrderShippingCardProps) {
   const toast = useToast();
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [loading, setLoading] = useState(false);
   const [booking, setBooking] = useState(false);
   const [trackingId, setTrackingId] = useState<string | null>(null);
+
+  // The server refuses a COD booking with nothing to collect, and refuses a
+  // Prepaid one on an order with no payment at all. So: nothing paid + money
+  // owed is the COD case, everything else is Prepaid.
+  const collectable = balanceDue > 0 ? balanceDue : 0;
+  const defaultMethod: CourierPayment =
+    paymentStatus === 'UNPAID' && collectable > 0 ? 'COD' : 'Prepaid';
+  const [method, setMethod] = useState<CourierPayment>(defaultMethod);
+  // The modal reuses this card across orders, so re-seed on a new order.
+  useEffect(() => {
+    setMethod(defaultMethod);
+  }, [orderId, defaultMethod]);
 
   const load = useCallback(async () => {
     if (!orderId) return;
@@ -59,7 +97,11 @@ export function OrderShippingCard({ orderId, orderNumber, storeId }: OrderShippi
   const handleBook = async () => {
     setBooking(true);
     try {
-      const res = await shippingApi.book({ order_id: orderId, store_id: storeId });
+      const res = await shippingApi.book({
+        order_id: orderId,
+        store_id: storeId,
+        address: { payment_method: method },
+      });
       if (res.simulated) {
         toast.info(res.message || 'Shipment simulated (not dispatched live)');
       } else if (res.status === 'FAILED') {
@@ -116,6 +158,56 @@ export function OrderShippingCard({ orderId, orderNumber, storeId }: OrderShippi
         </button>
       </div>
       <p className="text-xs text-gray-500 mb-3">Shiprocket &middot; #{orderNumber}</p>
+
+      {/* Courier payment - COD collects the balance, Prepaid collects nothing */}
+      <fieldset className="mb-3">
+        <legend className="text-xs text-gray-500 mb-1.5">Courier payment</legend>
+        <div className="grid grid-cols-2 gap-2">
+          <label
+            className={`flex items-center gap-2 min-h-[44px] px-2.5 rounded-lg border cursor-pointer transition-colors ${
+              method === 'COD'
+                ? 'border-blue-300 bg-blue-50'
+                : 'border-gray-200 hover:bg-gray-50'
+            } ${collectable > 0 ? '' : 'opacity-60 cursor-not-allowed'}`}
+          >
+            <input
+              type="radio"
+              name={`courier-payment-${orderId}`}
+              value="COD"
+              checked={method === 'COD'}
+              disabled={collectable <= 0}
+              onChange={() => setMethod('COD')}
+              className="w-4 h-4"
+            />
+            <span className="text-xs leading-tight">
+              <span className="block font-medium text-gray-900">COD</span>
+              <span className="block text-gray-500">
+                {collectable > 0 ? `Collect ${money(collectable)}` : 'Nothing to collect'}
+              </span>
+            </span>
+          </label>
+          <label
+            className={`flex items-center gap-2 min-h-[44px] px-2.5 rounded-lg border cursor-pointer transition-colors ${
+              method === 'Prepaid'
+                ? 'border-blue-300 bg-blue-50'
+                : 'border-gray-200 hover:bg-gray-50'
+            }`}
+          >
+            <input
+              type="radio"
+              name={`courier-payment-${orderId}`}
+              value="Prepaid"
+              checked={method === 'Prepaid'}
+              onChange={() => setMethod('Prepaid')}
+              className="w-4 h-4"
+            />
+            <span className="text-xs leading-tight">
+              <span className="block font-medium text-gray-900">Prepaid</span>
+              <span className="block text-gray-500">Courier collects nothing</span>
+            </span>
+          </label>
+        </div>
+      </fieldset>
 
       {/* Shipment list */}
       {loading ? (
