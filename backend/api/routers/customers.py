@@ -919,7 +919,14 @@ async def create_customer(
             )
         except CustomerConflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail)
-        created = customer_data if created_id else None
+        if not created_id:
+            # ensure_customer returns None only when the repository is
+            # unavailable; a conflict raised above and a race re-found the
+            # winner. Fail loud, and do it HERE so `created` below is never
+            # Optional -- the CI lint gate (pylint E1136) rightly refused the
+            # subscripts on a value it could prove might be None.
+            raise HTTPException(status_code=500, detail="Failed to create customer")
+        created = customer_data
         if created:
             _audit_customer(
                 "CUSTOMER_CREATED",
