@@ -1786,6 +1786,11 @@ def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+# The path the in-app uploader (routers/products.py upload_product_image)
+# stores; served public by GET /products/image/{file_id}.
+_APP_IMAGE_PATH = "/api/v1/products/image/"
+
+
 def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     """Every usable PHOTOGRAPH URL on a catalog product doc, in display order.
     Pure; deduped; never raises.
@@ -1805,6 +1810,14 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     rule exists to prevent (the same rule online_sync_health.uploads_image_audit
     already flags rows on).
 
+    The ONE exception is this API's own product-image serve: the in-app
+    uploader (POST /products/image) stores `/api/v1/products/image/<id>`, a
+    relative path to a PUBLIC, immutable-cached endpoint. It becomes a
+    photograph only when PUBLIC_API_BASE_URL names the address Shopify can
+    fetch it from (e.g. https://<backend>.up.railway.app). Unset -- the
+    default -- it is NOT a photograph, exactly as before: what reaches the
+    storefront never changes by a code deploy alone.
+
     NOTE: this deliberately does NOT read the `product_images` design queue.
     Those rows push on their own, LATER press (push_image), and a photo that
     arrives after the product is already visible does not protect the
@@ -1812,6 +1825,7 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     rather than published bare -- conservative, and the operator fixes it by
     putting the photo on the product."""
     out: List[str] = []
+    public_base = (os.getenv("PUBLIC_API_BASE_URL") or "").strip().rstrip("/")
 
     def _add(value: Any) -> None:
         if isinstance(value, dict):
@@ -1819,6 +1833,8 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
         if not isinstance(value, str):
             return
         url = value.strip()
+        if public_base and url.startswith(_APP_IMAGE_PATH):
+            url = public_base + url
         if url.lower().startswith(("http://", "https://")) and url not in out:
             out.append(url)
 

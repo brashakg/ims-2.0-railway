@@ -34,6 +34,11 @@ logger = logging.getLogger("ims.products")
 # `catalog/add` route guard. SUPERADMIN auto-passes via require_roles.
 _CATALOG_ROLES = ("ADMIN", "CATALOG_MANAGER")
 
+# How many spine rows a photo-filtered listing (`?photo=has|missing`) scans
+# before paging in Python -- the photo predicate is the push's own Python
+# rule, evaluated once per row, never a Mongo filter (see list_products).
+_PHOTO_SCAN_CAP = 2000
+
 # Roles permitted to run BULK price / offer operations. Bulk pricing is
 # revenue-sensitive, so it is restricted to the catalog-mutation roles
 # (ADMIN, CATALOG_MANAGER); SUPERADMIN auto-passes via require_roles.
@@ -841,6 +846,17 @@ async def list_products(
             "everything (Catalog Manager 'include inactive')."
         ),
     ),
+    photo: Optional[str] = Query(
+        None,
+        pattern="^(has|missing)$",
+        description=(
+            "Photo filter. 'has' = a usable photo by the Shopify push's own "
+            "predicate (an absolute http(s) URL on the product's catalog "
+            "twin, the doc the push reads), 'missing' = none -- the "
+            "Missing-photos work list. Every row also carries has_photo + "
+            "online (LIVE / QUEUED / OFF / BLOCKED), computed here."
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
@@ -850,6 +866,7 @@ async def list_products(
     that's in the catalog can always be looked up at any store the user has
     access to."""
     from ..services.cache import cache
+    from ..services.online_catalog import stamp_online_state
     from ..services.product_master import resolve_category
 
     # Direct-call safety: several unit suites invoke this handler as a plain
@@ -858,6 +875,23 @@ async def list_products(
     # non-blank string as "absent" (HTTP callers always deliver a str/None).
     if not isinstance(created_by, str) or not created_by.strip():
         created_by = None
+    if not isinstance(photo, str):
+        photo = None
+
+    def _stamped(result: Dict[str, Any]) -> Dict[str, Any]:
+        # Photo / online truth is stamped on EVERY response, cache hit or
+        # miss: a push or a photo edit must show on the next load, not after
+        # the 5-minute listing TTL. The stamp is idempotent; only the product
+        # rows themselves are cached.
+        try:
+            from ..dependencies import get_db as _gdb
+
+            conn = _gdb()
+            live_db = conn if getattr(conn, "is_connected", False) else None
+        except Exception:  # noqa: BLE001 - a listing must never fail on this
+            live_db = None
+        stamp_online_state(live_db, result.get("products") or [])
+        return result
 
     # Cataloguer-attribution posture (panel finding 4): attribution is a
     # MANAGER surface. Non-manager roles get neither the created_by filter
@@ -892,13 +926,22 @@ async def list_products(
     _tier = "mgr" if can_see_attribution else "staff"
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}:{created_by}:{_tier}"
+        f":{is_active}:{created_by}:{_tier}:{photo}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
-        return cached
+        return _stamped(cached)
 
     repo = get_product_repository()
+
+    # The photo filter is the push predicate (Python, one place) over the
+    # product's catalog twin -- it cannot be a Mongo filter without a second
+    # implementation of the rule. So a photo-filtered page scans the whole
+    # filtered set, stamps, filters, then slices. ponytail: the catalog is
+    # ~80 rows; move the photo flag onto the doc at write time if it ever
+    # passes the scan cap.
+    _scan = photo is not None
+    _skip, _limit = (0, _PHOTO_SCAN_CAP) if _scan else (skip, limit)
 
     if repo is not None:
         # Tri-state is_active resolution. When the param is ABSENT each path
@@ -923,8 +966,8 @@ async def list_products(
                 category,
                 is_active=filtered_active,
                 created_by=created_by,
-                skip=skip,
-                limit=limit,
+                skip=_skip,
+                limit=_limit,
             )
             total_count = repo.count_search_products(
                 search, category, is_active=filtered_active, created_by=created_by
@@ -935,8 +978,8 @@ async def list_products(
                 category,
                 is_active=filtered_active,
                 created_by=created_by,
-                skip=skip,
-                limit=limit,
+                skip=_skip,
+                limit=_limit,
             )
             total_count = repo.count_by_brand(
                 brand, category, is_active=filtered_active, created_by=created_by
@@ -946,8 +989,8 @@ async def list_products(
                 category,
                 is_active=filtered_active,
                 created_by=created_by,
-                skip=skip,
-                limit=limit,
+                skip=_skip,
+                limit=_limit,
             )
             total_count = repo.count_by_category(
                 category, is_active=filtered_active, created_by=created_by
@@ -958,7 +1001,7 @@ async def list_products(
             )
             if created_by:
                 _default_filter["created_by"] = created_by
-            products = repo.find_many(_default_filter, skip=skip, limit=limit)
+            products = repo.find_many(_default_filter, skip=_skip, limit=_limit)
             total_count = repo.count(_default_filter)
 
         # Tag filter (step-12). Normalise the requested tag the SAME way tags are
@@ -1012,13 +1055,22 @@ async def list_products(
                 ):
                     p.pop(_f, None)
 
+        if _scan:
+            # Stamp first (the filter reads the stamped value), then keep the
+            # rows the caller asked for and page THEM.
+            _stamped({"products": products})
+            want = photo == "has"
+            products = [p for p in products if p.get("has_photo") is want]
+            total_count = len(products)
+            products = products[skip : skip + limit]
+
         # LEGACY CONTRACT: `total` stays the PAGE length (pinned by existing
         # consumers/tests). `total_count` is the additive true pre-slice count
         # of the applied repo filter, feeding the Catalog Manager pagination.
         total = len(products)
         result = {"products": products, "total": total, "total_count": total_count}
         cache.set(cache_key, result, ttl=cache.TTL_MEDIUM)
-        return result
+        return _stamped(result)
 
     return {"products": [], "total": 0, "total_count": 0}
 

@@ -1815,7 +1815,24 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         },
         # Surface the common Shopify superset fields top-level too (verbatim).
         "attributes": attrs,
+        # THE PHOTOGRAPH. The publish gate ("no photo, no publish") and the
+        # media the push attaches both read the TWIN's image fields
+        # (shopify_push.product_photo_urls), and this projection never carried
+        # them: prod 2026-09-04 had 69 of 76 spine products with an absolute
+        # photo URL and only 6 twins -- every IMS-catalogued product was
+        # refused as "no photograph" while its photo sat one collection over.
+        "images": _spine_images(spine),
     }
+
+
+def _spine_images(spine: Dict[str, Any]) -> List[str]:
+    """The spine's photo URLs as the twin stores them: strings, trimmed, blanks
+    dropped, order kept. The spine carries `images[]` only -- its `image_url`
+    is a read-time alias the list endpoints stamp, never stored."""
+    imgs = spine.get("images")
+    if not isinstance(imgs, (list, tuple)):
+        return []
+    return [u.strip() for u in imgs if isinstance(u, str) and u.strip()]
 
 
 def _write_mirror(
@@ -2488,11 +2505,12 @@ def mirror_update_to_catalog_twin(
       * hsn_code / gst_rate / is_active / description mirror top-level.
       * the twin QUEUES for the manual Online Store push
         (ecom.locally_modified) only when a field the storefront actually
-        shows moved: mrp / offer_price (the variant price fallbacks) or
-        description (descriptionHtml). A description-only edit DOES queue --
-        the pending count must be truthful about copy changes. cost / tier /
-        hsn / gst / is_active are in NO pushed payload: queuing on them would
-        send a push that changes nothing on Shopify.
+        shows moved: mrp / offer_price (the variant price fallbacks),
+        description (descriptionHtml) or images (the photograph the push
+        attaches and the publish gate reads). A description-only edit DOES
+        queue -- the pending count must be truthful about copy changes.
+        cost / tier / hsn / gst / is_active are in NO pushed payload: queuing
+        on them would send a push that changes nothing on Shopify.
       * twin key: current.pim_product_id first (door-created products key the
         twin on that separate uuid), spine product_id as the legacy /
         convergence fallback.
@@ -2529,7 +2547,12 @@ def mirror_update_to_catalog_twin(
         for key in ("hsn_code", "gst_rate", "is_active", "description"):
             if key in patch:
                 cat_patch[key] = patch[key]
-        if any(k in patch for k in ("mrp", "offer_price", "description")):
+        # The photograph moves with the spine and QUEUES: it is the one field
+        # the storefront shows more prominently than the price, and the push
+        # reads it off the twin (see _build_pim_doc).
+        if "images" in patch:
+            cat_patch["images"] = _spine_images({"images": patch["images"]})
+        if any(k in patch for k in ("mrp", "offer_price", "description", "images")):
             cat_patch["ecom.locally_modified"] = True
         if not cat_patch:
             return
