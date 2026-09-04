@@ -296,7 +296,21 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
   { path: '/incentive/staff/:staffId', reason: 'needs a seeded staff id; seed_e2e.py seeds only the admin user' },
-  { path: '/workshop/station/:stationCode', reason: 'needs a seeded workshop station; seed_e2e.py creates none' },];
+  { path: '/workshop/station/:stationCode', reason: 'needs a seeded workshop station; seed_e2e.py creates none' },
+  {
+    path: '/clinical/test/:entryId',
+    reason:
+      'the eye examination page; needs a seeded clinical queue entry id, and '
+      + 'seed_e2e.py creates no queue entries. Its layout is covered by '
+      + 'frontend/src/pages/clinical/__tests__/EyeExamPage.test.tsx, which '
+      + 'drives the real page and the real step bodies.',
+  },
+  {
+    path: '/clinical/test/amend/:testId',
+    reason:
+      'the same examination page reopened on a completed exam; needs a seeded '
+      + 'eye_test id, and seed_e2e.py creates none.',
+  },];
 
 /**
  * The only `.map()` route generator in routes/*.tsx. `deriveRoutePaths`
