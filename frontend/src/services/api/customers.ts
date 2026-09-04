@@ -69,8 +69,28 @@ export interface OwnAccountConflict {
   patient_name: string;
 }
 
-/** Either direction of the one-person-one-record rule, as a 409 body. */
-export type CustomerConflict = FamilyMemberConflict | OwnAccountConflict;
+// ── ONE HOUSEHOLD (owner ruling 2026-09-04: "Block it, one household account") ─
+// A number may be a family member on only ONE account. Every member-adding door
+// refuses (409) a row whose number already sits in ANOTHER account's family;
+// the body names that account and the member row. The popup offers to OPEN
+// that household -- no promote, no link, no copy.
+export const HOUSEHOLD_CONFLICT_CODE = 'MOBILE_ON_ANOTHER_HOUSEHOLD';
+
+export interface HouseholdConflict {
+  code: typeof HOUSEHOLD_CONFLICT_CODE;
+  message: string;
+  /** The account that already holds the person as a family member. */
+  customer_id: string;
+  account_holder_name: string;
+  patient_id: string | null;
+  patient_name: string;
+  relation?: string | null;
+  /** Position of the offending row in the submitted patients[] (0 for a single add). */
+  patient_index: number;
+}
+
+/** Any refusal of the one-person-one-record rule, as a 409 body. */
+export type CustomerConflict = FamilyMemberConflict | OwnAccountConflict | HouseholdConflict;
 
 /** The structured `detail` of a rejected request, from the ApiError the client
  *  throws (`.detail`) or a raw axios error alike; undefined when not an object. */
@@ -105,6 +125,21 @@ export function ownAccountConflictFrom(err: unknown): OwnAccountConflict | null 
     typeof detail.patient_name === 'string'
   ) {
     return detail as OwnAccountConflict;
+  }
+  return null;
+}
+
+/** Pull the one-household 409 (a member row already on another account's
+ *  family) out of a rejected create / update / add-patient, or null. */
+export function householdConflictFrom(err: unknown): HouseholdConflict | null {
+  const detail = conflictDetailFrom(err) as Partial<HouseholdConflict> | undefined;
+  if (
+    detail &&
+    detail.code === HOUSEHOLD_CONFLICT_CODE &&
+    typeof detail.customer_id === 'string' &&
+    typeof detail.patient_name === 'string'
+  ) {
+    return detail as HouseholdConflict;
   }
   return null;
 }

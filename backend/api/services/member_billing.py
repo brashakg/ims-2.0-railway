@@ -8,8 +8,9 @@ entries in the nested `customers.patients[]` array. This module is the single,
 pure, testable place that owns the "every order bills a MEMBER, never a bare
 account" rule:
 
-  * build_primary_member()   -- mint the canonical Primary member dict for an
-                                account (B2C: from the account name/mobile).
+  * build_primary_member()   -- the Primary member row for an account (B2C:
+                                from the account name/mobile); a call-through
+                                to customer_service.make_patient_row.
   * ensure_primary_member()  -- guarantee an account doc has >=1 member, marking
                                 a Primary; returns (primary_member, changed).
   * find_member()            -- look up a member by patient_id inside an account.
@@ -47,20 +48,21 @@ def build_primary_member(
     patient_id: Optional[str] = None,
     relation: str = "Self",
 ) -> Dict[str, Any]:
-    """Build the canonical Primary member dict for an account.
+    """The Primary (Self) member row for an account.
 
-    Shape mirrors the existing patients[] entries created by customers.py
-    (patient_id / name / mobile / relation) plus the new is_primary flag the
-    council added. A B2B 'department' Primary (P4) reuses this same shape; the
-    relation just differs -- P1 only needs the B2C self-member.
+    A call-through to the ONE row builder (customer_service.make_patient_row)
+    with the Self flavour -- this module no longer mints its own shape. A B2B
+    'department' Primary (P4) reuses the same call; the relation just differs.
     """
-    return {
-        "patient_id": patient_id or str(uuid.uuid4()),
-        "name": _norm(name) or "Primary",
-        "mobile": _norm(mobile) or None,
-        "relation": relation or "Self",
-        "is_primary": True,
-    }
+    from .customer_service import make_patient_row
+
+    return make_patient_row(
+        name=_norm(name) or "Primary",
+        mobile=mobile,
+        patient_id=patient_id,
+        relation=relation,
+        is_primary=True,
+    )
 
 
 def choose_primary_member(

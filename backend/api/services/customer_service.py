@@ -64,6 +64,25 @@ names the existing account + the offending row (code MOBILE_IS_OWN_ACCOUNT).
 The account's own number is exempt (the holder's Self row, a child recorded
 under the parent's phone) -- that is one record, not two.
 
+ONE HOUSEHOLD (owner ruling 2026-09-04: "Block it, one household account")
+--------------------------------------------------------------------------
+A number may be a family member on only ONE account. ``household_conflict``
+is that rule, applied at the same three member-adding doors as the reverse
+guard: a row whose number already sits in ``patients[]`` of a DIFFERENT
+account is refused with a 409 naming the account that holds them (code
+MOBILE_ON_ANOTHER_HOUSEHOLD). Separated parents share one household account
+for the child. Exempt: the same account (re-sending its own member on a
+legacy row) and the account's own number (the holder's Self row, a child
+recorded under the parent's phone).
+
+ONE WAY TO MINT A MEMBER ROW
+----------------------------
+``make_patient_row`` is the only place a ``patients[]`` row is built. Before
+it, three doors minted rows with drifting relation defaults ("Other" /
+"Family" / a name heuristic) and no ``created_at``. Every mint site now calls
+it: the create door's ``patients[]``, PUT append, POST /{id}/patients, and
+``member_billing.build_primary_member`` (the Self row).
+
 PUBLIC API
 ----------
     ensure_customer(db, *, mobile, name=None, store_id=None, source,
@@ -71,6 +90,10 @@ PUBLIC API
         -> (customer_id: Optional[str], created: bool)
     family_member_conflict(repo, mobile, exclude_customer_id=None) -> Optional[dict]
     own_account_conflict(repo, members, exclude_customer_id=None) -> Optional[dict]
+    household_conflict(repo, members, exclude_customer_id=None, own_mobile=None)
+        -> Optional[dict]
+    make_patient_row(*, name, mobile=None, dob=None, anniversary=None,
+                     relation=None, patient_id=None, is_primary=False) -> dict
     promote_patient(db, repo, parent, patient_id) -> dict
     CustomerConflict (exception; ``.detail`` is the 409 body)
 
@@ -203,6 +226,113 @@ def own_account_conflict(repo, members, exclude_customer_id: Optional[str] = Non
             "patient_name": member.get("name") or "this family member",
         }
     return None
+
+
+HOUSEHOLD_CODE = "MOBILE_ON_ANOTHER_HOUSEHOLD"
+
+
+def household_conflict(
+    repo,
+    members,
+    exclude_customer_id: Optional[str] = None,
+    own_mobile: Optional[str] = None,
+):
+    """THE one-household rule. ``members`` are the rows being ADDED as
+    ``(index, row)`` pairs in submitted order. Returns the 409 body for the
+    first row whose mobile is already a FAMILY MEMBER's number on a DIFFERENT
+    account (not ``exclude_customer_id``), else None.
+
+    Exempt: the account's own number (``own_mobile`` -- the holder's Self row,
+    a child recorded under the parent's phone) and the same account (a legacy
+    row re-sent under another spelling adds nothing new). The body names the
+    holding account and the member row, never the holder's record."""
+    finder = getattr(repo, "find_by_patient_mobile", None)
+    if not callable(finder):
+        return None
+    for index, member in members:
+        if not member:
+            continue
+        mobile = member.get("mobile")
+        if not mobile or mobile == own_mobile:
+            continue
+        try:
+            # ponytail: find_one returns the FIRST holder; a legacy number
+            # already on two households names whichever the index yields.
+            holder = finder(mobile)
+        except Exception:  # noqa: BLE001 -- fail-soft read, like find_by_mobile
+            logger.debug("[ENSURE_CUSTOMER] find_by_patient_mobile failed", exc_info=True)
+            continue
+        if not holder or not holder.get("customer_id"):
+            continue
+        if exclude_customer_id and holder.get("customer_id") == exclude_customer_id:
+            continue
+        row = next(
+            (p for p in (holder.get("patients") or []) if p and p.get("mobile") == mobile),
+            {},
+        )
+        holder_name = holder.get("name") or "an existing customer"
+        row_name = row.get("name") or "a family member"
+        return {
+            "code": HOUSEHOLD_CODE,
+            "message": (
+                f"This number is already {row_name}, a family member on "
+                f"{holder_name}'s account"
+            ),
+            "customer_id": holder.get("customer_id"),
+            "account_holder_name": holder_name,
+            "patient_id": row.get("patient_id"),
+            "patient_name": row_name,
+            "relation": row.get("relation"),
+            "patient_index": index,
+        }
+    return None
+
+
+# The one relation a member row gets when the caller gives none. "Other" is
+# the catch-all the Customers UI offers in every relation picker, and the only
+# default that can never be mistaken for the account holder: choose_primary_
+# member promotes a relation=="Self" row to Primary, so a silent "Self" would
+# make an unlabelled member the holder.
+DEFAULT_RELATION = "Other"
+
+
+def _iso(v: Any) -> Any:
+    return v.isoformat() if hasattr(v, "isoformat") else v
+
+
+def make_patient_row(
+    *,
+    name: Optional[str],
+    mobile: Optional[str] = None,
+    dob: Any = None,
+    anniversary: Any = None,
+    relation: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    is_primary: bool = False,
+) -> Dict[str, Any]:
+    """THE one way a ``patients[]`` row is minted. Stamps a stable
+    ``patient_id`` (or keeps the one given -- promote keeps the Rx links),
+    the canonical mobile, ONE relation default and ``created_at``
+    (``datetime.now()``, like BaseRepository._add_timestamps). Dates are
+    stored as ISO strings like every other customer date."""
+    try:
+        norm = normalize_indian_mobile(mobile)
+    except ValueError:
+        # A legacy number that does not parse (an imported landline on a Self
+        # row) is kept verbatim: never dropped, never a 500 on order-create.
+        norm = str(mobile).strip() or None
+    row: Dict[str, Any] = {
+        "patient_id": patient_id or str(uuid.uuid4()),
+        "name": (str(name).strip() if name is not None else ""),
+        "mobile": norm,
+        "dob": _iso(dob),
+        "anniversary": _iso(anniversary),
+        "relation": (str(relation).strip() if relation else "") or DEFAULT_RELATION,
+        "created_at": datetime.now(),
+    }
+    if is_primary:
+        row["is_primary"] = True
+    return row
 
 
 def _get_repo(db=None):
@@ -432,6 +562,13 @@ def ensure_customer(
         own = own_account_conflict(repo, enumerate(doc.get("patients") or []))
         if own:
             raise CustomerConflict(own)
+        # ONE HOUSEHOLD: nor may it already be a family member elsewhere. The
+        # holder's own number is exempt (and already proven free above).
+        house = household_conflict(
+            repo, enumerate(doc.get("patients") or []), own_mobile=norm_mobile
+        )
+        if house:
+            raise CustomerConflict(house)
 
     # --- validate any provided email/gstin/dob (raises on bad value) ---------------
     validated_extra = _validate_extras(extra)
@@ -504,8 +641,6 @@ def promote_patient(db, repo, parent: Dict[str, Any], patient_id: str) -> Dict[s
     top-level account (an existing split: owner decides per case, no auto-merge).
     Raises RuntimeError with ``.customer_id`` set when a step AFTER the create
     fails (door -> 500 carrying the id)."""
-    from .member_billing import build_primary_member
-
     member = next(
         (
             p
@@ -535,15 +670,15 @@ def promote_patient(db, repo, parent: Dict[str, Any], patient_id: str) -> Dict[s
         )
 
     now = datetime.now(timezone.utc).isoformat()
-    primary = build_primary_member(
+    primary = make_patient_row(
         name=member.get("name") or "Customer",
         mobile=mobile,
+        dob=member.get("dob"),
+        anniversary=member.get("anniversary"),
         patient_id=patient_id,  # STABLE: keeps the Rx / eye-test links
         relation="Self",
+        is_primary=True,
     )
-    for k in ("dob", "anniversary"):
-        if member.get(k) is not None:
-            primary[k] = member.get(k)
     new_doc: Dict[str, Any] = {
         "customer_id": str(uuid.uuid4()),
         "customer_type": "B2C",
