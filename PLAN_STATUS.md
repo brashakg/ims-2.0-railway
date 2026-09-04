@@ -179,6 +179,7 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | lab-routing scan reply lacks a PAYMENT_DUE sentence (blocks correctly, says only the code) | `services/lab_routing.py` | cosmetic |
 | `find_overdue` datetime vs string `expected_delivery` -> `/orders/overdue/list` empty in prod | `order_repository.py` | needs the field's storage shape settled |
 | Optical SALE-stage WhatsApp `ORDER_CONFIRMED` now seeded; owner must map the real approved template name before arming | `notification_templates.py` | owner paperwork (DLT) |
+| Stale worktrees: inventory delivered; owner ruled REMOVE ALL 15 (msgv verified as a stale 08-27 snapshot, nothing unmerged) -- removal running | git worktrees | **DONE (in progress)** |
 | `POSReceipt.tsx` orphaned after the till retirement; `calculateGST`/`calculateIGST` in `constants/gst.ts` have zero callers | frontend | salvage look before delete |
 | Pune store's `store_id` is a UUID (`4dc49c44-...`) while every other store uses its code (`BV-DHN-02`, `WIZ-DHN-01`...) as the id; `store_code` is `BV-PUN-01` | `stores` collection (prod) | possibly related to the open "Pune 2 orphan units"; needs a look before any store-id join |
 | PIXEL audit list still names `/pos` (follows the redirect) | `agents/implementations/pixel.py:107` | harmless |
