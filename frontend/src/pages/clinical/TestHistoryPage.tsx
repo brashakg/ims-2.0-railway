@@ -15,6 +15,7 @@ import {
   Stethoscope,
   ChevronDown,
   ChevronUp,
+  RotateCcw,
 } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
 import type { SoapNotePayload } from '../../services/api/clinical';
@@ -119,6 +120,34 @@ export function TestHistoryPage() {
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to print prescription.');
+    }
+  };
+
+  // Flag a redo (lens remake / re-dispense) against the Rx behind this test.
+  // Prompts for a reason; server gates this to optometry + manager roles.
+  //
+  // Re-homed here from the DELETED standalone /prescriptions page (Wave 2 door
+  // consolidation) — this was the ONLY caller of clinicalApi.recordRedo, and
+  // redo records feed clinical abuse detection, so the door must stay open.
+  // A remake is flagged when the customer comes back, and staff find that
+  // visit by name right on this page.
+  const handleMarkRedo = async (test: CompletedTest) => {
+    const rxId = test.prescriptionId;
+    if (!rxId) {
+      toast.error('No prescription is linked to this test, so a redo cannot be recorded.');
+      return;
+    }
+    const reason = window.prompt('Reason for redo (e.g. wrong axis, coating defect):');
+    if (reason === null) return; // user cancelled
+    if (!reason.trim()) {
+      toast.error('A reason is required to mark a redo.');
+      return;
+    }
+    try {
+      await clinicalApi.recordRedo(rxId, reason.trim());
+      toast.success('Redo recorded.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to record redo.');
     }
   };
 
@@ -505,6 +534,13 @@ export function TestHistoryPage() {
                   >
                     <FileText className="w-4 h-4 mr-2" />
                     Print Prescription
+                  </button>
+                  <button
+                    onClick={() => handleMarkRedo(selectedTest)}
+                    className="btn-outline flex items-center justify-center"
+                  >
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    Mark redo
                   </button>
                   <button
                     onClick={() => setSelectedTest(null)}

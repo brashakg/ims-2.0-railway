@@ -1,23 +1,29 @@
 // ============================================================================
 // IMS 2.0 - POS Invoice / Order Complete Step
 // ============================================================================
-// Extracted from POSLayout.tsx — displays order confirmation, receipt/invoice
-// buttons, incentive-qualifying items, and GST invoice modal.
+// Displays order confirmation, receipt/invoice buttons and the
+// incentive-qualifying items panel. Callers: POSLayout (legacy till),
+// BillingSurface (fallback branch) and GeneralCounterSurface.
+//
+// THE TAX INVOICE IS THE SERVER'S DOCUMENT. "Tax Invoice" opens
+// GET /orders/{id}/invoice.pdf (backend invoice_pdf.py) -- the same door
+// SaleCompleteScreen.tsx uses -- so the serial on the paper is the one minted
+// and recorded server-side. The old client-side GSTInvoice modal INVENTED an
+// invoice number in the browser (a BV/FY/store/order-slice pattern that
+// existed nowhere in the books) and re-computed GST locally; it was retired
+// 2026-09-03 (owner decision: one invoice document, one number).
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState } from 'react';
 import {
-  CheckCircle, Plus, Printer, FileText, X, Sparkles, AlertTriangle,
+  CheckCircle, Plus, Printer, FileText, Sparkles, AlertTriangle,
 } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
-import type { Store } from '../../types';
-import { GSTInvoice } from './GSTInvoice';
-import { resolveStoreIdentity, type StoreIdentity } from '../print/storeIdentity';
-import type { EntityLike } from '../print/legalPrimitives';
+import api from '../../services/api/client';
 
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
-  return `\u20B9${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 interface StepCompleteProps {
@@ -27,102 +33,37 @@ interface StepCompleteProps {
 
 export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
   const store = usePOSStore();
-  const [showGSTInvoice, setShowGSTInvoice] = useState(false);
+  const [invoiceError, setInvoiceError] = useState<string | null>(null);
+  const [invoiceBusy, setInvoiceBusy] = useState(false);
 
-  // Resolve the DOCUMENT store identity (store + its legal entity) from the
-  // order's own store_id. The resolver normalises the snake_case /stores/{id}
-  // doc into the camelCase Store the invoice reads (fixing the blank-header
-  // bug) and fetches the parent entity so the tax invoice shows the real legal
-  // name + PAN + per-state GSTIN + brand logo.
-  const [identity, setIdentity] = useState<StoreIdentity | null>(null);
-  const [storeWarning, setStoreWarning] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!store.store_id) return;
-    let cancelled = false;
-    resolveStoreIdentity(store.store_id)
-      .then((id) => {
-        if (cancelled) return;
-        setIdentity(id);
-        if (!id.hasIdentity) {
-          setStoreWarning('Could not load store details. The tax invoice cannot be issued without the issuing store identity.');
-        } else if (!id.hasGstin) {
-          setStoreWarning('Store GSTIN is not configured. A GST tax invoice cannot be issued for this store.');
-        } else {
-          setStoreWarning(null);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setIdentity(null);
-        setStoreWarning('Could not load store details. The tax invoice cannot be issued without the issuing store identity.');
+  // Server-rendered A4 tax invoice. Nothing is numbered, laid out or totalled
+  // in the browser -- fetch the PDF and hand it to a new tab for printing.
+  // (Same snippet as SaleCompleteScreen.openDocumentPdf; that file lives in
+  // pages/pos/next and is owned elsewhere, so the ten lines are duplicated
+  // rather than half-extracted.)
+  const openTaxInvoicePdf = async () => {
+    if (!store.order_id || invoiceBusy) return;
+    setInvoiceError(null);
+    setInvoiceBusy(true);
+    try {
+      const res = await api.get(`/orders/${store.order_id}/invoice.pdf`, {
+        responseType: 'blob',
       });
-    return () => { cancelled = true; };
-  }, [store.store_id]);
-
-  const fetchedStore: Store | null = identity?.store ?? null;
-  const entityForInvoice: EntityLike | null = identity?.entity ?? null;
-  // A tax invoice can only be issued when the issuing store + its GSTIN resolved.
-  const canIssueTaxInvoice = !!(identity?.hasIdentity && identity?.hasGstin);
-
-  // Build Order-shaped object from POS store for GSTInvoice
-  const orderForInvoice = useMemo(() => ({
-    id: store.order_id || '',
-    orderNumber: store.order_number || '',
-    storeId: store.store_id,
-    customerId: store.customer?.id || '',
-    customerName: store.customer?.name || 'Walk-in',
-    customerPhone: store.customer?.phone || '',
-    // PLACE OF SUPPLY. Without these the invoice had no customer state at all,
-    // so its inter-state test was false on 100% of bills and it could NEVER
-    // print IGST - while the server's PDF for the same order printed IGST
-    // correctly. The customer was handed a document naming the wrong tax heads
-    // on every out-of-state sale.
-    customer_gstin: (store.customer as { gstin?: string } | null)?.gstin || '',
-    customer_state: (store.customer as { state?: string } | null)?.state || '',
-    billing_address: (store.customer as { billing_address?: unknown } | null)?.billing_address,
-    patientName: store.patient?.name,
-    items: (store.cart || []).map(item => ({
-      id: item.id,
-      itemType: item.category || 'FRAME',
-      productId: item.product_id,
-      productName: item.name,
-      brand: item.brand,       // carried into GSTInvoice for customer-friendly description
-      subbrand: item.subbrand,
-      category: item.category,
-      // The product's OWN HSN. A statutory tax invoice prints what the product
-      // is stored with; GSTInvoice only derives a code when this is absent.
-      hsnCode: item.hsn_code,
-      sku: item.sku || '',
-      quantity: item.quantity,
-      unitPrice: item.unit_price,
-      discountPercent: item.discount_percent || 0,
-      discountAmount: item.discount_amount || 0,
-      finalPrice: item.line_total || item.unit_price * item.quantity,
-    })),
-    payments: (store.payments || []).map((p, i) => ({
-      id: `pay-${i}`,
-      mode: p.method,
-      amount: p.amount,
-      reference: p.reference,
-      paidAt: new Date().toISOString(),
-    })),
-    subtotal: store.getSubtotal(),
-    totalDiscount: store.getTotalDiscount(),
-    // GST-inclusive: tax is extracted from WITHIN the inclusive total.
-    taxAmount: store.getTax(),
-    grandTotal: store.getGrandTotal(),
-    amountPaid: store.getTotalPaid(),
-    balanceDue: store.getBalance(),
-    orderStatus: 'CONFIRMED',
-    createdAt: new Date().toISOString(),
-  }), [store.order_id]);
-
-  // The store passed to GSTInvoice is ALWAYS the resolved document store. When
-  // the fetch failed we do NOT synthesize a brand-defaulted blank store -- the
-  // Tax Invoice button is disabled below so a blank, BV-branded statutory
-  // document can never be printed.
-  const storeForInvoice = fetchedStore;
+      const url = URL.createObjectURL(
+        new Blob([res.data as BlobPart], { type: 'application/pdf' }),
+      );
+      const win = window.open(url, '_blank');
+      if (!win) setInvoiceError('Allow pop-ups for this site to open the tax invoice.');
+      // Keep the blob alive long enough for the new tab to load it.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch {
+      // An error body on a blob request is itself a Blob -- no readable server
+      // detail here, so the message stays generic.
+      setInvoiceError('Could not build the tax invoice. Check the store GSTIN in settings.');
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
 
   return (
     <div className="max-w-md mx-auto text-center py-8 space-y-6">
@@ -134,7 +75,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
         <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">{fc(store.getGrandTotal())}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">{fc(store.getTotalPaid())}</span></div>
         {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">{fc(store.getBalance())}</span></div>}
-        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs font-medium">Rx Order {'\u2192'} Workshop</span></div>}
+        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs font-medium">Rx Order {'→'} Workshop</span></div>}
       </div>
 
       {/* Incentive qualifying items — auto-tagged for kicker tracking */}
@@ -157,7 +98,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
             <div className="space-y-1.5">
               {qualifying.map(item => {
                 const brandLabel = item.brand || 'Unknown';
-                const subLabel = item.subbrand ? ` \u00B7 ${item.subbrand}` : '';
+                const subLabel = item.subbrand ? ` · ${item.subbrand}` : '';
                 return (
                   <div key={item.id} className="flex items-center justify-between gap-2 bg-white/60 rounded-lg px-2.5 py-1.5">
                     <div className="flex-1 min-w-0">
@@ -178,37 +119,23 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
         );
       })()}
 
-      {storeWarning && (
-        <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-300 rounded-lg text-left text-xs text-amber-800">
-          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
-          <span>{storeWarning}</span>
+      {invoiceError && (
+        <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-left text-xs text-red-700">
+          <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+          <span>{invoiceError}</span>
         </div>
       )}
 
       <div className="flex gap-3 justify-center flex-wrap">
         <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-100"><Printer className="w-4 h-4" /> Receipt</button>
         <button
-          onClick={() => setShowGSTInvoice(true)}
-          disabled={!canIssueTaxInvoice}
-          title={canIssueTaxInvoice ? 'Print GST tax invoice' : 'Store identity / GSTIN unavailable — cannot issue a tax invoice'}
+          onClick={() => void openTaxInvoicePdf()}
+          disabled={!store.order_id || invoiceBusy}
+          title={store.order_id ? 'Open the server-issued GST tax invoice (PDF)' : 'Order id missing — reprint this invoice from the Orders screen'}
           className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
-        ><FileText className="w-4 h-4" /> Tax Invoice</button>
+        ><FileText className="w-4 h-4" /> {invoiceBusy ? 'Opening…' : 'Tax Invoice'}</button>
         <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700"><Plus className="w-4 h-4" /> New Sale</button>
       </div>
-
-      {showGSTInvoice && storeForInvoice && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90dvh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between no-print">
-              <h3 className="font-semibold text-gray-900">GST Tax Invoice</h3>
-              <button onClick={() => setShowGSTInvoice(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="p-4">
-              <GSTInvoice order={orderForInvoice as any} store={storeForInvoice as any} entity={entityForInvoice} onPrint={() => setShowGSTInvoice(false)} />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

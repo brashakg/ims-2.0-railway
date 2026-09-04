@@ -248,8 +248,11 @@ def test_a_scan_records_the_counted_quantity_onto_the_session(admin_client, mong
     body = r.json()
     assert body["recorded"] is True
     assert body["items_counted"] == 1
-    assert body["system_count"] == 5
-    assert body["variance"] == -2
+    # BLIND COUNT (owner ruling 2026-08-25): a scan recording onto an open
+    # session must not echo the expected figure or a live variance.
+    assert "system_count" not in body
+    assert "variance" not in body
+    assert "variance_percent" not in body
 
     doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
     assert doc["items_counted"] == 1, "the session's line count must move"
@@ -959,7 +962,9 @@ def test_the_session_hands_the_screen_the_lines_it_expects_to_find(
     )
     assert len(lines) == 2
     for ln in lines:
-        assert ln["system_quantity"] == 2
+        # BLIND COUNT: an OPEN session's sheet lists WHAT to count, never
+        # how many the books expect (owner ruling 2026-08-25).
+        assert "system_quantity" not in ln
         assert ln["counted_quantity"] is None, "nothing counted yet"
         assert ln["product_name"], "a line with no name cannot be counted"
         assert ln["sku"]

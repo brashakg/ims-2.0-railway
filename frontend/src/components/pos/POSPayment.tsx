@@ -14,7 +14,9 @@ import {
   CheckCircle, X, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
-import { usePOSStore } from '../../stores/posStore';
+// Direct module import, not the barrel (TS2614 gotcha).
+import { customerApi } from '../../services/api/customers';
+import { usePOSStore, type CashTenderCapture, type PaymentEntry } from '../../stores/posStore';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
 import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
@@ -30,6 +32,141 @@ const EMI_ANNUAL_RATE_PERCENT_FALLBACK = 12;
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
   return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+// The store-credit tender. The SERVER does the actual spend: when the leg is
+// posted to POST /orders/{id}/payments with method=STORE_CREDIT, orders.
+// add_payment calls customers.redeem_store_credit_atomic against the ORDER's
+// customer_id -- atomically (guarded conditional decrement, the voucher
+// mechanism), never against a customer id from the request body. Adding the
+// leg here moves NO money; an abandoned or failed sale burns nothing.
+// posStore's PaymentEntry.method union is owned by another change and gains
+// 'STORE_CREDIT' as a one-word edit; this cast keeps the file compiling both
+// before and after it.
+const STORE_CREDIT_METHOD = 'STORE_CREDIT' as unknown as PaymentEntry['method'];
+
+// ============================================================================
+// Store-credit redemption (the missing SPEND side of refund credit notes)
+// ============================================================================
+// Refunds ISSUE store credit and the till DISPLAYS the balance, but until this
+// control there was no tender to SPEND it -- the liability sat on the books
+// forever. The balance shown is the server's scoped read (the ledger GET
+// 404s a customer outside the operator's store), and it is fail-CLOSED: an
+// unreadable balance is Rs 0 spendable, never a guess.
+function StoreCreditRedeemControl({
+  customerId,
+  balanceDue,
+  payments,
+  addPayment,
+  removePayment,
+}: {
+  customerId: string;
+  /** Remaining unpaid amount on the bill/order — the hard cap on the leg. */
+  balanceDue: number;
+  payments: PaymentEntry[];
+  addPayment: (p: Omit<PaymentEntry, 'timestamp'>) => void;
+  removePayment: (index: number) => void;
+}) {
+  const [available, setAvailable] = useState<number | null>(null);
+  const [amount, setAmount] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setAvailable(null);
+    customerApi
+      .getStoreCreditLedger(customerId)
+      .then((d) => { if (alive) setAvailable(Math.max(0, Number(d?.balance) || 0)); })
+      .catch(() => { if (alive) setAvailable(0); }); // fail-closed
+    return () => { alive = false; };
+  }, [customerId]);
+
+  const appliedIdx = (payments || []).findIndex((p) => (p.method as string) === 'STORE_CREDIT');
+  const applied = appliedIdx >= 0 ? payments[appliedIdx] : null;
+  // Never more than the credit, never more than what the bill still owes.
+  // The server re-enforces BOTH (atomic balance guard + balance_due cap);
+  // this clamp just keeps the operator honest before submit.
+  const cap = Math.round(Math.min(available ?? 0, Math.max(0, balanceDue)) * 100) / 100;
+
+  const handleApply = () => {
+    const a = Math.round((parseFloat(amount) || cap) * 100) / 100;
+    if (!a || a <= 0) return;
+    if (available === null) return; // balance not loaded yet
+    if (a > available + 0.001) {
+      setError(`Only ${fc(available)} of store credit is available.`);
+      return;
+    }
+    if (a > balanceDue + 0.001) {
+      setError(`Only ${fc(balanceDue)} is still due on this bill.`);
+      return;
+    }
+    addPayment({ method: STORE_CREDIT_METHOD, amount: a, reference: 'Store credit' });
+    setAmount('');
+    setError(null);
+  };
+
+  return (
+    <div className="border-2 border-emerald-200 rounded-lg p-4 bg-emerald-50 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="font-semibold text-gray-900">Store credit</p>
+        <p className="text-sm text-gray-600">
+          Available:{' '}
+          <span className="font-semibold text-emerald-700">
+            {available === null ? '…' : fc(available)}
+          </span>
+        </p>
+      </div>
+      {applied ? (
+        <div className="bg-white rounded-lg p-3 border border-emerald-100 flex items-center justify-between">
+          <div>
+            <p className="text-sm text-gray-600">Applied to this bill</p>
+            <p className="text-lg font-bold text-emerald-700">{fc(applied.amount)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => removePayment(appliedIdx)}
+            className="px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium text-red-600 border border-red-300 bg-white hover:bg-red-50"
+          >
+            Remove
+          </button>
+        </div>
+      ) : available !== null && available <= 0 ? (
+        <p className="text-sm text-gray-500">This customer has no store credit.</p>
+      ) : (
+        <div className="flex gap-2">
+          <input
+            type="number"
+            min="1"
+            step="0.01"
+            value={amount}
+            onChange={(e) => { setAmount(e.target.value); setError(null); }}
+            onFocus={(e) => e.target.select()}
+            placeholder={cap > 0 ? `Amount (max ${fc(cap)})` : 'Amount'}
+            className="flex-1 px-3 py-2 min-h-[44px] border border-gray-300 rounded-lg text-sm text-gray-900"
+          />
+          <button
+            type="button"
+            onClick={handleApply}
+            disabled={available === null || cap <= 0}
+            className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold ${
+              available === null || cap <= 0
+                ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                : 'bg-bv-red-600 text-white hover:bg-bv-red-700'
+            }`}
+          >
+            Apply
+          </button>
+        </div>
+      )}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {!applied && (
+        <p className="text-xs text-gray-500">
+          The credit is deducted from the customer's balance only when the sale
+          completes — cancelling this bill burns nothing.
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ============================================================================
@@ -48,8 +185,16 @@ function fc(amount: number | undefined | null): string {
 // against a 28,000 cash leg is 1,000 CHANGE. Telling a cashier to collect
 // another 11,590 that has already been paid by card and UPI is the worst
 // possible direction for this error to point.
-function CashChangeCalculator({ cashDue }: { cashDue: number }) {
-  const setCashTender = usePOSStore((s) => s.setCashTender);
+function CashChangeCalculator({
+  cashDue,
+  onCapture,
+}: {
+  cashDue: number;
+  /** Where the capture goes when this till is not billing the cart. */
+  onCapture?: (capture: CashTenderCapture | null) => void;
+}) {
+  const storeSetCashTender = usePOSStore((s) => s.setCashTender);
+  const setCashTender = onCapture ?? storeSetCashTender;
   const [cashTendered, setCashTendered] = useState('');
   const [noteRows, setNoteRows] = useState<DenomRow[]>(blankDenoms());
   const [showNotes, setShowNotes] = useState(false);
@@ -118,18 +263,75 @@ function CashChangeCalculator({ cashDue }: { cashDue: number }) {
 }
 
 // ============================================================================
+// PaymentTarget — the seam that lets a NON-CART surface reuse this till
+// ============================================================================
+// Pass nothing and every line below behaves EXACTLY as the two live tills
+// (/pos/new, /pos/counter) already render it: the cart is the target.
+//
+// The delivery counter is not a fresh sale — it collects the BALANCE of an
+// order that already exists on the server — so it hands in its own due figure
+// and its own payment list instead of the cart's. Everything that makes this a
+// real till (split tender, per-leg reference, EMI, the leg list, the cash
+// denomination capture) is then the SAME code on all three surfaces.
+//
+// What target mode deliberately does NOT render: loyalty / khata / voucher.
+// Those read `store.customer` and `store.getGrandTotal()` and park their
+// intent ON THE CART for submitOrder to consume — so on a non-cart surface
+// they would spend the wrong customer's points against the wrong amount and
+// leak into the next sale at the till. They stay cart-only until they grow a
+// target of their own. STORE CREDIT is the one tender with a target seam:
+// pass `customerId` (the ORDER's customer, from the server-loaded order — not
+// the cart) and the control renders against the target's due; omit it and
+// store credit stays hidden on that surface. The server redeems against the
+// ORDER's customer either way, so a wrong/forged id cannot spend someone
+// else's credit — the id here only scopes the balance DISPLAY.
+export interface PaymentTarget {
+  /** What is owed on the thing being paid — an existing order's balance_due. */
+  due: number;
+  payments: PaymentEntry[];
+  addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => void;
+  removePayment: (index: number) => void;
+  /** Where the note-by-note cash capture goes. Omitted -> not recorded. */
+  setCashTender?: (capture: CashTenderCapture | null) => void;
+  /** Store whose EMI rate applies. Defaults to the cart's store. */
+  storeId?: string;
+  /** The ORDER's customer. Present -> the store-credit tender renders on this
+      surface (the delivery counter passes it, owner 2026-09-04). Absent ->
+      store credit is hidden, so a cart-bound balance can never be spent
+      against another bill. The server debits the ORDER's customer whatever id
+      is sent; this only scopes the balance the till displays. */
+  customerId?: string;
+}
+
+// ============================================================================
 // StepPayment
 // ============================================================================
-export function StepPayment() {
+export function StepPayment({ target }: { target?: PaymentTarget } = {}) {
   const store = usePOSStore();
-  const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = Math.round((total - paid) * 100) / 100;
+  const payments = target ? target.payments : store.payments;
+  const addPayment = target ? target.addPayment : store.addPayment;
+  const removePayment = target ? target.removePayment : store.removePayment;
+  const total = target ? target.due : store.getGrandTotal();
+  // Same arithmetic as the store's getTotalPaid — a plain sum of the legs.
+  const paid = target
+    ? (target.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0)
+    : store.getTotalPaid();
+  const balance = Math.round((total - paid) * 100) / 100;
+  const storeId = target?.storeId || store.store_id;
   const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI'>('CASH');
-  const [payAmount, setPayAmount] = useState(''); const [payRef, setPayRef] = useState('');
+  // Target mode opens with the amount due already typed in: at the delivery
+  // counter "collect the balance" is the common case, and the method row —
+  // which is what prefills in cart mode — already sits on CASH.
+  const [payAmount, setPayAmount] = useState(
+    target ? String(Math.round(target.due * 100) / 100) : '',
+  );
+  const [payRef, setPayRef] = useState('');
 
   // EMI state
   const [showEMIForm, setShowEMIForm] = useState(false);
   const [showCredit, setShowCredit] = useState(false);
   const [showVoucher, setShowVoucher] = useState(false);
+  const [showStoreCredit, setShowStoreCredit] = useState(false);
   const [emiProvider, setEmiProvider] = useState('HDFC');
   const [emiTenure, setEmiTenure] = useState(12);
   const [emiDownPayment, setEmiDownPayment] = useState('');
@@ -145,16 +347,16 @@ export function StepPayment() {
   const [emiAnnualRatePct, setEmiAnnualRatePct] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
-    if (!store.store_id) return () => { alive = false; };
+    if (!storeId) return () => { alive = false; };
     storeApi
-      .getStore(store.store_id)
+      .getStore(storeId)
       .then((detail: { emi_annual_rate_percent?: number }) => {
         const v = Number(detail?.emi_annual_rate_percent);
         if (alive && Number.isFinite(v)) setEmiAnnualRatePct(v);
       })
       .catch(() => { /* keep fallback -- it mirrors the registry default */ });
     return () => { alive = false; };
-  }, [store.store_id]);
+  }, [storeId]);
   const annualRatePct = emiAnnualRatePct ?? EMI_ANNUAL_RATE_PERCENT_FALLBACK;
 
   const emiProviders = ['HDFC', 'ICICI', 'AXIS', 'ADITYA BIRLA', 'BAJAJ', 'INDIABULLS'];
@@ -178,7 +380,7 @@ export function StepPayment() {
     const monthlyRate = annualRatePct / 100 / 12;
     const monthlyEMI = calculateEMI(emiBalance, monthlyRate, emiTenure);
     const processingFee = (emiBalance * 0.02);
-    store.addPayment({
+    addPayment({
       method: 'EMI',
       amount: downPayment,
       reference: emiProvider,
@@ -203,17 +405,20 @@ export function StepPayment() {
 
   return (
     <div className="w-full max-w-2xl mx-auto space-y-4">
-      <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
+      {/* The owning surface prints the headline figure in target mode (the
+          delivery counter shows the ORDER's balance, with what is already
+          paid against the order total), so this card would only repeat it. */}
+      {!target && <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
         <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
         <p className="figure text-4xl text-gray-900">{'₹'}{Math.round(total).toLocaleString('en-IN')}</p>
         {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
           <span className="figure text-green-600">Paid: {'₹'}{Math.round(paid).toLocaleString('en-IN')}</span>
           <span className={balance > 0 ? 'figure text-red-600' : 'figure text-green-600'}>Balance: {'₹'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
-      </div>
+      </div>}
 
-      {/* Loyalty Points & Credit Billing Options */}
-      {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
+      {/* Loyalty Points & Credit Billing Options — CART ONLY, see PaymentTarget */}
+      {!target && store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
         <div className="space-y-2">
           <LoyaltyRedeemControl />
           {/* Store credit and vouchers apply to a minority of bills but were
@@ -222,7 +427,11 @@ export function StepPayment() {
               is one click away and a sale that does not never sees them. */}
           <div className="flex gap-2">
             {([
-              ['credit', 'Store credit', showCredit, setShowCredit] as const,
+              // 'Store credit' used to (mis)label the khata card — the till
+              // SHOWED a store-credit button while opening the pay-later
+              // option, with no way to actually spend the credit balance.
+              ['storecredit', 'Store credit', showStoreCredit, setShowStoreCredit] as const,
+              ['credit', 'Credit (khata)', showCredit, setShowCredit] as const,
               ['voucher', 'Voucher / gift card', showVoucher, setShowVoucher] as const,
             ]).map(([key, label, open, set]) => (
               <button
@@ -240,9 +449,33 @@ export function StepPayment() {
               </button>
             ))}
           </div>
+          {showStoreCredit && (
+            <StoreCreditRedeemControl
+              customerId={String(store.customer.id)}
+              balanceDue={Math.max(0, balance)}
+              payments={payments}
+              addPayment={addPayment}
+              removePayment={removePayment}
+            />
+          )}
           {showCredit && <CreditBillingOption />}
           {showVoucher && <VoucherRedemption />}
         </div>
+      )}
+
+      {/* Store credit on a TARGET surface (an existing order's balance) — only
+          when the owning surface hands in the ORDER's customer. See the
+          PaymentTarget doc: without customerId this renders nothing, so the
+          delivery counter cannot paper over a manager-gated shortfall with a
+          cart-bound balance. */}
+      {target && target.customerId && balance > 0 && (
+        <StoreCreditRedeemControl
+          customerId={target.customerId}
+          balanceDue={Math.max(0, balance)}
+          payments={payments}
+          addPayment={addPayment}
+          removePayment={removePayment}
+        />
       )}
 
       {balance > 0 && (
@@ -293,7 +526,7 @@ export function StepPayment() {
               if (!a || a <= 0) return;
               if (a > balance + 0.01) { setPayAmount(String(Math.ceil(balance * 100) / 100)); return; }
               if (payMethod !== 'CASH' && !payRef.trim()) return; // Require ref for non-cash
-              store.addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
+              addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
               setPayAmount(''); setPayRef('');
             }}
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
@@ -345,8 +578,8 @@ export function StepPayment() {
         </div>
       )}
 
-      {(store.payments || []).length > 0 && <div className="space-y-2">
-        {(store.payments || []).map((p, i) => (
+      {(payments || []).length > 0 && <div className="space-y-2">
+        {(payments || []).map((p, i) => (
           <div key={i} className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -358,7 +591,7 @@ export function StepPayment() {
                 <span className="font-semibold text-gray-900">
                   {'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}
                 </span>
-                <button onClick={() => store.removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button>
+                <button onClick={() => removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button>
               </div>
             </div>
             {/* POS-2: show EMI financed balance + monthly installment below the down-payment row */}
@@ -376,11 +609,12 @@ export function StepPayment() {
           to the CASH LEG: on a split bill the other tenders are already
           settled, so comparing the notes on the counter against the WHOLE bill
           reports a shortfall that does not exist. */}
-      {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
+      {(payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
         <CashChangeCalculator
+          onCapture={target?.setCashTender}
           cashDue={
             Math.round(
-              (store.payments || [])
+              (payments || [])
                 .filter((p) => p.method === 'CASH')
                 .reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100,
             ) / 100
@@ -388,7 +622,7 @@ export function StepPayment() {
         />
       )}
 
-      {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
+      {!target && balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
     </div>
   );
 }

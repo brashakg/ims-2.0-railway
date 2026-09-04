@@ -8,6 +8,12 @@
 // requireRoles, the same module gating in both places.
 
 import { moduleForPath } from '../../context/ModuleContext';
+import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
+import {
+  INVENTORY_MODULE_ROLES,
+  INVENTORY_MANAGE_ROLES,
+  POWER_GRID_ROLES,
+} from '../../pages/inventory/inventoryRoles';
 import type { IconName } from './Icon';
 import type { UserRole } from '../../types';
 
@@ -43,16 +49,26 @@ export const NAV_GROUPS: NavGroup[] = [
     // requireRoles on each item MIRRORS the route's ProtectedRoute allowedRoles
     // in App.tsx, so a role never sees a nav link that lands it on /unauthorized.
     items: [
-      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       // The redesigned till, alongside the classic one during changeover. The
       // three surfaces existed and worked but appeared in NO menu, so the only
       // way to reach them was to type the address - which is not a changeover
       // plan. requireRoles mirrors each route's own allowedRoles in
       // posRoutes.tsx exactly, per this file's rule.
-      { id: 'pos-new', label: 'Billing (new)', to: '/pos/new', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'pos-new', label: 'Billing', to: '/pos/new', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'pos-counter', label: 'General Counter', to: '/pos/counter', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'pos-delivery', label: 'Delivery Counter', to: '/pos/delivery', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      // Nine finished, tested, permission-checked screens appeared in NO
+      // menu - roughly 2,000 lines of CRM that staff could only reach by
+      // typing the address. They were in the layout test suite the whole
+      // time: rendered on every build, reachable by nobody. requireRoles
+      // mirror each route's own allowedRoles, and a test fails BY NAME if
+      // one role is added or dropped on either side.
+      { id: 'customer-360', label: 'Customer 360', to: '/customers/360', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'crm-follow-ups', label: 'Follow-ups', to: '/customers/follow-ups', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER'] },
+      { id: 'cl-refill', label: 'CL Refill Due', to: '/customers/cl-refill', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'OPTOMETRIST'] },
+      { id: 'reactivation', label: 'Win-back List', to: '/customers/reactivation', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
+      { id: 'family-wallet', label: 'Family Wallet', to: '/customers/family-wallet', icon: 'wallet', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER'] },
       // F39: NBA daily call list — ranked customers to phone today (in-app only).
       { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
       { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
@@ -73,9 +89,18 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Stock & supply',
     items: [
-      { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'] },
-      { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'OPTOMETRIST'] },
-      { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      // Inventory gates are IMPORTED from the module's own list, never
+      // re-typed. Three of these screens were finished work nobody could
+      // reach: Stock count, Replenishment and Opening stock had real routes,
+      // no menu entry and no in-app link, so the only way in was to type the
+      // address. The module's seventeen sections live behind the Inventory
+      // entry, which now lands on the stock ledger.
+      { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'replenishment', label: 'Replenishment', to: '/inventory/replenishment', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: POWER_GRID_ROLES },
+      { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Buy Desk — the one-screen catalog -> purchase landing. The page + route
       // shipped earlier but only ModuleContext's sidebar knew about it; this
@@ -116,7 +141,12 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Operations',
     items: [
-      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // Tasks: gate IMPORTED from the route's own list, never re-typed here.
+      // It used to be re-typed, and the copy was five roles narrower than the
+      // route - so sales staff, cashiers, optometrists and workshop staff, who
+      // do most of the tasks, had no Tasks link at all and could only reach
+      // their own queue by typing the address.
+      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks/mine', icon: 'check', requireRoles: TASK_MODULE_ROLES },
       // E4: PIN-gated approval inbox. requireRoles mirrors the /approvals
       // ProtectedRoute gate (the approver set; ACCOUNTANT is inbox read-only).
       { id: 'approvals', label: 'Approvals', to: '/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
@@ -126,7 +156,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // self check-in card. requireRoles mirrors the /attendance route gate.
       { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // Salary is ADMIN/SUPERADMIN only (owner ruling 2026-08-10, no accountant
+      // carve-out). The ROUTE was narrowed to match the endpoints behind it;
+      // this row has to follow or three roles keep seeing a menu item that
+      // now bounces them at the router.
+      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
     ],
@@ -185,6 +219,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // F40: VIP churn watchlist -- overdue high-LTV customers (personalised
       // buying rhythm). Read-only retention oversight; SUPERADMIN / ADMIN only.
       { id: 'vip-churn-watchlist', label: 'VIP Watch List', to: '/customers/vip-churn-watchlist', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'segmentation', label: 'Segmentation (RFM)', to: '/customers/segmentation', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'loyalty', label: 'Loyalty Program', to: '/customers/loyalty', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'referrals', label: 'Referral Tracker', to: '/customers/referrals', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'feedback', label: 'Feedback & NPS', to: '/customers/feedback', icon: 'chat', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       // CRM-14: WhatsApp Inbox -- inbound customer messages via Meta Business API.
       { id: 'whatsapp-inbox', label: 'WA Inbox', to: '/customers/whatsapp-inbox', icon: 'chat', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       // In-app Online Store module. IMS owns Shopify writes directly (the

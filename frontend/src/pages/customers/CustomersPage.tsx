@@ -39,6 +39,9 @@ import {
   copyWouldOverwrite,
 } from '../../utils/patientFromCustomer';
 import { AddCustomerModal } from '../../components/customers/AddCustomerModal';
+import { EditCustomerModal, CUSTOMER_EDIT_ROLES } from '../../components/customers/EditCustomerModal';
+import { FamilyMemberConflictModal } from '../../components/customers/FamilyMemberConflictModal';
+import { ownAccountConflictFrom, type OwnAccountConflict } from '../../services/api/customers';
 import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
@@ -123,12 +126,14 @@ export function CustomersPage() {
   // Modal state
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [editForm, setEditForm] = useState({ name: '', phone: '', email: '', address: '' });
 
   // Add patient modal state
   const [showAddPatientModal, setShowAddPatientModal] = useState(false);
   const [patientForm, setPatientForm] = useState({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
   const [isAddingPatient, setIsAddingPatient] = useState(false);
+  // Reverse split (owner ruling 2026-09-04): the add was refused because the
+  // number is already someone's OWN account. A decision popup, not a toast.
+  const [patientConflict, setPatientConflict] = useState<OwnAccountConflict | null>(null);
 
   // Reset page when filters change
   useEffect(() => {
@@ -303,7 +308,9 @@ export function CustomersPage() {
 
   // Check if user can add customers (role-based)
   const canAddCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']);
-  const canEditCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
+  // ONE list, shared with the POS tills (owner ruling 2026-09-03: CASHIER and
+  // SALES_STAFF get full customer edit, phone and GSTIN included).
+  const canEditCustomer = hasRole(CUSTOMER_EDIT_ROLES);
 
   // Handle creating new customer
   const handleCreateCustomer = async (formData: CustomerFormData) => {
@@ -325,6 +332,11 @@ export function CustomersPage() {
     } catch (e: any) {
       const detail = e?.response?.data?.detail || e?.message || 'Failed to create customer';
       toast.error(typeof detail === 'string' ? detail : 'Failed to create customer');
+      // Rethrow so the MODAL sees the refusal: on a 409 whose number belongs to
+      // a family member on another account it offers promote / open-existing.
+      // Swallowing here (as before) meant that popup could never show on this
+      // page.
+      throw e;
     }
   };
 
@@ -382,7 +394,14 @@ export function CustomersPage() {
       if (updated) {
         setSelectedCustomer(updated);
       }
-    } catch {
+    } catch (e) {
+      // The number is already this person's own account: one person, one
+      // record. Offer to open that account instead of a dead-end toast.
+      const own = ownAccountConflictFrom(e);
+      if (own) {
+        setPatientConflict(own);
+        return;
+      }
       toast.error('Failed to add customer');
     } finally {
       setIsAddingPatient(false);
@@ -709,15 +728,7 @@ export function CustomersPage() {
         {canEditCustomer && (
           <button
             onClick={() => {
-              if (selectedCustomer) {
-                setEditForm({
-                  name: selectedCustomer.name || '',
-                  phone: selectedCustomer.phone || '',
-                  email: selectedCustomer.email || '',
-                  address: resolveAddress(selectedCustomer).address,
-                });
-                setShowEditModal(true);
-              }
+              if (selectedCustomer) setShowEditModal(true);
             }}
             className="btn-outline flex items-center gap-2"
           >
@@ -736,7 +747,7 @@ export function CustomersPage() {
             <Bell className="w-4 h-4" />
           </button>
           <button
-            onClick={() => navigate('/pos')}
+            onClick={() => navigate('/pos/new')}
             className="p-2 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
             title="New Order"
             aria-label="New Order"
@@ -1172,103 +1183,40 @@ export function CustomersPage() {
         </div>
       )}
 
-      {/* Edit Customer Modal */}
+      {patientConflict && (
+        <FamilyMemberConflictModal
+          conflict={patientConflict}
+          busy={false}
+          onOpenExisting={() => {
+            const id = patientConflict.customer_id;
+            setPatientConflict(null);
+            setShowAddPatientModal(false);
+            navigate(`/customers/${id}`);
+          }}
+          onCancel={() => setPatientConflict(null)}
+        />
+      )}
+
+      {/* Edit Customer Modal — the ONE shared implementation (also opened
+          from the customer card on both POS tills). It prefills itself,
+          talks to PUT /customers/{id} and surfaces server refusals verbatim;
+          this page only merges the saved fields back into its lists. */}
       {showEditModal && selectedCustomer && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-gray-900">Edit Customer</h2>
-                <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="Close" title="Close">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-                  <input
-                    type="text"
-                    value={editForm.name}
-                    onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
-                    className="input-field"
-                    title="Customer full name"
-                    placeholder="Customer full name"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
-                  <input
-                    type="tel"
-                    value={editForm.phone}
-                    onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))}
-                    className="input-field"
-                    maxLength={10}
-                    title="Customer 10-digit mobile number"
-                    placeholder="10-digit mobile"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                  <input
-                    type="email"
-                    value={editForm.email}
-                    onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
-                    className="input-field"
-                    title="Customer email address"
-                    placeholder="name@example.com"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
-                  <textarea
-                    value={editForm.address}
-                    onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
-                    className="input-field"
-                    rows={2}
-                    title="Customer billing address"
-                    placeholder="Street, city, state, pincode"
-                  />
-                </div>
-                <button
-                  onClick={async () => {
-                    if (!editForm.name || !editForm.phone) {
-                      toast.error('Name and phone are required');
-                      return;
-                    }
-                    if (editForm.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim())) {
-                      toast.error('Please enter a valid email address');
-                      return;
-                    }
-                    try {
-                      // phone/address now persist — CustomerUpdate accepts them
-                      // (previously dropped, so edits silently reverted).
-                      const normalizedPhone = (editForm.phone || '').replace(/\D/g, '').slice(-10);
-                      await customerApi.updateCustomer(selectedCustomer.id, {
-                        name: editForm.name,
-                        phone: normalizedPhone,
-                        email: editForm.email || undefined,
-                        address: editForm.address || undefined,
-                      } as any);
-                      // Update local state
-                      const updated = { ...selectedCustomer, ...editForm, phone: normalizedPhone };
-                      setSelectedCustomer(updated as Customer);
-                      setCustomers(prev => prev.map(c => c.id === updated.id ? updated as Customer : c));
-                      setShowEditModal(false);
-                      toast.success('Customer updated successfully');
-                    } catch (e: any) {
-                      const detail = e?.response?.data?.detail || e?.message || 'Failed to update customer';
-                      toast.error(typeof detail === 'string' ? detail : 'Failed to update customer');
-                    }
-                  }}
-                  disabled={!editForm.name || !editForm.phone}
-                  className="btn-primary w-full"
-                >
-                  Save Changes
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <EditCustomerModal
+          customer={selectedCustomer as any}
+          onClose={() => setShowEditModal(false)}
+          onSaved={(fields) => {
+            // Merge only the fields that were actually sent — an omitted
+            // (undefined) field was not changed on the server.
+            const defined = Object.fromEntries(
+              Object.entries(fields).filter(([, v]) => v !== undefined),
+            );
+            const updated = { ...selectedCustomer, ...defined } as Customer;
+            setSelectedCustomer(updated);
+            setCustomers(prev => prev.map(c => c.id === updated.id ? updated : c));
+            toast.success('Customer updated successfully');
+          }}
+        />
       )}
 
       {/* Phase 6.13 — Add Prescription modal. Replaces the old "Eye test

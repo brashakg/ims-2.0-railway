@@ -29,8 +29,11 @@ export const SEED = {
   secondaryStore: 'BV-BOK-02',
 
   // 5% frame priced at exactly Rs 999 (the canonical inclusive-GST case).
+  // `sku` is the till's search handle: product search matches brand / model /
+  // sku / variant / barcode (ProductRepository.SEARCH_FIELDS), never the name.
   frame: {
     productId: 'e2e-frame-999',
+    sku: 'E2E-FR-999',
     name: 'E2E Test Frame 999',
     category: 'FRAMES',
     itemType: 'FRAME',
@@ -40,6 +43,7 @@ export const SEED = {
   // 18% sunglass for the multi-rate cart.
   sunglass: {
     productId: 'e2e-sunglass-1180',
+    sku: 'E2E-SG-1180',
     name: 'E2E Test Sunglass 1180',
     category: 'SUNGLASSES',
     itemType: 'SUNGLASS',

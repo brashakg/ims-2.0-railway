@@ -172,6 +172,11 @@ class ScanAdvanceBody(BaseModel):
 
     scanned_code: Optional[str] = None
     station: Optional[str] = None
+    # CREDIT_DELIVERY approval token for the PICKUP -> DELIVERED scan when the
+    # linked order still carries a balance and the scanning user is not a
+    # manager (owner ruling: credit delivery is PIN-gated). Same token the
+    # Orders deliver door accepts; ignored for any other advance.
+    approval_token: Optional[str] = None
 
 
 # Roles allowed to drive scan-to-advance. Mirrors workshop.py's fulfilment
@@ -228,8 +233,11 @@ async def scan_advance(
 
     reasons: NOT_FOUND, WRONG_JOB, TERMINAL_STAGE, WRONG_STATION, WRITE_FAILED,
              and the patient-safety gate holds SALES_CONFIRM_REQUIRED /
-             DC_REQUIRED (-> IN_PROGRESS) and QC_REQUIRED (-> READY), which mirror
-             the manager status-PATCH gates via workshop.evaluate_scan_transition_gate.
+             DC_REQUIRED (-> IN_PROGRESS), QC_REQUIRED (-> READY/DELIVERED) and
+             PAYMENT_DUE (-> DELIVERED: money still owed on the linked order and
+             the scanner is not a manager / carries no CREDIT_DELIVERY token),
+             which mirror the manager status-PATCH gates via
+             workshop.evaluate_scan_transition_gate.
     success: {ok: true, job_id, previous, stage, station, stamped_at}
     """
     repo = get_workshop_repository()
@@ -328,7 +336,18 @@ async def scan_advance(
     except Exception as e:  # noqa: BLE001 -- fail-soft; DC lookup falls back to lock-ON
         logger.warning("[LABELS] scan-advance db handle unavailable: %s", e)
         db = None
-    gate_block = evaluate_scan_transition_gate(db, job, target)
+    # current_user + approval_token feed the DELIVERED money leg of the shared
+    # gate (owner ruling: a balance still due needs a manager or a manager's
+    # CREDIT_DELIVERY PIN token) - the PICKUP scan is a physical handover, so
+    # it clears the SAME rule as the Orders deliver door. Block code:
+    # PAYMENT_DUE.
+    gate_block = evaluate_scan_transition_gate(
+        db,
+        job,
+        target,
+        current_user=current_user,
+        approval_token=body.approval_token,
+    )
     if gate_block is not None:
         return {
             "ok": False,

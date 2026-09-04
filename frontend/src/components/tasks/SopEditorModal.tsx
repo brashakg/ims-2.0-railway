@@ -15,6 +15,8 @@ import { useEffect, useState } from 'react';
 import { X, Plus, Trash2, AlertTriangle, Loader2, Check } from 'lucide-react';
 import { tasksApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { useStoreStaff } from '../../pages/tasks/tasksQueries';
 
 export interface SopStep {
   step_number: number;
@@ -64,6 +66,10 @@ interface SopEditorModalProps {
 
 export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorModalProps) {
   const toast = useToast();
+  const { user } = useAuth();
+  // The SAME staff hook the SOP list uses, not a second fetch-and-normalise.
+  const { data: staffRows, isLoading: staffLoading } = useStoreStaff(user?.activeStoreId);
+  const staff = staffRows ?? [];
   const [form, setForm] = useState<SopTemplateForm>(emptyForm());
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -116,6 +122,14 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
       assigned_roles: prev.assigned_roles.includes(role)
         ? prev.assigned_roles.filter(r => r !== role)
         : [...prev.assigned_roles, role],
+    }));
+
+  const togglePerson = (userId: string) =>
+    setForm(prev => ({
+      ...prev,
+      assigned_users: prev.assigned_users.includes(userId)
+        ? prev.assigned_users.filter(u => u !== userId)
+        : [...prev.assigned_users, userId],
     }));
 
   const handleSave = async () => {
@@ -198,7 +212,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
             <p className="text-xs text-gray-500 mt-0.5">
               {isEdit
                 ? `Editing ${form.template_id}`
-                : 'Create a reusable procedure. Assign to roles so the right staff see it.'}
+                : 'Create a reusable procedure, then put people on it — each one gets it as their own daily task.'}
             </p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded text-gray-500">
@@ -329,6 +343,44 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* WHO DOES THIS. Owner ruling 2026-09-03: an SOP is given to a
+              person by name, not to a job title — "assign it to individuals
+              like sameer, rupesh and so". People come first here because the
+              generator now issues one task PER NAMED PERSON; a role is kept
+              below as shorthand for "everyone holding it in this store", which
+              the generator resolves to those same people. */}
+          <div>
+            <label className="text-xs font-medium text-gray-700 block mb-2">Assign to people</label>
+            {staffLoading ? (
+              <p className="text-xs text-gray-500">Loading the store’s staff…</p>
+            ) : staff.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                No staff found for this store. Assign a role below and the SOP will
+                go to whoever holds it here.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {staff.map(person => {
+                  const active = form.assigned_users.includes(person.userId);
+                  return (
+                    <button
+                      key={person.userId}
+                      onClick={() => togglePerson(person.userId)}
+                      className={`min-h-[44px] px-3 py-2 rounded-full text-xs font-medium border transition-colors ${
+                        active
+                          ? 'bg-bv-red-600 text-white border-bv-red-600'
+                          : 'bg-white text-gray-700 border-gray-300 hover:border-bv-red-300'
+                      }`}
+                    >
+                      {active && <Check className="inline w-3 h-3 mr-1" />}
+                      {person.name}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

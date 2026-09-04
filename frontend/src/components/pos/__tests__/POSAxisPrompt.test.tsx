@@ -1,7 +1,7 @@
 // ============================================================================
-// PATIENT SAFETY: POS counter axis prompt (POSLayout)
+// PATIENT SAFETY: POS counter axis prompt (NewPrescriptionAtTill, on the till)
 // ============================================================================
-// POSLayout used to build the prescription payload with `rxData.axis_od || 180`
+// The till used to build the prescription payload with `rxData.axis_od || 180`
 // on each eye. An Rx with no axis was saved with an INVENTED axis of 180, which
 // travelled into the lens spec and was ground by the lab at a guessed
 // orientation; it also silently defeated the clinical toric-axis gate (PR #969)
@@ -11,16 +11,22 @@
 // supply the axis, but the line cannot proceed without one. These tests pin the
 // gate at the component boundary -- that nothing reaches the server until a
 // valid axis exists, that EACH EYE triggers it independently, that a recorded
-// axis of 0 sails straight through untouched, and that the Rx chooser no longer
-// prints a fabricated 180.
+// axis of 0 sails straight through untouched, and that attaching a stored Rx
+// never invents one.
+//
+// The vehicle is the REAL till, BillingSurface (the legacy wizard was retired
+// 2026-09-04): Rx card -> picker -> "Create New Prescription" opens
+// NewPrescriptionAtTill, which owns the gate; the picker's rows are the attach
+// door (PrescriptionSelectModal -> mapRx -> store).
 //
 // ---------------------------------------------------------------------------
 // Why PrescriptionForm is STUBBED here
 // ---------------------------------------------------------------------------
-// To isolate POSLayout's gate from the form's own validation, so a failure here
-// names POSLayout and nothing else. The stub feeds onSubmit an exact payload,
-// which lets each eye be varied independently -- awkward to do through the real
-// inputs, and that per-eye independence is what catches a half-applied fix.
+// To isolate the gate from the form's own validation, so a failure here names
+// NewPrescriptionAtTill and nothing else. The stub feeds onSubmit an exact
+// payload, which lets each eye be varied independently -- awkward to do
+// through the real inputs, and that per-eye independence is what catches a
+// half-applied fix.
 //
 // The real form IS driven, without any stub, in POSAxisPromptRealForm.test.tsx:
 // that file proves the door actually opens (PrescriptionForm.validateEyePair
@@ -48,11 +54,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
   Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true, writable: true });
 })();
 
+// Every case mounts the whole till plus a modal or two; under a full parallel
+// suite run that can outrun vitest's 5s default. Slow, not flaky.
+vi.setConfig({ testTimeout: 20000 });
+
 // Hoisted so the vi.mock factories below can reach them.
 const H = vi.hoisted(() => ({
   /** The flat form payload the stubbed PrescriptionForm will emit. */
   rx: {} as any,
-  /** Prescriptions the Rx chooser lists. */
+  /** Prescriptions the Rx picker lists (backend wire shape). */
   stored: [] as any[],
   createPrescription: vi.fn(),
 }));
@@ -68,7 +78,12 @@ const MOCK_USER = {
 };
 // MUTABLE on purpose: the role-truth banner can only be tested by rendering as
 // a role that CANNOT save. Reset in beforeEach so no test leaks its role.
-const MOCK_AUTH: { user: any } = { user: MOCK_USER };
+// hasRole reads the CURRENT mock user: CustomerCardWithLoyalty gates its edit
+// door on it, so the double must carry it.
+const MOCK_AUTH: { user: any; hasRole: (r: string | string[]) => boolean } = {
+  user: MOCK_USER,
+  hasRole: (r) => [r].flat().some((x) => MOCK_AUTH.user.roles.includes(x)),
+};
 /** Render the rest of this test as `roles`. Must be called BEFORE renderPOS. */
 function signInAs(roles: string[]) {
   MOCK_AUTH.user = { ...MOCK_USER, roles, activeRole: roles[0] };
@@ -96,7 +111,20 @@ vi.mock('../../../services/api', () => {
     orderApi: { createOrder: noop, addPayment: noop },
     prescriptionApi: {
       getPrescriptions: () => Promise.resolve({ prescriptions: H.stored }),
+      // The picker reads the account's family, grouped by patient. One
+      // member holding H.stored; none at all when H.stored is empty, which
+      // is the empty state whose only door is "Create New Prescription".
+      getFamilyRx: () => Promise.resolve({
+        members: H.stored.length
+          ? [{
+              patient_id: 'p1', name: 'Asha', relation: 'SELF',
+              prescription_count: H.stored.length, valid_count: H.stored.length,
+              prescriptions: H.stored,
+            }]
+          : [],
+      }),
       createPrescription: H.createPrescription,
+      uploadPrescriptionPhoto: noop,
     },
     workshopApi: { createJob: noop, updateFittingDetails: noop },
     adminStoreApi: { listStores: noop, getStoreUsers: () => Promise.resolve([]), getStaff: () => Promise.resolve([]) },
@@ -106,11 +134,42 @@ vi.mock('../../../services/api', () => {
   };
 });
 
+// Leaves of the surface that fetch through DIRECT module imports, not the
+// barrel: loyalty (customer card + loyalty tender), customers (search bar +
+// store-credit tender), handoffs (Rx picker). Inert -- none is under test.
+vi.mock('../../../services/api/loyalty', () => ({
+  loyaltyApi: {
+    getAccount: () => Promise.resolve({
+      account: { balance_points: 0, tier: 'BRONZE' }, settings: {}, expiring_soon_points: 0,
+    }),
+  },
+}));
+vi.mock('../../../services/api/customers', () => ({
+  customerApi: {
+    getCustomers: () => Promise.resolve([]),
+    getCustomer: () => Promise.resolve(null),
+    createCustomer: () => Promise.resolve({}),
+    getStoreCreditLedger: () => Promise.resolve({ balance: 0 }),
+  },
+  customersApi: {},
+}));
+vi.mock('../../../services/api/handoffs', () => ({
+  handoffsApi: { listClinicalInbox: () => Promise.resolve({ handoffs: [] }) },
+}));
+
 vi.mock('../../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
 
-// Stub the Rx form: one button that hands POSLayout the fixture payload.
+vi.mock('../../../services/api/settings', () => ({
+  policiesApi: { getOne: () => Promise.resolve({ value: 12 }) },
+}));
+
+// Off-assertion strips that fetch through modules the barrel mock does not cover.
+vi.mock('../../../pages/pos/next/PosWidgets', () => ({ PosWidgets: () => null }));
+vi.mock('../../../pages/pos/next/SaleCompleteScreen', () => ({ default: () => null }));
+
+// Stub the Rx form: one button that hands the gate the fixture payload.
 vi.mock('../PrescriptionForm', () => ({
   PrescriptionForm: ({ onSubmit }: any) => (
     <button onClick={() => onSubmit(H.rx)}>stub-submit-rx</button>
@@ -118,7 +177,8 @@ vi.mock('../PrescriptionForm', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { POSLayout, RX_SAVE_ROLES } from '../POSLayout';
+import { BillingSurface } from '../../../pages/pos/next/BillingSurface';
+import { RX_SAVE_ROLES } from '../NewPrescriptionAtTill';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 import { AXIS_SOURCE_COUNTER } from '../../../utils/rxAxisEntry';
@@ -127,7 +187,7 @@ function renderPOS() {
   return render(
     <MemoryRouter>
       <ToastProvider>
-        <POSLayout />
+        <BillingSurface />
       </ToastProvider>
     </MemoryRouter>,
   );
@@ -139,40 +199,30 @@ function seedRxSale() {
     s.resetTransaction();
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
-    s.setSaleType('prescription_order');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
   });
 }
 
-/**
- * The Customer step, where RxAvailableBadge offers one-click "Attach Latest Rx".
- * This door renders NO powers before attaching, so the honest "axis not
- * recorded" label never appears here -- the store value is the only evidence.
- */
-async function openCustomerStep() {
+/** Tap the Rx card: opens the picker (PrescriptionSelectModal). Its family
+ *  fetch settles before any of its doors render, so what follows is
+ *  deterministic. */
+async function openRxPicker() {
   seedRxSale();
   renderPOS();
-  act(() => usePOSStore.getState().setStep('customer'));
+  fireEvent.click(await screen.findByRole('button', { name: /Choose or add/ }));
 }
 
-/** Reveal the Rx surface on the merged Products & Rx step. */
-async function openRxSurface() {
-  seedRxSale();
-  renderPOS();
-  act(() => usePOSStore.getState().setStep('products'));
-  fireEvent.click(screen.getByRole('button', { name: 'Use last exam' }));
-}
-
-/** ...and open the New Prescription modal on top of it.
- *
- *  The await is load-bearing: the Rx step fetches prescriptions in an effect,
- *  and a promise settling after the form mounts re-renders it. Wait for the
- *  fetch to settle first so the suite is deterministic. */
+/** ...and open the New Prescription modal from it. */
 async function openNewRxForm() {
-  await openRxSurface();
-  await screen.findByText(/No prescriptions found/);
-  fireEvent.click(screen.getByText('New Prescription'));
+  await openRxPicker();
+  fireEvent.click(await screen.findByRole('button', { name: /Create New Prescription/ }));
   return screen.getByText('stub-submit-rx');
+}
+
+/** ...or attach the one stored Rx the picker lists (its row is a button). */
+async function attachStoredRx() {
+  await openRxPicker();
+  fireEvent.click((await screen.findByText('Valid')).closest('button')!);
 }
 
 const PROMPT_TITLE = /Axis needed before this prescription can be saved/;
@@ -297,9 +347,9 @@ describe('a toric Rx with no axis cannot proceed without a value', () => {
   // THE ASYMMETRY GUARD FOR THE STAMP ITSELF. The test above pins the RIGHT
   // eye's stamp; every other left-eye assertion in this file pins the NEGATIVE
   // case (axis_source undefined), which stays true when the left-eye stamp is
-  // deleted outright. Deleting POSLayout's left-eye `axis_source` therefore
-  // survived the whole suite. This is the positive probe: prompt for the LEFT
-  // eye, answer it, and require the marker to be THERE.
+  // deleted outright. Deleting the left-eye `axis_source` therefore survived
+  // the whole suite. This is the positive probe: prompt for the LEFT eye,
+  // answer it, and require the marker to be THERE.
   it('stamps counter provenance on the LEFT eye when that is the eye prompted', async () => {
     H.rx = { sph_od: -2, cyl_od: -1.25, axis_od: 10, sph_os: -1, cyl_os: -0.75, axis_os: undefined };
     const submit = await openNewRxForm();
@@ -382,10 +432,10 @@ describe('a non-toric Rx with no axis is unaffected', () => {
 // saveNewPrescription writes the Rx TWICE: once to the API, and once into
 // usePOSStore via setPrescription. Every assertion above inspects only the API
 // payload, so restoring the original `|| 180` on the STORE copy killed nothing
-// -- on either eye. That copy is the more dangerous of the two: it feeds
-// `rxInput` and the lens auto-suggest panel, so a regression there puts a
-// fabricated axis of 180 ON SCREEN IN FRONT OF THE COUNTER, where staff read it
-// as the customer's prescription. Both eyes, both cases.
+// -- on either eye. That copy is the more dangerous of the two: it is what the
+// till's Rx card prints, so a regression there puts a fabricated axis of 180
+// ON SCREEN IN FRONT OF THE COUNTER, where staff read it as the customer's
+// prescription. Both eyes, both cases.
 describe('the prescription kept in the POS store is never given a fabricated axis', () => {
   it('keeps a blank axis blank on BOTH eyes', async () => {
     H.rx = { sph_od: -2, cyl_od: 0, axis_od: undefined, sph_os: -1.5, cyl_os: 0, axis_os: undefined };
@@ -426,41 +476,14 @@ describe('the prescription kept in the POS store is never given a fabricated axi
   });
 });
 
-describe('the Rx chooser never prints an axis the prescription does not have', () => {
-  it('shows "axis not recorded" instead of a fabricated 180, on BOTH eyes', async () => {
-    H.stored = [{
-      prescription_id: 'RX-OLD-1',
-      test_date: new Date().toISOString(),
-      validity_months: 24,
-      right_eye: { sph: '-2.00', cyl: '-1.25', axis: null },
-      left_eye: { sph: '-1.00', cyl: '-0.75', axis: null },
-    }];
-    await openRxSurface();
-
-    const row = await screen.findByText(/axis not recorded/);
-    expect(row).toBeInTheDocument();
-    // Both eyes, and nothing claiming 180.
-    expect(row.textContent).toMatch(/R: .*×axis not recorded/);
-    expect(row.textContent).toMatch(/L: .*×axis not recorded/);
-    expect(row.textContent).not.toContain('180');
-  });
-
-  it('shows a recorded axis of 0 as 0, not as 180', async () => {
-    H.stored = [{
-      prescription_id: 'RX-OLD-2',
-      test_date: new Date().toISOString(),
-      validity_months: 24,
-      right_eye: { sph: '-2.00', cyl: '-1.25', axis: 0 },
-      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 5 },
-    }];
-    await openRxSurface();
-
-    const row = await screen.findByText(/R: .*×0/);
-    expect(row.textContent).toMatch(/R: .*×0/);
-    expect(row.textContent).toMatch(/L: .*×5/);
-    expect(row.textContent).not.toContain('180');
-  });
-
+// ============================================================================
+// Attaching a STORED Rx from the picker
+// ============================================================================
+// The highest-traffic axis door, and the worst place to fabricate: the
+// picker row is what staff read before tapping, so a `|| 180` on the attach
+// mapping puts a guessed meridian on the sale with nothing on screen to
+// contradict it. Backend wire shape (snake_case, `axis` as int | null).
+describe('the picker attaches a stored Rx with the axis it actually has', () => {
   // BOTH eyes exercise the MISSING-axis path here. An earlier version of this
   // fixture put the missing axis on the right eye and a recorded 0 on the left,
   // so the left eye's only assertion pinned the 0 case -- and a mutation that
@@ -475,9 +498,8 @@ describe('the Rx chooser never prints an axis the prescription does not have', (
       right_eye: { sph: '-2.00', cyl: '-1.25', axis: null },
       left_eye: { sph: '-1.00', cyl: '-0.75', axis: null },
     }];
-    await openRxSurface();
+    await attachStoredRx();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach' }));
     await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
     const rx: any = usePOSStore.getState().prescription;
     expect(rx.rightEye.axis).toBeNull();
@@ -492,53 +514,8 @@ describe('the Rx chooser never prints an axis the prescription does not have', (
       right_eye: { sph: '-2.00', cyl: '-1.25', axis: 0 },
       left_eye: { sph: '-1.00', cyl: '-0.75', axis: 0 },
     }];
-    await openRxSurface();
+    await attachStoredRx();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach' }));
-    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
-    const rx: any = usePOSStore.getState().prescription;
-    expect(rx.rightEye.axis).toBe(0);
-    expect(rx.leftEye.axis).toBe(0);
-  });
-});
-
-// ============================================================================
-// The one-click "Attach Latest Rx" door (RxAvailableBadge.handleSwitchToRx)
-// ============================================================================
-// This was the highest-traffic axis door and had NO test at all: restoring the
-// original `Number(... || ... || 180)` on BOTH eyes here killed nothing. It is
-// also the worst place to fabricate, because it renders no powers before
-// attaching -- staff see a button, not a prescription, so there is nothing on
-// screen to contradict a fabricated 180.
-describe('one-click "Attach Latest Rx" never fabricates an axis', () => {
-  it('attaches an axis-less stored Rx as axis-less on BOTH eyes', async () => {
-    H.stored = [{
-      prescription_id: 'RX-LATEST-1',
-      test_date: new Date().toISOString(),
-      validity_months: 24,
-      right_eye: { sph: '-2.00', cyl: '-1.25', axis: null },
-      left_eye: { sph: '-1.00', cyl: '-0.75', axis: null },
-    }];
-    await openCustomerStep();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
-    await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
-    const rx: any = usePOSStore.getState().prescription;
-    expect(rx.rightEye.axis).toBeNull();
-    expect(rx.leftEye.axis).toBeNull();
-  });
-
-  it('keeps a recorded axis of 0 on BOTH eyes', async () => {
-    H.stored = [{
-      prescription_id: 'RX-LATEST-2',
-      test_date: new Date().toISOString(),
-      validity_months: 24,
-      right_eye: { sph: '-2.00', cyl: '-1.25', axis: 0 },
-      left_eye: { sph: '-1.00', cyl: '-0.75', axis: 0 },
-    }];
-    await openCustomerStep();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
     await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
     const rx: any = usePOSStore.getState().prescription;
     expect(rx.rightEye.axis).toBe(0);
@@ -553,9 +530,8 @@ describe('one-click "Attach Latest Rx" never fabricates an axis', () => {
       right_eye: { sph: '-2.00', cyl: '-1.25', axis: 12 },
       left_eye: { sph: '-1.00', cyl: '-0.75', axis: 175 },
     }];
-    await openCustomerStep();
+    await attachStoredRx();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Latest Rx' }));
     await waitFor(() => expect(usePOSStore.getState().prescription).not.toBeNull());
     const rx: any = usePOSStore.getState().prescription;
     expect(rx.rightEye.axis).toBe(12);

@@ -271,7 +271,20 @@ def wired(monkeypatch):
                 "mrp": 5000.0,
                 "cost_price": 1000.0,
                 "is_active": True,
-            }
+            },
+            # The add-item door now shares create_order's billing resolver and
+            # REFUSES a product_id that does not resolve (it used to fail OPEN
+            # and append the line with every price/cap guard skipped). These
+            # tests exercise stock semantics for other product ids -- seed the
+            # masters they bill so the refusal doesn't mask what they test.
+            {"product_id": "P2", "product_name": "Other",
+             "category": "FRAME", "is_active": True},
+            {"product_id": "SVC-1", "product_name": "Fitting",
+             "category": "SERVICE", "is_active": True},
+            {"product_id": "L-REAL", "product_name": "Stock Lens",
+             "category": "LENS", "is_active": True},
+            {"product_id": "P-UNTRACKED", "product_name": "Cloth",
+             "category": "ACCESSORY", "is_active": True},
         ]
     )
     workshop = _FakeWorkshopRepo()

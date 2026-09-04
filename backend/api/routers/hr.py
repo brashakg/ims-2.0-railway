@@ -222,7 +222,7 @@ class LeaveCreate(BaseModel):
         if self.to_date < self.from_date:
             raise ValueError("to_date must be on or after from_date")
         # Allow leave applications for future dates (pre-booking), but not
-        # back-dated by more than 90 days (prevents historical data injection).
+        # back-dated by more than 1 year (prevents historical data injection).
         if self.from_date < date(today.year - 1, today.month, today.day):
             raise ValueError("from_date cannot be more than 1 year in the past")
         return self

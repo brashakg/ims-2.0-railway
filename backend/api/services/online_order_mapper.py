@@ -540,18 +540,23 @@ def _match_or_create_customer(
         except Exception:  # noqa: BLE001
             logger.debug("[ONLINE_MAP] email match failed", exc_info=True)
 
-    # Nothing to identify the buyer by -> don't mint an orphan keyless customer.
-    if not phone and not email:
+    # A phone-keyed buyer is resolved ONLY by the canonical service above -- the
+    # unique-mobile dedup and the family-member guard live there. If it could not
+    # resolve one, the order is recorded as a guest sale; this side door never
+    # mints a phone-keyed record the one door refused. Nothing to key on at all
+    # -> no orphan keyless customer either.
+    if phone or not email:
         return None
 
-    # --- create an email-only (or create-failed phone) minimal ONLINE customer --
+    # --- create an email-only minimal ONLINE (MARKETING) customer ---------------
+    # NO `mobile`/`phone` keys: the unique index on `mobile` is sparse, and a
+    # sparse index still indexes an explicit "" / null. Writing `mobile: ""` made
+    # the SECOND-ever email-only buyer's insert collide with the first.
     now = datetime.now(timezone.utc).isoformat()
     customer_id = str(uuid.uuid4())
     doc = {
         "customer_id": customer_id,
         "name": buyer.get("name") or "Online Customer",
-        "mobile": phone,
-        "phone": phone,
         "raw_phone": raw_phone,
         "email": email,
         "customer_type": "B2C",
@@ -575,34 +580,29 @@ def _match_or_create_customer(
     }
     # Owner model (2026-07-20): an email-only online contact is captured as a
     # MARKETING-tier customer (no loyalty / no WhatsApp / excluded from POS
-    # pickers) that auto-upgrades to FULL the moment a phone appears. A record
-    # that already carries a phone here (the ensure_customer-failed fallback) is a
-    # normal full customer, so it stays untagged (absent tier == FULL).
-    if email and not phone:
-        doc["contact_tier"] = CONTACT_TIER_MARKETING
-        # Store the casefolded email so a re-delivery in any surface case dedupes
-        # (find_by_email is exact-match).
-        doc["email"] = email_key
+    # pickers) that auto-upgrades to FULL the moment a phone appears. Store the
+    # casefolded email so a re-delivery in any surface case dedupes
+    # (find_by_email is exact-match).
+    doc["contact_tier"] = CONTACT_TIER_MARKETING
+    doc["email"] = email_key
     try:
         created = repo.create(doc)
-        if created and _norm(created.get("customer_id")):
-            return _norm(created.get("customer_id"))
-        return customer_id
     except Exception:  # noqa: BLE001
-        # A racing create (unique mobile/email) -> re-read by phone/email.
-        try:
-            if phone:
-                found = repo.find_by_mobile(phone)
-                if found and _norm(found.get("customer_id")):
-                    return _norm(found.get("customer_id"))
-            if email_key:
-                found = repo.find_by_email(email_key)
-                if found and _norm(found.get("customer_id")):
-                    return _norm(found.get("customer_id"))
-        except Exception:  # noqa: BLE001
-            pass
-        logger.debug("[ONLINE_MAP] customer create failed", exc_info=True)
-        return None
+        created = None
+    if created and _norm(created.get("customer_id")):
+        return _norm(created.get("customer_id"))
+    # The insert did not land (a unique-index rejection the repo swallowed, or a
+    # racing email-only create): re-find the row that actually EXISTS. Never
+    # hand back an id that was never persisted -- that links the order to a
+    # phantom customer.
+    try:
+        found = repo.find_by_email(email_key)
+        if found and _norm(found.get("customer_id")):
+            return _norm(found.get("customer_id"))
+    except Exception:  # noqa: BLE001
+        pass
+    logger.debug("[ONLINE_MAP] email-only customer create failed", exc_info=True)
+    return None
 
 
 def _match_existing_customer(db, buyer: Dict[str, str]) -> Optional[str]:

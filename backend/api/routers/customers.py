@@ -819,28 +819,18 @@ async def create_customer(
     repo = get_customer_repository()
 
     if repo is not None:
-        # Duplicate-number guard. find_by_mobile matches an existing active
-        # customer whose `mobile` OR `phone` equals the new number (the number
-        # is the customer's identity; TechCherry-imported docs carry it under
-        # `phone`, natively-created docs under `mobile`). Checking both fields
-        # here -- and writing BOTH `mobile` and `phone` below -- prevents the
-        # split-AR duplicate accounts the UNIQUE `mobile` index alone could miss.
-        existing = repo.find_by_mobile(customer.mobile)
-        if existing is not None:
-            raise HTTPException(
-                status_code=409, detail="Customer with this mobile already exists"
-            )
-
-        # Check if email already exists (when provided)
-        if customer.email:
-            existing_email = repo.find_by_email(customer.email)
-            if existing_email is not None:
-                raise HTTPException(
-                    status_code=409, detail="Customer with this email already exists"
-                )
+        # Dedup + create live in ONE place: services.customer_service.ensure_customer
+        # (strict=True below). It refuses a top-level duplicate mobile/email, a
+        # number that is already someone's FAMILY MEMBER (owner ruling 2026-09-04),
+        # and a race-lost insert -- each as a 409, never a 500. This router used
+        # to carry its own copy of that logic; a second copy is how every drift
+        # bug in this repo started.
 
         # Prepare customer data
         customer_data = {
+            # Minted here (the repo keeps a supplied id) so this dict IS the
+            # created record after the insert, whatever repo double is bound.
+            "customer_id": str(uuid.uuid4()),
             "customer_type": customer.customer_type,
             "name": customer.name,
             "mobile": customer.mobile,
@@ -914,7 +904,29 @@ async def create_customer(
         if stamp:
             customer_data["email_validation"] = stamp
 
-        created = repo.create(customer_data)
+        from ..services.customer_service import CustomerConflict, ensure_customer
+
+        try:
+            created_id, _ = ensure_customer(
+                None,
+                mobile=customer.mobile,
+                name=customer.name,
+                store_id=current_user.get("active_store_id"),
+                source="POS",
+                doc=customer_data,
+                strict=True,
+                repo=repo,
+            )
+        except CustomerConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.detail)
+        if not created_id:
+            # ensure_customer returns None only when the repository is
+            # unavailable; a conflict raised above and a race re-found the
+            # winner. Fail loud, and do it HERE so `created` below is never
+            # Optional -- the CI lint gate (pylint E1136) rightly refused the
+            # subscripts on a value it could prove might be None.
+            raise HTTPException(status_code=500, detail="Failed to create customer")
+        created = customer_data
         if created:
             _audit_customer(
                 "CUSTOMER_CREATED",
@@ -1062,11 +1074,7 @@ async def search_customer_by_phone(
     # find_by_mobile ORs phone+mobile; the partial search must too, since
     # TechCherry-imported docs carry the number under `phone`.
     exact = repo.find_by_mobile(digits)
-    # Same object-level store scope as GET /customers/mobile/{mobile}: an
-    # out-of-scope hit is treated as no hit (it falls through to the partial
-    # search, which is filtered too), so a store user cannot pull another
-    # store's customer -- name, phone, balances -- by typing a number.
-    if exact and customer_in_scope(exact, current_user):
+    if exact:
         _annotate_customer_matches([exact], digits)
         return {"customers": [exact], "customer": exact}
 
@@ -1076,12 +1084,7 @@ async def search_customer_by_phone(
     # sub-docs only ever store `mobile`; top-level `phone` is the TechCherry
     # import field.)
     matches = _annotate_customer_matches(
-        [
-            c
-            for c in repo.search(digits, ["mobile", "phone", "patients.mobile"])
-            if customer_in_scope(c, current_user)
-        ],
-        digits,
+        repo.search(digits, ["mobile", "phone", "patients.mobile"]), digits
     )
     return {
         "customers": matches,
@@ -1101,7 +1104,9 @@ async def get_customer_by_mobile(
         customer = repo.find_by_mobile(mobile)
         # Object-level store scope: an out-of-scope match falls through to 404
         # so a store user can't enumerate another store's customers by phone.
-        if customer and customer_in_scope(customer, current_user):
+        if customer and can_access_store_scoped(
+            _customer_store_id(customer), current_user
+        ):
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")
@@ -1244,6 +1249,17 @@ async def update_customer(
                     status_code=409,
                     detail="Another customer already uses this mobile number",
                 )
+            # ...nor with a FAMILY MEMBER on another account (same rule, same
+            # implementation as the create door -- an edit must not open the
+            # side door the create door closed). Own account excluded: the
+            # holder's Self row carries their own number.
+            from ..services.customer_service import family_member_conflict
+
+            family = family_member_conflict(
+                repo, new_mobile_for_dup, exclude_customer_id=customer_id
+            )
+            if family:
+                raise HTTPException(status_code=409, detail=family)
 
         # B2B-requires-GSTIN on the MERGED state: enforce presence using the
         # effective customer_type + gstin after this edit is applied, so you
@@ -1267,7 +1283,9 @@ async def update_customer(
                 )
                 for p in current_patients
             }
-            for p in incoming:
+            # (submitted index, row) for the rows that will actually be appended.
+            to_add = []
+            for idx, p in enumerate(incoming):
                 # `p` is a dict (PatientCreate dumped)
                 name = (p.get("name") or "").strip()
                 mobile = (p.get("mobile") or "").strip()
@@ -1277,24 +1295,40 @@ async def update_customer(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                current_patients.append(
-                    {
-                        "patient_id": str(uuid.uuid4()),
-                        "name": name,
-                        "mobile": mobile or None,
-                        "dob": (
-                            p["dob"].isoformat()
-                            if isinstance(p.get("dob"), date)
-                            else p.get("dob")
-                        ),
-                        "anniversary": (
-                            p["anniversary"].isoformat()
-                            if isinstance(p.get("anniversary"), date)
-                            else p.get("anniversary")
-                        ),
-                        "relation": p.get("relation") or "Other",
-                    }
+                to_add.append(
+                    (
+                        idx,
+                        {
+                            "patient_id": str(uuid.uuid4()),
+                            "name": name,
+                            "mobile": mobile or None,
+                            "dob": (
+                                p["dob"].isoformat()
+                                if isinstance(p.get("dob"), date)
+                                else p.get("dob")
+                            ),
+                            "anniversary": (
+                                p["anniversary"].isoformat()
+                                if isinstance(p.get("anniversary"), date)
+                                else p.get("anniversary")
+                            ),
+                            "relation": p.get("relation") or "Other",
+                        },
+                    )
                 )
+            # REVERSE family-member guard (owner ruling 2026-09-04): a row being
+            # ADDED must not carry a number that is already someone's own account
+            # -- same rule as the create door and POST .../patients; this account
+            # exempt (the holder's Self row). Only rows actually being appended
+            # are checked, so the clinical per-visit re-send of an existing
+            # member never trips on a legacy split. All-or-nothing: one bad row
+            # appends none.
+            from ..services.customer_service import own_account_conflict
+
+            own = own_account_conflict(repo, to_add, exclude_customer_id=customer_id)
+            if own:
+                raise HTTPException(status_code=409, detail=own)
+            current_patients.extend(row for _, row in to_add)
             update_data["patients"] = current_patients
 
         # Keep the structured billing_address and the flat top-level address
@@ -1384,6 +1418,15 @@ async def add_patient(
             "relation": patient.relation or "Family",
         }
 
+        # REVERSE family-member guard: the number must not already be someone's
+        # own account (same rule as the create door's patients[] and the PUT
+        # append; this account exempt -- the holder's Self row).
+        from ..services.customer_service import own_account_conflict
+
+        own = own_account_conflict(repo, [(0, patient_data)], exclude_customer_id=customer_id)
+        if own:
+            raise HTTPException(status_code=409, detail=own)
+
         if repo.add_patient(customer_id, patient_data):
             _audit_customer(
                 "CUSTOMER_PATIENT_ADDED",
@@ -1400,6 +1443,77 @@ async def add_patient(
         raise HTTPException(status_code=500, detail="Failed to add patient")
 
     return {"patient_id": str(uuid.uuid4())}
+
+
+@router.post("/{customer_id}/patients/{patient_id}/promote", status_code=201)
+async def promote_patient_to_own_account(
+    customer_id: str = Path(..., description="Account the family member is on"),
+    patient_id: str = Path(..., description="Family member (patients[].patient_id)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Promote a family member to their OWN top-level customer account.
+
+    The counterpart of the family-member guard on POST /customers: when a
+    create is refused because the number already belongs to a family member,
+    staff press Promote here instead of being stuck at the counter. Carries the
+    member's prescriptions + eye tests (re-pointed at the new account; the
+    patient_id stays the same) and removes the row from the parent account.
+    Orders are NOT moved (a bill stays with the account that paid). Same gate as
+    creating a customer; store-scoped like every customer write."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Customer database unavailable")
+    parent = _scoped_customer_or_404(customer_id, current_user, write=True)
+
+    from ..dependencies import get_db
+    from ..services.customer_service import CustomerConflict, promote_patient
+
+    try:
+        promoted = promote_patient(get_db(), repo, parent, patient_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CustomerConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTE_INCOMPLETE",
+                "customer_id": getattr(exc, "customer_id", None),
+                "message": str(exc),
+            },
+        )
+
+    new_id = promoted.get("customer_id")
+    _audit_customer(
+        "CUSTOMER_PROMOTED",
+        new_id,
+        current_user,
+        detail={
+            "from_customer_id": customer_id,
+            "patient_id": patient_id,
+            "carried": promoted.get("carried"),
+        },
+    )
+    _audit_customer(
+        "CUSTOMER_PATIENT_PROMOTED_OUT",
+        customer_id,
+        current_user,
+        detail={"patient_id": patient_id, "to_customer_id": new_id},
+    )
+    return {
+        "customer_id": new_id,
+        "name": promoted.get("name"),
+        "mobile": promoted.get("mobile"),
+        "phone": promoted.get("phone"),
+        "customer_type": promoted.get("customer_type"),
+        "patients": promoted.get("patients", []),
+        "primary_patient_id": promoted.get("primary_patient_id"),
+        "promoted_from": promoted.get("promoted_from"),
+        "carried": promoted.get("carried", {}),
+    }
 
 
 @router.get("/{customer_id}/orders")
@@ -1536,14 +1650,8 @@ async def get_customer_prescriptions(
     customer_id: str = Path(..., description="Customer ID"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get prescriptions for a customer.
-
-    STUB - it has never been connected to PrescriptionRepository and always
-    returns an empty list. Deliberately NOT store-scoped: it reads nothing, so
-    a scope check here would be dead code that reads like protection. Wire the
-    repository in and the check comes with it (see _scoped_customer_or_404).
-    The real prescription doors live in routers/prescriptions.py and are
-    already scoped."""
+    """Get prescriptions for a customer"""
+    # This will be implemented when we connect PrescriptionRepository
     return {"prescriptions": []}
 
 
@@ -1578,22 +1686,23 @@ async def add_store_credit(
     amount: float = Query(..., gt=0),
     current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
 ):
-    """Add store credit to customer"""
-    repo = get_customer_repository()
+    """Add store credit to customer.
 
-    if repo is not None:
-        # Store credit is MONEY. Reading this customer's ledger was already
-        # store-scoped while writing rupees into it was not, which is how a
-        # manager at one shop could credit another shop's customer.
-        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
-
-        if repo.add_store_credit(customer_id, amount):
-            return {
-                "message": f"Added store credit: {amount}",
-                "new_total": existing.get("store_credit", 0) + amount,
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to add store credit")
+    LEGACY DOOR, now routed through the ledger: it used to $inc the bare
+    customer.store_credit with NO ledger row, so credit added here was
+    invisible to the audit trail and silently broke the invariant
+    issued - redeemed == balance. Same roles, same response keys -- it is now
+    literally the /issue door (which also gives it the store-scope check)."""
+    out = _post_credit_entry(
+        customer_id,
+        "ISSUED",
+        StoreCreditEntryRequest(amount=amount, reason="manual add (legacy /add door)"),
+        current_user,
+    )
+    return {
+        "message": f"Added store credit: {amount}",
+        "new_total": out["balance"],
+    }
 
 
 # ============================================================================
@@ -1645,6 +1754,109 @@ def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> f
     return float((customer_doc or {}).get("store_credit", 0) or 0)
 
 
+def redeem_store_credit_atomic(
+    customer_id: str,
+    amount: float,
+    *,
+    reason: str = "",
+    ref: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> dict:
+    """THE one store-credit spend door: atomic guarded decrement + ledger row.
+
+    Extracted from _post_credit_entry's REDEEM branch so the POS tender
+    (orders.add_payment, method=STORE_CREDIT) and the /store-credit/redeem
+    route spend through the SAME implementation -- a second copy of this rule
+    is this repo's dominant defect class. Raises HTTPException (400/404/503);
+    on success returns {"entry": <ledger row>, "balance": <post-debit>}.
+
+    AUTHORITY NOTE: no store-scope authz HERE, deliberately -- each caller owns
+    it. The HTTP route scopes via _scoped_customer_or_404 (a customer id in a
+    URL is not authority to spend that customer's money); orders.add_payment
+    takes the customer from the ORDER document (never the request body) after
+    validate_store_access on the order's store -- which also allows the
+    legitimate cross-branch case where a customer redeems at a store that is
+    not their home store.
+
+    The bug this mechanism fixed: the old code recomputed balance_after from a
+    STALE pre-read snapshot, so two concurrent redeems both read the same
+    balance, both passed make_entry's Python check, and both wrote an absolute
+    store_credit value -- the second clobbering the first and effectively
+    spending the same credit twice. Now the spend is a single conditional
+    decrement filtered on store_credit >= amount (atomic in Mongo, via
+    repo.try_debit_store_credit -> money_guard.debit, the same engine behind
+    vouchers.redeem_voucher_atomic); the returned balance is read from the
+    POST-update document, never a snapshot.
+    """
+    from ..services import store_credit_ledger as scl
+
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    existing = repo.find_by_id(customer_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    try:
+        amt = round(float(amount), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="amount must be a number")
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="amount must be greater than 0")
+
+    debited = repo.try_debit_store_credit(customer_id, amt)
+    if debited is None:
+        # No document matched the store_credit >= amount guard -> insufficient
+        # (or a concurrent redeem won the race for the last rupees).
+        available = _current_credit_balance(customer_id, existing)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"insufficient store credit: requested {amt:.2f}, "
+                f"available {available:.2f}"
+            ),
+        )
+    if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
+        # DOUBLE-SPEND GUARD (security): the collection cannot perform a
+        # conditional (atomic) decrement. Taking the old snapshot
+        # read-modify-write fallback here let two concurrent redeems both
+        # pass and spend the same credit twice. A REDEEM (debit) is a
+        # double-spend risk, so REJECT with 503 rather than fall back to the
+        # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
+        # in _post_credit_entry -- a credit cannot overspend.)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Store-credit redemption is temporarily unavailable: the "
+                "atomic debit path is not available, and a non-atomic "
+                "decrement could double-spend the balance. Please retry."
+            ),
+        )
+    # Authoritative post-update balance from the decremented document.
+    new_balance = float((debited or {}).get("store_credit", 0) or 0)
+    # Build the ledger row whose balance_after matches the atomic result.
+    entry = scl.make_entry(
+        customer_id=customer_id,
+        entry_type=scl.REDEEMED,
+        amount=amt,
+        current_balance=new_balance + amt,  # pre-debit balance
+        reason=reason or "",
+        ref=ref,
+        store_id=store_id,
+        user_id=user_id,
+    )
+    entry["balance_after"] = round(new_balance, 2)
+    coll = _ledger_coll()
+    if coll is not None:
+        try:
+            coll.insert_one(dict(entry))
+        except Exception:  # noqa: BLE001
+            pass
+    entry.pop("_id", None)
+    return {"entry": entry, "balance": entry["balance_after"]}
+
+
 def _post_credit_entry(
     customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
 ):
@@ -1653,84 +1865,29 @@ def _post_credit_entry(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    # Covers BOTH /store-credit/issue and /store-credit/redeem, which delegate
-    # here - one fix, two doors, and no chance of the two drifting apart.
+    # Object-level store scope, WRITE flavour (cross-store IDOR): the ledger
+    # GET already scoped, but issue/redeem -- the doors that MOVE the money --
+    # trusted the raw id. Out-of-scope -> 403 (write) / 404 (read), same rule.
     existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
     et = (entry_type or "").upper()
 
     # ------------------------------------------------------------------
-    # REDEEM (debit) -> ATOMIC guarded decrement, no double-spend.
+    # REDEEM (debit) -> the ONE atomic spend door above.
     # ------------------------------------------------------------------
-    # The bug being fixed: the old code recomputed balance_after from a STALE
-    # pre-read snapshot, so two concurrent redeems both read the same balance,
-    # both passed make_entry's Python check, and both wrote an absolute
-    # store_credit value -- the second clobbering the first and effectively
-    # spending the same credit twice. Now the spend is a single conditional
-    # decrement filtered on store_credit >= amount (atomic in Mongo); the
-    # returned balance is read from the POST-update document, never a snapshot.
     if et == scl.REDEEMED:
-        try:
-            amt = round(float(body.amount), 2)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="amount must be a number")
-        if amt <= 0:
-            raise HTTPException(status_code=400, detail="amount must be greater than 0")
-
-        debited = repo.try_debit_store_credit(customer_id, amt)
-        if debited is None:
-            # No document matched the store_credit >= amount guard -> insufficient
-            # (or a concurrent redeem won the race for the last rupees).
-            available = _current_credit_balance(customer_id, existing)
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"insufficient store credit: requested {amt:.2f}, "
-                    f"available {available:.2f}"
-                ),
-            )
-        if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
-            # DOUBLE-SPEND GUARD (security): the collection cannot perform a
-            # conditional (atomic) decrement. Taking the old snapshot
-            # read-modify-write fallback here let two concurrent redeems both
-            # pass and spend the same credit twice. A REDEEM (debit) is a
-            # double-spend risk, so REJECT with 503 rather than fall back to the
-            # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
-            # below -- a credit cannot overspend.)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Store-credit redemption is temporarily unavailable: the "
-                    "atomic debit path is not available, and a non-atomic "
-                    "decrement could double-spend the balance. Please retry."
-                ),
-            )
-        # Authoritative post-update balance from the decremented document.
-        new_balance = float((debited or {}).get("store_credit", 0) or 0)
-        # Build the ledger row whose balance_after matches the atomic result.
-        entry = scl.make_entry(
-            customer_id=customer_id,
-            entry_type=scl.REDEEMED,
-            amount=amt,
-            current_balance=new_balance + amt,  # pre-debit balance
+        return redeem_store_credit_atomic(
+            customer_id,
+            body.amount,
             reason=body.reason or "",
             ref=body.ref,
             store_id=current_user.get("active_store_id"),
             user_id=current_user.get("user_id"),
         )
-        entry["balance_after"] = round(new_balance, 2)
-        coll = _ledger_coll()
-        if coll is not None:
-            try:
-                coll.insert_one(dict(entry))
-            except Exception:  # noqa: BLE001
-                pass
-        entry.pop("_id", None)
-        return {"entry": entry, "balance": entry["balance_after"]}
 
     # ------------------------------------------------------------------
-    # ISSUE / ADJUST (credit), or no-atomic REDEEM fallback.
-    # A credit cannot overspend, so the snapshot path is safe for it.
+    # ISSUE / ADJUST (credit). A credit cannot overspend, so the snapshot
+    # path is safe for it; a REDEEM never reaches here (returned above).
     # ------------------------------------------------------------------
     balance = _current_credit_balance(customer_id, existing)
     try:

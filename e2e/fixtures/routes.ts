@@ -50,10 +50,12 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/catalog/quick-share' },
   { path: '/catalog/buy-desk' },
   { path: '/catalog/pricing' },
-  { path: '/clinical' },
-  { path: '/clinical/test' },
+  { path: '/clinical/queue' },
+  { path: '/clinical/completed' },
+  { path: '/clinical/prescriptions' },
+  { path: '/clinical/abuse-alerts' },
+  { path: '/clinical/conversion' },
   { path: '/clinical/history' },
-  { path: '/prescriptions' },
   { path: '/clinical/family-rx' },
   { path: '/clinical/contact-lens' },
   { path: '/customers' },
@@ -86,7 +88,11 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/finance/budgeting' },
   { path: '/finance/b2b-tally-export' },
   { path: '/finance/b2b-tally-worklist' },
-  { path: '/hr' },
+  { path: '/hr/today' },
+  { path: '/hr/leave' },
+  { path: '/hr/week-off-swaps' },
+  { path: '/hr/shifts' },
+  { path: '/hr/leaderboard' },
   { path: '/hr/payroll' },
   { path: '/hr/salary-setup' },
   { path: '/hr/payroll-run' },
@@ -95,7 +101,23 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/incentive/payout' },
   { path: '/incentive/payouts' },
   { path: '/incentive/settings' },
-  { path: '/inventory' },
+  { path: '/inventory/stock' },
+  { path: '/inventory/display-layout' },
+  { path: '/inventory/low-stock' },
+  { path: '/inventory/non-moving' },
+  { path: '/inventory/aging' },
+  { path: '/inventory/alerts' },
+  { path: '/inventory/reorders' },
+  { path: '/inventory/transfers' },
+  { path: '/inventory/movements' },
+  { path: '/inventory/rebalance' },
+  { path: '/inventory/quarantine' },
+  { path: '/inventory/serial-numbers' },
+  { path: '/inventory/contact-lens' },
+  { path: '/inventory/sell-through' },
+  { path: '/inventory/overstock' },
+  { path: '/inventory/brand-insights' },
+  { path: '/inventory/collection-insights' },
   { path: '/inventory/replenishment' },
   { path: '/inventory/audit' },
   { path: '/inventory/opening-stock' },
@@ -123,9 +145,6 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/walkouts/dashboard' },
   { path: '/returns' },
   { path: '/pos/counter' },
-  // The classic POS renders its own chrome, not the generic page header,
-  // so the default ready selector never matches (measured: >15s timeout).
-  { path: '/pos', ready: '.steps-rail, .pos-body, [class*="pos-"]' },
   { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/footfall' },
@@ -179,8 +198,11 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/go-live' },
   { path: '/jarvis' },
   { path: '/admin/activity-log' },
-  { path: '/tasks' },
+  { path: '/tasks/mine' },
+  { path: '/tasks/team' },
   { path: '/tasks/checklists' },
+  { path: '/tasks/sops' },
+  { path: '/tasks/performance' },
   { path: '/my-work' },
   { path: '/attendance' },
   { path: '/workshop' },];
@@ -193,6 +215,67 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
  * is excluded for RBAC — every role gate in the app admits this user.
  */
 export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
+  {
+    path: '/hr',
+    reason: 'redirect-only: index maps the legacy ?tab= onto /hr/<section>, all probed above.',
+  },
+  {
+    path: '/hr/monthly-summary',
+    reason: 'redirect-only: retired tab, Navigate to /attendance which shows a superset.',
+  },
+  {
+    path: '/hr/self-service',
+    reason: 'redirect-only: retired duplicate of /my-work, Navigate there.',
+  },
+  {
+    path: '/hr/attendance',
+    reason:
+      'redirect-only: a JARVIS card linked this address, which never existed and 404d. ' +
+      'Navigate to /hr/today.',
+  },
+  {
+    path: '/clinical',
+    reason: 'redirect-only: the index Navigates to /clinical/queue. All five sections are probed above.',
+  },
+  {
+    path: '/clinical/test',
+    reason:
+      'redirect-only: NewEyeTestPage was a screen whose whole job was a 2s '
+      + 'auto-redirect to the queue. Deleted; the address now forwards directly.',
+  },
+  {
+    path: '/prescriptions',
+    reason:
+      'redirect-only: the read-only Rx library was the weaker of two rival '
+      + 'prescription doors and was deleted; this address forwards to '
+      + '/clinical/prescriptions, which can create and edit.',
+  },
+  {
+    path: '/inventory',
+    reason:
+      'redirect-only: the index maps the legacy ?tab= values onto '
+      + '/inventory/<section> and lands on /inventory/stock. All seventeen '
+      + 'sections are probed above.',
+  },
+  {
+    path: '/pos',
+    reason:
+      'redirect-only: the legacy wizard till (POSLayout) was retired on the owner '
+      + 'instruction "retire old pos" (2026-09-03/04). Navigate to /pos/new, probed '
+      + 'above, with the query string preserved for the walkouts deep-link.',
+  },
+  {
+    path: '/tasks',
+    reason:
+      'redirect-only: the index Navigates to /tasks/mine, the one section every ' +
+      'role can open. All five sections are probed above.',
+  },
+  {
+    path: '/tasks/dashboard',
+    reason:
+      'redirect-only: the HR module launcher links this address, which never ' +
+      'existed as a route and 404d. Navigate to /tasks/mine.',
+  },
   {
     path: '/reports',
     reason:
@@ -208,6 +291,7 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/settings', reason: 'redirect-only: index route Navigates to /settings/profile, which is covered' },
   { path: '/settings/entities', reason: 'redirect-only: Navigate to /organization, which is covered' },
   { path: '/customers/:customerId/360', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
+  { path: '/customers/:customerId', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/customers/:customerId/loyalty', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
@@ -383,6 +467,26 @@ export function deriveRoutePaths(): string[] {
         if (!selfClosing) stack.push(full);
         i = j + 1;
         continue;
+      }
+      // A ROUTE FACTORY: `{section('stock', InventoryStockPage)}` written as a
+      // child of a <Route>. This is not a <Route> tag, so the walker above
+      // skipped it entirely -- and the inventory split put SEVENTEEN screens
+      // behind one, every one of them invisible to this guard and therefore
+      // never probed at any width. The guard's whole promise is NO SILENT
+      // SKIPS, so a factory that names its segment as a literal is expanded
+      // here rather than being quietly dropped. A factory driven by an array
+      // is still a `.map(` and is caught by findRouteGenerators instead.
+      if (src[i] === '{' && stack.length) {
+        const factory =
+          /^\{\s*[A-Za-z_$][\w$]*\(\s*['"]([A-Za-z0-9:_-]+(?:\/[A-Za-z0-9:_-]+)*)['"]\s*,/.exec(
+            src.slice(i, i + 160),
+          );
+        if (factory) {
+          const parent = stack[stack.length - 1];
+          out.push('/' + [parent, factory[1]].filter(Boolean).join('/'));
+          i += factory[0].length;
+          continue;
+        }
       }
       i++;
     }

@@ -262,13 +262,16 @@ class TestOnlineMapperRawPhone:
 
         monkeypatch.setattr(deps, "get_customer_repository", lambda: _Repo())
 
-        # Junk phone + a usable email -> still creates (keyed by email), but the
-        # normalized mobile is '' (no fake un-dedupable number) and raw is kept.
+        # Junk phone + a usable email -> still creates (keyed by email), with NO
+        # mobile/phone key at all (the sparse unique index on `mobile` indexes an
+        # explicit "" -- writing it made the second email-only buyer collide)
+        # and the raw input kept for traceability.
         buyer = {"name": "Bad Phone", "phone": "not-a-number", "email": "e@x.com"}
         online_order_mapper._match_or_create_customer(
             db=object(), buyer=buyer, store_id="BV-ONLINE-01"
         )
-        assert created["mobile"] == ""
+        assert "mobile" not in created
+        assert "phone" not in created
         assert created["raw_phone"] == "not-a-number"
 
 

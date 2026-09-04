@@ -145,6 +145,35 @@ export const hrApi = {
     return response.data as MyLeaves;
   },
 
+  /**
+   * Apply for leave as the logged-in employee. POST /hr/me/leaves delegates to
+   * the ONE backend apply door (hr.apply_leave) outside the HR finance gate, so
+   * floor staff can file too. Server-pinned to the caller (no employee_id).
+   * Body is snake_case: the axios aliaser only camelizes RESPONSES.
+   * Server rejects: bad leave_type (422), to<from (422), >1yr backdate (422),
+   * overlap with an APPROVED/PENDING leave (409, message in error.message).
+   */
+  applyMyLeave: async (payload: {
+    leave_type: string;
+    from_date: string; // 'YYYY-MM-DD'
+    to_date: string; // 'YYYY-MM-DD'
+    reason: string;
+  }) => {
+    const response = await api.post('/hr/me/leaves', payload);
+    return response.data as {
+      leaveId: string;
+      message: string;
+      status: string;
+      fast_path?: boolean;
+    };
+  },
+
+  /** Cancel own still-PENDING leave request (404 on a colleague's id; 400 once decided). */
+  cancelMyLeave: async (leaveId: string) => {
+    const response = await api.post(`/hr/me/leaves/${leaveId}/cancel`);
+    return response.data as { message: string; leave_id: string; status: string };
+  },
+
   /** Own most-recent payslip (same shape as GET /payroll/payslip/{id}). */
   getMyPayslip: async () => {
     const response = await api.get('/hr/me/payslip');

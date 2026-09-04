@@ -106,7 +106,9 @@ export interface CartLineItem {
 }
 
 export interface PaymentEntry {
-  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER' | 'GIFT_VOUCHER' | 'LOYALTY';
+  // STORE_CREDIT is a real tender, not a discount: the server redeems it
+  // atomically against the ORDER's customer when the payment is recorded.
+  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER' | 'GIFT_VOUCHER' | 'LOYALTY' | 'STORE_CREDIT';
   amount: number;
   reference?: string;            // UPI ref, card last 4, voucher code, etc.
   timestamp: string;
@@ -139,8 +141,6 @@ export interface POSState {
   store_id: string;
   salesperson_id: string;
   salesperson_name: string;
-  // Incentive — Visufit measurement ID captured at Review for optical carts
-  visufit_id: string;
 
   // Customer & patient
   customer: Customer | null;
@@ -203,7 +203,6 @@ export interface POSState {
   // Context
   setStoreId: (id: string) => void;
   setSalesperson: (id: string, name: string) => void;
-  setVisufitId: (id: string) => void;
 
   // Customer
   setCustomer: (customer: Customer | null) => void;
@@ -332,7 +331,6 @@ const initialState = {
   store_id: '',
   salesperson_id: '',
   salesperson_name: '',
-  visufit_id: '',
   customer: null,
   patient: null,
   prescription: null,
@@ -374,7 +372,6 @@ export const usePOSStore = create<POSState>()(
       // --- Context ---
       setStoreId: (id) => set({ store_id: id }),
       setSalesperson: (id, name) => set({ salesperson_id: id, salesperson_name: name }),
-      setVisufitId: (id) => set({ visufit_id: id }),
 
       // --- Customer ---
       setCustomer: (customer) => set({ customer, patient: null, prescription: null }),

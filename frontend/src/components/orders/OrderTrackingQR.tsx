@@ -31,7 +31,7 @@ function resolveBaseUrl(override?: string): string {
   if (typeof window !== 'undefined' && window.location?.origin) {
     return window.location.origin;
   }
-  return 'https://ims-2-0-railway.vercel.app';
+  return 'https://app.uniparallel.com';
 }
 
 export function OrderTrackingQR({

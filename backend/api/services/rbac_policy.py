@@ -746,6 +746,45 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/auth/switch-store/{store_id}",
         "allowed": "AUTHENTICATED",
     },
+    # --- /api/v1/auth/devices (approved-device login gate; routers/devices.py,
+    # DARK behind DEVICE_GATE_MODE=off) ---
+    # The three POST pre-auth routes are PUBLIC in the middleware sense but the
+    # two enrolment ones demand a purpose-scoped ENROLMENT TICKET that only a
+    # correct-password login mints (and which get_current_user refuses as a
+    # session token); assertion-options serves only a TTL'd random challenge.
+    # Approval/revocation/listing are SUPERADMIN-ONLY by owner ruling
+    # 2026-09-02 -- an ADMIN is exempt from the gate but must NOT approve
+    # devices. Do not widen these rows (see store_login_device_gate memory).
+    {
+        "method": "POST",
+        "path": "/api/v1/auth/devices/enroll/options",
+        "allowed": "PUBLIC",
+    },
+    {"method": "POST", "path": "/api/v1/auth/devices/enroll", "allowed": "PUBLIC"},
+    # Pre-arming path: any signed-in user may mint a ticket to register the
+    # device they are CURRENTLY on (so devices get approved before enforce
+    # mode is armed). Approval still gates actual sign-in rights.
+    {
+        "method": "POST",
+        "path": "/api/v1/auth/devices/enroll-ticket",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/auth/devices/assertion-options",
+        "allowed": "PUBLIC",
+    },
+    {"method": "GET", "path": "/api/v1/auth/devices", "allowed": ["SUPERADMIN"]},
+    {
+        "method": "POST",
+        "path": "/api/v1/auth/devices/{device_id}/approve",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/auth/devices/{device_id}/revoke",
+        "allowed": ["SUPERADMIN"],
+    },
     # --- /api/v1/catalog ---
     {"method": "GET", "path": "/api/v1/catalog", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/catalog/", "allowed": "PUBLIC"},
@@ -1401,6 +1440,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/customers/{customer_id}/patients",
         "allowed": "AUTHENTICATED",
     },
+    # Promote a family member to their own account (family-member guard
+    # counterpart). Whoever can create a customer can promote one; the handler
+    # is store-scoped via _scoped_customer_or_404(write=True). AUTHENTICATED is
+    # the module's existing create gate, so this row broadens no grant-union.
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/{customer_id}/patients/{patient_id}/promote",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/customers/{customer_id}/prescriptions",
@@ -1983,10 +2031,18 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {
-        # Session list reveals expected/variance -> manager/finance read roles.
+        # Session list: manager/finance see the full figures. Cashier roles may
+        # list too -- without it they cannot FIND the shared drawer they must
+        # count (owner ruling 2026-09-03: cashiers count and submit; the
+        # manager reviews the variance AFTER submission). Their rows are
+        # blind-redacted at the data layer (redact_for_cashier -- no expected
+        # figure on the wire pre-lock).
         "method": "GET",
         "path": "/api/v1/till/sessions",
         "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
             "STORE_MANAGER",
             "AREA_MANAGER",
             "ADMIN",
@@ -2956,6 +3012,23 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/hr/me/leaves",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
+    # Apply-for-leave door for EVERY role (floor staff included). Delegates to
+    # hr.apply_leave, which pins the employee to the requesting user (the body
+    # has no employee_id field), so this is self-write-only despite AUTHENTICATED.
+    {
+        "method": "POST",
+        "path": "/api/v1/hr/me/leaves",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
+    # Cancel own still-PENDING leave. Handler 404s unless the leave belongs to
+    # the caller (colleague's id == missing id), and 400s once decided.
+    {
+        "method": "POST",
+        "path": "/api/v1/hr/me/leaves/{leave_id}/cancel",
         "allowed": AUTHENTICATED,
         "self_enforced": True,
     },
@@ -6264,11 +6337,6 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/sop-templates/",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/tasks/sop-templates/seed-defaults",
         "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
     },
     {

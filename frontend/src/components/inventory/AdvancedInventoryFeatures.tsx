@@ -1,10 +1,10 @@
 // ============================================================================
 // IMS 2.0 - Advanced Inventory Features
 // ============================================================================
-// Contact Lens Expiry, Power Grid, Sell-Through, Overstock Analysis
+// Contact Lens Expiry, Sell-Through, Overstock Analysis
 
 import { useState, useEffect } from 'react';
-import { AlertTriangle, TrendingUp, Package, Grid3x3, ArrowLeftRight, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, TrendingUp, Package, ArrowLeftRight, ShieldAlert } from 'lucide-react';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
@@ -309,112 +309,6 @@ export function ContactLensInventoryWidget() {
           </table>
         </div>
       )}
-    </div>
-  );
-}
-
-// ============================================================================
-// POWER-WISE LENS STOCK GRID
-// ============================================================================
-
-interface PowerGridCell {
-  count: number;
-  in_stock: boolean;
-}
-
-export function LensPowerGridWidget() {
-  const { user } = useAuth();
-  const [grid, setGrid] = useState<Record<string, Record<string, PowerGridCell>>>({});
-  const [sphValues, setSphValues] = useState<string[]>([]);
-  const [cylValues, setCylValues] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    loadData();
-  }, [user?.activeStoreId]);
-
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const storeParam = user?.activeStoreId ? `?store_id=${user.activeStoreId}` : '';
-      const response = await api.get(`/inventory/lenses/power-grid${storeParam}`);
-      setGrid(response.data?.grid || {});
-      setSphValues(response.data?.sph_range || []);
-      setCylValues(response.data?.cyl_range || []);
-    } catch (error) {
-      // silently handle error
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="p-4 text-center text-gray-500">Loading grid...</div>;
-  }
-
-  return (
-    <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-x-auto p-4">
-      <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-        <Grid3x3 className="w-5 h-5 text-bv-red-500" />
-        Lens Power Grid (SPH × CYL)
-      </h3>
-
-      <div className="inline-block min-w-full">
-        <table className="border-collapse">
-          <thead>
-            <tr>
-              <th className="px-2 py-2 text-xs font-semibold text-gray-500 border border-gray-200">
-                SPH/CYL
-              </th>
-              {cylValues.map((cyl) => (
-                <th
-                  key={cyl}
-                  className="px-2 py-2 text-xs font-semibold text-gray-500 border border-gray-200 text-center"
-                >
-                  {cyl}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {sphValues.map((sph) => (
-              <tr key={sph}>
-                <td className="px-2 py-2 text-xs font-semibold text-gray-700 border border-gray-200 bg-white">
-                  {sph}
-                </td>
-                {cylValues.map((cyl) => {
-                  const cell = grid[sph]?.[cyl];
-                  const inStock = cell?.in_stock;
-                  const count = cell?.count || 0;
-
-                  return (
-                    <td
-                      key={`${sph}-${cyl}`}
-                      className={clsx(
-                        'px-2 py-2 text-xs font-semibold text-center border border-gray-200',
-                        inStock ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
-                      )}
-                    >
-                      {count}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="mt-4 flex gap-4 text-xs">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-green-500" />
-          <span className="text-gray-700">In Stock</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-red-500" />
-          <span className="text-gray-700">Out of Stock</span>
-        </div>
-      </div>
     </div>
   );
 }

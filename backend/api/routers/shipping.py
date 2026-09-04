@@ -85,6 +85,11 @@ class ShipmentCreate(BaseModel):
     store_id: Optional[str] = None
     pickup_location: Optional[str] = None
     address: ShipAddress = Field(default_factory=ShipAddress)
+    # CREDIT_DELIVERY approval token for a NON-COD booking on an order that
+    # still carries a balance and a caller who is not a manager (owner ruling:
+    # dispatching goods with money still owed is a credit decision). Same
+    # token the Orders deliver door accepts.
+    approval_token: Optional[str] = None
 
 
 # ============================================================================
@@ -283,6 +288,31 @@ async def book_shipment(
         from .workshop import assert_linked_job_qc_cleared
 
         assert_linked_job_qc_cleared(order)
+
+        # MONEY GATE (owner ruling): booking a shipment dispatches the goods,
+        # and the courier is told "Prepaid" unless the booking says COD - so a
+        # non-COD booking on an order with money still owed hands the goods
+        # over with NOTHING collected at either end. It must clear the SAME
+        # money rule as the counter deliver door (services.delivery_gate -
+        # the single implementation): at least partial payment on record, and
+        # a balance still due needs a manager or a manager-approved
+        # CREDIT_DELIVERY token.
+        #
+        # A COD booking is exempt: the courier collects on delivery, so a
+        # web COD order (imported UNPAID from Shopify) ships normally - and a
+        # prepaid web order is only "unpaid-at-dispatch" legitimately when
+        # payment was captured upstream, which the Shopify/ONDC ingest
+        # records as payment_status PAID / balance_due 0, so it passes this
+        # gate untouched.
+        if (body.address.payment_method or "").strip().upper() != "COD":
+            from ..services.delivery_gate import assert_handover_payment
+
+            assert_handover_payment(
+                order,
+                approval_token=body.approval_token,
+                current_user=current_user,
+                db=_get_db(),
+            )
     if order is None:
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
         logger.info(

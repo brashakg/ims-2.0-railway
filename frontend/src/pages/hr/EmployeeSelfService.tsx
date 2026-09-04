@@ -18,13 +18,65 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CalendarCheck, Clock, FileText, TrendingUp, Award, Download,
-  ChevronLeft, ChevronRight, Loader2,
+  ChevronLeft, ChevronRight, Loader2, Plus, X,
 } from 'lucide-react';
 import { hrApi } from '../../services/api';
 import type {
   MyAttendance, MyLeaves, MyPayslip, MyCommission,
 } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
+
+// Leave types offered in the picker. The SERVER's _VALID_LEAVE_TYPES whitelist
+// (backend hr.LeaveCreate) is the authority -- it also accepts LWP/LOP, which
+// are aliases of UNPAID and deliberately left out of the picker. An option
+// added here that the server does not know is rejected with a 422.
+export const LEAVE_TYPE_OPTIONS = [
+  { value: 'CASUAL', label: 'Casual' },
+  { value: 'SICK', label: 'Sick' },
+  { value: 'EARNED', label: 'Earned' },
+  { value: 'PRIVILEGE', label: 'Privilege' },
+  { value: 'MATERNITY', label: 'Maternity' },
+  { value: 'PATERNITY', label: 'Paternity' },
+  { value: 'UNPAID', label: 'Unpaid' },
+] as const;
+
+/**
+ * Client-side mirror of what the server rejects anyway (422): both dates
+ * present and ordered, a type picked, a non-empty reason. The server stays the
+ * authority for everything else (type whitelist, 1-year backdate cap, overlap
+ * with an existing APPROVED/PENDING leave -> 409). Returns the exact
+ * snake_case payload POST /hr/me/leaves expects.
+ */
+export function buildLeaveApplication(input: {
+  leaveType: string;
+  fromDate: string;
+  toDate: string;
+  reason: string;
+}):
+  | { ok: true; payload: { leave_type: string; from_date: string; to_date: string; reason: string } }
+  | { ok: false; error: string } {
+  const { leaveType, fromDate, toDate, reason } = input;
+  if (!leaveType) return { ok: false, error: 'Pick a leave type.' };
+  if (!fromDate || !toDate) return { ok: false, error: 'Pick both dates.' };
+  // ISO 'YYYY-MM-DD' strings compare correctly as strings.
+  if (toDate < fromDate) return { ok: false, error: 'End date cannot be before start date.' };
+  if (!reason.trim()) return { ok: false, error: 'Please give a short reason.' };
+  return {
+    ok: true,
+    payload: { leave_type: leaveType, from_date: fromDate, to_date: toDate, reason: reason.trim() },
+  };
+}
+
+/** Only a still-undecided request can be cancelled (server 400s otherwise). */
+export function canCancelLeave(status: string | undefined | null): boolean {
+  return (status || '').toUpperCase() === 'PENDING';
+}
+
+function localIsoToday(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -37,6 +89,7 @@ function rupee(n: number | undefined | null): string {
 
 export function EmployeeSelfService() {
   const { user } = useAuth();
+  const toast = useToast();
   const now = new Date();
 
   // Month selector shared by the attendance + commission cards.
@@ -82,6 +135,55 @@ export function EmployeeSelfService() {
 
   useEffect(() => { loadMonth(); }, [loadMonth]);
   useEffect(() => { loadStatic(); }, [loadStatic]);
+
+  // --- Apply-for-leave form state ---------------------------------------
+  const [showApply, setShowApply] = useState(false);
+  const [leaveType, setLeaveType] = useState<string>('CASUAL');
+  const [fromDate, setFromDate] = useState<string>(localIsoToday());
+  const [toDate, setToDate] = useState<string>(localIsoToday());
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+
+  const submitLeave = async () => {
+    const built = buildLeaveApplication({ leaveType, fromDate, toDate, reason });
+    if (!built.ok) {
+      toast.error(built.error);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await hrApi.applyMyLeave(built.payload);
+      toast.success(
+        res.fast_path
+          ? 'Leave request sent to your manager for quick approval.'
+          : 'Leave request submitted.',
+      );
+      setShowApply(false);
+      setReason('');
+      await loadStatic(); // refresh the list + balance
+    } catch (e) {
+      // The server's own message (e.g. the 409 overlap explanation) is the
+      // most useful thing to show.
+      toast.error(e instanceof Error ? e.message : 'Could not submit leave request.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const cancelLeave = async (leaveId: string) => {
+    if (!window.confirm('Cancel this leave request?')) return;
+    setCancellingId(leaveId);
+    try {
+      await hrApi.cancelMyLeave(leaveId);
+      toast.success('Leave request cancelled.');
+      await loadStatic();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not cancel leave request.');
+    } finally {
+      setCancellingId(null);
+    }
+  };
 
   const shiftMonth = (delta: number) => {
     let m = month + delta;
@@ -340,10 +442,98 @@ export function EmployeeSelfService() {
                   ))}
                 </div>
               )}
-              {/* Recent leave rows */}
+              {/* Apply for leave */}
+              {!showApply ? (
+                <button
+                  type="button"
+                  onClick={() => setShowApply(true)}
+                  className="btn-primary w-full mt-3 inline-flex items-center justify-center gap-2 h-11"
+                >
+                  <Plus className="w-4 h-4" /> Apply for leave
+                </button>
+              ) : (
+                <div className="mt-3 border border-gray-200 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-gray-900">New leave request</p>
+                    <button
+                      type="button"
+                      onClick={() => setShowApply(false)}
+                      className="inline-flex items-center justify-center w-11 h-11 -m-2 text-gray-400"
+                      aria-label="Close leave form"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                  <div>
+                    <label htmlFor="essLeaveType" className="block text-xs text-gray-500 mb-1">Leave type</label>
+                    <select
+                      id="essLeaveType"
+                      value={leaveType}
+                      onChange={(e) => setLeaveType(e.target.value)}
+                      className="input-field w-full h-11"
+                    >
+                      {LEAVE_TYPE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="essFromDate" className="block text-xs text-gray-500 mb-1">From</label>
+                      <input
+                        id="essFromDate"
+                        type="date"
+                        value={fromDate}
+                        onChange={(e) => {
+                          setFromDate(e.target.value);
+                          // Keep the range valid as the user moves the start.
+                          if (toDate && e.target.value && toDate < e.target.value) {
+                            setToDate(e.target.value);
+                          }
+                        }}
+                        className="input-field w-full h-11"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="essToDate" className="block text-xs text-gray-500 mb-1">To</label>
+                      <input
+                        id="essToDate"
+                        type="date"
+                        value={toDate}
+                        min={fromDate || undefined}
+                        onChange={(e) => setToDate(e.target.value)}
+                        className="input-field w-full h-11"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="essReason" className="block text-xs text-gray-500 mb-1">Reason</label>
+                    <textarea
+                      id="essReason"
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                      rows={2}
+                      placeholder="Why do you need this leave?"
+                      className="input-field w-full"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={submitLeave}
+                    disabled={submitting}
+                    className="btn-primary w-full h-11 inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                    Submit request
+                  </button>
+                </div>
+              )}
+
+              {/* This year's requests, newest start date first (server-sorted).
+                  PENDING rows can be cancelled. */}
               {leaves && leaves.leaves.length > 0 && (
                 <div className="mt-3 border-t border-gray-100 pt-3 space-y-2">
-                  {leaves.leaves.slice(0, 4).map((l) => (
+                  {leaves.leaves.map((l) => (
                     <div key={l.leave_id || `${l.from_date}-${l.leave_type}`} className="flex items-center justify-between gap-2 text-sm">
                       <div className="min-w-0">
                         <p className="font-medium text-gray-900 truncate capitalize">
@@ -353,9 +543,25 @@ export function EmployeeSelfService() {
                           {l.from_date}{l.to_date && l.to_date !== l.from_date ? ` to ${l.to_date}` : ''} &middot; {l.days}d
                         </p>
                       </div>
-                      <span className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium ${leaveStatusClasses(l.status)}`}>
-                        {l.status}
-                      </span>
+                      <div className="shrink-0 flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${leaveStatusClasses(l.status)}`}>
+                          {l.status}
+                        </span>
+                        {canCancelLeave(l.status) && (
+                          <button
+                            type="button"
+                            onClick={() => cancelLeave(l.leave_id)}
+                            disabled={cancellingId === l.leave_id}
+                            className="btn-secondary h-11 px-3 text-xs inline-flex items-center disabled:opacity-50"
+                          >
+                            {cancellingId === l.leave_id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              'Cancel'
+                            )}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

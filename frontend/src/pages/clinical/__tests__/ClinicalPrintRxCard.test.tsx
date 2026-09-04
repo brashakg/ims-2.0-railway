@@ -1,5 +1,5 @@
 // ============================================================================
-// PATIENT SAFETY: the clinical queue's "Print Rx Card" button
+// PATIENT SAFETY: the clinical "Print Rx Card" button (/clinical/completed)
 // ============================================================================
 // This is the button that hands a printed prescription to the patient, and its
 // mapping carried the blank-vs-zero conflation three times over:
@@ -15,6 +15,10 @@
 // PrescriptionCardBlankVsZero.test.tsx pins how the CARD renders a value. This
 // file pins what this call site FEEDS it, which is a separate failure: a card
 // that renders null correctly is no help if the caller sends 0.
+//
+// Wave 2 split: the call site moved from the ClinicalPage "Completed today"
+// tab to ClinicalCompletedPage (/clinical/completed). Same button, same
+// mapping, same requirement.
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -49,21 +53,30 @@ vi.mock('../../../components/print/storeIdentity', () => ({
   resolveStoreIdentity: () => Promise.resolve(null),
 }));
 
-// The page asks whether this is an online store via a react-query hook. Stubbed
-// rather than wrapped in a QueryClientProvider: none of it bears on the powers.
-vi.mock('../../../hooks/useIsOnlineStore', () => ({
-  useIsOnlineStore: () => false,
-  default: () => false,
-}));
-
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastProvider } from '../../../context/ToastContext';
-import { ClinicalPage } from '../ClinicalPage';
+import { ClinicalCompletedPage } from '../ClinicalCompletedPage';
 
 const SLOW = 20000;
 
 // Distance-vision columns of the printed card: Eye SPH CYL AXIS ADD
 const SPH = 1, CYL = 2, ADD = 4;
+
+function renderPage() {
+  // Fresh client per render: retries off (the queries fail-soft anyway) and no
+  // cross-test cache bleed.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <ToastProvider>
+          <ClinicalCompletedPage />
+        </ToastProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
 
 /** Load the page with ONE completed test and open its printed Rx card. */
 async function printCardFor(right: Record<string, unknown>, left: Record<string, unknown>) {
@@ -81,17 +94,8 @@ async function printCardFor(right: Record<string, unknown>, left: Record<string,
     ],
   });
 
-  const { container } = render(
-    <MemoryRouter>
-      <ToastProvider>
-        <ClinicalPage />
-      </ToastProvider>
-    </MemoryRouter>,
-  );
+  const { container } = renderPage();
 
-  // By ROLE: "Completed today" is also a stat-card label, so a bare text query
-  // is ambiguous and would click the wrong node (or throw).
-  fireEvent.click(await screen.findByRole('button', { name: /Completed today/ }, { timeout: SLOW }));
   fireEvent.click(await screen.findByTitle('Print Rx Card', {}, { timeout: SLOW }));
   await waitFor(() => expect(powerRows(container).length).toBeGreaterThan(1), { timeout: SLOW });
   const rows = powerRows(container);
@@ -175,11 +179,11 @@ describe('the printed card reflects what the eye test actually recorded', () => 
 });
 
 describe('the Completed-today list survives an Rx with fields simply absent', () => {
-  it('renders the row as dashes instead of crashing the tab', async () => {
-    // A CRASH, not a cosmetic bug. The page's own formatPower guarded only
+  it('renders the row as dashes instead of crashing the page', async () => {
+    // A CRASH, not a cosmetic bug. The old page's own formatPower guarded only
     // `value === null`, but readEyePower returns UNDEFINED for an absent field
     // (a Mongo doc that omits the key, an import, a device feed), so it reached
-    // `.toFixed` and threw -- taking the whole "Completed today" tab down.
+    // `.toFixed` and threw -- taking the whole "Completed today" list down.
     H.getTodayTests.mockResolvedValue({
       tests: [
         {
@@ -194,15 +198,7 @@ describe('the Completed-today list survives an Rx with fields simply absent', ()
       ],
     });
 
-    render(
-      <MemoryRouter>
-        <ToastProvider>
-          <ClinicalPage />
-        </ToastProvider>
-      </MemoryRouter>,
-    );
-
-    fireEvent.click(await screen.findByRole('button', { name: /Completed today/ }, { timeout: SLOW }));
+    renderPage();
 
     // THE REQUIREMENT: the row is on screen at all.
     expect(await screen.findByText('Ravi Kumar', {}, { timeout: SLOW })).toBeInTheDocument();
@@ -226,15 +222,7 @@ describe('the Completed-today list survives an Rx with fields simply absent', ()
       ],
     });
 
-    render(
-      <MemoryRouter>
-        <ToastProvider>
-          <ClinicalPage />
-        </ToastProvider>
-      </MemoryRouter>,
-    );
-
-    fireEvent.click(await screen.findByRole('button', { name: /Completed today/ }, { timeout: SLOW }));
+    renderPage();
 
     expect(await screen.findByText('R: +0.00 / +0.00', {}, { timeout: SLOW })).toBeInTheDocument();
     expect(screen.getByText('L: +0.00 / +0.00')).toBeInTheDocument();

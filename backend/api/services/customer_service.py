@@ -36,10 +36,43 @@ WHAT THIS GUARANTEES
     does NOT add a consent gate and does NOT flip an existing flag.
   * NO online loyalty, NO comms (owner). This service only resolves identity.
 
+FAMILY-MEMBER GUARD (owner ruling 2026-09-04: "block it outright")
+------------------------------------------------------------------
+A person may already be in the system as a FAMILY MEMBER (``patients[]``) on
+someone else's account, with their own mobile. Creating a top-level customer
+with that number splits their prescriptions and purchase history across two
+records -- and the shops run Rx reminders off that history. So this ONE
+function also checks ``patients.mobile`` before any create:
+  * strict door (POST /customers, a human at the counter): raises
+    ``CustomerConflict`` whose ``.detail`` is the 409 body the UI acts on
+    (promote-to-own-account or open the existing account);
+  * lenient doors (walkout / online / Shopify sync, unattended): resolve to the
+    account that already holds the person -- a MATCH, never a create.
+POST /customers used to carry its own copy of find-or-create; it now calls
+this function (``strict=True``, ``doc=<its full record>``) so the guard cannot
+be bypassed by any door.
+
+THE REVERSE SPLIT (owner ruling 2026-09-04: "block it the same way")
+--------------------------------------------------------------------
+The same person can also end up in two places from the OTHER side: a family
+member added to an account with a number that is already a top-level customer
+in their own right. ``own_account_conflict`` is that one rule; every door that
+adds a member row applies it -- the create door's ``patients[]`` (here, in
+``ensure_customer``), PUT /customers/{id} patients-append and
+POST /customers/{id}/patients (in the router). Refusal is a 409 whose body
+names the existing account + the offending row (code MOBILE_IS_OWN_ACCOUNT).
+The account's own number is exempt (the holder's Self row, a child recorded
+under the parent's phone) -- that is one record, not two.
+
 PUBLIC API
 ----------
-    ensure_customer(db, *, mobile, name=None, store_id=None, source, **extra)
+    ensure_customer(db, *, mobile, name=None, store_id=None, source,
+                    doc=None, strict=False, **extra)
         -> (customer_id: Optional[str], created: bool)
+    family_member_conflict(repo, mobile, exclude_customer_id=None) -> Optional[dict]
+    own_account_conflict(repo, members, exclude_customer_id=None) -> Optional[dict]
+    promote_patient(db, repo, parent, patient_id) -> dict
+    CustomerConflict (exception; ``.detail`` is the 409 body)
 
     ``customer_id`` is None ONLY when there is nothing to key on (blank mobile) or
     the customer repo is unreachable -- the caller decides whether to proceed with a
@@ -73,6 +106,103 @@ _SOURCE_CHANNEL = {
     "WALKOUT": "STORE",
     "ONLINE": "ONLINE",
 }
+
+
+class CustomerConflict(Exception):
+    """A create was refused because the number/email already identifies someone.
+    ``detail`` is exactly what the HTTP door returns as the 409 body: a plain
+    string for a top-level duplicate (unchanged wording), or a dict with a
+    ``code`` for the family-member case so the UI can offer promote / open."""
+
+    def __init__(self, detail):
+        super().__init__(detail if isinstance(detail, str) else detail.get("message", ""))
+        self.detail = detail
+
+
+FAMILY_MEMBER_CODE = "MOBILE_BELONGS_TO_FAMILY_MEMBER"
+
+
+def family_member_conflict(repo, mobile: str, exclude_customer_id: Optional[str] = None):
+    """THE family-member rule. Returns the 409 body when ``mobile`` is already a
+    family member's number on an account (other than ``exclude_customer_id``),
+    else None. The body carries only what the UI needs to act -- the holder's
+    id + name and the member's id/name/relation -- never the holder's record."""
+    if not mobile:
+        return None
+    finder = getattr(repo, "find_by_patient_mobile", None)
+    if not callable(finder):
+        return None
+    try:
+        holder = finder(mobile)
+    except Exception:  # noqa: BLE001 -- fail-soft read, like find_by_mobile
+        logger.debug("[ENSURE_CUSTOMER] find_by_patient_mobile failed", exc_info=True)
+        return None
+    if not holder or not holder.get("customer_id"):
+        return None
+    if exclude_customer_id and holder.get("customer_id") == exclude_customer_id:
+        return None
+    member = next(
+        (p for p in (holder.get("patients") or []) if p and p.get("mobile") == mobile),
+        {},
+    )
+    holder_name = holder.get("name") or "an existing customer"
+    member_name = member.get("name") or "a family member"
+    return {
+        "code": FAMILY_MEMBER_CODE,
+        "message": (
+            f"This number belongs to {member_name}, a family member on "
+            f"{holder_name}'s account"
+        ),
+        "customer_id": holder.get("customer_id"),
+        "account_holder_name": holder_name,
+        "patient_id": member.get("patient_id"),
+        "patient_name": member_name,
+        "relation": member.get("relation"),
+    }
+
+
+OWN_ACCOUNT_CODE = "MOBILE_IS_OWN_ACCOUNT"
+
+
+def own_account_conflict(repo, members, exclude_customer_id: Optional[str] = None):
+    """THE reverse family-member rule. ``members`` are the rows being ADDED to
+    an account as ``(index, row)`` pairs in the order the caller submitted
+    them. Returns the 409 body for the first row whose mobile is already a
+    TOP-LEVEL customer's own number (other than ``exclude_customer_id``, the
+    account being edited), else None.
+
+    Exempt: the account's own number. The holder's Self row, and a child
+    recorded under the parent's phone, are one record, not two. On a create
+    there is no id to exclude and none is needed: ``ensure_customer`` has
+    already refused a taken holder number before this runs, so a Self row can
+    only carry a free one. The body carries only what the UI needs to act --
+    the existing customer's id + name and the offending row's index + name --
+    never the customer's record."""
+    for index, member in members:
+        if not member:
+            continue
+        mobile = member.get("mobile")
+        if not mobile:
+            continue
+        try:
+            other = repo.find_by_mobile(mobile)
+        except Exception:  # noqa: BLE001 -- fail-soft read, like find_by_mobile
+            logger.debug("[ENSURE_CUSTOMER] find_by_mobile failed", exc_info=True)
+            continue
+        if not other or not other.get("customer_id"):
+            continue
+        if exclude_customer_id and other.get("customer_id") == exclude_customer_id:
+            continue
+        other_name = other.get("name") or "an existing customer"
+        return {
+            "code": OWN_ACCOUNT_CODE,
+            "message": f"This number is already {other_name}'s own account",
+            "customer_id": other.get("customer_id"),
+            "customer_name": other_name,
+            "patient_index": index,
+            "patient_name": member.get("name") or "this family member",
+        }
+    return None
 
 
 def _get_repo(db=None):
@@ -209,6 +339,9 @@ def ensure_customer(
     name: Optional[str] = None,
     store_id: Optional[str] = None,
     source: str,
+    doc: Optional[Dict[str, Any]] = None,
+    strict: bool = False,
+    repo=None,
     **extra: Any,
 ) -> Tuple[Optional[str], bool]:
     """Resolve (or create) the ONE canonical customer for a person entering at any
@@ -223,19 +356,27 @@ def ensure_customer(
         name: optional display name for a NEW record (ignored when matching existing).
         store_id: optional store to home a NEW record to.
         source: one of VALID_SOURCES (POS | CLINIC | WALKOUT | ONLINE).
+        doc: the FULL record to insert instead of the lenient skeleton (the human
+            create door passes its validated CustomerCreate record; its mobile must
+            already be the canonical form). Mutated by the repo on insert.
+        strict: the human-at-the-counter contract. An existing top-level match, a
+            family-member match, an email duplicate or a race-lost insert RAISES
+            ``CustomerConflict`` (the door maps it to 409) instead of resolving.
         **extra: optional ``email`` / ``gstin`` / ``dob`` (validated when provided),
             and an optional ``raw_phone`` (the verbatim input; defaults to the
             normalized mobile).
 
     Returns:
         (customer_id, created):
-          * (id, False) -- matched an existing customer by normalized mobile.
-          * (new_id, True) -- created a fresh skeleton.
+          * (id, False) -- matched an existing customer by normalized mobile, OR
+            the account that already holds this number as a FAMILY MEMBER.
+          * (new_id, True) -- created a fresh record.
           * (id, False) -- a racing create lost; the winner's id is returned.
           * (None, False) -- nothing to key on (blank/unparseable mobile) OR the
             repo is unreachable OR the create failed. Caller decides what to do.
 
     Raises:
+        CustomerConflict -- strict only (see above).
         ValueError -- only when a PROVIDED email/gstin/dob is malformed (mirrors the
         canonical create validators). Mobile is handled leniently (never raises).
     """
@@ -257,7 +398,9 @@ def ensure_customer(
     if not norm_mobile:
         return (None, False)
 
-    repo = _get_repo(db)
+    # A door that already holds its repository passes it (POST /customers), so the
+    # service writes through exactly the handle that door -- and its tests -- see.
+    repo = repo if repo is not None else _get_repo(db)
     if repo is None:
         return (None, False)
 
@@ -268,14 +411,44 @@ def ensure_customer(
         logger.debug("[ENSURE_CUSTOMER] find_by_mobile failed", exc_info=True)
         existing = None
     if existing and existing.get("customer_id"):
+        if strict:
+            raise CustomerConflict("Customer with this mobile already exists")
         return (existing.get("customer_id"), False)
+
+    # --- FAMILY-MEMBER GUARD: the number is already someone's family member -------
+    # Strict door: refuse with the actionable body. Lenient doors: the person IS in
+    # the system -- resolve to the account holding them, create nothing.
+    family = family_member_conflict(repo, norm_mobile)
+    if family:
+        if strict:
+            raise CustomerConflict(family)
+        return (family["customer_id"], False)
+
+    # --- REVERSE GUARD: a member row on the NEW record must not be someone's own
+    # account (same rule as the edit doors). Runs AFTER the top-level dedup, so
+    # the holder's own Self row can only carry a free number. Only the strict
+    # door ever passes a doc.
+    if strict and doc:
+        own = own_account_conflict(repo, enumerate(doc.get("patients") or []))
+        if own:
+            raise CustomerConflict(own)
 
     # --- validate any provided email/gstin/dob (raises on bad value) ---------------
     validated_extra = _validate_extras(extra)
-    email = validated_extra.get("email")
+    email = validated_extra.get("email") or (doc or {}).get("email")
 
-    # --- create the canonical skeleton --------------------------------------------
-    skeleton = _build_skeleton(
+    # Strict door only: an email already on file is a duplicate too (the lenient
+    # doors deliberately never dedup on email -- families share addresses).
+    if strict and email:
+        try:
+            dup_email = repo.find_by_email(email)
+        except Exception:  # noqa: BLE001
+            dup_email = None
+        if dup_email is not None:
+            raise CustomerConflict("Customer with this email already exists")
+
+    # --- create: the door's full record, else the canonical skeleton --------------
+    skeleton = doc if doc is not None else _build_skeleton(
         mobile=norm_mobile,
         raw_phone=raw_phone,
         name=name,
@@ -293,7 +466,149 @@ def ensure_customer(
         logger.debug("[ENSURE_CUSTOMER] create raced/failed; re-finding", exc_info=True)
 
     # --- a racing create won the unique-mobile guard: return the survivor ----------
+    # (strict: that is a duplicate -> 409, never the old 500)
     won = _refind(repo, norm_mobile, email)
     if won:
+        if strict:
+            raise CustomerConflict("Customer with this mobile already exists")
         return (won, False)
     return (None, False)
+
+
+# ---------------------------------------------------------------------------
+# Promote a family member to their own account
+# ---------------------------------------------------------------------------
+
+# Collections keyed to a family member (patient_id) that carry a customer_id
+# pointer. These are re-pointed at the promoted account. NOT re-pointed: orders
+# (a bill belongs to the account that paid; it still names the member via its
+# own patient_id) and handoffs (workflow items, not history).
+PATIENT_KEYED_COLLECTIONS = ("prescriptions", "eye_tests", "eye_test_queue")
+
+
+def promote_patient(db, repo, parent: Dict[str, Any], patient_id: str) -> Dict[str, Any]:
+    """Take family member ``patient_id`` OUT of ``parent`` and make them a
+    top-level customer, carrying their clinical history.
+
+    ORDERING (why): create the new account FIRST, re-point the patient-keyed
+    records SECOND, remove the member row from the parent LAST. The person is
+    never in NEITHER place: a failure before the create changes nothing; a
+    failure after it leaves them in BOTH places -- the same recoverable state
+    the read-only repair script (scripts/family_member_split_report.py) already
+    lists -- and the promoted account is returned in the error so nothing is
+    hidden. The member keeps the SAME patient_id on the new account, which is
+    what keeps every prescription/eye-test link intact.
+
+    Raises ValueError (door -> 400) when the member cannot be promoted, and
+    CustomerConflict (door -> 409) when the member's number already has its own
+    top-level account (an existing split: owner decides per case, no auto-merge).
+    Raises RuntimeError with ``.customer_id`` set when a step AFTER the create
+    fails (door -> 500 carrying the id)."""
+    from .member_billing import build_primary_member
+
+    member = next(
+        (
+            p
+            for p in (parent.get("patients") or [])
+            if p and str(p.get("patient_id") or "") == str(patient_id)
+        ),
+        None,
+    )
+    if member is None:
+        raise LookupError("Family member not found on this account")
+    parent_id = parent.get("customer_id")
+    if member.get("is_primary") or patient_id == parent.get("primary_patient_id"):
+        raise ValueError("The account holder already owns this account and cannot be promoted")
+    mobile = normalize_indian_mobile(member.get("mobile"))
+    if not mobile:
+        raise ValueError(
+            "This family member has no mobile number; add one before promoting them"
+        )
+    other = repo.find_by_mobile(mobile)
+    if other and other.get("customer_id"):
+        raise CustomerConflict(
+            {
+                "code": "MOBILE_ALREADY_OWN_ACCOUNT",
+                "message": "This family member already has their own customer account",
+                "customer_id": other.get("customer_id"),
+            }
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    primary = build_primary_member(
+        name=member.get("name") or "Customer",
+        mobile=mobile,
+        patient_id=patient_id,  # STABLE: keeps the Rx / eye-test links
+        relation="Self",
+    )
+    for k in ("dob", "anniversary"):
+        if member.get(k) is not None:
+            primary[k] = member.get(k)
+    new_doc: Dict[str, Any] = {
+        "customer_id": str(uuid.uuid4()),
+        "customer_type": "B2C",
+        "name": primary["name"],
+        "mobile": mobile,
+        "phone": mobile,
+        "email": None,
+        "dob": member.get("dob"),
+        "anniversary": member.get("anniversary"),
+        "gstin": None,
+        "billing_address": None,
+        # Consent was given by the account holder when this person's data was
+        # recorded on the family account; it travels with the person.
+        "marketing_consent": parent.get("marketing_consent", True),
+        "data_consent": parent.get("data_consent"),
+        "data_consent_at": parent.get("data_consent_at"),
+        "data_consent_text_version": parent.get("data_consent_text_version"),
+        "home_store_id": parent.get("home_store_id") or parent.get("preferred_store_id"),
+        "preferred_store_id": parent.get("preferred_store_id") or parent.get("home_store_id"),
+        "loyalty_points": 0,
+        "store_credit": 0,
+        "total_purchases": 0,
+        "is_active": True,
+        "patients": [primary],
+        "primary_patient_id": patient_id,
+        "promoted_from": {"customer_id": parent_id, "patient_id": patient_id, "at": now},
+    }
+
+    # 1) CREATE the own account (the only step with no prior side effect).
+    created = repo.create(new_doc)
+    if not created or not created.get("customer_id"):
+        won = repo.find_by_mobile(mobile)
+        raise CustomerConflict(
+            {
+                "code": "MOBILE_ALREADY_OWN_ACCOUNT",
+                "message": "This family member already has their own customer account",
+                "customer_id": (won or {}).get("customer_id"),
+            }
+        )
+    new_id = created["customer_id"]
+
+    try:
+        # 2) RE-POINT every patient-keyed record at the promoted account.
+        carried: Dict[str, int] = {}
+        for name in PATIENT_KEYED_COLLECTIONS:
+            coll = db.get_collection(name) if db is not None else None
+            if coll is None:
+                carried[name] = 0
+                continue
+            res = coll.update_many(
+                {"patient_id": patient_id},
+                {"$set": {"customer_id": new_id, "promoted_from_customer_id": parent_id}},
+            )
+            carried[name] = int(getattr(res, "modified_count", 0) or 0)
+        # 3) REMOVE the member row from the parent (last: the only removal).
+        if not repo.pull_patient(parent_id, patient_id):
+            raise RuntimeError("family member row was not removed from the parent account")
+    except Exception as exc:  # noqa: BLE001
+        err = RuntimeError(
+            f"Own account {new_id} was created but the move did not finish: {exc}. "
+            "The person is now in BOTH places; run scripts/family_member_split_report.py"
+        )
+        err.customer_id = new_id  # type: ignore[attr-defined]
+        raise err from exc
+
+    out = dict(created)
+    out["carried"] = carried
+    return out

@@ -6,10 +6,10 @@
 // document's OWN store_id -> the store record -> its entity_id -> the entity.
 //
 // GET /stores/{id} returns a RAW snake_case Mongo doc (store_name, store_code,
-// state_code, ...) but the camelCase `Store` type + GSTInvoice read storeName /
+// state_code, ...) but the camelCase `Store` type + the print consumers read storeName /
 // storeCode / stateCode. That type lie is the root cause of blank invoice
 // headers. This module is the ONE adapter at the API boundary that:
-//   - normalises a raw store doc into BOTH the camelCase `Store` (for GSTInvoice)
+//   - normalises a raw store doc into BOTH the camelCase `Store` (for print consumers)
 //     and the snake_case `StoreLike` (for legalPrimitives), and
 //   - resolves the store's parent entity (for the statutory identity block),
 //     folding the store's own GSTIN into the entity gstins when the entity is
@@ -43,7 +43,7 @@ export interface RawStoreDoc {
 
 /** Resolved identity for printing a store-specific document. */
 export interface StoreIdentity {
-  /** camelCase Store shape GSTInvoice / types/index.ts expect. */
+  /** camelCase Store shape the print consumers / types/index.ts expect. */
   store: Store;
   /** snake_case StoreLike shape legalPrimitives.buildLegalHeader expects. */
   storeLike: StoreLike;

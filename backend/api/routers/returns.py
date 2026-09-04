@@ -1265,9 +1265,18 @@ def _issue_store_credit(
     gst_rate: Optional[float] = None,
     bump_balance: bool = True,
     interstate: Optional[bool] = None,
+    store_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
+
+    Store attribution (`store_id`): the credit note must be booked under the
+    SAME store -- hence the same GSTIN -- the parent invoice was filed under,
+    so pass the ORDER's store. Defaulting to the cashier's active store booked
+    an online-order refund taken at a counter (and any HQ-processed return)
+    under the WRONG GSTIN, and because the return doc carries the order's
+    store while the ledger row carried the cashier's, the two GST report legs
+    could not dedup them: one refund reversed output tax under TWO GSTINs.
 
     Reuses services.store_credit_ledger.make_entry and the same persistence
     shape as customers.py. `amount` is the NET credit issued; when a credit
@@ -1311,7 +1320,7 @@ def _issue_store_credit(
             current_balance=balance,
             reason=reason,
             ref=ref,
-            store_id=current_user.get("active_store_id"),
+            store_id=store_id or current_user.get("active_store_id"),
             user_id=current_user.get("user_id"),
         )
     except ValueError as exc:
@@ -2649,9 +2658,7 @@ async def quote_return(
         "restocking_fee": restocking_fee,
         # THE authoritative figure the refund-tender split must sum to.
         "net_refund": net_amount,
-        "gst_breakup": engine.gst_breakup(
-            gross_refund, engine.dominant_gst_rate(priced_lines)
-        ),
+        "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
         # Server-resolved replacement lines + the total they sum to, so the till
         # shows (and the cashier confirms) the SAME figures the settlement used.
@@ -2993,9 +3000,11 @@ async def create_return(
     refund_approval_by_name = _resolve_user_name(refund_approval_by)
 
     # Back the GST out of the gross for the credit note / GSTR-1 reversal. The
-    # tax is INSIDE the gross (not added on top). Use the dominant rate across
-    # the returned lines when they span rates.
-    gst_view = engine.gst_breakup(gross_refund, engine.dominant_gst_rate(priced_lines))
+    # tax is INSIDE the gross (not added on top). EXACT per-line back-out --
+    # each line at ITS OWN rate, the same engine the online refund path uses --
+    # so a mixed-rate return (18% sunglass + 5% lens) reverses the true tax,
+    # not a dominant-rate approximation of it.
+    gst_view = engine.gst_breakup_lines(priced_lines)
 
     # `ret_value` carries the GST-inclusive gross for the response + doc
     # (preserves the existing field name; now correctly gross, not net).
@@ -3066,15 +3075,20 @@ async def create_return(
         account" with ZERO ledger rows AND a permanently burned returnable
         quantity. A 201 must never claim credit that does not exist.
 
-        GST: the reversal is backed out of the CREDITED amount itself, not
-        pro-rated off the gross. Pro-rating mixed two bases (gst_view is built
-        on `gross_refund`, the share on `net_amount = gross - fee`), which made
-        the stamped tax VANISH at fee 900 and go NEGATIVE at fee 1500 -- and
-        reports.py SUBTRACTS the CDNR from hsn_by_rate, so a negative tax ADDS
-        to the bucket."""
+        GST: gst_view is the EXACT per-line back-out (gst_breakup_lines), so
+        the stamped tax is gst_view's tax SCALED by the credited share of the
+        gross: identical to gst_view at fee 0, proportional under a restocking
+        fee, and right for mixed-rate returns where a single dominant-rate
+        back-out drifts. A RATIO of two gross-inclusive amounts stays in
+        [0, gst_view.tax] -- unlike the old SUBTRACTION across mixed bases
+        that made the stamped tax vanish at fee 900 and go negative at fee
+        1500 (reports.py SUBTRACTS the CDNR from hsn_by_rate, so a negative
+        tax ADDS to the bucket)."""
         rate = float(gst_view.get("gst_rate") or 0)
-        taxable = round(amount / (1 + rate / 100.0), 2) if rate else round(amount, 2)
-        tax = round(amount - taxable, 2)
+        _view_gross = float(gst_view.get("gross") or 0.0)
+        _view_tax = float(gst_view.get("tax") or 0.0)
+        tax = round(_view_tax * (amount / _view_gross), 2) if _view_gross > 0 else 0.0
+        taxable = round(amount - tax, 2)
         entry = _issue_store_credit(
             customer_id,
             amount,
@@ -3091,6 +3105,9 @@ async def create_return(
                 if isinstance(order.get("interstate"), bool)
                 else None
             ),
+            # The ORDER's store: the credit note reverses under the GSTIN the
+            # sale was filed under, not the counter it was processed at.
+            store_id=store_id,
         )
         if entry is None:
             # Release the qty claim so the return stays retryable, then say so.

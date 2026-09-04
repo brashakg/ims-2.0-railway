@@ -13,11 +13,16 @@
 // on the Payment step will see the same fallback state.
 
 import { useEffect, useState } from 'react';
-import { Award, Clock } from 'lucide-react';
+import { Award, Clock, Pencil } from 'lucide-react';
 import clsx from 'clsx';
 
 import { usePOSStore } from '../../stores/posStore';
+import { useAuth } from '../../context/AuthContext';
 import { loyaltyApi, type LoyaltyTier } from '../../services/api/loyalty';
+import {
+  EditCustomerModal,
+  CUSTOMER_EDIT_ROLES,
+} from '../customers/EditCustomerModal';
 
 // Color tokens per tier — used by the badge below the points number.
 const TIER_TOKENS: Record<LoyaltyTier, { bg: string; text: string; ring: string }> = {
@@ -27,14 +32,23 @@ const TIER_TOKENS: Record<LoyaltyTier, { bg: string; text: string; ring: string 
   PLATINUM: { bg: 'bg-violet-50', text: 'text-violet-700', ring: 'ring-violet-200' },
 };
 
-export function CustomerCardWithLoyalty() {
+/** `onChange`: the till's way to clear the pick and choose someone else. The
+ *  new tills pass it; the classic surface keeps its own Change button and
+ *  passes nothing, so it renders exactly as before. */
+export function CustomerCardWithLoyalty({ onChange }: { onChange?: () => void } = {}) {
   const store = usePOSStore();
+  const { hasRole } = useAuth();
   const [tier, setTier] = useState<LoyaltyTier>('BRONZE');
   const [expiringSoon, setExpiringSoon] = useState<number>(0);
   const [loading, setLoading] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   const customerId = store.customer?.id;
   const isWalkin = customerId?.toString().startsWith('walkin-');
+  // Owner ruling 2026-09-03: cashiers and sales staff get FULL customer edit
+  // (phone + GSTIN included) right at the till. ONE role list, shared with
+  // the Customers page; the server (PUT /customers/{id}) owns the real rules.
+  const canEdit = !isWalkin && hasRole(CUSTOMER_EDIT_ROLES);
 
   useEffect(() => {
     let alive = true;
@@ -72,6 +86,41 @@ export function CustomerCardWithLoyalty() {
       'border rounded-xl p-3 space-y-3 mt-2',
       isWalkin ? 'bg-white border-gray-200' : 'bg-bv-red-50 border-bv-red-200'
     )}>
+      {/* Who is on the bill + the edit door. A wrong phone or a missing GSTIN
+          surfaces exactly here, mid-bill — sending staff to the Customers
+          screen to fix it meant abandoning the sale. */}
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="m-0 text-sm font-semibold text-gray-900 truncate">
+            {store.customer.name || 'Customer'}
+          </p>
+          <p className="m-0 text-[11px] text-gray-500 truncate">
+            {store.customer.phone || 'No phone'}
+          </p>
+        </div>
+        {canEdit && (
+          <button
+            type="button"
+            onClick={() => setEditOpen(true)}
+            title="Edit this customer (name, phone, GSTIN, address)"
+            className="shrink-0 min-h-[44px] px-3 inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+            Edit
+          </button>
+        )}
+        {onChange && (
+          <button
+            type="button"
+            onClick={onChange}
+            title="Pick a different customer for this bill"
+            className="shrink-0 min-h-[44px] px-3 inline-flex items-center rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Change
+          </button>
+        )}
+      </div>
+
       {!isWalkin && (
         <>
           {/* Loyalty Points + Tier Badge */}
@@ -111,6 +160,25 @@ export function CustomerCardWithLoyalty() {
         <p className="text-xs text-bv-red-600 bg-white rounded p-2">
           Selected Patient: <span className="font-semibold">{store.patient.name}</span>
         </p>
+      )}
+
+      {editOpen && store.customer && (
+        <EditCustomerModal
+          customer={store.customer as any}
+          onClose={() => setEditOpen(false)}
+          onSaved={(fields) => {
+            // Merge the saved fields into the bill's customer IN PLACE.
+            // Never via store.setCustomer — that action resets the selected
+            // patient and prescription, which would silently unlink the Rx
+            // from a half-built optical bill.
+            const defined = Object.fromEntries(
+              Object.entries(fields).filter(([, v]) => v !== undefined),
+            );
+            usePOSStore.setState((s: any) => ({
+              customer: s.customer ? { ...s.customer, ...defined } : s.customer,
+            }));
+          }}
+        />
       )}
     </div>
   );

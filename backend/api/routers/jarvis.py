@@ -3399,7 +3399,7 @@ async def pixel_audit_history(
     # Resolved the same way PIXEL resolves it (Settings -> Integrations first,
     # then PAGESPEED_API_KEY) so this readout cannot disagree with the agent.
     pagespeed_ready = _is_pagespeed_available()
-    frontend_url = _os.getenv("FRONTEND_BASE_URL", "https://ims-2-0-railway.vercel.app")
+    frontend_url = _os.getenv("FRONTEND_BASE_URL", "https://app.uniparallel.com")
 
     if col is None:
         return {

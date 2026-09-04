@@ -1,145 +1,140 @@
 /**
- * Page object for the POS condensed checkout (Quick Sale path).
+ * Page object for the one-surface till at /pos/new (BillingSurface.tsx).
  *
- * The condensed 3-step grouping is the SOLE checkout flow since PR #783/#790
- * (the classic 4-step wizard was removed). For a QUICK SALE the groups are
- *   Customer -> Products -> Payment
- * — there is NO Review step (QUICK_STEPS parity: the review panel only exists
- * inside the merged "Pay & Review" group of a prescription order).
+ * Everything is on ONE viewport-locked screen -- no wizard, no Continue:
+ * salesperson chip + Hold / Held / Walkout strip on top, customer + Rx and
+ * the scan/search row on the left, cart + tenders + "Complete sale" on the
+ * right. A finished sale swaps the surface for SaleCompleteScreen, which
+ * prints the SERVER's tax invoice (GET /orders/{id}/invoice.pdf). There is no
+ * client-side invoice modal any more, so invoice assertions read the same
+ * document through ApiClient.getInvoice, not the DOM.
  *
- * Totals the customer sees before Payment therefore live in the CART SIDEBAR
- * (right column, `aside.pos-cart-col`): Subtotal / GST / "Total (incl. GST)".
+ * Owner rule: EVERY bill needs a customer -- there is no walk-in button. The
+ * seed creates no customers, so a spec creates one through "+ New customer"
+ * (the same AddCustomerModal the till uses for a first-time buyer).
  *
- * Selectors are role/label-based and match POSLayout.tsx / POSCart.tsx /
- * POSPayment.tsx / POSInvoice.tsx as they exist on origin/main.
+ * Selectors are role/label-based and match BillingSurface / SalespersonPicker
+ * (compact) / AddCustomerModal / ProductResultsStrip / POSCart / POSPayment /
+ * SaleCompleteScreen as they exist on origin/main.
  */
 import { type Page, type Locator, expect } from '@playwright/test';
 
+/** A fresh 10-digit Indian mobile (leading 9) per call, so a re-run never
+ *  trips the one-person-one-record 409 on the customer create door. */
+export function uniqueMobile(): string {
+  return '9' + Date.now().toString().slice(-9);
+}
+
 export class PosPage {
   readonly page: Page;
+  /** Compact salesperson chip in the bill strip. Manager-tier only, and the
+   *  e2e user is SUPERADMIN; a sales-floor login gets no picker at all. */
   readonly salespersonSelect: Locator;
-  readonly continueButton: Locator;
-  readonly completeOrderButton: Locator;
-  /** Right cart column (inline on desktop) — scopes the totals rows. */
-  readonly cart: Locator;
+  /** The scan / search row (BarcodeScanner). Also the route-ready signal. */
+  readonly scanInput: Locator;
+  readonly completeSaleButton: Locator;
 
   constructor(page: Page) {
     this.page = page;
-    this.salespersonSelect = page.getByLabel('Select salesperson');
-    // Bottom action bar CTA — "Continue" on every input group except the
-    // final one, where it reads "Complete order" (POSLayout pos-footer).
-    this.continueButton = page.getByRole('button', { name: 'Continue' });
-    this.completeOrderButton = page.getByRole('button', { name: 'Complete order' });
-    this.cart = page.locator('aside.pos-cart-col');
+    this.salespersonSelect = page.getByLabel('Salesperson', { exact: true });
+    this.scanInput = page.getByPlaceholder(/Scan barcode/);
+    this.completeSaleButton = page.getByRole('button', { name: 'Complete sale', exact: true });
   }
 
   async goto() {
-    await this.page.goto('/pos', { waitUntil: 'domcontentloaded' });
-    // Step 1 renders the salesperson picker once the store context is ready.
-    await expect(this.salespersonSelect).toBeVisible();
+    await this.page.goto('/pos/new', { waitUntil: 'domcontentloaded' });
+    // Same "the register is up" selector fixtures/routes.ts uses for /pos/new.
+    await expect(this.scanInput).toBeVisible();
   }
 
-  /** Step 1: pick the first real salesperson and create a walk-in customer. */
-  async selectFirstSalespersonAndWalkin() {
-    // Wait for staff to load (the picker shows "Loading staff…" until then),
-    // then pick the first non-placeholder option by value.
+  /** Pick the first real salesperson once the store's staff list has loaded
+   *  (the chip shows a single placeholder option until then). */
+  async pickFirstSalesperson() {
     await expect
       .poll(async () => this.salespersonSelect.locator('option').count())
       .toBeGreaterThan(1);
-    const firstRealValue = await this.salespersonSelect
-      .locator('option')
-      .nth(1)
-      .getAttribute('value');
-    await this.salespersonSelect.selectOption(firstRealValue!);
-
-    // The CUSTOMER button (not the sidebar "+1 walk-in" footfall button).
-    // Picking it also forces sale_type = quick_sale.
-    await this.page
-      .getByRole('button', { name: 'Walk-in (Quick Sale only)' })
-      .click();
-    // Confirm the selected-customer CARD rendered. "Walk-in Customer" also
-    // appears in the step-indicator subtitle (a <div>), so scope to the card's
-    // <p> (paragraph role) to avoid a strict-mode 2-element match.
-    await expect(
-      this.page.getByRole('paragraph').filter({ hasText: /^Walk-in Customer$/ })
-    ).toBeVisible();
-
-    await this.continueButton.click();
-  }
-
-  /** Step 2 (Products): add a product tile by visible name. */
-  async addProductByName(name: string) {
-    const tile = this.page.getByRole('button', { name: new RegExp(escapeRe(name)) });
-    await expect(tile.first()).toBeVisible();
-    await tile.first().click();
+    const value = await this.salespersonSelect.locator('option').nth(1).getAttribute('value');
+    await this.salespersonSelect.selectOption(value!);
   }
 
   /**
-   * Leave the Products step. For a quick sale this lands DIRECTLY on the
-   * Payment step (no Review group exists — QUICK_STEPS parity).
+   * "+ New customer" -> AddCustomerModal -> Create Customer. Resolves once the
+   * customer card is on the bill (its Change button is the signal: it only
+   * renders for a selected customer).
    */
-  async continueFromProducts() {
-    await this.continueButton.click();
+  async createCustomer(name = 'E2E Buyer', mobile = uniqueMobile()) {
+    await this.page.getByRole('button', { name: '+ New customer' }).click();
+    const modal = this.page.locator('div.fixed.inset-0', {
+      has: this.page.getByRole('heading', { name: 'Add New Customer' }),
+    });
+    await expect(modal).toBeVisible();
+    await modal.getByPlaceholder('Enter name').fill(name);
+    // The customer's own Mobile field comes before any family-member row's.
+    await modal.getByPlaceholder('9876543210').first().fill(mobile);
+    await modal.getByRole('button', { name: 'Create Customer' }).click();
+    await expect(modal).toHaveCount(0);
+    await expect(this.page.getByRole('button', { name: 'Change', exact: true })).toBeVisible();
   }
 
   /**
-   * Locate a cart-sidebar totals row value by its exact label.
-   * Each row is `<div><span>label</span><span class="figure">₹value</span></div>`
-   * (POSCart.tsx totals footer). The value span carries the ₹-prefixed,
-   * whole-rupee en-IN formatted amount (e.g. "₹2,179").
+   * Type the SKU into the scan row and tap the product card in the results
+   * strip. Enter on a hyphenated SKU is a MANUAL search (BarcodeScanner only
+   * treats 8+ plain alphanumerics as a scan), and product search matches
+   * brand / model / sku / variant / barcode -- never the display name -- so
+   * the SKU is the handle and the name is what the card and cart line show.
+   * Resolves once the cart line exists.
+   */
+  async addProduct(product: { sku: string; name: string }) {
+    await this.scanInput.fill(product.sku);
+    await this.scanInput.press('Enter');
+    // The strip card carries the SKU in its second line; the cart's own
+    // "Remove <name>" button also contains the name, so filter on the SKU.
+    await this.page
+      .getByRole('button', { name: product.name })
+      .filter({ has: this.page.getByText(product.sku) })
+      .first()
+      .click();
+    await expect(
+      this.page.getByRole('button', { name: `Remove ${product.name}`, exact: true })
+    ).toBeVisible();
+  }
+
+  /**
+   * A cart-totals row value by its exact label. Each row is
+   * `<div><span>label</span><span class="figure">₹value</span></div>`
+   * (POSCart totals footer), whole-rupee en-IN, e.g. "₹2,179".
    */
   cartRowValue(label: 'Subtotal' | 'GST' | 'Total (incl. GST)'): Locator {
-    return this.cart
-      .locator('div', { has: this.page.getByText(label, { exact: true }) })
-      .last()
-      .locator('span')
-      .last();
+    return this.page.getByText(label, { exact: true }).locator('..').locator('span').last();
   }
 
-  /** Step 4 (Payment): the "Total Due (incl. GST)" headline amount. */
+  /** The payment card's "Total Due (incl. GST)" headline amount. */
   get totalDueHeadline(): Locator {
     return this.page.locator('p.text-4xl');
   }
 
-  /** Pay the whole balance in cash, then finalise the order.
-   *
-   * The one-tap "Full Cash" button is gone: it duplicated the tender chips in
-   * the payment card, which now prefill the full remaining balance. Same two
-   * taps a cashier makes -- pick Cash, press Add. */
-  async payFullCashAndComplete() {
+  /** Pay the whole balance in cash: pick Cash (prefills the balance), Add. */
+  async payFullCash() {
     await this.page.getByRole('button', { name: 'Cash', exact: true }).click();
     await this.page.getByRole('button', { name: 'Add', exact: true }).click();
-    await expect(
-      this.page.getByText(/Payment complete/i)
-    ).toBeVisible();
-    await expect(this.completeOrderButton).toBeEnabled();
-    await this.completeOrderButton.click();
+    await expect(this.page.getByText(/Payment complete/)).toBeVisible();
   }
 
-  /** Step 5 (Complete): wait for success and return the ORD-... number. */
-  async waitForOrderCreated(): Promise<string> {
-    await expect(
-      this.page.getByRole('heading', { name: 'Order Created!' })
-    ).toBeVisible({ timeout: 30_000 });
-    const orderLine = this.page.getByText(/Order #ORD-/);
-    await expect(orderLine).toBeVisible();
-    const text = (await orderLine.textContent()) ?? '';
+  /** "Complete sale" -> SaleCompleteScreen. Returns the ORD-... number it
+   *  shows in its "Sale complete" banner. */
+  async completeSale(): Promise<string> {
+    await expect(this.completeSaleButton).toBeEnabled();
+    await this.completeSaleButton.click();
+    await expect(this.page.getByText('Sale complete', { exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
+    const line = this.page.getByText(/ORD-/).first();
+    await expect(line).toBeVisible();
+    const text = (await line.textContent()) ?? '';
     const match = text.match(/ORD-[A-Z0-9-]+/);
     if (!match) {
       throw new Error(`Could not parse order number from "${text}"`);
     }
     return match[0];
   }
-
-  /** Open the GST Tax Invoice modal from the Complete step. */
-  async openTaxInvoice() {
-    await this.page.getByRole('button', { name: 'Tax Invoice' }).click();
-    await expect(
-      this.page.getByRole('heading', { name: 'GST Tax Invoice' })
-    ).toBeVisible();
-  }
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

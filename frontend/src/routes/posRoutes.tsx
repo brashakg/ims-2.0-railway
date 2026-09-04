@@ -1,10 +1,18 @@
-// POS routes. Moved verbatim from App.tsx (route-registry split);
-// paths, elements and role gates are unchanged.
+// POS routes. /pos is a redirect to the one-surface till at /pos/new since
+// the legacy wizard was retired (owner, 2026-09-03/04); every other path and
+// role gate is as it was when this moved out of App.tsx.
 import { lazy } from 'react';
-import { Route } from 'react-router-dom';
+import { Navigate, Route, useLocation } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 
-const POSPage = lazy(() => import('../pages/pos/POSPage').then(m => ({ default: m.POSPage })));
+/** /pos -> /pos/new, query string intact. The legacy wizard till is retired
+    (owner, 2026-09-03); staff bookmarks and the walkouts deep-link
+    (walkouts/ResultPanel: ?customer_id&walkout_id&return_to) keep working
+    forever. No role gate here -- /pos/new carries the same one. */
+function LegacyPosRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/pos/new${search}`} replace />;
+}
 const FootfallPage = lazy(() => import('../pages/pos/FootfallPage').then(m => ({ default: m.FootfallPage })));
 const BillingSurface = lazy(() => import('../pages/pos/next/BillingSurface'));
 const DeliverySurface = lazy(() => import('../pages/pos/next/DeliverySurface'));
@@ -12,22 +20,12 @@ const GeneralCounterSurface = lazy(() => import('../pages/pos/next/GeneralCounte
 
 export const posRoutes = (
   <>
-    {/* POS */}
-    <Route
-      path="pos"
-      element={
-        <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
-        >
-          <POSPage />
-        </ProtectedRoute>
-      }
-    />
+    <Route path="pos" element={<LegacyPosRedirect />} />
 
     {/* POS Wave 4: the general (non-optical) counter - sunglasses, solutions,
         accessories. No Rx panel and no workshop job; the same order API, GST
         math and discount caps. Prompts back to /pos/new when the sale turns
-        out to be optical, so that route must stay. Same role gate as /pos. */}
+        out to be optical, so that route must stay. Same role gate as /pos/new. */}
     <Route
       path="pos/counter"
       element={
@@ -39,9 +37,7 @@ export const posRoutes = (
       }
     />
 
-    {/* POS Wave 4: the new one-surface register, building at /pos/new.
-        Same role gate as /pos. Swaps onto /pos (with the classic surface
-        moving to /pos/classic) only when the owner calls the switch. */}
+    {/* POS Wave 4: the one-surface register. /pos redirects here. */}
     <Route
       path="pos/new"
       element={

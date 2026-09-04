@@ -288,6 +288,10 @@ _token_blacklist = TokenBlacklist()
 # SCHEMAS
 # ============================================================================
 
+# Device-gate assertion schema (services/device_gate.py imports THIS module
+# only lazily inside functions, so this top-level import cannot cycle).
+from api.services.device_gate import DeviceAssertion as _DeviceAssertion
+
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=3)
@@ -295,6 +299,10 @@ class LoginRequest(BaseModel):
     store_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # ADDITIVE (device gate, owner rulings 2026-09-02): WebAuthn assertion
+    # proving this is a SUPERADMIN-approved device. Ignored while
+    # DEVICE_GATE_MODE=off (the default); old clients simply omit it.
+    device_assertion: Optional["_DeviceAssertion"] = None
 
 
 class LoginResponse(BaseModel):
@@ -600,6 +608,17 @@ async def get_current_user(
             )
 
         payload = decode_token(token)
+        # PURPOSE-SCOPED tokens (e.g. the device-enrolment ticket minted by
+        # the device gate) are signed with the same key but are NOT sessions:
+        # accepting one here would let a device-REJECTED login reach every
+        # AUTHENTICATED route for the ticket's lifetime -- a bypass of the
+        # very gate that minted it. No real access token carries `purpose`.
+        if payload.get("purpose"):
+            raise HTTPException(
+                status_code=401,
+                detail="Not an access token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         # F18: a valid signature is not enough -- the account behind it must
         # still be active. See the block comment above for the cost and the
         # deliberate fail-soft behaviour when the lookup cannot be made.
@@ -873,6 +892,60 @@ async def login(request: LoginRequest, req: Request = None):
         )
         raise HTTPException(status_code=403, detail="User account is disabled")
 
+    # Normalize deprecated role aliases (SALES_CASHIER -> SALES_STAFF, backlog
+    # #12) BEFORE the device gate below, so exemption is judged on the merged
+    # survivor roles. The same normalized list feeds the JWT + response later.
+    from api.services.user_roles import normalize_roles
+
+    user_roles_normalized = normalize_roles(user.get("roles", []))
+
+    # ------------------------------------------------------------------
+    # DEVICE GATE (owner rulings 2026-09-02) -- DARK until DEVICE_GATE_MODE
+    # is armed (default off). Staff sign in only on SUPERADMIN-approved
+    # devices; ADMIN and SUPERADMIN are NEVER gated (check_login exempts
+    # them before touching the DB, so the owner can always reach the very
+    # screen that approves devices -- the invariant).
+    #
+    # Placed AFTER password + is_active checks on purpose:
+    #   * a wrong password stays a plain 401 and still feeds the limiter;
+    #   * a device rejection means the password WAS correct, so it must NOT
+    #     touch the rate limiter at all -- otherwise retrying from an
+    #     unapproved device (or replaying a colleague's known password)
+    #     would manufacture a lockout on the till (a lockout oracle).
+    # The 403 carries a short-lived purpose-scoped ENROLMENT TICKET so the
+    # frontend can offer "register this device"; get_current_user refuses
+    # purpose-bearing tokens, so the ticket is never a session.
+    # ------------------------------------------------------------------
+    from api.services import device_gate
+
+    _gate_reason = device_gate.check_login(
+        user_roles_normalized, request.device_assertion
+    )
+    if _gate_reason is not None:
+        _audit_auth_event(
+            action="login_device_rejected",
+            user_id=user.get("user_id"),
+            username=user.get("username", request.username),
+            ip_address=client_ip,
+            severity="WARNING",
+            detail=_gate_reason,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "DEVICE_NOT_APPROVED",
+                "message": (
+                    "This device is not approved for sign-in. Register it "
+                    "and ask the owner to approve it, or use an approved "
+                    "store device."
+                ),
+                "enroll_ticket": device_gate.mint_enroll_ticket(
+                    user.get("user_id", user.get("_id", "")),
+                    user.get("username", request.username),
+                ),
+            },
+        )
+
     # Geo-fence validation: a geo_restricted user must log in within range of an
     # allowed coordinate. Allowed coordinates are the union of the user's
     # explicit allowed_coordinates AND the geo-coordinates of the store(s) they
@@ -956,13 +1029,8 @@ async def login(request: LoginRequest, req: Request = None):
     # read by the frontend to HIDE/route-block modules, never to grant one.
     module_access = user.get("module_access") or {}
 
-    # Normalize deprecated role aliases (SALES_CASHIER -> SALES_STAFF, backlog
-    # #12) so both the freshly-issued JWT and the user object returned to the
-    # frontend carry the merged survivor role even for a legacy DB user that was
-    # never migrated. decode_token applies the same map on every subsequent read.
-    from api.services.user_roles import normalize_roles
-
-    user_roles_normalized = normalize_roles(user.get("roles", []))
+    # (roles were normalized once, above the device gate --
+    # user_roles_normalized feeds both the JWT and the response user object.)
 
     # Create token
     token_data = {
@@ -1537,3 +1605,15 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
     new_token, _expires_in = _mint_access_token(token_data)
 
     return {"access_token": new_token, "active_store_id": store_id}
+
+
+# ============================================================================
+# DEVICE ENROLMENT / APPROVAL SUB-ROUTER (routers/devices.py)
+# ============================================================================
+# Included HERE (bottom of the module, after every name devices.py needs is
+# defined) rather than in main.py: the device gate is part of authentication,
+# and this keeps the whole feature inside the auth mount. Routes land at
+# /api/v1/auth/devices/*.
+from .devices import router as _devices_router  # noqa: E402
+
+router.include_router(_devices_router, prefix="/devices", tags=["Devices"])

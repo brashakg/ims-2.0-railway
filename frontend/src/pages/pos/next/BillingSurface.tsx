@@ -20,7 +20,7 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
-import { useHeldBills } from '../../../components/pos/useHeldBills';
+import { HeldBillsControls } from '../../../components/pos/HeldBillsControls';
 import { addManualLensToCart, LensDetailsModal } from '../../../components/pos/LensDetailsModal';
 import { NewPrescriptionAtTill } from '../../../components/pos/NewPrescriptionAtTill';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
@@ -34,8 +34,12 @@ import { PrescriptionSelectModal } from '../../../components/pos/PrescriptionSel
 import { AddCustomerModal } from '../../../components/customers/AddCustomerModal';
 import { SalespersonPicker } from '../../../components/pos/SalespersonPicker';
 import { PosWidgets } from './PosWidgets';
-import { CustomerSearchBar, createAndSelectCustomer } from '../../../components/pos/CustomerSearchBar';
-import { submitPosOrder } from '../../../components/pos/submitOrder';
+import {
+  CustomerSearchBar,
+  createAndSelectCustomer,
+  selectCustomerHit,
+} from '../../../components/pos/CustomerSearchBar';
+import { submitPosOrder, workshopItemsOf } from '../../../components/pos/submitOrder';
 import SaleCompleteScreen from './SaleCompleteScreen';
 import ProductResultsStrip from './ProductResultsStrip';
 import DeliveryOptionsRow from './DeliveryOptionsRow';
@@ -56,13 +60,8 @@ export function BillingSurface() {
   const [discountLine, setDiscountLine] = useState<CartLineItem | null>(null);
   const [rxPickerOpen, setRxPickerOpen] = useState(false);
   const [addCustomerOpen, setAddCustomerOpen] = useState(false);
-  const [recallOpen, setRecallOpen] = useState(false);
   const [lensModalOpen, setLensModalOpen] = useState(false);
   const [newRxOpen, setNewRxOpen] = useState(false);
-  // Hold / recall, shared with the classic till. The store ALSO parks a cart
-  // automatically when the screen idles, so without this the new POS could
-  // strand that work with no way to bring it back.
-  const held = useHeldBills(store, user?.id || '');
   const [productQuery, setProductQuery] = useState('');
   // The finished sale, held so the completion screen can print and send
   // against it. Cleared by Done, which also resets the till for the next
@@ -71,6 +70,7 @@ export function BillingSurface() {
     orderId: string;
     orderNumber?: string;
     jobId?: string;
+    fittingCoating?: string;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
 
@@ -128,7 +128,22 @@ export function BillingSurface() {
           : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
     try {
-      const res = await submitPosOrder(store, idempotencyKeyRef.current);
+      // sale_type drives the WORKSHOP JOB: submitOrder creates one only for a
+      // 'prescription_order', and only the classic till ever set it, so an Rx
+      // sale rung here reached the lab as nothing at all. It is DERIVED here,
+      // never asked: an Rx on the bill plus something the lab makes or fits
+      // (a frame/sunglass or a lens line -- the job creator's own predicate)
+      // is a prescription order; anything else is a quick sale. A CL-only or
+      // accessory-only bill with an Rx attached stays a quick sale, so it can
+      // never dead-end on "requires a lens item" with no switch to flip.
+      const live = usePOSStore.getState();
+      const { frameItem, lensItem } = workshopItemsOf(live.cart || []);
+      live.setSaleType(
+        live.prescription && (frameItem || lensItem) ? 'prescription_order' : 'quick_sale',
+      );
+      // Read the LIVE store, not this render's snapshot -- the write above
+      // landed in the store, while `store` is the value from render time.
+      const res = await submitPosOrder(usePOSStore.getState(), idempotencyKeyRef.current);
       if (!res.ok) {
         setErrorMsg(res.error || 'Failed to create order');
         return;
@@ -144,8 +159,22 @@ export function BillingSurface() {
           orderId: res.orderId,
           orderNumber: res.orderNumber,
           jobId: res.fittingJobId,
+          fittingCoating: res.fittingCoating,
         });
       }
+    } catch (e: any) {
+      // Same silent-failure shape the general counter was reported with: a
+      // `try/finally` and no `catch` means anything that THROWS escapes as an
+      // unhandled rejection, the spinner clears, and the till looks like the
+      // button did nothing. submitPosOrder returns its refusals rather than
+      // throwing, so what reaches here is the unexpected kind -- the kind that
+      // must never be silent on a screen that takes money.
+      const detail = e?.response?.data?.detail;
+      setErrorMsg(
+        typeof detail === 'string'
+          ? detail
+          : `Could not complete the sale: ${e?.message || 'unexpected error'}. Nothing was charged.`,
+      );
     } finally {
       store.setProcessing(false);
     }
@@ -177,31 +206,11 @@ export function BillingSurface() {
           </span>
           <SalespersonPicker compact />
           <div className="flex-1" />
-          <button
-            type="button"
-            onClick={() => {
-              if ((store.cart || []).length === 0) return;
-              held.holdCurrentBill();
-            }}
-            disabled={(store.cart || []).length === 0}
-            title="Put this bill aside and serve the next customer"
-            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
-          >
-            Hold bill
-          </button>
-          <button
-            type="button"
-            onClick={() => setRecallOpen(true)}
-            title="Bring back a bill you put aside"
-            className="inline-flex items-center gap-1.5 px-2.5 min-h-[36px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
-          >
-            Held
-            {held.heldBills.length > 0 && (
-              <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold">
-                {held.heldBills.length}
-              </span>
-            )}
-          </button>
+          {/* Hold / recall, shared with the general counter (HeldBillsControls).
+              The store ALSO parks a cart automatically when the screen idles,
+              so without this a till could strand that work with no way to
+              bring it back. */}
+          <HeldBillsControls />
           <WalkinWalkoutControls />
           <span className="text-[11px] text-gray-500">
             {(store.cart || []).length} item{(store.cart || []).length === 1 ? '' : 's'}
@@ -214,6 +223,7 @@ export function BillingSurface() {
           orderId={completed.orderId}
           orderNumber={completed.orderNumber}
           jobId={completed.jobId}
+          fittingCoating={completed.fittingCoating}
           salespersonId={store.salesperson_id}
           salespersonName={store.salesperson_name}
           onDone={() => {
@@ -247,7 +257,10 @@ export function BillingSurface() {
                 rows are actually useful. */}
             <div className="rounded-xl border border-gray-200 bg-white p-3 shrink-0 lg:max-h-[45%] lg:overflow-y-auto">
               {store.customer ? (
-                <CustomerCardWithLoyalty />
+                /* Change = clear the pick (customer, member AND Rx go together:
+                   setCustomer(null) drops all three). Without it a wrong pick
+                   could only be undone by reloading the page. */
+                <CustomerCardWithLoyalty onChange={() => store.setCustomer(null)} />
               ) : (
                 <div>
                   <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500 mb-1.5">
@@ -265,7 +278,7 @@ export function BillingSurface() {
                     <button
                       type="button"
                       onClick={() => setAddCustomerOpen(true)}
-                      className="shrink-0 min-h-[32px] px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                      className="shrink-0 min-h-[44px] px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50"
                     >
                       + New customer
                     </button>
@@ -418,6 +431,24 @@ export function BillingSurface() {
             <div className="lg:min-h-0 lg:overflow-y-auto flex flex-col gap-3">
               <BillDiscountCard />
               <StepPayment />
+              {/* A DEPOSIT sale. submitOrder refuses a partly-paid bill unless
+                  is_advance_payment, and only the classic till's review panel
+                  could set it -- so this surface could not create the very
+                  order the delivery counter exists to collect the balance on. */}
+              <button
+                type="button"
+                aria-pressed={store.is_advance_payment}
+                onClick={() => store.setAdvancePayment(!store.is_advance_payment)}
+                title="Take a deposit now; the delivery counter collects the rest at handover"
+                className={
+                  'shrink-0 min-h-[44px] px-3 rounded-lg border text-sm font-medium text-left ' +
+                  (store.is_advance_payment
+                    ? 'bg-amber-50 border-amber-400 text-amber-900'
+                    : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50')
+                }
+              >
+                Advance only — collect the balance on delivery
+              </button>
             </div>
             <button
               type="button"
@@ -447,51 +478,6 @@ export function BillingSurface() {
         />
       )}
 
-      {recallOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => setRecallOpen(false)}>
-          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[80dvh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-3.5 border-b border-gray-200 flex items-center gap-3">
-              <h2 className="text-base font-semibold flex-1">Held bills</h2>
-              <button onClick={() => setRecallOpen(false)} aria-label="Close" className="text-gray-500 hover:text-gray-900">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            {held.heldBills.length === 0 ? (
-              <div className="p-6 text-center text-sm text-gray-500">
-                Nothing on hold. Use <span className="font-medium text-gray-700">Hold bill</span> to
-                put the current sale aside without losing it.
-              </div>
-            ) : (
-              <div className="p-3 space-y-2">
-                {held.heldBills.map((b) => (
-                  <div key={b.id} className="flex items-center gap-3 rounded-xl border border-gray-200 p-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium truncate">{b.customer || 'No customer'}</div>
-                      <div className="text-[11px] text-gray-500">
-                        {b.items} item{b.items === 1 ? '' : 's'} · {'₹'}{Math.round(b.total || 0).toLocaleString('en-IN')}
-                        {b.auto ? ' · parked automatically' : ''}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => { held.discardBill(b.id); }}
-                      className="min-h-[36px] px-2.5 rounded-lg border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
-                    >
-                      Discard
-                    </button>
-                    <button
-                      onClick={() => { if (held.recallBill(b.id)) setRecallOpen(false); }}
-                      className="min-h-[36px] px-3 rounded-lg bg-gray-900 text-white text-[11px] font-semibold"
-                    >
-                      Recall
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Mounted unconditionally: the whole point is to reach it when there
           is NO customer on the bill yet. It renders nothing while closed. */}
       <AddCustomerModal
@@ -499,6 +485,21 @@ export function BillingSurface() {
         onClose={() => setAddCustomerOpen(false)}
         onSave={async (data) => {
           await createAndSelectCustomer(store, data);
+          setAddCustomerOpen(false);
+        }}
+        /* The number belongs to a family member on another account: the modal
+           offers promote-to-own-account / open-existing and hands back the
+           resulting customer here, so the SALE CONTINUES on this till instead
+           of navigating away to /customers. Same selector the search bar uses. */
+        onSelectExisting={(c: any) => {
+          selectCustomerHit(store, {
+            kind: 'account',
+            customer: c,
+            accountName: c?.name || '',
+            displayName: c?.name || '',
+            phone: c?.phone || c?.mobile || '',
+            key: String(c?.id || c?.customer_id || ''),
+          });
           setAddCustomerOpen(false);
         }}
       />

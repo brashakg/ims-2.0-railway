@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 PAGESPEED_URL = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 FRONTEND_BASE_URL = os.getenv(
     "FRONTEND_BASE_URL",
-    "https://ims-2-0-railway.vercel.app",
+    "https://app.uniparallel.com",
 )
 AUDIT_TIMEOUT = float(os.getenv("PAGESPEED_TIMEOUT", "60.0"))
 

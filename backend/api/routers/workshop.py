@@ -324,6 +324,11 @@ SCAN_GATE_MESSAGES = {
         "QC not passed for this job - complete QC (or record an audited waiver) "
         "before marking it Ready or handing it to the patient."
     ),
+    "PAYMENT_DUE": (
+        "Money is still due on this order - collect the balance first, or a "
+        "manager (or a manager-approved credit-delivery PIN token) must "
+        "authorise handing it over on credit."
+    ),
 }
 
 # PATIENT-FACING statuses. READY parks the job on the pickup shelf; DELIVERED is
@@ -694,11 +699,94 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
             )
 
 
-def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional[str]:
+def _resolve_job_order(job: dict) -> Optional[dict]:
+    """The ORDER a workshop job bills under, or None. Infrastructure fail-soft
+    (no order repo / lookup error -> None); a job with no order_id also
+    resolves None (legacy / anomalous rows - logged by the caller)."""
+    order_id = (job or {}).get("order_id")
+    if not order_id:
+        return None
+    try:
+        repo = get_order_repository()
+    except Exception:  # noqa: BLE001 -- infrastructure fail-soft
+        return None
+    if repo is None:
+        return None
+    try:
+        found = repo.find_by_id(order_id)
+    except Exception:  # noqa: BLE001 -- infrastructure fail-soft
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def gate_job_handover_payment(
+    job: dict,
+    current_user: dict,
+    approval_token: Optional[str],
+    db=None,
+) -> None:
+    """MONEY GATE for handing a workshop JOB to the customer (-> DELIVERED).
+
+    A job going DELIVERED is a physical handover of the order's goods, so it
+    must clear the SAME money rule as the Orders-screen deliver door: at least
+    partial payment on record, and a balance still due needs a manager or a
+    manager-approved CREDIT_DELIVERY token (see services.delivery_gate - the
+    single implementation; never re-derive it here).
+
+    Skip rules (each one deliberate):
+      * no order repo / lookup error -> infrastructure fail-soft, pass
+        (mirrors assert_linked_job_qc_cleared: an outage must not strand a
+        paid customer; prod fails loud on DB-down anyway).
+      * order not found / job carries no order_id -> pass with a LOUD log
+        (data anomaly - jobs are created against a validated order, so this
+        is a legacy shape, and blocking it would have no remedy).
+      * order already DELIVERED -> pass: the handover (and its credit
+        decision, if any) already happened at the counter door and is
+        audited there; re-blocking the job record buys zero safety and would
+        strand it forever for non-manager roles.
+
+    Raises HTTPException (400 unpaid / 403 credit) when the rule bites."""
+    order = _resolve_job_order(job)
+    if order is None:
+        if (job or {}).get("order_id"):
+            logger.warning(
+                "[WORKSHOP] money gate: order %s for job %s not resolvable - "
+                "payment check skipped",
+                (job or {}).get("order_id"), (job or {}).get("job_id"),
+            )
+        return
+    if (order.get("status") or "").strip().upper() == "DELIVERED":
+        return
+    from ..services.delivery_gate import assert_handover_payment
+
+    assert_handover_payment(
+        order,
+        approval_token=approval_token,
+        current_user=current_user,
+        db=db,
+    )
+
+
+def evaluate_scan_transition_gate(
+    db,
+    job: dict,
+    target_status: str,
+    current_user: Optional[dict] = None,
+    approval_token: Optional[str] = None,
+) -> Optional[str]:
     """Return None if a SCAN may advance `job` to `target_status`, else a block
     code (a key of SCAN_GATE_MESSAGES).
 
-    Pure decision: never mutates state, never raises for a gate failure. This is
+    current_user / approval_token feed the DELIVERED money gate only: a caller
+    that omits them (the lab-station PICKUP scan cannot supply either) is
+    treated as never-privileged, so its scan BLOCKS whenever money is due -
+    fail-closed; the remedy is the Orders deliver door or the labels
+    scan-advance, which do carry the caller's roles/token.
+
+    Near-pure decision: never mutates job state and never raises for a gate
+    failure. The ONE side effect is the money leg's single-use CREDIT_DELIVERY
+    token consume (same ordering hazard as the counter door: the token is
+    spent before the status write). This is
     the single source of truth for the scan-side patient-safety gates and mirrors
     the update_job_status PATCH gates by reusing the SAME rule sources (see the
     section comment above).
@@ -740,6 +828,18 @@ def evaluate_scan_transition_gate(db, job: dict, target_status: str) -> Optional
     # PICKUP station's target) has to be in this set.
     if _is_patient_facing(target) and not _qc_cleared(job):
         return "QC_REQUIRED"
+
+    # MONEY GATE (owner ruling): the PICKUP scan lands straight on DELIVERED -
+    # a physical handover - so it must clear the SAME money rule as the
+    # Orders-screen deliver door. Same helper, never re-derived. A missing
+    # current_user is never-privileged (see docstring).
+    if target == "DELIVERED":
+        try:
+            gate_job_handover_payment(
+                job, current_user or {"roles": []}, approval_token, db=None
+            )
+        except HTTPException:
+            return "PAYMENT_DUE"
 
     return None
 
@@ -915,6 +1015,11 @@ class StatusBody(BaseModel):
     # transition.
     picked_up_by_name: Optional[str] = None
     picked_up_by_phone: Optional[str] = None
+    # CREDIT_DELIVERY approval token for the -> DELIVERED transition when the
+    # linked order still carries a balance and the caller is not a manager
+    # (owner ruling: credit delivery is PIN-gated). Same token the Orders
+    # deliver door accepts; ignored for any other transition.
+    approval_token: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -2016,6 +2121,19 @@ async def update_job_status(
                     f"via the QC endpoint) or be explicitly waived (qc_waived) "
                     f"first."
                 ),
+            )
+
+        # MONEY GATE (owner ruling): marking a job DELIVERED is the physical
+        # handover of the order's goods, so it must clear the SAME money rule
+        # as the Orders-screen deliver door - at least partial payment, and a
+        # balance still due needs a manager or a manager-approved
+        # CREDIT_DELIVERY token. WORKSHOP_ROLES includes WORKSHOP_STAFF, a role
+        # the owner's credit-delivery ruling deliberately excludes from taking
+        # that decision - the shared gate (services.delivery_gate via
+        # gate_job_handover_payment) is what enforces the exclusion. 400/403.
+        if status == "DELIVERED":
+            gate_job_handover_payment(
+                job, current_user, (body.approval_token if body else None)
             )
 
         # BUG-116d: a QC_FAILED -> IN_PROGRESS move is a rework. Cap it: once the

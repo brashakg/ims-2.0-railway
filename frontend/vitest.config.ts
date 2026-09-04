@@ -12,6 +12,11 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // 5s (the default) is not a correctness bound, it is a load bound: under
+    // parallel agents or a busy CI runner a dozen unrelated suites failed at
+    // 5.1-6.5s and all 1,246 passed alone at 20s. A genuine hang still fails.
+    testTimeout: 15000,
+    hookTimeout: 15000,
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],

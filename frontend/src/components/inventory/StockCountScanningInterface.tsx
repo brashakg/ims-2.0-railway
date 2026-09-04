@@ -6,11 +6,16 @@
 // S2 fix this panel posted to the same endpoint without a session, so the
 // server resolved the barcode, calculated a difference and threw it away --
 // which is why every completed count reported a perfect result.
+//
+// THE COUNT IS BLIND (owner ruling 2026-08-25): the server withholds every
+// expected quantity while the session is open, and this screen must not show
+// one from any source -- no "books say" column, no variance, no
+// green-on-match tell. Expected vs counted belongs to the variance review
+// AFTER submission.
 
 import { useState, useEffect, useCallback } from 'react';
 import { Barcode, AlertCircle, CheckCircle, Loader2, ListChecks } from 'lucide-react';
 import api, { inventoryApi } from '../../services/api';
-import clsx from 'clsx';
 
 interface Props {
   /** The in-progress count session every scan is written onto. Required:
@@ -23,24 +28,28 @@ interface Props {
 /** One line of the count SHEET: something this session expects to find.
  *  `counted_quantity: null` means nobody has answered for it yet -- a counted
  *  ZERO is a real answer (the style has walked entirely) and must not read as
- *  "not counted". */
+ *  "not counted".
+ *
+ *  THE COUNT IS BLIND (owner ruling 2026-08-25): while the session is open
+ *  the server withholds every expected quantity, so there is no
+ *  system_quantity here and this screen must never show "books say N", a
+ *  variance, or a matched/unmatched tell. Expected vs counted appears in the
+ *  variance review AFTER the count is submitted. */
 interface ExpectedLine {
   product_id: string;
   product_name: string;
   sku: string;
-  system_quantity: number;
   counted_quantity: number | null;
 }
 
+/** What a recording scan answers with. Deliberately NO system count and NO
+ *  variance: the session is open, so the count is blind. */
 interface ScanResult {
   barcode: string;
   product_id: string;
   product_name: string;
   sku: string;
-  system_count: number;
   physical_count: number;
-  variance: number;
-  variance_percent: number;
   notes?: string;
   count_id?: string;
   recorded?: boolean;
@@ -166,12 +175,6 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
     }
   };
 
-  const varianceColor = (variance: number) => {
-    if (variance === 0) return 'text-green-600';
-    if (variance > 0) return 'text-blue-600'; // More stock than system
-    return 'text-red-600'; // Less stock than system
-  };
-
   return (
     <div className="space-y-6">
       {/* THE COUNT SHEET. Every line the session expects, with a box to write
@@ -199,7 +202,6 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
               <thead className="bg-white border-b border-gray-200 sticky top-0">
                 <tr>
                   <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500">Product</th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">Books say</th>
                   <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">On the shelf</th>
                   <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">&nbsp;</th>
                 </tr>
@@ -211,7 +213,6 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
                       <p className="text-gray-900 text-xs font-medium">{line.product_name}</p>
                       <p className="text-gray-500 text-xs">{line.sku}</p>
                     </td>
-                    <td className="px-3 py-2 text-right text-gray-700">{line.system_quantity}</td>
                     <td className="px-3 py-2 text-right">
                       <input
                         type="number"
@@ -322,16 +323,14 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
         </div>
       </div>
 
-      {/* Last Scan Result */}
+      {/* Last scan: a SAVED acknowledgement only. The count is blind, so this
+          panel must never show a system count, a variance, or anything that
+          reads differently on a match. */}
       {result && (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
           <div className="flex items-start justify-between mb-3">
             <h4 className="font-semibold text-gray-900">Recorded</h4>
-            {result.variance === 0 ? (
-              <CheckCircle className="w-5 h-5 text-green-600" />
-            ) : (
-              <AlertCircle className="w-5 h-5 text-orange-600" />
-            )}
+            <CheckCircle className="w-5 h-5 text-gray-400" />
           </div>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
@@ -343,19 +342,8 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
               <span className="text-gray-700">{result.sku}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-gray-500">System Count:</span>
-              <span className="text-gray-700">{result.system_count}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Physical Count:</span>
+              <span className="text-gray-500">Counted:</span>
               <span className="text-gray-900 font-semibold">{result.physical_count}</span>
-            </div>
-            <div className="flex justify-between pt-2 border-t border-gray-200">
-              <span className="text-gray-500">Variance:</span>
-              <span className={clsx('font-semibold', varianceColor(result.variance))}>
-                {result.variance > 0 ? '+' : ''}
-                {result.variance} ({result.variance_percent}%)
-              </span>
             </div>
           </div>
         </div>
@@ -377,13 +365,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
                     Product
                   </th>
                   <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">
-                    System
-                  </th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">
-                    Physical
-                  </th>
-                  <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">
-                    Variance
+                    Counted
                   </th>
                 </tr>
               </thead>
@@ -396,17 +378,8 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
                     <td className="px-3 py-2">
                       <p className="text-gray-900 text-xs font-medium">{item.product_name}</p>
                     </td>
-                    <td className="px-3 py-2 text-right text-gray-700">
-                      {item.system_count}
-                    </td>
                     <td className="px-3 py-2 text-right text-gray-900 font-semibold">
                       {item.physical_count}
-                    </td>
-                    <td className={clsx(
-                      'px-3 py-2 text-right font-semibold',
-                      varianceColor(item.variance)
-                    )}>
-                      {item.variance > 0 ? '+' : ''}{item.variance}
                     </td>
                   </tr>
                 ))}

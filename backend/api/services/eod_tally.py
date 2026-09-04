@@ -1392,15 +1392,26 @@ def list_sessions(
 
 
 # Fields a SALES_CASHIER / CASHIER must NEVER see before the manager locks
-# (blind enforcement at the DATA layer, not just the UI).
+# (blind enforcement at the DATA layer, not just the UI). A hidden column is
+# defeated by a devtools tab, so everything DERIVED from the expected-cash
+# computation is withheld from the RESPONSE BODY itself: the figures, the
+# verdict, the auto-pulled payout leg, and the advisories (in particular
+# ``negative_expected_advisory``, which literally discloses the sign of the
+# expected figure).
 _CASHIER_HIDDEN_FIELDS = (
     "expected_cash_paisa",
     "variance_paisa",
     "variance_status",
     "cash_sales_paisa",
     "cash_refunds_paisa",
+    "cash_payouts_paisa",
+    "cash_payouts_source",
     "by_mode",
     "tolerance_paisa",
+    "negative_expected_advisory",
+    "refund_double_entry_advisory",
+    "off_till_expense_advisory",
+    "variance_note",
 )
 
 

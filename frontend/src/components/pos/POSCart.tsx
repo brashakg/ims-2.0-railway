@@ -132,7 +132,7 @@ export function CartSidebar({
               <button
                 onClick={() => store.removeFromCart(item.id)}
                 className="btn icon ghost sm"
-                style={{ marginLeft: 6 }}
+                style={{ marginLeft: 6, minWidth: 44, minHeight: 44 }}
                 aria-label={`Remove ${item.name}`}
               >
                 <X className="w-3.5 h-3.5" />
@@ -147,16 +147,18 @@ export function CartSidebar({
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {/* 44px minimum: these run on shop iPads. They were 22x22 —
+                    half a fingertip — on every surface. */}
                 <button
                   onClick={() => store.updateQuantity(item.id, item.quantity - 1)}
                   style={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: 4,
+                    minWidth: 44,
+                    minHeight: 44,
+                    borderRadius: 6,
                     border: '1px solid var(--line-strong)',
                     background: 'var(--surface)',
                     fontFamily: 'var(--font-mono)',
-                    fontSize: 11,
+                    fontSize: 14,
                     cursor: 'pointer',
                   }}
                   aria-label="Decrease quantity"
@@ -175,12 +177,13 @@ export function CartSidebar({
                   }}
                   onFocus={(e) => e.target.select()}
                   style={{
-                    width: 38,
+                    width: 44,
+                    minHeight: 44,
                     textAlign: 'center',
                     fontFamily: 'var(--font-mono)',
-                    fontSize: 12,
+                    fontSize: 13,
                     border: '1px solid var(--line-strong)',
-                    borderRadius: 4,
+                    borderRadius: 6,
                     padding: '2px 4px',
                     background: 'var(--surface)',
                     color: 'var(--ink)',
@@ -189,13 +192,13 @@ export function CartSidebar({
                 <button
                   onClick={() => store.updateQuantity(item.id, item.quantity + 1)}
                   style={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: 4,
+                    minWidth: 44,
+                    minHeight: 44,
+                    borderRadius: 6,
                     border: '1px solid var(--line-strong)',
                     background: 'var(--surface)',
                     fontFamily: 'var(--font-mono)',
-                    fontSize: 11,
+                    fontSize: 14,
                     cursor: 'pointer',
                   }}
                   aria-label="Increase quantity"
@@ -234,7 +237,7 @@ export function CartSidebar({
                   <span
                     title="Already discounted by HQ (offer below MRP) — no further store discount"
                     style={{
-                      minHeight: 32,
+                      minHeight: 44,
                       padding: '0 10px',
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -253,7 +256,7 @@ export function CartSidebar({
                   type="button"
                   onClick={() => onOpenDiscount(item)}
                   style={{
-                    minHeight: 32,
+                    minHeight: 44,
                     padding: '0 10px',
                     borderRadius: 6,
                     fontSize: 11,
@@ -286,7 +289,7 @@ export function CartSidebar({
                     type="button"
                     onClick={() => store.setLinePair(item.id, item.pair_id === pid ? null : pid)}
                     style={{
-                      minHeight: 30,
+                      minHeight: 44,
                       padding: '0 10px',
                       borderRadius: 6,
                       fontSize: 11,
@@ -304,7 +307,7 @@ export function CartSidebar({
                   type="button"
                   onClick={() => store.setLinePair(item.id, nextPairId(store.cart || []))}
                   style={{
-                    minHeight: 30,
+                    minHeight: 44,
                     padding: '0 10px',
                     borderRadius: 6,
                     fontSize: 11,

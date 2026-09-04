@@ -29,7 +29,7 @@ from ..services.file_store import (
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
 )
-from ..utils.ist import ist_today
+from ..utils.ist import ist_day_start_utc, ist_today
 from ..services.task_triggers import (
     create_system_task,
     is_suspicious_closure,
@@ -47,7 +47,6 @@ from ..services.task_sla import (
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.sop_checklist import (
-    DEFAULT_SOP_TEMPLATES,
     apply_item_toggle,
     completion_status,
     default_template_steps,
@@ -994,8 +993,14 @@ async def auto_generate_daily_tasks(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Auto-generate today's daily tasks from persisted DAILY SOP templates for
-    the store. Falls back to the built-in starter set when none are configured."""
+    """Issue today's daily tasks from this store's DAILY SOP templates.
+
+    One task PER NAMED PERSON on each template (owner ruling 2026-09-03), not
+    one task for whoever pressed the button. Roles on a template resolve to the
+    people holding them in this store. Nothing is generated when the store has
+    configured no templates - a fabricated checklist is worse than none.
+    Re-running on the same day tops up what is missing rather than duplicating.
+    """
     repo = get_task_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
@@ -1022,8 +1027,50 @@ async def auto_generate_daily_tasks(
 
     now = datetime.now()
     generated_count = 0
+    unassigned: list = []
 
-    def _make_task(title, description, category, items, template_id=None):
+    # ------------------------------------------------------------------
+    # WHO the SOP is actually for
+    # ------------------------------------------------------------------
+    # Owner ruling 2026-09-03: "instead of assigning it to store manager,
+    # Cashier, optom, assign it to individuals like sameer, rupesh and so".
+    #
+    # Every generated task used to be assigned to WHOEVER PRESSED THE BUTTON,
+    # no matter what the template said. So the manager who ran the morning
+    # generate received the cashier's cash-drawer SOP, the optometrist's
+    # room-prep SOP and every other one - and nobody else on the floor
+    # received anything at all. The template's `assigned_users` field was
+    # written by the editor and read by NOTHING.
+    #
+    # A role on a template is resolved to the PEOPLE holding it in this store,
+    # so an SOP set to CASHIER becomes Sameer's task and Rupesh's task, by
+    # name. A task is always somebody's; a job title cannot do the work.
+    user_repo = get_user_repository()
+
+    def _assignees(tpl: dict) -> list:
+        """User ids this template's daily task belongs to, deduped, in order."""
+        ids: list = []
+        seen = set()
+
+        def _add(uid):
+            if uid and uid not in seen:
+                seen.add(uid)
+                ids.append(uid)
+
+        for uid in tpl.get("assigned_users") or []:
+            _add(uid)
+        # Roles resolve to the named people holding them IN THIS STORE. A role
+        # is a way of naming a group of people, never an assignee itself.
+        if user_repo is not None:
+            for role in tpl.get("assigned_roles") or []:
+                try:
+                    for u in user_repo.find_by_role(role, active_store) or []:
+                        _add(u.get("user_id") or u.get("id"))
+                except Exception:
+                    continue
+        return ids
+
+    def _make_task(title, description, category, items, template_id=None, assignee=None):
         return {
             "task_id": generate_task_id(),
             "title": title,
@@ -1032,7 +1079,7 @@ async def auto_generate_daily_tasks(
             "priority": "P2",
             "status": "OPEN",
             "source": "SOP",
-            "assigned_to": current_user.get("user_id"),
+            "assigned_to": assignee or current_user.get("user_id"),
             "assigned_by": current_user.get("user_id"),
             "store_id": active_store,
             "due_at": now + timedelta(days=1),
@@ -1044,29 +1091,87 @@ async def auto_generate_daily_tasks(
         }
 
     if templates:
+        # What today already issued. Without this, pressing "generate" a second
+        # time hands every member of staff a duplicate of every SOP - a hazard
+        # the old code got away with only because it issued ONE task per
+        # template, to one person.
+        # created_at is a STORED INSTANT (written by _add_timestamps), so the
+        # window must be the IST business day expressed in that frame, not
+        # the box clock's midnight (BUG-104: a UTC midnight is 05:30 IST, so
+        # every SOP issued before then read as 'yesterday' and was re-issued).
+        day_start = ist_day_start_utc(ist_today())
+        issued_today = set()
+        try:
+            for t in repo.find_many(
+                {
+                    "store_id": active_store,
+                    "source": "SOP",
+                    "created_at": {
+                        "$gte": day_start,
+                        "$lt": day_start + timedelta(days=1),
+                    },
+                }
+            ):
+                issued_today.add((t.get("sop_template_id"), t.get("assigned_to")))
+        except Exception:
+            issued_today = set()
+
         for tpl in templates:
             items = [s.get("instruction") for s in (tpl.get("steps") or [])]
-            task_data = _make_task(
-                tpl.get("title") or "Daily SOP",
-                tpl.get("description") or "Daily SOP checklist",
-                tpl.get("category"),
-                items,
-                template_id=tpl.get("template_id"),
-            )
-            if repo.create(task_data):
-                generated_count += 1
-    else:
-        # No templates configured yet -> built-in starter set.
-        for tdef in DEFAULT_SOP_TEMPLATES:
-            task_data = _make_task(
-                tdef["title"], tdef["description"], tdef["category"], tdef["steps"]
-            )
-            if repo.create(task_data):
-                generated_count += 1
+            people = _assignees(tpl)
+            if not people:
+                # Nobody has been given this procedure. Still issue it, so the
+                # work does not silently stop happening, but name the template
+                # in the response so a manager can assign it to a real person.
+                unassigned.append(tpl.get("title") or tpl.get("template_id"))
+                people = [current_user.get("user_id")]
+            for uid in people:
+                if (tpl.get("template_id"), uid) in issued_today:
+                    continue
+                task_data = _make_task(
+                    tpl.get("title") or "Daily SOP",
+                    tpl.get("description") or "Daily SOP checklist",
+                    tpl.get("category"),
+                    items,
+                    template_id=tpl.get("template_id"),
+                    assignee=uid,
+                )
+                if repo.create(task_data):
+                    generated_count += 1
+    elif not templates:
+        # NO TEMPLATES CONFIGURED -> GENERATE NOTHING.
+        #
+        # This used to fall back to a built-in starter set, which meant a shop
+        # that had never written an SOP was ISSUED REAL DAILY TASKS from
+        # invented procedure - "verify the starting float is Rs 5,000",
+        # "retain Rs 5,000 overnight", "collect a minimum 50% advance". Not a
+        # placeholder on a screen: actual work, assigned to actual staff, in
+        # figures nobody at this company chose.
+        #
+        # An empty checklist is honest. A fabricated one is worse than none,
+        # because staff cannot tell it from policy the owner wrote.
+        return {
+            "generated": 0,
+            "message": (
+                "No SOP templates are configured for this store, so no daily "
+                "tasks were generated. Add the store's real procedures under "
+                "Tasks > SOPs."
+            ),
+        }
 
+    message = f"Generated {generated_count} daily task(s) from SOP templates"
+    if unassigned:
+        # Named, not counted: a manager has to open each one and put a person
+        # on it. Saying "3 templates have no assignee" is not actionable.
+        message += (
+            ". These have nobody assigned, so they went to you - "
+            "give each one a person under Tasks > SOPs: "
+            + ", ".join(unassigned)
+        )
     return {
         "generated": generated_count,
-        "message": f"Generated {generated_count} daily task(s) from SOP templates",
+        "unassigned_templates": unassigned,
+        "message": message,
     }
 
 
@@ -2116,54 +2221,20 @@ async def toggle_sop_checklist_item(
     }
 
 
-@router.post("/sop-templates/seed-defaults")
-async def seed_default_sop_templates(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Create the starter daily SOP templates (opening / closing / stock-count)
-    for a store if they don't already exist. SUPERADMIN / ADMIN / STORE_MANAGER."""
-    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
-    if not (set(current_user.get("roles", [])) & allowed):
-        raise HTTPException(status_code=403, detail="Not authorized to seed SOPs")
-    col = _sop_collection()
-    if col is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
-
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    now = datetime.now()
-    created = 0
-    for tdef in DEFAULT_SOP_TEMPLATES:
-        if col.find_one({"title": tdef["title"], "store_id": active_store}):
-            continue  # already seeded for this store
-        col.insert_one(
-            {
-                "template_id": f"SOP-{uuid.uuid4().hex[:8].upper()}",
-                "title": tdef["title"],
-                "description": tdef["description"],
-                "category": tdef["category"],
-                "frequency": tdef["frequency"],
-                "estimated_time": tdef["estimated_time"],
-                "steps": default_template_steps(tdef["steps"]),
-                "assigned_roles": [],
-                "assigned_users": [],
-                "store_id": active_store,
-                "is_active": True,
-                "created_by": current_user.get("user_id"),
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        created += 1
-    return {
-        "created": created,
-        "store_id": active_store,
-        "message": f"Seeded {created} starter SOP template(s)",
-    }
-
-
+# REMOVED: POST /sop-templates/seed-defaults.
+#
+# It wrote four INVENTED procedures into the live database and the shop had no
+# way to tell them from policy somebody actually wrote - including a cash
+# routine instructing staff to verify a Rs 5,000 opening float and retain
+# Rs 5,000 overnight, and an order procedure demanding a 50% advance. Numbers
+# nobody at this company chose, presented to staff as the company's rules.
+#
+# Owner ruling 2026-09-03: delete them, show an honest empty state, and let a
+# manager write the real ones at /tasks/sops. The frontend button is gone; this
+# removes the door behind it, because a live endpoint that seeds fiction is one
+# curl away from doing it again.
 # ============================================================================
-# Catch-all parametric routes — registered LAST so they do not shadow
+# Catch-all parametric routes - registered LAST so they do not shadow
 # any specific path above (`/summary`, `/checklists`, `/sop-templates`,
 # `/auto-generate`, etc.). FastAPI resolves routes in registration order.
 # ============================================================================
@@ -2171,7 +2242,7 @@ router.add_api_route("/{task_id}", get_task, methods=["GET"])
 
 
 # ============================================================================
-# Action aliases — match what the frontend's `tasksApi` already calls
+# Action aliases - match what the frontend's `tasksApi` already calls
 # ============================================================================
 # `PUT /tasks/{id}` was 404'ing because only PATCH is decorated above.
 # `POST /tasks/{id}/start` and `/reassign` likewise didn't exist.

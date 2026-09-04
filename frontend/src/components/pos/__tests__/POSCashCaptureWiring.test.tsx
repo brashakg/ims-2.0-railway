@@ -4,9 +4,11 @@
 // The launch audit's exact finding (owner ruling 2026-08-25): the backend door
 // for per-sale cash accountability existed and was tested, but POSPayment's
 // CashChangeCalculator collected the tendered figure and THREW IT AWAY —
-// POSLayout sent only method/amount/reference. These tests drive the REAL
-// POSLayout + the REAL "Cash Tendered" input and assert what actually leaves
-// the browser through orderApi.addPayment:
+// the till sent only method/amount/reference. These tests drive the REAL
+// till (BillingSurface -- the legacy wizard was retired 2026-09-04; the
+// calculator and the submit brain are the same shared components it used)
+// + the REAL "Cash Tendered" input and assert what actually leaves the
+// browser through orderApi.addPayment:
 //
 //   * typing a tendered figure -> the CASH leg body carries tendered_amount /
 //     change_amount (the fields orders.py already reads)
@@ -43,8 +45,13 @@ const MOCK_USER = {
   storeIds: ['BV-BOK-01'],
   discountCap: 20,
 };
+const MOCK_AUTH = {
+  user: MOCK_USER,
+  // CustomerCardWithLoyalty gates its edit door on hasRole.
+  hasRole: (r: string | string[]) => [r].flat().some((x) => MOCK_USER.roles.includes(x)),
+};
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: MOCK_USER }),
+  useAuth: () => MOCK_AUTH,
 }));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({
@@ -81,6 +88,30 @@ vi.mock('../../../services/api', () => {
   };
 });
 
+// The surface's leaves that fetch through DIRECT module imports (not the
+// barrel): the customer card + loyalty tender read the loyalty account, the
+// search bar / store-credit tender read customers, the Rx picker reads the
+// clinical inbox. All inert here -- none is under test.
+vi.mock('../../../services/api/loyalty', () => ({
+  loyaltyApi: {
+    getAccount: () => Promise.resolve({
+      account: { balance_points: 0, tier: 'BRONZE' }, settings: {}, expiring_soon_points: 0,
+    }),
+  },
+}));
+vi.mock('../../../services/api/customers', () => ({
+  customerApi: {
+    getCustomers: () => Promise.resolve([]),
+    getCustomer: () => Promise.resolve(null),
+    createCustomer: () => Promise.resolve({}),
+    getStoreCreditLedger: () => Promise.resolve({ balance: 0 }),
+  },
+  customersApi: {},
+}));
+vi.mock('../../../services/api/handoffs', () => ({
+  handoffsApi: { listClinicalInbox: () => Promise.resolve({ handoffs: [] }) },
+}));
+
 vi.mock('../../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
@@ -89,8 +120,13 @@ vi.mock('../../../services/api/settings', () => ({
   policiesApi: { getOne: () => Promise.resolve({ value: 12 }) },
 }));
 
+// Off-assertion strips that fetch on mount / after the sale through modules
+// the barrel mock does not cover.
+vi.mock('../../../pages/pos/next/PosWidgets', () => ({ PosWidgets: () => null }));
+vi.mock('../../../pages/pos/next/SaleCompleteScreen', () => ({ default: () => null }));
+
 import { MemoryRouter } from 'react-router-dom';
-import { POSLayout } from '../POSLayout';
+import { BillingSurface } from '../../../pages/pos/next/BillingSurface';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 
@@ -98,20 +134,19 @@ function renderPOS() {
   return render(
     <MemoryRouter>
       <ToastProvider>
-        <POSLayout />
+        <BillingSurface />
       </ToastProvider>
     </MemoryRouter>,
   );
 }
 
-// A ready-to-pay sale: cart Rs 1,000 inclusive, on the payment step.
+// A ready-to-pay sale: cart Rs 1,000 inclusive, tenders entered.
 function seedPaidSale(methods: Array<{ method: string; amount?: number }>) {
   act(() => {
     const s = usePOSStore.getState();
     s.resetTransaction();
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
-    s.setSaleType('otc_sale');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
     s.addToCart({
       product_id: 'p1', name: 'Sunglass A', sku: 'SG-1', category: 'SUNGLASSES',
@@ -121,12 +156,11 @@ function seedPaidSale(methods: Array<{ method: string; amount?: number }>) {
     for (const mth of methods) {
       s.addPayment({ method: mth.method as any, amount: mth.amount ?? total });
     }
-    s.setStep('payment');
   });
 }
 
 async function completeOrder() {
-  const btn = await screen.findByRole('button', { name: /Complete order/i });
+  const btn = await screen.findByRole('button', { name: /Complete sale/i });
   expect(btn).toBeEnabled();
   fireEvent.click(btn);
   await waitFor(() => expect(createOrderMock).toHaveBeenCalledTimes(1));
