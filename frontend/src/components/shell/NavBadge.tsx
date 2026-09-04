@@ -47,13 +47,6 @@ export function refreshNavCounts(): Promise<CatalogCounts | null> {
   return fetchCounts();
 }
 
-/** Test seam: forget the shared cache. */
-export function resetNavCountsForTests(): void {
-  cached = null;
-  fetchedAt = 0;
-  inflight = null;
-}
-
 function pick(badge: NavBadgeKey, counts: CatalogCounts | null): number {
   if (!counts) return 0;
   return badge === 'catalog-review' ? counts.needs_review : counts.no_photo;
