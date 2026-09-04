@@ -102,7 +102,10 @@ const POPUPS: ReadonlyArray<Popup> = [
   { path: '/catalog', trigger: SEED.frame.name, name: 'catalog product-drawer' },
   // ── Tasks (.nt-modal convention — no Tailwind backdrop) ──────────────────
   { path: '/tasks', trigger: 'New task', name: 'tasks new-task' },
-  { path: '/tasks/checklists', trigger: 'Create Task', name: 'tasks checklist-task' },
+  // The checklist page's own create-task popup went with the Tasks split (the
+  // layout hides New task there on purpose). Its slot is taken by the SOP
+  // library's create popup, which is new and was uncovered.
+  { path: '/tasks/sops', trigger: 'New SOP', name: 'tasks sop-template' },
   // ── Finance / operations ─────────────────────────────────────────────────
   { path: '/finance/expenses', trigger: 'Add expense', name: 'finance add-expense' },
   { path: '/workshop', trigger: 'New job from order', name: 'workshop new-job' },
