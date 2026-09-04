@@ -4120,11 +4120,22 @@ async def add_order_item(
         # catalog-only product create_order refuses was billed outright.
         _pid = item.product_id or ""
         _pr = get_product_repository()
-        product = (
-            _resolve_billable_product(_pr, _pid, item.product_name or "")
-            if _pr is not None
-            else None
-        )
+        product = None
+        if _pr is not None:
+            try:
+                product = _resolve_billable_product(_pr, _pid, item.product_name or "")
+            except HTTPException:
+                # A MISSING or catalog-only product is a refusal, and stays one.
+                raise
+            except Exception:  # noqa: BLE001 -- fail CLOSED, never open
+                # The repository itself failed (not "not found"). The old door
+                # degraded to a no-doc line here, and the shared gate below is
+                # built for exactly that: with no master it caps on the ROLE
+                # and the client-named LUXURY brand, so a Cartier line still
+                # meets the 2% floor and a mass line still meets the role cap.
+                # Letting the exception escape instead turned a flaky product
+                # read into a 500 on the till -- and skipped the cap entirely.
+                product = None
 
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT

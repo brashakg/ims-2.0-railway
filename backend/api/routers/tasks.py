@@ -29,7 +29,7 @@ from ..services.file_store import (
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
 )
-from ..utils.ist import ist_today
+from ..utils.ist import ist_day_start_utc, ist_today
 from ..services.task_triggers import (
     create_system_task,
     is_suspicious_closure,
@@ -1095,7 +1095,11 @@ async def auto_generate_daily_tasks(
         # time hands every member of staff a duplicate of every SOP - a hazard
         # the old code got away with only because it issued ONE task per
         # template, to one person.
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # created_at is a STORED INSTANT (written by _add_timestamps), so the
+        # window must be the IST business day expressed in that frame, not
+        # the box clock's midnight (BUG-104: a UTC midnight is 05:30 IST, so
+        # every SOP issued before then read as 'yesterday' and was re-issued).
+        day_start = ist_day_start_utc(ist_today())
         issued_today = set()
         try:
             for t in repo.find_many(

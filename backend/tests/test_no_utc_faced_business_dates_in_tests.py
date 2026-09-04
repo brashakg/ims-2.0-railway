@@ -152,6 +152,7 @@ ALLOWED = {
         "test_stock_count_lifecycle.py",
         'bc = f"BC-{uuid.uuid4().hex[:10]}"',
     ): _HEX,
+    ("test_stock_count_blind.py", 'bc = f"BC-{uuid.uuid4().hex[:10]}"'): _HEX,
     # -- validators that only care about past / today / future --------------
     (
         "test_customer_validation.py",

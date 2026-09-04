@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from tests.ist_business_day import business_day
 from datetime import date, timedelta
 
 import pytest
@@ -69,7 +70,9 @@ def _payload(days_ahead: int = 10, length_days: int = 1, leave_type: str = "EARN
     """A valid LeaveCreate payload. Defaults to EARNED, 10 days out, so the F26
     CASUAL/SICK short-notice fast-path (covered by test_f26_remote_approval)
     stays out of the way."""
-    frm = date.today() + timedelta(days=days_ahead)
+    # IST business day, not the box clock: this date is compared against the
+    # leave table's business-day window and would drift between 00:00 and 05:30.
+    frm = date.fromisoformat(business_day()) + timedelta(days=days_ahead)
     to = frm + timedelta(days=length_days - 1)
     return {
         "leave_type": leave_type,
