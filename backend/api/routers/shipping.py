@@ -33,7 +33,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
-from ..dependencies import get_customer_repository, get_order_repository
+from ..dependencies import (
+    get_customer_repository,
+    get_order_repository,
+    validate_store_access,
+)
 from ..services import shiprocket
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,18 @@ _FULFILMENT_ROLES = (
 )
 
 _HQ_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER")
+
+# Orders whose goods must never leave. OrderStatus (orders.py) names CANCELLED
+# as its only dead state; REFUNDED / RETURNED / VOID(ED) are the wider
+# vocabulary returns.py already refuses to act on, and imports carry them too.
+# Cancelling RELEASES the stock without zeroing balance_due, so without this a
+# cancelled part-paid order still looked like a perfectly good COD booking.
+_DEAD_ORDER_STATUSES = ("CANCELLED", "REFUNDED", "RETURNED", "VOID", "VOIDED")
+
+# Shipment statuses that never reached a courier, so they do not block a
+# retry. (create_shipment writes BOOKED | SIMULATED | FAILED; CANCELLED is
+# listed for a future cancel door.)
+_DEAD_SHIPMENT_STATUSES = ("FAILED", "CANCELLED")
 
 
 # ============================================================================
@@ -90,6 +106,11 @@ class ShipmentCreate(BaseModel):
     # dispatching goods with money still owed is a credit decision). Same
     # token the Orders deliver door accepts.
     approval_token: Optional[str] = None
+    # Deliberate SECOND booking for an order that already has a live shipment
+    # (a split parcel, or a re-book after a courier no-show). Without it the
+    # door refuses 409 rather than telling the courier to collect the same
+    # balance twice. No screen sends it - it is a considered, typed-out act.
+    rebook: bool = False
 
 
 # ============================================================================
@@ -141,6 +162,25 @@ def _resolve_order(order_id: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHIPROCKET] order lookup failed: %s", exc)
     return None
+
+
+def _live_shipment_for_order(order_id: str) -> Optional[Dict[str, Any]]:
+    """The shipment already out for this order, if any - the guard against
+    booking a SECOND collection of the same balance. Fail-soft (no DB / a
+    lookup error) -> None, like every other read in this router."""
+    coll = _shipments_coll()
+    if coll is None:
+        return None
+    try:
+        return coll.find_one(
+            {
+                "order_id": order_id,
+                "status": {"$nin": list(_DEAD_SHIPMENT_STATUSES)},
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHIPROCKET] duplicate-booking lookup failed: %s", exc)
+        return None
 
 
 def _merge_address(req: ShipAddress, order: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -265,10 +305,33 @@ async def book_shipment(
     (or creds unset) the booking is SIMULATED - a fake AWB is recorded and no
     network call is made - so the flow is always exercisable safely.
     """
-    order = _resolve_order(body.order_id)
-    is_cod = shiprocket.is_cod(body.address.payment_method)
+    # ONE reading of the method, shared with the carrier payload (400 on an
+    # unrecognised spelling - never a silent fallback to Prepaid).
+    payment_method = shiprocket.payment_kind(body.address.payment_method)
+    is_cod = payment_method == "COD"
     cod_amount = 0.0
+    order = _resolve_order(body.order_id)
     if order is not None:
+        # IDOR guard: mirror the Orders doors - only ship an order in a store
+        # the caller can reach (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
+
+        # A cancelled / refunded / returned order is finished: cancelling
+        # RELEASES its stock but leaves balance_due standing, so it still
+        # reads as a bookable COD parcel. Nothing may be dispatched on it.
+        order_status = str(order.get("status") or "").strip().upper()
+        if order_status in _DEAD_ORDER_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ORDER_NOT_SHIPPABLE",
+                    "message": (
+                        f"Order {order.get('order_number') or body.order_id} is "
+                        f"{order_status} - nothing ships on it."
+                    ),
+                },
+            )
+
         # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a held
         # spectacle order (missing a valid prescription) must never be
         # dispatched -- and booking a shipment for an ONLINE order ALSO pushes a
@@ -331,10 +394,13 @@ async def book_shipment(
             # Never tell a courier to collect an amount we cannot read.
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Order not found - a COD booking needs the order's "
-                    "balance to tell the courier what to collect"
-                ),
+                detail={
+                    "code": "COD_ORDER_NOT_FOUND",
+                    "message": (
+                        "Order not found - a COD booking needs the order's "
+                        "balance to tell the courier what to collect."
+                    ),
+                },
             )
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
         logger.info(
@@ -342,6 +408,28 @@ async def book_shipment(
             body.order_id,
         )
         order = {"order_id": body.order_id}
+
+    # One order, one live shipment. A retry after a courier no-show used to
+    # insert a SECOND booking, so the courier was told to collect the same
+    # balance again. Runs AFTER the money/role gates so a caller who may not
+    # ship at all still hears that first.
+    existing = _live_shipment_for_order(order.get("order_id") or body.order_id)
+    if existing is not None and not body.rebook:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHIPMENT_ALREADY_BOOKED",
+                "message": (
+                    f"Shipment {existing.get('shipment_id')} "
+                    f"({existing.get('awb') or 'no AWB yet'}, "
+                    f"{existing.get('status')}) is already out for this order. "
+                    f"Re-book only if that parcel is not coming."
+                ),
+                "shipment_id": existing.get("shipment_id"),
+                "awb": existing.get("awb"),
+                "status": existing.get("status"),
+            },
+        )
 
     store_id = (
         body.store_id or order.get("store_id") or current_user.get("active_store_id")
@@ -376,7 +464,7 @@ async def book_shipment(
         "simulated": simulated,
         # What the courier was told to collect (0.0 on a Prepaid booking) -
         # the figure a COD remittance will one day have to reconcile against.
-        "payment_method": "COD" if is_cod else "Prepaid",
+        "payment_method": payment_method,
         "cod_amount": cod_amount,
         "ship_to": {
             "address": address.get("address"),
