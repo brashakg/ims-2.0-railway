@@ -184,6 +184,12 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | next branch, with the household block |
 | `GET /incentive/points/settings/eligibility` reveals per-person commission weight/bonus % to any authenticated user | `points.py` | owner call (percentages, not rupees) |
 
+## 4h. Closed by owner statement
+
+| Item | Status |
+|---|---|
+| BV-ONLINE-01 GSTIN (was 'owner owes', hard-blocking web-order invoices) | **CLOSED 09-04** -- verified in prod: identical to the Pune store's (same entity, state 27); no write needed |
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
