@@ -4,8 +4,9 @@ IMS 2.0 - Workshop Repository
 Workshop job data access operations
 """
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from api.utils.ist import ist_today
+from api.utils.dates import iso_date_window
 from .base_repository import BaseRepository
 
 
@@ -48,19 +49,18 @@ class WorkshopJobRepository(BaseRepository):
         return self.find_many(filter_dict, sort=[("completed_at", -1)])
 
     def find_overdue(self, store_id: str = None) -> List[Dict]:
-        # expected_date is stored as a date-only ISO string (e.g. "2026-05-30")
-        # by create_job / update_job. We compare date-only vs date-only so that a
-        # job due TODAY is NOT flagged as overdue until the day rolls over.
-        # Using datetime.now().isoformat() (which includes time) would cause a
-        # same-day date string ("2026-05-30") to compare LESS-THAN the datetime
-        # string ("2026-05-30T14:00:00") and incorrectly mark today's jobs overdue.
-        # IST (TZ-P3): expected_date is a BUSINESS date; the server runs UTC, so
-        # datetime.now() between 00:00-05:30 IST is still on the PREVIOUS day and
-        # would under-flag jobs that are already overdue in India.
-        today_str = ist_today().isoformat()  # "2026-05-30"
+        # expected_date is a date-only ISO STRING ("2026-05-30", written by
+        # create_job / update_job), so the bound is a string too, and it is
+        # day-granular: a job due TODAY is not overdue until the IST day rolls
+        # over (a stamped bound would flag it at 00:01). "today" is the IST
+        # business day -- the server runs UTC, and between 18:30-24:00 UTC the
+        # box clock is still on the previous day, under-flagging jobs already
+        # late in India. ONE rule, shared with OrderRepository.find_overdue and
+        # the clinical date window: the last admitted day is yesterday, i.e.
+        # strictly-less-than the IST-today string.
         filter_dict = {
             "status": {"$in": ["PENDING", "IN_PROGRESS"]},
-            "expected_date": {"$lt": today_str},
+            "expected_date": iso_date_window(to_day=ist_today() - timedelta(days=1)),
         }
         if store_id:
             filter_dict["store_id"] = store_id

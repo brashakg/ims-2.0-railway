@@ -6,7 +6,8 @@ Order data access operations
 import logging
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, date, timedelta
-from api.utils.ist import now_ist, now_ist_naive, ist_day_start_utc
+from api.utils.ist import now_ist, ist_today, ist_day_start_utc
+from api.utils.dates import iso_date_window
 from decimal import Decimal
 from .base_repository import BaseRepository
 
@@ -193,10 +194,30 @@ class OrderRepository(BaseRepository):
         return self.find_many(filter, sort=[("created_at", -1)])
     
     def find_overdue(self, store_id: str = None) -> List[Dict]:
-        """Find overdue orders (past expected delivery)"""
+        """Open orders whose promised delivery day has passed (IST calendar).
+
+        ``expected_delivery`` is an ISO STRING on every write path -- POST
+        /orders stores ``datetime.isoformat()`` (a midnight stamp from an
+        explicit delivery_date, or a full timestamp from the +N-days default)
+        and PUT /orders/{id} stores ``date.isoformat()`` (bare YYYY-MM-DD);
+        no writer stores a BSON date, whatever schemas.py declares (its
+        validator is not applied). This used to bind a naive DATETIME against
+        the column; BSON never compares a date with a string, so the overdue
+        screen returned [] in production.
+
+        The bound is therefore a STRING, and day-granular: a job promised for
+        TODAY is not overdue until the IST day has rolled over (a stamped
+        bound would flag it at 00:01, and the box clock is UTC, 5h30m behind).
+        The window's last admitted day is yesterday, which iso_date_window --
+        the ONE rule shared with the clinical date window and the workshop
+        overdue list -- expresses as strictly-less-than the IST-today string,
+        matching both stored shapes.
+        """
         filter = {
             "status": {"$in": ["CONFIRMED", "PROCESSING", "READY"]},
-            "expected_delivery": {"$lt": now_ist_naive()}
+            "expected_delivery": iso_date_window(
+                to_day=ist_today() - timedelta(days=1)
+            ),
         }
         if store_id:
             filter["store_id"] = store_id
