@@ -353,6 +353,15 @@ def ctx(monkeypatch):
         "customer_phone": "9876543210",
         "store_id": "BV-PUN-01",
         "grand_total": 3000.0,
+        # PAID, deliberately. These tests exercise booking MECHANICS. The
+        # courier door now runs the shared handover money gate (a non-COD
+        # shipment of an order with money still owed used to leave with the
+        # courier told "Prepaid"), and a seed order with no payment fields
+        # reads as fully UNPAID and is refused before any of this is reached.
+        # The money-gate behaviour itself is pinned in test_delivery_money_gate.
+        "payment_status": "PAID",
+        "amount_paid": 3000.0,
+        "balance_due": 0.0,
         "items": [
             {"product_name": "Ray-Ban", "sku": "RB-1", "quantity": 1, "item_total": 3000}
         ],
