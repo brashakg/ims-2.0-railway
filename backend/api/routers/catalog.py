@@ -20,6 +20,7 @@ from api.services.cost_mask import mask_cost, mask_cost_list
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
+    product_online_state,
     reconcile_store_barcodes,
     online_mapping_available,
 )
@@ -1511,12 +1512,38 @@ async def list_catalog_products(
     source: Optional[str] = Query(
         default=None, description="Filter by import source, e.g. 'bvi_import'."
     ),
+    photo: Optional[str] = Query(
+        default=None,
+        pattern="^(has|missing)$",
+        description=(
+            "Photo filter. 'has' = a usable photo by the Shopify push's own "
+            "predicate (an absolute http(s) URL), 'missing' = none -- the "
+            "Missing-photos work list. Every row also carries has_photo + "
+            "online (LIVE / QUEUED / OFF / BLOCKED), computed here, never "
+            "re-derived by the screen."
+        ),
+    ),
     limit: int = Query(default=50, ge=1, le=250),
     page: int = Query(default=1, ge=1),
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
     products = _all_catalog_products()
+    # Direct-call safety (unit suites call this handler as a plain function):
+    # an unsupplied `photo` arrives as its Query default object, not None.
+    if not isinstance(photo, str):
+        photo = None
+
+    # Photo + online truth, ONE rule (online_catalog.product_online_state),
+    # stamped before the filters so the photo filter reads the same value the
+    # column shows.
+    for p in products:
+        state = product_online_state(p)
+        p["has_photo"] = state["has_photo"]
+        p["online"] = state["online"]
+    if photo:
+        want = photo == "has"
+        products = [p for p in products if p.get("has_photo") is want]
 
     # Apply filters
     if category:

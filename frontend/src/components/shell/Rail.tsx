@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { Icon } from './Icon';
+import { NavBadge } from './NavBadge';
 import { NAV_GROUPS, filterVisibleGroups } from './navConfig';
 import { getBrandAssets } from '../../utils/brandAssets';
 
@@ -246,6 +247,9 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                   >
                     <IconCmp />
                     <span className="rail-label">{item.label}</span>
+                    {/* Count only where the label is visible (drawer / expanded
+                        rail); in icon-only mode the label is a hover tooltip. */}
+                    {expanded && item.badge && <NavBadge badge={item.badge} />}
                   </NavLink>
                 );
               })}

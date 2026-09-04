@@ -15,6 +15,7 @@ import {
   POWER_GRID_ROLES,
 } from '../../pages/inventory/inventoryRoles';
 import type { IconName } from './Icon';
+import type { NavBadgeKey } from './NavBadge';
 import type { UserRole } from '../../types';
 
 export interface NavItem {
@@ -24,6 +25,8 @@ export interface NavItem {
   icon: IconName;
   requireRoles?: UserRole[]; // if set, only visible to users holding one of these roles
   external?: boolean; // render as <a target=_blank> instead of an in-app route
+  /** Live count rendered after the label (NavBadge) — a work list's size. */
+  badge?: NavBadgeKey;
 }
 
 export interface NavGroup {
@@ -120,6 +123,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
       // inside it links on to /catalog/add — no second sidebar entry).
       { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      // Two work lists off the Catalog Manager (design 2026-08-30, built
+      // 2026-09-04) — real addresses somebody can be SENT to, each with its
+      // live size. Same gate as /catalog; the counts come from the server.
+      { id: 'catalog-review', label: 'Needs review', to: '/catalog/review', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-review' },
+      { id: 'catalog-missing-photos', label: 'Missing photos', to: '/catalog/missing-photos', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-missing-photos' },
       // Cataloguing Scorecard + QC review (attribution phase 2). requireRoles
       // mirrors the /catalog/scorecard ProtectedRoute gate + backend rbac rows.
       { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },

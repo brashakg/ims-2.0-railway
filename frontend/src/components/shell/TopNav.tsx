@@ -27,6 +27,7 @@ import {
 } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Icon } from './Icon';
+import { NavBadge } from './NavBadge';
 import { filterVisibleGroups, type NavItem } from './navConfig';
 import { getBrandAssets } from '../../utils/brandAssets';
 
@@ -71,6 +72,7 @@ function DropdownItem({ item, onNavigate }: { item: NavItem; onNavigate: () => v
     >
       <IconCmp />
       <span>{item.label}</span>
+      {item.badge && <NavBadge badge={item.badge} />}
     </NavLink>
   );
 }

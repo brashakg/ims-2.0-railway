@@ -1,25 +1,38 @@
 // ============================================================================
-// IMS 2.0 - Catalog Manager (/catalog)
+// IMS 2.0 - Catalog Manager (/catalog, /catalog/review, /catalog/missing-photos)
 // ============================================================================
-// The owner's single "what exists and its truth" screen: a photo-grid browse
-// over TWO honest data sources behind one segmented control —
+// The owner's single "what exists and its truth" screen: ONE list page over
+// TWO honest data sources, the ROUTE deciding which (design 2026-08-30, built
+// 2026-09-04) —
 //
-//   Segment "Catalog"        → GET /products (the billing/stock SPINE,
-//                               server-paginated via skip/limit+total_count)
-//   Segment "Needs review"   → GET /catalog/products?needs_review=true&
-//                               is_active=all (the 4,393 BVI-imported docs;
-//                               server-paginated via page/limit+total)
+//   /catalog                 → GET /products (the billing/stock SPINE,
+//                              server-paginated via skip/limit+total_count)
+//   /catalog/missing-photos  → the same list, pre-filtered ?photo=missing:
+//                              the "cannot go online" work list
+//   /catalog/review          → GET /catalog/products?needs_review=true&
+//                              is_active=all (imported docs awaiting review;
+//                              server-paginated via page/limit+total)
 //
-// A card click opens the slide-over drawer (view / edit-in-place links /
+// Every row carries two SERVER-computed truths the frontend never re-derives:
+//   has_photo — the Shopify push's own predicate (an absolute http(s) URL on
+//               the doc the push reads), so "Photo: Missing" here IS "the
+//               push would refuse it"
+//   online    — LIVE / QUEUED / OFF / BLOCKED (blocked = no usable photo)
+// and the counts row at the top is the server's tally with the same rule
+// (GET /catalog/online-summary → catalog), so the figures and the rows
+// cannot disagree. "Waiting to push" reads ecom.locally_modified — the flag
+// the push sweep walks; cataloguing sets it, a human still presses publish.
+//
+// A row click opens the slide-over drawer (view / edit-in-place links /
 // review + approve). Approving PROMOTES the imported doc in place (same id)
 // — the only thing that clears needs_review. Bulk approve is a client-side
 // loop over the single promote endpoint (concurrency 4, cap 200): every item
 // passes the identical door validation, so bulk can never force-approve.
 //
-// POS is untouched — its card look is mirrored here for familiarity only.
+// POS is untouched.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, NavLink, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Search,
   RefreshCw,
@@ -28,16 +41,21 @@ import {
   AlertTriangle,
   ShieldCheck,
   CheckCircle2,
+  ImagePlus,
+  Pencil,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
+import { refreshNavCounts } from '../../components/shell/NavBadge';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
-import { productApi } from '../../services/api/products';
+import { productApi, catalogApi, type CatalogCounts } from '../../services/api/products';
 import {
   catalogProductsApi,
   type CatalogProductDoc,
+  type OnlineState,
+  type PhotoFilter,
 } from '../../services/api/catalog';
 import { CATEGORY_BROWSE_OPTIONS } from '../../utils/categoryNormalize';
 import {
@@ -52,7 +70,7 @@ import {
 } from './CatalogProductDrawer';
 import { writeReviewQueue } from './reviewQueue';
 
-const PAGE_SIZE = 48; // divisible by every column tier (2/3/4/6)
+const PAGE_SIZE = 48;
 const BULK_CAP = 200;
 const BULK_CONCURRENCY = 4;
 
@@ -71,106 +89,72 @@ const fmtINR = (n: number | null): string => {
   }
 };
 
+const fmtN = (n: number | undefined | null): string =>
+  typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString('en-IN') : '—';
+
 // ---------------------------------------------------------------------------
-// Product card (module level — POS-grid look mirrored, POS never touched).
+// Chips — the server's booleans rendered with the app's own .chip tokens.
 // ---------------------------------------------------------------------------
-function CatalogCard({
-  item,
-  selectable,
-  selected,
-  failMessage,
-  onToggleSelect,
-  onOpen,
-  onImageClick,
-}: {
-  item: CatalogDrawerItem;
-  selectable: boolean;
-  selected: boolean;
-  failMessage?: string;
-  onToggleSelect: () => void;
-  onOpen: () => void;
-  onImageClick: () => void;
-}) {
-  const doc = item.doc;
-  const name = docName(doc);
-  const brand = String(
-    doc.brand || (doc.attributes as Record<string, unknown>)?.brand_name || ''
+function PhotoChip({ has }: { has: boolean | undefined }) {
+  if (has === undefined) return <span className="chip">—</span>;
+  return has ? (
+    <span className="chip ok">Yes</span>
+  ) : (
+    <span className="chip err" title="No usable photo — the push would refuse it">
+      Missing
+    </span>
   );
-  const images = docImages(doc);
-  const mrp = docMrp(doc);
-  const offer = docOffer(doc);
-  const hasDiscount = mrp !== null && offer !== null && offer < mrp;
-  const inactive = doc.is_active === false;
-  const needsReview = item.kind === 'imported' && Boolean(doc.needs_review);
+}
 
+const ONLINE_LABEL: Record<OnlineState, { text: string; cls: string; title: string }> = {
+  LIVE: { text: 'Live', cls: 'chip ok', title: 'On bettervision.in' },
+  QUEUED: { text: 'Queued', cls: 'chip info', title: 'Waiting for a human to press push' },
+  OFF: { text: 'Off', cls: 'chip', title: 'Not online, not queued' },
+  BLOCKED: { text: 'Blocked', cls: 'chip', title: 'No usable photo — cannot go online' },
+};
+
+function OnlineChip({ state }: { state: OnlineState | undefined }) {
+  const meta = state ? ONLINE_LABEL[state] : undefined;
+  if (!meta) return <span className="chip">—</span>;
   return (
-    <div
-      className={clsx(
-        'relative rounded-xl border bg-white text-left transition-all hover:shadow-md',
-        selected ? 'border-amber-400 ring-1 ring-amber-300' : 'border-gray-200 hover:border-bv-red-300',
-        inactive && 'opacity-50'
-      )}
-    >
-      {selectable && (
-        <label className="absolute left-2 top-2 z-10 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md bg-white/90 border border-gray-300 shadow-sm">
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={onToggleSelect}
-            className="h-3.5 w-3.5 accent-amber-500"
-            aria-label={`Select ${name}`}
-          />
-        </label>
-      )}
+    <span className={clsx(meta.cls, state === 'BLOCKED' && 'text-gray-400')} title={meta.title}>
+      {meta.text}
+    </span>
+  );
+}
 
-      {/* Image area (click → lightbox) */}
-      <button
-        type="button"
-        onClick={images.length > 0 ? onImageClick : onOpen}
-        className="block w-full h-36 p-2 rounded-t-xl bg-white flex items-center justify-center overflow-hidden"
-        aria-label={images.length > 0 ? `View images of ${name}` : name}
-      >
-        <CatalogImage
-          url={images[0] || ''}
-          alt={name}
-          className="max-h-full max-w-full object-contain"
-        />
-      </button>
-
-      {/* Body (click → drawer) */}
-      <button type="button" onClick={onOpen} className="block w-full text-left px-3 pb-3">
-        {brand && <p className="text-xs font-bold text-gray-900 truncate">{brand}</p>}
-        <p className="text-xs text-gray-700 leading-snug line-clamp-2 min-h-[2rem]">{name}</p>
-        <div className="mt-1.5 flex items-baseline gap-1.5">
-          <span className="text-sm font-bold text-gray-900">{fmtINR(offer ?? mrp)}</span>
-          {hasDiscount && (
-            <span className="text-[10px] text-gray-500 line-through">{fmtINR(mrp)}</span>
-          )}
+// ---------------------------------------------------------------------------
+// Counts row — four server figures (GET /catalog/online-summary → catalog).
+// ---------------------------------------------------------------------------
+function CountsRow({ counts }: { counts: CatalogCounts | null }) {
+  const card = 'rounded-xl border border-gray-200 bg-white px-4 py-3';
+  const eyebrow = 'text-[10.5px] font-medium uppercase tracking-[.12em] text-gray-500';
+  const figure = 'mt-0.5 text-2xl font-semibold tabular-nums text-gray-900';
+  const sub = 'text-[11.5px] text-gray-500';
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4" data-testid="catalog-counts">
+      <div className={card}>
+        <div className={eyebrow}>In catalog</div>
+        <div className={figure}>{fmtN(counts?.in_catalog)}</div>
+        <div className={sub}>
+          {fmtN(counts?.smartglasses)} smart glasses · {fmtN(counts?.own)} own
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          {needsReview ? (
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-              <AlertTriangle className="h-3 w-3" /> Needs review
-            </span>
-          ) : inactive ? (
-            <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
-              Inactive
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">
-              <ShieldCheck className="h-3 w-3" /> POS-ready
-            </span>
-          )}
-          {failMessage && (
-            <span
-              className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700"
-              title={failMessage}
-            >
-              needs fixes
-            </span>
-          )}
-        </div>
-      </button>
+      </div>
+      <Link to="/catalog/missing-photos" className={clsx(card, 'border-red-200 bg-red-50/40 hover:bg-red-50')}>
+        <div className={eyebrow}>No usable photo</div>
+        <div className={clsx(figure, 'text-red-700')}>{fmtN(counts?.no_photo)}</div>
+        <div className={sub}>cannot go online</div>
+      </Link>
+      <div className={card}>
+        <div className={eyebrow}>Live online</div>
+        <div className={figure}>{fmtN(counts?.live)}</div>
+        <div className={sub}>on bettervision.in</div>
+      </div>
+      <div className={card}>
+        <div className={eyebrow}>Waiting to push</div>
+        <div className={figure}>{fmtN(counts?.pending)}</div>
+        <div className={sub}>queued, needs a human</div>
+      </div>
     </div>
   );
 }
@@ -178,34 +162,25 @@ function CatalogCard({
 // ===========================================================================
 // Page
 // ===========================================================================
-export function CatalogManagerPage() {
+export function CatalogManagerPage({
+  segment = 'catalog',
+  photoPreset,
+}: {
+  /** Which list this address shows. The ROUTE decides; never a query string. */
+  segment?: Segment;
+  /** /catalog/missing-photos: the catalog pre-filtered to rows with no usable
+   *  photo. Fixed for that address (the page IS the filter). */
+  photoPreset?: PhotoFilter;
+}) {
   const navigate = useNavigate();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Segment + page live in the URL (not useState) so the full-page review
-  // editor's "Back to queue" (/catalog?segment=review&page=N&focus=<id>)
-  // restores the exact grid position. Unknown/absent params fall back to the
-  // previous defaults, so plain /catalog behaves exactly as before.
-  const segment: Segment = searchParams.get('segment') === 'review' ? 'review' : 'catalog';
+  // Page lives in the URL (not useState) so the full-page review editor's
+  // "Back to queue" (/catalog/review?page=N&focus=<id>) restores the exact
+  // list position. Unknown/absent params fall back to page 1.
   const pageRaw = parseInt(searchParams.get('page') || '1', 10);
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
-
-  const setSegment = useCallback(
-    (next: Segment) => {
-      setSearchParams(
-        (prev) => {
-          const sp = new URLSearchParams(prev);
-          if (next === 'review') sp.set('segment', 'review');
-          else sp.delete('segment');
-          sp.delete('page'); // a segment switch always starts at page 1
-          return sp;
-        },
-        { replace: true }
-      );
-    },
-    [setSearchParams]
-  );
 
   const setPage = useCallback(
     (next: number) => {
@@ -234,19 +209,24 @@ export function CatalogManagerPage() {
   const [brand, setBrand] = useState('');
   const [brandOptions, setBrandOptions] = useState<string[]>([]);
   const [includeInactive, setIncludeInactive] = useState(false);
+  const [photoPick, setPhotoPick] = useState<PhotoFilter | ''>('');
+  const photo: PhotoFilter | undefined = photoPreset ?? (photoPick || undefined);
+
+  // Counts row + review badge — the server's tally, one fetch.
+  const [counts, setCounts] = useState<CatalogCounts | null>(null);
+  const reviewCount = counts?.needs_review ?? 0;
 
   // Review machinery
-  const [reviewCount, setReviewCount] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [failMap, setFailMap] = useState<Record<string, string>>({});
   const [bulkRunning, setBulkRunning] = useState(false);
 
-  // Drawer: an index into `items` (grid navigation), or a standalone item
+  // Drawer: an index into `items` (list navigation), or a standalone item
   // (?focus= deep link to a product not on the current page).
   const [drawerIdx, setDrawerIdx] = useState<number | null>(null);
   const [focusItem, setFocusItem] = useState<CatalogDrawerItem | null>(null);
 
-  // Page-level lightbox opened straight from a card image.
+  // Page-level lightbox opened straight from a row thumbnail.
   const [lightbox, setLightbox] = useState<{ images: string[]; alt: string } | null>(null);
 
   // ---- Search debounce (300ms; Enter flushes for barcode scanners) --------
@@ -266,6 +246,7 @@ export function CatalogManagerPage() {
           category: category || undefined,
           brand: brand || undefined,
           is_active: includeInactive ? 'all' : 'true',
+          photo,
           skip: (page - 1) * PAGE_SIZE,
           limit: PAGE_SIZE,
         });
@@ -279,15 +260,13 @@ export function CatalogManagerPage() {
           search: debouncedSearch || undefined,
           category: category || undefined,
           brand: brand || undefined,
+          photo,
           page,
           limit: PAGE_SIZE,
         });
         const docs = (res?.products || []) as unknown as Array<Record<string, unknown>>;
         setItems(docs.map((doc) => ({ kind: 'imported' as const, doc })));
         setTotal(Number(res?.total ?? docs.length));
-        setReviewCount((prev) =>
-          debouncedSearch || category || brand ? prev : Number(res?.total ?? prev)
-        );
       }
     } catch (e: unknown) {
       setItems([]);
@@ -296,30 +275,27 @@ export function CatalogManagerPage() {
     } finally {
       setLoading(false);
     }
-  }, [segment, debouncedSearch, category, brand, includeInactive, page]);
+  }, [segment, debouncedSearch, category, brand, includeInactive, photo, page]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // Live review-queue count (badge + amber banner), independent of filters.
-  const refreshReviewCount = useCallback(async () => {
+  // The counts row + the review badge, independent of filters. Also pushes
+  // the fresh figures to the sidebar badges (same server tally).
+  const refreshCounts = useCallback(async () => {
     try {
-      const res = await catalogProductsApi.list({
-        needs_review: true,
-        is_active: 'all',
-        page: 1,
-        limit: 1,
-      });
-      setReviewCount(Number(res?.total ?? 0));
+      const res = await catalogApi.getOnlineSummary();
+      setCounts(res?.catalog ?? null);
+      void refreshNavCounts();
     } catch {
-      /* fail-soft — badge just goes stale */
+      /* fail-soft — the row just goes stale */
     }
   }, []);
 
   useEffect(() => {
-    void refreshReviewCount();
-  }, [refreshReviewCount]);
+    void refreshCounts();
+  }, [refreshCounts]);
 
   // Brand select options (Brand Master; re-scoped when a category is picked).
   useEffect(() => {
@@ -338,8 +314,8 @@ export function CatalogManagerPage() {
   }, [category]);
 
   // Reset page + selection when the view meaningfully changes. Skipped on the
-  // FIRST run so a deep-linked ?segment=review&page=N isn't clobbered back to
-  // page 1 on mount (page now lives in the URL).
+  // FIRST run so a deep-linked ?page=N isn't clobbered back to page 1 on
+  // mount (page lives in the URL).
   const viewResetReady = useRef(false);
   useEffect(() => {
     if (!viewResetReady.current) {
@@ -355,10 +331,10 @@ export function CatalogManagerPage() {
     // Back-to-queue's ?page=N restore). setPage uses the functional-updater
     // form, so a stale closure is harmless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segment, debouncedSearch, category, brand, includeInactive]);
+  }, [segment, debouncedSearch, category, brand, includeInactive, photo]);
 
   // Keep the review-queue stash current: whenever the review segment shows a
-  // page of imported docs, that page (+ filters + grid position) IS the
+  // page of imported docs, that page (+ filters + list position) IS the
   // reviewer's working queue — the full-page editor reads it for "Item N of M"
   // and Prev/Next. The drawer's "Edit everything" pins the index just before
   // navigating.
@@ -380,10 +356,11 @@ export function CatalogManagerPage() {
     });
   }, [segment, loading, items, page, total, debouncedSearch, category, brand]);
 
-  // "Edit everything" (drawer) → full cataloguing page with the queue stashed
-  // at this item's position.
+  // "Edit everything" (drawer / row action) → full cataloguing page with the
+  // queue stashed at this item's position. `hash` = '#images' lands on the
+  // uploader ("Add photo").
   const handleEditEverything = useCallback(
-    (id: string) => {
+    (id: string, hash = '') => {
       const ids = items.filter((it) => it.kind === 'imported').map((it) => docId(it.doc));
       const at = ids.indexOf(id);
       writeReviewQueue({
@@ -398,9 +375,20 @@ export function CatalogManagerPage() {
           page,
         },
       });
-      navigate(`/catalog/add?review=${encodeURIComponent(id)}`);
+      navigate(`/catalog/add?review=${encodeURIComponent(id)}${hash}`);
     },
     [items, page, total, debouncedSearch, category, brand, navigate]
+  );
+
+  // Row action. "Add photo" opens the ONE existing image upload (QuickAdd's
+  // Product Images section) for this product; "Edit" opens the same editor.
+  const openEditor = useCallback(
+    (it: CatalogDrawerItem, hash = '') => {
+      const id = docId(it.doc);
+      if (it.kind === 'imported') handleEditEverything(id, hash);
+      else navigate(`/catalog/add?edit=${encodeURIComponent(id)}${hash}`);
+    },
+    [handleEditEverything, navigate]
   );
 
   // ---- ?focus=<id> read-once deep link (drawer reopen after QuickAdd edit) --
@@ -446,8 +434,8 @@ export function CatalogManagerPage() {
   // ---- Approve flows ----------------------------------------------------------
   const advanceAfterApprove = useCallback(
     async (approvedId: string) => {
-      // Remove the approved card, keep the drawer on the SAME index (the list
-      // shifts up), so the owner clears a rack without touching the grid.
+      // Remove the approved row, keep the drawer on the SAME index (the list
+      // shifts up), so the owner clears a rack without touching the list.
       setItems((prev) => {
         const nextItems = prev.filter((it) => docId(it.doc) !== approvedId);
         setDrawerIdx((idx) => {
@@ -464,10 +452,10 @@ export function CatalogManagerPage() {
         return next;
       });
       setTotal((t) => Math.max(0, t - 1));
-      setReviewCount((c) => Math.max(0, c - 1));
-      void refreshReviewCount();
+      setCounts((c) => (c ? { ...c, needs_review: Math.max(0, c.needs_review - 1) } : c));
+      void refreshCounts();
     },
-    [refreshReviewCount]
+    [refreshCounts]
   );
 
   const handleApproved = useCallback(
@@ -516,8 +504,8 @@ export function CatalogManagerPage() {
       `${approved} approved · ${failedIds.length} need fixes`
     );
     await load();
-    void refreshReviewCount();
-  }, [bulkRunning, selected, load, refreshReviewCount, toast]);
+    void refreshCounts();
+  }, [bulkRunning, selected, load, refreshCounts, toast]);
 
   // ---- Drawer plumbing -------------------------------------------------------
   const drawerItem: CatalogDrawerItem | null =
@@ -548,22 +536,38 @@ export function CatalogManagerPage() {
   }, []);
 
   // ---------------------------------------------------------------------------
+  const isMissingPhotos = photoPreset === 'missing';
+  const title =
+    segment === 'review' ? 'Needs review' : isMissingPhotos ? 'Missing photos' : 'Catalog';
+  const subtitle = loading
+    ? 'Loading…'
+    : `${total.toLocaleString('en-IN')} product${total === 1 ? '' : 's'}${
+        segment === 'review'
+          ? ' waiting for review'
+          : isMissingPhotos
+            ? ' without a usable photo — cannot go online'
+            : ' in the catalog'
+      }`;
+
+  const segmentLink = (active: boolean) =>
+    clsx(
+      'rounded-md px-3 py-1.5 text-sm font-medium transition-colors flex items-center gap-1.5',
+      active ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+    );
+
   return (
-    <div className="p-6 space-y-4">
+    <div className="p-4 sm:p-6 space-y-4">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Catalog</h1>
-          <p className="text-sm text-gray-500">
-            {loading ? 'Loading…' : `${total.toLocaleString('en-IN')} product${total === 1 ? '' : 's'}`}
-            {segment === 'review' ? ' waiting for review' : ' in the catalog'}
-          </p>
+          <h1 className="text-xl font-bold text-gray-900">{title}</h1>
+          <p className="text-sm text-gray-500">{subtitle}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => {
               void load();
-              void refreshReviewCount();
+              void refreshCounts();
             }}
             className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
@@ -578,11 +582,13 @@ export function CatalogManagerPage() {
         </div>
       </div>
 
-      {/* Amber review banner — THE review entry point */}
+      {/* Counts row — the catalog's truth, from the server */}
+      {segment === 'catalog' && <CountsRow counts={counts} />}
+
+      {/* Amber review banner — links to the queue's own address */}
       {reviewCount > 0 && segment === 'catalog' && (
-        <button
-          type="button"
-          onClick={() => setSegment('review')}
+        <Link
+          to="/catalog/review"
           className="w-full flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left hover:bg-amber-100 transition-colors"
         >
           <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
@@ -591,36 +597,22 @@ export function CatalogManagerPage() {
             product{reviewCount === 1 ? ' is' : 's are'} waiting for review
           </span>
           <span className="ml-auto text-sm font-medium text-amber-700 underline">Review now</span>
-        </button>
+        </Link>
       )}
 
-      {/* Segmented control */}
+      {/* Segment links — real addresses, not a query string */}
       <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-        <button
-          type="button"
-          onClick={() => setSegment('catalog')}
-          className={clsx(
-            'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
-            segment === 'catalog' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          )}
-        >
+        <NavLink to="/catalog" end className={({ isActive }) => segmentLink(isActive)}>
           Catalog
-        </button>
-        <button
-          type="button"
-          onClick={() => setSegment('review')}
-          className={clsx(
-            'rounded-md px-3 py-1.5 text-sm font-medium transition-colors flex items-center gap-1.5',
-            segment === 'review' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          )}
-        >
+        </NavLink>
+        <NavLink to="/catalog/review" className={({ isActive }) => segmentLink(isActive)}>
           Needs review — imported
           {reviewCount > 0 && (
             <span className="inline-flex items-center justify-center rounded-full bg-amber-500 px-1.5 py-px text-[10px] font-semibold text-white min-w-[1.25rem]">
               {reviewCount > 999 ? '999+' : reviewCount}
             </span>
           )}
-        </button>
+        </NavLink>
       </div>
 
       {/* Toolbar */}
@@ -653,6 +645,20 @@ export function CatalogManagerPage() {
               </option>
             ))}
           </select>
+          {/* Photo filter — the server's predicate; fixed on /catalog/missing-photos */}
+          {!photoPreset && (
+            <select
+              value={photoPick}
+              onChange={(e) => setPhotoPick(e.target.value as PhotoFilter | '')}
+              className="input-field w-40"
+              title="Filter by photo"
+              aria-label="Photo"
+            >
+              <option value="">Photo: Any</option>
+              <option value="has">Photo: Has photo</option>
+              <option value="missing">Photo: Missing</option>
+            </select>
+          )}
           {segment === 'catalog' && (
             <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
               <input
@@ -688,7 +694,7 @@ export function CatalogManagerPage() {
         </div>
       </div>
 
-      {/* Grid */}
+      {/* List */}
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center text-sm text-red-700">
           {error}
@@ -707,6 +713,12 @@ export function CatalogManagerPage() {
                 Every imported product matching these filters has been handled.
               </p>
             </>
+          ) : isMissingPhotos ? (
+            <>
+              <CheckCircle2 className="mx-auto h-8 w-8 text-green-500" />
+              <p className="mt-2 text-sm font-medium text-gray-900">Every product has a photo</p>
+              <p className="text-xs text-gray-500">Nothing here is blocked from going online.</p>
+            </>
           ) : (
             <>
               <p className="text-sm font-medium text-gray-900">No products found</p>
@@ -716,27 +728,167 @@ export function CatalogManagerPage() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-            {items.map((it, idx) => {
-              const pid = docId(it.doc);
-              return (
-                <CatalogCard
-                  key={pid || idx}
-                  item={it}
-                  selectable={segment === 'review'}
-                  selected={selected.has(pid)}
-                  failMessage={failMap[pid]}
-                  onToggleSelect={() => toggleSelect(pid)}
-                  onOpen={() => {
+          {/* The table scrolls inside its own box at narrow widths; the page
+              never scrolls sideways.
+
+              `contain:paint` is LOAD-BEARING, not decoration. Every page is
+              wrapped in .ims-anim-page, whose entry animation leaves a
+              transform on the element -- and while an ancestor is transformed,
+              Chrome counts a nested scroller's UNCLIPPED content in that
+              ancestor's scrollWidth. The box clipped correctly on screen and
+              #main-content still reported scrollWidth 693 at every phone
+              width, which the layout gate reads as "the page scrolls
+              sideways". Containing paint stops the overflow escaping upward;
+              the box still scrolls its own table. Measured 687 -> 350 at
+              360px, unchanged at 768/1180. */}
+          <div className="overflow-x-auto [contain:paint] rounded-xl border border-gray-200 bg-white">
+            <table className="w-full min-w-[780px] text-sm" data-testid="catalog-table">
+              <thead>
+                <tr className="text-left text-[10px] font-semibold uppercase tracking-[.08em] text-gray-500">
+                  {segment === 'review' && (
+                    <th className="w-8 px-3 pb-2 pt-3">
+                      <span className="sr-only">Select</span>
+                    </th>
+                  )}
+                  <th className="w-12 px-3 pb-2 pt-3">
+                    <span className="sr-only">Image</span>
+                  </th>
+                  <th className="px-3 pb-2 pt-3">Product</th>
+                  <th className="px-3 pb-2 pt-3">SKU</th>
+                  <th className="px-3 pb-2 pt-3">Category</th>
+                  <th className="px-3 pb-2 pt-3 text-right">MRP</th>
+                  <th className="px-3 pb-2 pt-3">Photo</th>
+                  <th className="px-3 pb-2 pt-3">Online</th>
+                  <th className="px-3 pb-2 pt-3">
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it, idx) => {
+                  const doc = it.doc;
+                  const pid = docId(doc);
+                  const name = docName(doc);
+                  const brandName = String(
+                    doc.brand || (doc.attributes as Record<string, unknown>)?.brand_name || ''
+                  );
+                  const images = docImages(doc);
+                  const mrp = docMrp(doc);
+                  const offer = docOffer(doc);
+                  const hasDiscount = mrp !== null && offer !== null && offer < mrp;
+                  const inactive = doc.is_active === false;
+                  const needsReview = it.kind === 'imported' && Boolean(doc.needs_review);
+                  const hasPhoto = doc.has_photo as boolean | undefined;
+                  const online = doc.online as OnlineState | undefined;
+                  const openRow = () => {
                     setFocusItem(null);
                     setDrawerIdx(idx);
-                  }}
-                  onImageClick={() =>
-                    setLightbox({ images: docImages(it.doc), alt: docName(it.doc) })
-                  }
-                />
-              );
-            })}
+                  };
+                  return (
+                    <tr
+                      key={pid || idx}
+                      className={clsx(
+                        'border-t border-gray-100 hover:bg-gray-50',
+                        selected.has(pid) && 'bg-amber-50',
+                        inactive && 'opacity-60'
+                      )}
+                    >
+                      {segment === 'review' && (
+                        <td className="px-3 py-2 align-middle">
+                          <input
+                            type="checkbox"
+                            checked={selected.has(pid)}
+                            onChange={() => toggleSelect(pid)}
+                            className="h-3.5 w-3.5 accent-amber-500"
+                            aria-label={`Select ${name}`}
+                          />
+                        </td>
+                      )}
+                      <td className="px-3 py-2 align-middle">
+                        <button
+                          type="button"
+                          onClick={images.length > 0 ? () => setLightbox({ images, alt: name }) : openRow}
+                          className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-md bg-gray-50"
+                          aria-label={images.length > 0 ? `View images of ${name}` : name}
+                        >
+                          <CatalogImage
+                            url={images[0] || ''}
+                            alt={name}
+                            className="max-h-full max-w-full object-contain"
+                          />
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 align-middle">
+                        <button type="button" onClick={openRow} className="text-left">
+                          <div className="font-medium text-gray-900 leading-snug">{name}</div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500">
+                            {brandName && <span>{brandName}</span>}
+                            {needsReview ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                                <AlertTriangle className="h-3 w-3" /> Needs review
+                              </span>
+                            ) : inactive ? (
+                              <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+                                Inactive
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">
+                                <ShieldCheck className="h-3 w-3" /> POS-ready
+                              </span>
+                            )}
+                            {failMap[pid] && (
+                              <span
+                                className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700"
+                                title={failMap[pid]}
+                              >
+                                needs fixes
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 align-middle font-mono text-xs text-gray-700">
+                        {String(doc.sku || doc.parent_sku || '—')}
+                      </td>
+                      <td className="px-3 py-2 align-middle text-gray-700">
+                        {String(doc.category_name || doc.category || '—')}
+                      </td>
+                      <td className="px-3 py-2 align-middle text-right tabular-nums">
+                        <span className="font-semibold text-gray-900">{fmtINR(offer ?? mrp)}</span>
+                        {hasDiscount && (
+                          <span className="ml-1 text-[10px] text-gray-500 line-through">{fmtINR(mrp)}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-middle" data-testid="photo-cell">
+                        <PhotoChip has={hasPhoto} />
+                      </td>
+                      <td className="px-3 py-2 align-middle" data-testid="online-cell">
+                        <OnlineChip state={online} />
+                      </td>
+                      <td className="px-3 py-2 align-middle text-right">
+                        {hasPhoto === false ? (
+                          <button
+                            type="button"
+                            onClick={() => openEditor(it, '#images')}
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-gray-300 px-2.5 text-xs font-medium text-gray-800 hover:bg-gray-50"
+                          >
+                            <ImagePlus className="h-3.5 w-3.5" /> Add photo
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openEditor(it)}
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-gray-300 px-2.5 text-xs font-medium text-gray-800 hover:bg-gray-50"
+                          >
+                            <Pencil className="h-3.5 w-3.5" /> Edit
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
           <Pagination
             currentPage={page}
@@ -793,7 +945,7 @@ export function CatalogManagerPage() {
         />
       )}
 
-      {/* Page-level lightbox (card image click). ImageLightbox itself renders
+      {/* Page-level lightbox (thumbnail click). ImageLightbox itself renders
           null for an empty list, so no extra guard is needed. */}
       {lightbox && (
         <ImageLightbox

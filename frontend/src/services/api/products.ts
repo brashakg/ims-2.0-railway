@@ -292,7 +292,9 @@ export const catalogApi = {
     return (response.data?.statuses || {}) as Record<string, OnlineStatus>;
   },
 
-  /** Diagnostic: is the IMS online catalog populated (Shopify-mapped) + counts. */
+  /** Diagnostic: is the IMS online catalog populated (Shopify-mapped) + counts.
+   *  `catalog` is the Catalog screen's counts row + the sidebar badges, tallied
+   *  on the server with the same per-row rule the list rows carry. */
   getOnlineSummary: async () => {
     const response = await api.get('/catalog/online-summary');
     return response.data as {
@@ -303,9 +305,25 @@ export const catalogApi = {
       online_variants?: number;
       published_products?: number;
       draft_products?: number;
+      catalog?: CatalogCounts;
     };
   },
 };
+
+/** The Catalog screen's counts row, from GET /catalog/online-summary. */
+export interface CatalogCounts {
+  in_catalog: number;
+  smartglasses: number;
+  own: number;
+  /** No usable photo — cannot go online. */
+  no_photo: number;
+  /** On bettervision.in. */
+  live: number;
+  /** Queued for the manual push — needs a human. */
+  pending: number;
+  /** Imports awaiting review (the review queue's total). */
+  needs_review: number;
+}
 
 export const productApi = {
   // GET /products (the billing/stock SPINE list). `total` is the LEGACY page
@@ -322,6 +340,10 @@ export const productApi = {
     is_active?: 'true' | 'false' | 'all';
     /** Cataloguer attribution filter: only products created by this user_id. */
     created_by?: string;
+    /** 'has' = a usable photo by the Shopify push's own predicate (judged on
+     *  the product's catalog twin, the doc the push reads); 'missing' = none.
+     *  Rows come back stamped with has_photo + online either way. */
+    photo?: 'has' | 'missing';
   }) => {
     const response = await api.get('/products', { params });
     return response.data;

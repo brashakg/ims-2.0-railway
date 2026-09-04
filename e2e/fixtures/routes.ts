@@ -45,6 +45,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/approvals/mine' },
   { path: '/returns/approvals' },
   { path: '/catalog' },
+  { path: '/catalog/review' },
+  { path: '/catalog/missing-photos' },
   { path: '/catalog/add' },
   { path: '/catalog/scorecard' },
   { path: '/catalog/quick-share' },

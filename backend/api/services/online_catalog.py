@@ -512,7 +512,154 @@ def online_summary(db) -> Dict[str, Any]:
         "online_variants": mapped_variants,
         "published_products": published,
         "draft_products": draft,
+        # The Catalog screen's counts row (+ the sidebar badges). Same
+        # per-doc rule as the list rows -- see product_online_state.
+        "catalog": catalog_counts(db),
     }
+
+
+# ---------------------------------------------------------------------------
+# Catalog screen truth: per-product photo / online state + the counts row
+# ---------------------------------------------------------------------------
+# ONE predicate answers "does this product have a usable photo": the push's
+# own shopify_push.product_photo_urls -- the publish gate ("no photo, no
+# publish") and the media the push attaches both read it. The Photo column,
+# the Photo filter, the Missing-photos work list and the "No usable photo"
+# figure all come from THIS function, computed on the server; the frontend
+# never re-derives it, so what the screen calls a photo and what the push
+# accepts can never disagree.
+
+
+def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """The Catalog screen's per-row truth for ONE catalog_products doc.
+
+      has_photo -- the push predicate (absolute http(s) URL on image_url /
+                   images[] / image; missing, None, "" and a relative path
+                   are all "no photo", exactly as the publish gate sees them)
+      queued    -- ecom.locally_modified, the ONE flag the push sweep walks
+                   and the pending count reads
+      online    -- LIVE     on Shopify (_ecom_online: gid present or PUBLISHED)
+                   BLOCKED  not live and no usable photo: the push refuses it
+                   QUEUED   has a photo, waiting for a human to press push
+                   OFF      not live, not queued
+
+    Pure; never raises."""
+    # Lazy: shopify_push is the heavy Shopify client module and this helper
+    # runs on every list request.
+    from .shopify_push import product_photo_urls
+
+    doc = doc if isinstance(doc, dict) else {}
+    ecom = doc.get("ecom") if isinstance(doc.get("ecom"), dict) else {}
+    has_photo = bool(product_photo_urls(doc))
+    queued = bool(ecom.get("locally_modified"))
+    if _ecom_online(ecom):
+        online = "LIVE"
+    elif not has_photo:
+        online = "BLOCKED"
+    elif queued:
+        online = "QUEUED"
+    else:
+        online = "OFF"
+    return {"has_photo": has_photo, "online": online, "queued": queued}
+
+
+def stamp_online_state(db, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stamp `has_photo` + `online` onto SPINE (`products`) rows from their
+    catalog_products twin -- the doc the push actually reads, so a spine row
+    is judged exactly as the publish gate would judge it. Twin key:
+    pim_product_id first (the create door's own link), sku as the legacy
+    fallback (products convergence; prod 2026-09-04: 76/76 match on both). A
+    spine row with no twin at all is judged on its own fields -- it cannot be
+    pushed either way. Mutates in place and returns the same list. Fail-soft:
+    a lookup failure judges every row on its own fields."""
+    if not products:
+        return products
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_sku: Dict[str, Dict[str, Any]] = {}
+    try:
+        coll = _coll(db, "catalog_products")
+        ids = [p.get("pim_product_id") for p in products if p.get("pim_product_id")]
+        skus = [p.get("sku") for p in products if p.get("sku")]
+        ors: List[Dict[str, Any]] = []
+        if ids:
+            ors.append({"id": {"$in": ids}})
+        if skus:
+            ors.append({"sku": {"$in": skus}})
+        if coll is not None and ors:
+            flt = ors[0] if len(ors) == 1 else {"$or": ors}
+            for twin in coll.find(flt, {"_id": 0}):
+                if twin.get("id"):
+                    by_id.setdefault(str(twin["id"]), twin)
+                if twin.get("sku"):
+                    by_sku.setdefault(str(twin["sku"]), twin)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_CATALOG] twin lookup failed: %s", exc)
+    for p in products:
+        twin = by_id.get(str(p.get("pim_product_id") or "")) or by_sku.get(
+            str(p.get("sku") or "")
+        )
+        state = product_online_state(twin if twin is not None else p)
+        p["has_photo"] = state["has_photo"]
+        p["online"] = state["online"]
+    return products
+
+
+def _in_catalog(doc: Dict[str, Any]) -> bool:
+    """The online catalog population: active (a missing flag is active) and
+    not an import still awaiting review."""
+    return doc.get("is_active") is not False and doc.get("needs_review") is not True
+
+
+def catalog_counts(db) -> Dict[str, int]:
+    """The Catalog screen's counts row, tallied over catalog_products with the
+    SAME product_online_state the per-row columns use -- so the figures and
+    the rows cannot disagree.
+
+      in_catalog / smartglasses / own / no_photo / live -- over the catalog
+          population (_in_catalog)
+      pending      -- every dirty row, population or not: it is what the
+                      "push all pending" sweep walks, and the number must
+                      agree with the Online Store screen's pending count
+      needs_review -- imports awaiting review (the review queue's total)
+
+    ponytail: one Python pass over the catalog (~80 rows); aggregate in Mongo
+    if it ever passes a few thousand. Fail-soft: zeros on any failure."""
+    out = {
+        "in_catalog": 0,
+        "smartglasses": 0,
+        "own": 0,
+        "no_photo": 0,
+        "live": 0,
+        "pending": 0,
+        "needs_review": 0,
+    }
+    prods = _coll(db, "catalog_products")
+    if prods is None:
+        return out
+    try:
+        from .product_master import resolve_category
+
+        for doc in prods.find({}, {"_id": 0}):
+            state = product_online_state(doc)
+            if state["queued"]:
+                out["pending"] += 1
+            if doc.get("needs_review") is True:
+                out["needs_review"] += 1
+            if not _in_catalog(doc):
+                continue
+            out["in_catalog"] += 1
+            cat = resolve_category(doc.get("category")) or doc.get("category")
+            if cat == "SMARTGLASSES":
+                out["smartglasses"] += 1
+            else:
+                out["own"] += 1
+            if not state["has_photo"]:
+                out["no_photo"] += 1
+            if state["online"] == "LIVE":
+                out["live"] += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_CATALOG] catalog counts failed: %s", exc)
+    return out
 
 
 def reconcile_store_barcodes(
