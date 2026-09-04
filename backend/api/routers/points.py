@@ -135,6 +135,25 @@ def _viewer_visibility(current_user: dict) -> tuple:
     return "self", uid
 
 
+# OWNER RULING 2026-09-04: a staff member's commission weighting and a
+# supervisor's bonus percentage ARE that person's pay terms -- ADMIN/SUPERADMIN
+# only, like salary, managers included. The keys are POPPED, not emptied: an
+# empty dict would still answer "does anyone here have a weighting", and the
+# roster of who has one is itself the leak. Same predicate as everything above.
+_PAY_TERM_KEYS = ("staff_weightages", "supervisor_bonuses")
+
+
+def _redact_pay_terms(out: Dict, current_user: dict) -> Dict:
+    """Leaderboard envelope on a settings doc: 'all' keeps everything, 'self'
+    loses the per-person keys. Mutates and returns the (already copied) doc."""
+    visibility, _ = _viewer_visibility(current_user)
+    if visibility != "all":
+        for key in _PAY_TERM_KEYS:
+            out.pop(key, None)
+    out["visibility"] = visibility
+    return out
+
+
 # F33 -- leaderboard scope widening. org/area visibility is a management
 # privilege; floor roles stay store-scoped.
 _SCOPE_WIDE_ROLES = {"AREA_MANAGER", "ADMIN", "SUPERADMIN"}
@@ -946,11 +965,13 @@ async def get_settings(
     current_user: dict = Depends(get_current_user),
     store_id: Optional[str] = Query(None),
 ):
-    """Current eligibility bands + visufit gate config."""
+    """Current eligibility bands + visufit gate config. Per-person pay terms
+    (staff_weightages / supervisor_bonuses) reach ADMIN/SUPERADMIN only."""
     store = _resolve_store(current_user, store_id)
     settings_repo = _settings_repo()
     if settings_repo is None:
-        return IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store)  # type: ignore
+        out = IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store)  # type: ignore
+        return _redact_pay_terms(out, current_user)
     out = _serialize(settings_repo.get_for_store(store))
     # The page footer reads "Last updated ... by <updated_by>", and every
     # writer stamps current_user["user_id"] -- so it printed a raw id.
@@ -963,7 +984,7 @@ async def get_settings(
         stamp_user_names(get_db(), [out], ("updated_by",))
     except Exception:  # noqa: BLE001
         pass
-    return out
+    return _redact_pay_terms(out, current_user)
 
 
 @router.get("/settings/effective")
@@ -985,13 +1006,18 @@ async def get_effective_settings(
     store = _resolve_store(current_user, store_id)
     settings_repo = _settings_repo()
     if settings_repo is None:
-        return scorecard_engine.resolve_settings(
+        out = scorecard_engine.resolve_settings(
             store, entity_id, settings_repo=None
         )
-    resolved = scorecard_engine.resolve_settings(
-        store, entity_id, settings_repo=settings_repo
-    )
-    return _serialize(resolved)
+    else:
+        out = _serialize(
+            scorecard_engine.resolve_settings(
+                store, entity_id, settings_repo=settings_repo
+            )
+        )
+    # Same door-class as /settings/eligibility: the resolved doc carries the
+    # per-person pay terms, and this route admits managers + accountant.
+    return _redact_pay_terms(out, current_user)
 
 
 class UpdateScopeSettingsRequest(BaseModel):
