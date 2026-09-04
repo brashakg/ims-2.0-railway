@@ -42,6 +42,7 @@ import logging
 import os
 
 import httpx
+from fastapi import HTTPException
 
 from ..utils.ist import ist_date_str, ist_today
 from .delivery_gate import cod_collectable
@@ -226,10 +227,37 @@ def _simulated_awb(order_id: str) -> str:
     return f"SIMSR{stamp}{suffix or 'ORDER'}"
 
 
-def is_cod(payment_method: Any) -> bool:
-    """THE one predicate for 'this booking is cash-on-delivery' (router gate
-    and payload builder both use it, so they can never disagree)."""
-    return str(payment_method or "").strip().upper() == "COD"
+# The only two methods a courier booking has. Shiprocket's create-adhoc body
+# takes exactly these spellings.
+_PAYMENT_KINDS = {"COD": "COD", "PREPAID": "Prepaid"}
+
+
+def payment_kind(payment_method: Any) -> str:
+    """THE one reading of a booking's payment method - "COD" or "Prepaid".
+    The router gate and the carrier payload both call it, so what the door
+    decided and what the courier is told can never disagree.
+
+    Blank / absent keeps the historical default, Prepaid (an order paid
+    upstream). Anything ELSE is refused 400: an unrecognised spelling like
+    "Cash on Delivery" used to be coerced to Prepaid, which ships a part-paid
+    order with nothing collected at either end - the failure this whole fix
+    exists to stop, arriving through a typo instead."""
+    raw = str(payment_method or "").strip()
+    if not raw:
+        return "Prepaid"
+    kind = _PAYMENT_KINDS.get(raw.upper())
+    if kind is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "UNKNOWN_PAYMENT_METHOD",
+                "message": (
+                    f"'{raw}' is not a shipping payment method. A booking is "
+                    f"either COD (the courier collects) or Prepaid."
+                ),
+            },
+        )
+    return kind
 
 
 def build_shipment_payload(
@@ -292,8 +320,8 @@ def build_shipment_payload(
     # so it must be the IST calendar day. created_at is stored as a naive UTC
     # wall clock, so a 00:00-05:30-IST order otherwise ships dated YESTERDAY.
     order_date = ist_date_str(order.get("created_at")) or ist_today().isoformat()
-    cod = is_cod(address.get("payment_method"))
-    if cod:
+    method = payment_kind(address.get("payment_method"))
+    if method == "COD":
         sub_total = cod_collectable(order)
     else:
         sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
@@ -315,7 +343,7 @@ def build_shipment_payload(
         "billing_phone": str(address.get("phone") or order.get("customer_phone") or ""),
         "shipping_is_billing": True,
         "order_items": line_items,
-        "payment_method": "COD" if cod else "Prepaid",
+        "payment_method": method,
         "sub_total": sub_total,
         # Default parcel dims (cm / kg) - small optical parcel. Overridable.
         "length": float(address.get("length") or 15),
@@ -350,7 +378,22 @@ async def create_shipment(
     # exact body a live booking would send (raw['payload']): the money fields
     # are checkable without a carrier, and a payload bug surfaces in
     # simulation instead of on the first live booking.
-    payload = build_shipment_payload(order, address, pickup_location=pickup_location)
+    #
+    # The builder now REFUSES bad money (an unknown payment method, a balance
+    # that is zero / above the bill / not a number), and this function's
+    # contract above is that it never raises - the router pre-validates and
+    # answers 400 itself, but an unattended caller (a sweep, a retry job) must
+    # get a FAILED result, not a 500.
+    try:
+        payload = build_shipment_payload(
+            order, address, pickup_location=pickup_location
+        )
+    except Exception as exc:  # noqa: BLE001 - see contract above
+        reason = getattr(exc, "detail", None) or exc
+        if isinstance(reason, dict):
+            reason = reason.get("message") or reason.get("code")
+        logger.warning("[SHIPROCKET] payload refused for %s: %s", order_id, reason)
+        return ShipResult(ok=False, status="FAILED", error=str(reason))
 
     mode = dispatch_mode()
     if mode != "live":
