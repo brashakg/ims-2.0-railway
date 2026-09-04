@@ -251,6 +251,11 @@ export function eyeTestWriteBody(data: EyeTestData): EyeTestWriteBody {
       optometristName: data.optometristName || undefined,
       chiefComplaint: data.chiefComplaint || undefined,
       vduUsage: data.vduUsage || undefined,
+      // STAFF-ONLY note. Sent as-is, '' included: an emptied box CLEARS the
+      // stored note (the backend leaves it alone only when the key is absent).
+      // It lands on the test document and is never mirrored to the Rx.
+      internalNote: data.internalNote,
+      examStep: data.examStep,
       // Final Rx: signed strings, sign intact end-to-end.
       ...finalRxPayload(data.finalRx),
       // `notes` carries the optometrist's FINAL RX REMARKS, because that is

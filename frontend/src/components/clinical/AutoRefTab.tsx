@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { Camera } from 'lucide-react';
-import { EyePowerRow } from './EyeTestInput';
+import { EyePowerRow, PowerGrid } from './EyeTestInput';
 import { RxPowerInput } from './RxPowerInput';
 import type { AutoRefData, PowerReading } from './eyeTestTypes';
 
@@ -119,7 +119,7 @@ export function AutoRefTab({ data, onChange }: AutoRefTabProps) {
 
       <div className="card">
         <h3 className="font-semibold text-gray-900 mb-4">Auto-Refraction</h3>
-        <div className="space-y-2">
+        <PowerGrid showVA={false}>
           <EyePowerRow
             eye="R"
             data={data.rightEye}
@@ -132,7 +132,7 @@ export function AutoRefTab({ data, onChange }: AutoRefTabProps) {
             onChange={(field, value) => handlePowerChange('leftEye', field, value)}
             showVA={false}
           />
-        </div>
+        </PowerGrid>
       </div>
 
       <div className="card">

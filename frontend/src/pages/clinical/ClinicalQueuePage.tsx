@@ -2,11 +2,17 @@
 // IMS 2.0 - /clinical/queue
 // ============================================================================
 // The optometrist queue, by token. Was the "queue" tab of the deleted
-// ClinicalPage mega-page; behaviour is unchanged. Data comes from the shared
-// clinicalQueries cache (the layout's stat strip reads the same keys).
+// ClinicalPage mega-page. Data comes from the shared clinicalQueries cache
+// (the layout's stat strip reads the same keys).
+//
+// Start / Continue NAVIGATE to the examination page, /clinical/test/:entryId.
+// The exam used to open here as a modal (owner, 2026-09-04: "why is this
+// screen still a pop up"); that modal is deleted, and the exam's brain --
+// state, the one range validator, the save path -- lives with the page.
 // NO MOCK DATA - All data from API.
 
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Eye,
   Play,
@@ -20,10 +26,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiDetailMessage } from '../../utils/errorHandler';
-import { EyeTestForm } from '../../components/clinical/EyeTestForm';
-import type { EyeTestData } from '../../components/clinical/EyeTestForm';
-import { eyeTestWriteBody } from '../../components/clinical/eyeTestPayload';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
 import { CLINICAL_MODULE_ROLES } from './clinicalRoles';
@@ -52,20 +54,12 @@ interface TokenPrintData {
 export function ClinicalQueuePage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const { data: queue = [], isLoading } = useClinicalQueue(user?.activeStoreId);
   const { storeInfo, storeEntity } = useClinicalStoreIdentity(user?.activeStoreId);
 
-  const [showEyeTestForm, setShowEyeTestForm] = useState(false);
-  const [selectedPatient, setSelectedPatient] = useState<{
-    id: string;
-    name: string;
-    phone: string;
-    age?: number;
-    customerId: string;
-  } | null>(null);
-  const [currentTestId, setCurrentTestId] = useState<string | null>(null);
   const [printToken, setPrintToken] = useState<TokenPrintData | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
@@ -115,47 +109,8 @@ export function ClinicalQueuePage() {
     }
   };
 
-  const handleOpenEyeTest = (item: QueueItem) => {
-    setSelectedPatient({
-      id: item.id,
-      name: item.patientName,
-      phone: item.customerPhone,
-      age: item.age,
-      customerId: item.customerId || item.id,
-    });
-    setShowEyeTestForm(true);
-  };
-
-  const handleSaveEyeTest = async (data: EyeTestData) => {
-    try {
-      if (!currentTestId) {
-        toast.error('No active test found');
-        return;
-      }
-
-      // Extract prescription data from finalRx for the API. Forward the FULL
-      // Final-Rx field set (VA / prism / base per eye + IPD + lens type + next
-      // checkup) so the auto-created prescription carries the SAME data a
-      // POS-created Rx does (field + DB parity).
-      //
-      // The mapping lives in eyeTestPayload.finalRxPayload rather than inline
-      // here. It used to run every power through parseFloat, which is exactly
-      // where a typed "+4.00" became the number 4 and the explicit plus was
-      // destroyed for good.
-      await clinicalApi.completeTest(currentTestId, eyeTestWriteBody(data));
-
-      toast.success('Eye test saved successfully');
-      setShowEyeTestForm(false);
-      setSelectedPatient(null);
-      setCurrentTestId(null);
-      await reload();
-    } catch (err: unknown) {
-      // Surface the backend's specific validation message (e.g. "Right eye CYL
-      // value -50 is outside the valid range (-6 to 6)") instead of a generic
-      // failure, so the optometrist knows which field to fix.
-      toast.error(apiDetailMessage(err, 'Failed to save eye test'));
-    }
-  };
+  /** The examination page for this queue entry. Its own URL, not a modal. */
+  const openExam = (item: QueueItem) => navigate(`/clinical/test/${item.id}`);
 
   return (
     <div>
@@ -294,10 +249,7 @@ export function ClinicalQueuePage() {
                   <button
                     onClick={async () => {
                       const testId = await handleStartTest(item.id);
-                      if (testId) {
-                        setCurrentTestId(testId);
-                        handleOpenEyeTest(item);
-                      }
+                      if (testId) openExam(item);
                     }}
                     disabled={isActionLoading}
                     className="btn sm primary disabled:opacity-50"
@@ -312,11 +264,7 @@ export function ClinicalQueuePage() {
                 )}
                 {item.status === 'IN_PROGRESS' && canStartTest && (
                   <button
-                    onClick={() => {
-                      const testId = item.testId || item.id;
-                      setCurrentTestId(testId);
-                      handleOpenEyeTest(item);
-                    }}
+                    onClick={() => openExam(item)}
                     className="btn sm primary"
                   >
                     <Eye className="w-4 h-4" />
@@ -355,19 +303,6 @@ export function ClinicalQueuePage() {
           onClose={() => setPrintToken(null)}
         />
       )}
-
-      {/* Eye Test Form Modal */}
-      <EyeTestForm
-        isOpen={showEyeTestForm}
-        onClose={() => {
-          setShowEyeTestForm(false);
-          setSelectedPatient(null);
-          setCurrentTestId(null);
-        }}
-        onSave={handleSaveEyeTest}
-        patient={selectedPatient}
-        optometristName={user?.name}
-      />
 
       {/* Prescription history / edit / new — per customer, grouped by family */}
       {rxHistoryFor && (

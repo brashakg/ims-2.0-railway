@@ -465,6 +465,17 @@ class EyeTestData(BaseModel):
     chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
     vdu_usage: Optional[str] = Field(None, alias="vduUsage")
 
+    # ---- The exam PAGE (2026-09-04) ------------------------------------------
+    # `internal_note` is STAFF-ONLY. It is stored on the eye-test document and
+    # NOWHERE else: never copied onto the mirrored prescription, so the printed
+    # Rx card, the customer portal projection and any WhatsApp send -- all of
+    # which read the prescription, not the exam -- cannot carry it. An empty
+    # string CLEARS a stored note; an absent field leaves it alone.
+    # `exam_step` is the step the optometrist paused on, so "Continue" from the
+    # queue reopens the exam where it was left.
+    internal_note: Optional[str] = Field(None, alias="internalNote", max_length=2000)
+    exam_step: Optional[str] = Field(None, alias="examStep", max_length=32)
+
     model_config = ConfigDict(populate_by_name=True)
 
 
@@ -727,9 +738,16 @@ def _exam_header_for_storage(data: "EyeTestData") -> dict:
         ("optometrist_name", data.optometrist_name),
         ("chief_complaint", data.chief_complaint),
         ("vdu_usage", data.vdu_usage),
+        ("exam_step", data.exam_step),
     ):
         if value is not None and str(value).strip() != "":
             header[key] = value
+    # The staff-only note is the one header field a blank may overwrite: an
+    # optometrist who deletes the note means "there is no note", and the exam
+    # page always sends the field, so None here means the caller was not the
+    # exam page and the stored note is left alone.
+    if data.internal_note is not None:
+        header["internal_note"] = data.internal_note.strip()
     return header
 
 
@@ -1386,7 +1404,8 @@ async def amend_eye_test(
     data: EyeTestData,
     current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
-    """Amend an already-completed eye test -- the clinic's Edit screen.
+    """Amend an already-completed eye test -- the clinic's Edit screen -- or,
+    for a test still IN_PROGRESS, save it and pause (see `is_pause` below).
 
     The Edit pencil used to open an Rx-ONLY form, so the lensometer, slit-lamp,
     auto-ref and subjective-refraction readings could not be corrected: roughly
@@ -1418,6 +1437,15 @@ async def amend_eye_test(
     # Cross-store IDOR guard, same as completion: 404-hide a test in another
     # store rather than confirming it exists.
     _store_scope_or_404(existing, current_user)
+
+    # SAVE & PAUSE (the exam page, 2026-09-04). An exam still IN_PROGRESS is
+    # saved through this same door: same seven steps in the body, same range
+    # gate, same fields stored. What differs is the bookkeeping -- a pause is
+    # not an amendment of a recorded exam, so nothing goes on the append-only
+    # `amendments` list, nothing is stamped amended_by, there is no mirrored
+    # prescription yet to re-sync, and the queue entry stays IN_PROGRESS so
+    # "Continue" on the queue finds the exam where it was left.
+    is_pause = existing.get("status") != "COMPLETED"
 
     now_iso = datetime.utcnow().isoformat()
     soap_note_dict = None
@@ -1458,9 +1486,30 @@ async def amend_eye_test(
         next_checkup=data.next_checkup,
         amended_by=current_user.get("user_id", ""),
         amended_at=now_iso,
+        draft=is_pause,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to amend test")
+
+    if is_pause:
+        _audit_clinical(
+            "EYE_TEST_PAUSED",
+            test_id,
+            current_user,
+            store_id=existing.get("store_id"),
+            detail={
+                "customer_id": existing.get("customer_id"),
+                "patient_id": existing.get("patient_id"),
+                "exam_step": data.exam_step,
+            },
+        )
+        return {
+            "testId": test_id,
+            "prescriptionId": None,
+            "amended": False,
+            "paused": True,
+            "message": "Eye test saved; still in progress",
+        }
 
     # Keep the mirrored prescription in step with the corrected Final Rx --
     # otherwise the amendment would fix the exam record while the document the

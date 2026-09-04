@@ -16,6 +16,10 @@
 // /clinical/test was a placeholder page whose entire behaviour was "go to the
 // queue" (with a 2-second auto-redirect); it is now an actual redirect.
 //
+// /clinical/test/:entryId is THE EYE EXAMINATION -- its own page, opened from
+// a queue row (it used to be a modal over the queue). /clinical/test/amend/
+// :testId is the same page reopening a completed exam from Rx history.
+//
 // Role gates come from ONE list, pages/clinical/clinicalRoles.ts. The six
 // contradicting copies that used to live here and inside ClinicalPage are
 // deleted, not synced.
@@ -34,6 +38,7 @@ const ClinicalCompletedPage = lazy(() => import('../pages/clinical/ClinicalCompl
 const ClinicalPrescriptionsPage = lazy(() => import('../pages/clinical/ClinicalPrescriptionsPage').then(m => ({ default: m.ClinicalPrescriptionsPage })));
 const ClinicalAbusePage = lazy(() => import('../pages/clinical/ClinicalAbusePage').then(m => ({ default: m.ClinicalAbusePage })));
 const ClinicalConversionPage = lazy(() => import('../pages/clinical/ConversionTab').then(m => ({ default: m.ConversionTab })));
+const EyeExamPage = lazy(() => import('../pages/clinical/EyeExamPage').then(m => ({ default: m.EyeExamPage })));
 const TestHistoryPage = lazy(() => import('../pages/clinical/TestHistoryPage').then(m => ({ default: m.TestHistoryPage })));
 const FamilyRxPage = lazy(() => import('../pages/clinical/FamilyRxPage').then(m => ({ default: m.FamilyRxPage })));
 const ContactLensFittingPage = lazy(() => import('../pages/clinical/ContactLensFittingPage').then(m => ({ default: m.ContactLensFittingPage })));
@@ -95,6 +100,23 @@ export const clinicalRoutes = (
           "add the patient to the queue first" plus a 2s auto-redirect. Now the
           redirect it always was. */}
       <Route path="test" element={<Navigate to="/clinical/queue" replace />} />
+      {/* The eye examination: a page with an address, inside the module rail. */}
+      <Route
+        path="test/:entryId"
+        element={
+          <ProtectedRoute allowedRoles={CLINICAL_MODULE_ROLES}>
+            <EyeExamPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="test/amend/:testId"
+        element={
+          <ProtectedRoute allowedRoles={CLINICAL_MODULE_ROLES}>
+            <EyeExamPage />
+          </ProtectedRoute>
+        }
+      />
     </Route>
 
     {/* Standalone clinical pages (own full-page chrome, addresses unchanged) */}

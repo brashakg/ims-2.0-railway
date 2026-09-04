@@ -3,10 +3,13 @@
 // ============================================================================
 
 import { FileText, Stethoscope } from 'lucide-react';
+import clsx from 'clsx';
 import type { FinalRxData, SubjectiveRxData, ClinicalFindingsData } from './eyeTestTypes';
 import { LENS_TYPES, COLOUR_VISION_OPTIONS } from './eyeTestTypes';
 import { RxPowerInput } from './RxPowerInput';
 import { VA_OPTIONS } from '../../constants/rxLimits';
+import { rxDriftWarning, type PreviousRx } from './rxDrift';
+import type { PowerWarnings } from './EyeTestInput';
 
 interface FinalRxTabProps {
   data: FinalRxData;
@@ -15,7 +18,11 @@ interface FinalRxTabProps {
   // C6-B internal-only findings — rendered here but never printed on the Rx card.
   findings: ClinicalFindingsData;
   onFindingsChange: (data: ClinicalFindingsData) => void;
+  /** The drift guardrail's inputs: the patient's previous Rx and their age. */
+  drift?: { previousRx?: PreviousRx | null; age?: number };
 }
+
+const pw = (v: string) => clsx('pw', v.trim() !== '' && 'filled');
 
 const BASE_OPTIONS = ['IN', 'OUT', 'UP', 'DOWN'];
 
@@ -24,43 +31,48 @@ function DistanceVisionRow({
   eye,
   data,
   onFieldChange,
+  warnings,
 }: {
   label: string;
   eye: 'rightEye' | 'leftEye';
   data: FinalRxData['rightEye'];
   onFieldChange: (eye: 'rightEye' | 'leftEye', field: string, value: string) => void;
+  warnings?: PowerWarnings;
 }) {
   return (
-    <tr className={eye === 'rightEye' ? 'border-b border-gray-100' : ''}>
-      <td className="py-3 px-3 font-medium text-gray-900">{label}</td>
-      <td className="py-2 px-2">
+    <tr>
+      <td className="eye">{eye === 'rightEye' ? 'R' : 'L'}</td>
+      <td>
         <RxPowerInput kind="SPH" value={data.sphere} onChange={(v) => onFieldChange(eye, 'sphere', v)}
-          placeholder="SPH" className="input-field text-center text-sm w-full" aria-label={`${label} sphere`} />
+          placeholder="+0.00" className={pw(data.sphere)} aria-label={`${label} sphere`} />
+        {/* The step's own guardrail, in place, not as a toast */}
+        {warnings?.sphere && <div className="exam-drift" role="note">{warnings.sphere}</div>}
       </td>
-      <td className="py-2 px-2">
+      <td>
         <RxPowerInput kind="CYL" value={data.cylinder} onChange={(v) => onFieldChange(eye, 'cylinder', v)}
-          placeholder="CYL" className="input-field text-center text-sm w-full" aria-label={`${label} cylinder`} />
+          placeholder="-0.00" className={pw(data.cylinder)} aria-label={`${label} cylinder`} />
+        {warnings?.cylinder && <div className="exam-drift" role="note">{warnings.cylinder}</div>}
       </td>
-      <td className="py-2 px-2">
+      <td>
         <RxPowerInput kind="AXIS" value={data.axis} onChange={(v) => onFieldChange(eye, 'axis', v)}
-          placeholder="1-180" className="input-field text-center text-sm w-full" aria-label={`${label} axis`} />
+          placeholder="1-180" className={pw(data.axis)} aria-label={`${label} axis`} />
       </td>
-      <td className="py-2 px-2">
+      <td>
         <input type="text" value={data.prism} onChange={(e) => onFieldChange(eye, 'prism', e.target.value)}
-          placeholder="Prism" className="input-field text-center text-sm w-full" />
+          placeholder="Prism" className={pw(data.prism)} aria-label={`${label} prism`} />
       </td>
-      <td className="py-2 px-2">
+      <td>
         <select value={data.base} onChange={(e) => onFieldChange(eye, 'base', e.target.value)}
-          className="input-field text-center text-sm w-full">
+          className={pw(data.base)} aria-label={`${label} prism base`}>
           <option value="">-</option>
           {BASE_OPTIONS.map(opt => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
         </select>
       </td>
-      <td className="py-2 px-2">
+      <td>
         <select value={data.va} onChange={(e) => onFieldChange(eye, 'va', e.target.value)}
-          className="input-field text-center text-sm w-full">
+          className={pw(data.va)} aria-label={`${label} VA`}>
           {VA_OPTIONS.map(opt => (
             <option key={opt} value={opt}>{opt || '-'}</option>
           ))}
@@ -70,7 +82,9 @@ function DistanceVisionRow({
   );
 }
 
-export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindingsChange }: FinalRxTabProps) {
+export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindingsChange, drift }: FinalRxTabProps) {
+  const warn = (eye: 'Right' | 'Left', field: 'SPH' | 'CYL', next: string) =>
+    rxDriftWarning({ eye, field, previous: drift?.previousRx, next, age: drift?.age });
   const setFinding = (field: keyof ClinicalFindingsData, value: string) =>
     onFindingsChange({ ...findings, [field]: value });
   const iopHigh = (v: string) => {
@@ -118,86 +132,108 @@ export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindi
 
   return (
     <div className="space-y-4">
-      {/* Header with Copy buttons */}
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-gray-900">Final Prescription</h3>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleCopyFromSubjective}
-            className="btn-outline text-sm flex items-center gap-1"
-          >
-            <FileText className="w-4 h-4" />
-            Copy from Subjective
-          </button>
-          <button
-            onClick={handleCopyRightToLeft}
-            className="btn-outline text-sm flex items-center gap-1"
-          >
-            Copy R → L
-          </button>
-        </div>
+      {/* Copy actions -- 44px targets */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button type="button" onClick={handleCopyFromSubjective} className="btn lg">
+          <FileText className="w-4 h-4" />
+          Copy from subjective
+        </button>
+        <button type="button" onClick={handleCopyRightToLeft} className="btn lg">
+          Copy R to L
+        </button>
       </div>
 
-      {/* Distance Vision Table */}
+      {/* Distance vision */}
       <div className="card">
-        <h4 className="font-medium text-gray-800 mb-4">Distance Vision</h4>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+        <h4 className="font-medium text-ink mb-3">Distance vision</h4>
+        <div className="pw-wrap">
+          <table className="pw-grid">
             <thead>
-              <tr className="border-b border-gray-200">
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-600 w-28">Eye</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">SPH</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">CYL</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">AXIS</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">PRISM</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">BASE</th>
-                <th className="text-center py-2 px-3 text-sm font-medium text-gray-600">VA</th>
+              <tr>
+                <th aria-label="Eye" />
+                <th>SPH</th>
+                <th>CYL</th>
+                <th>AXIS</th>
+                <th>PRISM</th>
+                <th>BASE</th>
+                <th>VA</th>
               </tr>
             </thead>
             <tbody>
-              <DistanceVisionRow label="Right (OD)" eye="rightEye" data={data.rightEye} onFieldChange={handleFieldChange} />
-              <DistanceVisionRow label="Left (OS)" eye="leftEye" data={data.leftEye} onFieldChange={handleFieldChange} />
+              <DistanceVisionRow
+                label="Right (OD)"
+                eye="rightEye"
+                data={data.rightEye}
+                onFieldChange={handleFieldChange}
+                warnings={{
+                  sphere: warn('Right', 'SPH', data.rightEye.sphere),
+                  cylinder: warn('Right', 'CYL', data.rightEye.cylinder),
+                }}
+              />
+              <DistanceVisionRow
+                label="Left (OS)"
+                eye="leftEye"
+                data={data.leftEye}
+                onFieldChange={handleFieldChange}
+                warnings={{
+                  sphere: warn('Left', 'SPH', data.leftEye.sphere),
+                  cylinder: warn('Left', 'CYL', data.leftEye.cylinder),
+                }}
+              />
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* Near Vision (ADD) */}
+      {/* Near vision (ADD) + binocular */}
       <div className="card">
-        <h4 className="font-medium text-gray-800 mb-4">Near Vision (ADD)</h4>
-        <div className="grid grid-cols-3 gap-4">
+        <h4 className="font-medium text-ink mb-3">Near vision and binocular</h4>
+        <div className="flex items-end gap-4 flex-wrap">
           <div>
-            <label className="text-sm text-gray-600 mb-1 block">Right ADD</label>
+            <label className="text-xs text-ink-4 mb-1 block">Right ADD</label>
             <RxPowerInput
               kind="ADD"
               value={data.rightAdd}
               onChange={(v) => onChange({ ...data, rightAdd: v })}
               placeholder="+0.00"
-              className="input-field"
+              className={pw(data.rightAdd)}
               aria-label="Right eye add"
             />
           </div>
           <div>
-            <label className="text-sm text-gray-600 mb-1 block">Left ADD</label>
+            <label className="text-xs text-ink-4 mb-1 block">Left ADD</label>
             <RxPowerInput
               kind="ADD"
               value={data.leftAdd}
               onChange={(v) => onChange({ ...data, leftAdd: v })}
               placeholder="+0.00"
-              className="input-field"
+              className={pw(data.leftAdd)}
               aria-label="Left eye add"
             />
           </div>
           <div>
-            <label className="text-sm text-gray-600 mb-1 block">IPD (mm)</label>
+            <label className="text-xs text-ink-4 mb-1 block">IPD (mm)</label>
             <RxPowerInput
               kind="PD"
               value={data.ipd}
               onChange={(v) => onChange({ ...data, ipd: v })}
               placeholder="e.g., 62"
-              className="input-field"
+              className={clsx(pw(data.ipd), 'w-24')}
               aria-label="Interpupillary distance"
             />
+          </div>
+          <div>
+            <label className="text-xs text-ink-4 mb-1 block">Dominant eye</label>
+            <select
+              value={findings.dominantEye}
+              onChange={(e) => setFinding('dominantEye', e.target.value)}
+              className={clsx(pw(findings.dominantEye), 'w-24')}
+              aria-label="Dominant eye"
+            >
+              <option value="">-</option>
+              <option value="RIGHT">Right</option>
+              <option value="LEFT">Left</option>
+            </select>
           </div>
         </div>
       </div>
@@ -264,18 +300,6 @@ export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindi
             {iopHigh(findings.iopLeft) && <p className="text-xs text-red-600 mt-0.5">High (&gt;21) — consider referral</p>}
           </div>
           <div>
-            <label className="text-sm text-gray-600 mb-1 block">Dominant Eye</label>
-            <select
-              value={findings.dominantEye}
-              onChange={(e) => setFinding('dominantEye', e.target.value)}
-              className="input-field"
-            >
-              <option value="">—</option>
-              <option value="RIGHT">Right</option>
-              <option value="LEFT">Left</option>
-            </select>
-          </div>
-          <div>
             <label className="text-sm text-gray-600 mb-1 block">Colour Vision</label>
             <input
               type="text" list="colour-vision-options"
@@ -311,10 +335,15 @@ export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindi
         </div>
       </div>
 
-      {/* Remarks */}
+      {/* Remarks. THIS is the note that PRINTS on the patient's Rx card; the
+          staff-only internal note is a different field and never does. The
+          label is associated, and named for its step, so neither a screen
+          reader nor a test can confuse it with the subjective remarks. */}
       <div className="card">
-        <label className="text-sm text-gray-600 mb-1 block">Remarks</label>
+        <label htmlFor="final-rx-remarks" className="text-sm text-gray-600 mb-1 block">Remarks</label>
         <textarea
+          id="final-rx-remarks"
+          aria-label="Final Rx remarks"
           value={data.remarks}
           onChange={(e) => onChange({ ...data, remarks: e.target.value })}
           placeholder="Clinical notes, recommendations..."

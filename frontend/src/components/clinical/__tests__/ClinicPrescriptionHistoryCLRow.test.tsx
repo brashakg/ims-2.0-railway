@@ -30,6 +30,9 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ error: () => {}, success: () => {}, warning: () => {}, info: () => {} }),
 }));
 
+// The panel navigates to the examination page now (the Edit pencil on an
+// exam-backed Rx opens /clinical/test/amend/:testId), so it needs a router.
+import { MemoryRouter } from 'react-router-dom';
 import { ClinicPrescriptionHistory } from '../ClinicPrescriptionHistory';
 
 // One CL Rx and one spectacle Rx on the same patient, with values chosen so
@@ -67,7 +70,9 @@ beforeEach(() => {
 describe('a CONTACT_LENS row in the prescription history', () => {
   it('renders the cl_right/cl_left fitting values, power SIGNED', async () => {
     render(
-      <ClinicPrescriptionHistory isOpen onClose={() => {}} customerId="c1" customerName="Asha Kumari" />,
+      <MemoryRouter>
+        <ClinicPrescriptionHistory isOpen onClose={() => {}} customerId="c1" customerName="Asha Kumari" />
+      </MemoryRouter>,
     );
     // THE REQUIREMENT: the CL row informs -- OD/OS carry the fitting values.
     expect(await screen.findByText('+4.00 · BC 8.6 · DIA 14.2')).toBeTruthy();
@@ -79,7 +84,9 @@ describe('a CONTACT_LENS row in the prescription history', () => {
 
   it('leaves the spectacle row on the spectacle fields', async () => {
     render(
-      <ClinicPrescriptionHistory isOpen onClose={() => {}} customerId="c1" customerName="Asha Kumari" />,
+      <MemoryRouter>
+        <ClinicPrescriptionHistory isOpen onClose={() => {}} customerId="c1" customerName="Asha Kumari" />
+      </MemoryRouter>,
     );
     expect(await screen.findByText('+1.25 / -0.75 / 90')).toBeTruthy();
     // A recorded plano cylinder renders as +0.00 (the formatter's contract:

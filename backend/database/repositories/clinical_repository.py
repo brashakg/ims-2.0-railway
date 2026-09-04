@@ -256,8 +256,14 @@ class EyeTestRepository(BaseRepository):
         next_checkup: Optional[str] = None,
         amended_by: Optional[str] = None,
         amended_at: Optional[str] = None,
+        draft: bool = False,
     ) -> bool:
         """Amend an ALREADY-COMPLETED test in place (the clinic Edit screen).
+
+        ``draft=True`` is SAVE & PAUSE on a test still in progress: the same
+        fields are written, but nothing is snapshotted onto ``amendments`` and
+        nothing is stamped amended_by/amended_at -- a pause is not a
+        correction of a recorded exam. ``draft_saved_at`` is stamped instead.
 
         Deliberately NOT `complete_test`: that call also flips status, stamps
         completed_at, and its caller creates the mirrored prescription and the
@@ -304,6 +310,9 @@ class EyeTestRepository(BaseRepository):
             update_data[key] = value
 
         stamped_at = amended_at or datetime.now().isoformat()
+        if draft:
+            update_data["draft_saved_at"] = stamped_at
+            return self.update(test_id, update_data)
         update_data["amended_at"] = stamped_at
         if amended_by:
             update_data["amended_by"] = amended_by

@@ -12,10 +12,13 @@
 // consumed none of them. Lensometer / Auto-Ref / Subjective Rx accepted -9999,
 // +9999, a cylinder with no axis, and a monocular PD of any size.
 //
-// These tests drive the REAL EyeTestForm with the REAL tabs and the REAL
-// RxPowerInput, click the REAL Save button, and assert on the RENDERED alert
-// plus whether onSave was reached. Nothing about the validator is stubbed --
-// the subject IS the validation, so a mock of it would prove nothing.
+// These tests drive the REAL exam screen with the REAL step bodies and the
+// REAL RxPowerInput, click the REAL save button, and assert on the RENDERED
+// alert plus whether the save was reached. Nothing about the validator is
+// stubbed -- the subject IS the validation, so a mock of it would prove
+// nothing. (The screen became a PAGE on 2026-09-04, and the seven tabs became
+// the seven steps of a rail; the ONE validator moved with it -- there is no
+// second copy to drift from this one.)
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -29,30 +32,32 @@ vi.mock('../../print/storeIdentity', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { EyeTestForm } from '../EyeTestForm';
+import { EyeExamWorkbench } from '../EyeExamWorkbench';
 import { eyeTestWriteBody } from '../eyeTestPayload';
 import type { EyeTestData } from '../eyeTestTypes';
 
-const PATIENT = { id: 'p1', name: 'Asha Kumari', phone: '9000000001', age: 44 };
+const PATIENT = { id: 'p1', name: 'Asha Kumari', phone: '9000000001', age: 44, customerId: 'c1' };
 
 function renderForm() {
   const onSave = vi.fn(async () => {});
   render(
     <MemoryRouter>
-      <EyeTestForm
-        isOpen
-        onClose={() => {}}
-        onSave={onSave}
-        patient={PATIENT as any}
+      <EyeExamWorkbench
+        patient={PATIENT}
         optometristName="Dr Rao"
+        mode="exam"
+        onFinish={onSave}
+        onBack={() => {}}
       />
     </MemoryRouter>,
   );
   return onSave;
 }
 
-function openTab(name: RegExp) {
-  fireEvent.click(screen.getByRole('button', { name }));
+/** A RAIL button, matched EXACTLY so the footer's "Continue to final Rx"
+ *  cannot stand in for the step button. */
+function openTab(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${name}$`) }));
 }
 
 /** Type into a labelled Rx box the way a clinician does: change, then blur. */
@@ -62,8 +67,12 @@ function typeInto(label: string, value: string, { blur = true } = {}) {
   if (blur) fireEvent.blur(el);
 }
 
+/** Complete the exam. The page offers "Complete test" from the Final Rx step
+ *  on, so walking there first is the real path -- and the validator still
+ *  checks EVERY step, which is exactly what these tests are about. */
 function save() {
-  fireEvent.click(screen.getByRole('button', { name: /Save Prescription/i }));
+  openTab('Final Rx');
+  fireEvent.click(screen.getByRole('button', { name: /Complete test/ }));
 }
 
 /** The rendered validation banner, or null when the form reported no problem. */
@@ -78,7 +87,7 @@ function alertText(): string | null {
 describe('Lensometer refuses an impossible power', () => {
   it('REJECTS -9999 SPH and never calls onSave', async () => {
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right SPH', '-9999');
     save();
 
@@ -90,7 +99,7 @@ describe('Lensometer refuses an impossible power', () => {
 
   it('REJECTS +9999 SPH and never calls onSave', async () => {
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Left SPH', '+9999');
     save();
 
@@ -103,7 +112,7 @@ describe('Lensometer refuses an impossible power', () => {
     // 0 is not a meridian (the axis notation runs 1..180) and a toric lens with
     // no usable axis is un-grindable.
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right CYL', '-1.00');
     // Blurs for real: the box used to CLAMP 0 up to 1 on blur, so this test
     // had to skip the blur to see the bug at all. It no longer does.
@@ -117,7 +126,7 @@ describe('Lensometer refuses an impossible power', () => {
 
   it('REJECTS an off-grid power no lens is ground to', async () => {
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right SPH', '-1.30');
     save();
 
@@ -131,16 +140,16 @@ describe('Lensometer refuses an impossible power', () => {
 // THE SET of clinical capture surfaces -- not a count. Every tab that takes a
 // power must range-check it; the owner asked for "all modules in clinic".
 // ---------------------------------------------------------------------------
-describe('every eye-test tab that captures a power range-checks it', () => {
-  const SURFACES: { tab: RegExp; label: string }[] = [
-    { tab: /Lensometer/, label: 'Right SPH' },
-    { tab: /Auto-Ref/, label: 'Right SPH' },
-    { tab: /Subjective Rx/, label: 'Right SPH' },
-    { tab: /Final Rx/, label: 'Right (OD) sphere' },
+describe('every exam step that captures a power range-checks it', () => {
+  const SURFACES: { tab: string; label: string }[] = [
+    { tab: 'Lensometer', label: 'Right SPH' },
+    { tab: 'Auto-refraction', label: 'Right SPH' },
+    { tab: 'Subjective Rx', label: 'Right SPH' },
+    { tab: 'Final Rx', label: 'Right (OD) sphere' },
   ];
 
   for (const { tab, label } of SURFACES) {
-    it(`${String(tab)} rejects -9999`, async () => {
+    it(`${tab} rejects -9999`, async () => {
       const onSave = renderForm();
       openTab(tab);
       typeInto(label, '-9999');
@@ -153,7 +162,7 @@ describe('every eye-test tab that captures a power range-checks it', () => {
 
   it('Auto-Ref rejects an impossible keratometry reading', async () => {
     const onSave = renderForm();
-    openTab(/Auto-Ref/);
+    openTab('Auto-refraction');
     const k1 = screen.getByLabelText('Right Eye K1');
     fireEvent.change(k1, { target: { value: '-9999' } });
     fireEvent.blur(k1);
@@ -172,16 +181,16 @@ describe('ordinary clinical values still save', () => {
   it('accepts a normal lensometer + subjective + final reading', async () => {
     const onSave = renderForm();
 
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right SPH', '-2.50');
     typeInto('Right CYL', '-0.75');
     typeInto('Right AXIS', '90');
     typeInto('Left SPH', '+4.00');
 
-    openTab(/Subjective Rx/);
+    openTab('Subjective Rx');
     typeInto('Right SPH', '-2.25');
 
-    openTab(/Final Rx/);
+    openTab('Final Rx');
     typeInto('Right (OD) sphere', '-2.25');
     typeInto('Right eye add', '+2.00');
 
@@ -197,7 +206,7 @@ describe('ordinary clinical values still save', () => {
     // 32.5 was refused while the backend (EyeData.validate_pd -> "pd_mono",
     // 20-45) accepted it. The backend is the source of truth.
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right PD', '32.5');
     save();
 
@@ -236,7 +245,7 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
   for (const typed of IMPOSSIBLE) {
     it(`keeps ${typed} exactly as typed and refuses to save it`, async () => {
       const onSave = renderForm();
-      openTab(/Lensometer/);
+      openTab('Lensometer');
       // A cylinder alongside it, so the refusal cannot be the CYL<->AXIS
       // pairing rule standing in for the range check we are actually testing.
       typeInto('Right CYL', '-1.00');
@@ -255,7 +264,7 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
 
   it('says a fractional axis is not a whole number, not "out of range"', async () => {
     renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right CYL', '-1.00');
     typeInto('Right AXIS', '90.5');
     save();
@@ -266,7 +275,7 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
 
   it('refuses an impossible axis on the FINAL Rx too (the billable one)', async () => {
     const onSave = renderForm();
-    openTab(/Final Rx/);
+    openTab('Final Rx');
     typeInto('Right (OD) cylinder', '-1.00');
     typeInto('Right (OD) axis', '181');
 
@@ -280,7 +289,7 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
   // POSITIVE CONTROLS: refusing everything would pass every assertion above.
   it('accepts the boundary meridians 1, 90 and 180 and normalises them', async () => {
     const onSave = renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right CYL', '-1.00');
     typeInto('Right AXIS', '001');
     expect((screen.getByLabelText('Right AXIS') as HTMLInputElement).value).toBe('1');
@@ -297,7 +306,7 @@ describe('an impossible AXIS is refused, not silently corrected', () => {
 
   it('leaves the SIGNED kinds alone -- a plus power still formats on blur', async () => {
     renderForm();
-    openTab(/Lensometer/);
+    openTab('Lensometer');
     typeInto('Right SPH', '4');
     expect((screen.getByLabelText('Right SPH') as HTMLInputElement).value).toBe('+4.00');
     typeInto('Right ADD', '2');
@@ -327,7 +336,7 @@ describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction'
   for (const notation of LOW_VISION) {
     it(`saves ${notation} on the Subjective Rx, verbatim on the wire`, async () => {
       const onSave = renderForm();
-      openTab(/Subjective Rx/);
+      openTab('Subjective Rx');
       typeInto('Right VA', notation);
       save();
 
@@ -341,7 +350,7 @@ describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction'
 
   it('accepts a lower-case cf, exactly as the server does', async () => {
     const onSave = renderForm();
-    openTab(/Subjective Rx/);
+    openTab('Subjective Rx');
     typeInto('Right VA', 'cf');
     save();
 
@@ -351,7 +360,7 @@ describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction'
 
   it('records the low-vision finding on the LEFT eye too', async () => {
     const onSave = renderForm();
-    openTab(/Subjective Rx/);
+    openTab('Subjective Rx');
     typeInto('Left VA', 'HM');
     save();
 
@@ -366,7 +375,7 @@ describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction'
   for (const junk of ['banana', '6/7', '20/20']) {
     it(`still REFUSES ${junk}`, async () => {
       const onSave = renderForm();
-      openTab(/Subjective Rx/);
+      openTab('Subjective Rx');
       typeInto('Right VA', junk);
       save();
 
@@ -381,7 +390,7 @@ describe('a low-vision acuity is recorded, not rounded up to a Snellen fraction'
 
   it('still accepts the ordinary Snellen values', async () => {
     const onSave = renderForm();
-    openTab(/Subjective Rx/);
+    openTab('Subjective Rx');
     typeInto('Right VA', '6/6');
     typeInto('Left VA', '6/60');
     save();

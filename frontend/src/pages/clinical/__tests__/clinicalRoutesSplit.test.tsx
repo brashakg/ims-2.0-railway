@@ -46,6 +46,7 @@ vi.mock('../ClinicalCompletedPage', () => ({ ClinicalCompletedPage: () => <div>C
 vi.mock('../ClinicalPrescriptionsPage', () => ({ ClinicalPrescriptionsPage: () => <div>RX-DOOR-SENTINEL</div> }));
 vi.mock('../ClinicalAbusePage', () => ({ ClinicalAbusePage: () => <div>ABUSE-PAGE-SENTINEL</div> }));
 vi.mock('../ConversionTab', () => ({ ConversionTab: () => <div>CONVERSION-PAGE-SENTINEL</div> }));
+vi.mock('../EyeExamPage', () => ({ EyeExamPage: () => <div>EXAM-PAGE-SENTINEL</div> }));
 
 import { clinicalRoutes } from '../../../routes/clinicalRoutes';
 
@@ -97,9 +98,47 @@ describe('role gates come from clinicalRoles, and hold by direct URL', () => {
     expect(await screen.findByText('ABUSE-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
   }, SLOW);
 
+  // ---------------------------------------------------------------------
+  // /clinical/conversion is NOT manager-only, and pinning that is the point.
+  // ---------------------------------------------------------------------
+  // The pre-split page gated this tab on
+  //   canViewConversion = hasRole(['SUPERADMIN','ADMIN','AREA_MANAGER',
+  //                                'STORE_MANAGER','OPTOMETRIST'])
+  // and the backend still does the same: clinical.py `_CONVERSION_VIEW_ROLES`
+  // includes OPTOMETRIST, and GET /conversion-dashboard serves them their OWN
+  // row with the revenue column stripped server-side ("DECISIONS sec 3,
+  // LOCKED"). CLINICAL_MODULE_ROLES is that list intersected with the module
+  // gate, so the split neither widened nor narrowed it.
+  //
+  // Both directions are pinned here. WIDENING (adding a role the pre-split
+  // page did not admit) fails on the CASHIER case; NARROWING it to
+  // CLINICAL_MANAGER_ROLES -- which would blank a screen the API serves and
+  // contradict a locked decision -- fails on the OPTOMETRIST case.
   it('keeps an OPTOMETRIST on /clinical/conversion (parity with the old tab)', async () => {
     renderAt('/clinical/conversion', ['OPTOMETRIST']);
     expect(await screen.findByText('CONVERSION-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+  }, SLOW);
+
+  it('bounces a CASHIER off /clinical/conversion -- the gate must not widen', async () => {
+    renderAt('/clinical/conversion', ['CASHIER']);
+    expect(await screen.findByText('DENIED-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+    expect(screen.queryByText('CONVERSION-PAGE-SENTINEL')).not.toBeInTheDocument();
+  }, SLOW);
+
+  it('lets an OPTOMETRIST open the examination page, and bounces a SALES_STAFF', async () => {
+    renderAt('/clinical/test/q-1', ['OPTOMETRIST']);
+    expect(await screen.findByText('EXAM-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+  }, SLOW);
+
+  it('bounces a SALES_STAFF off the examination page by direct URL', async () => {
+    renderAt('/clinical/test/q-1', ['SALES_STAFF']);
+    expect(await screen.findByText('DENIED-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+    expect(screen.queryByText('EXAM-PAGE-SENTINEL')).not.toBeInTheDocument();
+  }, SLOW);
+
+  it('/clinical/test/amend/:testId is the SAME page, not swallowed by :entryId', async () => {
+    renderAt('/clinical/test/amend/test-9', ['OPTOMETRIST']);
+    expect(await screen.findByText('EXAM-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
   }, SLOW);
 
   it('bounces a SALES_STAFF off the module entirely, by direct URL', async () => {
