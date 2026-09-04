@@ -44,6 +44,7 @@ import os
 import httpx
 
 from ..utils.ist import ist_date_str, ist_today
+from .delivery_gate import cod_collectable
 
 try:
     # Reuse the single DISPATCH_MODE gate the rest of the app uses.
@@ -225,6 +226,12 @@ def _simulated_awb(order_id: str) -> str:
     return f"SIMSR{stamp}{suffix or 'ORDER'}"
 
 
+def is_cod(payment_method: Any) -> bool:
+    """THE one predicate for 'this booking is cash-on-delivery' (router gate
+    and payload builder both use it, so they can never disagree)."""
+    return str(payment_method or "").strip().upper() == "COD"
+
+
 def build_shipment_payload(
     order: Dict[str, Any],
     address: Dict[str, Any],
@@ -237,6 +244,21 @@ def build_shipment_payload(
     `order` is the IMS order doc (snake_case). `address` carries the ship-to
     fields the booking form supplies (with customer-doc fallbacks resolved by the
     caller). Money is in Rupees. Quantities default to 1.
+
+    MONEY. Shiprocket's create-adhoc body has NO separate COD-collectable
+    field: `sub_total` (plus shipping/giftwrap/transaction charges minus
+    total_discount, none of which we send) IS the order total the courier
+    collects on a COD parcel, and the same field is the order value on a
+    Prepaid one (Shiprocket's own MCP sends exactly `payment_method` +
+    `sub_total` and nothing else money-wise). So:
+      * Prepaid -> sub_total = grand_total (order value; nothing collected).
+      * COD     -> sub_total = balance_due (what is still OWED, the server
+                   figure via delivery_gate.cod_collectable - which refuses a
+                   zero or over-bill balance). Sending grand_total here made
+                   the courier collect the whole bill from a customer who had
+                   already paid a deposit at the counter.
+    order_items[].selling_price stay at goods value in both cases - they
+    describe what is in the box, not what is owed.
     """
     items = order.get("items") or []
     line_items: List[Dict[str, Any]] = []
@@ -270,7 +292,11 @@ def build_shipment_payload(
     # so it must be the IST calendar day. created_at is stored as a naive UTC
     # wall clock, so a 00:00-05:30-IST order otherwise ships dated YESTERDAY.
     order_date = ist_date_str(order.get("created_at")) or ist_today().isoformat()
-    sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
+    cod = is_cod(address.get("payment_method"))
+    if cod:
+        sub_total = cod_collectable(order)
+    else:
+        sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
 
     return {
         "order_id": str(order.get("order_number") or order.get("order_id") or ""),
@@ -289,7 +315,7 @@ def build_shipment_payload(
         "billing_phone": str(address.get("phone") or order.get("customer_phone") or ""),
         "shipping_is_billing": True,
         "order_items": line_items,
-        "payment_method": address.get("payment_method") or "Prepaid",
+        "payment_method": "COD" if cod else "Prepaid",
         "sub_total": sub_total,
         # Default parcel dims (cm / kg) - small optical parcel. Overridable.
         "length": float(address.get("length") or 15),
@@ -320,6 +346,12 @@ async def create_shipment(
     """
     order_id = str(order.get("order_id") or order.get("order_number") or "")
 
+    # Built BEFORE the mode/creds gates so a SIMULATED result carries the
+    # exact body a live booking would send (raw['payload']): the money fields
+    # are checkable without a carrier, and a payload bug surfaces in
+    # simulation instead of on the first live booking.
+    payload = build_shipment_payload(order, address, pickup_location=pickup_location)
+
     mode = dispatch_mode()
     if mode != "live":
         return ShipResult(
@@ -330,6 +362,7 @@ async def create_shipment(
             courier="SIMULATED",
             tracking_status="SIMULATED",
             error=f"DISPATCH_MODE={mode} - not booking a live shipment",
+            raw={"payload": payload},
         )
 
     if not credentials_present(db):
@@ -341,6 +374,7 @@ async def create_shipment(
             courier="SIMULATED",
             tracking_status="SIMULATED",
             error="shiprocket credentials not configured",
+            raw={"payload": payload},
         )
 
     auth = await authenticate(db)
@@ -348,7 +382,6 @@ async def create_shipment(
     if not auth.ok or not token:
         return ShipResult(ok=False, status="FAILED", error=auth.error or "auth failed")
 
-    payload = build_shipment_payload(order, address, pickup_location=pickup_location)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",

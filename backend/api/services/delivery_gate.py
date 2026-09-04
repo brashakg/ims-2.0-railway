@@ -137,3 +137,42 @@ def assert_handover_payment(
             detail="Order must have at least partial payment before delivery",
         )
     gate_credit_delivery(order, approval_token, current_user, db=db)
+
+
+def cod_collectable(order: dict) -> float:
+    """The amount a COD courier is told to collect: the order's balance_due,
+    the SERVER figure (grand_total - amount_paid, maintained by
+    OrderRepository.add_payment and the online ingest) - never a number the
+    booking request supplies.
+
+    This is the other half of the COD exemption in assert_handover_payment: a
+    COD booking skips the counter money gate ONLY because the courier
+    collects, and that is honest only if the courier is told what is still
+    OWED. It used to be told the whole bill, so a customer who paid a deposit
+    at the counter was asked to pay it again at the door.
+
+    Refuses (400) two states rather than guessing:
+      * nothing due (fully paid, or no balance recorded): there is nothing to
+        collect - book it Prepaid. Silently flipping the method would change
+        what the customer was told at the counter and what the courier
+        charges the shop, so the caller is told to choose.
+      * balance above the bill: a corrupt order nobody should ship on."""
+    grand_total = float(order.get("grand_total") or 0.0)
+    balance_due = float(order.get("balance_due") or 0.0)
+    if balance_due <= 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This order records Rs {balance_due:,.2f} due - nothing for "
+                f"the courier to collect. Book it Prepaid, not COD."
+            ),
+        )
+    if balance_due > grand_total + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Balance due Rs {balance_due:,.2f} exceeds the bill "
+                f"Rs {grand_total:,.2f} - fix the order before shipping it COD."
+            ),
+        )
+    return round(balance_due, 2)

@@ -266,6 +266,8 @@ async def book_shipment(
     network call is made - so the flow is always exercisable safely.
     """
     order = _resolve_order(body.order_id)
+    is_cod = shiprocket.is_cod(body.address.payment_method)
+    cod_amount = 0.0
     if order is not None:
         # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a held
         # spectacle order (missing a valid prescription) must never be
@@ -304,7 +306,18 @@ async def book_shipment(
         # payment was captured upstream, which the Shopify/ONDC ingest
         # records as payment_status PAID / balance_due 0, so it passes this
         # gate untouched.
-        if (body.address.payment_method or "").strip().upper() != "COD":
+        #
+        # The exemption is only honest if the courier is told the amount
+        # still OWED (the order's server-side balance_due), so the COD leg
+        # runs the other half of the same gate: it yields that figure and
+        # refuses a booking with nothing to collect or a balance above the
+        # bill. The same helper feeds the courier payload, so what is
+        # persisted here and what the courier collects cannot differ.
+        if is_cod:
+            from ..services.delivery_gate import cod_collectable
+
+            cod_amount = cod_collectable(order)
+        else:
             from ..services.delivery_gate import assert_handover_payment
 
             assert_handover_payment(
@@ -314,6 +327,15 @@ async def book_shipment(
                 db=_get_db(),
             )
     if order is None:
+        if is_cod:
+            # Never tell a courier to collect an amount we cannot read.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Order not found - a COD booking needs the order's "
+                    "balance to tell the courier what to collect"
+                ),
+            )
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
         logger.info(
             "[SHIPROCKET] order %s not found - booking with request data only",
@@ -352,6 +374,10 @@ async def book_shipment(
         "tracking_url": result.tracking_url,
         "status": result.status,  # BOOKED | SIMULATED | FAILED
         "simulated": simulated,
+        # What the courier was told to collect (0.0 on a Prepaid booking) -
+        # the figure a COD remittance will one day have to reconcile against.
+        "payment_method": "COD" if is_cod else "Prepaid",
+        "cod_amount": cod_amount,
         "ship_to": {
             "address": address.get("address"),
             "city": address.get("city"),
@@ -399,6 +425,8 @@ async def book_shipment(
         "label_url": result.label_url,
         "tracking_status": result.tracking_status,
         "tracking_url": result.tracking_url,
+        "payment_method": doc["payment_method"],
+        "cod_amount": cod_amount,
         "message": message,
     }
 

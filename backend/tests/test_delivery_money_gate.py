@@ -471,7 +471,7 @@ def test_ship_prepaid_blocked_when_fully_unpaid_even_for_manager(monkeypatch):
     NOBODY as Prepaid - book it COD (or record a payment) instead."""
     client, coll = _ship_client(
         monkeypatch,
-        _order(order_id="ORD-S1", payment_status="UNPAID", balance_due=18000.0),
+        _order(order_id="ORD-S1", payment_status="UNPAID", grand_total=18000.0, balance_due=18000.0),
     )
     resp = client.post(
         "/api/v1/shipping/shipments",
@@ -488,7 +488,7 @@ def test_ship_cod_booking_is_exempt(monkeypatch):
     courier collects on delivery. No money gate."""
     client, coll = _ship_client(
         monkeypatch,
-        _order(order_id="ORD-S1", payment_status="UNPAID", balance_due=18000.0),
+        _order(order_id="ORD-S1", payment_status="UNPAID", grand_total=18000.0, balance_due=18000.0),
     )
     resp = client.post(
         "/api/v1/shipping/shipments",
