@@ -1,6 +1,6 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-09-04**. PR #1088 (`feat/hr-split`, 45 commits) is REBASED onto main and PUSHED; CI running. Rebase damage found and repaired before push: main's customer ownership predicate, the 5-key store resolver and NINE scoped customer doors had been lost in the replay. This file is the single place to see what is done, what
+Updated **2026-09-04**. **PR #1088 MERGED to main** (46 commits, the whole 09-03/04 wave) after six CI rounds that each caught one real find (lint typing hole, a UTC-faced test date, an SOP midnight window, a lost fail-closed catch, a stale store-credit test, a dead popup probe). #1090 (household guard) and #1091 (weightings admin-only) are rebased to one commit each and in CI. Rebase damage found and repaired before push: main's customer ownership predicate, the 5-key store resolver and NINE scoped customer doors had been lost in the replay. This file is the single place to see what is done, what
 is in flight, and what is waiting on a decision. Claude keeps it current; if it
 disagrees with reality, the file is wrong and should be fixed.
 
@@ -162,7 +162,7 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) -- through the existing /ready + /deliver doors; a HOME-DELIVERY counter bill is deliberately NOT stamped (parcel still on the packing desk) | **DONE** |
 | Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **DONE** |
 | Reverse split: adding a family member whose number is already a customer -- BLOCKED at all 3 doors; link-existing NOT built (cannot be truthful: POS Rx gate + clinical readers key on customer id); popup opens their own account | **DONE** |
-| Member-on-two-accounts (child on both parents') -- BLOCK, one household account (owner 09-04) | **PR #1090** (stacked on #1088; retargets to main on merge) |
+| Member-on-two-accounts (child on both parents') -- BLOCK, one household account (owner 09-04) | **PR #1090** (on main, in CI) |
 | Member rows minted in 3 places with drifting `relation` defaults and no `created_at` | **TODO** (one-rule-two-implementations) |
 | Legacy till RETIRED: /pos redirects to /pos/new (query kept), POSLayout deleted, 8 legacy-vehicle tests re-pointed, a recorded-axis-0 bug caught on the new picker. Follow-ups: Playwright specs re-pointed (DONE); POSReceipt.tsx orphaned; PIXEL audit list still names /pos (follows redirect) | **DONE** |
 
@@ -184,7 +184,7 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | Pune store's `store_id` is a UUID (`4dc49c44-...`) while every other store uses its code (`BV-DHN-02`, `WIZ-DHN-01`...) as the id; `store_code` is `BV-PUN-01` | `stores` collection (prod) | possibly related to the open "Pune 2 orphan units"; needs a look before any store-id join |
 | PIXEL audit list still names `/pos` (follows the redirect) | `agents/implementations/pixel.py:107` | harmless |
 | Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | **PR #1090**: one `make_patient_row`, five sites, default `Other` (a silent `Self` would make the member the holder) |
-| `GET /incentive/points/settings/eligibility` (and `/settings/effective`, a second leak) revealed per-person commission weight/bonus % | `points.py` | **PR #1091** (stacked on #1088; retargets to main on merge) |
+| `GET /incentive/points/settings/eligibility` (and `/settings/effective`, a second leak) revealed per-person commission weight/bonus % | `points.py` | **PR #1091** (on main, in CI) |
 
 ## 4h. Closed by owner statement
 
