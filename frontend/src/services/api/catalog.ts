@@ -48,8 +48,18 @@ export interface CatalogProductDoc {
     page_url?: string | null;
     shopify_product_id?: string | null;
   } | null;
+  /** Server-computed with the Shopify push's own photo predicate (an absolute
+   *  http(s) URL). Never re-derive it here: what the screen calls a photo and
+   *  what the publish gate accepts must be one rule. */
+  has_photo?: boolean;
+  /** Server-computed: LIVE (on Shopify) / QUEUED (waiting for a human to
+   *  press push) / OFF / BLOCKED (no usable photo — cannot go online). */
+  online?: OnlineState;
   [k: string]: unknown;
 }
+
+export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED';
+export type PhotoFilter = 'has' | 'missing';
 
 export interface CatalogProductListResponse {
   products: CatalogProductDoc[];
@@ -68,6 +78,9 @@ export interface CatalogProductListParams {
   is_active?: 'true' | 'false' | 'all';
   needs_review?: boolean;
   source?: string;
+  /** 'has' = a usable photo by the push predicate; 'missing' = none (the
+   *  Missing-photos work list). Filtered on the server. */
+  photo?: PhotoFilter;
   page?: number;
   limit?: number;
 }

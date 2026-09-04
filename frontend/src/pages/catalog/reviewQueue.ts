@@ -93,3 +93,19 @@ export function removeFromReviewQueue(id: string): ReviewQueueStash | null {
   writeReviewQueue(next);
   return next;
 }
+
+/** The review queue moved from `?segment=review` on /catalog to its own
+ *  address /catalog/review. Bookmarks, the old full-page editor's "Back to
+ *  queue" links and anything else already in the wild still carry the query
+ *  form, so /catalog forwards them -- keeping `page` and `focus` (and any
+ *  other filter) intact, so the reviewer lands exactly where they left.
+ *
+ *  Returns the address to forward to, or null when this is a plain /catalog
+ *  visit. Pure; `search` is a location.search string (leading '?' optional). */
+export function legacyReviewRedirect(search: string): string | null {
+  const sp = new URLSearchParams(search);
+  if (sp.get('segment') !== 'review') return null;
+  sp.delete('segment');
+  const rest = sp.toString();
+  return `/catalog/review${rest ? `?${rest}` : ''}`;
+}

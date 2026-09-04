@@ -941,16 +941,31 @@ export function QuickAddPage() {
     openReviewItem(stash.ids[at - 1]);
   }, [editMode, queuePos, confirmLeaveReviewItem, openReviewItem]);
 
-  // "Back to queue" — restore the exact Catalog Manager grid position
-  // (?segment=review&page=N&focus=<id>; the ?focus fallback re-opens the card).
+  // "Back to queue" — restore the exact review-queue position on its own
+  // address (/catalog/review?page=N&focus=<id>; ?focus re-opens the card).
   const handleBackToQueue = useCallback(() => {
     if (editMode?.kind !== 'catalog') return;
     if (!confirmLeaveReviewItem()) return;
     const pg = readReviewQueue()?.filters?.page;
     navigate(
-      `/catalog?segment=review${pg && pg > 1 ? `&page=${pg}` : ''}&focus=${encodeURIComponent(editMode.id)}`
+      `/catalog/review?${pg && pg > 1 ? `page=${pg}&` : ''}focus=${encodeURIComponent(editMode.id)}`
     );
   }, [editMode, confirmLeaveReviewItem, navigate]);
+
+  // "Add photo" from the Catalog / Missing-photos list lands here as
+  // ?edit=<id>#images (or ?review=<id>#images): once the product is loaded,
+  // bring the image uploader into view. The uploader itself is the ONE
+  // existing upload path (uploadImageFiles above); nothing is duplicated.
+  // The intent is captured at FIRST render, not read in the effect: the ?edit
+  // loader clears its param with setSearchParams, and react-router's setter
+  // navigates to a search-only path -- which drops the hash before the effect
+  // ever runs. Fires once.
+  const wantImagesRef = useRef(window.location.hash === '#images');
+  useEffect(() => {
+    if (!editMode || !wantImagesRef.current) return;
+    wantImagesRef.current = false;
+    document.getElementById('product-images')?.scrollIntoView({ block: 'start' });
+  }, [editMode]);
 
   // Save fixes: lenient validation -> DIFF-ONLY PUT (with the optimistic-
   // concurrency stamp) -> re-seed form + snapshot from the response (so the
@@ -1543,7 +1558,7 @@ export function QuickAddPage() {
           <div className="mt-5 flex items-center justify-center gap-2">
             <button
               type="button"
-              onClick={() => navigate('/catalog?segment=review')}
+              onClick={() => navigate('/catalog/review')}
               className="btn-primary"
             >
               Back to catalog
@@ -2571,8 +2586,9 @@ export function QuickAddPage() {
             </p>
 
             {/* Product images — real upload (durably stored + served by the
-                backend; the create payload sends the resulting URLs). */}
-            <div className="mt-4 pt-4 border-t border-gray-100">
+                backend; the create payload sends the resulting URLs). The id
+                is the #images anchor the catalog list's "Add photo" lands on. */}
+            <div id="product-images" className="mt-4 pt-4 border-t border-gray-100 scroll-mt-4">
               <label className="block text-xs font-medium text-gray-700 mb-2">Product Images</label>
 
               <input

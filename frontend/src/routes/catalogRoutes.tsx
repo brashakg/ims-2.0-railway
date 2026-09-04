@@ -1,13 +1,30 @@
 // Catalog + pricing routes. Moved verbatim from App.tsx (route-registry
 // split); paths, elements and role gates are unchanged.
 import { lazy } from 'react';
-import { Route, Navigate } from 'react-router-dom';
+import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { legacyReviewRedirect } from '../pages/catalog/reviewQueue';
 
-// /catalog — the Catalog Manager: photo-grid browse over the product spine +
-// the imported-needs-review queue, with the slide-over drawer (view / edit /
-// approve). The sidebar "Catalog" item lands here; "+ Add product" links on.
+// /catalog — the Catalog Manager: the product list over the billing spine,
+// with the slide-over drawer (view / edit / approve). ONE page component serves
+// three addresses — the route decides the segment / preset:
+//   /catalog                 the catalog (spine list) + the counts row
+//   /catalog/review          the imported-needs-review queue
+//   /catalog/missing-photos  the catalog pre-filtered to rows with no usable
+//                            photo (the "cannot go online" work list)
+// The sidebar "Catalog" item lands on the first; "+ Add product" links on.
 const CatalogManagerPage = lazy(() => import('../pages/catalog/CatalogManagerPage'));
+
+/** /catalog, with the legacy review deep link forwarded. The review queue
+ *  used to be `?segment=review` on this address (nobody could be SENT to it);
+ *  the full-page editor's old "Back to queue" links and bookmarks still carry
+ *  `?segment=review&page=N&focus=<id>`, so they land on /catalog/review with
+ *  page + focus intact. */
+function CatalogIndex() {
+  const [sp] = useSearchParams();
+  const forward = legacyReviewRedirect(sp.toString());
+  return forward ? <Navigate to={forward} replace /> : <CatalogManagerPage />;
+}
 // /catalog/add — the single product-add door (Quick Add). Guided + Bulk modes
 // were removed; Quick Add absorbed every field/section Guided had.
 const QuickAddPage = lazy(() => import('../pages/catalog/QuickAddPage'));
@@ -25,13 +42,36 @@ const PricingOffersPage = lazy(() => import('../pages/pricing/PricingOffersPage'
 
 export const catalogRoutes = (
   <>
-    {/* Catalog Manager — browse the spine + review the imported
-        queue; roles mirror the navConfig 'catalog' item. */}
+    {/* Catalog Manager — browse the spine; roles mirror the navConfig
+        'catalog' item. */}
     <Route
       path="catalog"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
-          <CatalogManagerPage />
+          <CatalogIndex />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* Needs review — the imported queue as a real address (sidebar row
+        carries the count). Same page, same gate. */}
+    <Route
+      path="catalog/review"
+      element={
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+          <CatalogManagerPage segment="review" />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* Missing photos — the catalog pre-filtered to rows the Shopify push
+        would refuse (no usable photo); "Add photo" opens the product's
+        image upload. Same page, same gate. */}
+    <Route
+      path="catalog/missing-photos"
+      element={
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+          <CatalogManagerPage photoPreset="missing" />
         </ProtectedRoute>
       }
     />
