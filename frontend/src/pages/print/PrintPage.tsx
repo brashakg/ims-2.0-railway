@@ -5,8 +5,9 @@
 //
 // Scope for Phase 1.8: a single index page that surfaces every printable
 // document in the app. The actual print output is produced by the existing
-// print components (POSReceipt, EyeTestTokenPrint, DayEndReport, GRN / PO
-// print templates, etc.) — this page is the discovery surface, not a
+// print components (EyeTestTokenPrint, WorkshopJobCardPrint, GRN / PO print
+// templates, etc.) or, for the POS tax invoice, by the server PDF
+// (GET /orders/{id}/invoice.pdf) — this page is the discovery surface, not a
 // competing renderer.
 //
 // Each template card either:

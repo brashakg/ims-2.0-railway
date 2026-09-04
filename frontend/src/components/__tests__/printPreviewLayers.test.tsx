@@ -1,12 +1,15 @@
 // ============================================================================
 // IMS 2.0 - Print previews must open ABOVE the popup that launched them
 // ============================================================================
-// The shared print folder's seven previews sit at z-[70] so they clear the
-// z-50/z-60 detail popups that open them (owner report: "the preview comes
-// behind the section and is not useable"). Three previews live OUTSIDE that
-// folder and were missed in the sweep: the thermal LabelPreviewModal, the
-// clinical PrescriptionPrint card, and the POS ReceiptPreview. These pin each
-// one's overlay to the same shared layer.
+// The shared print folder's previews sit at z-[70] so they clear the z-50/z-60
+// detail popups that open them (owner report: "the preview comes behind the
+// section and is not useable"). Two previews live OUTSIDE that folder and were
+// missed in the sweep: the thermal LabelPreviewModal and the clinical
+// PrescriptionPrint card. The third case is the workshop job card -- the
+// preview the POS completion screen (SaleCompleteScreen) opens over its own
+// overlays; it took the slot the thermal ReceiptPreview held until that
+// renderer was deleted on 2026-09-04 (no live screen rendered it). These pin
+// each one's overlay to the same shared layer.
 //
 // (POSInvoice is deliberately NOT covered here -- POS changes are owner-gated.)
 
@@ -31,7 +34,7 @@ vi.mock('../../services/api/labels', () => ({
 
 import { LabelPreviewModal } from '../labels/LabelPreviewModal';
 import { PrescriptionPrint } from '../clinical/PrescriptionPrint';
-import { ReceiptPreview } from '../pos/ReceiptPreview';
+import { WorkshopJobCardPrint } from '../print/WorkshopJobCardPrint';
 
 /** The numeric z-index carried by a Tailwind class: `z-50` or `z-[70]`. */
 function zLayer(el: HTMLElement): number {
@@ -84,19 +87,30 @@ describe('print previews sit on the shared z-[70] layer', () => {
     expect(zLayer(overlay())).toBeGreaterThan(POPUP_LAYER);
   });
 
-  it('ReceiptPreview (POS receipt preview modal)', () => {
+  it('WorkshopJobCardPrint (job card opened from the POS completion screen)', () => {
     render(
-      <ReceiptPreview
-        billData={{
-          bill_number: 'B1',
-          total_amount: 100,
-          subtotal: 100,
-          total_gst: 0,
-          item_discount: 0,
-          order_discount_amount: 0,
+      <WorkshopJobCardPrint
+        job={{
+          jobNumber: 'JOB-0001',
+          orderNumber: 'BV-BOK01-000001',
+          customerName: 'Test Customer',
+          customerPhone: '9999999999',
+          frameBrand: 'Ray-Ban',
+          frameModel: 'RB2140',
+          frameColor: 'Black',
+          lensType: 'Single Vision',
+          priority: 'NORMAL',
+          dueDate: '2026-09-06',
+          status: 'PENDING',
+          createdDate: '2026-09-04',
         }}
-        selectedCustomer={{ name: 'Test Customer', phone: '9999999999' }}
-        cartItems={[]}
+        store={{
+          storeName: 'Better Vision',
+          address: 'Main Road',
+          city: 'Bokaro',
+          state: 'Jharkhand',
+          pincode: '827001',
+        }}
         onClose={vi.fn()}
       />,
     );
