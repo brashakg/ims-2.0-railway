@@ -579,6 +579,19 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
         }
       });
     }
+    // HSN: the form has marked it required since the Guided wizard, but the
+    // rule lived nowhere -- the Advanced row had no error slot and a blanked
+    // code sailed through to the server's category default. It sits in THIS
+    // validator so the still-missing row, the section counts and the inline
+    // slot all read one list.
+    //
+    // Gated on resolveHsn(): that returns '' until GET /products/gst-rates has
+    // answered, and in exactly that window the page never auto-filled the code
+    // and the SERVER fills in its own (the right one). Requiring it there would
+    // be an unsatisfiable block on a cold session, not a useful rule.
+    if (!String(values.hsnCode || '').trim() && resolveHsn(values.category)) {
+      errors.hsn_code = 'Pick an HSN code';
+    }
   }
 
   const mrpNum = parseFloat(values.mrp);
@@ -601,6 +614,28 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
   // saves as DRAFT with the gap named -- visible, never silently MASS.
 
   return errors;
+}
+
+// Labels for the keys validateProductForm can name that are NOT category
+// attributes (they live on the form itself, not in the registry).
+const FORM_LEVEL_LABELS: Record<string, string> = {
+  category: 'Category',
+  mrp: 'MRP',
+  offer_price: 'Offer Price',
+  hsn_code: 'HSN Code',
+};
+
+// The human label for any key the validator / review card can name: form-level
+// keys first, then the category registry (the same list the form renders
+// from), then a spaced-out key for a legacy attribute the registry no longer
+// carries (a cloned older doc). One helper, so a field is never named two
+// ways on one screen.
+export function fieldLabelFor(category: string | null | undefined, name: string): string {
+  return (
+    FORM_LEVEL_LABELS[name] ||
+    getCategoryFields(category).find((f) => f.name === name)?.label ||
+    name.replace(/_/g, ' ')
+  );
 }
 
 // Build the exact CreateProductPayload the wizard's handleSubmit produced.
