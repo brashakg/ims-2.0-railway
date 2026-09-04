@@ -906,7 +906,10 @@ export interface SupervisorBonus {
 
 export interface IncentiveSettings {
   store_id: string;
-  staff_weightages: Record<string, number>;
+  /** Per-person pay terms. ABSENT (not empty) unless visibility === 'all' --
+   *  the server strips them for everyone but ADMIN/SUPERADMIN (owner ruling
+   *  2026-09-04, same rule as salary). Never read them without a guard. */
+  staff_weightages?: Record<string, number>;
   eligibility_bands: EligibilityBand[];
   growth_targets: Record<string, number>;
   base_rates: Record<string, number>;
@@ -914,11 +917,14 @@ export interface IncentiveSettings {
   discount_multipliers: Array<{ max_pct: number; multiplier: number }>;
   visufit_gate_threshold: number;
   visufit_gate_enabled: boolean;
-  supervisor_bonuses: SupervisorBonus[];
+  /** See staff_weightages -- absent unless visibility === 'all'. */
+  supervisor_bonuses?: SupervisorBonus[];
   updated_at: string | null;
   updated_by: string | null;
   /** Display name resolved server-side; absent when the id names nobody. */
   updated_by_name?: string | null;
+  /** 'all' = salary admin (pay terms included); 'self' = everyone else. */
+  visibility?: 'all' | 'self';
 }
 
 // ============================================================================
