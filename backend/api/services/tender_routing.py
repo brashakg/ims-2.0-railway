@@ -27,9 +27,9 @@ from typing import Any, Dict, Iterable, List, Optional
 # ---------------------------------------------------------------------------
 
 # Canonical tender names. These mirror orders.PaymentMethod EXACTLY for the
-# wired tenders, plus STORE_CREDIT (forward-compat only -- see CORRECTIONS:
-# STORE_CREDIT is in the default map but is NOT a PaymentMethod value today and
-# is NOT wired at capture) and UNKNOWN (the safe sink for a blank/garbage row).
+# wired tenders -- STORE_CREDIT included since 2026-09-03, when the redemption
+# tender was built (it was forward-compat only before that) -- plus UNKNOWN
+# (the safe sink for a blank/garbage row).
 CANONICAL_TENDERS = (
     "CASH",
     "UPI",

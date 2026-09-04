@@ -679,18 +679,25 @@ def test_locked_snapshot_is_immutable_on_rebuild(db):
 
 
 # ============================================================================
-# 10 - STORE_CREDIT deferred (in the default map; forward-compat only)
+# 10 - STORE_CREDIT is a real tender AND routes to the liability ledger
 # ============================================================================
+# This case used to pin the opposite ("in the default map but NOT a
+# PaymentMethod today") as forward-compat. Owner 2026-09-03: refunds issued
+# store credit the till displayed but nobody could SPEND, so a redemption
+# tender was built (orders.PaymentMethod.STORE_CREDIT, redeemed atomically
+# against the ORDER's customer). The two halves that must now hold together:
+# the capture side accepts it, and the recon side still books it against the
+# customer liability -- never a bank ledger, because no cash came in.
 
 
-def test_store_credit_in_default_map_but_not_a_pos_capture():
-    # Present in the default ledger map (forward-compat).
+def test_store_credit_is_a_tender_and_books_to_the_liability_ledger():
     assert "STORE_CREDIT" in IMS_DEFAULT_LEDGERS
     assert resolve_ledger("STORE_CREDIT") == "Customer Store Credit Liability"
-    # But STORE_CREDIT is NOT one of orders.PaymentMethod's enum values today.
     from api.routers.orders import PaymentMethod
 
-    assert "STORE_CREDIT" not in {m.value for m in PaymentMethod}
+    assert "STORE_CREDIT" in {m.value for m in PaymentMethod}
+    # And it is canonical on the recon side under its own name, not via CASH.
+    assert canonicalize_tender("STORE_CREDIT") == "STORE_CREDIT"
 
 
 # ============================================================================
