@@ -183,7 +183,7 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | Pune store's `store_id` is a UUID (`4dc49c44-...`) while every other store uses its code (`BV-DHN-02`, `WIZ-DHN-01`...) as the id; `store_code` is `BV-PUN-01` | `stores` collection (prod) | possibly related to the open "Pune 2 orphan units"; needs a look before any store-id join |
 | PIXEL audit list still names `/pos` (follows the redirect) | `agents/implementations/pixel.py:107` | harmless |
 | Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | **DONE** on `feat/household-guard`: one `make_patient_row`, five sites, default `Other` (a silent `Self` would make the member the holder) |
-| `GET /incentive/points/settings/eligibility` reveals per-person commission weight/bonus % to any authenticated user | `points.py` | **RULED 09-04: admins only** -- in build on its own branch |
+| `GET /incentive/points/settings/eligibility` (and `/settings/effective`, a second leak) revealed per-person commission weight/bonus % | `points.py` | **DONE** on `feat/weightings-admin-only` (pushed; PR after #1088 merges) |
 
 ## 4h. Closed by owner statement
 
