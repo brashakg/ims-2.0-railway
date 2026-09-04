@@ -18,6 +18,12 @@ goods can physically leave through enforces the SAME rule:
     gate in workshop.evaluate_scan_transition_gate
   * shipping.py POST /shipments (non-COD booking)      - the courier door
 
+A COD courier booking is exempt from the gate above because the courier
+collects instead - cod_collectable is the other half of that bargain (what it
+must be told to collect). order_balance_due underneath is the ONE reading of
+what an order owes; orders.py add_payment (the counter) calls it too, so the
+two doors can no longer refuse the same order for opposite reasons.
+
 "One rule, two implementations" is this repo's dominant defect class - do NOT
 copy these checks into a router; import and call them.
 
@@ -139,6 +145,44 @@ def assert_handover_payment(
     gate_credit_delivery(order, approval_token, current_user, db=db)
 
 
+def _as_amount(raw, field: str) -> float:
+    """Money off an order doc as a float, or a 400. Legacy/imported rows carry
+    formatted strings ("2,000.00"); float() raised ValueError on those and the
+    caller answered a shop question with a 500."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "AMOUNT_NOT_A_NUMBER",
+                "message": (
+                    f"This order stores {field} as '{raw}', which is not an "
+                    f"amount. Fix the order before shipping or billing it."
+                ),
+            },
+        ) from exc
+
+
+def order_balance_due(order: dict) -> Optional[float]:
+    """What this order still OWES - the ONE reading every money door uses.
+
+    The convention is the counter's (orders.py add_payment): an order doc with
+    NO balance_due key at all is a legacy / freshly-imported row on which
+    nothing has been paid, so the whole bill is still due. Reading that same
+    order as "Rs 0.00 due" - which the courier door used to - made the two
+    doors refuse the same order for opposite reasons.
+
+    Returns None when there is genuinely no figure to read (an explicit
+    null/blank balance, or neither field present), so a caller can say "no
+    balance recorded on this order" instead of asserting Rs 0.00. Raises 400
+    when a stored value is not a number."""
+    raw = order.get("balance_due", order.get("grand_total"))
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    return _as_amount(raw, "balance_due")
+
+
 def cod_collectable(order: dict) -> float:
     """The amount a COD courier is told to collect: the order's balance_due,
     the SERVER figure (grand_total - amount_paid, maintained by
@@ -151,28 +195,48 @@ def cod_collectable(order: dict) -> float:
     OWED. It used to be told the whole bill, so a customer who paid a deposit
     at the counter was asked to pay it again at the door.
 
-    Refuses (400) two states rather than guessing:
-      * nothing due (fully paid, or no balance recorded): there is nothing to
-        collect - book it Prepaid. Silently flipping the method would change
-        what the customer was told at the counter and what the courier
-        charges the shop, so the caller is told to choose.
-      * balance above the bill: a corrupt order nobody should ship on."""
-    grand_total = float(order.get("grand_total") or 0.0)
-    balance_due = float(order.get("balance_due") or 0.0)
+    Refuses (400, with a stable `code`) rather than guessing:
+      * COD_NO_BALANCE_RECORDED - the order carries no balance figure at all.
+      * COD_NOTHING_TO_COLLECT  - fully paid; there is nothing to collect, so
+        book it Prepaid. Silently flipping the method would change what the
+        customer was told at the counter and what the courier charges the
+        shop, so the caller is told to choose.
+      * COD_BALANCE_EXCEEDS_BILL - a corrupt order nobody should ship on."""
+    balance_due = order_balance_due(order)
+    if balance_due is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "COD_NO_BALANCE_RECORDED",
+                "message": (
+                    "There is no balance recorded on this order, so there is "
+                    "nothing to tell the courier to collect. Record the bill, "
+                    "or book it Prepaid."
+                ),
+            },
+        )
+    grand_total = _as_amount(order.get("grand_total") or 0.0, "grand_total")
     if balance_due <= 0.01:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"This order records Rs {balance_due:,.2f} due - nothing for "
-                f"the courier to collect. Book it Prepaid, not COD."
-            ),
+            detail={
+                "code": "COD_NOTHING_TO_COLLECT",
+                "message": (
+                    f"This order records Rs {balance_due:,.2f} due - nothing "
+                    f"for the courier to collect. Book it Prepaid, not COD."
+                ),
+            },
         )
     if balance_due > grand_total + 0.01:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Balance due Rs {balance_due:,.2f} exceeds the bill "
-                f"Rs {grand_total:,.2f} - fix the order before shipping it COD."
-            ),
+            detail={
+                "code": "COD_BALANCE_EXCEEDS_BILL",
+                "message": (
+                    f"Balance due Rs {balance_due:,.2f} exceeds the bill "
+                    f"Rs {grand_total:,.2f} - fix the order before shipping "
+                    f"it COD."
+                ),
+            },
         )
     return round(balance_due, 2)
