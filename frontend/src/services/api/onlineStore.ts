@@ -66,6 +66,10 @@ export function classifyLoadError(err: unknown): OnlineStoreLoadFailure {
 export interface StorefrontPosture {
   storefront_id: string;
   name: string;
+  /** The brand this storefront trades as ("BETTER_VISION" / "WIZOPT") — the
+   *  only key that joins a posture row to an ONLINE store doc (a store carries
+   *  `brand`, never a storefront_id). Empty from a pre-brand backend. */
+  brand?: string | null;
   is_default?: boolean | null;
   creds_present?: boolean | null;
   is_live?: boolean | null;
@@ -223,6 +227,7 @@ export const onlineStoreApi = {
           ? data.storefronts.map((r) => ({
               storefront_id: String(r?.storefront_id ?? ''),
               name: String(r?.name ?? r?.storefront_id ?? ''),
+              brand: String(r?.brand ?? ''),
               is_default: r?.is_default ?? null,
               creds_present: r?.creds_present ?? null,
               is_live: !!r?.is_live,

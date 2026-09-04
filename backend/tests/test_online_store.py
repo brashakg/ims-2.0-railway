@@ -135,10 +135,19 @@ def test_summary_degraded_and_storefronts_shape(client, auth_headers):
     sfs = body["storefronts"]
     assert isinstance(sfs, list) and len(sfs) >= 1
     row = sfs[0]
-    assert {"storefront_id", "name", "is_default", "creds_present", "is_live"} <= set(
-        row
-    )
+    assert {
+        "storefront_id",
+        "name",
+        "brand",
+        "is_default",
+        "creds_present",
+        "is_live",
+    } <= set(row)
     assert row["name"], "storefront row must carry a human name"
+    # `brand` is what joins a posture row to an ONLINE store doc (a store has
+    # `brand`, never a storefront_id) -- without it the store picker cannot
+    # tell WizOpt Online's dark posture from the default storefront's.
+    assert row["brand"] == "BETTER_VISION"
     # Gates unarmed in tests -> every storefront posture must be dark.
     assert all(r["is_live"] is False for r in sfs)
 

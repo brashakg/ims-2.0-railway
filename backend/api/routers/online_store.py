@@ -163,6 +163,12 @@ def _storefront_postures(db, push_mode: Optional[Dict]) -> list:
                 {
                     "storefront_id": sid,
                     "name": row.get("name") or sid,
+                    # The brand this storefront trades as ("BETTER_VISION" /
+                    # "WIZOPT"). It is the ONLY key that joins a posture row to
+                    # an ONLINE store doc -- a store carries `brand`, never a
+                    # storefront_id -- so the picker can say live/dark per
+                    # storefront instead of assuming the default one.
+                    "brand": str(row.get("brand") or ""),
                     "is_default": is_default,
                     "creds_present": creds,
                     "is_live": bool(writes and dispatch_live and creds),
