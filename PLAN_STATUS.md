@@ -162,7 +162,7 @@ inventory first. Nothing is deleted until it is proven replaced.
 | Counter sale marked DELIVERED at completion, cashier as handover (owner 09-04) -- through the existing /ready + /deliver doors; a HOME-DELIVERY counter bill is deliberately NOT stamped (parcel still on the packing desk) | **DONE** |
 | Optical till: 'Order receipt (A4)' relabelled 'Tax invoice (A4)' -- serial mints at sale (owner 09-04) | **DONE** |
 | Reverse split: adding a family member whose number is already a customer -- BLOCKED at all 3 doors; link-existing NOT built (cannot be truthful: POS Rx gate + clinical readers key on customer id); popup opens their own account | **DONE** |
-| Member-on-two-accounts (child on both parents') -- BLOCK, one household account (owner 09-04) | **DONE** on `feat/household-guard` (pushed; PR after #1088 merges) |
+| Member-on-two-accounts (child on both parents') -- BLOCK, one household account (owner 09-04) | **PR #1090** (stacked on #1088; retargets to main on merge) |
 | Member rows minted in 3 places with drifting `relation` defaults and no `created_at` | **TODO** (one-rule-two-implementations) |
 | Legacy till RETIRED: /pos redirects to /pos/new (query kept), POSLayout deleted, 8 legacy-vehicle tests re-pointed, a recorded-axis-0 bug caught on the new picker. Follow-ups: Playwright specs re-pointed (DONE); POSReceipt.tsx orphaned; PIXEL audit list still names /pos (follows redirect) | **DONE** |
 
@@ -183,8 +183,8 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | `POSReceipt.tsx` orphaned after the till retirement; `calculateGST`/`calculateIGST` in `constants/gst.ts` have zero callers | frontend | salvage look before delete |
 | Pune store's `store_id` is a UUID (`4dc49c44-...`) while every other store uses its code (`BV-DHN-02`, `WIZ-DHN-01`...) as the id; `store_code` is `BV-PUN-01` | `stores` collection (prod) | possibly related to the open "Pune 2 orphan units"; needs a look before any store-id join |
 | PIXEL audit list still names `/pos` (follows the redirect) | `agents/implementations/pixel.py:107` | harmless |
-| Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | **DONE** on `feat/household-guard`: one `make_patient_row`, five sites, default `Other` (a silent `Self` would make the member the holder) |
-| `GET /incentive/points/settings/eligibility` (and `/settings/effective`, a second leak) revealed per-person commission weight/bonus % | `points.py` | **DONE** on `feat/weightings-admin-only` (pushed; PR after #1088 merges) |
+| Member rows minted in 3 places, drifting `relation` defaults, no `created_at` | `customers.py` / `customer_service.py` | **PR #1090**: one `make_patient_row`, five sites, default `Other` (a silent `Self` would make the member the holder) |
+| `GET /incentive/points/settings/eligibility` (and `/settings/effective`, a second leak) revealed per-person commission weight/bonus % | `points.py` | **PR #1091** (stacked on #1088; retargets to main on merge) |
 
 ## 4h. Closed by owner statement
 
