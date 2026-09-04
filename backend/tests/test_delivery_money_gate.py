@@ -430,12 +430,36 @@ def _ship_token(roles, store_id="BV-TEST-01", uid="u1"):
     )
 
 
+def doc_matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    """Mongo-ish match for the in-memory fakes. Honours the operators the
+    routers actually send ($nin / $ne / $in) - a double that ignored them
+    would match nothing and be blind to the guard it is meant to police."""
+    for key, cond in (query or {}).items():
+        value = doc.get(key)
+        if isinstance(cond, dict):
+            if "$nin" in cond and value in cond["$nin"]:
+                return False
+            if "$in" in cond and value not in cond["$in"]:
+                return False
+            if "$ne" in cond and value == cond["$ne"]:
+                return False
+        elif value != cond:
+            return False
+    return True
+
+
 class _FakeColl:
     def __init__(self):
         self.docs: List[Dict[str, Any]] = []
 
     def insert_one(self, doc):
         self.docs.append(doc)
+
+    def find_one(self, query=None, projection=None):
+        for d in self.docs:
+            if doc_matches(d, query or {}):
+                return dict(d)
+        return None
 
 
 def _ship_client(monkeypatch, order):

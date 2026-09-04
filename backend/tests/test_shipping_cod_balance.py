@@ -16,6 +16,12 @@ DISCRIMINATING POWER was MEASURED: the pre-fix copies of
 services/shiprocket.py, services/delivery_gate.py and routers/shipping.py
 were restored and this file re-run; the per-test outcome is recorded in the
 PR. Fakes carry REAL money fields; no assertion reads comment text.
+
+Refusals are asserted on the STABLE `detail["code"]`, never on the author's
+own error prose - a reworded message is not a behaviour change, and a test
+that fails when it is reworded teaches nothing (review round 1, finding 9).
+The adversarial probes that found the round-1 bugs live alongside this file
+in test_cod_probe_review.py.
 """
 
 from __future__ import annotations
@@ -131,7 +137,7 @@ def test_cod_payload_refuses_fully_paid():
             {**_ADDR, "payment_method": "COD"},
         )
     assert exc.value.status_code == 400
-    assert "prepaid" in str(exc.value.detail).lower()
+    assert exc.value.detail["code"] == "COD_NOTHING_TO_COLLECT"
 
 
 def test_cod_payload_refuses_balance_above_bill():
@@ -141,7 +147,7 @@ def test_cod_payload_refuses_balance_above_bill():
             {**_ADDR, "payment_method": "COD"},
         )
     assert exc.value.status_code == 400
-    assert "exceeds" in str(exc.value.detail).lower()
+    assert exc.value.detail["code"] == "COD_BALANCE_EXCEEDS_BILL"
 
 
 # ============================================================================
@@ -241,7 +247,7 @@ def test_book_cod_refused_when_fully_paid(monkeypatch):
         headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
     )
     assert resp.status_code == 400, resp.text
-    assert "prepaid" in resp.text.lower()
+    assert resp.json()["detail"]["code"] == "COD_NOTHING_TO_COLLECT"
     assert coll.docs == []  # nothing booked, nothing persisted
 
 
@@ -256,7 +262,7 @@ def test_book_cod_refused_when_balance_exceeds_bill(monkeypatch):
         headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
     )
     assert resp.status_code == 400, resp.text
-    assert "exceeds" in resp.text.lower()
+    assert resp.json()["detail"]["code"] == "COD_BALANCE_EXCEEDS_BILL"
     assert coll.docs == []
 
 
@@ -273,6 +279,44 @@ def test_book_cod_refused_when_order_unresolvable(monkeypatch):
     )
     assert resp.status_code == 400, resp.text
     assert coll.docs == []
+
+
+@pytest.mark.parametrize(
+    "spelling", ["COD", " cod ", "cod", "Cod", None, "Prepaid", "prepaid", ""]
+)
+def test_persisted_shipment_matches_the_carrier_body(monkeypatch, spelling):
+    """Adopted from the review (probe H1). Whatever spelling arrives, the
+    shipment doc IMS keeps and the body the courier is handed must agree -
+    that agreement is the whole point of one shared payment_kind(). A blank
+    or absent method keeps the historical default, Prepaid."""
+    seen = []
+    real = shiprocket.create_shipment
+
+    async def _capture(order, address, db=None, **kw):
+        res = await real(order, address, db=db, **kw)
+        seen.append(res.raw.get("payload"))
+        return res
+
+    monkeypatch.setattr(shiprocket, "create_shipment", _capture)
+    client, coll = _ship_client(
+        monkeypatch,
+        _order(order_id="ORD-C1", grand_total=3000.0, amount_paid=1000.0,
+               balance_due=2000.0),
+    )
+    address = {} if spelling is None else {"payment_method": spelling}
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-C1", "address": address},
+        headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
+    )
+    assert resp.status_code == 201, resp.text
+    (doc,) = coll.docs
+    (payload,) = seen
+    assert doc["payment_method"] == payload["payment_method"]
+    if doc["payment_method"] == "COD":
+        assert doc["cod_amount"] == payload["sub_total"] == 2000.0
+    else:
+        assert doc["cod_amount"] == 0.0 and payload["sub_total"] == 3000.0
 
 
 def test_book_prepaid_records_zero_cod_amount(monkeypatch):
