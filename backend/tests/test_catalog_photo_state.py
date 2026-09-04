@@ -35,7 +35,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
-import uuid  # noqa: E402
+import itertools  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -422,6 +422,16 @@ def test_catalog_list_photo_filter_missing_and_has(monkeypatch):
     assert has["total"] == 1
 
 
+# The listing cache key is process-global, so each call needs its own store.
+# A COUNTER, not a uuid slice: the BUG-104 guard hunts `[:10]` (a UTC day
+# face) and cannot tell a uuid slice from a date one.
+_STORE_SEQ = itertools.count()
+
+
+def _unique_store(prefix: str) -> str:
+    return "%s-%d" % (prefix, next(_STORE_SEQ))
+
+
 def _spine_repo(rows):
     coll = StrictCollection("products")
     for r in rows:
@@ -436,8 +446,7 @@ def _products_list(monkeypatch, repo, db, **kwargs):
     monkeypatch.setattr(deps, "get_db", lambda: db)
     params = {
         "category": None, "brand": None, "search": None, "tag": None, "created_by": None,
-        # unique store per call: the store id is in the process-global cache key
-        "store_id": f"S-photo-{uuid.uuid4().hex[:10]}",
+        "store_id": _unique_store("S-photo"),
         "skip": 0, "limit": 50, "is_active": "all", "photo": None, "current_user": ADMIN,
     }
     params.update(kwargs)
@@ -491,7 +500,7 @@ def test_products_list_restamps_on_a_cache_hit(monkeypatch):
     next load, cache hit or miss."""
     rows, db = _spine_fixture()
     repo = _spine_repo(rows)
-    store = f"S-cache-{uuid.uuid4().hex[:10]}"
+    store = _unique_store("S-cache")
     first = _products_list(monkeypatch, repo, db, store_id=store)
     assert {p["product_id"]: p["has_photo"] for p in first["products"]}["S2"] is False
     db["catalog_products"].update_one({"id": "P2"}, {"$set": {"images": [HTTP]}})
