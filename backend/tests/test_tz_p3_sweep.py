@@ -187,7 +187,13 @@ async def test_points_list_daily_defaults_to_ist_day(monkeypatch):
     monkeypatch.setattr(points_mod, "ist_today", lambda: FROZEN_IST_DATE)
     monkeypatch.setattr(points_mod, "_points_repo", lambda: _FakeRepo())
 
-    user = {"roles": [], "active_store_id": "BV-TEST-01"}
+    # ADMIN, deliberately: owner ruling 2026-09-03 makes the daily list SELF-ONLY
+    # for everyone below ADMIN/SUPERADMIN (a viewer with no user_id is refused
+    # outright, and a non-admin is served through find_by_date_and_staff, not
+    # list_by_date). This test is about the IST-day DEFAULT, which is decided
+    # before either path; it needs the full-board viewer to reach the repo call
+    # it captures. Visibility itself is pinned in test_incentive_self_only.py.
+    user = {"roles": ["ADMIN"], "user_id": "admin-1", "active_store_id": "BV-TEST-01"}
     resp = await points_mod.list_daily(current_user=user, date=None, store_id=None)
 
     # 01:00 IST: a UTC clock would have produced "2026-06-09".
