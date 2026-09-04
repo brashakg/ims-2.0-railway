@@ -6,6 +6,7 @@ Prescription data access operations
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
 from api.utils.ist import now_ist_naive
+from api.utils.dates import iso_date_window
 from .base_repository import BaseRepository
 
 
@@ -58,29 +59,15 @@ class PrescriptionRepository(BaseRepository):
         match NOTHING against a string field -- so an optometrist filtering
         their own prescriptions by date silently got an empty list.
 
-        The field holds TWO string shapes and a bound has to match both:
-          * the create door writes a full ISO datetime with a real time
-            (``2026-06-18T12:05:26.552211`` -- verified on production), and
-          * marketing writes a bare ``YYYY-MM-DD``.
-
-        So neither bound carries a time component:
-          * lower is the plain from-day. A ``T00:00:00`` lower bound would drop
-            the bare-date rows ON the boundary day -- a shorter string that is a
-            prefix of a longer one sorts BEFORE it, so ``"2026-06-18"`` is NOT
-            ``>= "2026-06-18T00:00:00"``.
-          * upper is EXCLUSIVE at the next day. A ``$lte`` of the bare to-day
-            would drop every full-datetime row on the last day, because
-            ``"2026-06-18T12:05" > "2026-06-18"``.
-
-        ISO-8601 is lexicographically ordered, so a string compare is a correct
-        date compare for both shapes.
+        The field holds TWO string shapes (the create door writes a full ISO
+        datetime, marketing writes a bare ``YYYY-MM-DD``) and the bound must
+        admit both at both edges. That rule now lives in ONE place for every
+        string-dated column -- ``api.utils.dates.iso_date_window``, also the
+        orders / workshop overdue bound -- see its docstring for the two edge
+        defects it prevents. This name stays so the three call sites and
+        test_prescription_date_window keep a single entry point.
         """
-        out: Dict = {}
-        if from_date:
-            out["$gte"] = from_date.isoformat()
-        if to_date:
-            out["$lt"] = (to_date + timedelta(days=1)).isoformat()
-        return out
+        return iso_date_window(from_date, to_date)
 
     def find_by_optometrist(self, optometrist_id: str, from_date: date = None, 
                             to_date: date = None) -> List[Dict]:
