@@ -68,7 +68,7 @@ vi.mock('../../../components/crm/PrescriptionQRCode', () => ({ PrescriptionQRCod
 vi.mock('../../../components/pos/PrescriptionForm', () => ({ PrescriptionForm: () => null }));
 
 import { buildApiError } from '../../../services/api/client';
-import { OWN_ACCOUNT_CONFLICT_CODE } from '../../../services/api/customers';
+import { HOUSEHOLD_CONFLICT_CODE, OWN_ACCOUNT_CONFLICT_CODE } from '../../../services/api/customers';
 import { CustomersPage } from '../CustomersPage';
 
 const OWN = {
@@ -78,6 +78,19 @@ const OWN = {
   customer_name: 'Arun Kumar',
   patient_index: 0,
   patient_name: 'Arun',
+};
+
+// The one-household refusal (owner ruling 2026-09-04): the number is already
+// a family member on ANOTHER account. Same popup, third shape.
+const HOUSEHOLD = {
+  code: HOUSEHOLD_CONFLICT_CODE,
+  message: "This number is already Arun Verma, a family member on Sunil Verma's account",
+  customer_id: 'cust-house2',
+  account_holder_name: 'Sunil Verma',
+  patient_id: 'pat-arun-2',
+  patient_name: 'Arun Verma',
+  relation: 'Son',
+  patient_index: 0,
 };
 
 const rejectedWith = (status: number, detail: unknown) =>
@@ -125,6 +138,19 @@ describe('CustomersPage add-patient own-account conflict', () => {
     await screen.findByRole('dialog');
     fireEvent.click(screen.getByRole('button', { name: /open their account/i }));
     await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/customers/cust-own'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByPlaceholderText('10-digit mobile')).toBeNull();
+  });
+
+  it('a number already on ANOTHER household shows the popup with OPEN THAT HOUSEHOLD, and navigates there', async () => {
+    addPatient.mockRejectedValue(rejectedWith(409, HOUSEHOLD));
+    await openAccountAndSubmitMember();
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent("already Arun Verma, a family member on Sunil Verma's account");
+    expect(screen.queryByRole('button', { name: /promote|open their account/i })).toBeNull();
+    expect(toast.error).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /open that household/i }));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/customers/cust-house2'));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByPlaceholderText('10-digit mobile')).toBeNull();
   });

@@ -12,7 +12,9 @@ import { useDebounce } from '../../hooks/useDebounce';
 import { customerApi } from '../../services/api';
 import {
   FAMILY_MEMBER_CONFLICT_CODE,
+  OWN_ACCOUNT_CONFLICT_CODE,
   familyMemberConflictFrom,
+  householdConflictFrom,
   ownAccountConflictFrom,
   type CustomerConflict,
   type SelectableCustomer,
@@ -193,7 +195,8 @@ export function AddCustomerModal({
     } catch (err) {
       // Everything else is the parent's to report. The one-person-one-record
       // 409s are ours: they need a decision, not a toast.
-      const found = familyMemberConflictFrom(err) ?? ownAccountConflictFrom(err);
+      const found =
+        familyMemberConflictFrom(err) ?? ownAccountConflictFrom(err) ?? householdConflictFrom(err);
       if (found) {
         setConflictError(null);
         setConflict(found);
@@ -235,9 +238,9 @@ export function AddCustomerModal({
     if (!conflict) return;
     if (!onSelectExisting) {
       const name =
-        conflict.code === FAMILY_MEMBER_CONFLICT_CODE
-          ? conflict.account_holder_name
-          : conflict.customer_name;
+        conflict.code === OWN_ACCOUNT_CONFLICT_CODE
+          ? conflict.customer_name
+          : conflict.account_holder_name;
       resolveConflictWith({ customer_id: conflict.customer_id, name, patients: [] });
       return;
     }

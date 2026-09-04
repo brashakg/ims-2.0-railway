@@ -868,24 +868,20 @@ async def create_customer(
         # shows a created customer's address instead of a blank.
         _sync_address_representations(customer_data)
 
-        # Add the supplied family members (if any).
-        if customer.patients:
-            for p in customer.patients:
-                customer_data["patients"].append(
-                    {
-                        "patient_id": str(uuid.uuid4()),
-                        "name": p.name,
-                        "mobile": p.mobile,
-                        "dob": p.dob.isoformat() if p.dob else None,
-                        "anniversary": (
-                            p.anniversary.isoformat() if p.anniversary else None
-                        ),
-                        # Honor the caller-supplied relation; fall back to the
-                        # name-heuristic only when the field is absent/blank.
-                        "relation": p.relation
-                        or ("Self" if p.name == customer.name else "Other"),
-                    }
+        # Add the supplied family members (if any) -- minted by the ONE row
+        # builder every member door uses (customer_service.make_patient_row).
+        from ..services.customer_service import make_patient_row
+
+        for p in customer.patients:
+            customer_data["patients"].append(
+                make_patient_row(
+                    name=p.name,
+                    mobile=p.mobile,
+                    dob=p.dob,
+                    anniversary=p.anniversary,
+                    relation=p.relation,
                 )
+            )
 
         # BILL-TO-MEMBER P1 (council 2026-06-19): every account must carry >=1
         # member, and exactly one is the Primary (the account holder, a REAL
@@ -1274,6 +1270,12 @@ async def update_customer(
 
         # Handle patients additively
         if "patients" in update_data:
+            from ..services.customer_service import (
+                household_conflict,
+                make_patient_row,
+                own_account_conflict,
+            )
+
             incoming = update_data.pop("patients") or []
             current_patients = list(existing.get("patients") or [])
             seen_keys = {
@@ -1298,22 +1300,13 @@ async def update_customer(
                 to_add.append(
                     (
                         idx,
-                        {
-                            "patient_id": str(uuid.uuid4()),
-                            "name": name,
-                            "mobile": mobile or None,
-                            "dob": (
-                                p["dob"].isoformat()
-                                if isinstance(p.get("dob"), date)
-                                else p.get("dob")
-                            ),
-                            "anniversary": (
-                                p["anniversary"].isoformat()
-                                if isinstance(p.get("anniversary"), date)
-                                else p.get("anniversary")
-                            ),
-                            "relation": p.get("relation") or "Other",
-                        },
+                        make_patient_row(
+                            name=name,
+                            mobile=mobile or None,
+                            dob=p.get("dob"),
+                            anniversary=p.get("anniversary"),
+                            relation=p.get("relation"),
+                        ),
                     )
                 )
             # REVERSE family-member guard (owner ruling 2026-09-04): a row being
@@ -1322,12 +1315,19 @@ async def update_customer(
             # exempt (the holder's Self row). Only rows actually being appended
             # are checked, so the clinical per-visit re-send of an existing
             # member never trips on a legacy split. All-or-nothing: one bad row
-            # appends none.
-            from ..services.customer_service import own_account_conflict
-
+            # appends none. ONE HOUSEHOLD: nor a number already a member on a
+            # DIFFERENT account (this account and its own number exempt).
             own = own_account_conflict(repo, to_add, exclude_customer_id=customer_id)
             if own:
                 raise HTTPException(status_code=409, detail=own)
+            house = household_conflict(
+                repo,
+                to_add,
+                exclude_customer_id=customer_id,
+                own_mobile=existing.get("mobile") or existing.get("phone"),
+            )
+            if house:
+                raise HTTPException(status_code=409, detail=house)
             current_patients.extend(row for _, row in to_add)
             update_data["patients"] = current_patients
 
@@ -1407,25 +1407,35 @@ async def add_patient(
                     "deduped": True,
                 }
 
-        patient_data = {
-            "patient_id": str(uuid.uuid4()),
-            "name": patient.name,
-            "mobile": patient.mobile,
-            "dob": patient.dob.isoformat() if patient.dob else None,
-            "anniversary": (
-                patient.anniversary.isoformat() if patient.anniversary else None
-            ),
-            "relation": patient.relation or "Family",
-        }
+        from ..services.customer_service import (
+            household_conflict,
+            make_patient_row,
+            own_account_conflict,
+        )
+
+        patient_data = make_patient_row(
+            name=patient.name,
+            mobile=patient.mobile,
+            dob=patient.dob,
+            anniversary=patient.anniversary,
+            relation=patient.relation,
+        )
 
         # REVERSE family-member guard: the number must not already be someone's
         # own account (same rule as the create door's patients[] and the PUT
-        # append; this account exempt -- the holder's Self row).
-        from ..services.customer_service import own_account_conflict
-
+        # append; this account exempt -- the holder's Self row). ONE HOUSEHOLD:
+        # nor already a family member on a DIFFERENT account.
         own = own_account_conflict(repo, [(0, patient_data)], exclude_customer_id=customer_id)
         if own:
             raise HTTPException(status_code=409, detail=own)
+        house = household_conflict(
+            repo,
+            [(0, patient_data)],
+            exclude_customer_id=customer_id,
+            own_mobile=existing.get("mobile") or existing.get("phone"),
+        )
+        if house:
+            raise HTTPException(status_code=409, detail=house)
 
         if repo.add_patient(customer_id, patient_data):
             _audit_customer(

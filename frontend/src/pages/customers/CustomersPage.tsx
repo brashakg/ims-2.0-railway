@@ -41,7 +41,12 @@ import {
 import { AddCustomerModal } from '../../components/customers/AddCustomerModal';
 import { EditCustomerModal, CUSTOMER_EDIT_ROLES } from '../../components/customers/EditCustomerModal';
 import { FamilyMemberConflictModal } from '../../components/customers/FamilyMemberConflictModal';
-import { ownAccountConflictFrom, type OwnAccountConflict } from '../../services/api/customers';
+import {
+  householdConflictFrom,
+  ownAccountConflictFrom,
+  type HouseholdConflict,
+  type OwnAccountConflict,
+} from '../../services/api/customers';
 import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
@@ -133,7 +138,9 @@ export function CustomersPage() {
   const [isAddingPatient, setIsAddingPatient] = useState(false);
   // Reverse split (owner ruling 2026-09-04): the add was refused because the
   // number is already someone's OWN account. A decision popup, not a toast.
-  const [patientConflict, setPatientConflict] = useState<OwnAccountConflict | null>(null);
+  const [patientConflict, setPatientConflict] = useState<
+    OwnAccountConflict | HouseholdConflict | null
+  >(null);
 
   // Reset page when filters change
   useEffect(() => {
@@ -395,9 +402,10 @@ export function CustomersPage() {
         setSelectedCustomer(updated);
       }
     } catch (e) {
-      // The number is already this person's own account: one person, one
-      // record. Offer to open that account instead of a dead-end toast.
-      const own = ownAccountConflictFrom(e);
+      // The number is already this person's own account, or already a family
+      // member on another household: one person, one record. Offer to open
+      // that account instead of a dead-end toast.
+      const own = ownAccountConflictFrom(e) ?? householdConflictFrom(e);
       if (own) {
         setPatientConflict(own);
         return;
