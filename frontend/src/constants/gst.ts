@@ -307,39 +307,11 @@ export function getGSTRateByCategory(category: string): number {
   }
 }
 
-// Calculate GST components
-export function calculateGST(amount: number, gstRate: number) {
-  const gstAmount = (amount * gstRate) / (100 + gstRate);
-  // Round CGST down, assign remainder to SGST to avoid 1-paisa loss on odd amounts
-  const roundedGst = parseFloat(gstAmount.toFixed(2));
-  const cgst = Math.floor(roundedGst * 100 / 2) / 100;
-  const sgst = parseFloat((roundedGst - cgst).toFixed(2));
-  const baseAmount = amount - gstAmount;
-
-  return {
-    baseAmount: parseFloat(baseAmount.toFixed(2)),
-    cgst,
-    sgst,
-    igst: 0, // For intra-state transactions
-    totalGst: parseFloat(gstAmount.toFixed(2)),
-    totalAmount: parseFloat(amount.toFixed(2)),
-  };
-}
-
-// Calculate GST for inter-state transactions
-export function calculateIGST(amount: number, gstRate: number) {
-  const gstAmount = (amount * gstRate) / (100 + gstRate);
-  const baseAmount = amount - gstAmount;
-
-  return {
-    baseAmount: parseFloat(baseAmount.toFixed(2)),
-    cgst: 0,
-    sgst: 0,
-    igst: parseFloat(gstAmount.toFixed(2)),
-    totalGst: parseFloat(gstAmount.toFixed(2)),
-    totalAmount: parseFloat(amount.toFixed(2)),
-  };
-}
+// No GST arithmetic lives here. The taxable base / CGST / SGST / IGST split
+// on a billing document is the SERVER's (services/gst_rates.split_gst, applied
+// in orders._compute_per_category_gst); the client-side mirror that used to
+// sit here had no callers once the browser stopped rendering invoices, and a
+// dead copy of a money rule is the copy that gets resurrected and drifts.
 
 // Validate GST number format
 export function validateGSTNumber(gstin: string): boolean {
@@ -389,8 +361,6 @@ export const GSTR3B_TABLES = {
 
 export default {
   HSN_CODES,
-  calculateGST,
-  calculateIGST,
   validateGSTNumber,
   GSTR1_SECTIONS,
   GSTR3B_TABLES,

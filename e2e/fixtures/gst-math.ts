@@ -1,9 +1,9 @@
 /**
  * GST expectation math — the test's independent oracle.
  *
- * The backend (`orders._compute_per_category_gst`) and the GST invoice
- * (`constants/gst.ts::calculateGST`) both EXTRACT GST from within an inclusive
- * counter price under PR #331:
+ * The backend (`orders._compute_per_category_gst`) EXTRACTS GST from within an
+ * inclusive counter price under PR #331 (the invoice is the server's document;
+ * the client-side mirror of this math went with the till retirement):
  *     taxable = price / (1 + rate/100)   (rounded to paise)
  *     tax     = price - taxable
  *     cgst    = floor(tax*100 / 2) / 100   (remainder to sgst)
@@ -45,7 +45,7 @@ export function lineGst(price: number, rate: number, mode: GstMode): LineGst {
     tax = round2((price * rate) / 100);
     grandTotal = round2(taxable + tax);
   }
-  // CGST floored, remainder to SGST — matches calculateGST + the backend.
+  // CGST floored, remainder to SGST — matches the backend (gst_rates.split_gst).
   const cgst = Math.floor((tax * 100) / 2) / 100;
   const sgst = round2(tax - cgst);
   return { grandTotal, taxable, tax, cgst, sgst };

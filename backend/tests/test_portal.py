@@ -642,3 +642,47 @@ class TestRxView:
         patch_repos(prescriptions=[])
         resp = client.get("/api/v1/portal/rx", headers=auth_headers)
         assert resp.status_code == 401
+
+
+# ===========================================================================
+# CUSTOMER-FACING ITEM LABEL
+# ===========================================================================
+# _describe_for_customer / _category_label are the ONE implementation of the
+# "Ray-Ban Sunglass" line (the frontend copy, utils/receiptFormat.ts, went
+# with the thermal receipt on 2026-09-04). These cases are its unit test,
+# ported so the rule keeps a pin on the side that still runs it.
+
+
+def test_describe_for_customer_is_brand_plus_category():
+    d = portal_module._describe_for_customer
+    assert d({"brand": "Ray-Ban", "category": "SUNGLASSES",
+              "product_name": "Wayfarer RB2140"}) == "Ray-Ban Sunglass"
+    assert d({"brand": "Zeiss", "category": "OPTICAL_LENS",
+              "product_name": "DuraVision"}) == "Zeiss Spectacle Lens"
+    # Whitespace around the brand never reaches the customer.
+    assert d({"brand": "  Gucci  ", "category": "SUNGLASSES"}) == "Gucci Sunglass"
+
+
+def test_describe_for_customer_fallback_chain():
+    d = portal_module._describe_for_customer
+    # brand -> subbrand -> product name -> bare category -> "Item"
+    assert d({"brand": "", "subbrand": "Aqualite",
+              "category": "FRAMES"}) == "Aqualite Spectacle Frame"
+    assert d({"category": "SERVICE",
+              "product_name": "Frame fitting & adjustment"}) == "Frame fitting & adjustment"
+    assert d({"category": "CONTACT_LENS"}) == "Contact Lens"
+    assert d({}) == "Item"
+
+
+def test_category_label_normalises_and_never_leaks_upper_case():
+    c = portal_module._category_label
+    assert c("FRAMES") == "Spectacle Frame"
+    assert c("WATCHES") == "Watch"
+    # dash / space / mixed case are the same key
+    assert c("spectacle-frame") == "Spectacle Frame"
+    assert c("contact lenses") == "Contact Lens"
+    assert c("Smart_Watch") == "Watch"
+    # unknown category is Title-cased, never shown as UPPER_CASE
+    assert c("GIFT_CARD") == "Gift Card"
+    assert c(None) == "Item"
+    assert c("") == "Item"

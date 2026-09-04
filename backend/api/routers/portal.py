@@ -146,9 +146,10 @@ def _check_rate(bucket: dict, key: str, limit: int, label: str) -> None:
 
 
 # ============================================================================
-# Customer-facing item label -- Python mirror of
-# frontend/src/utils/receiptFormat.ts::describeForReceipt
-# ("Ray-Ban Sunglass", "Zeiss Spectacle Lens"). Never leaks SKU/cost.
+# Customer-facing item label ("Ray-Ban Sunglass", "Zeiss Spectacle Lens").
+# Never leaks SKU/cost. The ONE implementation: the frontend copy went with
+# the thermal receipt on 2026-09-04; its cases are pinned in
+# tests/test_portal.py.
 # ============================================================================
 
 _CATEGORY_LABELS = {
