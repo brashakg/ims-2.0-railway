@@ -9,10 +9,10 @@
  * Source of truth = the persisted order (verified via API). The UI checks
  * confirm the customer is shown the same all-in figure.
  *
- * CONDENSED FLOW (#783/#790): a quick sale is Customer -> Products -> Payment.
- * The Review step no longer exists for quick sales (QUICK_STEPS parity), so the
- * pre-payment totals the customer sees live in the CART SIDEBAR
- * (Subtotal / GST / "Total (incl. GST)"), asserted on the Products step.
+ * ONE-SURFACE TILL (/pos/new): the cart (Subtotal / GST / "Total (incl.
+ * GST)") and the payment card ("Total Due (incl. GST)") are on screen at the
+ * same time, so both figures are asserted before a single tender is taken.
+ * Every bill needs a customer (owner rule), so each sale creates one first.
  *
  * Mode-aware: if the backend reports exclusive pricing (legacy), the same
  * spec asserts the exclusive expectation (Rs 1048.95) instead, so it stays
@@ -23,7 +23,7 @@ import { PosPage } from '../fixtures/pos-page';
 import { lineGst, cartGst } from '../fixtures/gst-math';
 import { SEED } from '../fixtures/constants';
 
-/** The cart sidebar renders whole-rupee en-IN figures, e.g. "₹2,179". */
+/** The cart renders whole-rupee en-IN figures, e.g. "₹2,179". */
 const rupees = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 
 test.describe('POS — GST-inclusive sale', () => {
@@ -44,26 +44,24 @@ test.describe('POS — GST-inclusive sale', () => {
 
     const pos = new PosPage(page);
     await pos.goto();
-    await pos.selectFirstSalespersonAndWalkin();
-    await pos.addProductByName(SEED.frame.name);
+    await pos.pickFirstSalesperson();
+    await pos.createCustomer();
+    await pos.addProduct(SEED.frame);
 
-    // --- Products step, cart sidebar: the all-in total the customer is shown.
-    // getGrandTotal() is inclusive under #331, so this equals the counter
-    // price (Rs 999), NOT price + GST-on-top (Rs 1048.95).
+    // --- Cart: the all-in total the customer is shown. getGrandTotal() is
+    // inclusive under #331, so this equals the counter price (Rs 999), NOT
+    // price + GST-on-top (Rs 1048.95).
     await expect(pos.cartRowValue('Total (incl. GST)')).toHaveText(
       rupees(expected.grandTotal)
     );
 
-    // Quick sale: Continue goes STRAIGHT to Payment (no Review step).
-    await pos.continueFromProducts();
-
-    // --- Payment step: "Total Due (incl. GST)" headline ---
+    // --- Payment card: "Total Due (incl. GST)" headline ---
     await expect(pos.totalDueHeadline).toHaveText(
       new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
     );
 
-    await pos.payFullCashAndComplete();
-    const orderNumber = await pos.waitForOrderCreated();
+    await pos.payFullCash();
+    const orderNumber = await pos.completeSale();
     expect(orderNumber).toMatch(/^ORD-/);
 
     // --- Source of truth: the persisted order (camelCase API) ---
@@ -105,18 +103,18 @@ test.describe('POS — GST-inclusive sale', () => {
 
     const pos = new PosPage(page);
     await pos.goto();
-    await pos.selectFirstSalespersonAndWalkin();
-    await pos.addProductByName(SEED.frame.name);
-    await pos.addProductByName(SEED.sunglass.name);
+    await pos.pickFirstSalesperson();
+    await pos.createCustomer();
+    await pos.addProduct(SEED.frame);
+    await pos.addProduct(SEED.sunglass);
 
     // The cart's all-in total equals the sum of the inclusive line prices.
     await expect(pos.cartRowValue('Total (incl. GST)')).toHaveText(
       rupees(expected.grandTotal)
     );
 
-    await pos.continueFromProducts();
-    await pos.payFullCashAndComplete();
-    const orderNumber = await pos.waitForOrderCreated();
+    await pos.payFullCash();
+    const orderNumber = await pos.completeSale();
 
     const order = await api.getOrder(orderNumber);
     // The all-in total equals the sum of the inclusive line prices.
@@ -133,22 +131,18 @@ test.describe('POS — GST-inclusive sale', () => {
   });
 
   /**
-   * Condensed-flow behavior guard (#783/#790, QUICK_STEPS parity): a quick
-   * sale must go STRAIGHT from Products to Payment — the Review panel
-   * ("Order Review") must never render — and the GST the cart shows is the
-   * component EXTRACTED WITHIN the inclusive total (₹48 within ₹999 at 5%),
-   * not added on top (which would show ~₹50 over a ₹1,049 total).
+   * The GST the cart shows is the component EXTRACTED WITHIN the inclusive
+   * total (₹48 within ₹999 at 5%), not added on top (which would show ~₹50
+   * over a ₹1,049 total), and the payment card's headline agrees with the
+   * cart before any tender is taken.
    *
-   * (The Review panel's own CGST/SGST split — the old #333/#335 guard — now
-   * only exists inside a prescription order's merged "Pay & Review" group and
-   * is covered by the component tests in POSCondensedFlow.test.tsx; the
-   * paisa-level split of the persisted order is asserted via API in the
-   * Rs 999 spec above, and on the Tax Invoice in gst-invoice.spec.ts.)
+   * (The paisa-level split of the persisted order is asserted via API in the
+   * Rs 999 spec above, and on the server's tax invoice in gst-invoice.spec.ts.)
    *
    * Mode-aware: in exclusive mode the same rows must show the on-top figures
    * (GST ₹50, total ₹1,049), so the assertion stays honest either way.
    */
-  test('quick sale skips Review: cart shows GST extracted within the inclusive total', async ({
+  test('cart shows GST extracted within the inclusive total, headline agrees', async ({
     page,
     mode,
   }) => {
@@ -156,10 +150,11 @@ test.describe('POS — GST-inclusive sale', () => {
 
     const pos = new PosPage(page);
     await pos.goto();
-    await pos.selectFirstSalespersonAndWalkin();
-    await pos.addProductByName(SEED.frame.name);
+    await pos.pickFirstSalesperson();
+    await pos.createCustomer();
+    await pos.addProduct(SEED.frame);
 
-    // Cart sidebar: GST is the extracted-within component; the total stays the
+    // Cart: GST is the extracted-within component; the total stays the
     // inclusive counter price. (Whole-rupee display: 47.57 -> ₹48, 999 -> ₹999.
     // A regression to on-top math would show ₹50 / ₹1,049 in inclusive mode.)
     await expect(pos.cartRowValue('Subtotal')).toHaveText(rupees(SEED.frame.price));
@@ -168,19 +163,10 @@ test.describe('POS — GST-inclusive sale', () => {
       rupees(expected.grandTotal)
     );
 
-    // Continue from Products lands DIRECTLY on Payment: the Total-Due headline
-    // appears and no "Order Review" panel ever renders.
-    await pos.continueFromProducts();
+    // Payment card, on the same screen: the Total-Due headline matches.
     await expect(pos.totalDueHeadline).toBeVisible();
     await expect(pos.totalDueHeadline).toHaveText(
       new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
     );
-    await expect(
-      page.getByRole('heading', { name: 'Order Review' })
-    ).toHaveCount(0);
   });
-
-  // NB: the GST invoice paisa-split equality (line-item CGST === HSN-summary
-  // CGST to the paise) is still unfixed and remains a `test.fixme` in
-  // gst-invoice.spec.ts; no duplicate guard is added here.
 });

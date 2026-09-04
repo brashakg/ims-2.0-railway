@@ -92,6 +92,17 @@ export class ApiClient {
     return this.getJson(`/api/v1/orders/${orderIdOrNumber}`);
   }
 
+  /**
+   * The server's tax invoice as data (GET /orders/{id}/invoice). It is the
+   * SAME assembly the A4 door renders (orders._assemble_invoice feeds both),
+   * so what this returns is the statutory document, not a second opinion.
+   * Reading it mints the FY-consecutive serial exactly as the till's print
+   * button does. Takes the order ID (UUID), not the ORD- number.
+   */
+  async getInvoice(orderId: string): Promise<any> {
+    return this.getJson(`/api/v1/orders/${orderId}/invoice`);
+  }
+
   async switchStore(storeId: string): Promise<{ token: string; activeStoreId: string }> {
     const res = await this.ctx.post(`/api/v1/auth/switch-store/${storeId}`, {
       headers: this.authHeaders(),

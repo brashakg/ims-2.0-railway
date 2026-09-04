@@ -71,8 +71,12 @@ test('coverage has not silently shrunk', () => {
     { probedAtLeast: ROUTES.length >= 134, exclusions: EXCLUSIONS.length },
     'The layout gate covered 134 screens with 15 exclusions (14 when armed, ' +
       '+1 for /reports and +4 for the HR redirects, once their sections '+
-      'became real pages). ' +
+      'became real pages; +8 redirect-only legacy addresses kept alive for ' +
+      'bookmarks and deep-links -- /pos -> /pos/new when the wizard till was ' +
+      'retired, plus /hr/attendance, /clinical/test, /prescriptions, ' +
+      '/tasks/dashboard, /catalog/autopilot, /purchase/vendors and ' +
+      '/purchase/invoices/book -- every one a Navigate, none a screen). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 19 });
+  ).toEqual({ probedAtLeast: true, exclusions: 27 });
 });

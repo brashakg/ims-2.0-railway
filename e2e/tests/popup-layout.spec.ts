@@ -74,26 +74,18 @@ type Popup = {
  * save/send/… — so a test that opens one and never submits mutates nothing.
  */
 const POPUPS: ReadonlyArray<Popup> = [
-  // ── POS (revenue-critical) ───────────────────────────────────────────────
-  {
-    path: '/pos',
-    trigger: 'Recall',
-    name: 'pos held-bills',
-    absentBelow: {
-      width: 768,
-      why: 'Below 768px `.steps-rail` computes display:none, so Hold/Recall/New/Walkout do not exist on a phone at all. index.css:2606 claims the opposite ("Keep Hold / Recall / New / +walk-in / Walkout reachable on phones"), so this absence is a POS phone regression in its own right — reported separately. It is not a popup-geometry fault, so it is asserted here rather than measured.',
-    },
-  },
-  {
-    path: '/pos',
-    trigger: 'Walkout',
-    name: 'pos walkout-intake',
-    absentBelow: {
-      width: 768,
-      why: 'Same `.steps-rail { display: none }` phone rule as "pos held-bills" above.',
-    },
-  },
-  { path: '/pos', trigger: 'Create new customer', name: 'pos add-customer' },
+  // ── POS (revenue-critical): the one-surface till at /pos/new ─────────────
+  // The bill strip (Hold bill / Held / Discard bill / +1 walk-in / Walkout)
+  // and the "+ New customer" door render at EVERY width: BillingSurface,
+  // HeldBillsControls and WalkinWalkoutControls carry no responsive hide (the
+  // legacy wizard's display:none phone rule for its rail died with the wizard).
+  // Below lg the strip is a non-wrapping flex row that can be wider than a
+  // phone; it then scrolls sideways inside the surface root (`overflow-y-auto`
+  // there implies overflow-x auto), which is why the probe scrolls the trigger
+  // into view before tapping. No absentBelow: the coverage is real at 360px.
+  { path: '/pos/new', trigger: 'Held', name: 'pos held-bills' },
+  { path: '/pos/new', trigger: 'Walkout', name: 'pos walkout-intake' },
+  { path: '/pos/new', trigger: '+ New customer', name: 'pos add-customer' },
   // ── HR / payroll (owner-reported phone clipping) ─────────────────────────
   { path: '/hr/salary-setup', trigger: '+ Add salary', name: 'hr salary-config' },
   // ── Clinical ─────────────────────────────────────────────────────────────
@@ -136,13 +128,13 @@ const POPUPS: ReadonlyArray<Popup> = [
  */
 const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string }> = [
   // REMOVED: 'pos add-customer' at 390/430. It was recorded from a local run
-  // (overlay `fixed inset-0` whose containing block is `.pos-work`, 689px, while
-  // the panel is `max-h-[90dvh]` = 760px) but CI measures it CLEAN at all seven
+  // against the legacy wizard till (its overlay's containing block was shorter
+  // than the `max-h-[90dvh]` panel) but CI measured it CLEAN at all seven
   // widths, and the gate said so rather than letting a stale entry sit here.
-  // The local finding is not dismissed - it is real and worth fixing - but a
-  // quarantine may only record what THIS suite observes, or it silently exempts
-  // a popup nothing is watching. With the entry gone this popup now blocks on
-  // any violation, which is the stronger position.
+  // A quarantine may only record what THIS suite observes, or it silently
+  // exempts a popup nothing is watching. The wizard is gone; the same modal
+  // now opens from /pos/new and blocks on any violation, which is the stronger
+  // position.
   {
     name: 'hr salary-config',
     widths: [768, 820],
@@ -172,12 +164,12 @@ const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string 
  */
 const POPUP_EXCLUSIONS: ReadonlyArray<{ what: string; why: string }> = [
   {
-    what: 'POS Wave-4 surfaces /pos/new and /pos/delivery',
-    why: 'They render no popup at all today: frontend/src/pages/pos/next/{BillingSurface,DeliverySurface,PosWidgets}.tsx contain zero role="dialog" and zero fixed inset-0. Their page layout is already covered by tests/layout.spec.ts.',
+    what: 'POS delivery counter /pos/delivery',
+    why: 'No opener exists there against seed data: frontend/src/pages/pos/next/DeliverySurface.tsx has no role="dialog" / fixed inset-0 of its own, and the modals its completion screen can open need an order handed over first -- seed_e2e.py creates no orders. Its page layout is covered by tests/layout.spec.ts.',
   },
   {
-    what: 'POS in-cart modals (DiscountModal, PrescriptionSelectModal, LensDetailsModal, LensFittingFormModal, GST Tax Invoice)',
-    why: 'Each needs a salesperson + customer + a cart line before its button exists. That setup is the slowest and flakiest path in the suite and it writes orders; a blocking layout gate must not depend on it. Cover these once a non-mutating cart fixture exists.',
+    what: 'POS in-cart modals (DiscountModal, PrescriptionSelectModal, NewPrescriptionAtTill, LensDetailsModal, and the completion screen\'s LensFittingFormModal / job-card print)',
+    why: 'Each needs a customer + a cart line (or a completed sale) before its button exists. That setup is the slowest and flakiest path in the suite and it writes orders; a blocking layout gate must not depend on it. Cover these once a non-mutating cart fixture exists. The old client-side "GST Tax Invoice" modal is gone: the till prints the server PDF.',
   },
   {
     what: 'Any opener whose accessible name matches delete/remove/void/refund/approve/reject/pay/cancel/submit/confirm/save/send/lock/export/print/transfer/write-off/...',
@@ -192,8 +184,8 @@ const POPUP_EXCLUSIONS: ReadonlyArray<{ what: string; why: string }> = [
     why: 'Their trigger is simply not on the page against seed_e2e.py data, so a test would silently pass on an empty list. They need seed rows first: extend backend/scripts/seed_e2e.py, then move the entry up into POPUPS.',
   },
   {
-    what: 'Second triggers for a modal already covered (/customers "New customer", /walkouts "Log Walkout")',
-    why: 'They mount the SAME component as /pos "Create new customer" and /pos "Walkout" respectively. Seven more viewport runs each, for zero new geometry.',
+    what: 'Second triggers for a modal already covered (/customers "New customer", /walkouts "Log Walkout", and the general counter /pos/counter "Held" / "Walkout" / "+ New customer")',
+    why: 'They mount the SAME components as /pos/new "+ New customer" (AddCustomerModal), "Walkout" (WalkoutIntakeModal) and "Held" (HeldBillsControls) -- the counter shares the exact controls, per routes/__tests__/posRoutesResolve.test.tsx. Seven more viewport runs each, for zero new geometry.',
   },
 ];
 

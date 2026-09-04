@@ -1,40 +1,52 @@
 /**
  * GST Tax Invoice reconciliation (guards PR #331 invoice math).
  *
- * After a Rs 999 inclusive sale, the Tax Invoice must:
+ * The invoice is the SERVER's document: the till's completion screen prints
+ * GET /orders/{id}/invoice.pdf, and GET /orders/{id}/invoice is the same
+ * assembly (orders._assemble_invoice) as data. The client-side invoice modal
+ * these specs used to read is gone, so they sell through the real till and
+ * then read the statutory document through the API.
+ *
+ * After a Rs 999 inclusive sale, the invoice must:
  *   - reconcile its Grand Total to the amount the customer paid (Rs 999),
  *   - extract the taxable base within (Rs 951.43) + total GST (Rs 47.57),
- *   - show that same total GST in BOTH the line-item table and the
- *     HSN-wise summary.
+ *   - split that GST into CGST + SGST that sum back EXACTLY to the line tax
+ *     (23.78 + 23.79 -- the odd paisa lands on either head, per
+ *     gst_rates.split_gst, which both the JSON and the PDF tables share).
  *
- * Known paisa-split skew: the line-item table (calculateGST) floors CGST
- * (23.78 / 23.79) while the HSN summary (hsnTaxSummary) rounds the half up
- * (23.79 / 23.78) — so the per-side CGST/SGST values are swapped by 1 paisa
- * between the two tables, though both sum to 47.57. That exact-equality check
- * is marked fixme (never a fake pass) until the rounding is unified.
+ * The old `test.fixme` here guarded a 1-paisa CGST swap between two CLIENT
+ * tables (calculateGST floored, hsnTaxSummary rounded). Both tables were
+ * retired with the client invoice; the server prints both from one split of
+ * the same stored tax, so the paisa-exact check below is asserted for real.
  */
 import { test, expect } from '../fixtures/test';
 import { PosPage } from '../fixtures/pos-page';
 import { lineGst } from '../fixtures/gst-math';
 import { SEED } from '../fixtures/constants';
-import type { Locator } from '@playwright/test';
 
-async function sellFrameAndOpenInvoice(page: any): Promise<{ orderNumber: string }> {
-  const pos = new PosPage(page);
-  await pos.goto();
-  await pos.selectFirstSalespersonAndWalkin();
-  await pos.addProductByName(SEED.frame.name);
-  // Condensed quick sale (#783/#790): Products -> Payment directly, no Review.
-  await pos.continueFromProducts();
-  await pos.payFullCashAndComplete();
-  const orderNumber = await pos.waitForOrderCreated();
-  await pos.openTaxInvoice();
-  return { orderNumber };
+/** GET /orders/search hands back order_to_frontend rows: `order_id` -> `id`. */
+function orderIdOf(order: any): string {
+  const id = order.id ?? order.orderId ?? order.order_id;
+  if (!id) throw new Error(`Order has no id: ${JSON.stringify(order).slice(0, 200)}`);
+  return String(id);
 }
 
-/** The invoice modal root (scopes all invoice locators). */
-function invoiceModal(page: any): Locator {
-  return page.locator('.tax-invoice-print');
+const paise = (n: number) => Math.round(n * 100);
+
+async function sellFrameAndReadInvoice(
+  page: any,
+  api: any
+): Promise<{ order: any; invoice: any }> {
+  const pos = new PosPage(page);
+  await pos.goto();
+  await pos.pickFirstSalesperson();
+  await pos.createCustomer();
+  await pos.addProduct(SEED.frame);
+  await pos.payFullCash();
+  const orderNumber = await pos.completeSale();
+  const order = await api.getOrder(orderNumber);
+  const invoice = await api.getInvoice(orderIdOf(order));
+  return { order, invoice };
 }
 
 test.describe('GST Tax Invoice', () => {
@@ -49,70 +61,68 @@ test.describe('GST Tax Invoice', () => {
     );
 
     const expected = lineGst(SEED.frame.price, SEED.frame.gstRate, 'inclusive');
-    const { orderNumber } = await sellFrameAndOpenInvoice(page);
+    const { order, invoice } = await sellFrameAndReadInvoice(page, api);
 
-    const modal = invoiceModal(page);
-    await expect(modal).toBeVisible();
+    // A statutory serial is minted on first read (FY-consecutive, Rule 46(b)).
+    expect(invoice.invoiceNumber, 'invoice number minted').toBeTruthy();
 
-    // Grand Total row in the line-item table shows the all-in Rs 999.00.
-    const grandTotalRow = modal.locator('tr', {
-      has: page.getByText('Grand Total', { exact: true }),
-    });
-    await expect(grandTotalRow).toContainText('999.00');
-
-    // Taxable base extracted within (Rs 951.43) and total GST (Rs 47.57)
-    // both present on the invoice.
-    await expect(modal).toContainText('951.43');
-
-    // The invoice Grand Total must equal what the customer actually paid.
-    const order = await api.getOrder(orderNumber);
+    // Grand Total on the invoice is the all-in Rs 999.00 ...
+    expect(invoice.grandTotal).toBeCloseTo(999, 2);
+    // ... and equals what the customer actually paid on the persisted order.
     expect(order.amountPaid).toBeCloseTo(999, 2);
     expect(order.grandTotal).toBeCloseTo(999, 2);
 
-    // Total GST = 47.57 appears in the HSN-wise summary TOTAL row.
-    // (CGST 23.78/23.79 + SGST 23.79/23.78 across the two tables — the SUM is
-    // identical even though the per-side split is skewed by a paisa.)
+    // Taxable base extracted within (Rs 951.43) + total GST (Rs 47.57), and
+    // the two reconcile back to the Grand Total.
+    expect(invoice.taxTotals.taxable).toBeCloseTo(951.43, 2);
+    expect(invoice.taxTotals.tax).toBeCloseTo(47.57, 2);
+    expect(invoice.taxTotals.taxable + invoice.taxTotals.tax).toBeCloseTo(invoice.grandTotal, 2);
     expect(expected.tax).toBeCloseTo(47.57, 2);
     expect(expected.cgst + expected.sgst).toBeCloseTo(expected.tax, 2);
+
+    // The A4 the completion screen prints comes from the same assembly.
+    const pdf = await api.rawGet(`/api/v1/orders/${orderIdOf(order)}/invoice.pdf`);
+    expect(pdf.status()).toBe(200);
+    expect(pdf.headers()['content-type']).toContain('pdf');
   });
 
-  test('CGST + SGST sum is consistent between line-item table and HSN summary', async ({
+  test('CGST + SGST split reconciles to the line tax to the paisa', async ({
     page,
+    api,
     mode,
   }) => {
     test.skip(mode !== 'inclusive', 'Specified for inclusive pricing.');
 
-    await sellFrameAndOpenInvoice(page);
-    const modal = invoiceModal(page);
+    const { invoice } = await sellFrameAndReadInvoice(page, api);
 
-    // Both tables must surface the same TOTAL tax. We assert the aggregate
-    // (47.57) shows up at least twice on the invoice — once in the line-item
-    // table's CGST+SGST and once in the HSN summary's CGST+SGST. We check the
-    // robust, rounding-independent invariant: the sum of CGST and SGST equals
-    // 47.57 in each table.
-    //
-    // Line-item table CGST/SGST: 23.78 + 23.79 = 47.57.
-    // HSN summary CGST/SGST:     23.79 + 23.78 = 47.57.
-    await expect(modal.getByText('23.78').first()).toBeVisible();
-    await expect(modal.getByText('23.79').first()).toBeVisible();
+    // One 5% rate row -- the HSN-wise summary the PDF prints. The modal-created
+    // customer has no state, so place of supply defaults to intra-state.
+    expect(invoice.interstate).toBe(false);
+    const rows: Array<{
+      rate: number;
+      taxable: number;
+      cgst: number;
+      sgst: number;
+      igst: number;
+      tax: number;
+    }> = invoice.taxSummary;
+    expect(rows).toHaveLength(1);
+    const [row] = rows;
+    expect(row.rate).toBe(SEED.frame.gstRate);
+    expect(row.igst).toBe(0);
+    expect(row.tax).toBeCloseTo(47.57, 2);
+
+    // 47.57 halves to 23.785: the odd paisa lands on ONE head (either), and
+    // the heads must sum back to the line tax EXACTLY -- never 23.79 + 23.79.
+    expect(paise(row.cgst) + paise(row.sgst)).toBe(paise(row.tax));
+    expect([row.cgst, row.sgst].sort((a, b) => a - b)).toEqual([23.78, 23.79]);
+
+    // The line items carry the same tax the summary aggregates.
+    const lineTax = (invoice.items as any[]).reduce(
+      (sum, it) => sum + Number(it.tax_amount ?? it.taxAmount ?? 0),
+      0
+    );
+    expect(lineTax).toBeCloseTo(invoice.taxTotals.tax, 2);
+    expect(paise(row.cgst) + paise(row.sgst)).toBe(paise(lineTax));
   });
-
-  /**
-   * Strict per-side equality between the two tables. The line-item table shows
-   * CGST 23.78 / SGST 23.79; the HSN summary shows CGST 23.79 / SGST 23.78 —
-   * a 1-paisa swap from divergent rounding (Math.floor vs Math.round on the
-   * half). Marked fixme until calculateGST and hsnTaxSummary share one
-   * rounding rule. NOT a fake pass — the sums already reconcile (test above).
-   */
-  test.fixme(
-    'line-item CGST equals HSN-summary CGST to the paisa (rounding not yet unified)',
-    async ({ page }) => {
-      await sellFrameAndOpenInvoice(page);
-      const modal = invoiceModal(page);
-      // Post-fix expectation: the same CGST value in both tables (no swap).
-      const cgsts = await modal.getByText(/23\.7[89]/).allTextContents();
-      const unique = new Set(cgsts.map((t) => t.trim()));
-      expect(unique.size).toBe(1);
-    }
-  );
 });
