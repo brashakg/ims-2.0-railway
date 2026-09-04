@@ -3,10 +3,6 @@
 // ============================================================================
 
 import { Eye, Glasses, Camera, FileText, Upload, Stethoscope } from 'lucide-react';
-// TYPE-ONLY, so this is erased at compile time and the pairing with
-// eyeTestHydrate (which imports the tab types from here) is not a real cycle.
-import type { StoredEyeTest } from './eyeTestHydrate';
-
 // Types
 export interface PatientInfo {
   id: string;
@@ -14,24 +10,6 @@ export interface PatientInfo {
   phone: string;
   age?: number;
   customerId: string;
-}
-
-export interface EyeTestFormProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onSave: (data: EyeTestData) => void;
-  patient: PatientInfo | null;
-  optometristName?: string;
-  /**
-   * A stored eye test to EDIT, as returned by GET /clinical/tests/{id}.
-   *
-   * Absent -> a new exam (every tab empty), exactly as before. Present -> the
-   * same seven tabs, pre-filled, so lensometer and slit-lamp readings can be
-   * corrected instead of being invisible in an Rx-only form.
-   */
-  initialTest?: StoredEyeTest | null;
-  /** Label for the save button; an amendment is not a "Complete test". */
-  saveLabel?: string;
 }
 
 // Form Data Types
@@ -143,6 +121,13 @@ export interface EyeTestData {
   // the standalone POST /tests/{id}/soap-note endpoint.
   soapNote: SoapNoteData;
   uploads: UploadedFile[];
+  // STAFF-ONLY. Stored on the eye-test document and nowhere else -- never on
+  // the Rx card print, the invoice, the customer portal or a WhatsApp send
+  // (all of which read the mirrored prescription, which never carries it).
+  internalNote?: string;
+  // The examination step the optometrist is on, persisted by "Save & pause"
+  // so "Continue" from the queue reopens the exam where it was left.
+  examStep?: ExamStepId;
 }
 
 // CLI-11: Structured SOAP exam note types.
@@ -226,18 +211,36 @@ export const createEmptySoapNote = (): SoapNoteData => ({
   patientInstructions: '',
 });
 
-export type TabId = 'lensometer' | 'slitlamp' | 'autoref' | 'subjective' | 'final' | 'soap' | 'uploads';
+export type ExamStepId = 'lensometer' | 'slitlamp' | 'autoref' | 'subjective' | 'final' | 'uploads' | 'soap';
 
-export const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'lensometer', label: 'Lensometer', icon: Glasses },
-  { id: 'slitlamp', label: 'Slit Lamp', icon: Eye },
-  { id: 'autoref', label: 'Auto-Ref', icon: Camera },
-  { id: 'subjective', label: 'Subjective Rx', icon: Eye },
-  { id: 'final', label: 'Final Rx', icon: FileText },
-  // CLI-11: SOAP exam note tab — structured EHR charting.
-  { id: 'soap', label: 'SOAP Note', icon: Stethoscope },
-  { id: 'uploads', label: 'Uploads', icon: Upload },
+/**
+ * THE EXAMINATION, in clinical order. Lensometer -> slit lamp -> auto-ref ->
+ * subjective -> final is the exam itself, not a set of tabs; the page shows
+ * it as a rail with state so the optometrist sees the whole test at a glance.
+ * `title` heads the step body; `short` is the lowercase form the footer uses
+ * ("Continue to slit lamp").
+ */
+export const EXAM_STEPS: ReadonlyArray<{
+  id: ExamStepId;
+  label: string;
+  short: string;
+  title: string;
+  hint?: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'lensometer', label: 'Lensometer', short: 'lensometer', title: 'Lensometer', hint: 'old Rx', icon: Glasses },
+  { id: 'slitlamp', label: 'Slit lamp', short: 'slit lamp', title: 'Slit lamp', icon: Eye },
+  { id: 'autoref', label: 'Auto-refraction', short: 'auto-ref', title: 'Auto-refraction', icon: Camera },
+  { id: 'subjective', label: 'Subjective Rx', short: 'subjective Rx', title: 'Subjective refraction', icon: Eye },
+  { id: 'final', label: 'Final Rx', short: 'final Rx', title: 'Final prescription', icon: FileText },
+  { id: 'uploads', label: 'Uploads', short: 'uploads', title: 'Uploads', icon: Upload },
+  // CLI-11: structured SOAP exam note.
+  { id: 'soap', label: 'Clinical note', short: 'clinical note', title: 'Clinical note', icon: Stethoscope },
 ];
+
+export function isExamStepId(v: unknown): v is ExamStepId {
+  return EXAM_STEPS.some((s) => s.id === v);
+}
 
 export const VDU_OPTIONS = ['None', '< 2 hours', '2-4 hours', '4-6 hours', '6-8 hours', '> 8 hours'];
 

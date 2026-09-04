@@ -36,6 +36,9 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ error: () => {}, success: () => {}, warning: () => {}, info: () => {} }),
 }));
 
+// The panel navigates to the examination page now (the Edit pencil on an
+// exam-backed Rx opens /clinical/test/amend/:testId), so it needs a router.
+import { MemoryRouter } from 'react-router-dom';
 import { ClinicPrescriptionHistory } from '../ClinicPrescriptionHistory';
 
 // A prescription as it actually sits in the database: strings, no signs, and
@@ -67,12 +70,14 @@ beforeEach(() => {
 
 async function openEditor() {
   render(
-    <ClinicPrescriptionHistory
-      isOpen
-      onClose={() => {}}
-      customerId="c1"
-      customerName="Asha Kumari"
-    />,
+    <MemoryRouter>
+      <ClinicPrescriptionHistory
+        isOpen
+        onClose={() => {}}
+        customerId="c1"
+        customerName="Asha Kumari"
+      />
+    </MemoryRouter>,
   );
   await waitFor(() => expect(screen.getByText('Asha Kumari')).toBeTruthy());
   fireEvent.click(await screen.findByRole('button', { name: /Edit/ }));
@@ -132,12 +137,14 @@ describe('editing a stored prescription', () => {
 
   it('shows the stored powers signed in the history list too', async () => {
     render(
-      <ClinicPrescriptionHistory
-        isOpen
-        onClose={() => {}}
-        customerId="c1"
-        customerName="Asha Kumari"
-      />,
+      <MemoryRouter>
+        <ClinicPrescriptionHistory
+          isOpen
+          onClose={() => {}}
+          customerId="c1"
+          customerName="Asha Kumari"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByText('Asha Kumari')).toBeTruthy());
     expect(screen.getByText(/\+4\.00 \/ -0\.75 \/ 90/)).toBeTruthy();

@@ -44,6 +44,8 @@ export interface QueueItem {
   /** Linked customer name — only set when patientName !== customerName,
    *  to make the patient-vs-customer relationship explicit on the card. */
   customerName?: string;
+  /** The specific family member being examined (the Rx groups under them). */
+  patientId?: string;
 }
 
 export interface CompletedTest {

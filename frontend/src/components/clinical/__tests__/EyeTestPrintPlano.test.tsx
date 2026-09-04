@@ -2,7 +2,7 @@
 // PATIENT SAFETY: a recorded PLANO must print as a power, not as a dash
 // ============================================================================
 // SITE 2 of the blank-vs-zero conflation, and the opposite direction to POS.
-// EyeTestForm.buildPrintData computed
+// The exam screen's buildPrintData computed
 //
 //     sphere: parseFloat(finalRxData.rightEye.sphere) || null
 //
@@ -12,10 +12,12 @@
 // made. The patient, the lab and any optician reading the card back all see
 // "never measured" where "measured, and it is zero" is the truth.
 //
-// This drives the REAL form: type into the real Final Rx inputs, click the real
-// Print button, and read the cells of the rendered card. It deliberately does
-// not call buildPrintData directly -- that function is private, and a test that
-// reached past the component could not tell whether the component still uses it.
+// This drives the REAL exam screen: type into the real Final Rx inputs, click
+// the real Print button, and read the cells of the rendered card. It
+// deliberately does not call buildPrintData directly -- that function is
+// private, and a test that reached past the component could not tell whether
+// the component still uses it. (The screen became a PAGE on 2026-09-04; the
+// rule and this test moved with it, they were not rewritten.)
 //
 // BOTH EYES, and SPH / CYL / ADD each. The axis fix last round shipped with the
 // left eye unpinned; per-eye asymmetry is the specific failure watched for here.
@@ -35,22 +37,22 @@ vi.mock('../../print/storeIdentity', () => ({
 }));
 
 import { MemoryRouter } from 'react-router-dom';
-import { EyeTestForm } from '../EyeTestForm';
+import { EyeExamWorkbench } from '../EyeExamWorkbench';
 
 // Distance Vision columns: Eye SPH CYL AXIS ADD PD V/A
 const SPH = 1, CYL = 2, ADD = 4;
 
-const PATIENT = { id: 'p1', name: 'Asha Kumari', phone: '9000000001', age: 44 };
+const PATIENT = { id: 'p1', name: 'Asha Kumari', phone: '9000000001', age: 44, customerId: 'c1' };
 
 function renderEyeTest() {
   return render(
     <MemoryRouter>
-      <EyeTestForm
-        isOpen
-        onClose={() => {}}
-        onSave={async () => {}}
-        patient={PATIENT as any}
+      <EyeExamWorkbench
+        patient={PATIENT}
         optometristName="Dr Rao"
+        mode="exam"
+        onFinish={async () => {}}
+        onBack={() => {}}
       />
     </MemoryRouter>,
   );
@@ -79,7 +81,9 @@ function distanceRows(container: HTMLElement): string[][] {
 /** Fill the Final Rx tab, then open the print preview and return its rows. */
 async function printAfter(fill: () => void): Promise<{ od: string[]; os: string[] }> {
   const { container } = renderEyeTest();
-  fireEvent.click(screen.getByRole('button', { name: /Final Rx/ }));
+  // The RAIL button, matched exactly so the footer's "Continue to final Rx"
+  // cannot match instead.
+  fireEvent.click(screen.getByRole('button', { name: /^Final Rx$/ }));
   fill();
   fireEvent.click(screen.getByRole('button', { name: /^Print$/ }));
   await waitFor(() => expect(distanceRows(container).length).toBeGreaterThan(1));
@@ -137,6 +141,51 @@ describe('a recorded ZERO prints as a power on the patient card', () => {
 
     expect(od[SPH]).toBe('-2.25');
     expect(os[SPH]).toBe('+1.50');
+  });
+});
+
+// ============================================================================
+// STAFF-ONLY: the internal note must never reach the patient's card
+// ============================================================================
+// The exam page carries an INTERNAL NOTE ("do not sell him the cheapest PAL
+// again") that the sales floor and the workshop read and the patient must not.
+// The Rx card is the one surface that has to be told: the customer portal and
+// the WhatsApp send project the mirrored PRESCRIPTION, which never carries the
+// note, but the card is built here in the exam screen from the draft itself --
+// one wrong field reference and the advice is printed and handed over.
+//
+// The Final Rx REMARKS are the field that IS meant to print, so this pins both
+// directions at once: a card that printed neither would pass a bare "the note
+// is absent" assertion and be a different bug.
+describe('the staff-only internal note is never printed on the patient card', () => {
+  const NOTE = 'Do not sell him the cheapest PAL again.';
+  const REMARK = 'Advise photochromic.';
+
+  it('prints the Final Rx remarks and NOT the internal note', async () => {
+    const { container } = renderEyeTest();
+    fireEvent.change(screen.getByLabelText('Internal note (staff only)'), {
+      target: { value: NOTE },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Final Rx$/ }));
+    fireEvent.change(screen.getByLabelText('Final Rx remarks'), { target: { value: REMARK } });
+    fireEvent.click(screen.getByRole('button', { name: /^Print$/ }));
+
+    await waitFor(() => expect(distanceRows(container).length).toBeGreaterThan(1));
+    // THE PRINTED CARD ONLY -- `.rx-print-area` is the element the @media
+    // print rule makes visible. Deliberately NOT the whole container: React
+    // syncs a textarea by assigning `defaultValue`, which in the DOM IS the
+    // element's text, so the note the optometrist typed appears in
+    // container.textContent whether or not it was ever printed. Asserting on
+    // the container would have been red for the wrong reason and could never
+    // have gone green.
+    const card = container.querySelector('.rx-print-area');
+    expect(card, 'the print card did not render').not.toBeNull();
+    const shown = card?.textContent || '';
+    // THE REQUIREMENT.
+    expect(shown).not.toContain(NOTE);
+    expect(shown).not.toContain('cheapest PAL');
+    // ...and the field that IS meant to reach the patient still does.
+    expect(shown).toContain(REMARK);
   });
 });
 

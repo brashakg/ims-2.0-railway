@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { Glasses } from 'lucide-react';
-import { EyePowerRow } from './EyeTestInput';
+import { EyePowerRow, PowerGrid } from './EyeTestInput';
 import type { LensometerData, PowerReading } from './eyeTestTypes';
 
 interface LensometerTabProps {
@@ -28,7 +28,7 @@ export function LensometerTab({ data, onChange }: LensometerTabProps) {
 
       <div className="card">
         <h3 className="font-semibold text-gray-900 mb-4">Current Glasses Power</h3>
-        <div className="space-y-2">
+        <PowerGrid showVA={false}>
           <EyePowerRow
             eye="R"
             data={data.rightEye}
@@ -41,7 +41,7 @@ export function LensometerTab({ data, onChange }: LensometerTabProps) {
             onChange={(field, value) => handleEyeChange('leftEye', field, value)}
             showVA={false}
           />
-        </div>
+        </PowerGrid>
 
         <div className="mt-4">
           <label className="text-sm text-gray-600 mb-1 block">Remarks</label>

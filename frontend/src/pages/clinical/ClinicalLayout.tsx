@@ -110,6 +110,7 @@ export function ClinicalLayout() {
         : (cb) => { setTimeout(cb, 1500); };
     idle(() => {
       void import('./ClinicalQueuePage');
+      void import('./EyeExamPage');
       void import('./ClinicalCompletedPage');
       void import('./ClinicalPrescriptionsPage');
       void import('./ConversionTab');

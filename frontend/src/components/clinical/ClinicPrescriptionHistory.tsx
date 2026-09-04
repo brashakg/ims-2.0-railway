@@ -13,6 +13,7 @@
 // and the shared PrescriptionForm for both create and edit.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   X, Users, User, Eye, Calendar, Plus, Pencil, Printer,
   Loader2, AlertTriangle, CheckCircle, Clock, Search, Phone, ArrowLeft,
@@ -23,13 +24,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionForm } from '../pos/PrescriptionForm';
 import { formatRxPower, type RxPowerKind } from './RxPowerInput';
-import { EyeTestForm } from './EyeTestForm';
-import { eyeTestWriteBody } from './eyeTestPayload';
-import type { StoredEyeTest } from './eyeTestHydrate';
-import type { EyeTestData, PatientInfo } from './eyeTestTypes';
 // PATIENT SAFETY: one display formatter, one blank-vs-zero rule.
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
-import { apiDetailMessage } from '../../utils/errorHandler';
 
 interface FamilyMember {
   patient_id: string | null;
@@ -140,6 +136,7 @@ export function ClinicPrescriptionHistory({
 }: ClinicPrescriptionHistoryProps) {
   const { user } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
 
   const isPanel = mode === 'panel';
 
@@ -164,11 +161,6 @@ export function ClinicPrescriptionHistory({
   const [formOpen, setFormOpen] = useState(false);
   const [formPatientId, setFormPatientId] = useState<string | null>(null);
   const [editingRx, setEditingRx] = useState<any | null>(null);
-  // The stored eye test behind the Rx being edited, when there is one. Present
-  // -> the full seven-tab exam screen opens, pre-filled. Null -> the Rx-only
-  // form, which is correct for a counter-raised Rx with no examination.
-  const [editingTest, setEditingTest] = useState<StoredEyeTest | null>(null);
-  const [loadingExam, setLoadingExam] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -252,43 +244,23 @@ export function ClinicPrescriptionHistory({
    * auto-ref or subjective readings corrected -- roughly a hundred recorded
    * values with nineteen of them editable.
    *
-   * When the Rx carries an `eye_test_id` it came from an exam, so we fetch that
-   * exam and reopen the SAME seven-tab screen the readings were typed into.
-   * When it does not (an Rx raised at the POS counter, no examination behind
-   * it) there are no exam readings to show and the Rx-only form is still the
-   * right screen.
-   *
-   * If the exam cannot be loaded we fall back to the Rx-only form rather than
-   * opening a blank exam form -- saving a blank one would erase the readings.
+   * When the Rx carries an `eye_test_id` it came from an exam, so the SAME
+   * examination page the readings were typed into is reopened at its own
+   * address -- /clinical/test/amend/:testId -- pre-filled, to be corrected.
+   * (It used to open here as a modal; the exam is a page now.) When it does
+   * not (an Rx raised at the POS counter, no examination behind it) there are
+   * no exam readings to show and the Rx-only form is still the right screen.
    */
-  const openEdit = async (patientId: string | null, rx: any) => {
+  const openEdit = (patientId: string | null, rx: any) => {
     setFormPatientId(patientId);
     setFormError(null);
     const testId = rx?.eye_test_id || rx?.eyeTestId || null;
-    if (!testId) {
-      setEditingTest(null);
-      setEditingRx(rx);
-      setFormOpen(true);
+    if (testId) {
+      navigate(`/clinical/test/amend/${testId}`);
       return;
     }
-    setLoadingExam(true);
-    try {
-      const test = await clinicalApi.getTest(testId);
-      setEditingTest(test ?? null);
-      setEditingRx(rx);
-      setFormOpen(true);
-    } catch {
-      // Fall back to the Rx-only form and SAY SO, rather than silently
-      // presenting an empty exam that a save would write over the real one.
-      setEditingTest(null);
-      setEditingRx(rx);
-      setFormOpen(true);
-      toast.error(
-        'Could not load the full eye test; editing the prescription values only.',
-      );
-    } finally {
-      setLoadingExam(false);
-    }
+    setEditingRx(rx);
+    setFormOpen(true);
   };
 
   const printA5 = async (rx: any) => {
@@ -313,67 +285,6 @@ export function ClinicPrescriptionHistory({
   };
 
   // Submit handler for PrescriptionForm — branches on create vs edit.
-  /** The optometrist recorded on an Rx, whatever shape it was stored in. */
-  const optometristNameOf = (rx: any): string =>
-    rx?.optometrist_name || rx?.optometristName || '';
-
-  /**
-   * The patient header the exam screen shows. Built from the Rx being edited,
-   * because that is the record we are amending -- an Rx belongs to a specific
-   * family member, and using the account holder here would relabel a child's
-   * exam with the parent's name.
-   */
-  const examPatient: PatientInfo | null = editingRx
-    ? {
-        id: editingRx.patient_id || editingRx.patientId || effectiveCustomerId || '',
-        name:
-          editingRx.patient_name || editingRx.patientName ||
-          editingRx.customer_name || selected?.name || 'Patient',
-        phone: editingRx.customer_phone || editingRx.customerPhone || '',
-        age: editingRx.patient_age ?? editingRx.age ?? undefined,
-        customerId: editingRx.customer_id || editingRx.customerId || effectiveCustomerId || '',
-      }
-    : null;
-
-  /**
-   * Save an amended EXAM (the seven-tab screen), as opposed to an Rx-only edit.
-   *
-   * Sends the SAME body the first save sent -- eyeTestWriteBody -- so a tab
-   * cannot be present on creation and missing on amendment. The backend keeps
-   * the previous values on an append-only `amendments` list and re-syncs the
-   * mirrored prescription, so the lab and the patient see the corrected power
-   * rather than the old one.
-   */
-  const handleExamSubmit = async (data: EyeTestData) => {
-    const testId = editingTest?.testId ?? editingTest?.id ?? null;
-    if (!testId) {
-      setFormError('This prescription is not linked to an eye test.');
-      return;
-    }
-    setSaving(true);
-    setFormError(null);
-    try {
-      await clinicalApi.amendTest(testId, eyeTestWriteBody(data));
-      toast.success('Eye test updated');
-      setFormOpen(false);
-      setEditingRx(null);
-      setEditingTest(null);
-      await load();
-    } catch (err: unknown) {
-      // Surface the backend's specific message (e.g. "Right eye CYL value -50
-      // is outside the valid range") so the optometrist knows which field to
-      // fix, instead of a generic failure. As a TOAST as well as the banner:
-      // the exam screen is a full-screen overlay ON TOP of the panel that
-      // banner lives in, so on this path the banner alone is invisible and a
-      // refused save would look like nothing happened.
-      const msg = apiDetailMessage(err, 'Failed to update eye test');
-      setFormError(msg);
-      toast.error(msg);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleFormSubmit = async (rxData: any) => {
     setSaving(true);
     setFormError(null);
@@ -608,11 +519,10 @@ export function ClinicPrescriptionHistory({
                           <div className="flex items-center gap-3">
                             <button
                               onClick={() => openEdit(member.patient_id, rx)}
-                              disabled={loadingExam}
-                              className="text-sm text-teal-600 hover:text-teal-700 flex items-center gap-1 disabled:opacity-50"
+                              className="text-sm text-teal-600 hover:text-teal-700 flex items-center gap-1"
                             >
                               <Pencil className="w-4 h-4" />
-                              {loadingExam ? 'Opening...' : 'Edit'}
+                              Edit
                             </button>
                             <button
                               onClick={() => printA5(rx)}
@@ -698,38 +608,13 @@ export function ClinicPrescriptionHistory({
               </div>
             </div>
           )}
-          {editingTest ? (
-            /* The Rx came from an eye examination -> reopen the SAME seven-tab
-               screen it was recorded on, pre-filled, so the lensometer and
-               slit-lamp values are editable too. */
-            <EyeTestForm
-              // One mount per exam: the form seeds every tab from `initialTest`
-              // at mount, so a different exam must arrive as a new mount.
-              key={editingTest.testId ?? editingTest.id ?? 'exam'}
-              isOpen
-              initialTest={editingTest}
-              saveLabel="Save changes"
-              patient={examPatient}
-              optometristName={optometristNameOf(editingRx) || user?.name || ''}
-              onSave={handleExamSubmit}
-              onClose={() => {
-                if (!saving) {
-                  setFormOpen(false);
-                  setEditingRx(null);
-                  setEditingTest(null);
-                  setFormError(null);
-                }
-              }}
-            />
-          ) : (
-            <PrescriptionForm
-              allowContactLens={false}
-              initialData={editingRx ? rxToFormInitial(editingRx) : undefined}
-              submitLabel={editingRx ? 'Save changes' : 'Save prescription'}
-              onSubmit={handleFormSubmit}
-              onCancel={() => { if (!saving) { setFormOpen(false); setEditingRx(null); setFormError(null); } }}
-            />
-          )}
+          <PrescriptionForm
+            allowContactLens={false}
+            initialData={editingRx ? rxToFormInitial(editingRx) : undefined}
+            submitLabel={editingRx ? 'Save changes' : 'Save prescription'}
+            onSubmit={handleFormSubmit}
+            onCancel={() => { if (!saving) { setFormOpen(false); setEditingRx(null); setFormError(null); } }}
+          />
         </div>
       )}
     </>

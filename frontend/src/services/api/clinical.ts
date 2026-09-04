@@ -229,6 +229,10 @@ export interface EyeTestWriteBody {
   optometristName?: string;
   chiefComplaint?: string;
   vduUsage?: string;
+  // The exam page: a staff-only note ('' clears, absent leaves alone) and the
+  // step "Save & pause" left the exam on.
+  internalNote?: string;
+  examStep?: string;
 }
 
 export const clinicalApi = {

@@ -143,6 +143,10 @@ export interface HydratedEyeTest {
   finalRx: FinalRxData;
   clinicalFindings: ClinicalFindingsData;
   soapNote: SoapNoteData;
+  /** Staff-only note; '' when none was stored. */
+  internalNote: string;
+  /** The step "Save & pause" left the exam on; '' when never paused. */
+  examStep: string;
 }
 
 export function hydrateLensometer(raw: unknown): LensometerData {
@@ -277,7 +281,26 @@ export function hydrateEyeTest(test: StoredEyeTest | null | undefined): Hydrated
     finalRx: hydrateFinalRx(t.prescription),
     clinicalFindings: hydrateClinicalFindings(t.clinicalFindings ?? t.clinical_findings),
     soapNote: hydrateSoapNote(t.soapNote ?? t.soap_note),
+    internalNote: s(t.internalNote ?? t.internal_note),
+    examStep: s(t.examStep ?? t.exam_step),
   };
+}
+
+/**
+ * Does a stored test carry ANY exam data? A test the queue has only just
+ * started is a bare header (patient, store, optometrist, IN_PROGRESS) and must
+ * seed the page with the BLANK defaults (slit lamp "Normal"/"Clear"), exactly
+ * as a fresh exam always did -- hydrating an empty document would seed every
+ * slit-lamp box with '' instead.
+ */
+export function storedExamHasData(test: StoredEyeTest | null | undefined): boolean {
+  const t = obj(test);
+  return [
+    'lensometer', 'slitLamp', 'slit_lamp', 'autoRef', 'auto_ref',
+    'subjectiveRx', 'subjective_rx', 'prescription', 'clinicalFindings',
+    'clinical_findings', 'soapNote', 'soap_note', 'examStep', 'exam_step',
+    'internalNote', 'internal_note',
+  ].some((k) => t[k] !== undefined && t[k] !== null && t[k] !== '');
 }
 
 // Re-exported for the form, which seeds untouched tabs from these.
