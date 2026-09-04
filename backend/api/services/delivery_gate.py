@@ -177,10 +177,11 @@ def order_balance_due(order: dict) -> Optional[float]:
     null/blank balance, or neither field present), so a caller can say "no
     balance recorded on this order" instead of asserting Rs 0.00. Raises 400
     when a stored value is not a number."""
-    raw = order.get("balance_due", order.get("grand_total"))
+    field = "balance_due" if "balance_due" in order else "grand_total"
+    raw = order.get(field)
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None
-    return _as_amount(raw, "balance_due")
+    return _as_amount(raw, field)
 
 
 def cod_collectable(order: dict) -> float:
