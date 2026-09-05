@@ -86,6 +86,15 @@ const POPUPS: ReadonlyArray<Popup> = [
   { path: '/pos/new', trigger: 'Held', name: 'pos held-bills' },
   { path: '/pos/new', trigger: 'Walkout', name: 'pos walkout-intake' },
   { path: '/pos/new', trigger: '+ New customer', name: 'pos add-customer' },
+  // The customer panel (PosWidgets -> CustomerPanel): a tile opens a slide-over
+  // (bottom sheet below 768px) on the till itself; role="dialog" and the
+  // fixed.inset-0 scrim are the SAME element. The Family Rx tile opens with or
+  // without a customer on the bill (no customer = the section's empty hint), so
+  // no cart fixture is needed. One row per surface: the tiles are one shared
+  // component but each surface mounts them in a different column geometry.
+  { path: '/pos/new', trigger: 'Family Rx', name: 'pos customer-panel' },
+  { path: '/pos/counter', trigger: 'Family Rx', name: 'pos counter customer-panel' },
+  { path: '/pos/delivery', trigger: 'Family Rx', name: 'pos delivery customer-panel' },
   // ── HR / payroll (owner-reported phone clipping) ─────────────────────────
   { path: '/hr/salary-setup', trigger: '+ Add salary', name: 'hr salary-config' },
   // ── Clinical ─────────────────────────────────────────────────────────────
@@ -167,8 +176,8 @@ const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string 
  */
 const POPUP_EXCLUSIONS: ReadonlyArray<{ what: string; why: string }> = [
   {
-    what: 'POS delivery counter /pos/delivery',
-    why: 'No opener exists there against seed data: frontend/src/pages/pos/next/DeliverySurface.tsx has no role="dialog" / fixed inset-0 of its own, and the modals its completion screen can open need an order handed over first -- seed_e2e.py creates no orders. Its page layout is covered by tests/layout.spec.ts.',
+    what: 'POS delivery counter /pos/delivery completion-screen modals',
+    why: 'The counter itself is now covered through its customer panel (the Family Rx tile, "pos delivery customer-panel" above). The modals its completion screen can open still need an order handed over first -- seed_e2e.py creates no orders. Its page layout is covered by tests/layout.spec.ts.',
   },
   {
     what: 'POS in-cart modals (DiscountModal, PrescriptionSelectModal, NewPrescriptionAtTill, LensDetailsModal, and the completion screen\'s LensFittingFormModal / job-card print)',
