@@ -291,6 +291,9 @@ export interface CommissionSummary {
   store_id?: string;
   items: CommissionItem[];
   total_commission: number;
+  /** Owner ruling 2026-09-03: 'self' = the caller's own row only (rank kept). */
+  visibility?: 'all' | 'self';
+  total_participants?: number;
 }
 
 export interface LeaderboardEntry {
@@ -306,4 +309,7 @@ export interface LeaderboardEntry {
 export interface CommissionLeaderboard {
   leaderboard: LeaderboardEntry[];
   period: string;
+  /** Owner ruling 2026-09-03: 'self' = the caller's own row only (rank kept). */
+  visibility?: 'all' | 'self';
+  total_participants?: number;
 }

@@ -1,10 +1,11 @@
 // ============================================================================
 // Commission Leaderboard (HR-3)
 // ============================================================================
-// Staff sales leaderboard + per-staff commission summary for managers.
-// All authenticated users see ranks; names are revealed only to managers
-// (backend enforces the same rule -- non-managers see own row with name,
-// others are anonymised as "Staff Member").
+// Staff sales leaderboard + per-staff commission summary.
+// OWNER RULING 2026-09-03: ADMIN/SUPERADMIN receive the full board; everyone
+// else (managers included) receives ONLY their own row plus their rank among
+// the field. Enforced on the SERVER (payroll.py via points.self_only_rows);
+// this component just renders whichever shape arrives (visibility: 'all'|'self').
 
 import { useState, useEffect } from 'react';
 import { Trophy, TrendingUp, Loader2 } from 'lucide-react';
@@ -29,6 +30,8 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [commissionData, setCommissionData] = useState<CommissionSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [visibility, setVisibility] = useState<'all' | 'self'>('all');
+  const [totalParticipants, setTotalParticipants] = useState(0);
 
   const now = new Date();
 
@@ -48,6 +51,8 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
         }).catch(() => null),
       ]);
       setLeaderboard(lb?.leaderboard || []);
+      setVisibility(lb?.visibility === 'self' ? 'self' : 'all');
+      setTotalParticipants(lb?.total_participants ?? (lb?.leaderboard || []).length);
       setCommissionData(cs);
     } catch {
       // fail soft
@@ -86,14 +91,36 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
         </div>
       </div>
 
+      {/* Owner ruling 2026-09-03 -- non-admins see their own standing only */}
+      {visibility === 'self' && !isLoading && (
+        <div className="rounded-lg border border-gray-200 p-4">
+          {leaderboard[0] ? (
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-2xl font-bold text-gray-900">#{leaderboard[0].rank}</span>
+              <span className="text-sm text-gray-600">of {totalParticipants} this {period}</span>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">
+              You have no sales this {period}
+              {totalParticipants > 0 ? ` (${totalParticipants} on the board)` : ''}.
+            </div>
+          )}
+          <p className="text-xs text-gray-400 mt-1">
+            You see your own figures and rank only. The full board is visible to administrators.
+          </p>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="flex justify-center py-8">
           <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
         </div>
       ) : leaderboard.length === 0 ? (
-        <div className="text-center py-8 text-sm text-gray-400">
-          No sales recorded for this period.
-        </div>
+        visibility === 'self' ? null : (
+          <div className="text-center py-8 text-sm text-gray-400">
+            No sales recorded for this period.
+          </div>
+        )
       ) : (
         <div className="space-y-2">
           {leaderboard.map((entry) => (
