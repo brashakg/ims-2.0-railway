@@ -14,9 +14,10 @@
 // anywhere) — the fixture never contains those strings, only the new code
 // path composes them.
 // ============================================================================
+import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { MTDStaffEntry } from '../../../types';
 
 const getLeaderboard = vi.fn();
@@ -44,6 +45,7 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 import { MTDLeaderboardPage } from '../MTDLeaderboardPage';
+import { incentiveRoutes } from '../../../routes/incentiveRoutes';
 
 function row(overrides: Partial<MTDStaffEntry>): MTDStaffEntry {
   return {
@@ -126,5 +128,75 @@ describe('MTDLeaderboardPage — self-only visibility (owner ruling 2026-09-03)'
     );
     expect(screen.getAllByText('Tarun Third').length).toBeGreaterThan(0);
     expect(screen.queryByText(/in this window/)).not.toBeInTheDocument();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The route gate. Before this ruling landed on the router, SALES_STAFF and
+// CASHIER could not open /incentive/leaderboard at all -- the one screen that
+// shows a floor person their own standing. This drives the REAL route tree
+// through ProtectedRoute with an auth shape for each role and checks where it
+// lands: the page, or the /unauthorized redirect.
+//
+// Discriminating power (measured): remove SALES_STAFF from the route's
+// allowedRoles and "SALES_STAFF lands on the page" fails on the sentinel; the
+// OPTOMETRIST control proves the gate is still a gate.
+// ----------------------------------------------------------------------------
+function authFor(role: string) {
+  return {
+    user: { id: 'me-1', roles: [role], activeRole: role, activeStoreId: 'BV-TEST-01' },
+    isAuthenticated: true,
+    isLoading: false,
+    hasRole: (r: string | string[]) => ([] as string[]).concat(r).includes(role),
+    hasPermission: () => true,
+    hasModuleAccess: () => true,
+  };
+}
+
+function renderRouteAs(role: string) {
+  mockUseAuth.mockReturnValue(authFor(role));
+  return render(
+    <MemoryRouter initialEntries={['/incentive/leaderboard']}>
+      <Suspense fallback={null}>
+        <Routes>
+          {incentiveRoutes}
+          <Route path="/unauthorized" element={<div>UNAUTHORIZED-SENTINEL</div>} />
+        </Routes>
+      </Suspense>
+    </MemoryRouter>,
+  );
+}
+
+describe('/incentive/leaderboard route gate (owner ruling 2026-09-03)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getLeaderboard.mockResolvedValue({
+      store_id: 'BV-TEST-01',
+      scope: 'store',
+      days: 30,
+      date_from: '2026-06-01',
+      date_to: '2026-06-30',
+      visibility: 'self',
+      total_participants: 5,
+      items: [row({ staff_id: 'me-1', staff_name: 'Reader Themselves', rank: 3 })],
+    });
+  });
+
+  it.each(['SALES_STAFF', 'CASHIER'])('%s lands on the page and sees their own standing', async role => {
+    renderRouteAs(role);
+    await waitFor(() =>
+      expect(screen.getByText(/of 5 in this window/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('UNAUTHORIZED-SENTINEL')).not.toBeInTheDocument();
+    // Floor roles never get the org/area scope toggle -- store only.
+    expect(screen.queryByRole('group', { name: 'Leaderboard scope' })).not.toBeInTheDocument();
+  });
+
+  it('a role outside the list is still redirected (the gate is still a gate)', async () => {
+    renderRouteAs('OPTOMETRIST');
+    await waitFor(() =>
+      expect(screen.getByText('UNAUTHORIZED-SENTINEL')).toBeInTheDocument(),
+    );
+    expect(getLeaderboard).not.toHaveBeenCalled();
   });
 });
