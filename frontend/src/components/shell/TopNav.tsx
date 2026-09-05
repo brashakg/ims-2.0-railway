@@ -284,7 +284,11 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                   role="menu"
                   aria-label={title}
                   // Fixed + JS-anchored so the menu's overflow-x clip can't hide it.
-                  style={ddPos ? { position: 'fixed', left: ddPos.left, top: ddPos.top, margin: 0 } : undefined}
+                  // Height is capped to the VISIBLE viewport below the trigger (dvh, not
+                  // vh): on a tablet/phone the layout viewport runs under the browser
+                  // toolbar, so a 72vh box could end behind it and its last rows were
+                  // unreachable while the box itself believed it fit.
+                  style={ddPos ? { position: 'fixed', left: ddPos.left, top: ddPos.top, margin: 0, maxHeight: `calc(100dvh - ${ddPos.top}px - 12px)` } : undefined}
                 >
                   {group.items.map((item) => (
                     <DropdownItem key={item.id} item={item} onNavigate={closeAll} />
