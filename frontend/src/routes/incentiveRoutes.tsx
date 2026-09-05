@@ -24,11 +24,15 @@ export const incentiveRoutes = (
         </ProtectedRoute>
       }
     />
+    {/* OWNER RULING 2026-09-03: the server sends non-admins their OWN row +
+        rank, so floor roles may open the board to see their own standing
+        (same list as /incentive itself). The staff-history page follows,
+        because the own row links to it; the backend refuses any other id. */}
     <Route
       path="incentive/leaderboard"
       element={
         <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER']}
         >
           <MTDLeaderboardPage />
         </ProtectedRoute>
@@ -38,7 +42,7 @@ export const incentiveRoutes = (
       path="incentive/staff/:staffId"
       element={
         <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER']}
         >
           <PointsHistoryPage />
         </ProtectedRoute>
