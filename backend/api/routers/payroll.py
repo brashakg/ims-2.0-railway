@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
+from .points import self_only_rows
 from ..dependencies import (
     validate_store_access,
     resolve_store_scope,
@@ -2170,9 +2171,10 @@ async def get_commission_summary(
     db = _get_db()
     caller_id = current_user.get("user_id") or current_user.get("id")
 
-    # Self-service gate: staff may only read their own data. Commission is a
-    # sales-performance surface, so it keeps the WIDER manager tier -- the
-    # owner's salary ruling deliberately does not reach it.
+    # Non-managers only ever LOAD their own orders. Managers load the whole
+    # store so the rank is against the full field -- but what they RECEIVE is
+    # trimmed by self_only_rows below (owner ruling 2026-09-03: ADMIN/SUPERADMIN
+    # see all, everyone else including managers sees their own row + rank).
     is_manager = _is_commission_manager(current_user)
     if not is_manager:
         # Non-manager: restrict to self only.
@@ -2283,6 +2285,11 @@ async def get_commission_summary(
         for i, item in enumerate(items):
             item["rank"] = i + 1
 
+        items, visibility, total_participants = self_only_rows(
+            items, current_user, key="employee_id"
+        )
+        # Totalled AFTER the trim: a store total beside one's own row is the
+        # colleagues' commission by subtraction (see services/salary_visibility).
         total_commission = round(sum(x["commission_amount"] for x in items), 2)
         return {
             "month": month,
@@ -2290,7 +2297,11 @@ async def get_commission_summary(
             "store_id": active_store,
             "items": items,
             "total_commission": total_commission,
+            "visibility": visibility,
+            "total_participants": total_participants,
         }
+    except HTTPException:
+        raise  # the fail-closed 403 from self_only_rows must stay a 403
     except Exception as e:
         logger.error("Commission summary failed: %s", e)
         raise HTTPException(
@@ -2306,9 +2317,10 @@ async def get_commission_leaderboard(
 ):
     """Staff sales leaderboard (revenue-ranked) for today/week/month.
 
-    All authenticated users can view the leaderboard -- it motivates staff.
-    SUPERADMIN and manager roles see names; non-managers see anonymised ranks
-    (their own name is always revealed).
+    Reachable by the roles the payroll mount admits (_FINANCE_ROLES +
+    SUPERADMIN). Owner ruling 2026-09-03: ADMIN/SUPERADMIN receive every row;
+    everyone else (managers included) receives ONLY their own row, ranked
+    against the full field (total_participants carries the field size).
     """
     db = _get_db()
     if db is None:
@@ -2351,19 +2363,13 @@ async def get_commission_leaderboard(
             )
 
         caller_id = current_user.get("user_id") or current_user.get("id")
-        caller_roles = current_user.get("roles") or []
-        is_manager = any(
-            r in caller_roles
-            for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
-        )
 
         leaderboard = []
         for sid, stats in staff_map.items():
-            reveal_name = is_manager or sid == caller_id
             leaderboard.append(
                 {
                     "staff_id": sid,
-                    "name": stats["name"] if reveal_name else "Staff Member",
+                    "name": stats["name"],
                     "sales_count": stats["sales_count"],
                     "revenue": round(stats["revenue"], 2),
                     "rank": 0,
@@ -2378,7 +2384,17 @@ async def get_commission_leaderboard(
             entry["rank"] = i + 1
             entry["badge"] = badges[i] if i < 3 else "Team Player"
 
-        return {"leaderboard": leaderboard, "period": period}
+        leaderboard, visibility, total_participants = self_only_rows(
+            leaderboard, current_user
+        )
+        return {
+            "leaderboard": leaderboard,
+            "period": period,
+            "visibility": visibility,
+            "total_participants": total_participants,
+        }
+    except HTTPException:
+        raise  # the fail-closed 403 from self_only_rows must stay a 403
     except Exception as e:
         logger.error("Commission leaderboard failed: %s", e)
         raise HTTPException(

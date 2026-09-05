@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
+from .points import self_only_rows
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
@@ -1019,7 +1020,16 @@ async def staff_leaderboard(
         else:
             entry["badge"] = "Team Player"
 
-    return {"leaderboard": leaderboard, "period": period}
+    # Owner ruling 2026-09-03 -- same trim as the payroll twin, never a copy.
+    leaderboard, visibility, total_participants = self_only_rows(
+        leaderboard, current_user
+    )
+    return {
+        "leaderboard": leaderboard,
+        "period": period,
+        "visibility": visibility,
+        "total_participants": total_participants,
+    }
 
 
 # ============================================================================

@@ -280,7 +280,10 @@ def _payroll_db():
             # MF4: commission aggregates from ORDERS. Without these the
             # commission payload test ran against an empty item list and could
             # not fail -- the chair injected net_pay + a bank account into every
-            # row and all 135 tests still passed.
+            # row and all 135 tests still passed. Credited via salesperson_id,
+            # the key order_actor_id actually reads (the dead sales_staff_id
+            # spelling attributed every row to "Unknown", which passed only
+            # because nothing was trimmed to self yet -- owner ruling 2026-09-03).
             "orders": _FakeColl(
                 [
                     {
@@ -288,8 +291,8 @@ def _payroll_db():
                         "status": "COMPLETED",
                         "created_at": datetime(2026, 5, 4, 10, 0),
                         "store_id": STORE_A,
-                        "sales_staff_id": SELF_ID,
-                        "sales_staff_name": "Own Staffer",
+                        "salesperson_id": SELF_ID,
+                        "salesperson_name": "Own Staffer",
                         "total_amount": 12000.0,
                     },
                     {
@@ -297,8 +300,8 @@ def _payroll_db():
                         "status": "COMPLETED",
                         "created_at": datetime(2026, 5, 9, 12, 0),
                         "store_id": STORE_A,
-                        "sales_staff_id": OTHER_ID,
-                        "sales_staff_name": "Colleague",
+                        "salesperson_id": OTHER_ID,
+                        "salesperson_name": "Colleague",
                         "total_amount": 8000.0,
                     },
                     {
@@ -306,8 +309,8 @@ def _payroll_db():
                         "status": "DELIVERED",
                         "created_at": datetime(2026, 5, 21, 16, 30),
                         "store_id": STORE_A,
-                        "sales_staff_id": SELF_ID,
-                        "sales_staff_name": "Own Staffer",
+                        "salesperson_id": SELF_ID,
+                        "salesperson_name": "Own Staffer",
                         "total_amount": 5000.0,
                     },
                 ]

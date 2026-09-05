@@ -135,6 +135,21 @@ def _viewer_visibility(current_user: dict) -> tuple:
     return "self", uid
 
 
+def self_only_rows(rows: List[Dict], current_user: dict, key: str = "staff_id"):
+    """THE trim for any ranked list of people (owner ruling 2026-09-03).
+
+    Call it AFTER ranking, so a non-admin's row still carries the rank it earned
+    against the whole field ("4th of 11"); ``total_participants`` is the field
+    size. Returns ``(rows, visibility, total_participants)``. Imported by the
+    payroll and analytics leaderboards too -- one rule, one trim, never a second
+    copy per router."""
+    visibility, uid = _viewer_visibility(current_user)
+    total = len(rows)
+    if visibility == "self":
+        rows = [r for r in rows if r.get(key) == uid]
+    return rows, visibility, total
+
+
 # OWNER RULING 2026-09-04: a staff member's commission weighting and a
 # supervisor's bonus percentage ARE that person's pay terms -- ADMIN/SUPERADMIN
 # only, like salary, managers included. The keys are POPPED, not emptied: an
@@ -711,7 +726,7 @@ async def get_mtd(
     Owner ruling 2026-09-03: ADMIN/SUPERADMIN receive every row; everyone
     else (managers included) receives ONLY their own row, ranked against
     the full field (total_participants carries the field size)."""
-    visibility, uid = _viewer_visibility(current_user)
+    visibility, _ = _viewer_visibility(current_user)
     stores = _resolve_scope_stores(current_user, scope, store_id)
     store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
@@ -748,11 +763,7 @@ async def get_mtd(
     period_days = elapsed if elapsed > 0 else None
 
     items = _decorate_items(items, current_user, prev_ranks, period_days)
-    total_participants = len(items)
-    if visibility == "self":
-        # Rank/tier/badges were computed against the FULL field above, so the
-        # caller still learns "4th of 11" -- without the other ten rows.
-        items = [r for r in items if r.get("staff_id") == uid]
+    items, visibility, total_participants = self_only_rows(items, current_user)
     return {
         "store_id": store,
         "scope": scope,
@@ -782,7 +793,7 @@ async def get_leaderboard(
     Owner ruling 2026-09-03: ADMIN/SUPERADMIN receive every row; everyone
     else (managers included) receives ONLY their own row, ranked against
     the full field (total_participants carries the field size)."""
-    visibility, uid = _viewer_visibility(current_user)
+    visibility, _ = _viewer_visibility(current_user)
     stores = _resolve_scope_stores(current_user, scope, store_id)
     store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
@@ -806,11 +817,7 @@ async def get_leaderboard(
     prev_ranks = _prev_rank_map(repo, stores, prev_from, prev_to)
 
     items = _decorate_items(items, current_user, prev_ranks, days)
-    total_participants = len(items)
-    if visibility == "self":
-        # Rank/tier/badges were computed against the FULL field above, so the
-        # caller still learns "4th of 11" -- without the other ten rows.
-        items = [r for r in items if r.get("staff_id") == uid]
+    items, visibility, total_participants = self_only_rows(items, current_user)
     return {
         "store_id": store,
         "scope": scope,
