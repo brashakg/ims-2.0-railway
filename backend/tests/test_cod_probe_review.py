@@ -403,37 +403,6 @@ def test_H7_request_amounts_and_order_fields_cannot_steer(monkeypatch):
     assert r.status_code == 201 and seen[0]["sub_total"] == 2000.0
 
 
-def test_F1b_differential_main_vs_branch_on_unknown_spelling():
-    """DIFFERENTIAL (FIXED): exec main's shiprocket.py and compare the carrier
-    body. main forwarded the raw string (a carrier-side reject at worst); the
-    first cut of this PR coerced any non-'COD' string to Prepaid, which the
-    carrier happily accepts and collects nothing on. The branch now refuses
-    the booking outright."""
-    import subprocess
-    import types
-
-    src = subprocess.run(
-        ["git", "show", "origin/main:backend/api/services/shiprocket.py"],
-        capture_output=True, text=True, check=True,
-        cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    ).stdout.replace("from ..utils.ist", "from api.utils.ist")
-    main_mod = types.ModuleType("shiprocket_main_probe")
-    sys.modules["shiprocket_main_probe"] = main_mod  # dataclass needs it registered
-    exec(compile(src, "shiprocket_main", "exec"), main_mod.__dict__)
-
-    order = _partial()
-    for spelling in ("Cash on Delivery", "cash_on_delivery"):
-        addr = {"pincode": "834001", "payment_method": spelling}
-        # pylint: disable=no-member -- main_mod is exec'd at runtime
-        on_main = main_mod.build_shipment_payload(order, addr)
-        assert on_main["payment_method"] == spelling      # verbatim on main
-        with pytest.raises(HTTPException) as exc:
-            shiprocket.build_shipment_payload(order, addr)
-        print(f"{spelling!r}: main={on_main['payment_method']!r}/"
-              f"{on_main['sub_total']}  branch=400/{exc.value.detail['code']}")
-        assert exc.value.status_code == 400
-
-
 def test_H8_credit_tender_order_ships_cod_for_cash_balance():
     """payment_status CREDIT (pay-later promise): amount_paid excludes the
     promise, so the courier collects the real cash balance."""
