@@ -3,8 +3,10 @@ IMS 2.0 — misc router gating (clinical / settings / marketing)
 ==============================================================
 Three world-writable surfaces hardened:
 
-* clinical queue + eye-test writes (add/status/remove/start/complete) — gated
+* clinical queue + eye-test writes (status/remove/start/complete) — gated
   to (ADMIN, STORE_MANAGER, OPTOMETRIST), mirroring the Clinical route.
+  Queue ADD alone is also open to the sales roles (owner ruling 2026-09-06:
+  the POS customer panel books eye tests); bare CASHIER stays out.
 * settings notification-provider config (holds SMS/WhatsApp API credentials) —
   gated to ADMIN only, mirroring the SettingsPage Notifications tab guard.
 * marketing bulk notification fan-out (mass customer messaging) — gated to
@@ -41,8 +43,10 @@ def _headers(roles):
     return {"Authorization": f"Bearer {token}"}
 
 
+QUEUE_ADD = ("post", "/api/v1/clinical/queue")
+QUEUE_ADD_BODY = {"storeId": "BV-TEST-01", "patientName": "Walk In", "customerPhone": "9999999999"}
+
 CLINICAL_WRITES = [
-    ("post", "/api/v1/clinical/queue"),
     ("patch", "/api/v1/clinical/queue/q1/status"),
     ("delete", "/api/v1/clinical/queue/q1"),
     ("post", "/api/v1/clinical/queue/q1/start-test"),
@@ -64,6 +68,54 @@ class TestClinicalWriteGating:
     @pytest.mark.parametrize("method,path", CLINICAL_WRITES)
     def test_superadmin_allowed(self, client, auth_headers, method, path):
         assert getattr(client, method)(path, headers=auth_headers).status_code != 403
+
+
+class TestQueueAddSalesRoles:
+    """Owner ruling 2026-09-06: sales staff may book an eye test (POST
+    /clinical/queue) from the POS customer panel. Reverting the gate fails
+    the first test; widening anything else fails the controls."""
+
+    @pytest.mark.parametrize(
+        "roles",
+        [["SALES_STAFF"], ["SALES_CASHIER"], ["OPTOMETRIST"], ["STORE_MANAGER"], ["ADMIN"]],
+    )
+    def test_queue_add_allowed(self, client, roles):
+        method, path = QUEUE_ADD
+        resp = getattr(client, method)(path, headers=_headers(roles), json=QUEUE_ADD_BODY)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["patientName"] == "Walk In"
+
+    def test_queue_add_blocked_for_bare_cashier(self, client):
+        method, path = QUEUE_ADD
+        resp = getattr(client, method)(path, headers=_headers(["CASHIER"]), json=QUEUE_ADD_BODY)
+        assert resp.status_code == 403
+
+    # CONTROL: the sales roles gained ONE door. Every other clinical write and
+    # the prescription create still 403 them.
+    @pytest.mark.parametrize("method,path", CLINICAL_WRITES)
+    def test_sales_still_blocked_on_other_clinical_writes(self, client, method, path):
+        assert getattr(client, method)(path, headers=_headers(["SALES_STAFF"])).status_code == 403
+
+    @pytest.mark.parametrize("roles", [["SALES_STAFF"], ["SALES_CASHIER"]])
+    def test_sales_still_cannot_create_prescription(self, client, roles):
+        resp = client.post(
+            "/api/v1/prescriptions",
+            headers=_headers(roles),
+            json={"customer_id": "C1", "patient_id": "P1", "sph_od": -1.0, "sph_os": -1.0},
+        )
+        assert resp.status_code == 403
+        assert "clinical" in resp.json()["detail"].lower()
+
+    def test_queue_add_broadens_no_grant_union(self):
+        """The row stays on clinical:write rather than a carved key because that
+        union ALREADY carries AUTHENTICATED (any actor may grant it) -- so adding
+        the sales roles changes who-may-grant nothing. If this sentinel ever
+        leaves the union, the queue row is then the broadener: carve a
+        dedicated key (precedent products:qc) before merging."""
+        from api.services.capabilities import capability_for, capability_roles
+
+        assert capability_for("POST", "/api/v1/clinical/queue") == "clinical:write"
+        assert "AUTHENTICATED" in capability_roles("clinical:write")
 
 
 class TestNotificationProvidersAdminOnly:

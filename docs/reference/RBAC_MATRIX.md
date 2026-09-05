@@ -340,7 +340,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/clinical/prescriptions/{prescription_id}/redo` | ADMIN, AREA_MANAGER, STORE_MANAGER, OPTOMETRIST |  |
 | `GET` | `/api/v1/clinical/prescriptions/{prescription_id}/redos` | AUTH |  |
 | `GET` | `/api/v1/clinical/queue` | AUTH |  |
-| `POST` | `/api/v1/clinical/queue` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
+| `POST` | `/api/v1/clinical/queue` | ADMIN, STORE_MANAGER, OPTOMETRIST, SALES_STAFF, SALES_CASHIER |  |
 | `GET` | `/api/v1/clinical/queue/stats` | AUTH |  |
 | `DELETE` | `/api/v1/clinical/queue/{queue_id}` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
 | `POST` | `/api/v1/clinical/queue/{queue_id}/start-test` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
