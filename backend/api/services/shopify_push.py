@@ -156,6 +156,10 @@ class PushResult:
     payload: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+    # Stable machine code for a failure the operator can act on (e.g.
+    # PUBLISH_SCOPE_MISSING). `error` stays the plain-language line; the raw
+    # vendor text lives on the side-channel dict (`publication.error`).
+    code: Optional[str] = None
     # Product pushes only: the attribute->metafield side channel. SIMULATED ->
     # the planned rows; LIVE -> {"set": n, "errors": [...]}. None elsewhere.
     metafields: Optional[Any] = None
@@ -541,6 +545,30 @@ def _user_errors(body: Dict[str, Any], mutation_field: str) -> Optional[str]:
     return None
 
 
+PUBLISH_SCOPE_MISSING = "PUBLISH_SCOPE_MISSING"
+_PUBLISH_SCOPE_MISSING_MSG = (
+    "Saved on Shopify but not made visible: the IMS app has no "
+    "write_publications access. Re-approve the app's permissions in Shopify, "
+    "then press again."
+)
+
+
+def _is_access_denied(body: Any) -> bool:
+    """True when a transport-200 GraphQL body carries Shopify's ACCESS_DENIED
+    (a missing access scope on the app token). Fail-soft -> False."""
+    try:
+        for e in (body or {}).get("errors") or []:
+            if isinstance(e, dict) and (
+                (e.get("extensions") or {}).get("code") == "ACCESS_DENIED"
+            ):
+                return True
+            if "access denied" in str(e).lower():
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -798,8 +826,20 @@ def build_product_input(
         inp["tags"] = merged_tags
     # Variant identity is carried as options/skus only (price/qty stay BVI/stock
     # owned -- online qty is the derived allocation, not pushed from here).
+    # CREATE ONLY: Shopify rejects productOptions on productUpdate
+    # ("product_options cannot be specified during update"), which failed a
+    # LIVE press outright. Changed option axes on an existing product need the
+    # separate productOptions* mutations -- not built; the update goes out
+    # without them and the skip is logged.
     if variants:
-        inp["productOptions"] = _derive_options(variants)
+        if sid:
+            logger.info(
+                "[SHOPIFY_PUSH] update %s: productOptions not re-synced "
+                "(create-only field)",
+                sid,
+            )
+        else:
+            inp["productOptions"] = _derive_options(variants)
     return inp
 
 
@@ -1628,7 +1668,14 @@ async def _publish_to_online_store(db, product_gid: str) -> Dict[str, Any]:
         return {"published": False, "publication_id": pub_id, "error": str(e)}
     err = _user_errors(body, "publishablePublish")
     if err:
-        return {"published": False, "publication_id": pub_id, "error": err}
+        out: Dict[str, Any] = {"published": False, "publication_id": pub_id, "error": err}
+        if _is_access_denied(body):
+            # The product write BEFORE this step succeeded (its gid is already
+            # written back), so the next press UPDATES. Say what to fix in
+            # plain words; the raw vendor text stays on `error` for the audit.
+            out["code"] = PUBLISH_SCOPE_MISSING
+            out["message"] = _PUBLISH_SCOPE_MISSING_MSG
+        return out
     return {"published": True, "publication_id": pub_id}
 
 
@@ -2465,8 +2512,13 @@ async def push_product(
             error=(
                 None
                 if published_ok
-                else ((pub_summary or {}).get("error") or "publish withheld")
+                else (
+                    (pub_summary or {}).get("message")
+                    or (pub_summary or {}).get("error")
+                    or "publish withheld"
+                )
             ),
+            code=None if published_ok else (pub_summary or {}).get("code"),
             reason=(
                 ("archived_not_listed" if archived_not_listed else None)
                 if published_ok

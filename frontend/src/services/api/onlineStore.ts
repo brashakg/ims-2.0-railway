@@ -1446,6 +1446,8 @@ export interface PushResult {
   payload?: Record<string, any> | null;
   error?: string | null;
   reason?: string | null;
+  /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
+  code?: string | null;
 }
 
 /** Per-entity pushed-vs-pending counts (shapes differ per entity, mirroring the
@@ -1540,6 +1542,7 @@ export interface PushHistoryEntry {
   shopify_id?: string | null;
   error?: string | null;
   reason?: string | null;
+  code?: string | null;
 }
 
 export interface PushHistoryResult {
