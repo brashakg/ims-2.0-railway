@@ -26,6 +26,7 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 import { OrderShippingCard } from '../OrderShippingCard';
+import { ApiError } from '../../../services/api/client';
 
 const UNPAID_WEB_ORDER = {
   orderId: 'ORD-W1',
@@ -104,5 +105,80 @@ describe('OrderShippingCard courier payment', () => {
     fireEvent.click(screen.getByText('Book shipment'));
     await waitFor(() => expect(book).toHaveBeenCalledTimes(1));
     expect(book.mock.calls[0][0].address).toEqual({ payment_method: 'Prepaid' });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Review round 2: the card must not GUESS a balance the API did not send, and
+// a 409 (parcel already out) needs a confirmed re-book path in the UI.
+// ----------------------------------------------------------------------------
+
+function alreadyBooked409() {
+  return new ApiError(
+    'Shipment SHP-LIVE (AWB-1, BOOKED) is already out for this order. Re-book only if that parcel is not coming.',
+    {
+      status: 409,
+      code: 'SHIPMENT_ALREADY_BOOKED',
+      detail: { code: 'SHIPMENT_ALREADY_BOOKED', shipment_id: 'SHP-LIVE', awb: 'AWB-1', status: 'BOOKED' },
+    },
+  );
+}
+
+describe('OrderShippingCard when the balance is not recorded', () => {
+  it('keeps COD offerable and shows the bill (the server reads the whole bill as owed)', async () => {
+    render(
+      <OrderShippingCard
+        orderId="ORD-L1"
+        orderNumber="INV-2"
+        storeId="BV-TEST-01"
+        grandTotal={3000}
+        paymentStatus="UNPAID"
+      />,
+    );
+    await waitFor(() => expect(radio('COD').checked).toBe(true));
+    expect(radio('COD').disabled).toBe(false);
+    expect(screen.getByText(/Collect .*3,000/)).toBeTruthy();
+    expect(screen.queryByText('Nothing to collect')).toBeNull();
+  });
+
+  it('defers the figure to the server when neither balance nor bill is known', async () => {
+    render(<OrderShippingCard orderId="ORD-L2" orderNumber="INV-3" storeId="BV-TEST-01" />);
+    await waitFor(() => expect(screen.getByText('Book shipment')).toBeTruthy());
+    expect(radio('COD').disabled).toBe(false);
+    expect(screen.getByText('Amount confirmed by the server')).toBeTruthy();
+  });
+});
+
+describe('OrderShippingCard on 409 SHIPMENT_ALREADY_BOOKED', () => {
+  it('names the existing shipment and re-posts with rebook only after confirm', async () => {
+    book.mockRejectedValueOnce(alreadyBooked409());
+    render(<OrderShippingCard {...UNPAID_WEB_ORDER} />);
+    await waitFor(() => expect(radio('COD').checked).toBe(true));
+    fireEvent.click(screen.getByText('Book shipment'));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect(screen.getByRole('alert').textContent).toMatch(/AWB-1.*BOOKED.*already out/);
+    expect(book).toHaveBeenCalledTimes(1);
+    expect(book.mock.calls[0][0].rebook).toBeUndefined();
+
+    fireEvent.click(screen.getByText('Book again anyway'));
+    await waitFor(() => expect(book).toHaveBeenCalledTimes(2));
+    expect(book.mock.calls[1][0]).toEqual({
+      order_id: 'ORD-W1',
+      store_id: 'BV-TEST-01',
+      address: { payment_method: 'COD' },
+      rebook: true,
+    });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('lets the user keep the existing shipment instead', async () => {
+    book.mockRejectedValueOnce(alreadyBooked409());
+    render(<OrderShippingCard {...UNPAID_WEB_ORDER} />);
+    await waitFor(() => expect(radio('COD').checked).toBe(true));
+    fireEvent.click(screen.getByText('Book shipment'));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    fireEvent.click(screen.getByText('Keep the existing shipment'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(book).toHaveBeenCalledTimes(1);
   });
 });

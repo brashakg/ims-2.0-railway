@@ -810,6 +810,7 @@ export function OrdersPage() {
                   orderNumber={selectedOrder.orderNumber}
                   storeId={selectedOrder.storeId}
                   balanceDue={selectedOrder.balanceDue}
+                  grandTotal={selectedOrder.grandTotal}
                   paymentStatus={selectedOrder.paymentStatus}
                 />
 

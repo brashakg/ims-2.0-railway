@@ -16,19 +16,31 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Truck, Package, RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
 import { shippingApi, type Shipment } from '../../services/api/shipping';
+import { ApiError } from '../../services/api/client';
 import { useToast } from '../../context/ToastContext';
 
 interface OrderShippingCardProps {
   orderId: string;
   orderNumber: string;
   storeId?: string;
-  /** What the order still owes - what a COD courier will collect. */
+  /** What the order still owes - what a COD courier will collect. Undefined
+   *  on a legacy/imported row; the server then reads the whole bill as owed. */
   balanceDue?: number;
+  /** The bill - what the server collects when balanceDue is not recorded. */
+  grandTotal?: number;
   /** UNPAID / PARTIAL / PAID ... - drives the default choice. */
   paymentStatus?: string;
 }
 
 type CourierPayment = 'COD' | 'Prepaid';
+
+/** The 409 body: the parcel already out for this order. */
+interface ExistingShipment {
+  shipment_id?: string;
+  awb?: string | null;
+  status?: string;
+  message?: string;
+}
 
 const money = (amount: number) =>
   new Intl.NumberFormat('en-IN', {
@@ -55,7 +67,8 @@ export function OrderShippingCard({
   orderId,
   orderNumber,
   storeId,
-  balanceDue = 0,
+  balanceDue,
+  grandTotal,
   paymentStatus,
 }: OrderShippingCardProps) {
   const toast = useToast();
@@ -63,17 +76,23 @@ export function OrderShippingCard({
   const [loading, setLoading] = useState(false);
   const [booking, setBooking] = useState(false);
   const [trackingId, setTrackingId] = useState<string | null>(null);
+  const [existing, setExisting] = useState<ExistingShipment | null>(null);
 
   // The server refuses a COD booking with nothing to collect, and refuses a
   // Prepaid one on an order with no payment at all. So: nothing paid + money
-  // owed is the COD case, everything else is Prepaid.
-  const collectable = balanceDue > 0 ? balanceDue : 0;
+  // owed is the COD case, everything else is Prepaid. The card does NOT
+  // guess when the balance is not recorded: the server reads such a row as
+  // owing the whole bill, so COD stays offerable and the figure shown is the
+  // bill (or, with neither figure, whatever the server confirms).
+  const collectable = balanceDue ?? grandTotal;
+  const codDisabled = balanceDue !== undefined && balanceDue <= 0;
   const defaultMethod: CourierPayment =
-    paymentStatus === 'UNPAID' && collectable > 0 ? 'COD' : 'Prepaid';
+    (paymentStatus ?? 'UNPAID') === 'UNPAID' && !codDisabled ? 'COD' : 'Prepaid';
   const [method, setMethod] = useState<CourierPayment>(defaultMethod);
   // The modal reuses this card across orders, so re-seed on a new order.
   useEffect(() => {
     setMethod(defaultMethod);
+    setExisting(null);
   }, [orderId, defaultMethod]);
 
   const load = useCallback(async () => {
@@ -94,13 +113,17 @@ export function OrderShippingCard({
     load();
   }, [load]);
 
-  const handleBook = async () => {
+  // rebook = the user has confirmed against the named existing shipment (a
+  // courier no-show / split parcel); without it the server answers 409.
+  const handleBook = async (rebook = false) => {
     setBooking(true);
+    setExisting(null);
     try {
       const res = await shippingApi.book({
         order_id: orderId,
         store_id: storeId,
         address: { payment_method: method },
+        ...(rebook ? { rebook: true } : {}),
       });
       if (res.simulated) {
         toast.info(res.message || 'Shipment simulated (not dispatched live)');
@@ -111,6 +134,11 @@ export function OrderShippingCard({
       }
       await load();
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'SHIPMENT_ALREADY_BOOKED') {
+        const detail = (err.detail ?? {}) as ExistingShipment;
+        setExisting({ ...detail, message: detail.message || err.message });
+        return;
+      }
       toast.error(err instanceof Error ? err.message : 'Failed to book shipment');
     } finally {
       setBooking(false);
@@ -145,7 +173,7 @@ export function OrderShippingCard({
         </h3>
         <button
           type="button"
-          onClick={handleBook}
+          onClick={() => handleBook()}
           disabled={booking}
           className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg px-2.5 py-1 transition-colors disabled:opacity-60"
         >
@@ -159,6 +187,38 @@ export function OrderShippingCard({
       </div>
       <p className="text-xs text-gray-500 mb-3">Shiprocket &middot; #{orderNumber}</p>
 
+      {/* 409: a parcel is already out. Re-booking is a confirmed act - the
+          courier would otherwise be told to collect the same balance twice. */}
+      {existing && (
+        <div
+          role="alert"
+          className="mb-3 border border-amber-200 bg-amber-50 rounded-lg p-2.5 text-xs text-amber-900"
+        >
+          <p>
+            Shipment <span className="font-medium">{existing.awb || existing.shipment_id}</span>
+            {existing.status ? ` (${existing.status})` : ''} is already out for this order.
+            Book again only if that parcel is not coming.
+          </p>
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              type="button"
+              onClick={() => handleBook(true)}
+              disabled={booking}
+              className="min-h-[44px] sm:min-h-0 inline-flex items-center text-xs font-medium text-amber-900 bg-white hover:bg-amber-100 border border-amber-300 rounded-lg px-2.5 py-1 disabled:opacity-60"
+            >
+              Book again anyway
+            </button>
+            <button
+              type="button"
+              onClick={() => setExisting(null)}
+              className="text-xs text-gray-600 hover:text-gray-900"
+            >
+              Keep the existing shipment
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Courier payment - COD collects the balance, Prepaid collects nothing */}
       <fieldset className="mb-3">
         <legend className="text-xs text-gray-500 mb-1.5">Courier payment</legend>
@@ -168,21 +228,25 @@ export function OrderShippingCard({
               method === 'COD'
                 ? 'border-blue-300 bg-blue-50'
                 : 'border-gray-200 hover:bg-gray-50'
-            } ${collectable > 0 ? '' : 'opacity-60 cursor-not-allowed'}`}
+            } ${codDisabled ? 'opacity-60 cursor-not-allowed' : ''}`}
           >
             <input
               type="radio"
               name={`courier-payment-${orderId}`}
               value="COD"
               checked={method === 'COD'}
-              disabled={collectable <= 0}
+              disabled={codDisabled}
               onChange={() => setMethod('COD')}
               className="w-4 h-4"
             />
             <span className="text-xs leading-tight">
               <span className="block font-medium text-gray-900">COD</span>
               <span className="block text-gray-500">
-                {collectable > 0 ? `Collect ${money(collectable)}` : 'Nothing to collect'}
+                {codDisabled
+                  ? 'Nothing to collect'
+                  : collectable !== undefined && collectable > 0
+                    ? `Collect ${money(collectable)}`
+                    : 'Amount confirmed by the server'}
               </span>
             </span>
           </label>

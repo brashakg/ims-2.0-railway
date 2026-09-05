@@ -34,7 +34,8 @@ export interface BookShipmentPayload {
   // Deliberate SECOND booking for an order that already has a live shipment
   // (split parcel, or a re-book after a courier no-show). Without it the
   // server answers 409 rather than telling the courier to collect the same
-  // balance twice. No screen sends it yet.
+  // balance twice. The shipping card sends it only after the user confirms
+  // against the named existing shipment.
   rebook?: boolean;
 }
 
