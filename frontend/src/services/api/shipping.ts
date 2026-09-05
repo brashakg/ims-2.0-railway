@@ -31,6 +31,12 @@ export interface BookShipmentPayload {
   store_id?: string;
   pickup_location?: string;
   address?: ShipAddressPayload;
+  // Deliberate SECOND booking for an order that already has a live shipment
+  // (split parcel, or a re-book after a courier no-show). Without it the
+  // server answers 409 rather than telling the courier to collect the same
+  // balance twice. The shipping card sends it only after the user confirms
+  // against the named existing shipment.
+  rebook?: boolean;
 }
 
 export interface Shipment {
@@ -47,6 +53,10 @@ export interface Shipment {
   tracking_url?: string | null;
   status: ShipmentStatus;
   simulated?: boolean;
+  // What the courier was told to collect: 'COD' with an amount, or 'Prepaid'
+  // with 0.
+  payment_method?: string;
+  cod_amount?: number;
   created_at?: string;
 }
 
@@ -60,6 +70,8 @@ export interface BookShipmentResponse {
   label_url?: string | null;
   tracking_status?: string | null;
   tracking_url?: string | null;
+  payment_method?: string;
+  cod_amount?: number;
   message: string;
 }
 

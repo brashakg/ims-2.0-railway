@@ -4810,7 +4810,15 @@ async def add_payment(
                 status_code=400, detail="Cannot add payment to cancelled order"
             )
 
-        balance_due = order.get("balance_due", order.get("grand_total", 0))
+        # ONE reading of what an order owes, shared with the courier door
+        # (services.delivery_gate.order_balance_due). The fallback below used
+        # to live here alone, so the shipping gate read a balance-less order
+        # as Rs 0.00 while this door read the whole bill - contradictory
+        # refusals on the same order. A stored non-number now 400s instead of
+        # TypeError-ing through the comparison below.
+        from ..services.delivery_gate import order_balance_due
+
+        balance_due = order_balance_due(order) or 0
         # C-9: a CREDIT tender is a pay-later PROMISE, not cash collected, so it
         # is exempt from the over-tender block -- matching OrderRepository.
         # add_payment (which excludes CREDIT from its cash-collected/over-tender

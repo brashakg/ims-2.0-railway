@@ -36,10 +36,11 @@ os.environ["DISPATCH_MODE"] = "off"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import labels as labels_mod  # noqa: E402
+from api.routers import orders as orders_mod  # noqa: E402
 from api.routers import shipping as shipping_mod  # noqa: E402
 from api.routers import workshop as wm  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
@@ -430,12 +431,36 @@ def _ship_token(roles, store_id="BV-TEST-01", uid="u1"):
     )
 
 
+def doc_matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    """Mongo-ish match for the in-memory fakes. Honours the operators the
+    routers actually send ($nin / $ne / $in) - a double that ignored them
+    would match nothing and be blind to the guard it is meant to police."""
+    for key, cond in (query or {}).items():
+        value = doc.get(key)
+        if isinstance(cond, dict):
+            if "$nin" in cond and value in cond["$nin"]:
+                return False
+            if "$in" in cond and value not in cond["$in"]:
+                return False
+            if "$ne" in cond and value == cond["$ne"]:
+                return False
+        elif value != cond:
+            return False
+    return True
+
+
 class _FakeColl:
     def __init__(self):
         self.docs: List[Dict[str, Any]] = []
 
     def insert_one(self, doc):
         self.docs.append(doc)
+
+    def find_one(self, query=None, projection=None):
+        for d in self.docs:
+            if doc_matches(d, query or {}):
+                return dict(d)
+        return None
 
 
 def _ship_client(monkeypatch, order):
@@ -471,7 +496,7 @@ def test_ship_prepaid_blocked_when_fully_unpaid_even_for_manager(monkeypatch):
     NOBODY as Prepaid - book it COD (or record a payment) instead."""
     client, coll = _ship_client(
         monkeypatch,
-        _order(order_id="ORD-S1", payment_status="UNPAID", balance_due=18000.0),
+        _order(order_id="ORD-S1", payment_status="UNPAID", grand_total=18000.0, balance_due=18000.0),
     )
     resp = client.post(
         "/api/v1/shipping/shipments",
@@ -488,7 +513,7 @@ def test_ship_cod_booking_is_exempt(monkeypatch):
     courier collects on delivery. No money gate."""
     client, coll = _ship_client(
         monkeypatch,
-        _order(order_id="ORD-S1", payment_status="UNPAID", balance_due=18000.0),
+        _order(order_id="ORD-S1", payment_status="UNPAID", grand_total=18000.0, balance_due=18000.0),
     )
     resp = client.post(
         "/api/v1/shipping/shipments",
@@ -546,6 +571,87 @@ def test_ship_token_authorises_non_manager(monkeypatch):
 # ============================================================================
 # E. one-implementation guard: the routers must not carry their own copy
 # ============================================================================
+
+
+# ============================================================================
+# D. ONE reading of what an order owes (delivery_gate.order_balance_due)
+# ============================================================================
+# The counter (orders.py add_payment), the Prepaid leg (gate_credit_delivery)
+# and the COD leg (cod_collectable) all read the balance through the same
+# helper. Each test below was measured against the inline reading it replaces:
+# revert that one line and the test goes red.
+
+
+def _legacy_partial_no_balance_key():
+    """A legacy / imported row: PARTIAL on record, grand_total present, NO
+    balance_due key. The counter reads that as the whole bill still due."""
+    doc = _order(order_id="ORD-S1", payment_status="PARTIAL", grand_total=3000.0)
+    del doc["balance_due"]
+    return doc
+
+
+def test_ship_prepaid_leg_reads_a_missing_balance_as_the_whole_bill(monkeypatch):
+    """gate_credit_delivery used to read float(order.get("balance_due") or 0)
+    - Rs 0.00 on a balance-less row - so a CASHIER could Prepaid-ship an order
+    owing the whole bill. Reverting to that inline read makes this 201."""
+    client, coll = _ship_client(monkeypatch, _legacy_partial_no_balance_key())
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-S1", "address": {"payment_method": "Prepaid"}},
+        headers={"Authorization": f"Bearer {_ship_token(['CASHIER'])}"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "3,000.00" in resp.text
+    assert coll.docs == []
+
+
+def test_ship_prepaid_leg_formatted_balance_is_a_400_not_a_500(monkeypatch):
+    """float("2,000.00") raised straight through the Prepaid leg (a 500 to the
+    shop). The shared reading answers 400 with a stable code."""
+    client, coll = _ship_client(
+        monkeypatch,
+        _order(order_id="ORD-S1", payment_status="PARTIAL", balance_due="2,000.00"),
+    )
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-S1", "address": {"payment_method": "Prepaid"}},
+        headers={"Authorization": f"Bearer {_ship_token(['CASHIER'])}"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "AMOUNT_NOT_A_NUMBER"
+    assert coll.docs == []
+
+
+def test_counter_add_payment_formatted_balance_is_a_400_not_a_500(monkeypatch):
+    """The orders.py half of the shared reading. main's inline
+    order.get("balance_due", order.get("grand_total", 0)) let "2,000.00"
+    reach the over-tender comparison and TypeError (a 500); the shared
+    reading answers 400 before any write."""
+    app = FastAPI()
+    app.include_router(orders_mod.router, prefix="/api/v1/orders")
+    order = _order(
+        order_id="ORD-S1", payment_status="PARTIAL", status="CONFIRMED",
+        balance_due="2,000.00",
+    )
+    monkeypatch.setattr(orders_mod, "get_order_repository", lambda: FakeOrderRepo(order))
+    app.dependency_overrides[get_current_user] = _user(["CASHIER"])
+    resp = TestClient(app).post(
+        "/api/v1/orders/ORD-S1/payments", json={"method": "CASH", "amount": 500}
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "AMOUNT_NOT_A_NUMBER"
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", float("nan"), float("inf")])
+def test_as_amount_rejects_non_finite(raw):
+    """float() accepts "nan" / "inf"; neither is an amount a courier can
+    collect or a cashier can compare against."""
+    from api.services.delivery_gate import _as_amount
+
+    with pytest.raises(HTTPException) as ei:
+        _as_amount(raw, "balance_due")
+    assert ei.value.status_code == 400
+    assert ei.value.detail["code"] == "AMOUNT_NOT_A_NUMBER"
 
 
 def test_gate_manager_set_is_the_canonical_one():
