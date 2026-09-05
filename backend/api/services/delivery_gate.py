@@ -33,6 +33,7 @@ No emoji / non-ASCII (Windows cp1252). "Rs", never the rupee glyph.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional
 
 from fastapi import HTTPException
@@ -80,8 +81,12 @@ def gate_credit_delivery(
     consume - no money math.
 
     Verbatim move of orders.py _gate_credit_delivery (the token is passed as a
-    plain string instead of a request-body object so any door can call it)."""
-    balance_due = float(order.get("balance_due") or 0.0)
+    plain string instead of a request-body object so any door can call it).
+    The balance is read through order_balance_due below - the same reading the
+    counter and the COD door use. An inline float(order.get("balance_due"))
+    here read a balance-less legacy row as Rs 0.00 and let a cashier Prepaid-
+    ship an order owing the whole bill."""
+    balance_due = order_balance_due(order) or 0.0
     if balance_due <= 0.01:
         return
     roles = current_user.get("roles", [])
@@ -148,9 +153,13 @@ def assert_handover_payment(
 def _as_amount(raw, field: str) -> float:
     """Money off an order doc as a float, or a 400. Legacy/imported rows carry
     formatted strings ("2,000.00"); float() raised ValueError on those and the
-    caller answered a shop question with a 500."""
+    caller answered a shop question with a 500. float() also accepts "nan" /
+    "inf", which are not amounts either."""
     try:
-        return float(raw)
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("not a finite amount")
+        return value
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=400,
