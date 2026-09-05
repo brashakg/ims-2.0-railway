@@ -565,6 +565,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/incentive/points/inputs/last-year-sale` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/incentive/points/leaderboard` | AUTH |  |
 | `GET` | `/api/v1/incentive/points/mtd` | AUTH |  |
+| `GET` | `/api/v1/incentive/points/my-day` | AUTH | Self-only by construction: keys on the JWT user_id, no staff parameter (POS "My day" tile) |
 | `GET` | `/api/v1/incentive/points/settings/eligibility` | AUTH |  |
 | `PATCH` | `/api/v1/incentive/points/settings/eligibility` | SUPERADMIN |  |
 | `PATCH` | `/api/v1/incentive/points/settings/payout` | SUPERADMIN |  |
