@@ -115,7 +115,16 @@ export async function auditLayout(
         const cs = getComputedStyle(n);
         if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0)
           return false;
-        n = n.parentElement;
+        // A closed <details> hides everything but its <summary> through the
+        // ::details-content pseudo-element (content-visibility: hidden), which
+        // no element's own computed style shows - and the skipped subtree still
+        // answers getBoundingClientRect with phantom boxes. Measured (Chrome
+        // 149): the SEO textarea inside the collection drawer's closed
+        // <details> reported a 36px box at the y of the Smart-rules section
+        // below it and "overlapped" every control in that row.
+        const p: Element | null = n.parentElement;
+        if (p instanceof HTMLDetailsElement && !p.open && n.tagName !== 'SUMMARY') return false;
+        n = p;
       }
       return true;
     };

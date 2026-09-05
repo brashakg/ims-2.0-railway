@@ -731,16 +731,16 @@ export function CatalogManagerPage({
           {/* The table scrolls inside its own box at narrow widths; the page
               never scrolls sideways.
 
-              `contain:paint` is LOAD-BEARING, not decoration. Every page is
-              wrapped in .ims-anim-page, whose entry animation leaves a
-              transform on the element -- and while an ancestor is transformed,
-              Chrome counts a nested scroller's UNCLIPPED content in that
-              ancestor's scrollWidth. The box clipped correctly on screen and
-              #main-content still reported scrollWidth 693 at every phone
-              width, which the layout gate reads as "the page scrolls
-              sideways". Containing paint stops the overflow escaping upward;
-              the box still scrolls its own table. Measured 687 -> 350 at
-              360px, unchanged at 768/1180. */}
+              `contain:paint` is LOAD-BEARING, not decoration. The header's
+              sr-only labels are position:absolute, and a scroll container is
+              NOT the containing block of its absolutely positioned
+              descendants -- so each label sits at its static position (the
+              far-right column, ~690px) OUTSIDE this box's clip and widens
+              whichever ancestor IS its containing block: #main-content
+              (body-hscroll) while .ims-anim-page still carried a transform,
+              the document (doc-overflow) now that it does not. Containing
+              paint makes this box their containing block, so they stay
+              clipped with the table. Measured 687 -> 350 at 360px. */}
           <div className="overflow-x-auto [contain:paint] rounded-xl border border-gray-200 bg-white">
             <table className="w-full min-w-[780px] text-sm" data-testid="catalog-table">
               <thead>
