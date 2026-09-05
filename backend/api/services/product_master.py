@@ -1780,6 +1780,13 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": spine.get("offer_price"),
         "hsn_code": spine.get("hsn_code"),
         "gst_rate": spine.get("gst_rate"),
+        # The PUBLIC barcode. The spine captures it as the `gtin` ATTRIBUTE
+        # (FRAME/SUNGLASS specs), but the push's pseudo-variant reads it
+        # TOP-LEVEL off the twin (_variants_for_price_push -> _publishable_gtin,
+        # which also rejects the internal GS1 20-29 code). Never projected, so
+        # a catalogued GTIN only ever reached Shopify as an ims.gtin metafield
+        # -- never as the variant barcode the Google/Meta feeds republish.
+        "gtin": attrs.get("gtin") or spine.get("gtin") or None,
         # Display identity the storefront + push read (top-level name/title).
         "name": name or None,
         "title": name or None,
@@ -2502,15 +2509,20 @@ def mirror_update_to_catalog_twin(
         moved; catalog-door twins and the PIM screens read the nested shape.
       * cost_price / discount_category (uppercased) go to pricing.* only --
         that is the only spelling any twin carries or any reader consults.
-      * hsn_code / gst_rate / is_active / description mirror top-level.
+      * hsn_code / gst_rate / is_active / description / brand / model /
+        category / attributes mirror top-level; tags mirror to ecom.seo.tags
+        (the only spelling the push reads); an attributes.gtin projects to the
+        twin's top-level gtin (the pseudo-variant's public-barcode source).
       * the twin QUEUES for the manual Online Store push
         (ecom.locally_modified) only when a field the storefront actually
         shows moved: mrp / offer_price (the variant price fallbacks),
-        description (descriptionHtml) or images (the photograph the push
-        attaches and the publish gate reads). A description-only edit DOES
-        queue -- the pending count must be truthful about copy changes.
-        cost / tier / hsn / gst / is_active are in NO pushed payload: queuing
-        on them would send a push that changes nothing on Shopify.
+        description (descriptionHtml), images (the photograph the push
+        attaches and the publish gate reads), brand (vendor + brand_ tag),
+        category (productType), attributes (ims.* metafields + filter tags)
+        or tags. A description-only edit DOES queue -- the pending count must
+        be truthful about copy changes. cost / tier / hsn / gst / is_active /
+        model are in NO pushed payload: queuing on them would send a push
+        that changes nothing on Shopify.
       * twin key: current.pim_product_id first (door-created products key the
         twin on that separate uuid), spine product_id as the legacy /
         convergence fallback.
@@ -2544,15 +2556,39 @@ def mirror_update_to_catalog_twin(
             cat_patch["pricing.discount_category"] = (
                 dc.upper() if isinstance(dc, str) else dc
             )
-        for key in ("hsn_code", "gst_rate", "is_active", "description"):
+        # Every field the spine edit can move that the push reads off the TWIN:
+        # brand -> vendor + the brand_ filter tag, category -> productType,
+        # attributes -> the ims.* metafields + the attribute filter tags, and
+        # tags -> ecom.seo.tags (build_product_input reads ONLY that spelling).
+        # These used to stop at the spine, so the twin -- and therefore Shopify
+        # -- went stale after an edit (prod 2026-09-06: one twin had already
+        # drifted from its spine on attributes). model / hsn / gst / is_active
+        # mirror for the PIM screens but queue nothing: no pushed payload
+        # reads them, and the spine never recomputes `name` on edit.
+        for key in (
+            "hsn_code", "gst_rate", "is_active", "description",
+            "brand", "model", "category", "attributes",
+        ):
             if key in patch:
                 cat_patch[key] = patch[key]
+        if "tags" in patch:
+            cat_patch["ecom.seo.tags"] = list(patch["tags"] or [])
+        if "gtin" in (patch.get("attributes") or {}):
+            # Same projection as _build_pim_doc: the public barcode rides
+            # top-level on the twin for the pseudo-variant.
+            cat_patch["gtin"] = patch["attributes"].get("gtin") or None
         # The photograph moves with the spine and QUEUES: it is the one field
         # the storefront shows more prominently than the price, and the push
         # reads it off the twin (see _build_pim_doc).
         if "images" in patch:
             cat_patch["images"] = _spine_images({"images": patch["images"]})
-        if any(k in patch for k in ("mrp", "offer_price", "description", "images")):
+        if any(
+            k in patch
+            for k in (
+                "mrp", "offer_price", "description", "images",
+                "brand", "category", "attributes", "tags",
+            )
+        ):
             cat_patch["ecom.locally_modified"] = True
         if not cat_patch:
             return
