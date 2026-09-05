@@ -35,6 +35,7 @@ import { buildPaymentBody } from '../../../components/pos/paymentBody';
 import { usePOSStore, type CashTenderCapture, type PaymentEntry } from '../../../stores/posStore';
 import type { Order } from '../../../types';
 import DeliveryCompleteScreen from './DeliveryCompleteScreen';
+import { PosWidgets } from './PosWidgets';
 
 const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
@@ -459,6 +460,20 @@ export function DeliverySurface() {
               />
             </div>
           )}
+
+          {/* The SAME four tiles + customer panel the billing surfaces show
+              (owner 2026-09-05: all three counters get it). There is no bill
+              customer in posStore here, so the scanned order's customer is
+              handed in; with no order the tiles read as "pick a customer". */}
+          <div className="shrink-0 lg:mt-auto">
+            <PosWidgets
+              customer={
+                order?.customerId
+                  ? { id: String(order.customerId), name: order.customerName || 'Customer', phone: order.customerPhone || '' }
+                  : null
+              }
+            />
+          </div>
         </div>
 
         {/* RIGHT: money + hand over (430px — the billing till's own column) */}

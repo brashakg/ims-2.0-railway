@@ -14,6 +14,10 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// The widget tiles + customer panel now mount on the delivery counter too
+// (owner 2026-09-05); they read through react-query and are not what this
+// file is about, so they are stubbed the way the billing/counter tests do.
+vi.mock('../PosWidgets', () => ({ PosWidgets: () => null }));
 vi.mock('../../../../context/AuthContext', () => ({
   useAuth: () => ({
     user: { id: 'u-1', name: 'Meena', activeStoreId: 'BV-BOK-01', roles: ['SUPERADMIN'] },
