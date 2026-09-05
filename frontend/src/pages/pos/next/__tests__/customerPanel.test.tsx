@@ -153,22 +153,11 @@ function seedBill() {
   } as any);
 }
 
-let phoneWidth = false;
-function installMatchMedia() {
-  Object.defineProperty(window, 'matchMedia', {
-    configurable: true,
-    writable: true,
-    value: (query: string) => ({
-      matches: query.includes('max-width') ? phoneWidth : !phoneWidth,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      onchange: null,
-      dispatchEvent: () => false,
-    }),
-  });
+/** The panel reads window.innerWidth and follows resize (the layout probe
+ *  resizes an open page). 390 = a phone, 1280 = the desktop till. */
+function setViewport(width: number) {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
+  act(() => { window.dispatchEvent(new Event('resize')); });
 }
 
 function mount() {
@@ -187,8 +176,7 @@ const familyTile = () => screen.getByRole('button', { name: /^Family Rx/ });
 
 beforeEach(() => {
   roles = ['CASHIER'];
-  phoneWidth = false;
-  installMatchMedia();
+  setViewport(1280);
   navigateSpy.mockReset();
   getFamilyRx.mockReset().mockResolvedValue(FAMILY);
   getQueue.mockReset().mockResolvedValue({ queue: [] });
@@ -292,23 +280,21 @@ describe('POS customer panel', () => {
     expect(getFamilyRx).toHaveBeenCalledWith('c1');
   });
 
-  it('phone width renders the bottom-sheet variant; desktop the slide-over', () => {
-    phoneWidth = true;
-    installMatchMedia();
-    const view = mount();
-    fireEvent.click(familyTile());
-    const sheet = dialog()!;
-    expect(sheet).toHaveAttribute('data-variant', 'sheet');
-    expect(screen.getByTestId('customer-panel-grab')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Back to bill' })).toHaveClass('w-full');
-    view.unmount();
-
-    phoneWidth = false;
-    installMatchMedia();
+  it('phone width renders the bottom-sheet variant; desktop the slide-over; it follows a resize', () => {
+    setViewport(390);
     mount();
     fireEvent.click(familyTile());
+    expect(dialog()).toHaveAttribute('data-variant', 'sheet');
+    expect(screen.getByTestId('customer-panel-grab')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back to bill' })).toHaveClass('w-full');
+
+    // The layout probe resizes an OPEN page; the panel must follow, not stick.
+    setViewport(1280);
     expect(dialog()).toHaveAttribute('data-variant', 'slide-over');
     expect(screen.queryByTestId('customer-panel-grab')).toBeNull();
+
+    setViewport(390);
+    expect(dialog()).toHaveAttribute('data-variant', 'sheet');
   });
 
   it('"Book eye test" adds the member to today\'s queue through the existing door, once', async () => {

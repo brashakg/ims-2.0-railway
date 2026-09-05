@@ -106,19 +106,19 @@ const firstName = (name: string | null | undefined) => (name || 'member').split(
 const serverDetail = (e: any, fallback: string) =>
   e?.response?.data?.detail || e?.message || fallback;
 
-/** <=767px is the phone sheet; the app's `tablet` breakpoint starts at 768. */
-const PHONE_QUERY = '(max-width: 767px)';
+/** <=767px is the phone sheet; the app's `tablet` breakpoint starts at 768.
+ *  FOLLOWS THE VIEWPORT (resize-subscribed), never a mount-time read: the e2e
+ *  layout probe resizes an open page rather than reloading it, and the
+ *  reactiveWidthGates guard fails any width gate that would not follow. */
+const PHONE_MAX_WIDTH = 767;
+const readIsPhone = () => typeof window !== 'undefined' && window.innerWidth <= PHONE_MAX_WIDTH;
 function useIsPhone(): boolean {
-  const supported = typeof window !== 'undefined' && typeof window.matchMedia === 'function';
-  const [phone, setPhone] = useState<boolean>(() => supported && window.matchMedia(PHONE_QUERY).matches);
+  const [phone, setPhone] = useState<boolean>(readIsPhone);
   useEffect(() => {
-    if (!supported) return;
-    const mq = window.matchMedia(PHONE_QUERY);
-    const onChange = (e: MediaQueryListEvent) => setPhone(e.matches);
-    setPhone(mq.matches);
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
-  }, [supported]);
+    const on = () => setPhone(readIsPhone());
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  }, []);
   return phone;
 }
 
