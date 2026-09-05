@@ -166,6 +166,10 @@ def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
                     "shopify_id": result.get("shopify_id"),
                     "error": result.get("error"),
                     "reason": result.get("reason"),
+                    "code": result.get("code"),
+                    # The publish side channel keeps the RAW vendor error
+                    # (`error` above is the plain-language line).
+                    "publication": result.get("publication"),
                 },
             }
         )
@@ -460,6 +464,7 @@ async def push_history(
                 "shopify_id": d.get("shopify_id"),
                 "error": d.get("error"),
                 "reason": d.get("reason"),
+                "code": d.get("code"),
             }
         )
         if len(entries) >= limit:

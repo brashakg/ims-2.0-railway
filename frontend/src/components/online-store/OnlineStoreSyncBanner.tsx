@@ -310,7 +310,8 @@ export function SyncChip({
 export function formatPushResult(label: string, r: PushResult): string {
   const where = r.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
   if (!r.ok) {
-    return `${label}: ${where} — ${r.error || r.reason || 'not pushed'}`;
+    const codePart = r.code ? ` [${r.code}]` : '';
+    return `${label}: ${where} — ${r.error || r.reason || 'not pushed'}${codePart}`;
   }
   const idPart = r.shopify_id ? ` · ${r.shopify_id}` : '';
   const actionPart = r.action ? ` (${r.action})` : '';
