@@ -1,6 +1,6 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-09-05**. The whole 09-03/04 wave is on main: **#1088** (46 commits, six CI rounds each catching one real find), **#1090** (household guard) and **#1091** (weightings admin-only), then six more squash-merged on 2026-09-04 — **#1093** overdue list, **#1095** till-retirement orphans, **#1096** Add-a-Product, **#1097** store picker, **#1098** catalog review queue + one photo rule, **#1099** eye examination as a page (section 4i). One PR open: **#1094 (draft)**, courier COD collects the balance due — NOT merged. Two new decisions owed (section 5). This file is the single place to see what is done, what
+Updated **2026-09-06**. Eight more squash-merged on 2026-09-05/06 (section 4j): **#1094** courier COD collects the balance due (out of draft after two adversarial rounds), **#1102** page-entry transform + KNOWN_BROKEN minus two, **#1103** top-menu dropdowns scroll on a tablet, **#1104** leaderboards self-only below ADMIN, **#1105** Shopify publish-scope code, **#1106** POS customer panel slide-over, **#1107** spine edits reach the catalog twin, **#1108** honest push timeout. On prod: the catalog twins' photos backfilled 09-05, the Shopify app's missing publication scopes found and granted 09-06, and the **first six IMS-originated products went live on bettervision.in** (section 4k). The 09-03/04 wave (#1088-#1099, sections 4f-4i) is all on main; no PR is open. Section 5: one new decision owed (Book eye test for sales roles); the leaderboard row is closed by #1104. This file is the single place to see what is done, what
 is in flight, and what is waiting on a decision. Claude keeps it current; if it
 disagrees with reality, the file is wrong and should be fixed.
 
@@ -102,7 +102,7 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 
 | Work | State |
 |---|---|
-| **Catalog** — review queue + the photo work | **MERGED #1098** + **#1096** (section 4i); MEASURED + REPAIRED on prod 2026-09-05: twins with a usable photo 6 -> 70 (64 repaired, nothing queued, publish still manual); 37 never-pushed products now qualify to go online; only 7 products have no photo anywhere |
+| **Catalog** — review queue + the photo work | **MERGED #1098** + **#1096** (section 4i); MEASURED + REPAIRED on prod 2026-09-05: twins with a usable photo 6 -> 70 (64 repaired, nothing queued, publish still manual); 37 never-pushed products now qualify to go online; only 7 products have no photo anywhere; **first 6 pushed LIVE 2026-09-06** (section 4k) |
 | **Staff sign-in gate** — approved devices (WebAuthn passkeys); ADMIN/SUPERADMIN never gated | **BUILT, shipped OFF** — owner arms it |
 | Three screens each re-map the store's staff list their own way (`NewTaskModal`, `SalespersonPicker`, the new `useStoreStaff`) | small follow-up |
 
@@ -177,7 +177,7 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | Finding | Where | Why open |
 |---|---|---|
 | Repair-portal DELIVERED is unbilled BY DESIGN | `repair_portal.py` | revisit before repairs carry charges at go-live |
-| COD booking sends `sub_total = grand_total`, not `balance_due` (over-collects on a partly-paid COD) | `services/shiprocket.py` | **PR #1094 (draft, NOT merged)**: COD sends `balance_due`; round-1 adversarial review's 9 findings fixed (39 probes kept), round-2 review in progress. Owner decision owed: a COD remittance door — a courier's collection is never recorded as a payment, so the order stays unpaid |
+| COD booking sends `sub_total = grand_total`, not `balance_due` (over-collects on a partly-paid COD) | `services/shiprocket.py` | **MERGED #1094**: COD sends `balance_due`; two adversarial rounds (39 probes kept). Round 2 fixed: `gate_credit_delivery` reads through the shared `order_balance_due` (a balance-less legacy row no longer reads Rs 0); a SIMULATED dry-run booking no longer 409-locks the order; the shipping card stops guessing a missing balance and offers "Book again anyway" on a 409; non-finite amounts refused. Left by its author: the duplicate-shipment lookup fails soft (no DB, no guard); a booking is not amended when the balance is paid at the counter afterwards; a COD REMITTANCE door is an owner decision (section 5), not built |
 | lab-routing scan reply lacks a PAYMENT_DUE sentence (blocks correctly, says only the code) | `services/lab_routing.py` | cosmetic |
 | `find_overdue` datetime vs string `expected_delivery` -> `/orders/overdue/list` empty in prod | `order_repository.py` | **MERGED #1093** — the string stays; one `iso_date_window` helper for the orders, workshop and prescription windows |
 | Optical SALE-stage WhatsApp `ORDER_CONFIRMED` now seeded; owner must map the real approved template name before arming | `notification_templates.py` | owner paperwork (DLT) |
@@ -203,14 +203,36 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | **Catalog review + photos** | Review queue at its own address `/catalog/review` (old `?segment=review` links forward); photo column + filter; `/catalog/missing-photos` work list; `has_photo` / `online` computed on the server from the push's own predicate; counts from the server. **Real bug fixed:** `_build_pim_doc` never projected the spine's `images` onto the catalog twin, so catalogued products were refused as "no photograph"; `scripts/backfill_twin_images.py` (dry-run by default) repairs existing twins. **Correction:** the earlier reading that photography is the go-live bottleneck came from this projection bug, not from a photo shortage; MEASURED + REPAIRED on prod 2026-09-05: twins with a usable photo 6 -> 70 (64 repaired, nothing queued, publish still manual); 37 never-pushed products now qualify to go online; only 7 products have no photo anywhere | **MERGED #1098** |
 | **Eye examination** | Its own page at `/clinical/test/:entryId` (and `/clinical/test/amend/:testId`); the `EyeTestForm` modal is DELETED; a staff-only internal note kept off print, portal and wire. **Correction:** the split did NOT widen `/clinical/conversion` -- optometrists always had it and the backend deliberately serves them a revenue-stripped row; the gate is now pinned both ways by test | **MERGED #1099** |
 
+## 4j. Merged 2026-09-05/06 (all squash-merged to main)
+
+| PR | What changed | Status |
+|---|---|---|
+| **#1094** courier COD | Collects `balance_due`, not `grand_total` — detail in section 4g | **MERGED #1094** |
+| **#1102** layout gate | `.ims-anim-page` entry animation no longer leaves a transform on the page wrapper (fill `both` -> `backwards`), so `fixed inset-0` overlays anchor to the viewport again; the e2e probe now treats closed `<details>` content as hidden. KNOWN_BROKEN shrank by two: `hr salary-config` (genuinely fixed) and `online-store new-smart-collection` (a probe artefact). The other too-wide rows are real width problems, unchanged | **MERGED #1102** |
+| **#1103** top menu | Owner could not scroll the Stock & supply submenu on a tablet: `vh` sized the dropdown under the browser toolbar. Dropdowns now size to the visible viewport (`dvh`) and stay finger-scrollable (`touch-action: pan-y`) | **MERGED #1103** |
+| **#1104** leaderboards | Everyone below ADMIN/SUPERADMIN sees their own row + rank only — one trim on `/incentive`, the `/payroll` commission leaderboard + summary, and the analytics-v2 staff leaderboard, which had **no gate at all** and leaked every colleague's revenue to any signed-in role. SALES_STAFF/CASHIER admitted to `/incentive/leaderboard`; NOT to `/hr/leaderboard` (the payroll mount is finance-only, pinned by test). Closes the section-5 leaderboard row | **MERGED #1104** |
+| **#1105** Shopify push | `PUBLISH_SCOPE_MISSING` code + a plain message when the publish step is denied (the product create had already succeeded); `productOptions` sent on CREATE only (Shopify rejects it on update); failed pushes show the server's message on `/online-store/products` and `/online-store/shopify` | **MERGED #1105** |
+| **#1106** POS customer panel | The four widget tiles (Family Rx, Dues, Offers & loyalty, My day) open a slide-over on the till (bottom sheet on phones) instead of navigating; "Bill for <member>" keeps the cart; money is read-only in the panel; one-tap "Book eye test" into today's clinical queue (reads the queue first, never adds twice); WhatsApp recall reminder queued via flow key `PRESCRIPTION_EXPIRY`; new `GET /incentive/points/my-day` (own data only). Owner decisions for all six behaviours recorded 09-06. **Open:** the server refuses "Book eye test" for SALES roles (section 5) | **MERGED #1106** |
+| **#1107** catalog twin | Spine edits now mirror brand/category/attributes/tags/gtin onto the catalog twin the push reads — vendor, metafields and tags no longer go stale after an edit. **Measured first (prod, read-only):** the "Shopify did not get the descriptions" report is NOT a push fault — only 10 of 76 products have a description in IMS at all; the `ims.*` attribute metafields DO reach Shopify but need theme blocks to render | **MERGED #1107** |
+| **#1108** push timeout | The shared axios 10 s timeout produced a FALSE "Network error" on a push that had succeeded. Push requests now get a sweep-sized timeout (180 s sweep, 60 s single entity) and an honest "still running on the server, do not press again" message | **MERGED #1108** |
+
+## 4k. Storefront — what happened on prod (dated facts)
+
+| Date | Event |
+|---|---|
+| 2026-09-05 | Catalog twins' `images` backfilled from the spine (dry-run measured first): twins with a usable photo **6 -> 70**; 37 never-pushed products now qualify; 7 have no photo anywhere; nothing queued |
+| 2026-09-06 | Root cause of every failed LIVE push: the installed Shopify app "BV Inventory-1" had 23 scopes and NO `write_publications` / `read_publications` — the store had never been asked to accept the July app version's scopes (legacy install flow). Fixed by opening the app's own OAuth authorize URL in the owner's admin; owner pressed Update; 25 scopes verified; backend redeployed to drop its cached token |
+| 2026-09-06 22:24 UTC | Owner authorised the assistant to press the Products "Push": **6 IMS products went LIVE on bettervision.in** (verified ACTIVE + published on Shopify), 4 refused for no photo — the first IMS-originated products on the storefront |
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
 |---|---|
-| **COD remittance door** — a courier's collection is never recorded as a payment, so a COD order stays unpaid in IMS after the customer has paid at the door | Surfaced by #1094; until it exists every COD order shows a false balance |
+| **COD remittance door** — a courier's collection is never recorded as a payment, so a COD order stays unpaid in IMS after the customer has paid at the door | Surfaced by #1094 (MERGED 09-05); until it exists every COD order shows a false balance. `cod_amount` on the shipment doc is the figure a reconcile would net against |
 | **36px or 44px controls** — the app-wide `.input-field` is 36px; the Add-a-Product design assumed 44px touch targets | Raising it changes every form in the app; found in #1096, deliberately not decided there |
+| **"Book eye test" from the POS customer panel, for sales roles** — the one-tap booking calls `POST /clinical/queue`, which the server gates to ADMIN/STORE_MANAGER/OPTOMETRIST; a SALES_STAFF/CASHIER press is refused with the server's own message | Surfaced by #1106; either the queue-add door admits floor roles (a permission widening) or the button hides for them — the owner's call |
 | **`app.uniparallel.com` move** | Passkeys bind to the web address; the device gate must not be enrolled before a domain change |
-| **Commission Leaderboard** shows per-staff revenue and commission in rupees to 5 roles | **RULED 09-03**: ADMIN/SUPERADMIN see all; everyone else, managers included, sees own figures + rank. **BUILT** — one trim (`points.self_only_rows`) on `/payroll/commission/leaderboard`, `/payroll/commission/summary`, `/analytics-v2/staff-leaderboard` and the `/incentive/points` boards; SALES_STAFF/CASHIER can now open `/incentive/leaderboard` for their own standing |
+| **Commission Leaderboard** shows per-staff revenue and commission in rupees to 5 roles | **RULED 09-03**: ADMIN/SUPERADMIN see all; everyone else, managers included, sees own figures + rank. **MERGED #1104** — one trim (`points.self_only_rows`) on `/payroll/commission/leaderboard`, `/payroll/commission/summary`, `/analytics-v2/staff-leaderboard` (which had NO gate) and the `/incentive/points` boards; SALES_STAFF/CASHIER can now open `/incentive/leaderboard` for their own standing, still not `/hr/leaderboard` (finance-only mount) |
 | **Apply-for-leave has no screen** — nobody in the company can request leave | **BUILT — MERGED #1088**: apply form on `/my-work` (open to every operational role), feeding the approve/reject chain that was already running |
 | **Thermal or A4** receipts at the counter? | **RULED 09-03: A4 + WhatsApp, not thermal** — this unblocked the POS switchover; the thermal renderers went in #1095 |
 | Is *"every bill needs a customer"* deliberate? | **RULED 09-03: yes** — no anonymous walk-in sale, no amount threshold; the till already assumed it |
@@ -237,3 +259,8 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
   "Cashier" becomes Sameer's task and Rupesh's task by name. Every generated
   task used to go to whoever pressed the button, and the template's assignee
   list was read by nothing.
+- **POS customer panel** (owner, recorded 2026-09-06): the widget tiles open a
+  slide-over on the till, never navigate; "Bill for <member>" keeps the cart;
+  money is read-only in the panel; "Book eye test" is one tap onto today's
+  queue; the WhatsApp reminder is the household recall (`PRESCRIPTION_EXPIRY`);
+  "My day" shows the signed-in person's own figures only.
