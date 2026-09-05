@@ -21,6 +21,16 @@ import type {
   KickerRollupResponse,
 } from '../../types';
 
+export interface MyDayResponse {
+  user_id: string;
+  store_id: string;
+  date: string;
+  sales_today: number;
+  bills_today: number;
+  walkins_today?: number;
+  conversion_pct?: number;
+}
+
 export const incentiveApi = {
   /** P1 — log one staff's points for one day. 409 if duplicate. */
   createDaily: async (
@@ -61,6 +71,15 @@ export const incentiveApi = {
     const r = await api.delete(`/incentive/points/daily/${logId}`, {
       data: { reason },
     });
+    return r.data;
+  },
+
+  /** POS "My day" tile: the SIGNED-IN person's own day at the active store.
+   *  Self-only by construction on the server (keys on the JWT user_id, no
+   *  staff parameter). conversion_pct / walkins_today are present only when a
+   *  walk-in was logged against the caller today; there is no target field. */
+  getMyDay: async (): Promise<MyDayResponse> => {
+    const r = await api.get('/incentive/points/my-day');
     return r.data;
   },
 
