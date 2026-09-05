@@ -49,6 +49,10 @@ from test_online_push_dirty_flag import _DB, _run  # noqa: E402
 
 
 _PUB_GID = "gid://shopify/Publication/1"
+_DENIED_PUBLISH_MSG = (
+    "Access denied for publishablePublish field. Required access: "
+    "write_publications access scope."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +66,9 @@ class _Shopify:
         self.calls = []
         self.media_on_existing = media_on_existing
         self.product_id = product_id
+        # The prod failure of 2026-09-05: the app token lacks
+        # write_publications, so ONLY the publish step is refused.
+        self.deny_publish = False
 
     @staticmethod
     def _op(query):
@@ -139,6 +146,17 @@ class _Shopify:
                 }
             }
         if op == "imsPublishablePublish":
+            if self.deny_publish:
+                return {
+                    "errors": [
+                        {
+                            "message": _DENIED_PUBLISH_MSG,
+                            "path": ["publishablePublish"],
+                            "extensions": {"code": "ACCESS_DENIED"},
+                        }
+                    ],
+                    "data": {"publishablePublish": None},
+                }
             return {"data": {"publishablePublish": {"userErrors": []}}}
         if op == "imsVariantPricesUpdate":
             return {
@@ -1115,3 +1133,162 @@ def test_a_success_with_no_product_id_is_not_reported_as_processed(
     assert "Error" not in (res.get("error") or ""), (
         "the operator is being shown a Python exception: %r" % (res.get("error"),)
     )
+
+
+# ===========================================================================
+# H. THE PUBLISH STEP IS REFUSED (prod 2026-09-05: 6 of 11 presses, mode LIVE,
+#    "Access denied for publishablePublish field. Required access:
+#    write_publications access scope."). The productCreate BEFORE it succeeded.
+# ===========================================================================
+
+
+def test_a_denied_publish_still_records_the_shopify_id(db, shopify):
+    """The create succeeded and only the publish was refused. The gid MUST be on
+    the IMS doc, or the next press CREATES A SECOND copy on Shopify."""
+    shopify.deny_publish = True
+    doc = _seed(db, _product())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok is False
+    assert len(shopify.calls_of("imsProductCreate")) == 1
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_product_id"] == shopify.product_id
+    assert saved["ecom"].get("status") != "PUBLISHED", "IMS must not claim visibility"
+    assert saved["ecom"].get("locally_modified") is True, "must stay queued for the retry"
+
+
+def test_the_press_after_a_denied_publish_updates_the_same_product(db, shopify):
+    """Second press = productUpdate on the SAME gid, never a second create."""
+    shopify.deny_publish = True
+    doc = _seed(db, _product())
+    _run(shopify_push.push_product(db, doc, []))
+    saved = db["catalog_products"].find_one({"id": "P1"})
+
+    shopify.deny_publish = False
+    shopify.media_on_existing = 1
+    res = _run(shopify_push.push_product(db, saved, []))
+
+    assert res.ok is True and res.action == "update"
+    assert len(shopify.calls_of("imsProductCreate")) == 1, "a duplicate product was minted"
+    assert _input_of(shopify, "imsProductUpdate")["id"] == shopify.product_id
+
+
+def test_a_denied_publish_says_what_to_fix_in_plain_words(db, shopify):
+    """The operator gets a stable code + an instruction, not the GraphQL text.
+    The raw vendor line is KEPT on the publish side channel for the audit."""
+    shopify.deny_publish = True
+    doc = _seed(db, _product())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.code == shopify_push.PUBLISH_SCOPE_MISSING == "PUBLISH_SCOPE_MISSING"
+    assert res.error == (
+        "Saved on Shopify but not made visible: the IMS app has no "
+        "write_publications access. Re-approve the app's permissions in "
+        "Shopify, then press again."
+    )
+    assert "graphql" not in res.error.lower()
+    assert _DENIED_PUBLISH_MSG in (res.publication or {}).get("error", "")
+    assert res.shopify_id == shopify.product_id
+
+
+def test_a_denial_without_the_extensions_code_is_still_recognised(db, shopify, monkeypatch):
+    """The prod audit text carried the sentence, not the extensions block --
+    the classifier must not depend on Shopify's optional metadata."""
+    real = shopify
+
+    async def _bare(db_, query, variables):
+        if "imsPublishablePublish" in query:
+            real.calls.append({"op": "imsPublishablePublish", "variables": variables})
+            return {"errors": [{"message": _DENIED_PUBLISH_MSG}]}
+        return await real(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", _bare)
+    doc = _seed(db, _product())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.code == "PUBLISH_SCOPE_MISSING"
+
+
+def test_an_ordinary_publish_failure_carries_no_scope_code(db, shopify, monkeypatch):
+    """Discriminating control: a different publish userError must NOT be
+    dressed up as the permissions problem."""
+    real = shopify
+
+    async def _other(db_, query, variables):
+        if "imsPublishablePublish" in query:
+            real.calls.append({"op": "imsPublishablePublish", "variables": variables})
+            return {
+                "data": {
+                    "publishablePublish": {
+                        "userErrors": [{"field": ["id"], "message": "Publishable not found"}]
+                    }
+                }
+            }
+        return await real(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", _other)
+    doc = _seed(db, _product())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok is False
+    assert res.code is None
+    assert "Publishable not found" in (res.error or "")
+
+
+def test_the_audit_row_keeps_the_raw_denial(db, shopify, monkeypatch):
+    """The screen shows the plain line; the ledger keeps the vendor's words."""
+    import api.dependencies as deps
+
+    rows = []
+
+    class _Audit:
+        def create(self, row):
+            rows.append(row)
+
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: _Audit())
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    shopify.deny_publish = True
+    _seed(db, _product())
+
+    out = _run(push_router.push_product(product_id="P1", current_user=_admin()))
+
+    assert out["result"]["code"] == "PUBLISH_SCOPE_MISSING"
+    [row] = rows
+    d = row["details"]
+    assert d["ok"] is False
+    assert d["code"] == "PUBLISH_SCOPE_MISSING"
+    assert d["error"].startswith("Saved on Shopify but not made visible")
+    assert _DENIED_PUBLISH_MSG in d["publication"]["error"]
+    assert d["shopify_id"] == shopify.product_id
+
+
+# ===========================================================================
+# I. productOptions ON UPDATE (prod 2026-09-05: "product_options cannot be
+#    specified during update") -- the field is create-only on Shopify.
+# ===========================================================================
+
+
+def test_an_update_never_sends_productOptions_but_a_create_still_does(db, shopify):
+    variants = [
+        {"sku": "S-1", "option_color": "Black", "option_size": "M"},
+        {"sku": "S-2", "option_color": "Gold", "option_size": "M"},
+    ]
+    create_inp = shopify_push.build_product_input(_product(), variants)
+    assert "productOptions" in create_inp
+
+    update_inp = shopify_push.build_product_input(
+        _product(shopify_id="gid://shopify/Product/900"), variants
+    )
+    assert update_inp["id"] == "gid://shopify/Product/900"
+    assert "productOptions" not in update_inp
+
+    # ...and the LIVE update press sends exactly that payload.
+    shopify.media_on_existing = 1
+    doc = _seed(db, _product(shopify_id="gid://shopify/Product/900"))
+    res = _run(shopify_push.push_product(db, doc, variants))
+    assert "productOptions" not in _input_of(shopify, "imsProductUpdate")
+    assert "productOptions" not in (res.payload or {})

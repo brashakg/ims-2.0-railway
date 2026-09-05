@@ -138,11 +138,12 @@ const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string 
   // exempts a popup nothing is watching. The wizard is gone; the same modal
   // now opens from /pos/new and blocks on any violation, which is the stronger
   // position.
-  {
-    name: 'hr salary-config',
-    widths: [768, 820],
-    why: 'THE OWNER-REPORTED ONE. The salary-config modal is taller than the viewport with no scroller, so entity/store/name rows land at y=-71..33 — above the top edge, unreachable. Screenshot-confirmed at 768x1024 and 820x1180.',
-  },
+  // REMOVED: 'hr salary-config' at 768/820 (THE OWNER-REPORTED ONE: rows at
+  // y=-71..33, unreachable). Its `fixed inset-0` overlay was anchored to the
+  // page wrapper, which `.ims-anim-page`'s forwards fill kept transformed, so
+  // a 90dvh panel was centred inside a box shorter than itself. With the fill
+  // on `backwards` the overlay anchors to the viewport and CI measured this
+  // popup CLEAN at all seven widths.
   {
     name: 'tasks new-task',
     widths: [360, 390, 430, 768, 820],
@@ -153,11 +154,12 @@ const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string 
     widths: [360, 390, 430, 768, 820, 1180, 1440],
     why: 'Broken at EVERY width: the panel clips its own first row, so Customer name / phone / email sit at y=67..103 behind the panel edge, unreachable. At 360px the Offer Price field additionally overlaps the delete-line button by 9x32px. Screenshot-confirmed at 1180x820 and 360x780.',
   },
-  {
-    name: 'online-store new-smart-collection',
-    widths: [360],
-    why: 'At 360px the Smart-rules section collides with the drawer footer: the description textarea overlaps the "ALL rules (AND)" / "ANY rule (OR)" toggles by ~9px of their height, so part of each toggle is not clickable. Screenshot-confirmed.',
-  },
+  // REMOVED: 'online-store new-smart-collection' at 360. The "textarea
+  // overlapping the AND/OR toggles" was the SEO textarea inside a CLOSED
+  // <details>: Chrome skips that subtree's layout but still hands out a
+  // phantom rect for it, and the probe took it for a visible control. Nothing
+  // overlaps on screen. The probe now treats closed-<details> content as
+  // hidden (fixtures/layout.ts styledVisible), so this popup blocks again.
 ];
 
 /**

@@ -329,6 +329,12 @@ export default function OnlineShopifySyncPage() {
         const withheld = Number(s?.publish_withheld ?? 0);
         const heldDown = Number(s?.taken_down_skipped ?? 0);
         const archived = Number(s?.archived_not_listed ?? 0);
+        // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
+        // first failed row's server message rides on the toast itself.
+        const firstFail = (res.results ?? []).find((r) => !r.ok && (r.error || r.reason));
+        const why = firstFail
+          ? ` — ${firstFail.error || firstFail.reason}${firstFail.code ? ` [${firstFail.code}]` : ''}`
+          : '';
         const msg =
           `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
           (s?.failed ? ` · ${s.failed} failed` : '') +
@@ -336,7 +342,8 @@ export default function OnlineShopifySyncPage() {
           (refused ? ` · ${refused} refused (no photograph)` : '') +
           (withheld ? ` · ${withheld} NOT made visible` : '') +
           (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
-          (archived ? ` · ${archived} archived (not listed)` : '');
+          (archived ? ` · ${archived} archived (not listed)` : '') +
+          why;
         if (refused || withheld || s?.failed) toast.warning(msg);
         else toast.success(msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
@@ -923,7 +930,10 @@ export default function OnlineShopifySyncPage() {
                           title={h.error || h.reason || undefined}
                         >
                           <XCircle className="w-3 h-3 shrink-0" />
-                          <span className="truncate">{h.error || h.reason || 'failed'}</span>
+                          <span className="truncate">
+                            {h.error || h.reason || 'failed'}
+                            {h.code ? ` [${h.code}]` : ''}
+                          </span>
                         </span>
                       )}
                     </td>
