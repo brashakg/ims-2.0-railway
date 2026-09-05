@@ -809,6 +809,9 @@ export function OrdersPage() {
                   orderId={selectedOrder.id}
                   orderNumber={selectedOrder.orderNumber}
                   storeId={selectedOrder.storeId}
+                  balanceDue={selectedOrder.balanceDue}
+                  grandTotal={selectedOrder.grandTotal}
+                  paymentStatus={selectedOrder.paymentStatus}
                 />
 
                 {/* Customer order-tracking QR — public, no-login link. */}

@@ -1003,7 +1003,15 @@
   top: 100%; left: 0;
   margin-top: 2px;
   min-width: 220px; max-width: min(320px, calc(100vw - 24px));
-  max-height: min(72vh, 560px); overflow-y: auto;
+  max-height: min(72dvh, 560px); overflow-y: auto;
+  /* A scrollable menu must stay scrollable by finger and wheel: pan-y keeps
+     vertical touch panning even though the menu list above is a horizontal
+     scroller; contain stops a wheel at the end of the list from scrolling the
+     page behind the menu; the last item gets breathing room above the edge. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scroll-padding-bottom: 8px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-md, 12px);
@@ -3565,8 +3573,16 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 @keyframes ims-shimmer   { 100% { transform: translateX(100%); } }
 
 /* Route/page mount — the page body eases in on every navigation. Keyed on the
-   pathname in AppLayout so it re-triggers per route. */
-.ims-anim-page { animation: ims-fade-up .26s cubic-bezier(.22,.61,.36,1) both; }
+   pathname in AppLayout so it re-triggers per route.
+   Fill is `backwards`, NOT `both`: a forwards fill keeps the interpolated end
+   value (translateY(0px), computed as matrix(1,0,0,1,0,0)) on the wrapper for
+   the life of the page, and a transformed element is the containing block for
+   every position:fixed / absolute descendant. That anchored every inline modal
+   to the page wrapper (top 52px, page height) instead of the viewport, and let
+   anything escaping a table scroller widen #main-content -- the layout gate's
+   body-hscroll. Once the animation ends the base style (opacity 1, no
+   transform) equals the last keyframe, so nothing visible changes. */
+.ims-anim-page { animation: ims-fade-up .26s cubic-bezier(.22,.61,.36,1) backwards; }
 
 /* Section / card entrance (opt-in on any block). */
 .ims-fade-up { animation: ims-fade-up .3s cubic-bezier(.22,.61,.36,1) both; }

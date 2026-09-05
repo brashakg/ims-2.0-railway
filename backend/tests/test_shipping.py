@@ -35,6 +35,7 @@ from api.services import shiprocket  # noqa: E402
 from api.routers import shipping as shipping_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from tests.ist_business_day import business_day  # noqa: E402
+from tests.test_delivery_money_gate import doc_matches  # noqa: E402
 
 
 def _run(coro):
@@ -289,7 +290,7 @@ class _FakeColl:
 
     def find_one(self, query=None, projection=None):
         for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
+            if doc_matches(d, query or {}):
                 out = dict(d)
                 out.pop("_id", None)
                 return out
