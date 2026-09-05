@@ -1003,7 +1003,15 @@
   top: 100%; left: 0;
   margin-top: 2px;
   min-width: 220px; max-width: min(320px, calc(100vw - 24px));
-  max-height: min(72vh, 560px); overflow-y: auto;
+  max-height: min(72dvh, 560px); overflow-y: auto;
+  /* A scrollable menu must stay scrollable by finger and wheel: pan-y keeps
+     vertical touch panning even though the menu list above is a horizontal
+     scroller; contain stops a wheel at the end of the list from scrolling the
+     page behind the menu; the last item gets breathing room above the edge. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scroll-padding-bottom: 8px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-md, 12px);
