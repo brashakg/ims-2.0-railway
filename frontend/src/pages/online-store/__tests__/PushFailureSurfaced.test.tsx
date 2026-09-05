@@ -90,6 +90,7 @@ import OnlineShopifySyncPage from '../OnlineShopifySyncPage';
 import { formatPushResult } from '../../../components/online-store/OnlineStoreSyncBanner';
 import { onlineStoreApi, pushApi, syncHealthApi } from '../../../services/api/onlineStore';
 import { catalogProductsApi } from '../../../services/api/catalog';
+import { buildApiError } from '../../../services/api/client';
 
 const LIVE_MODE = {
   mode: 'LIVE' as const,
@@ -187,5 +188,35 @@ describe('/online-store/shopify "Push"', () => {
     expect(warn.msg).toContain('[PUBLISH_SCOPE_MISSING]');
     // ...and the inline row state says the same.
     expect(await screen.findByText(new RegExp('PUBLISH_SCOPE_MISSING'))).toBeTruthy();
+  });
+
+  // Prod 2026-09-05 22:24 UTC: the sweep ran ~11 s on the server (6 live, 4
+  // refused, all audited) while the screen showed "Network error. Please check
+  // your internet connection and try again." A false failure on a storefront
+  // action invites the second press. The rejection is built by the REAL client
+  // transform so a hand-written message cannot make this pass.
+  it('a timed-out sweep says the push is still running, not "check your internet"', async () => {
+    (pushApi.pushAllPending as any).mockRejectedValue(
+      buildApiError({
+        message: 'timeout of 180000ms exceeded',
+        code: 'ECONNABORTED',
+        config: { url: '/online-store/push/all-pending?entities=products&limit=100' },
+        response: undefined,
+      } as any),
+    );
+    render(<OnlineShopifySyncPage />);
+    await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
+    const buttons = await screen.findAllByRole('button', { name: /^Push$/ });
+    await userEvent.click(buttons[0]);
+    await waitFor(() => expect(pushApi.pushAllPending).toHaveBeenCalled());
+
+    const err = await waitFor(() => {
+      const t = toastCalls.find((c) => c.kind === 'error');
+      expect(t).toBeTruthy();
+      return t!;
+    });
+    expect(err.msg).toMatch(/still running on the server/);
+    expect(err.msg).toMatch(/do not press again/);
+    expect(err.msg).not.toMatch(/internet connection/);
   });
 });

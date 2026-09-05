@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AxiosError } from 'axios';
-import { ApiError, buildApiError } from '../client';
+import { ApiError, buildApiError, PUSH_TIMEOUT_MESSAGE } from '../client';
 
 type Data = { message?: string; detail?: string | Array<Record<string, unknown>> };
 
@@ -79,5 +79,43 @@ describe('buildApiError — the one delivered error shape', () => {
     );
     expect(e.status).toBeUndefined();
     expect(e.detail).toBeUndefined();
+  });
+});
+
+// Prod 2026-09-05: the sweep POST outlived the client's 10 s timeout, the server
+// finished all 10 products, and the screen said "check your internet
+// connection and try again" -- the sentence that invites a second press.
+describe('buildApiError -- a timed-out push says the truth', () => {
+  const timeout = (url: string, code: string | undefined = 'ECONNABORTED') =>
+    ({
+      message: 'timeout of 180000ms exceeded',
+      code,
+      config: { url },
+      response: undefined,
+    }) as unknown as AxiosError<Data>;
+
+  it('a push sweep timeout says the push is still running, not "check your internet"', () => {
+    const e = buildApiError(timeout('/online-store/push/all-pending?entities=products&limit=100'));
+    expect(e.message).toBe(PUSH_TIMEOUT_MESSAGE);
+    expect(e.message).toMatch(/still running on the server/);
+    expect(e.message).toMatch(/do not press again/);
+    expect(e.message).not.toMatch(/internet connection/);
+    expect(e.status).toBeUndefined();
+  });
+
+  it('a single-entity push timeout gets the same honest message', () => {
+    expect(buildApiError(timeout('/online-store/push/product/P1')).message).toBe(PUSH_TIMEOUT_MESSAGE);
+  });
+
+  it('a timeout on any OTHER endpoint keeps the generic connection message', () => {
+    expect(buildApiError(timeout('/customers?search=riya')).message).toBe(
+      'Network error. Please check your internet connection and try again.',
+    );
+  });
+
+  it('a real network failure (ERR_NETWORK) on a push URL is NOT called "still running"', () => {
+    expect(buildApiError(timeout('/online-store/push/all-pending', 'ERR_NETWORK')).message).toBe(
+      'Network error. Please check your internet connection and try again.',
+    );
   });
 });

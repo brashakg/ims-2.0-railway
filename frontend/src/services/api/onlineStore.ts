@@ -1555,6 +1555,11 @@ export interface PushHistoryResult {
 }
 
 const PUSH_BASE = '/online-store/push';
+// The client's 10 s default is a CORS-fail-fast bound; a push is a live Shopify
+// round-trip per object (the sweep pages up to 100). A timeout here is mapped to
+// an honest "still running" message in client.ts (matched on this URL prefix).
+const PUSH_TIMEOUT = { timeout: 60_000 };
+const SWEEP_TIMEOUT = { timeout: 180_000 };
 
 /** A safe placeholder for a FAILED getStatus read. The caller must branch on
  *  `status_reason` before rendering: a 403 read means "posture unknown to this
@@ -1609,7 +1614,7 @@ export const pushApi = {
   /** Push a catalog product (+ ecom sub-doc + variants). Throws on HTTP failure
    *  (the caller toasts); a SIMULATED dry-run is a normal ok=true result. */
   pushProduct: async (productId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/product/${encodeURIComponent(productId)}`);
+    const res = await api.post(`${PUSH_BASE}/product/${encodeURIComponent(productId)}`, undefined, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 
@@ -1621,19 +1626,21 @@ export const pushApi = {
   takeDownProduct: async (productId: string): Promise<PushResult> => {
     const res = await api.post(
       `${PUSH_BASE}/product/${encodeURIComponent(productId)}/take-down`,
+      undefined,
+      PUSH_TIMEOUT,
     );
     return _pushResultFrom(res?.data);
   },
 
   /** Push an ecom_collections doc (collectionCreate/Update + smart ruleSet). */
   pushCollection: async (collectionId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/collection/${encodeURIComponent(collectionId)}`);
+    const res = await api.post(`${PUSH_BASE}/collection/${encodeURIComponent(collectionId)}`, undefined, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 
   /** Push an ecom_menus doc (the nav / mega-menu tree). */
   pushMenu: async (menuId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`);
+    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`, undefined, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 
@@ -1641,7 +1648,7 @@ export const pushApi = {
    *  non-APPROVED image is NOT an HTTP error — the engine returns ok=false
    *  action=skip, which the caller surfaces honestly. */
   pushImage: async (imageId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`);
+    const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`, undefined, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 
@@ -1662,7 +1669,7 @@ export const pushApi = {
     if (entities) params.set('entities', entities);
     params.set('limit', String(limit));
     if (offset > 0) params.set('offset', String(offset));
-    const res = await api.post(`${PUSH_BASE}/all-pending?${params.toString()}`);
+    const res = await api.post(`${PUSH_BASE}/all-pending?${params.toString()}`, undefined, SWEEP_TIMEOUT);
     const data = (res?.data ?? {}) as Partial<PushSweepResult>;
     const mode = (data.mode ?? {}) as PushMode;
     return {
