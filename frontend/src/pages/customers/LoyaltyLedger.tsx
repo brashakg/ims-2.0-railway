@@ -8,17 +8,12 @@
 // Read-only view. Adjustments are SUPERADMIN-gated and live on the
 // customer detail panel; this page is the audit trail.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Award, ArrowLeft, RefreshCw, Filter } from 'lucide-react';
 
-import {
-  loyaltyApi,
-  type LoyaltyAccountResponse,
-  type LoyaltyLedgerResponse,
-  type LoyaltyTier,
-  type LoyaltyTxnType,
-} from '../../services/api/loyalty';
+import type { LoyaltyTier, LoyaltyTxnType } from '../../services/api/loyalty';
+import { useLoyaltyLedger } from '../../hooks/useLoyaltyLedger';
 
 const TIER_TOKENS: Record<LoyaltyTier, string> = {
   BRONZE: 'bg-amber-50 text-amber-700 ring-amber-200',
@@ -41,40 +36,18 @@ export default function LoyaltyLedger() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
 
-  const [account, setAccount] = useState<LoyaltyAccountResponse | null>(null);
-  const [ledger, setLedger] = useState<LoyaltyLedgerResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const typeFilter = (params.get('type') as LoyaltyTxnType | null) || null;
   const skip = parseInt(params.get('skip') || '0', 10);
 
+  // THE loyalty read - the same hook the POS customer panel uses.
+  const query = useLoyaltyLedger(customerId, { limit: PAGE_SIZE, skip, type: typeFilter });
+  const account = query.data?.account ?? null;
+  const ledger = query.data?.ledger ?? null;
+  const loading = query.isLoading || query.isFetching;
+  const error = query.error ? query.error.message || 'Failed to load loyalty ledger' : null;
   const refresh = () => {
-    if (!customerId) return;
-    setLoading(true);
-    setError(null);
-    Promise.all([
-      loyaltyApi.getAccount(customerId),
-      loyaltyApi.getLedger(customerId, {
-        limit: PAGE_SIZE,
-        skip,
-        type: typeFilter ?? undefined,
-      }),
-    ])
-      .then(([acc, led]) => {
-        setAccount(acc);
-        setLedger(led);
-      })
-      .catch((err) => {
-        setError(err?.message || 'Failed to load loyalty ledger');
-      })
-      .finally(() => setLoading(false));
+    void query.refetch();
   };
-
-  useEffect(() => {
-    refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerId, typeFilter, skip]);
 
   const totalPages = useMemo(() => {
     if (!ledger) return 1;

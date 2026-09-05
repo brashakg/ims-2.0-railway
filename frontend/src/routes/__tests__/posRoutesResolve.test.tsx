@@ -98,6 +98,7 @@ vi.mock('../../services/api/walkouts', () => ({
 }));
 
 import { MemoryRouter, Routes, useLocation } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { posRoutes } from '../posRoutes';
 import { usePOSStore } from '../../stores/posStore';
 import { ToastProvider } from '../../context/ToastContext';
@@ -113,15 +114,21 @@ function LocationProbe() {
 }
 
 function renderAt(path: string) {
+  // The app mounts one QueryClientProvider at its root (App.tsx); the POS
+  // widget tiles + customer panel read through react-query, so the harness
+  // supplies the same provider the real shell does.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <ToastProvider>
-        <LocationProbe />
-        <Suspense fallback={<div data-testid="lazy-loading" />}>
-          <Routes>{posRoutes}</Routes>
-        </Suspense>
-      </ToastProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[path]}>
+        <ToastProvider>
+          <LocationProbe />
+          <Suspense fallback={<div data-testid="lazy-loading" />}>
+            <Routes>{posRoutes}</Routes>
+          </Suspense>
+        </ToastProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

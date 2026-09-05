@@ -3328,6 +3328,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/incentive/points/mtd",
         "allowed": "AUTHENTICATED",
     },
+    # POS "My day" tile: the caller's OWN figures only (the handler keys on
+    # user_id and takes no staff parameter), so the route is open to every POS
+    # role. Read-only; maps to incentive:read, whose union is already
+    # AUTHENTICATED-broad (kicker/{ym}, mtd, leaderboard) -- widens nothing.
+    {
+        "method": "GET",
+        "path": "/api/v1/incentive/points/my-day",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/incentive/points/settings/eligibility",

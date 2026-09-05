@@ -30,7 +30,8 @@ import {
   Layers,
 } from 'lucide-react';
 import type { Customer } from '../../types';
-import { customerApi, orderApi, prescriptionApi } from '../../services/api';
+import { customerApi, prescriptionApi } from '../../services/api';
+import { fetchCustomerOrders } from '../../hooks/useCustomerDues';
 import { buildCustomerSearchHits } from '../../utils/customerSearchHits';
 import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
@@ -215,14 +216,12 @@ export function Customer360Dashboard() {
       const customerData = await customerApi.getCustomer(customerId!);
       setCustomer(customerData);
 
-      // Fetch orders. getOrders returns an envelope {orders,total,data,...},
-      // NOT a bare array — calling .reduce on it threw and broke the whole
-      // page (blank total spend / "failed to load"). Orders come back
-      // camelCase (grandTotal/createdAt), so read those with snake fallbacks.
-      const ordersResp = await orderApi.getOrders({ customerId });
-      const ordersData: any[] = Array.isArray(ordersResp)
-        ? ordersResp
-        : ordersResp?.orders || ordersResp?.data || [];
+      // Fetch orders through THE one customer-orders read (shared with the POS
+      // customer panel's dues section): it unwraps the {orders,total,data}
+      // envelope, so a bare .reduce can never blank this page again. Orders
+      // come back camelCase (grandTotal/createdAt), so read those with snake
+      // fallbacks.
+      const ordersData: any[] = await fetchCustomerOrders(customerId!);
       setOrders(ordersData);
 
       const orderAmount = (o: any) => o?.grandTotal ?? o?.total_amount ?? 0;

@@ -22,12 +22,12 @@ import {
   HelpCircle,
   FileText,
 } from 'lucide-react';
-import { customerApi, prescriptionApi } from '../../services/api';
+import { customerApi } from '../../services/api';
 import type {
-  FamilyRxResponse,
   FamilyRxMember,
   FamilyRxPrescription,
 } from '../../services/api/sales';
+import { useFamilyRx } from '../../hooks/useFamilyRx';
 import { useToast } from '../../context/ToastContext';
 import { AutoSearch } from '../../components/common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
@@ -209,41 +209,38 @@ function MemberCard({ member }: { member: FamilyRxMember }) {
 export function FamilyRxPage() {
   const toast = useToast();
 
-  const [family, setFamily] = useState<FamilyRxResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [selectedCustomerName, setSelectedCustomerName] = useState<string>('');
-  // Deep link: /clinical/family-rx?customer=<id>. The POS "Family Rx" widget
-  // taps through with the customer already chosen on the bill, so making the
-  // cashier search for them a second time is the bug this closes. The name is
+  // Deep link: /clinical/family-rx?customer=<id>. The POS customer panel's
+  // "Open full page" hatch arrives with the customer already chosen on the
+  // bill, so the search box is not shown at all in that case - making the
+  // cashier search for them a second time was the bug this closes. The name is
   // left blank on purpose - getFamilyRx returns customer_name, and the header
   // already prefers the server's value over this fallback.
   const [searchParams] = useSearchParams();
   const deepLinkCustomerId = searchParams.get('customer') || '';
-
-  const loadFamily = async (customerId: string, fallbackName: string) => {
-    if (!customerId) return;
-    setIsLoading(true);
-    setError(null);
-    setSelectedCustomerName(fallbackName);
-    try {
-      const data = await prescriptionApi.getFamilyRx(customerId);
-      setFamily(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to load family prescriptions';
-      setError(msg);
-      toast.error(msg);
-      setFamily(null);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
+  const [customerId, setCustomerId] = useState<string>(deepLinkCustomerId);
   useEffect(() => {
-    if (deepLinkCustomerId) void loadFamily(deepLinkCustomerId, '');
-    // loadFamily is re-created every render; the id is the only real trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (deepLinkCustomerId) setCustomerId(deepLinkCustomerId);
   }, [deepLinkCustomerId]);
+
+  // THE family Rx read - the same hook the POS tile and customer panel use.
+  const familyQuery = useFamilyRx(customerId);
+  const family = familyQuery.data ?? null;
+  const isLoading = familyQuery.isLoading;
+  const error = familyQuery.error
+    ? familyQuery.error.message || 'Failed to load family prescriptions'
+    : null;
+  useEffect(() => {
+    if (error) toast.error(error);
+    // The toast fires once per new error message, not per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error]);
+
+  const loadFamily = (id: string, fallbackName: string) => {
+    if (!id) return;
+    setSelectedCustomerName(fallbackName);
+    setCustomerId(id);
+  };
 
   return (
     <div className="space-y-4">
@@ -256,7 +253,9 @@ export function FamilyRxPage() {
       </div>
 
       {/* Customer search — reuses the same AutoSearch + customerApi.getCustomers
-          flow as POS StepCustomer, scoped to the active store. */}
+          flow as POS StepCustomer, scoped to the active store. Not rendered
+          when the customer arrived in the link: there is nobody to find. */}
+      {!deepLinkCustomerId && (
       <div className="card">
         <label className="block text-sm font-medium text-gray-700 mb-2">Find a customer</label>
         <AutoSearch<CustomerSearchHit>
@@ -305,6 +304,7 @@ export function FamilyRxPage() {
           icon={<Search className="w-4 h-4" />}
         />
       </div>
+      )}
 
       {/* Error state */}
       {error && (

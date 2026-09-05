@@ -63,8 +63,9 @@ from api.services.leaderboard_display import (
     leaderboard_config_defaults,
     titles_catalog,
 )
+from api.services.name_resolver import order_actor_id
 from api.services.salary_visibility import is_salary_admin
-from api.utils.ist import ist_today
+from api.utils.ist import ist_day_start_utc, ist_today
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -707,6 +708,78 @@ def _decorate_items(
         )
         for idx, row in enumerate(items)
     ]
+
+
+# ============================================================================
+# POS "My day" tile (owner 2026-09-05): the signed-in person's OWN day.
+# ============================================================================
+# SELF-ONLY BY CONSTRUCTION, not by role check: every figure keys on the
+# caller's user_id and the route takes NO staff parameter, so no role can read
+# anyone else's day here (the same fail-closed rule as _viewer_visibility).
+#
+#   bills / sales   orders CREDITED to the caller (name_resolver.order_actor_id
+#                   is the ONE credit rule) at the active store since IST
+#                   midnight. BUG-104: ist_day_start_utc, never a naive UTC
+#                   midnight -- that bound loses every bill rung up between
+#                   00:00 and 05:30 IST. A cancelled or still-draft order is
+#                   not a sale.
+#   conversion      bills / the walk-in counter's per_staff bucket for the
+#                   caller (walk_in_counters.per_staff, written by the POS
+#                   "+1 walk-in" door). With no walk-ins logged against them
+#                   today the denominator does not exist and the field is
+#                   OMITTED rather than faked.
+#   target          none. incentive_settings.growth_targets are store-level
+#                   L1/L2/L3 envelopes against last year's sale; there is no
+#                   per-person target in the incentive config, so none is shown.
+_MY_DAY_NOT_A_SALE = frozenset({"CANCELLED", "DRAFT"})
+
+
+@router.get("/my-day")
+async def get_my_day(current_user: dict = Depends(get_current_user)):
+    """The caller's own sales day at their active store (POS "My day" tile)."""
+    uid = current_user.get("user_id")
+    if not uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "We could not tell which staff account you are signed in as, "
+                "so we cannot show your figures. Please sign in again."
+            ),
+        )
+    store = _user_store_id(current_user)
+    if not store:
+        raise HTTPException(status_code=400, detail="No active store on this session")
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    since = ist_day_start_utc()
+    bills, sales = 0, 0.0
+    for order in db.get_collection("orders").find(
+        {"store_id": store, "created_at": {"$gte": since}}
+    ):
+        if str(order.get("status") or "").upper() in _MY_DAY_NOT_A_SALE:
+            continue
+        if order_actor_id(order) != str(uid):
+            continue
+        bills += 1
+        sales += float(order.get("total_amount", 0) or order.get("grand_total", 0) or 0)
+
+    out: Dict[str, Any] = {
+        "user_id": uid,
+        "store_id": store,
+        "date": ist_today().isoformat(),
+        "sales_today": round(sales, 2),
+        "bills_today": bills,
+    }
+    walkin_repo = get_walkin_counter_repository()
+    if walkin_repo is not None:
+        per_staff = (walkin_repo.get_today(store) or {}).get("per_staff") or {}
+        walkins = int(per_staff.get(str(uid)) or 0)
+        if walkins > 0:
+            out["walkins_today"] = walkins
+            out["conversion_pct"] = round(bills * 100.0 / walkins, 1)
+    return out
 
 
 @router.get("/mtd")
