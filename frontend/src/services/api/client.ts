@@ -254,6 +254,15 @@ export class ApiError extends Error {
   }
 }
 
+export const PUSH_TIMEOUT_MESSAGE =
+  'The push is still running on the server. Refresh in a minute to see the result; do not press again.';
+
+// axios timeout = ECONNABORTED (ETIMEDOUT only under clarifyTimeoutError);
+// a plain network failure is ERR_NETWORK and keeps the generic message.
+const isPushTimeout = (error: AxiosError): boolean =>
+  (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') &&
+  String(error.config?.url || '').includes('/online-store/push/');
+
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
 // instead of hand-built axios shapes the client never delivers (the
@@ -265,8 +274,13 @@ export function buildApiError(
   let message: string;
 
   if (!error.response) {
-    // Network error
-    message = 'Network error. Please check your internet connection and try again.';
+    // A timed-out /online-store/push/* request is NOT a dead connection: the
+    // server keeps running the sweep (prod 2026-09-05: 10 products processed in
+    // ~11 s behind a red "check your internet" toast). Telling the operator to
+    // "try again" is the second press that pushes twice.
+    message = isPushTimeout(error)
+      ? PUSH_TIMEOUT_MESSAGE
+      : 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
     // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
     // a crash. Goods-receipt acceptance uses it to say "N units were received
