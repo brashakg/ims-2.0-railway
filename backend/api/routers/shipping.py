@@ -65,9 +65,12 @@ _HQ_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER")
 _DEAD_ORDER_STATUSES = ("CANCELLED", "REFUNDED", "RETURNED", "VOID", "VOIDED")
 
 # Shipment statuses that never reached a courier, so they do not block a
-# retry. (create_shipment writes BOOKED | SIMULATED | FAILED; CANCELLED is
-# listed for a future cancel door.)
-_DEAD_SHIPMENT_STATUSES = ("FAILED", "CANCELLED")
+# retry. create_shipment writes BOOKED | SIMULATED | FAILED; a SIMULATED
+# booking is the dry run taken while DISPATCH_MODE is off or courier creds are
+# absent - no parcel exists, so it is not a second collection and must not lock
+# the order out of the real booking later. CANCELLED is listed for a future
+# cancel door.
+_DEAD_SHIPMENT_STATUSES = ("FAILED", "CANCELLED", "SIMULATED")
 
 
 # ============================================================================

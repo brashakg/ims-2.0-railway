@@ -189,17 +189,20 @@ def test_F3_cancelled_order_not_bookable(monkeypatch):
 # ============================================================================
 
 
+_LIVE_PARCEL = {"shipment_id": "SHP-LIVE", "order_id": "ORD-P1", "awb": "AWB-1",
+                "status": "BOOKED", "cod_amount": 2000.0}
+
+
 def test_F4_second_cod_booking_double_collects(monkeypatch):
     client, coll = _ship_client(monkeypatch, _partial())
+    coll.docs.append(dict(_LIVE_PARCEL))
     body = {"order_id": "ORD-P1", "address": {"payment_method": "COD"}}
-    r1 = client.post(URL, json=body, headers=H(["STORE_MANAGER"]))
-    assert r1.status_code == 201
     r2 = client.post(URL, json=body, headers=H(["STORE_MANAGER"]))
     assert r2.status_code == 409, r2.text
     detail = r2.json()["detail"]
     assert detail["code"] == "SHIPMENT_ALREADY_BOOKED"
     # It NAMES the parcel already out, so the shop can go look for it.
-    assert detail["shipment_id"] == r1.json()["shipment_id"]
+    assert detail["shipment_id"] == "SHP-LIVE"
     assert sum(d["cod_amount"] for d in coll.docs) == 2000.0
 
 
@@ -207,9 +210,23 @@ def test_F4b_rebook_is_a_typed_out_act(monkeypatch):
     """The retry is legitimate when the first parcel is not coming - but only
     when the caller says so explicitly."""
     client, coll = _ship_client(monkeypatch, _partial())
+    coll.docs.append(dict(_LIVE_PARCEL))
+    body = {"order_id": "ORD-P1", "address": {"payment_method": "COD"}}
+    r2 = client.post(URL, json={**body, "rebook": True}, headers=H(["STORE_MANAGER"]))
+    assert r2.status_code == 201, r2.text
+    assert len(coll.docs) == 2
+
+
+def test_F4d_a_simulated_dry_run_never_blocks_the_real_booking(monkeypatch):
+    """Round 2: DISPATCH_MODE is off today, so every press of Book persists a
+    SIMULATED row. Counting that as a live parcel locked the order out of the
+    courier for good (and no screen could send rebook). A dry run reached no
+    courier, so it is not a second collection."""
+    client, coll = _ship_client(monkeypatch, _partial())
     body = {"order_id": "ORD-P1", "address": {"payment_method": "COD"}}
     assert client.post(URL, json=body, headers=H(["STORE_MANAGER"])).status_code == 201
-    r2 = client.post(URL, json={**body, "rebook": True}, headers=H(["STORE_MANAGER"]))
+    assert coll.docs[0]["status"] == "SIMULATED"
+    r2 = client.post(URL, json=body, headers=H(["STORE_MANAGER"]))
     assert r2.status_code == 201, r2.text
     assert len(coll.docs) == 2
 
