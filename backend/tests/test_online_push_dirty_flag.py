@@ -887,3 +887,108 @@ def test_both_doors_write_the_identical_twin(db, monkeypatch):
         "the two edit doors produced DIFFERENT twins -- the mirror rule has "
         "been duplicated and drifted again"
     )
+
+
+# ===========================================================================
+# 8. The customer-facing fields the edit mirror used to DROP (2026-09-06).
+# Prod measurement on the 6 IMS-pushed (non-smartglass) products: every field
+# IMS holds reached Shopify equal -- title / vendor / productType / tags /
+# price / images / ims.* metafields -- so build_product_input's mapping is
+# complete. The open door was the EDIT: brand / category / attributes / tags
+# stopped at the spine, so the twin (the doc the push reads) and therefore
+# Shopify went stale after an edit; one prod twin had already drifted on
+# attributes. Each test here reddens if its line of the mirror is reverted.
+# ===========================================================================
+
+
+def test_spine_put_carries_brand_attributes_and_tags_onto_the_twin_and_queues(
+    db, monkeypatch
+):
+    _seed_pushed(db)
+    _edit_spine(
+        db,
+        monkeypatch,
+        brand="Oakley",
+        attributes={"frame_color": "Matte Black", "gtin": "8901234567893"},
+        tags=["Polarised"],
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["brand"] == "Oakley", "vendor is read off the twin"
+    assert saved["attributes"]["frame_color"].lower() == "matte black", (
+        "metafields + filter tags read the twin's attributes"
+    )
+    assert saved["attributes"]["brand_name"] == "Ray-Ban", (
+        "the route's MERGED bag lands, not a partial overwrite"
+    )
+    assert saved["gtin"] == "8901234567893", (
+        "the public barcode the pseudo-variant reads top-level"
+    )
+    assert saved["ecom"]["seo"]["tags"] == ["polarised"], (
+        "build_product_input reads ONLY ecom.seo.tags"
+    )
+    assert saved["ecom"]["locally_modified"] is True
+    assert _pending(db) == 1
+    # ...and the payload the next press sends now carries them.
+    inp = shopify_push.build_product_input(saved, [])
+    assert inp["vendor"] == "Oakley"
+    assert "polarised" in inp["tags"]
+    mf = {m["key"]: m["value"] for m in shopify_push.build_product_metafields(saved)}
+    assert mf["frame_color"].lower() == "matte black"
+
+
+def test_master_door_carries_category_brand_attributes_and_tags(db):
+    from api.services.ecom_category_map import ims_to_shopify_type
+
+    _seed_pushed(db)
+    _pm_edit(
+        db,
+        {
+            "category": "SUNGLASS",
+            "brand": "Oakley",
+            "attributes": {"lens_color": "Grey"},
+            "tags": ["Summer"],
+        },
+    )
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["category"] == "SUNGLASS"
+    assert saved["brand"] == "Oakley"
+    assert saved["attributes"] == {"lens_color": "Grey"}, (
+        "verbatim what the spine now holds (the service door writes the "
+        "patch's attributes wholesale to the spine too)"
+    )
+    assert saved["ecom"]["seo"]["tags"] == ["summer"]
+    assert saved["ecom"]["locally_modified"] is True
+    assert shopify_push.build_product_input(saved, [])["productType"] == (
+        ims_to_shopify_type("SUNGLASS")
+    )
+
+
+def test_model_edit_mirrors_but_does_not_queue(db):
+    """model is in NO pushed payload (the spine never recomputes `name` on
+    edit, so the Shopify title cannot move): mirror for the PIM screens,
+    queue nothing."""
+    _seed_pushed(db)
+    _pm_edit(db, {"model": "RB1002X"})
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["model"] == "RB1002X"
+    assert saved["ecom"]["locally_modified"] is False
+    assert _pending(db) == 0
+
+
+def test_build_pim_doc_projects_the_attribute_gtin_as_the_public_barcode():
+    """The spine captures GTIN as an ATTRIBUTE; the push's pseudo-variant
+    reads product.gtin TOP-LEVEL. Without the projection a catalogued GTIN
+    only ever reached Shopify as an ims.gtin metafield, never as the variant
+    barcode the shopping feeds republish."""
+    doc = pm._build_pim_doc(
+        {"pim_product_id": "PIM-9", "sku": "X", "attributes": {"gtin": "8901234567893"}}
+    )
+    assert doc["gtin"] == "8901234567893"
+    doc["ecom"]["shopify_variant_id"] = "gid://shopify/ProductVariant/1"
+    pseudo = shopify_push._variants_for_price_push(doc, [])
+    assert pseudo and pseudo[0]["gtin"] == "8901234567893"
+    # tolerant of a spine with no gtin at all
+    assert pm._build_pim_doc({"pim_product_id": "PIM-10"})["gtin"] is None
