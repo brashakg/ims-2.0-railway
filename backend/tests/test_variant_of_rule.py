@@ -59,6 +59,18 @@ the test red -- table in the PR body):
  14. online_delist._raw_db passes a real pymongo Database through (the
      catalog doors hand it the raw db; the old hasattr check raised on
      pymongo's attribute factory, so no catalog-door take-down ever ran)
+ 15. the drawer's spine sync never reactivates a spine the twin has no flag
+     for (round-3 P1): a door-created twin carries no is_active, and the
+     sync wrote `existing.get("is_active", True)` on every save -- so once
+     pin 11 made that write land, a copy-only edit put a retired child /
+     parent / provisional-born spine back on sale; now is_active travels
+     only when the PUT carried it (both directions)
+ 16. the same clause never writes the twin's stale mrp / offer / cost /
+     tier / hsn / gst onto the billing spine (round-3 P2): only the keys
+     the PUT carried travel; a category change still lands its re-derived
+     hsn / gst
+ 17. the runbook's --apply refuses without --owner-ack (the four open owner
+     points are printed on every run); a dry-run never needs it
 
 Every Shopify call is a spy or a raiser. No network, no Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_variant_of_rule.py -q
@@ -1116,3 +1128,110 @@ def test_raw_db_unwraps_the_connection_wrapper_and_passes_a_pymongo_database_thr
 
     assert online_delist._raw_db(_Down(strict)) is None
     assert online_delist._raw_db(None) is None
+
+
+# ---------------------------------------------------------------------------
+# 15-16. the drawer's spine sync is keyed on the PUT, never the merged twin
+#        (round-3 verifier P1 / P2)
+# ---------------------------------------------------------------------------
+
+
+def _drawer(twin_id, **fields):
+    return _run(cat.update_catalog_product(twin_id, cat.ProductUpdateInput(**fields), current_user=ADMIN))
+
+
+@pytest.mark.parametrize("shape", ["child", "parent", "provisional"])
+def test_copy_only_drawer_edit_never_reactivates_a_spine_the_twin_has_no_flag_for(monkeypatch, shape):
+    """P1: _build_pim_doc never projects is_active onto a twin (71 of 77 prod
+    twins lack it; a provisional product is born is_active False with no
+    twin flag), and the spine sync wrote `existing.get("is_active", True)`
+    unconditionally -- so once the pin-11 resolver made that write land,
+    ANY drawer save put a retired spine back on sale at POS, and for a size
+    the next stock pass re-listed it. Now is_active reaches the spine only
+    when the PUT carried it."""
+    if shape == "child":
+        db = _world(child_active=False)
+        spine_id, twin_id = "sp-child", "tw-child"
+    elif shape == "parent":
+        db = _world(seed_child=False)
+        db["products"].update_one({"product_id": "sp-parent"}, {"$set": {"is_active": False}})
+        spine_id, twin_id = "sp-parent", "tw-parent"
+    else:
+        db = _world(seed_child=False)
+        created = pm.create_via_door(
+            {**_child_payload(), "provisional": True, "as_draft": True}, source="MASTER", actor="u", actor_name="u",
+            extra_fields={"name": CHILD_NAME, "images": []},
+            product_repo=ProductRepository(db["products"]),
+            variant_repo=CatalogVariantRepository(db["catalog_variants"]),
+            audit_repo=AuditRepository(db["audit_logs"]), db=db,
+        )
+        spine_id = created["product_id"]
+        twin_id = _spine(db, spine_id)["pim_product_id"]
+    assert _spine(db, spine_id)["is_active"] is False
+    assert "is_active" not in _twin(db, twin_id), "door-created shape: the twin carries no flag"
+    _wire_catalog(monkeypatch, db)
+
+    _drawer(twin_id, description="just copy")
+    assert _spine(db, spine_id)["is_active"] is False, "a copy edit reactivated a retired spine"
+
+    # the flag still travels when the PUT carries it, both directions
+    _drawer(twin_id, is_active=True)
+    assert _spine(db, spine_id)["is_active"] is True
+    _drawer(twin_id, is_active=False)
+    assert _spine(db, spine_id)["is_active"] is False
+
+
+def test_copy_only_drawer_edit_never_writes_the_twins_stale_price_tier_hsn_gst_onto_the_spine(monkeypatch):
+    """P2 (money path): the same clause copied mrp / offer / cost / tier /
+    hsn / gst from the MERGED twin on every save, so any twin-vs-spine drift
+    (a spine price moved by a path that did not mirror pricing.*, a GRN cost
+    update, a script) was written back onto the billing spine by a copy-only
+    edit. Only the keys the PUT carried travel; a category change is the one
+    PUT that moves hsn / gst without naming them, and those do land."""
+    db = _world(seed_child=False)
+    db["catalog_products"].update_one(
+        {"id": "tw-parent"},
+        {"$set": {"pricing": {"mrp": 39900.0, "offer_price": 39900.0, "cost_price": 20000.0,
+                              "discount_category": "PREMIUM"},
+                  "hsn_code": "9004", "gst_rate": 18.0}},
+    )
+    db["products"].update_one(
+        {"product_id": "sp-parent"},
+        {"$set": {"mrp": 42000.0, "offer_price": 41000.0, "cost_price": 25000.0, "discount_category": "LUXURY",
+                  "hsn_code": "852580", "gst_rate": 12.0}},
+    )
+    _wire_catalog(monkeypatch, db)
+
+    def spine_money():
+        sp = _spine(db, "sp-parent")
+        return (sp["mrp"], sp["offer_price"], sp["cost_price"], sp["discount_category"], sp["hsn_code"], sp["gst_rate"])
+
+    _drawer("tw-parent", description="copy")
+    assert spine_money() == (42000.0, 41000.0, 25000.0, "LUXURY", "852580", 12.0), \
+        "a copy edit wrote the twin's stale values onto the billing spine"
+
+    # a sent key travels ALONE: offer moves, mrp / cost / tier / hsn / gst stay the spine's
+    _drawer("tw-parent", pricing=cat.PricingPatchInput(offer_price=39000.0))
+    assert spine_money() == (42000.0, 39000.0, 25000.0, "LUXURY", "852580", 12.0)
+
+    # a category change re-derives hsn / gst on the twin and those DO reach the spine
+    _drawer("tw-parent", category="SUNGLASSES")
+    tw, sp = _twin(db, "tw-parent"), _spine(db, "sp-parent")
+    assert (tw["hsn_code"], tw["gst_rate"]) == ("900410", 18.0)
+    assert (sp["hsn_code"], sp["gst_rate"]) == ("900410", 18.0)
+    assert (sp["mrp"], sp["discount_category"]) == (42000.0, "LUXURY")
+
+
+# ---------------------------------------------------------------------------
+# 17. the runbook's owner-points fence
+# ---------------------------------------------------------------------------
+
+
+def test_runbook_apply_refuses_until_the_owner_points_are_acknowledged(capsys):
+    runbook.check_owner_points(False, False)  # a dry-run never needs the flag
+    runbook.check_owner_points(True, True)
+    with pytest.raises(SystemExit) as exc:
+        runbook.check_owner_points(True, False)
+    assert "--owner-ack" in str(exc.value)
+    out = capsys.readouterr().out
+    assert out.count("OWNER POINTS") == 3 and all(p in out for p in runbook.OWNER_POINTS)

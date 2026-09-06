@@ -1969,6 +1969,7 @@ async def update_catalog_product(
     # both are re-derived from the NEW category via the same canonical table the
     # BVI migration used -- this un-does the ACCESSORIES dumping ground without
     # silently overriding an explicit HSN/GST the caller sent alongside.
+    category_changed = False
     if product.category is not None:
         canonical = _pm.resolve_category(product.category)
         if canonical is None:
@@ -2241,29 +2242,41 @@ async def update_catalog_product(
         )
 
     # Products-convergence: keep the billing SPINE in sync with this catalog edit
-    # (the catalog id == the spine product_id). Propagate price / tier / gst /
+    # (the spine resolved by _spine_product_id). Propagate price / tier / gst /
     # active so POS bills the updated values. discount_category is upper-cased to
-    # match what the cap resolver expects. Fail-soft: a spine-sync error never
-    # breaks the catalog save.
+    # match what the cap resolver expects. Keyed on what THIS PUT carried, never
+    # on the merged twin: a door-created twin holds no is_active at all (71 of
+    # 77 prod twins), so the old `existing.get("is_active", True)` put a retired
+    # spine back on sale at POS on ANY copy edit -- and the twin's pricing /
+    # hsn / gst can drift from a spine moved by a path that did not mirror
+    # (pre-#1029 spine PUTs, GRN cost updates, scripts), so the same copy edit
+    # wrote the twin's stale MRP onto the billing spine. Both were latent while
+    # the write matched no spine. A category change is the one case where the
+    # PUT moves hsn / gst without naming them (re-derived above): it travels.
+    # Fail-soft: a spine-sync error never breaks the catalog save.
     try:
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
         _spine_id = _spine_product_id(_pr, existing)
         if _pr is not None and _spine_id:
+            _sent = product.pricing.model_dump(exclude_none=True) if product.pricing else {}
             _pricing = existing.get("pricing") or {}
-            _tier = _pricing.get("discount_category")
-            _patch = {
-                "mrp": _pricing.get("mrp"),
-                "offer_price": _pricing.get("offer_price"),
-                "cost_price": _pricing.get("cost_price"),
-                "discount_category": _tier.upper() if isinstance(_tier, str) else _tier,
-                "hsn_code": existing.get("hsn_code"),
-                "gst_rate": existing.get("gst_rate"),
-                "is_active": existing.get("is_active", True),
+            _patch: Dict[str, Any] = {
+                k: _pricing.get(k) for k in ("mrp", "offer_price", "cost_price") if k in _sent
             }
+            if "discount_category" in _sent:
+                _tier = _pricing.get("discount_category")
+                _patch["discount_category"] = _tier.upper() if isinstance(_tier, str) else _tier
+            if product.hsn_code is not None or category_changed:
+                _patch["hsn_code"] = existing.get("hsn_code")
+            if product.gst_rate is not None or category_changed:
+                _patch["gst_rate"] = existing.get("gst_rate")
+            if product.is_active is not None:
+                _patch["is_active"] = existing.get("is_active")
             _patch = {k: v for k, v in _patch.items() if v is not None}
-            _pr.update(_spine_id, _patch)
+            if _patch:
+                _pr.update(_spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
