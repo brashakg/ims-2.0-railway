@@ -12,13 +12,19 @@ _online_location_cache) and a per-variant target reader
 from the store list; all four are deleted. This guard fails CI if any of them
 is read again under backend/api or backend/agents.
 
+Also dead, and guarded by name: the pooled writer the #1125 world kept
+beside the per-store one (`shopify_set_inventory_available`,
+`repush_oversell_risk` / `_shopify_online_location` behind the deleted
+POST /online-store/repush-oversell), the second sku -> listing resolver
+(`_products_for_skus`; `online_catalog.listings_for_skus` is the one) and
+the second baseline writer (`zero_stock_ledger_entry`; push_skus_stock's
+write-back is the one).
+
 Pure-Python AST walk (no rg/grep binary needed), the
-test_no_legacy_stock_collection.py pattern. Two allowed reads of the env
-NAME, both listed here so the list can only shrink:
+test_no_legacy_stock_collection.py pattern. ONE allowed read of the env
+NAME, listed here so the list can only shrink:
   * shopify_push/__init__.py -- the one-line import-time WARNING that the
-    variable is ignored (a warning, never a value that is used);
-  * online_sync_health.py -- `_shopify_online_location`, the third location
-    reader behind POST /online-store/repush-oversell, deleted in PR 3.
+    variable is ignored (a warning, never a value that is used).
 """
 
 from __future__ import annotations
@@ -37,12 +43,18 @@ DEAD_CALLS = {
     "online_variant_targets_for_skus",
     "_online_store_name_hints",
     "_persist_location",
+    # the pooled writer + its location reader (design 3.6)
+    "shopify_set_inventory_available",
+    "repush_oversell_risk",
+    "_shopify_online_location",
+    # second implementations of the listing resolver / baseline writer
+    "_products_for_skus",
+    "zero_stock_ledger_entry",
 }
 DEAD_NAMES = {"_online_location_cache"}
 # Only shrinks. Relative to backend/.
 ENV_PIN_ALLOWED = {
     "api/services/shopify_push/__init__.py",
-    "api/services/online_sync_health.py",
 }
 
 

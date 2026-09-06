@@ -53,10 +53,8 @@ def _writeback_product(
     `inventory_item_gid` (optional) additionally persists
     ecom.shopify_inventory_item_id -- the oversell-guard stock target for a
     product with NO catalog_variants rows. This is the documented resolver
-    fallback (online_catalog.inventory_items_for_skus /
-    online_variant_targets_for_skus and online_sync_health.
-    _inventory_item_id_for_sku all read ecom.shopify_inventory_item_id when no
-    variant row matches a SKU). The caller only ever passes it for the
+    fallback (online_catalog.inventory_items_for_skus reads
+    ecom.shopify_inventory_item_id when no variant row matches a SKU). The caller only ever passes it for the
     product-level pseudo-variant, and it too is set-only, never cleared.
 
     `status` (optional) records what the storefront now shows: "PUBLISHED" after

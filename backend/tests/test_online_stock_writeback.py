@@ -18,24 +18,19 @@ call -- so the website can't oversell. These tests pin:
   * a shop that HOLDS a listed unit but has no location -> STORE_UNMAPPED, a
     not-ok run row (critic 9) -- the mapped shops still written
   * a transport EXCEPTION never propagates into the sale path
-  * the legacy nexus setter still gates on IMS_SHOPIFY_WRITES then DISPATCH_MODE
-    (it delegates to the one writer; deleted in PR 3)
 
-Shopify is mocked at shopify_push._graphql (the single network boundary) for
-the orchestrator; the nexus setter tests stub the HTTP client. No DB / network.
+Shopify is mocked at shopify_push._graphql (the single network boundary).
+No DB / network.
 """
 
 import asyncio
 import os
 import sys
 
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 
-from agents import nexus_providers  # noqa: E402
 from api.services import online_stock_writeback as wb  # noqa: E402
 
 
@@ -45,59 +40,6 @@ from api.services import online_stock_writeback as wb  # noqa: E402
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-class _FakeResp:
-    def __init__(self, status_code=200, json_body=None):
-        self.status_code = status_code
-        self._json = json_body if json_body is not None else {
-            "data": {"inventorySetQuantities": {
-                "inventoryAdjustmentGroup": {"createdAt": "now", "reason": "correction"},
-                "userErrors": [],
-            }}
-        }
-        self.text = "ok"
-
-    def json(self):
-        return self._json
-
-
-class _FakeAsyncClient:
-    """Stand-in for httpx.AsyncClient that records the GraphQL call and returns
-    a canned success (or whatever is injected)."""
-    calls = []
-    resp = None
-
-    def __init__(self, *a, **k):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def post(self, url, headers=None, json=None):
-        _FakeAsyncClient.calls.append({"url": url, "json": json})
-        return _FakeAsyncClient.resp or _FakeResp()
-
-
-@pytest.fixture(autouse=True)
-def _reset_fake():
-    _FakeAsyncClient.calls = []
-    _FakeAsyncClient.resp = None
-    yield
-
-
-def _live_shopify(monkeypatch):
-    """Enable writes + live dispatch + creds, and stub the HTTP client."""
-    monkeypatch.setenv("IMS_SHOPIFY_WRITES", "1")
-    monkeypatch.setattr(nexus_providers, "dispatch_mode", lambda: "live")
-    monkeypatch.setattr(
-        nexus_providers, "_load_integration_config",
-        lambda db, t, storefront_id=None: {"shop_url": "test.myshopify.com", "access_token": "tok"},
-    )
-    monkeypatch.setattr(nexus_providers.httpx, "AsyncClient", _FakeAsyncClient)
 
 
 # ---------------------------------------------------------------------------
@@ -122,60 +64,6 @@ def test_skus_from_items_skips_service_and_virtual_lines():
         {"sku": "SP-1", "product_id": "p1"},                               # dup
     ]
     assert wb.skus_from_items(items) == ["SP-1"]
-
-
-# ---------------------------------------------------------------------------
-# the GraphQL setter (gating + payload)
-# ---------------------------------------------------------------------------
-
-def test_setter_noop_when_writes_disabled(monkeypatch):
-    monkeypatch.delenv("IMS_SHOPIFY_WRITES", raising=False)
-    res = _run(nexus_providers.shopify_set_inventory_available(
-        None, "gid://shopify/InventoryItem/1", "gid://shopify/Location/1", 5))
-    assert res.ok is True
-    assert "RETIRED" in (res.notes or "")
-    assert _FakeAsyncClient.calls == []  # never hit the network
-
-
-def test_setter_simulated_when_dispatch_off(monkeypatch):
-    monkeypatch.setenv("IMS_SHOPIFY_WRITES", "1")
-    monkeypatch.setattr(nexus_providers, "dispatch_mode", lambda: "off")
-    monkeypatch.setattr(nexus_providers.httpx, "AsyncClient", _FakeAsyncClient)
-    res = _run(nexus_providers.shopify_set_inventory_available(
-        None, "123", "456", 7))
-    assert res.ok is True
-    assert res.items_synced == 0
-    assert "SIMULATED" in (res.notes or "")
-    assert _FakeAsyncClient.calls == []  # NO live call in off mode
-
-
-def test_setter_live_call_sends_absolute_qty(monkeypatch):
-    _live_shopify(monkeypatch)
-    res = _run(nexus_providers.shopify_set_inventory_available(
-        None, "123", "456", 4))
-    assert res.ok is True
-    assert res.items_synced == 1
-    assert len(_FakeAsyncClient.calls) == 1
-    sent = _FakeAsyncClient.calls[0]["json"]
-    q = sent["variables"]["input"]["quantities"][0]
-    # bare ids promoted to GIDs; absolute quantity carried through.
-    assert q["inventoryItemId"] == "gid://shopify/InventoryItem/123"
-    assert q["locationId"] == "gid://shopify/Location/456"
-    assert q["quantity"] == 4
-    assert sent["variables"]["input"]["name"] == "available"
-
-
-def test_setter_reports_user_errors_as_failure(monkeypatch):
-    _live_shopify(monkeypatch)
-    _FakeAsyncClient.resp = _FakeResp(json_body={
-        "data": {"inventorySetQuantities": {
-            "inventoryAdjustmentGroup": None,
-            "userErrors": [{"field": "quantities", "message": "bad item"}],
-        }}
-    })
-    res = _run(nexus_providers.shopify_set_inventory_available(None, "1", "2", 3))
-    assert res.ok is False
-    assert "userErrors" in (res.error or "")
 
 
 # ---------------------------------------------------------------------------

@@ -55,8 +55,7 @@ catalog_variants.shopify_inventory_item_id per variant row, plus
 ecom.shopify_inventory_item_id for a product with NO catalog_variants rows
 (its single "Default Title" variant IS the product). Those are exactly the two
 fields the stock write-back resolver reads
-(online_catalog.inventory_items_for_skus, online_sync_health.
-_inventory_item_id_for_sku): without them a product IMS creates on Shopify can
+(online_catalog.inventory_items_for_skus): without them a product IMS creates on Shopify can
 never have its listed quantity synced down after an in-store sale --
 unguardable against oversell. No location is captured here: the location is
 per SHOP (stores.shopify_location_id, owner ruling 2026-09-06), never per
