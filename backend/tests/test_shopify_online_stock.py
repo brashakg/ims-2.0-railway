@@ -36,8 +36,15 @@ Pinned here, each REVERT-PROOF (revert the named piece and the test fails):
   T12 push_mode_status reports mapped counts with _graphql=_explode.
   T13 buffer 1 applies PER shop (A:2 B:1 -> A:1 B:0).
   T14 a phantom unit on BV-ONLINE-01 never counts anywhere.
-  +   the item_events ledger hook and the three door one-liners feed the
-      writer; route + rbac row + package surface.
+  T15 a listing with size rows still writes its OWN inventory item (the
+      standalone variant seeded before the rows existed).
+  +   the item_events ledger hook and the door one-liners feed the writer;
+      route + rbac row + package surface.
+  Panel round (2026-09-07): a POS sale landing while the sweep is mid-loop
+  is written, not overwritten with the snapshot; the SUPERADMIN block is
+  IN the rule so the schedule agrees with the POS door; ONE sku -> listing
+  resolver (a size variant's twin never carries a baseline); Preview first
+  names a mapped shop whose read failed.
 
 Every Shopify call is MOCKED at shopify_push._graphql. No network, no Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_shopify_online_stock.py -q
@@ -856,3 +863,173 @@ def test_package_exports_and_patch_forwarding():
         assert callable(getattr(shopify_push, name))
     for gone in ("resolve_online_location_id", "pick_online_location", "stored_online_location_id", "_online_location_cache"):
         assert not hasattr(shopify_push, gone), gone
+
+
+# ---------------------------------------------------------------------------
+# 8. panel round (2026-09-07): mid-loop sale, own inventory item, the block
+#    in the rule, one listing resolver, an honest preview
+# ---------------------------------------------------------------------------
+
+INV_2 = "gid://shopify/InventoryItem/92"
+INV_ROW = "gid://shopify/InventoryItem/952"
+
+
+def test_P2_a_sale_landing_while_the_sweep_is_mid_loop_is_written_not_overwritten(monkeypatch):
+    """Two listings; the spy flips a unit of the SECOND product to SOLD the
+    moment the FIRST product's quantity write lands (the POS sale that
+    arrives mid-pass). The second product's row must carry the post-sale
+    number: the rule runs again right before each write, never from the
+    pass's opening snapshot."""
+    db = _db(a=2, b=1, c=0)
+    db.seed("products", [{"product_id": "spine-2", "sku": "SP-2"}])
+    db.seed(
+        "stock_units",
+        [
+            {"stock_id": "a2-0", "product_id": "spine-2", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "a2-1", "product_id": "spine-2", "store_id": "BV-A", "status": "AVAILABLE"},
+        ],
+    )
+    db.seed(
+        "catalog_products",
+        [_catalog_row("cat-1", "SP-1", gid=True), _catalog_row("cat-2", "SP-2", gid=True, shopify_inventory_item_id=INV_2)],
+    )
+
+    class _SaleMidLoop(_Spy):
+        async def __call__(self, db_, query, variables):
+            body = await super().__call__(db_, query, variables)
+            if "inventorySetQuantities" in query and len(self.calls_for("inventorySetQuantities")) == 1:
+                db.get_collection("stock_units").update_one({"stock_id": "a2-0"}, {"$set": {"status": "SOLD"}})
+            return body
+
+    spy = _SaleMidLoop(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is True and res.payload["changed"] == 2 and res.payload["synced"] == 2, res
+    assert (INV_2, LOC_A, 1) in spy.rows(), spy.rows()
+    assert (INV_2, LOC_A, 2) not in spy.rows(), "the pre-sale snapshot overwrote the sale"
+    assert _baseline(db, "cat-2")["quantities"] == {"SP-2": {"BV-A": 1, "BV-B": 0, "BV-C": 0}}
+    # ...and the next pass is a true noop: the baseline holds what was written.
+    _live(monkeypatch, _explode)
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop"
+
+
+def test_T15_a_listing_with_size_rows_still_writes_its_own_inventory_item(monkeypatch):
+    """A parent listed BEFORE its size rows existed carries its own inventory
+    item (ecom.shopify_inventory_item_id -- the standalone variant); the size
+    rows carry theirs. Both are written: left out, the parent's own number
+    on Shopify would survive every pass (probe E)."""
+    db = _db(a=1, b=0, c=0)
+    db.seed("products", [{"product_id": "spine-52", "sku": "SP-1-52"}])
+    db.seed("stock_units", [{"stock_id": "r52", "product_id": "spine-52", "store_id": "BV-B", "status": "AVAILABLE"}])
+    _listed(db)  # cat-1 / SP-1 with INV_GID on the product itself
+    db.seed(
+        "catalog_variants",
+        [{"sku": "SP-1-52", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/52",
+          "shopify_inventory_item_id": INV_ROW}],
+    )
+    product = db.get_collection("catalog_products").find_one({"id": "cat-1"})
+    rows = list(db.get_collection("catalog_variants").find({}))
+    assert shopify_push.product_skus(product, rows) == ["SP-1-52", "SP-1"]
+    # A product WITHOUT its own item lists its rows only (unchanged).
+    no_own = {**product, "ecom": {k: v for k, v in product["ecom"].items() if k != "shopify_inventory_item_id"}}
+    assert shopify_push.product_skus(no_own, rows) == ["SP-1-52"]
+    assert shopify_push.product_skus(no_own, []) == ["SP-1"]
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is True, res
+    assert spy.rows() == {
+        (INV_GID, LOC_A, 1), (INV_GID, LOC_B, 0), (INV_GID, LOC_C, 0),
+        (INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 1), (INV_ROW, LOC_C, 0),
+    }
+    assert _baseline(db)["quantities"] == {
+        "SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0},
+        "SP-1-52": {"BV-A": 0, "BV-B": 1, "BV-C": 0},
+    }
+
+
+def test_two_skus_on_one_inventory_item_write_it_once_and_name_the_second(monkeypatch):
+    """A mis-stamped mapping (two SKUs, one inventory item) must not send a
+    duplicate (item, location) pair -- Shopify would refuse the whole chunk."""
+    db = _listed(_db(a=2, b=1, c=0))
+    db.seed("products", [{"product_id": "spine-x", "sku": "SP-X"}])
+    db.seed("catalog_variants", [{"sku": "SP-X", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}])
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1", "SP-X"], source="test"))
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
+    assert out["ok"] is False and any("not written twice" in e and "SP-X" in e for e in out["errors"])
+
+
+def test_blocked_sku_is_zero_in_the_rule_so_the_schedule_agrees_with_the_pos_door(monkeypatch):
+    """The SUPERADMIN collection block is part of THE rule: the press and the
+    POS door write 0 at every shop, and the next 01:00 / 09:00 pass diffs
+    0 == 0 and sends NOTHING. It used to live only in writeback_skus, so the
+    schedule wrote the shelf count straight back (0 <-> on-hand, a real
+    inventorySetQuantities each time)."""
+    db = _listed(_db(a=2, b=1, c=0))
+    db.seed(
+        "ecom_collections",
+        [{"collection_id": "C-BAN", "collection_type": "CUSTOM", "online_sync_blocked": True,
+          "products": [{"sku": "SP-1", "position": 0}]}],
+    )
+    zeros = {(INV_GID, LOC_A, 0), (INV_GID, LOC_B, 0), (INV_GID, LOC_C, 0)}
+    assert wb.online_quantities_for_skus(db, ["SP-1"]) == {"SP-1": {"BV-A": 0, "BV-B": 0, "BV-C": 0}}
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    assert _run(shopify_push.sync_stock_levels(db)).ok is True  # the press
+    assert spy.rows() == zeros, "the press wrote the shelf count for a BLOCKED sku"
+    spy.calls.clear()
+    s = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))  # the POS door
+    assert s["pushed"] == 1 and spy.rows() == zeros
+    _live(monkeypatch, _explode)
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop"
+
+
+def test_a_size_variants_pos_writeback_lands_on_the_parent_listing_never_the_child_twin(monkeypatch):
+    """ONE sku -> listing resolver (online_catalog.listings_for_skus): a size
+    variant's own catalog_products row (same SKU as its variant row, a
+    variant_of link, no listing of its own) never receives a baseline the
+    schedule never diffs; the PARENT listing does -- with or without the
+    variant row."""
+    from api.services import online_catalog
+
+    child = {
+        "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
+        "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
+    }
+    db = _db(a=2, b=1, c=0, sku="SP-1-L")
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
+    db.seed(
+        "catalog_variants",
+        [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/52",
+          "shopify_inventory_item_id": INV_ROW}],
+    )
+    got = online_catalog.listings_for_skus(db, ["SP-1-L", "SP-1"])
+    assert {k: sorted(v) for k, v in got.items()} == {"cat-1": ["SP-1", "SP-1-L"]}
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    s = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-A"))
+    assert s["pushed"] == 1 and spy.rows() == {(INV_ROW, LOC_A, 2), (INV_ROW, LOC_B, 1), (INV_ROW, LOC_C, 0)}
+    assert _baseline(db)["quantities"] == {"SP-1-L": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}
+    assert "online_stock" not in db.get_collection("catalog_products").find_one({"id": "cat-1-L"})["ecom"]
+    # No variant row at all: the child twin still resolves to its PARENT.
+    bare = StrictDB()
+    bare.seed("catalog_products", [child])
+    assert online_catalog.listings_for_skus(bare, ["SP-1-L"]) == {"cat-1": ["SP-1-L"]}
+
+
+def test_T11b_preview_first_names_a_mapped_shop_whose_read_failed(monkeypatch):
+    """Section-7 step 4: the owner reads the preview. A mapped shop whose
+    on-hand read failed is simply ABSENT from the plan rows, so the preview
+    says so exactly as the live pass would -- ok=False, STOCK_ONHAND_UNKNOWN
+    naming it -- never a green 'nothing sent'."""
+    db = _listed(_db(a=2, b=1, c=0))
+    _break_shop(db, "BV-B")
+    _live(monkeypatch, _explode)
+    res = _run(shopify_push.sync_stock_levels(db, dry_run=True))
+    assert res.mode == "SIMULATED" and res.ok is False, res
+    assert res.code == shopify_push.STOCK_ONHAND_UNKNOWN and "BV-B" in (res.error or "")
+    assert res.payload["unknown_stores"] == ["BV-B"]
+    assert res.payload["plan"][0]["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
+    assert _baseline(db) is None

@@ -325,7 +325,8 @@ def test_block_unknown_collection_is_404(client, auth_headers, patched_db):
 def test_writeback_forces_zero_available_for_blocked(monkeypatch):
     """A blocked SKU is written as 0 at EVERY mapped shop whatever the shelves
     hold (per-store locations, owner ruling 2026-09-06); an unblocked SKU gets
-    each shop's own number."""
+    each shop's own number. The block is part of THE rule
+    (online_quantities_for_skus), so the same 0 reaches the schedule."""
     from strict_fakes import StrictDB
     from api.services import online_stock_writeback as wb
     from api.services import online_catalog, stock_allocation
@@ -359,7 +360,7 @@ def test_writeback_forces_zero_available_for_blocked(monkeypatch):
     monkeypatch.setattr(stock_allocation, "recommend_allocation", lambda oh, buf: oh)
 
     summary = _run(wb.writeback_skus(db, ["SKU-A", "SKU-B"], store_id="S1"))
-    assert summary["blocked_online"] == 1
+    assert summary["pushed"] == 2
     rows = set(captured)
     assert rows == {
         ("iiA", "gid://shopify/Location/1", 0),  # blocked -> 0 everywhere

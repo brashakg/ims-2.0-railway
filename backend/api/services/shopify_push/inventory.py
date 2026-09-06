@@ -11,6 +11,7 @@ THE ONE RULE (online_stock_writeback.online_quantities_for_skus):
 
     quantity Shopify shows for SKU s at location L
       = recommend_allocation( on_hand(s, store(L)), safety_buffer )
+      (0 at every L for a SKU in a SUPERADMIN online-blocked collection)
 
 THE ONE WRITER (``set_inventory_quantities(db, rows)``, rows = one
 ``(inventory_item_gid, location_gid, qty)`` per mapped shop and SKU, an
@@ -164,17 +165,21 @@ def inventory_policy_for(product: Dict[str, Any]) -> str:
 
 
 def product_skus(product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> List[str]:
-    """The SKUs whose quantities this product lists: one per variant row, or
-    the product's own SKU when it has no variant rows."""
+    """The SKUs whose quantities this product lists: one per variant row,
+    plus the product's own SKU when the product carries its OWN Shopify
+    inventory item (``ecom.shopify_inventory_item_id`` -- the standalone
+    variant that was seeded before any size rows existed and stays
+    purchasable beside them; left out, its number on Shopify would survive
+    every pass) or has no variant rows at all."""
     out: List[str] = []
     for v in variants or []:
         sku = str((v or {}).get("sku") or "").strip()
         if sku and sku not in out:
             out.append(sku)
-    if not out:
-        sku = str(product.get("sku") or "").strip()
-        if sku:
-            out.append(sku)
+    own = str(product.get("sku") or "").strip()
+    own_item = (product.get("ecom") or {}).get("shopify_inventory_item_id")
+    if own and own not in out and (not out or own_item):
+        out.append(own)
     return out
 
 
@@ -451,41 +456,6 @@ def _writeback_stock(
         logger.warning("[SHOPIFY_STOCK] stock write-back failed %s: %s", product_id, exc)
 
 
-def _products_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
-    """``{catalog product id: [skus]}`` -- which listing(s) carry each SKU: the
-    product whose own sku it is, or the PARENT of the catalog_variants row
-    that carries it (a size variant's row rides its parent's listing).
-    Fail-soft ``{}``."""
-    out: Dict[str, List[str]] = {}
-    if not skus:
-        return out
-    try:
-        coll = db["catalog_products"]
-        for d in coll.find({"sku": {"$in": list(skus)}}):
-            pid = str(d.get("id") or d.get("product_id") or "")
-            sku = str(d.get("sku") or "").strip()
-            if pid and sku and sku not in out.setdefault(pid, []):
-                out[pid].append(sku)
-        parent_skus: Dict[str, List[str]] = {}
-        for v in db["catalog_variants"].find({"sku": {"$in": list(skus)}}):
-            sku = str(v.get("sku") or "").strip()
-            pid = str(v.get("parent_product_id") or "")
-            if pid:
-                if sku and sku not in out.setdefault(pid, []):
-                    out[pid].append(sku)
-            elif v.get("parent_sku"):
-                parent_skus.setdefault(str(v["parent_sku"]), []).append(sku)
-        if parent_skus:
-            for d in coll.find({"sku": {"$in": list(parent_skus)}}):
-                pid = str(d.get("id") or d.get("product_id") or "")
-                for sku in parent_skus.get(str(d.get("sku") or ""), []):
-                    if pid and sku and sku not in out.setdefault(pid, []):
-                        out[pid].append(sku)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] sku -> listing lookup failed: %s", exc)
-    return out
-
-
 def _file_unmapped_task(db, store: Dict[str, Any]) -> None:
     """ONE deduped SYSTEM task per unmapped shop that holds listed stock
     (source_ref shopify-store-unmapped:<store_id>). Fail-soft."""
@@ -515,6 +485,13 @@ def _file_unmapped_task(db, store: Dict[str, Any]) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SHOPIFY_STOCK] unmapped-store task skipped: %s", exc)
+
+
+def _unknown_error(names: List[str]) -> str:
+    return (
+        f"on-hand unknown at {', '.join(names)} -- written nowhere this pass "
+        f"(never as 0); the other shops were written"
+    )
 
 
 def _unmapped_error(holders: List[Dict[str, Any]]) -> str:
@@ -547,7 +524,7 @@ async def push_skus_stock(
     stores_mapped, unmapped_stores, unknown_stores, target_missing}``.
     ``ok`` is False on any error OR an unmapped holder (STORE_UNMAPPED) --
     the mapped rows are written either way. Never raises."""
-    from ..online_catalog import inventory_items_for_skus
+    from ..online_catalog import inventory_items_for_skus, listings_for_skus
     from ..online_stock_writeback import online_quantities_for_skus
 
     distinct = [s for s in dict.fromkeys(skus or []) if s]
@@ -601,6 +578,7 @@ async def push_skus_stock(
     targets = inventory_items_for_skus(db, distinct)
     rows: List[Tuple[str, str, int]] = []
     key_of: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    item_of: Dict[str, str] = {}
     for sku in distinct:
         inv = targets.get(sku)
         if not inv:
@@ -614,6 +592,16 @@ async def push_skus_stock(
             summary["errors"].append(f"{sku}: on-hand unknown -- not written")
             continue
         inv_gid = _as_shopify_gid(inv, "InventoryItem")
+        if inv_gid in item_of:
+            # Two SKUs on one inventory item (a mis-stamped mapping): Shopify
+            # refuses a duplicate (item, location) pair and the whole chunk
+            # would fail, so the second SKU is named and skipped instead.
+            summary["errors"].append(
+                f"{sku}: inventory item {inv_gid} is already carried by {item_of[inv_gid]} "
+                f"-- not written twice"
+            )
+            continue
+        item_of[inv_gid] = sku
         for sid, loc in mapped.items():
             if sid not in per:
                 # That shop's read failed: written nowhere this pass (named in
@@ -625,10 +613,7 @@ async def push_skus_stock(
             summary["quantities"].setdefault(sku, {})[sid] = int(per[sid])
 
     if summary["unknown_stores"] and not summary["error"]:
-        summary["error"] = (
-            f"on-hand unknown at {', '.join(summary['unknown_stores'])} -- written "
-            f"nowhere this pass (never as 0); the other shops were written"
-        )
+        summary["error"] = _unknown_error(summary["unknown_stores"])
     live, reason = _live_or_reason(db)
     if not live or dry_run:
         summary["mode"] = MODE_SIMULATED
@@ -658,7 +643,7 @@ async def push_skus_stock(
         by_product = (
             {product_id: list(written_per_sku)}
             if product_id
-            else _products_for_skus(db, list(written_per_sku))
+            else listings_for_skus(db, list(written_per_sku))
         )
         for pid, pid_skus in by_product.items():
             rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
@@ -677,14 +662,15 @@ async def sync_product_stock(
     product_gid: str,
     *,
     extra_variant_gids: Optional[List[Optional[str]]] = None,
-    quantities: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates): tracking + policy on every
     known variant, then ``push_skus_stock`` for this product's SKUs -- one row
-    per mapped shop per SKU. ``quantities`` may be precomputed by a batch
-    caller (the rule once for the whole catalogue); else computed here.
-    Fail-soft summary, never raises; a shop whose on-hand is UNKNOWN is never
-    written as 0."""
+    per mapped shop per SKU. The rule is computed HERE, immediately before
+    the write, never from a batch snapshot: the whole-catalogue pass loops
+    ~70 network writes, and a POS sale that lands mid-loop must not be
+    overwritten with the pre-sale number (its own write-back would be undone
+    until the next tick). Fail-soft summary, never raises; a shop whose
+    on-hand is UNKNOWN is never written as 0."""
     pid = product.get("id") or product.get("product_id")
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
@@ -698,7 +684,6 @@ async def sync_product_stock(
     summary = await push_skus_stock(
         db,
         skus,
-        quantities=quantities,
         source="product_push",
         product_id=str(pid) if pid else None,
         policy=policy,
@@ -756,12 +741,19 @@ def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str,
 async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     """Send every product on Shopify whose per-store numbers CHANGED since they
     were last sent (or was never sent / never tracked). ONE call of the rule
-    for every listed SKU, the diff over the MAPPED shops, then one tracking +
-    one quantity write per changed product. DARK -> a SIMULATED plan and zero
+    for every listed SKU decides the DIFF over the MAPPED shops; each changed
+    product's rows are then RECOMPUTED immediately before its own write
+    (``sync_product_stock``), so a POS sale landing while the loop is
+    mid-way is written, not overwritten with the snapshot. Residual: one
+    round-trip and cross-worker (a sale between a product's recompute and
+    its inventorySetQuantities); closing it needs a per-SKU version, named
+    in the PR body, not built here. DARK -> a SIMULATED plan and zero
     network; ``dry_run=True`` returns that SIMULATED plan EVEN WHEN LIVE (the
-    "Preview first" press). Never raises. entity="stock", action="sync" (or
-    "noop" when nothing changed). The ONE function behind the Push-stock
-    button, the all-pending sweep and the 01:00 / 09:00 scheduled sync."""
+    "Preview first" press) -- with the SAME ok / code / error the live pass
+    would report, so a mapped shop whose read failed is named in the preview
+    too. Never raises. entity="stock", action="sync" (or "noop" when nothing
+    changed). The ONE function behind the Push-stock button, the all-pending
+    sweep and the 01:00 / 09:00 scheduled sync."""
     from ..online_stock_writeback import online_quantities_for_skus
 
     pairs = _gid_products_with_variants(db)
@@ -816,15 +808,25 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             for p, _v, _s, q in changed[:50]
         ],
     }
-    code: Optional[str] = STORE_UNMAPPED if holders else None
-    error: Optional[str] = _unmapped_error(holders) if holders else None
+    unknown = set(payload["unknown_stores"])
+
+    def _verdict() -> Tuple[Optional[str], Optional[str]]:
+        # Holders first (the mapped shops were still written), then an unknown
+        # shop -- the SAME verdict for the preview and the live pass.
+        if holders:
+            return STORE_UNMAPPED, _unmapped_error(holders)
+        if unknown:
+            return STOCK_ONHAND_UNKNOWN, _unknown_error(sorted(unknown))
+        return None, None
+
     live, reason = _live_or_reason(db)
     if not live or dry_run:
+        code, error = _verdict()
         return PushResult(
             mode=MODE_SIMULATED,
             entity="stock",
             action="sync" if changed else "noop",
-            ok=not holders,
+            ok=not holders and not unknown,
             payload=payload,
             reason=reason if not live else "dry_run (Preview first)",
             code=code,
@@ -833,31 +835,27 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     synced = 0
     failed = 0
     errors: List[str] = []
-    for product, variants, skus, _mine in changed:
+    product_code: Optional[str] = None
+    for product, variants, _skus, _mine in changed:
         gid = (product.get("ecom") or {}).get("shopify_product_id")
-        res = await sync_product_stock(
-            db,
-            product,
-            variants,
-            _as_shopify_gid(gid, "Product"),
-            quantities={s: quantities[s] for s in skus if s in quantities},
-        )
+        # No snapshot: the rule runs again inside, right before this write.
+        res = await sync_product_stock(db, product, variants, _as_shopify_gid(gid, "Product"))
+        unknown.update(res.get("unknown_stores") or [])
         if res.get("errors"):
             failed += 1
-            code = code or res.get("code")
             pid = product.get("id") or product.get("product_id")
             errors.append(f"{pid}: {res.get('error') or 'stock not written'}")
         else:
             synced += 1
-            code = code or res.get("code")
-    payload.update({"synced": synced, "failed": failed, "errors": errors[:20]})
-    unknown = payload["unknown_stores"]
-    if unknown:
-        code = code or STOCK_ONHAND_UNKNOWN
-        error = error or (
-            f"on-hand unknown at {', '.join(unknown)} -- written nowhere this pass "
-            f"(never as 0); the other shops were written"
-        )
+        product_code = product_code or res.get("code")
+    payload.update({
+        "synced": synced,
+        "failed": failed,
+        "errors": errors[:20],
+        "unknown_stores": sorted(unknown),
+    })
+    code, error = _verdict()
+    code = code or product_code
     if errors and not error:
         error = "; ".join(errors[:3])
     return PushResult(

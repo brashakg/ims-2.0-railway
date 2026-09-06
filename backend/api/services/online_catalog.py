@@ -397,8 +397,8 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
 def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
     """{requested_key: shopify_inventory_item_id} for identifiers that map to an
     online variant carrying an InventoryItem gid (catalog_variants first, then
-    the catalog_products ecom sub-doc fallback -- the same two sources
-    online_sync_health._inventory_item_id_for_sku reads). Fail-soft {}."""
+    the catalog_products ecom sub-doc fallback). ``listings_for_skus`` walks
+    the same two lookups to name the LISTING. Fail-soft {}."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
@@ -414,6 +414,40 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
             inv = normalize_sku((doc.get("ecom") or {}).get("shopify_inventory_item_id"))
             if inv:
                 out[key] = inv
+    return out
+
+
+def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
+    """``{catalog product id: [requested keys]}`` -- THE listing that carries
+    each key, for the stock baseline (``ecom.online_stock`` lives on the
+    listing): the PARENT of the catalog_variants row that matches it (a size
+    row rides its parent's listing), else the catalog_products row whose own
+    sku / barcode it is -- and a variant-of twin resolves to its PARENT twin
+    (``ecom.variant_of.twin_id``), never to itself: a size variant owns no
+    listing and must never carry a baseline the schedule never diffs. The
+    same two lookups ``inventory_items_for_skus`` resolves targets with, so
+    the target and the listing can never disagree. Fail-soft ``{}``."""
+    keys = _clean_keys(skus)
+    if not keys or db is None:
+        return {}
+    out: Dict[str, List[str]] = {}
+
+    def _add(pid: Any, key: str) -> None:
+        if pid and key not in out.setdefault(str(pid), []):
+            out[str(pid)].append(key)
+
+    variants = _variants_by_key(db, keys)
+    parents = _parents_for_variants(db, list(variants.values()))
+    for key, var in variants.items():
+        parent = parents.get(str(var.get("parent_product_id") or "")) or parents.get(
+            normalize_sku(var.get("parent_sku"))
+        )
+        _add((parent or {}).get("id"), key)
+    remaining = [k for k in keys if k not in variants]
+    for key, doc in _products_by_key(db, remaining).items():
+        link = (doc.get("ecom") or {}).get("variant_of")
+        pid = (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")
+        _add(pid, key)
     return out
 
 

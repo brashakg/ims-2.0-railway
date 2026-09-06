@@ -542,6 +542,24 @@ def test_unmapped_holder_is_a_loud_not_ok_run_and_the_mapped_shops_still_go_out(
     assert "STORE_UNMAPPED" in runs[0]["error"]
 
 
+def test_record_run_gate_opens_on_an_unmapped_holder_even_when_nothing_was_pushed(monkeypatch):
+    """Critic 9's silent case: EVERY mapped shop's read failed (rows=[] ->
+    set=0 -> pushed=0) while an unmapped shop holds the sold SKU. The run row
+    is still written, not-ok, naming both -- `pushed` cannot open the gate
+    here; only the unmapped_stores / unknown_stores clauses can."""
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    monkeypatch.setattr(wb, "_safety_buffer", lambda db: 0)
+    db = _break(_db(a=3, b=1, d=2), ["BV-A", "BV-B"], mid=True)
+    summary = _run(wb.writeback_skus(db, ["SP-1"], "BV-D"))
+    assert summary["pushed"] == 0 and spy.rows() == set()
+    assert [s["store_id"] for s in summary["unmapped_stores"]] == ["BV-D"]
+    assert summary["unknown_stores"] == ["BV-A", "BV-B"]
+    runs = _runs(db)
+    assert len(runs) == 1 and runs[0]["ok"] is False, runs
+    assert "BV-D" in runs[0]["error"] and "UNKNOWN" in runs[0]["error"]
+
+
 def test_record_run_writes_sync_row_for_guard_gap():
     """A guard-gap run (unmapped_online > 0) writes a NOT-ok sync_runs row so
     the sync-health tile can see it; a pure no-op run stays silent."""

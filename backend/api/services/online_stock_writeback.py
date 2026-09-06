@@ -17,7 +17,9 @@ ACTIVE PHYSICAL shop (stores_util.physical_stores; ONLINE stores are never in
 the loop, so a phantom unit on BV-ONLINE-01 counts nowhere), each shop read
 through the STRICT ``_on_hand_for_skus(db, skus, store_id)``: a shop whose
 read failed is ABSENT from every SKU's inner dict (unknown is never written
-as 0; every other shop's true numbers still go out).
+as 0; every other shop's true numbers still go out). A SKU in a SUPERADMIN
+online-blocked collection (online_block.blocked_skus) is 0 at every shop --
+part of the rule, so the POS door and the 01:00 / 09:00 pass agree.
 
 Flow on a sale:
   1. The POS create-order path flips serialized stock_units to SOLD, then calls
@@ -273,6 +275,18 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     return out
 
 
+def _blocked_online(db, skus: List[str]) -> set:
+    """The SKUs in a SUPERADMIN online-blocked collection. Fail-soft: an
+    error blocks nothing (never wrongly delists a sellable SKU)."""
+    try:
+        from . import online_block
+
+        return set(online_block.blocked_skus(db, list(skus)))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] block lookup skipped: %s", exc)
+        return set()
+
+
 def online_quantities_for_skus(
     db, skus: List[str], *, safety_buffer: Optional[int] = None
 ) -> Dict[str, Dict[str, int]]:
@@ -282,7 +296,10 @@ def online_quantities_for_skus(
     (stores_util.physical_stores -- mapped or not; the writer decides what to
     do with an unmapped holder). ONLINE stores are excluded structurally: they
     are never in the loop. The buffer applies PER SHOP (Shopify routes per
-    shelf).
+    shelf). A SKU blocked from online sale (online_block) is 0 at EVERY shop
+    whatever the shelves hold -- the block is part of the rule, not a caller's
+    override, so no pass can write the shelf count back after the POS door
+    wrote 0.
 
     STRICT, per shop: a shop whose ``_on_hand_for_skus`` call returned ``{}``
     for a non-empty request is ABSENT from every SKU's inner dict (unknown ->
@@ -326,6 +343,9 @@ def online_quantities_for_skus(
             out.setdefault(sku, {})[sid] = stock_allocation.recommend_allocation(q, buf)
     if stores and not known_store:
         return {}
+    sids = [str(s.get("store_id") or "").strip() for s in stores]
+    for sku in _blocked_online(db, clean):
+        out[sku] = {sid: 0 for sid in sids if sid}
     if not stores:
         return {sku: {} for sku in clean}
     return out
@@ -343,7 +363,8 @@ async def writeback_skus(
     inventory item and hand the per-shop rows to THE ONE WRITER
     (shopify_push.inventory.push_skus_stock). Gated + fail-soft. Returns a
     summary dict (pushed / skipped / failed / simulated / unmapped_stores).
-    NEVER raises.
+    NEVER raises. Nothing here computes a quantity: the online block, the
+    buffer and the per-shop on-hand all live in the rule.
 
     ``store_id`` is CONTEXT ONLY (recorded on the summary for logging);
     quantities are per shop by construction, so the shop that lost the unit
@@ -430,32 +451,8 @@ async def writeback_skus(
         _record_run(db, summary)
         return summary
 
-    # SUPERADMIN "block a collection from online sale": a product that belongs to
-    # an online_sync_blocked collection must NEVER be sellable online even if it
-    # is physically in stock, so we push available=0 for it at every shop (a
-    # delist-by-availability). Fail-soft -> no SKUs treated as blocked on any
-    # error.
-    try:
-        from . import online_block
-
-        blocked = online_block.blocked_skus(db, list(targets.keys()))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] block lookup skipped: %s", exc)
-        blocked = set()
-    summary["blocked_online"] = 0
-    if blocked:
-        try:
-            from .stores_util import physical_stores
-
-            every_shop = [str(s.get("store_id") or "") for s in physical_stores(db)]
-        except Exception:  # noqa: BLE001
-            every_shop = []
-        for sku in blocked:
-            if sku in targets:
-                summary["blocked_online"] += 1
-                quantities[sku] = {sid: 0 for sid in every_shop if sid}
-
-    # 3. THE ONE writer: one row per (mapped shop, SKU), explicit 0 included.
+    # 3. THE ONE writer: one row per (mapped shop, SKU), explicit 0 included
+    #    (a SUPERADMIN-blocked SKU arrives from the rule as 0 everywhere).
     res = await push_skus_stock(db, list(targets.keys()), quantities=quantities, source=source)
     summary["unmapped_stores"] = list(res.get("unmapped_stores") or [])
     summary["unknown_stores"] = list(res.get("unknown_stores") or [])
