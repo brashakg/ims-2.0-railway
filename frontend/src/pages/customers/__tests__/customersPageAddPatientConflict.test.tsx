@@ -60,7 +60,6 @@ vi.mock('../../../services/api/loyalty', () => ({
 vi.mock('../../../components/customers/AddCustomerModal', () => ({ AddCustomerModal: () => null }));
 vi.mock('../../../components/common/AutoSearch', () => ({ AutoSearch: () => null }));
 vi.mock('../../../components/common/Pagination', () => ({ Pagination: () => null }));
-vi.mock('../../../components/crm/RecallManager', () => ({ RecallManager: () => null }));
 vi.mock('../../../components/crm/CustomerPurchaseHistory', () => ({
   CustomerPurchaseHistory: () => null,
 }));

@@ -69,6 +69,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // one role is added or dropped on either side.
       { id: 'customer-360', label: 'Customer 360', to: '/customers/360', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'crm-follow-ups', label: 'Follow-ups', to: '/customers/follow-ups', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER'] },
+      // Recalls got its address in the Wave 2 finish (it was the last in-page
+      // `?tab=` branch of the customer list, so it appeared in no menu at all).
+      // requireRoles mirror the route gate, which is the /customers gate.
+      { id: 'recalls', label: 'Recalls', to: '/customers/recalls', icon: 'bell', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       { id: 'cl-refill', label: 'CL Refill Due', to: '/customers/cl-refill', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'OPTOMETRIST'] },
       { id: 'reactivation', label: 'Win-back List', to: '/customers/reactivation', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
       { id: 'family-wallet', label: 'Family Wallet', to: '/customers/family-wallet', icon: 'wallet', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER'] },

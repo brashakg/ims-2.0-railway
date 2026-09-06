@@ -46,7 +46,6 @@ vi.mock('../../../components/customers/AddCustomerModal', () => ({
 // Leaf screens the list view mounts; none is what this file is about.
 vi.mock('../../../components/common/AutoSearch', () => ({ AutoSearch: () => null }));
 vi.mock('../../../components/common/Pagination', () => ({ Pagination: () => null }));
-vi.mock('../../../components/crm/RecallManager', () => ({ RecallManager: () => null }));
 vi.mock('../../../components/crm/CustomerPurchaseHistory', () => ({
   CustomerPurchaseHistory: () => null,
 }));
