@@ -1027,6 +1027,8 @@ class InventoryInput(BaseModel):
 class ShopifySyncInput(BaseModel):
     sync_to_shopify: bool = False
     shopify_product_type: Optional[str] = None
+    # The form's "Shopify tags" box -> the spine's governed `tags` + the twin's
+    # ecom.seo.tags (product_master.set_twin_tags), the list the push sends.
     shopify_tags: List[str] = []
     # publish_to_online_store removed in Phase 6.12 — we don't run our
     # own storefront. Kept publish_to_pos for Shopify POS sync.
@@ -1083,7 +1085,8 @@ class ProductUpdateInput(BaseModel):
     #   name -- explicit operator name; applied AFTER the attributes block so
     #     it wins over the best-effort title regen for THAT save (sets both
     #     name and title; per-save only, no persistent flag).
-    #   tags -- replaces the tag list (each trimmed, empties dropped).
+    #   tags -- replaces the tag list (normalised, landed at ecom.seo.tags --
+    #     the one spelling the Shopify push reads; product_master.set_twin_tags).
     #   expected_updated_at -- ADDITIVE optimistic concurrency: when present
     #     and != the stored updated_at, the save 409s instead of clobbering a
     #     concurrent reviewer's fixes. Absent = today's last-write-wins (the
@@ -1700,6 +1703,10 @@ async def create_catalog_product(
                 "discount_category": product.pricing.discount_category,
                 "hsn_code": hsn_code,
                 "gst_rate": gst_rate,
+                # The form's "Shopify tags" box. Declared on ShopifySyncInput and
+                # read by nothing until sync audit gap #4: normalised into the
+                # spine's governed `tags` here, mirrored onto the twin below.
+                "tags": product.shopify.shopify_tags if product.shopify else None,
                 "created_by": current_user.get("user_id"),
             },
             source="CATALOG",
@@ -1841,6 +1848,11 @@ async def create_catalog_product(
         product_data["inventory"]["locations"][
             product.inventory.location_id
         ] = product.inventory.initial_quantity
+
+    # The twin's tag list (ecom.seo.tags, the ONLY spelling the push reads) is
+    # the spine's normalised list -- the same value in the two documents that
+    # hold it, exactly as the spine mirror keeps them after an edit.
+    _pm.set_twin_tags(product_data, _spine.get("tags"))
 
     _save_catalog_product(product_data)
 
@@ -2002,7 +2014,9 @@ async def update_catalog_product(
             existing["title"] = _name
 
     if product.tags is not None:
-        existing["tags"] = [t.strip() for t in product.tags if t and t.strip()]
+        # ONE spelling: ecom.seo.tags, the list the Shopify push reads. This
+        # used to write a top-level `tags` nothing pushed (sync audit gap #4).
+        _pm.set_twin_tags(existing, product.tags)
 
     if product.description is not None:
         existing["description"] = product.description
@@ -2274,7 +2288,9 @@ def _promote_payload_from_doc(doc: Dict, actor: Optional[str]) -> Dict[str, Any]
         "discount_category": pricing.get("discount_category"),
         "hsn_code": doc.get("hsn_code"),
         "gst_rate": doc.get("gst_rate"),
-        "tags": doc.get("tags"),
+        # ecom.seo.tags (the door-written spelling), else the BVI import's
+        # top-level `tags` -- product_master.twin_tags is the one reader.
+        "tags": _pm.twin_tags(doc),
         "created_by": actor,
     }
 

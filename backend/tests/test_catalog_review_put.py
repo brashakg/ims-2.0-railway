@@ -306,7 +306,12 @@ def test_name_and_tags_roundtrip(env):
     updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
     assert updated["name"] == "Vogue VO5051 Midnight"  # trimmed
     assert updated["title"] == "Vogue VO5051 Midnight"  # BOTH set
-    assert updated["tags"] == ["Aviator", "New Arrival"]  # empties dropped
+    # Sync audit gap #4: tags land at ecom.seo.tags -- the ONE spelling the
+    # Shopify push reads -- normalised (trimmed, lower-cased, empties dropped).
+    # The BVI import's top-level copy is not rewritten; twin_tags reads it
+    # only when ecom.seo.tags is absent.
+    assert updated["ecom"]["seo"]["tags"] == ["aviator", "new arrival"]
+    assert updated["tags"] == ["eyewear"]
     assert res["product"]["name"] == "Vogue VO5051 Midnight"
 
 

@@ -7,7 +7,7 @@ ecom.locally_modified (the ping-pong hazard).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ._shared import logger
 from .transport import _now
@@ -24,9 +24,16 @@ def _writeback_product(
     variant_gid: Optional[str] = None,
     inventory_item_gid: Optional[str] = None,
     status: Optional[str] = None,
+    tags_sent: Optional[List[str]] = None,
 ) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
+
+    `tags_sent` (optional) records ecom.shopify_tags_sent -- the exact tag list
+    IMS last put on the Shopify product (sync audit gap #4). It is the
+    ownership ledger the tag pass diffs against: IMS adds / removes ONLY tags
+    on this list, so a tag a human typed into the Shopify admin is never
+    touched. Set-only: None leaves the stored list alone.
 
     SYNC PATH -- this write only ever sets `locally_modified` to False, and must
     NEVER set it to True. It is the push's own book-keeping (the Shopify gid it
@@ -77,6 +84,8 @@ def _writeback_product(
             ecom["shopify_variant_id"] = variant_gid
         if inventory_item_gid:
             ecom["shopify_inventory_item_id"] = inventory_item_gid
+        if tags_sent is not None:
+            ecom["shopify_tags_sent"] = list(tags_sent)
         if status:
             ecom["status"] = status
             # THE TAKE-DOWN MARKER. Delist writes DRAFT and clears the dirty

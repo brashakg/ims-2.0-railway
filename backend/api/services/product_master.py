@@ -964,6 +964,47 @@ def normalise_tags(tags: Any) -> List[str]:
     return list(seen.keys())
 
 
+# ---------------------------------------------------------------------------
+# THE TWIN'S TAG LIST -- one spelling, one writer (sync audit gap #4, owner
+# 2026-09-06). `ecom.seo.tags` on the catalog_products twin is THE list IMS
+# sends to Shopify (shopify_push.product_input unions the attribute-derived
+# filter tags onto it and reads NO other spelling). Every door that accepts
+# tags lands them here through set_twin_tags: the catalog review PUT (which
+# used to write a top-level `tags` the push never read), the add-product
+# form's "Shopify tags" box (which was declared and dropped), and the spine
+# mirror (mirror_update_to_catalog_twin, the same normaliser by dot-path).
+# twin_tags is the matching reader; the BVI import wrote a top-level `tags`,
+# so a doc that has never been through a door is read from there.
+# ---------------------------------------------------------------------------
+
+
+def twin_tags(doc: Dict[str, Any]) -> List[str]:
+    """The twin's tag list as stored: ecom.seo.tags when it is a list (an
+    explicit [] is an empty list -- never the legacy copy), else the
+    top-level `tags` the BVI import wrote. Pure; never raises."""
+    seo = ((doc or {}).get("ecom") or {}).get("seo") or {}
+    tags = seo.get("tags") if isinstance(seo, dict) else None
+    if not isinstance(tags, list):
+        tags = (doc or {}).get("tags")
+    return [str(t) for t in tags if t is not None] if isinstance(tags, list) else []
+
+
+def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
+    """Land `tags` on the twin at ecom.seo.tags -- the ONLY writer of that
+    field on a full document (normalise_tags rule, so every door stores the
+    same list for the same input). Copy-on-write on the ecom/seo sub-dicts so
+    a caller holding a shallow copy of the stored doc never mutates the store
+    before its own save. Returns the stored list. Never touches
+    ecom.locally_modified -- the caller's save decides whether to queue."""
+    clean = normalise_tags(tags)
+    ecom = dict(doc.get("ecom") or {}) if isinstance(doc.get("ecom"), dict) else {}
+    seo = dict(ecom.get("seo") or {}) if isinstance(ecom.get("seo"), dict) else {}
+    seo["tags"] = clean
+    ecom["seo"] = seo
+    doc["ecom"] = ecom
+    return clean
+
+
 def _derive_brand_model_color_size(
     attributes: Dict[str, Any],
 ) -> Dict[str, Optional[str]]:
@@ -2582,7 +2623,8 @@ def mirror_update_to_catalog_twin(
             if key in patch:
                 cat_patch[key] = patch[key]
         if "tags" in patch:
-            cat_patch["ecom.seo.tags"] = list(patch["tags"] or [])
+            # The dot-path form of set_twin_tags: same field, same normaliser.
+            cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])
         if "gtin" in (patch.get("attributes") or {}):
             # Same projection as _build_pim_doc: the public barcode rides
             # top-level on the twin for the pseudo-variant.

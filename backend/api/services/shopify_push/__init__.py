@@ -112,6 +112,7 @@ from . import (
     media,
     writeback,
     inventory,
+    tags,
     product,
     webhooks,
 )
@@ -226,6 +227,14 @@ from .product_input import (  # noqa: F401
     _variants_for_price_push,
     _publishable_gtin,
     build_variant_price_inputs,
+    ims_product_tags,
+)
+from .tags import (  # noqa: F401
+    TAGS_SENT_FIELD,
+    TAGS_CODE,
+    sent_tags,
+    plan_product_tags,
+    sync_product_tags,
 )
 from .variants import (  # noqa: F401
     _norm_opt,
@@ -312,6 +321,7 @@ _SUBMODULES = (
     media,
     writeback,
     inventory,
+    tags,
     product,
     webhooks,
 )

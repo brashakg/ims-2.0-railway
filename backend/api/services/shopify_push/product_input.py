@@ -22,6 +22,27 @@ from .transport import _graphql
 # ===========================================================================
 
 
+def ims_product_tags(product: Dict[str, Any]) -> List[str]:
+    """THE tags IMS wants on this product's Shopify listing. Pure.
+
+    Union of the product's own tags (ecom.seo.tags -- the ONLY spelling any
+    door writes, product_master.set_twin_tags) and the attribute-derived
+    `<prefix>_<value>` filter tags the storefront facets on (shopify_tag_gen,
+    BVI parity). Lower-cased + deduped by merge_tag_lists. Both the create
+    payload and the update-time tag diff read this one list, so what IMS
+    records as "sent" is always what it computed."""
+    ecom = product.get("ecom") or {}
+    seo = ecom.get("seo") or {}
+    attrs = product.get("attributes") or {}
+    extras: Dict[str, Any] = {}
+    if product.get("brand"):
+        # Brand lives top-level on the product doc; feed it so the brand_ tag is
+        # emitted even when `attributes` has no brand_name.
+        extras["brand_name"] = product["brand"]
+    generated_tags = generate_attribute_tags(product.get("category"), attrs, extras)
+    return merge_tag_lists(seo.get("tags") or [], generated_tags)
+
+
 def build_product_input(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -79,20 +100,14 @@ def build_product_input(
             "title": seo.get("title") or title,
             "description": seo.get("description") or "",
         }
-    # Tags = union of the product's manual/browse tags (ecom.seo.tags) + the
-    # attribute-derived `<prefix>_<value>` filter tags the BVI admin app
-    # auto-generates (shopify_tag_gen). Reproducing BVI's tokens is what keeps a
-    # LIVE productUpdate (which REPLACES the whole tags array) from wiping the
-    # storefront's filter tags. Pure + deterministic; no new network.
-    attrs = product.get("attributes") or {}
-    extras: Dict[str, Any] = {}
-    if product.get("brand"):
-        # Brand lives top-level on the product doc; feed it so the brand_ tag is
-        # emitted even when `attributes` has no brand_name.
-        extras["brand_name"] = product["brand"]
-    generated_tags = generate_attribute_tags(product.get("category"), attrs, extras)
-    merged_tags = merge_tag_lists(seo.get("tags") or [], generated_tags)
-    if merged_tags:
+    # TAGS RIDE THE CREATE ONLY (sync audit gap #4, owner 2026-09-06). On a
+    # productUpdate the `tags` field REPLACES Shopify's whole list, which wiped
+    # every tag a human had added in the Shopify admin (measured on the 36
+    # connector-uploaded Ray-Ban Meta products). An existing product's tags are
+    # diffed by tags.sync_product_tags (tagsAdd / tagsRemove of the tags IMS
+    # itself sent) after the write; the create still carries the full list.
+    merged_tags = ims_product_tags(product)
+    if merged_tags and not sid:
         inp["tags"] = merged_tags
     # Variant identity is carried as options/skus only (price/qty stay BVI/stock
     # owned -- online qty is the derived allocation, not pushed from here).

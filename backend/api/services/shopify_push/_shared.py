@@ -119,6 +119,12 @@ class PushResult:
     # location}; LIVE -> {ok, tracked, set, quantities, location_id, errors}.
     # None when the push never reached it (refusal, ARCHIVED, transport error).
     stock: Optional[Any] = None
+    # Product pushes only: the TAG side channel (sync audit gap #4 -- IMS
+    # manages only the tags it sent; hand-added Shopify tags survive).
+    # SIMULATED -> the plan {add, remove, unmanaged, adopt, create}; LIVE ->
+    # {added, removed, unmanaged, adopted, error?, code?} from
+    # tags.sync_product_tags. None when the push never got that far.
+    tags: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
