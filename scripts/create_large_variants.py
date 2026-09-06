@@ -68,6 +68,11 @@ FENCES (each exits before any write)
           variant gid; the door's own three duplicate guards pass
   WINDOW  --apply refuses inside the 00:30-01:30 / 08:30-09:30 IST live-sync
           windows
+  OWNER   --apply refuses without --owner-ack: the four OWNER POINTS every
+          run prints (parent take-down drafts the Large too; a deleted parent
+          orphans its child; child online price = own MRP under the family
+          rule; child delist lands DELIST_FAILED until the online location
+          is set) were put to the owner and answered
   RERUN   --apply refuses when opening_stock_batches already holds a line for
           any "-L" sku, or when any "-L" product exists (the ROWS fence)
 Dry-run (default) = every fence + the door's normalise_payload + the three
@@ -80,7 +85,7 @@ USAGE
 Dry-run (DEFAULT, read-only):
     TZ=UTC railway run --service ims-2.0-railway -- ".venv\\Scripts\\python.exe" scripts/create_large_variants.py
 Apply:
-    TZ=UTC railway run --service ims-2.0-railway -- ".venv\\Scripts\\python.exe" scripts/create_large_variants.py --apply --actor <username>
+    TZ=UTC railway run --service ims-2.0-railway -- ".venv\\Scripts\\python.exe" scripts/create_large_variants.py --apply --actor <username> --owner-ack
 Optional: --input <large_11.json> (must match INPUT_SHA256), --out <response json>.
 DEFAULT_INPUT is the session scratchpad copy of the approved file -- a temp
 directory. If it is gone, --input a copy that still hashes to INPUT_SHA256
@@ -140,6 +145,34 @@ IST = timezone(timedelta(hours=5, minutes=30))
 SYNC_WINDOWS_IST = ((0, 30, 1, 30), (8, 30, 9, 30))  # around the 01:00 / 09:00 runs
 DB_NAME = "ims_2_0"
 EXIT_FENCE, EXIT_DRIFT, EXIT_SHORT = 1, 2, 4
+
+# Design section 6 / verifier round 3: not code defects -- decisions the
+# owner has not been asked yet. Printed by every run; --apply refuses until
+# --owner-ack says they were put to him and answered.
+OWNER_POINTS = (
+    "A. PARENT TAKE-DOWN DRAFTS THE WHOLE LISTING: the parent's take-down button / Delete runs "
+    "productUpdate status DRAFT, so its Large variant goes off sale with it (a child take-down only "
+    "DENIES + zeroes its own variant). Accepted?",
+    "B. A DELETED / DEACTIVATED PARENT ORPHANS ITS CHILD: no guard today -- the child stays POS-sellable, "
+    "its row points at a soft-deleted twin, and the stock pass keeps writing its quantity to a DRAFT "
+    "listing. Block the parent's deactivation while a child is active, cascade, or accept for now?",
+    "C. A CHILD'S ONLINE PRICE = ITS OWN MRP UNDER THE FAMILY'S DISCOUNT RULE, never its in-store "
+    "offer_price (moot for these 11: mrp == offer_price, no gtin). Accepted?",
+    "D. A DEACTIVATED SIZE LANDS DELIST_FAILED ON PROD TODAY: SHOPIFY_ONLINE_LOCATION_ID is not set, so "
+    "the Catalog screen says 'take-down failed' for a deactivated size until the online-location "
+    "decision lands (the same blocker as the 49-unit stock press). Known?",
+)
+
+
+def check_owner_points(apply: bool, acknowledged: bool) -> None:
+    """Print the open owner points on EVERY run; --apply refuses until
+    --owner-ack. A dry-run never needs the flag."""
+    print("OWNER POINTS (put to the owner before --apply):")
+    for p in OWNER_POINTS:
+        print("  ", p)
+    if apply and not acknowledged:
+        sys.exit("--apply needs --owner-ack: the OWNER POINTS above must be put to the owner and "
+                 "answered first. Nothing done.")
 
 _PAYLOAD_KEYS = (
     "category", "sku", "attributes", "mrp", "offer_price", "cost_price",
@@ -464,7 +497,10 @@ def main(argv=None):
     ap.add_argument("--apply", action="store_true", help="WRITE (default: read-only dry-run)")
     ap.add_argument("--actor", help="username or user_id recorded as the actor (required with --apply)")
     ap.add_argument("--out", help="write the run record here (default with --apply: next to --input)")
+    ap.add_argument("--owner-ack", action="store_true",
+                    help="the OWNER POINTS were put to the owner and answered (required with --apply)")
     a = ap.parse_args(argv)
+    check_owner_points(a.apply, a.owner_ack)
     if a.apply and not a.out:
         a.out = os.path.join(os.path.dirname(a.input), f"apply_{utc_naive():%Y%m%dT%H%M%SZ}.json")
 
