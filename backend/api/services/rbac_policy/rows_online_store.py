@@ -398,6 +398,16 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/all-pending",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # LIVE-PRODUCT SYNC BY HAND (owner ruling 2026-09-06): the same function
+    # the 01:00 / 09:00 IST schedule runs -- re-push every product already on
+    # Shopify that was edited in IMS; never a first publish. Same {ADMIN,
+    # SUPERADMIN} set as every other row in this push family, so the module
+    # grant-union is UNCHANGED (no capability broadening).
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/push/sync-live",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/catalogue ---  (Share collection as PDF + temp collections)
     # Catalogue sharing is a broad staff activity (anyone helping a customer),
     # so these are AUTHENTICATED -- the same posture as the internal catalogue
