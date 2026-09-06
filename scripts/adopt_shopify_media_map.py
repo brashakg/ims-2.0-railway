@@ -21,8 +21,11 @@ photo, so adoption claims a media ONLY on a POSITIVE identity match
   R1  the media's originalSource url IS the IMS url, or
   R3  the media's CDN file name IS the IMS url's file name -- Shopify's own
       ``_<uuid>`` collision suffix is ignored on the CDN side only, the
-      extension must agree whenever the IMS name has one, nothing else is
-      normalised (no ``_WxH``, no case folding, no bare-hex strip).
+      extension must agree exactly whenever the IMS name has one, nothing
+      else is normalised (no ``_WxH``, no case folding of stem OR extension,
+      no bare-hex strip). An extension-less IMS name of ANY shape (not only
+      the uploader's ObjectId) matches any image extension: 'front' claims
+      'front.png' -- wider than the ObjectId case, none such on the 42.
 Never position, never count, and NO alt rule (dropped 09-06 on the
 verifier's finding: IMS attaches every photo with alt '', so an alt equal
 to an IMS url / file name can only be a human's edit on a media IMS did not
@@ -33,11 +36,24 @@ a partial match is reported and nothing is written. Media no photo claimed
 exactly where it is, and the dry-run prints its file name so a wrong pairing
 is visible BEFORE --apply.
 
+KNOWN LIMIT (inherent to a file-name rule): a HUMAN'S upload that carries the
+SAME file name as an IMS photo IS claimed -- IMS 'x/1.jpg' claims a hand
+upload named '1.jpg', and IMS 'front.jpg' claims 'front_<uuid>.jpg' (a hand
+upload that collided with some other front.jpg in Files). The rule cannot
+tell them apart; the only defence is the printed pair. READ every
+'+ <ims url> -> <gid> (<cdn file name>)' line in the dry-run and drop the id
+from --ids when a name is not one IMS uploaded (0 such pairs on the 42:
+the six adopt candidates carry 24-hex ObjectId names and no hand uploads).
+
 Measured on prod 2026-09-06 (API 2024-10, 42 twins, 180 media): R3 adopts
 the six 09-05 IMS-pushed products (15 media, ObjectId <-> ObjectId.png/jpg/
 webp, 1:1, no unmanaged left); R1 fires on nothing (originalSource is
 always Shopify's own storage copy); the 36 Ray-Ban Meta products match
-under no rule. The 42 hold 0 same-base-name/different-uuid pairs.
+under no rule (R3b -- stripping the connector's '<own product id>__<nn>__'
+prefix and ignoring the extension -- would claim one media on 23 of them;
+measured, NOT adopted here: prefix strip + extension change is a looser
+rule than the owner ticked, his call). The 42 hold 0 same-base-name/
+different-uuid pairs, 0 non-ASCII and 0 upper-case CDN names.
 
 SCOPE
 -----
@@ -50,6 +66,21 @@ SCOPE
     drops such rows -- the pass pruned it or never wrote it) and is adopted
   - one audit_logs row per adopted product (action MEDIA_MAP_ADOPT)
   - --ids is REQUIRED and explicit; 'all' is refused
+
+ENVIRONMENT NOTES
+-----------------
+  - the map's ``url`` is whatever product_photo_urls(twin) yields IN THE
+    ENV THIS SCRIPT RUNS IN, and the photo pass later DELETES an owned row
+    whose url is not in its own photo list (then attaches a duplicate). So
+    run it under `railway run` against the SAME service as the pass
+    (PUBLIC_API_BASE_URL is unset on ims-2.0-railway today and the 42 store
+    ABSOLUTE up.railway.app image urls, so the two cannot disagree; if that
+    variable is ever set, both envs still see it through `railway run`).
+  - _writeback_media_map is a whole-``ecom`` read-merge-write, the same
+    idiom as the other ecom writers, so a write-back from the scheduled
+    sync (01:00 / 09:00 IST) running at the same instant can clobber the
+    map or be clobbered -- benign (a lost map = hands-off again; re-run),
+    but run --apply OUTSIDE those windows.
 
 USAGE
 -----
@@ -128,11 +159,13 @@ async def inspect(db, product_id: str) -> Dict[str, Any]:
         "unmatched": [],
         "unmanaged": [],
         "names": {},
+        "before_map": None,
     }
     twin = db["catalog_products"].find_one({"id": product_id})
     if twin is None:
         return row
     row["sku"] = twin.get("sku") or "-"
+    row["before_map"] = (twin.get("ecom") or {}).get("media_map")
     gid = _as_shopify_gid((twin.get("ecom") or {}).get("shopify_product_id"), "Product")
     if not gid:
         row["status"] = "not_on_shopify"
@@ -187,7 +220,7 @@ def _audit(db, row: Dict[str, Any]) -> None:
                 "user_id": ACTOR,
                 "actor": ACTOR,
                 "source": "ADOPT_SHOPIFY_MEDIA_MAP",
-                "before_state": {"media_map": []},
+                "before_state": {"media_map": row["before_map"]},
                 "after_state": {"media_map": row["map"], "unmanaged": row["unmanaged"]},
                 "reversal": "update_one({'id': product_id}, {'$unset': {'ecom.media_map': ''}})",
                 "severity": "INFO",
@@ -270,6 +303,8 @@ def _connect():
 def main(argv=None):
     args = parse_args(argv)
     ids = parse_ids(args.ids)
+    # a non-ASCII CDN file name must not crash the report under cp1252
+    sys.stdout.reconfigure(errors="backslashreplace")
     db = _connect()
     asyncio.run(run(db, ids, apply=args.apply))
 

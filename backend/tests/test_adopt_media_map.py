@@ -15,7 +15,8 @@ EXPLODES on any mutation; the adoption is a query, never a write to Shopify.
 
 Discriminating power (each test goes red when its rule is removed -- table in
 the PR): file name equality (R3) and its edges (CDN-side ``_<uuid>`` only,
-extension agreement, no ``_WxH`` / bare-hex / ``.v2`` normalising),
+extension agreement with NO case folding, no ``_WxH`` / bare-hex / ``.v2``
+normalising; a same-named hand upload IS claimed by design and pinned),
 originalSource url (R1), NO alt rule, IMS order, 1:1 (ambiguity refused),
 repeated url counts once, hand uploads unmanaged and PRINTED, partial = no
 write, position / count never match, dry-run = no write, --ids required,
@@ -327,13 +328,17 @@ def test_a_different_shopify_upload_with_the_same_base_name_is_not_the_photo():
     assert out["unmatched_photos"] == [mine] and out["unmanaged"] == [_m(1)]
 
 
-def test_generic_names_are_not_claimed():
+def test_names_that_differ_are_not_claimed_same_name_is():
     """VERIFIER probes: a rule that normalises too much claims a human's file.
     Same word, different extension; a size suffix in a human's name; a hex
     tail on either side that is not Shopify's uuid; a '.v2' that is not an
     extension (the name is 'photo.v2'); case and percent-encoding are not
     folded either. Same-extension pairs on purpose: the extension rule must
-    not be what saves them."""
+    not be what saves them. The name says what the test proves: only pairs
+    that DIFFER are refused -- a human's upload with the SAME name IS
+    claimed (pinned below): the rule cannot tell it from IMS's own upload,
+    and the operator's only defence is the printed pair in the dry-run
+    (the script docstring says so)."""
     for ims, cdn in [
         ("1.jpg", "1.png"),
         ("front.png", "front_600x600.png"),
@@ -341,10 +346,16 @@ def test_generic_names_are_not_claimed():
         ("front.png", "front_0123456789abcdef.png"),
         ("photo.v2", "photo.png"),
         ("Front.JPG", "front.jpg"),
+        ("Front.jpg", "front.jpg"),
         ("rb%20front.jpg", "rb_front.jpg"),
     ]:
         out = match_media_to_photos(["https://a/i/" + ims], [{"id": _m(1), "image": {"url": CDN + cdn}}])
         assert out["map"] == [] and out["unmanaged"] == [_m(1)], (ims, cdn)
+    # KNOWN LIMIT, by design: a same-named hand upload is claimed (plain, and
+    # via the CDN-side uuid strip when it collided with another front.jpg).
+    for ims, cdn in [("1.jpg", "1.jpg"), ("front.jpg", "front_89ffbc2c-6001-45c1-804a-2e4d838a4627.jpg")]:
+        out = match_media_to_photos(["https://a/i/" + ims], [{"id": _m(1), "image": {"url": CDN + cdn}}])
+        assert out["map"] == [{"url": "https://a/i/" + ims, "id": _m(1)}], (ims, cdn)
 
 
 def test_repeated_photo_url_counts_once():
@@ -362,6 +373,9 @@ def test_empty_or_malformed_map_is_not_already_mapped(db, monkeypatch):
     assert out["rows"][0]["status"] == "adopt" and out["written"] == ["P1"]
     assert _twin(db)["ecom"]["media_map"] == [{"url": U1, "id": _m(1)}]
     assert shop.calls == [{"id": GID}]
+    # the audit row records what was REALLY there before, not an empty list
+    audit = list(db["audit_logs"].find({}))
+    assert audit[0]["before_state"] == {"media_map": [{"id": "no-url"}, "junk"]}
 
 
 def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
@@ -380,3 +394,19 @@ def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
     assert out["rows"][0]["error"].startswith("ValueError: status 401: <url>")
     assert "myshopify" not in out["rows"][0]["error"]
     assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
+
+
+def test_extension_case_is_not_folded():
+    """VERIFIER 2 (2026-09-06): the rule is EXACT equality with no case
+    folding. _stem_ext lowers the extension (and _IMAGE_EXT is re.I), so IMS
+    'front.JPG' claims a media named 'front.jpg' -- a different file by name --
+    and the reverse; the existing probe ('Front.JPG' vs 'front.jpg') is saved
+    by the STEM, so the fold went untested. Stems are exact; the extension
+    must be too."""
+    for ims, cdn in [("front.JPG", "front.jpg"), ("front.jpg", "front.JPG"), ("front.Jpeg", "front.jpeg")]:
+        out = match_media_to_photos(["https://a/i/" + ims], [{"id": _m(1), "image": {"url": CDN + cdn}}])
+        assert out["map"] == [] and out["unmanaged"] == [_m(1)], (ims, cdn)
+    # positive control: same case IS the file
+    assert match_media_to_photos(["https://a/i/front.JPG"], [{"id": _m(1), "image": {"url": CDN + "front.JPG"}}])["map"] == [
+        {"url": "https://a/i/front.JPG", "id": _m(1)}
+    ]

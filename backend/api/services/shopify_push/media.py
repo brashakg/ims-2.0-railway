@@ -207,7 +207,8 @@ def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
 # of the same base name is not that photograph. Measured on the 42 (09-06):
 # 0 of 180 CDN names carry ``_WxH`` or a bare-hex suffix, so nothing else is
 # stripped; a human's "front_600x600.png" is a different file from
-# "front.png". Extensions are a fixed image whitelist so ".v2" is not one.
+# "front.png". Extensions are a fixed image whitelist so ".v2" is not one;
+# nothing is case-folded: "front.JPG" and "front.jpg" are two names.
 _IMAGE_EXT = re.compile(r"\.(jpe?g|png|gif|webp|avif|heic|heif|bmp|tiff?|svg)$", re.I)
 _COLLISION_SUFFIX = re.compile(
     r"_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -220,16 +221,19 @@ def _file_name(url: str) -> str:
 
 
 def _stem_ext(name: str) -> tuple:
-    """(stem, ext) of a file name; ext is '' unless it is an image extension."""
+    """(stem, ext) of a file name; ext is '' unless it is an image extension.
+    The extension is RECOGNISED case-insensitively (so '.JPG' is an extension
+    and not part of a stem) but returned as written: comparison is exact."""
     m = _IMAGE_EXT.search(name)
-    return (name[: m.start()], m.group(0).lower()) if m else (name, "")
+    return (name[: m.start()], m.group(0)) if m else (name, "")
 
 
 def _same_file(ims_url: str, cdn_url: str) -> bool:
     """R3: the CDN copy carries the IMS file's name -- the name equal, the
     CDN side allowed Shopify's ``_<uuid>`` collision suffix (once), and the
-    extension equal whenever the IMS name has one (an extension-less IMS
-    name matches whichever image extension Shopify gave the copy). Pure."""
+    extension equal -- exactly, no case folding -- whenever the IMS name has
+    one (an extension-less IMS name, of ANY shape, not only an ObjectId,
+    matches whichever image extension Shopify gave the copy). Pure."""
     stem, ext = _stem_ext(_file_name(ims_url))
     cstem, cext = _stem_ext(_file_name(cdn_url))
     if not stem or (ext and ext != cext):
