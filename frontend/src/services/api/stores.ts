@@ -80,6 +80,12 @@ export interface StorePayload {
   invoice_footer?: string;
   invoice_terms?: string;
   is_active?: boolean;
+  /** Per-store Shopify location (owner ruling 2026-09-06): the gid the shop's
+   *  own on-hand is written at. '' clears. Never on an ONLINE store; the
+   *  backend refuses a gid another store already holds (409). */
+  shopify_location_id?: string | null;
+  /** Display only; the backend copies it from Shopify's locations read on save. */
+  shopify_location_name?: string | null;
 }
 
 export interface Store extends StorePayload {

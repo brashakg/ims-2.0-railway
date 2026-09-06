@@ -13,8 +13,11 @@ import {
 } from 'lucide-react';
 import { entitiesApi, type Entity, type BankAccount, type OrgMeta } from '../../services/api/entities';
 import { orgStoreApi, type Store, type StorePayload } from '../../services/api/stores';
+import { pushApi, type ShopifyLocationsRead } from '../../services/api/onlineStore';
 import { useToast } from '../../context/ToastContext';
 import { validateGstin, validateIfsc, validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
+import { isOnlineStore } from '../../utils/storeMode';
+import { exactLocationMatch } from '../../utils/shopifyLocationMatch';
 
 const BRANDS = ['BETTER_VISION', 'WIZOPT'];
 const STORE_TYPES = ['RETAIL', 'HQ', 'WAREHOUSE'];
@@ -186,6 +189,17 @@ export default function OrganizationPage() {
                               {s.gstin && <span className="text-xs font-mono text-gray-500">{s.gstin}</span>}
                               {s.store_type && s.store_type !== 'RETAIL' && (
                                 <span className="text-xs bg-gray-100 rounded px-1.5 py-0.5">{s.store_type}</span>
+                              )}
+                              {/* Per-store Shopify location (owner ruling 2026-09-06). An
+                                  ONLINE store holds no stock, so it carries no badge. */}
+                              {!isOnlineStore(s) && (
+                                s.shopify_location_id ? (
+                                  <span title="Shopify location" className="text-xs bg-emerald-50 text-emerald-700 rounded px-1.5 py-0.5">
+                                    {s.shopify_location_name || s.shopify_location_id}
+                                  </span>
+                                ) : (
+                                  <span title="Shopify location" className="text-xs bg-amber-50 text-amber-700 rounded px-1.5 py-0.5">not mapped</span>
+                                )
                               )}
                               {s.is_active === false && <span className="text-xs text-red-600">inactive</span>}
                             </div>
@@ -422,6 +436,32 @@ function StoreModal({
   const set = (k: keyof StorePayload, v: unknown) => setForm((p) => ({ ...p, [k]: v }));
   const cats = form.enabled_categories || [];
 
+  // Per-store Shopify location (owner ruling 2026-09-06: every physical shop
+  // is a Shopify location; IMS writes that shop's own on-hand there). ONE read
+  // of Shopify's locations; DARK => [] and the store's current mapping is kept
+  // as its own option so a Save cannot clear it by accident. The preselect is
+  // FE-only and only for a shop with NO mapping yet: exactly one location whose
+  // name equals the store's name or code (utils/shopifyLocationMatch -- never a
+  // substring). Nothing reaches the backend until the owner presses Save.
+  const online = isOnlineStore({ store_id: store?.store_id, store_type: form.store_type });
+  const [locRead, setLocRead] = useState<ShopifyLocationsRead | null>(null);
+  const locs = locRead?.locations ?? [];
+  useEffect(() => {
+    if (online) return undefined;
+    let alive = true;
+    pushApi.getLocations().then((r) => {
+      if (!alive) return;
+      setLocRead(r);
+      setForm((p) => {
+        if (p.shopify_location_id) return p;
+        const hit = exactLocationMatch(r.locations, p);
+        if (!hit) return p;
+        return { ...p, shopify_location_id: hit, shopify_location_name: r.locations.find((l) => l.id === hit)?.name ?? null };
+      });
+    });
+    return () => { alive = false; };
+  }, [online]);
+
   // The entity's GSTIN for the chosen state (what the store will bill under).
   const derivedGstin = useMemo(() => {
     const g = (entity.gstins || []).find((x) => x.state_code === form.state_code);
@@ -497,6 +537,47 @@ function StoreModal({
         <Field label="Cost center"><input className={inputCls} value={form.cost_center || ''} onChange={(e) => set('cost_center', e.target.value)} /></Field>
         <Field label="Invoice prefix"><input className={inputCls} placeholder="BV-RNC" value={form.invoice_prefix || ''} onChange={(e) => set('invoice_prefix', e.target.value.toUpperCase())} /></Field>
       </div>
+
+      {!online && (
+        <>
+          <SectionHeader icon={<StoreIcon className="w-3.5 h-3.5" />} title="Shopify location (online stock)" />
+          <Field label="Shopify location">
+            <select
+              aria-label="Shopify location"
+              className={inputCls}
+              value={form.shopify_location_id || ''}
+              onChange={(e) => {
+                const id = e.target.value;
+                set('shopify_location_id', id);
+                set('shopify_location_name', locs.find((l) => l.id === id)?.name ?? null);
+              }}
+            >
+              <option value="">not mapped</option>
+              {form.shopify_location_id && !locs.some((l) => l.id === form.shopify_location_id) && (
+                <option value={form.shopify_location_id}>{form.shopify_location_name || form.shopify_location_id}</option>
+              )}
+              {locs.map((l) => {
+                const other = !!l.mapped_store_id && l.mapped_store_id !== store?.store_id;
+                return (
+                  <option key={l.id} value={l.id} disabled={other}>
+                    {l.name || l.id}
+                    {l.city ? ` - ${l.city}` : ''}
+                    {l.isActive === false ? ' (inactive)' : ''}
+                    {other ? ` (mapped to ${l.mapped_store_code || l.mapped_store_id})` : ''}
+                  </option>
+                );
+              })}
+            </select>
+          </Field>
+          <p className="text-xs text-gray-500 mt-1">
+            {locRead === null
+              ? 'Loading Shopify locations...'
+              : locs.length === 0
+                ? `Shopify location list unavailable${locRead.reason ? ` (${locRead.reason})` : ''}; the current mapping is kept.`
+                : "This shop's own on-hand is written at the location picked here. Create one location per shop in Shopify admin (Settings > Locations), named exactly as the store."}
+          </p>
+        </>
+      )}
 
       <SectionHeader icon={<StoreIcon className="w-3.5 h-3.5" />} title="Enabled categories" />
       <div className="flex flex-wrap gap-2">
