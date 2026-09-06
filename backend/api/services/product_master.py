@@ -1757,8 +1757,17 @@ def pim_display_name(spine: Dict[str, Any]) -> Optional[str]:
     return spine.get("name") or build_product_name(spine) or None
 
 
-def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
+def _build_pim_doc(
+    spine: Dict[str, Any], parent: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Project the spine + its attributes into a catalog_products PIM doc.
+
+    ``parent`` (the resolved parent SPINE, create_product's variant_of) marks
+    the twin as a SIZE VARIANT: ``ecom.variant_of`` names the parent in every
+    id space a reader needs (spine product_id / twin id / sku -- one key, no
+    wrong-space join) and the twin is born CLEAN (locally_modified False): it
+    owns no listing, so it is never queued for a push; its price, barcode and
+    stock ride the parent's listing through its catalog_variants row.
 
     PURE: builds and returns a dict, never raises, never touches the DB. The
     SKU precondition lives in _assert_pim_sku, called from inside each writer's
@@ -1806,7 +1815,7 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001 - listing copy must never fail a create
             logger.warning("[PM] smartglass listing build failed", exc_info=True)
 
-    return {
+    doc: Dict[str, Any] = {
         "id": spine.get("pim_product_id"),
         # ROOT FIX: the PIM row IS the parent and carries its OWN `sku`. Every
         # online consumer joins catalog_products on `sku`, never `parent_sku` --
@@ -1880,6 +1889,14 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         # refused as "no photograph" while its photo sat one collection over.
         "images": _spine_images(spine),
     }
+    if parent:
+        doc["ecom"]["variant_of"] = {
+            "product_id": parent.get("product_id"),
+            "twin_id": parent.get("pim_product_id") or parent.get("product_id"),
+            "sku": parent.get("sku"),
+        }
+        doc["ecom"]["locally_modified"] = False
+    return doc
 
 
 def _spine_images(spine: Dict[str, Any]) -> List[str]:
@@ -1895,6 +1912,7 @@ def _spine_images(spine: Dict[str, Any]) -> List[str]:
 def _write_mirror(
     spine: Dict[str, Any],
     *,
+    parent: Optional[Dict[str, Any]] = None,
     catalog_repo=None,
     variant_repo=None,
     db=None,
@@ -1915,7 +1933,7 @@ def _write_mirror(
             _SyncTarget("external", "SKIPPED", "mirror flag off"),
         ]
 
-    pim_doc = _build_pim_doc(spine)
+    pim_doc = _build_pim_doc(spine, parent=parent)
 
     # --- catalog_products (Mongo PIM doc) -- internal, flag-gated only ---
     try:
@@ -1953,13 +1971,7 @@ def _write_mirror(
     # --- catalog_variants (per-SKU identity) -- internal, flag-gated only ---
     try:
         if variant_repo is not None:
-            variant_repo.upsert(
-                {
-                    "sku": spine.get("sku"),
-                    "parent_product_id": spine.get("pim_product_id"),
-                    "parent_sku": spine.get("sku"),
-                }
-            )
+            variant_repo.upsert(_variant_row_for(spine, parent))
             targets.append(_SyncTarget("catalog_variants", "OK"))
         else:
             targets.append(
@@ -1986,9 +1998,49 @@ def _write_mirror(
     return targets
 
 
+def _variant_row_for(
+    spine: Dict[str, Any], parent: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The catalog_variants row the create door writes for a spine. Pure.
+
+    A regular product: its own self-row (sku == parent_sku, parent_product_id
+    = its own twin) -- the one row every online consumer joins on.
+
+    A SIZE VARIANT (``parent`` given): the row points at the PARENT twin. That
+    ONE link is what variants_for_product / _gid_products_with_variants /
+    the discount engine already join on, so the parent's stock pass, price
+    pass (push_variant_prices) and discount recompute carry the child with no
+    new pipeline code. The row MUST carry the child's own ``mrp``: the price
+    push resolves row.discounted_price, else row.mrp, else the PARENT's price
+    -- without it the Large would ship at the base size's price. ``gtin`` is
+    the child's own public barcode (the repo drops an invalid one);
+    ``option_size`` is the Size option value a first-publish seed matches
+    against Shopify's. Never discounted_price/compare_at_price: those belong
+    to the online discount engine (a child's online price = its own MRP under
+    the family's rule; its in-store offer_price stays a POS number)."""
+    if not parent:
+        return {
+            "sku": spine.get("sku"),
+            "parent_product_id": spine.get("pim_product_id"),
+            "parent_sku": spine.get("sku"),
+        }
+    attrs = spine.get("attributes") or {}
+    row: Dict[str, Any] = {
+        "sku": spine.get("sku"),
+        "parent_product_id": parent.get("pim_product_id") or parent.get("product_id"),
+        "parent_sku": parent.get("sku"),
+        "option_size": attrs.get("size") or spine.get("size"),
+        "mrp": spine.get("mrp"),
+    }
+    if attrs.get("gtin"):
+        row["gtin"] = attrs.get("gtin")
+    return row
+
+
 def _stage_catalog_draft(
     spine: Dict[str, Any],
     *,
+    parent: Optional[Dict[str, Any]] = None,
     catalog_repo=None,
     db=None,
 ) -> _SyncTarget:
@@ -2021,7 +2073,7 @@ def _stage_catalog_draft(
         # Same precondition as _write_mirror, inside this writer's own try so
         # staging records a FAILED target instead of raising into the create.
         _assert_pim_sku(spine)
-        pim_doc = _build_pim_doc(spine)
+        pim_doc = _build_pim_doc(spine, parent=parent)
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
             return _SyncTarget("catalog_draft", "OK")
@@ -2241,6 +2293,7 @@ def create_via_door(
         as_draft=bool(p.get("as_draft", False)),
         force_draft=force_draft,
         provisional=bool(p.get("provisional", False)),
+        variant_of=p.get("variant_of"),
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -2385,6 +2438,7 @@ def create_product(
     as_draft: bool = False,
     force_draft: bool = False,
     provisional: bool = False,
+    variant_of: Optional[str] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -2393,6 +2447,15 @@ def create_product(
     db=None,
 ) -> Dict[str, Any]:
     """SPINE-FIRST + COMPENSATION triple-write.
+
+    ``variant_of`` (owner ruling 2026-09-06): the parent spine's product_id
+    when this product is a SIZE VARIANT of another -- its own spine, SKU,
+    stock and POS sale, but NO Shopify listing of its own. Validated at this
+    ONE door (parent exists, same category, a parent is never itself a
+    variant) and written ONCE into the three id spaces the codebase already
+    has: spine ``variant_of`` (parent product_id), twin ``ecom.variant_of``
+    (_build_pim_doc), and the catalog_variants row's ``parent_product_id``
+    (_write_mirror) -- the link every online pass already joins on.
 
     Order (CORRECTIONS-binding):
       1. write the `products` spine FIRST + alone (single-document, atomic).
@@ -2436,6 +2499,11 @@ def create_product(
     )
     # Pre-assign the PIM link id so the spine + PIM doc share it from the start.
     spine["pim_product_id"] = str(uuid.uuid4())
+
+    parent: Optional[Dict[str, Any]] = None
+    if variant_of:
+        parent = _resolve_variant_parent(variant_of, spine, product_repo)
+        spine["variant_of"] = parent.get("product_id")
 
     if product_repo is None:
         # No DB (local/dev): echo a synthetic shape; no mirror, no audit.
@@ -2491,7 +2559,11 @@ def create_product(
 
     # --- STEP 2: gated, best-effort mirror (never corrupts the spine) ---
     targets = _write_mirror(
-        created, catalog_repo=catalog_repo, variant_repo=variant_repo, db=db
+        created,
+        parent=parent,
+        catalog_repo=catalog_repo,
+        variant_repo=variant_repo,
+        db=db,
     )
 
     # --- STEP 2b: ALWAYS stage the catalog_products DRAFT doc (linkage fix) ---
@@ -2500,7 +2572,7 @@ def create_product(
     # regardless of the mirror flag; fail-soft; recorded under its own target
     # key so the flag-gated mirror targets above are unaffected.
     targets.append(
-        _stage_catalog_draft(created, catalog_repo=catalog_repo, db=db)
+        _stage_catalog_draft(created, parent=parent, catalog_repo=catalog_repo, db=db)
     )
 
     # --- STEP 3: record compensation/sync status back on the spine ---
@@ -2537,6 +2609,84 @@ def create_product(
             logger.warning("[PM] audit write failed for %s: %s", product_id, exc)
 
     return created
+
+
+def _resolve_variant_parent(
+    variant_of: str, spine: Dict[str, Any], product_repo
+) -> Dict[str, Any]:
+    """The parent SPINE a variant_of create points at, or a 422. Needs the
+    repo (no unvalidated link is ever stamped): parent by product_id, same
+    category, and never a chain (a parent is not itself a variant)."""
+    if product_repo is None:
+        raise ProductMasterError(
+            "variant_of needs a product store to resolve the parent.",
+            status=503,
+            field="variant_of",
+        )
+    parent = product_repo.find_by_id(str(variant_of).strip())
+    if parent is None:
+        raise ProductMasterError(
+            f"variant_of: no product with product_id '{variant_of}'.",
+            status=422,
+            field="variant_of",
+        )
+    if resolve_category(parent.get("category")) != spine.get("category"):
+        raise ProductMasterError(
+            "variant_of: the parent must be in the same category "
+            f"('{parent.get('category')}' vs '{spine.get('category')}').",
+            status=422,
+            field="variant_of",
+        )
+    if parent.get("variant_of"):
+        raise ProductMasterError(
+            "variant_of: the parent is itself a size variant -- link to its parent "
+            f"('{parent.get('variant_of')}') instead; no chains.",
+            status=422,
+            field="variant_of",
+        )
+    return parent
+
+
+def _mirror_variant_row_update(
+    *, current: Dict[str, Any], patch: Dict[str, Any], db
+) -> None:
+    """The SIZE-VARIANT half of the spine-edit mirror: a child's mrp / gtin
+    live on its catalog_variants row (the price push reads the ROW, never the
+    child twin), and the listing that must carry them is the PARENT's.
+
+    So: $set the row (the discount engine's _persist_variant idiom, keyed on
+    the unique sku), let the engine -- the owner of discounted_price /
+    compare_at_price -- recompute the parent so a stale discounted_price
+    never ships the OLD price with the NEW mrp as compare-at, then queue the
+    PARENT twin. The child twin is never queued. Fail-soft."""
+    if "mrp" not in patch and "gtin" not in (patch.get("attributes") or {}):
+        return
+    sku = current.get("sku")
+    if not sku:
+        return
+    row_patch: Dict[str, Any] = {}
+    if "mrp" in patch:
+        row_patch["mrp"] = patch["mrp"]
+    if "gtin" in (patch.get("attributes") or {}):
+        row_patch["gtin"] = patch["attributes"].get("gtin") or None
+    variants = db.get_collection("catalog_variants")
+    variants.update_one({"sku": sku}, {"$set": row_patch})
+    row = variants.find_one({"sku": sku}) or {}
+    parent_twin_id = row.get("parent_product_id")
+    if not parent_twin_id:
+        return
+    cat = db.get_collection("catalog_products")
+    parent_twin = cat.find_one({"id": parent_twin_id})
+    if parent_twin is None:
+        return
+    if "mrp" in row_patch:
+        try:
+            from .online_discount_engine import recompute_online_price
+
+            recompute_online_price(parent_twin, db=db)
+        except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
+            logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
+    cat.update_one({"id": parent_twin_id}, {"$set": {"ecom.locally_modified": True}})
 
 
 def mirror_update_to_catalog_twin(
@@ -2673,6 +2823,13 @@ def mirror_update_to_catalog_twin(
                 cat_patch["title"] = new_name
                 if mark_dirty:
                     cat_patch["ecom.locally_modified"] = True
+        if current.get("variant_of"):
+            # A SIZE VARIANT owns no listing: its twin is NEVER queued (a
+            # rename never expects Shopify -- the title is the parent's), and
+            # its price / barcode reach the storefront through its
+            # catalog_variants row on the PARENT's next push.
+            cat_patch.pop("ecom.locally_modified", None)
+            _mirror_variant_row_update(current=current, patch=patch, db=db)
         if not cat_patch:
             return
         if cat_patch.get("ecom.locally_modified"):
