@@ -132,12 +132,97 @@ beforeEach(() => {
   (syncHealthApi.getDrift as any).mockResolvedValue({ unavailable: true });
 });
 
+// Sync audit #7: the product IS live (ok=true) but its price step failed, so
+// the website sells at the OLD price. The result carries a code + message and
+// every line that would have said "ok" must say that instead.
+const OLD_PRICE_MSG =
+  'Live on the website at the OLD price: the price change did not reach Shopify. ' +
+  'The product stays queued -- press again, or the next scheduled sync retries it.';
+
+const OLD_PRICE = {
+  mode: 'LIVE' as const,
+  entity: 'product',
+  action: 'update',
+  target_id: 'P1',
+  ok: true,
+  shopify_id: 'gid://shopify/Product/900',
+  error: OLD_PRICE_MSG,
+  code: 'PRICE_NOT_SYNCED',
+  reason: null,
+};
+
 describe('formatPushResult', () => {
   it('renders the plain-language message and the stable code', () => {
     const line = formatPushResult('Ray-Ban RB2140', DENIED);
     expect(line).toContain(SCOPE_MSG);
     expect(line).toContain('[PUBLISH_SCOPE_MISSING]');
     expect(line).not.toMatch(/graphql/i);
+  });
+
+  it('an ok result that carries a code is not a clean line: message + code', () => {
+    const line = formatPushResult('Ray-Ban RB2140', OLD_PRICE);
+    expect(line).toContain(OLD_PRICE_MSG);
+    expect(line).toContain('[PRICE_NOT_SYNCED]');
+  });
+});
+
+describe('/online-store/shopify push history', () => {
+  it('a row that is live at the OLD price shows the code, never a green ok', async () => {
+    (pushApi.getHistory as any).mockResolvedValue({
+      available: true,
+      count: 1,
+      entries: [
+        {
+          timestamp: '2026-09-06T10:00:00+00:00',
+          user_id: 'u1',
+          entity: 'product',
+          target_id: 'P1',
+          sku: 'RB2140',
+          name: 'Ray-Ban RB2140',
+          mode: 'LIVE',
+          push_action: 'update',
+          ok: true,
+          shopify_id: 'gid://shopify/Product/900',
+          error: OLD_PRICE_MSG,
+          reason: null,
+          code: 'PRICE_NOT_SYNCED',
+        },
+      ],
+    });
+    render(<OnlineShopifySyncPage />);
+    await waitFor(() => expect(pushApi.getHistory).toHaveBeenCalled());
+
+    const code = await screen.findByText(/PRICE_NOT_SYNCED/);
+    const row = code.closest('tr')!;
+    expect(row).toHaveTextContent('Ray-Ban RB2140');
+    expect(row).toHaveTextContent(/OLD price/);
+    expect(row).not.toHaveTextContent(/\bok\b/);
+  });
+
+  it('a clean row still shows ok', async () => {
+    (pushApi.getHistory as any).mockResolvedValue({
+      available: true,
+      count: 1,
+      entries: [
+        {
+          timestamp: '2026-09-06T10:00:00+00:00',
+          user_id: 'u1',
+          entity: 'product',
+          target_id: 'P1',
+          name: 'Ray-Ban RB2140',
+          mode: 'LIVE',
+          push_action: 'update',
+          ok: true,
+          shopify_id: 'gid://shopify/Product/900',
+          error: null,
+          reason: null,
+          code: null,
+        },
+      ],
+    });
+    render(<OnlineShopifySyncPage />);
+    const name = await screen.findByText('Ray-Ban RB2140');
+    expect(name.closest('tr')!).toHaveTextContent(/\bok\b/);
   });
 });
 

@@ -309,7 +309,9 @@ export function SyncChip({
 // ----------------------------------------------------------------------------
 export function formatPushResult(label: string, r: PushResult): string {
   const where = r.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
-  if (!r.ok) {
+  // An ok result that carries a code (PRICE_NOT_SYNCED: live, at the OLD
+  // price) is not a clean push either -- the message and the code go on the line.
+  if (!r.ok || r.code) {
     const codePart = r.code ? ` [${r.code}]` : '';
     return `${label}: ${where} — ${r.error || r.reason || 'not pushed'}${codePart}`;
   }
