@@ -1470,6 +1470,58 @@ export interface PushStatus {
   counts: PushCounts;
   /** Why the status read failed (null when the backend answered). */
   status_reason?: OnlineStoreLoadFailure | null;
+  /** The scheduled live-product sync (owner ruling 2026-09-06): settings,
+   *  last run, next IST slot. Null on a stale deploy / failed read. */
+  live_sync?: LiveSyncStatus | null;
+}
+
+/** One product the live sync could not update (from online_sync_runs). */
+export interface LiveSyncFailure {
+  product_id?: string | null;
+  sku?: string | null;
+  name?: string | null;
+  code?: string | null;
+  reason?: string | null;
+  error?: string | null;
+}
+
+/** One run of the live-product sync -- scheduled (01:00 / 09:00 IST by
+ *  default) or manual ("Sync live products now"). Mirrors the backend
+ *  online_sync_runs summary doc; instants are aware ISO strings (UTC). */
+export interface LiveSyncRun {
+  run_id?: string | null;
+  trigger?: 'scheduled' | 'manual' | string | null;
+  actor?: string | null;
+  /** "YYYY-MM-DD HH:MM" (IST) for a scheduled run, "manual" otherwise. */
+  slot?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status?: string | null;
+  mode?: 'SIMULATED' | 'LIVE' | string | null;
+  /** Products already on Shopify AND edited since (the only rows a sync touches). */
+  selected?: number | null;
+  attempted?: number | null;
+  pushed_ok?: number | null;
+  failed?: number | null;
+  refused_no_photo?: number | null;
+  publish_withheld?: number | null;
+  /** Dirty products with NO Shopify id: never synced -- first publish is a human press. */
+  awaiting_first_publish?: number | null;
+  taken_down_skipped?: number | null;
+  blocked_skipped?: number | null;
+  limit?: number | null;
+  limit_reached?: boolean | null;
+  failures?: LiveSyncFailure[] | null;
+}
+
+export interface LiveSyncStatus {
+  enabled: boolean;
+  /** "HH:MM" IST faces, e.g. ["01:00", "09:00"]. */
+  slots: string[];
+  max_products_per_run: number;
+  last_run: LiveSyncRun | null;
+  /** Next scheduled slot (null while disabled). `label` is rendered server-side in IST. */
+  next_slot: { slot: string; at: string; label: string } | null;
 }
 
 /** The POST /push/all-pending sweep result — the same engine, run over every
@@ -1602,6 +1654,7 @@ export const pushApi = {
         db_connected: !!data.db_connected,
         counts: (data.counts ?? {}) as PushCounts,
         status_reason: null,
+        live_sync: (data.live_sync as LiveSyncStatus | undefined) ?? null,
       };
     } catch (err) {
       // RC-E/OS-018: label the failed read. A 403 (catalog/design manager)
@@ -1650,6 +1703,17 @@ export const pushApi = {
   pushImage: async (imageId: string): Promise<PushResult> => {
     const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`, undefined, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
+  },
+
+  /** "Sync live products now" (owner ruling 2026-09-06): the SAME function the
+   *  01:00 / 09:00 IST schedule runs -- every product already on Shopify that
+   *  was edited in IMS is re-pushed; a never-pushed product is only counted
+   *  (first publish stays a human press). SIMULATED when the gates are off.
+   *  Throws on HTTP failure so the caller can toast. */
+  syncLiveNow: async (): Promise<{ run: LiveSyncRun | null; live_sync: LiveSyncStatus | null }> => {
+    const res = await api.post(`${PUSH_BASE}/sync-live`, undefined, SWEEP_TIMEOUT);
+    const data = (res?.data ?? {}) as { run?: LiveSyncRun | null; live_sync?: LiveSyncStatus | null };
+    return { run: data.run ?? null, live_sync: data.live_sync ?? null };
   },
 
   /** Sweep every pending/dirty ecom doc through the SAME engine and return the

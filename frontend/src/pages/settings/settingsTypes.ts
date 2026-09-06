@@ -27,6 +27,7 @@ export type SettingsTab =
   | 'lens-pricing'
   | 'policies'
   | 'refund-policy'
+  | 'shopify-live-sync'
   | 'system';
 
 export interface StoreData {

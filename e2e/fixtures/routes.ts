@@ -194,6 +194,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/settings/approvals' },
   { path: '/settings/agents' },
   { path: '/settings/feature-toggles' },
+  { path: '/settings/shopify-live-sync' },
   { path: '/settings/audit-logs' },
   { path: '/settings/system' },
   { path: '/organization' },
