@@ -552,12 +552,15 @@ def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
     Pure; never raises."""
     # Lazy: shopify_push is the heavy Shopify client module and this helper
     # runs on every list request.
-    from .shopify_push import product_photo_urls
+    from .shopify_push import is_variant_of, product_photo_urls
 
     doc = doc if isinstance(doc, dict) else {}
     ecom = doc.get("ecom") if isinstance(doc.get("ecom"), dict) else {}
     has_photo = bool(product_photo_urls(doc))
-    queued = bool(ecom.get("locally_modified"))
+    # A size variant is NEVER queued as a listing (the sweep skips it; its
+    # price/stock ride the parent), so the column and catalog_counts.pending
+    # must not show a dirty child as QUEUED.
+    queued = bool(ecom.get("locally_modified")) and not is_variant_of(doc)
     delist_state = str(ecom.get("online_state") or "").upper()
     if delist_state == "DELIST_FAILED":
         online = "DELIST_FAILED"
