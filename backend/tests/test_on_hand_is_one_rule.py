@@ -323,6 +323,18 @@ def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
     out["online_stock_writeback._on_hand_for_skus"] = int(
         online_stock_writeback._on_hand_for_skus(db, [sku], STORE).get(sku, 0) or 0
     )
+    # THE online quantity rule itself (per-store Shopify locations): what the
+    # website lists for this SKU at THIS shop's location. A re-copied status
+    # match here would drift the website from every other reader.
+    mongo_db["stores"].update_one(
+        {"store_id": STORE},
+        {"$set": {"store_id": STORE, "store_code": STORE, "store_name": STORE,
+                  "store_type": "RETAIL", "is_active": True}},
+        upsert=True,
+    )
+    out["online_stock_writeback.online_quantities_for_skus"] = int(
+        (online_stock_writeback.online_quantities_for_skus(db, [sku]).get(sku) or {}).get(STORE, 0) or 0
+    )
     # a fulfilment candidate is a store that HAS a sellable unit
     stores = shopify_ingest._available_stores_for_product(db, pid)
     out["shopify_ingest._available_stores_for_product"] = 1 if STORE in stores else 0

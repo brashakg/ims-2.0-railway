@@ -109,6 +109,21 @@ class _RouterSpy:
     def count_for(self, marker):
         return sum(1 for c in self.calls if marker in c["query"])
 
+    def seed_count_for(self, marker):
+        """Calls for ``marker`` EXCLUDING the stock step's tracking/policy
+        update (rows carrying ``inventoryPolicy``): per-store locations set
+        tracked=true + DENY on every push whatever the location map says, so
+        a seeding-count assertion must not count that call."""
+        return sum(
+            1
+            for c in self.calls
+            if marker in c["query"]
+            and not any(
+                isinstance(r, dict) and "inventoryPolicy" in r
+                for r in ((c.get("variables") or {}).get("variants") or [])
+            )
+        )
+
 
 def _force_live(monkeypatch, responses):
     """Open all three gates on shopify_push's OWN namespace and replace the
@@ -788,7 +803,7 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
     )
     # ...and Black/Gold were NEVER resubmitted -- no bulk-update call at all,
     # they were not even part of this push's seed_rows.
-    assert spy2.count_for("productVariantsBulkUpdate") == 0
+    assert spy2.seed_count_for("productVariantsBulkUpdate") == 0
     assert spy2.count_for("productVariantsBulkCreate") == 1
 
     black2 = db["catalog_variants"].find_one({"sku": "S-BLK"})
@@ -852,7 +867,7 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     # No price and no SKU anywhere -> nothing to seed AND nothing publishable.
     assert res.ok is False and res.reason == "publish_withheld"
     assert res.variants_seeded is None
-    assert spy.count_for("productVariantsBulkUpdate") == 0
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 0
     # productCreate + the photograph. Nothing else: no seeding call, and
     # no publish (the product is unpriced -- publish stays withheld).
     assert spy.count_for("productCreateMedia") == 1
@@ -962,7 +977,7 @@ def test_live_update_never_seeded_repairs_regardless_of_the_flag(monkeypatch):
     assert res.action == "update" and res.ok is True
     assert res.variants_seeded is not None
     assert res.variants_seeded["updated"] == 1
-    assert spy.count_for("productVariantsBulkUpdate") == 1
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 1
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
     assert (
@@ -1012,7 +1027,7 @@ def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):
     res = _run(shopify_push.push_product(db, product, []))
     assert res.action == "update"
     assert res.variants_seeded["updated"] == 1
-    assert spy.count_for("productVariantsBulkUpdate") == 1
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 1
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
 
@@ -1559,20 +1574,6 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
     items = online_catalog.inventory_items_for_skus(db, ["S-BLK", "BV-RB-0001"])
     assert items["S-BLK"] == "gid://shopify/InventoryItem/7002"
     assert items["BV-RB-0001"] == "gid://shopify/InventoryItem/7001"
-
-    monkeypatch.setenv(
-        "SHOPIFY_ONLINE_LOCATION_ID", "gid://shopify/Location/11"
-    )
-    targets = online_catalog.online_variant_targets_for_skus(
-        db, ["S-BLK", "BV-RB-0001"]
-    )
-    assert targets["S-BLK"] == {
-        "inventory_item_id": "gid://shopify/InventoryItem/7002",
-        "location_id": "gid://shopify/Location/11",
-    }
-    assert targets["BV-RB-0001"]["inventory_item_id"] == (
-        "gid://shopify/InventoryItem/7001"
-    )
 
     # --- online_sync_health: the oversell re-push sweep's per-SKU lookup ---
     assert (
