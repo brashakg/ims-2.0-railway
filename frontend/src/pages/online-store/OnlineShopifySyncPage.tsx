@@ -343,9 +343,11 @@ export default function OnlineShopifySyncPage() {
         const withheld = Number(s?.publish_withheld ?? 0);
         const heldDown = Number(s?.taken_down_skipped ?? 0);
         const archived = Number(s?.archived_not_listed ?? 0);
+        const oldPrice = Number(s?.price_not_synced ?? 0);
         // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
-        // first failed row's server message rides on the toast itself.
-        const firstFail = (res.results ?? []).find((r) => !r.ok && (r.error || r.reason));
+        // first failed row's server message rides on the toast itself. A row
+        // that is ok but carries a code (live at the OLD price) counts too.
+        const firstFail = (res.results ?? []).find((r) => (!r.ok || r.code) && (r.error || r.reason));
         const why = firstFail
           ? ` — ${firstFail.error || firstFail.reason}${firstFail.code ? ` [${firstFail.code}]` : ''}`
           : '';
@@ -357,6 +359,7 @@ export default function OnlineShopifySyncPage() {
           (withheld ? ` · ${withheld} NOT made visible` : '') +
           (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
           (archived ? ` · ${archived} archived (not listed)` : '') +
+          (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
           why;
         if (refused || withheld || s?.failed) toast.warning(msg);
         else toast.success(msg);
@@ -722,6 +725,7 @@ export default function OnlineShopifySyncPage() {
               failed · <span className="font-medium">{fmt(lastRun.awaiting_first_publish)}</span> awaiting first publish
               {(lastRun.refused_no_photo ?? 0) > 0 && <> · {fmt(lastRun.refused_no_photo)} refused (no photo)</>}
               {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
+              {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
             {(lastRun.failures?.length ?? 0) > 0 && (
@@ -871,6 +875,19 @@ export default function OnlineShopifySyncPage() {
                             title="These reached Shopify but were NOT made visible (no Online Store channel, the photograph did not attach, or the price could not be proved). They are still queued — fix the cause and press again."
                           >
                             <AlertTriangle className="w-3 h-3" /> {fmt(withheld)} NOT made visible
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const oldPrice = Number(
+                          (sweep.summary?.[ent.token]?.price_not_synced ?? 0) as number,
+                        );
+                        return oldPrice > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="Live on the website at the OLD price: the price change did not reach Shopify. They are still queued - press again, or the next scheduled sync retries them."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPrice)} at the OLD price
                           </span>
                         ) : null;
                       })()}
@@ -1143,7 +1160,10 @@ export default function OnlineShopifySyncPage() {
                       {h.user_name || h.user_id || '—'}
                     </td>
                     <td className="py-1.5">
-                      {h.ok ? (
+                      {/* ok + a code (PRICE_NOT_SYNCED: live at the OLD price) is
+                          not a clean ok -- it renders like a failure, with the
+                          message and the code, never a green tick. */}
+                      {h.ok && !h.code ? (
                         <span className="inline-flex items-center gap-1 text-green-700">
                           <CheckCircle2 className="w-3 h-3" /> ok
                         </span>

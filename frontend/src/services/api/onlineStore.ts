@@ -1515,6 +1515,8 @@ export interface LiveSyncRun {
   failed?: number | null;
   refused_no_photo?: number | null;
   publish_withheld?: number | null;
+  /** Live, but at the OLD price: the price step failed (PRICE_NOT_SYNCED). Still queued. */
+  price_not_synced?: number | null;
   /** Dirty products with NO Shopify id: never synced -- first publish is a human press. */
   awaiting_first_publish?: number | null;
   taken_down_skipped?: number | null;
@@ -1572,6 +1574,10 @@ export interface PushSweepResult {
            *  resolvable Online Store publication, the photograph did not
            *  attach, or the price was not provable). They stay queued. */
           publish_withheld?: number;
+          /** Products that are live but at the OLD price: the price step of
+           *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
+           *  shopper can find them); they stay queued for the retry. */
+          price_not_synced?: number;
           /** Products a take-down is holding off the storefront: the sweep
            *  skips them until someone presses that one product explicitly. */
           taken_down_skipped?: number;

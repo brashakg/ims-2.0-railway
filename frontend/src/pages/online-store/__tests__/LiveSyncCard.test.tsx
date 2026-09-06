@@ -138,6 +138,39 @@ describe('Live sync card', () => {
     expect(card).toHaveTextContent(/Configured in Settings > Shopify live sync/);
   });
 
+  // Sync audit #7: a product whose price step failed is LIVE at the OLD price.
+  // ok=true, so it is neither "failed" nor a clean "updated" -- it gets its own
+  // count on the line and its own row in the failures list (code + message).
+  it('shows a product that is live at the OLD price on its own line, with the code', async () => {
+    const run = {
+      ...LAST_RUN,
+      failed: 0,
+      pushed_ok: 3,
+      price_not_synced: 1,
+      failures: [
+        {
+          product_id: 'P11',
+          sku: 'RB-2140',
+          name: 'Wayfarer',
+          code: 'PRICE_NOT_SYNCED',
+          reason: null,
+          error: 'Live on the website at the OLD price: the price change did not reach Shopify.',
+        },
+      ],
+    };
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: run }) as any);
+    render(<OnlineShopifySyncPage />);
+
+    const card = await screen.findByTestId('live-sync-card');
+    expect(card).toHaveTextContent('1 at the OLD price');
+    const failures = within(card).getByRole('list', { name: /live sync failures/i });
+    const rows = within(failures).getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('RB-2140');
+    expect(rows[0]).toHaveTextContent('PRICE_NOT_SYNCED');
+    expect(rows[0]).toHaveTextContent(/OLD price/);
+  });
+
   it('the button runs the same backend door and reloads the status', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: null }) as any);
     vi.mocked(pushApi.syncLiveNow).mockResolvedValue({

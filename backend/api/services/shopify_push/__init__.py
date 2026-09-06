@@ -156,6 +156,8 @@ from ._shared import (  # noqa: F401
     _live_or_reason,
     push_lock_reason,
     _blocked_result,
+    PRICE_NOT_SYNCED,
+    _PRICE_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
     _MAX_RETRIES,

@@ -14,6 +14,8 @@ from ._shared import (
     MODE_BLOCKED,
     MODE_LIVE,
     MODE_SIMULATED,
+    PRICE_NOT_SYNCED,
+    _PRICE_NOT_SYNCED_MSG,
     PushResult,
     _blocked_result,
     _live_or_reason,
@@ -397,8 +399,6 @@ async def push_product(
         # OWN reason (never `failed`, which would read as a Shopify breakage)
         # so the sweep buckets and shows it exactly like refused_no_photo.
         published_ok = pub_summary is None or bool(pub_summary.get("published"))
-        if not published_ok and pid:
-            _requeue_unpublished(db, pid)
         # AN ARCHIVED ROW IS NOT A LISTING. The Shopify write succeeded and the
         # retirement is deliberate, so this is neither a failure nor a
         # withholding -- but no shopper can find the product, and "N processed"
@@ -429,6 +429,22 @@ async def push_product(
                 ),
                 "error": vp_res.error,
             }
+        # THE PRICE IS PART OF THE PRESS (sync audit gap #7). A failed price
+        # push used to ride out silently: the product write-back had already
+        # cleared locally_modified, the result said ok, and the website kept
+        # selling at the OLD price with nothing left in the queue to retry it
+        # -- the twice-daily live sync selects by that flag, so it never saw
+        # the product again. ok stays True (the product IS live), but the row
+        # is re-queued and the result carries PRICE_NOT_SYNCED so the sync
+        # page / audit say so and the next press or scheduled run retries.
+        price_not_synced = bool(vp_summary) and not vp_summary["ok"]
+        # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
+        # it was pressed for -- the product is not visible, or it is visible at
+        # the wrong price. Either way the row goes BACK in the queue so the next
+        # press / scheduled sync retries it. See _requeue_unpublished for why
+        # this is not the ping-pong hazard.
+        if pid and (not published_ok or price_not_synced):
+            _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
@@ -438,7 +454,7 @@ async def push_product(
             shopify_id=new_gid,
             payload=payload,
             error=(
-                None
+                (_PRICE_NOT_SYNCED_MSG if price_not_synced else None)
                 if published_ok
                 else (
                     (pub_summary or {}).get("message")
@@ -446,7 +462,11 @@ async def push_product(
                     or "publish withheld"
                 )
             ),
-            code=None if published_ok else (pub_summary or {}).get("code"),
+            code=(
+                (PRICE_NOT_SYNCED if price_not_synced else None)
+                if published_ok
+                else (pub_summary or {}).get("code")
+            ),
             reason=(
                 ("archived_not_listed" if archived_not_listed else None)
                 if published_ok
