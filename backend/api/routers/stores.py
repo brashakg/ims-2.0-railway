@@ -27,7 +27,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import org_validation as ov
-from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store
+from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
 
 router = APIRouter()
 
@@ -205,12 +205,13 @@ _LOCATION_GID_RE = re.compile(r"^gid://shopify/Location/\d+$")
 
 
 def _location_holder(db, gid: str) -> Optional[dict]:
-    """The store doc already carrying ``gid`` (store_id + store_code), else
-    None. No DB handle -> None (mock mode has nothing to collide with)."""
-    if db is None:
-        return None
-    return db.get_collection("stores").find_one(
-        {"shopify_location_id": gid}, {"_id": 0, "store_id": 1, "store_code": 1}
+    """The ACTIVE PHYSICAL store already carrying ``gid``, else None -- read
+    through stores_util.physical_stores, the ONE reader the locations dropdown
+    (GET /online-store/push/locations) joins against, so the validator and the
+    dropdown can never disagree about who holds a location: an inactive or
+    ONLINE doc holds nothing. No DB handle -> [] -> None."""
+    return next(
+        (s for s in physical_stores(db) if s.get("shopify_location_id") == gid), None
     )
 
 
@@ -224,10 +225,14 @@ def _validate_store_payload(
     """Block (HTTP 400) on malformed store fields. Validates only present keys.
 
     ``shopify_location_id`` (when present) is NORMALISED in place -- bare
-    digits become ``gid://shopify/Location/<n>`` -- then refused with 400 when
-    malformed or when the store is ONLINE (``store_type`` in the payload or on
-    ``existing``, or a known online id), and with 409 when another store
-    already carries that gid. Clearing ("") also clears the display name.
+    digits become ``gid://shopify/Location/<n>`` -- and refused with 400 when
+    malformed. Clearing ("") also clears the display name. Then, on the gid
+    the doc will carry AFTER this write (the payload's, else ``existing``'s):
+    400 when the store is ONLINE (``store_type`` in the payload or on
+    ``existing``, or a known online id) -- so flipping a mapped shop to ONLINE
+    is refused until the mapping is cleared; 409 when an ACTIVE PHYSICAL store
+    already carries it (``_location_holder``), checked whenever the doc enters
+    the physical list with a gid: a gid in the payload, or ``is_active: True``.
     ``store_id`` is the doc's own id on an update (create passes none and the
     known-id check falls back to ``store_code``).
     """
@@ -253,7 +258,8 @@ def _validate_store_payload(
         raise HTTPException(
             status_code=400, detail=f"Unknown categories: {', '.join(bad)}"
         )
-    if "shopify_location_id" in data:
+    declared = "shopify_location_id" in data
+    if declared:
         gid = _as_shopify_gid(data.get("shopify_location_id"), "Location")
         if gid and not _LOCATION_GID_RE.match(gid):
             raise HTTPException(
@@ -266,16 +272,29 @@ def _validate_store_payload(
         data["shopify_location_id"] = gid
         if not gid:
             data["shopify_location_name"] = None
-            return
-        sid = store_id or data.get("store_code")
+    # The gid the doc carries AFTER this write, whichever side of the rule the
+    # payload touches (a new gid, a store_type flip, a reactivation).
+    gid = (
+        data["shopify_location_id"]
+        if declared
+        else str((existing or {}).get("shopify_location_id") or "")
+    )
+    if not gid:
+        return
+    sid = store_id or data.get("store_code")
+    if declared or "store_type" in data:
         declared_type = str(
             data.get("store_type") or (existing or {}).get("store_type") or ""
         ).strip().upper()
         if declared_type == ONLINE_STORE_TYPE or is_online_store(db, sid):
             raise HTTPException(
                 status_code=400,
-                detail="Online stores hold no stock and take no Shopify location",
+                detail=(
+                    "Online stores hold no stock and take no Shopify location "
+                    "(clear the Shopify location first)"
+                ),
             )
+    if declared or data.get("is_active") is True:
         holder = _location_holder(db, gid)
         if holder and holder.get("store_id") != sid:
             raise HTTPException(

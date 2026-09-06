@@ -21,7 +21,14 @@ each REVERT-PROOF (revert the named piece and the test goes red):
      store_id, sorted by store_code; no DB handle -> [].
   7. scripts/migrate_store_locations.py --set routes through the router's
      validator (ONE rule): the same ONLINE / duplicate refusals; a clean plan
-     writes through the store repository.
+     writes through the store repository; Gangadham Pune (by code OR by
+     location number) is refused at plan time unless --i-know-pune.
+  8. ONE holder reader: the validator's "who holds this gid" is
+     stores_util.physical_stores -- the same list the dropdown joins against
+     -- so an ONLINE or inactive doc carrying a gid blocks nobody; flipping a
+     mapped shop to ONLINE is 400 until the mapping is cleared; reactivating
+     a doc whose gid an active shop now holds is 409 (an unrelated edit on
+     the inactive doc is not).
 
 TestClient + StrictDB; no Mongo, no network (the locations read is DARK).
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_store_shopify_location.py -q
@@ -381,3 +388,90 @@ def test_script_parse_sets_rejects_a_bare_code():
     mod = _script()
     with pytest.raises(SystemExit):
         mod.parse_sets(["BV-BOK-02"])
+
+
+def test_script_refuses_pune_by_code_or_by_location_number(monkeypatch):
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    mod = _script()
+    db = StrictDB()
+    db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-DHN-02")])
+    plan = mod.plan_sets(db, mod.parse_sets([
+        "BV-PUN-01=76684427513",                          # Pune's code
+        "bv-dhn-02=76684427513",                          # Pune's number on another code
+        "BV-DHN-02=gid://shopify/Location/76684427513",   # the gid form
+    ]))
+    assert [r["error"] for r in plan] == [mod.PUNE_REFUSAL] * 3
+    assert "49 opening-stock" in mod.PUNE_REFUSAL and "--i-know-pune" in mod.PUNE_REFUSAL
+    assert all(r["store_id"] is None for r in plan)
+    # a refused row never reaches the repository
+    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == 0
+    for code in ("BV-PUN-01", "BV-DHN-02"):
+        assert "shopify_location_id" not in db.get_collection("stores").find_one({"store_code": code})
+
+
+def test_script_i_know_pune_lifts_the_guard_but_not_the_routers_rules(monkeypatch):
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    mod = _script()
+    db = StrictDB()
+    db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-ONLINE-01", store_type="ONLINE")])
+    plan = mod.plan_sets(
+        db,
+        mod.parse_sets(["BV-PUN-01=76684427513", "BV-ONLINE-01=76684427513"]),
+        allow_pune=True,
+    )
+    assert plan[0]["error"] is None and plan[0]["gid"] == PUNE and plan[0]["store_id"] == PUNE_UUID
+    assert plan[1]["error"].startswith("400") and "Online stores" in plan[1]["error"]
+
+
+# ---------------------------------------------------------------------------
+# 8: ONE holder reader -- the validator agrees with the dropdown
+# ---------------------------------------------------------------------------
+
+
+def test_online_doc_carrying_a_gid_is_not_a_holder(monkeypatch):
+    # physical_stores (the dropdown join) says PUNE is free; the validator must too.
+    c, db = _world(monkeypatch, [
+        _store("BV-ONLINE-01", store_type="ONLINE", shopify_location_id=PUNE),
+        _store("BV-PUN-01", store_id=PUNE_UUID),
+    ])
+    r = c.put(f"/api/v1/stores/{PUNE_UUID}", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, PUNE_UUID)["shopify_location_id"] == PUNE
+
+
+def test_inactive_doc_carrying_a_gid_is_not_a_holder(monkeypatch):
+    c, db = _world(monkeypatch, [
+        _store("BV-OLD-01", is_active=False, shopify_location_id=BOKARO),
+        _store("BV-BOK-02"),
+    ])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_flipping_a_mapped_store_to_online_is_400_until_cleared(monkeypatch):
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"store_type": "ONLINE"})
+    assert r.status_code == 400, r.text
+    assert "Shopify location" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["store_type"] == "RETAIL"
+    # clearing the mapping in the same write is the way through
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"store_type": "ONLINE", "shopify_location_id": ""})
+    assert r.status_code == 200, r.text
+    saved = _saved(db, "BV-BOK-02")
+    assert saved["store_type"] == "ONLINE" and saved["shopify_location_id"] == ""
+
+
+def test_reactivating_a_doc_whose_gid_an_active_shop_holds_is_409(monkeypatch):
+    c, db = _world(monkeypatch, [
+        _store("BV-OLD-01", is_active=False, shopify_location_id=BOKARO),
+        _store("BV-BOK-02", shopify_location_id=BOKARO),
+    ])
+    r = c.put("/api/v1/stores/BV-OLD-01", json={"is_active": True})
+    assert r.status_code == 409, r.text
+    assert "BV-BOK-02" in r.json()["detail"]
+    assert _saved(db, "BV-OLD-01")["is_active"] is False
+    # an unrelated edit on the inactive doc is not blocked
+    r = c.put("/api/v1/stores/BV-OLD-01", json={"city": "Ranchi"})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-OLD-01")["city"] == "Ranchi"
