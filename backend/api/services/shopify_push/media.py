@@ -22,7 +22,12 @@ from ._shared import (
     push_lock_reason,
 )
 from .transport import _graphql, _now
-from .queries import _PRODUCT_CREATE_MEDIA
+from .queries import (
+    _MEDIA_LIMIT,
+    _PRODUCT_CREATE_MEDIA,
+    _PRODUCT_DELETE_MEDIA,
+    _PRODUCT_REORDER_MEDIA,
+)
 
 _APP_IMAGE_PATH = "/api/v1/products/image/"
 
@@ -92,9 +97,10 @@ async def _attach_product_photos(
     caller WITHHOLDS the publish when nothing attached, so a media failure
     leaves an invisible product rather than a visible grey box.
 
-    Only ever called when the Shopify product carries no media yet, so a
-    re-press can never pile a duplicate copy of the same photo onto a live
-    listing."""
+    Returns ``media_map`` too -- the ``[{url, id}]`` pairs Shopify minted for
+    the urls it was given, IN INPUT ORDER (productCreateMedia answers one node
+    per input, in order) -- so the photo pass can record which Shopify media
+    IMS owns and never attach the same photograph twice."""
     media = build_media_inputs([{"url": u} for u in urls])
     if not media:
         return {"attached": 0, "error": "no usable photograph"}
@@ -121,11 +127,19 @@ async def _attach_product_photos(
     # down rather than leave a grey box up.
     ok_nodes: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
-    for n in nodes:
+    media_map: List[Dict[str, str]] = []
+    for i, n in enumerate(nodes):
         n = n or {}
         if not n.get("id"):
             continue
-        (failed if str(n.get("status") or "").upper() == "FAILED" else ok_nodes).append(n)
+        if str(n.get("status") or "").upper() == "FAILED":
+            failed.append(n)
+            continue
+        ok_nodes.append(n)
+        # One node per input, in input order -- the ONLY way to learn which
+        # gid belongs to which IMS url (the CDN url is not the source url).
+        if len(nodes) == len(urls):
+            media_map.append({"url": urls[i], "id": str(n["id"])})
     if failed and not ok_nodes:
         detail = "; ".join(
             str(e.get("details") or e.get("message") or e.get("code") or "")
@@ -138,7 +152,245 @@ async def _attach_product_photos(
             "error": "Shopify could not fetch the photograph"
             + (": %s" % detail if detail else ""),
         }
-    return {"attached": len(ok_nodes)}
+    return {"attached": len(ok_nodes), "media_map": media_map}
+
+
+# ---------------------------------------------------------------------------
+# THE PHOTO PASS (sync audit gap #3, owner 2026-09-06): "replacing or removing
+# a photo, and reordering, update Shopify instead of silently doing nothing."
+#
+# OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
+# twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``
+# (written on attach, pruned on delete). Media that is on Shopify but not in
+# the map -- the hand-uploaded photographs on the connector-created Ray-Ban
+# Meta products, anything the design queue (push_image) attached, anything a
+# human added in the Shopify admin -- is NEVER deleted or re-attached: it is
+# counted as ``unmanaged`` and left exactly where it is. When IMS owns nothing
+# on a product that already carries media, the pass keeps its hands off
+# entirely (no attach either): that is today's behaviour for the products
+# that went live before the map existed, and it is what stops a re-press from
+# minting a duplicate of every photograph on them.
+#
+# ORDER OF OPERATIONS is attach -> delete -> reorder, and a failed step stops
+# the pass: a replacement is on Shopify BEFORE the photo it replaces comes
+# down, so a listing never loses its last photograph to a half-done pass.
+# Before any delete the {product_id, media_gid, url, shopify_url, deleted_at}
+# row goes to ``online_media_tombstones`` -- the never-lose-bytes lesson.
+# ---------------------------------------------------------------------------
+
+TOMBSTONES_COLLECTION = "online_media_tombstones"
+MEDIA_LIMIT_CODE = "MEDIA_LIMIT_250"
+
+
+def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The ``ecom.media_map`` rows IMS wrote on attach: ``[{url, id}]`` in IMS
+    order. Pure; malformed rows dropped; never raises."""
+    rows = (product.get("ecom") or {}).get("media_map")
+    out: List[Dict[str, str]] = []
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict) and r.get("url") and r.get("id"):
+                out.append({"url": str(r["url"]), "id": str(r["id"])})
+    return out
+
+
+def plan_product_media(
+    product: Dict[str, Any],
+    photos: List[str],
+    shopify_media: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """PURE diff of IMS's ordered photo list against the media IMS owns on
+    Shopify. ``shopify_media`` is the product's current media node list (the
+    create/update response); None means UNKNOWN (the dark plan), in which
+    case the stored map is trusted as-is.
+
+    Returns {attach: [url], delete: [{url, id, shopify_url}], reorder: [gid]
+    (the desired order of the IMS-owned media, [] when already in order),
+    unmanaged: n, hands_off: bool, owned: [{url, id}] (the rows that survive
+    the delete; the attach's new gids are not known until it runs)}."""
+    owned = owned_media(product)
+    cdn: Dict[str, Optional[str]] = {}
+    if shopify_media is None:
+        current_ids: Optional[List[str]] = None
+        live_owned = owned
+        unmanaged: List[str] = []
+    else:
+        current_ids = []
+        for n in shopify_media:
+            if isinstance(n, dict) and n.get("id"):
+                current_ids.append(str(n["id"]))
+                cdn[str(n["id"])] = (n.get("image") or {}).get("url")
+        owned_ids = {r["id"] for r in owned}
+        live_owned = [r for r in owned if r["id"] in current_ids]
+        unmanaged = [i for i in current_ids if i not in owned_ids]
+    hands_off = not live_owned and bool(unmanaged)
+    by_url = {r["url"]: r["id"] for r in live_owned}
+    attach = [] if hands_off else [u for u in photos if u not in by_url]
+    delete = (
+        []
+        if hands_off
+        else [
+            {"url": r["url"], "id": r["id"], "shopify_url": cdn.get(r["id"])}
+            for r in live_owned
+            if r["url"] not in photos
+        ]
+    )
+    delete_ids = {d["id"] for d in delete}
+    keep = [r for r in live_owned if r["id"] not in delete_ids]
+    desired = [by_url[u] for u in photos if u in by_url]
+    reorder: List[str] = []
+    if current_ids is not None and not hands_off:
+        keep_ids = {r["id"] for r in keep}
+        owned_now = [i for i in current_ids if i in keep_ids]
+        if owned_now != desired:
+            reorder = desired
+    return {
+        "attach": attach,
+        "delete": delete,
+        "reorder": reorder,
+        "unmanaged": len(unmanaged),
+        "hands_off": hands_off,
+        "owned": keep,
+    }
+
+
+def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) -> None:
+    """Record every media about to be deleted (the never-lose-bytes lesson:
+    10,355 images were lost once by deleting first). Raises on failure so the
+    caller SKIPS the delete -- no record, no removal."""
+    now = _now()
+    db[TOMBSTONES_COLLECTION].insert_many(
+        [
+            {
+                "product_id": product_id,
+                "media_gid": r["id"],
+                "url": r["url"],
+                "shopify_url": r.get("shopify_url"),
+                "deleted_at": now,
+            }
+            for r in rows
+        ]
+    )
+
+
+def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> None:
+    """Persist ecom.media_map (read-merge-write of the ecom sub-doc, the
+    _writeback_product idiom). NEVER touches locally_modified. Fail-soft."""
+    try:
+        coll = db["catalog_products"]
+        doc = coll.find_one({"id": product_id})
+        if doc is None:
+            return
+        ecom = dict(doc.get("ecom") or {})
+        if ecom.get("media_map") == media_map:
+            return
+        ecom["media_map"] = media_map
+        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_PUSH] media_map write-back failed %s: %s", product_id, exc)
+
+
+def _in_ims_order(owned: List[Dict[str, str]], photos: List[str]) -> List[Dict[str, str]]:
+    """The map as stored: one row per IMS photo that has a gid, in IMS order."""
+    by_url = {r["url"]: r["id"] for r in owned}
+    return [{"url": u, "id": by_url[u]} for u in photos if u in by_url]
+
+
+async def sync_product_media(
+    db,
+    product: Dict[str, Any],
+    product_gid: str,
+    photos: List[str],
+    shopify_media: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """LIVE-only (the caller has passed the gates): make the IMS-owned media on
+    the Shopify product match ``photos`` -- attach what is missing, delete what
+    IMS dropped, reorder to IMS order -- per the ownership rule above.
+    Fail-soft summary, never raises: {attached, deleted, reordered, unmanaged,
+    on_shopify (the media count after the pass -- the publish precondition),
+    hands_off, error?, code?}."""
+    pid = product.get("id") or product.get("product_id")
+    plan = plan_product_media(product, photos, shopify_media)
+    current = [str(n["id"]) for n in shopify_media if isinstance(n, dict) and n.get("id")]
+    summary: Dict[str, Any] = {
+        "attached": 0,
+        "deleted": 0,
+        "reordered": False,
+        "unmanaged": plan["unmanaged"],
+        "hands_off": plan["hands_off"],
+        "on_shopify": len(current),
+    }
+    if len(current) + len(plan["attach"]) > _MEDIA_LIMIT:
+        summary["code"] = MEDIA_LIMIT_CODE
+        summary["error"] = (
+            "refused: %d media on Shopify + %d to attach exceeds the %d-per-product "
+            "limit -- remove photographs before adding"
+            % (len(current), len(plan["attach"]), _MEDIA_LIMIT)
+        )
+        return summary
+    owned = list(plan["owned"])
+    # 1. ATTACH what IMS has and Shopify lacks (the replacement lands first).
+    if plan["attach"]:
+        res = await _attach_product_photos(db, product_gid, plan["attach"])
+        summary["attached"] = int(res.get("attached") or 0)
+        summary["on_shopify"] += summary["attached"]
+        owned.extend(res.get("media_map") or [])
+        if pid and res.get("media_map"):
+            _writeback_media_map(db, pid, _in_ims_order(owned, photos))
+        if res.get("error"):
+            summary["error"] = res["error"]
+            return summary
+    # 2. DELETE what IMS dropped -- tombstone first, then the call.
+    if plan["delete"]:
+        try:
+            _tombstone_media(db, pid, plan["delete"])
+            body = await _graphql(
+                db,
+                _PRODUCT_DELETE_MEDIA,
+                {"productId": product_gid, "mediaIds": [d["id"] for d in plan["delete"]]},
+            )
+            err = _user_errors_media(body, "productDeleteMedia")
+        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+            err = str(exc)
+        if err:
+            summary["error"] = err
+            return summary
+        summary["deleted"] = len(plan["delete"])
+        summary["on_shopify"] -= summary["deleted"]
+        if pid:
+            _writeback_media_map(db, pid, _in_ims_order(owned, photos))
+    # 3. REORDER the IMS-owned media into IMS order, in the SLOTS they already
+    # occupy (the attach appended its new media at the end): media IMS does
+    # not own keeps its exact position, so a hero shot a human placed first
+    # in the Shopify admin stays first.
+    by_url = {r["url"]: r["id"] for r in owned}
+    desired = [by_url[u] for u in photos if u in by_url]
+    deleted_ids = {d["id"] for d in plan["delete"]}
+    survivors = [i for i in current if i not in deleted_ids]
+    survivors += [r["id"] for r in owned if r["id"] not in survivors]
+    slots = [i for i, gid in enumerate(survivors) if gid in set(desired)]
+    owned_now = [survivors[i] for i in slots]
+    if desired and owned_now != desired:
+        try:
+            body = await _graphql(
+                db,
+                _PRODUCT_REORDER_MEDIA,
+                {
+                    "id": product_gid,
+                    "moves": [
+                        {"id": gid, "newPosition": str(slots[k])}
+                        for k, gid in enumerate(desired)
+                    ],
+                },
+            )
+            err = _user_errors_media(body, "productReorderMedia")
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)
+        if err:
+            summary["error"] = err
+            return summary
+        summary["reordered"] = True
+    return summary
 
 
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -299,13 +551,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
         )
 
 
-def _user_errors_media(body: Dict[str, Any]) -> Optional[str]:
-    """productCreateMedia uses `mediaUserErrors` (not `userErrors`)."""
+def _user_errors_media(body: Dict[str, Any], field: str = "productCreateMedia") -> Optional[str]:
+    """The media mutations (productCreateMedia / productDeleteMedia /
+    productReorderMedia) use `mediaUserErrors` (not `userErrors`)."""
     if not isinstance(body, dict):
         return "malformed graphql response"
     if body.get("errors"):
         return f"graphql errors: {str(body['errors'])[:300]}"
-    field_obj = (body.get("data") or {}).get("productCreateMedia") or {}
+    field_obj = (body.get("data") or {}).get(field) or {}
     ue = field_obj.get("mediaUserErrors") or []
     if ue:
         return f"mediaUserErrors: {str(ue)[:300]}"
