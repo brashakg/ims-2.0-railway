@@ -1,6 +1,6 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-09-06**. Eight more squash-merged on 2026-09-05/06 (section 4j): **#1094** courier COD collects the balance due (out of draft after two adversarial rounds), **#1102** page-entry transform + KNOWN_BROKEN minus two, **#1103** top-menu dropdowns scroll on a tablet, **#1104** leaderboards self-only below ADMIN, **#1105** Shopify publish-scope code, **#1106** POS customer panel slide-over, **#1107** spine edits reach the catalog twin, **#1108** honest push timeout. On prod: the catalog twins' photos backfilled 09-05, the Shopify app's missing publication scopes found and granted 09-06, and the **first six IMS-originated products went live on bettervision.in** (section 4k). The 09-03/04 wave (#1088-#1099, sections 4f-4i) is all on main; no PR is open. Section 5: one new decision owed (Book eye test for sales roles); the leaderboard row is closed by #1104. This file is the single place to see what is done, what
+Updated **2026-09-07**. Thirteen more squash-merged on 2026-09-07 (section 4l), and with them **all five waves of the 2026-08-30 page-split plan are on main**: **#1110** sales roles book eye tests (closes the last section-5 decision), **#1111** + **#1112** the Wave 1/2 loose ends (last `?tab=` links gone; recalls at `/customers/recalls`), **#1113-#1115** the Wave 3 file diets (QuickAdd, Jarvis, Workshop pages), **#1116-#1122** the Wave 5 backend packages (finance, vendors, reports, inventory, orders, rbac_policy, shopify_push — every one a pure move, byte-identical API, 1,313 routes throughout). On prod (read-only, 2026-09-07): the 6 live products are untracked on Shopify and on sale at quantity 0, 0 Shopify orders since the 27 Aug cut-over, all 11 webhooks point at IMS — the sync-path audit's five gaps are the next queue, website stock first (section 4b). In flight and NOT merged: website stock (`feat/shopify-online-stock`) and the scheduled live sync (`feat/shopify-live-sync`); no PR is open. The 09-05/06 wave (#1094, #1102-#1108, sections 4j-4k) is all on main. Section 5: nothing owed. This file is the single place to see what is done, what
 is in flight, and what is waiting on a decision. Claude keeps it current; if it
 disagrees with reality, the file is wrong and should be fixed.
 
@@ -65,10 +65,19 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 | **Reports** | 5 sections in one 1,345-line page; 16 data calls before any click; GST returns were pop-ups | **MERGED #1086** |
 | **HR** | 7 tabs, one URL; salary screens open to 5 roles against admin-only endpoints | **MERGED #1088** |
 | **Tasks** | Two rival pages with opposite permissions; fabricated SOPs; 50-task blindness | **DONE** |
-| **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** |
+| **Customers** | 10 finished screens in no menu; no address for a customer profile | **DONE** — **found 2026-09-07 (#1111):** the "split" had only moved the route registry; recalls was still an in-page tab. **MERGED #1112**: `/customers/recalls` is a real address (same `RecallManager`, in-page branch deleted, nav row "Sales floor -> Recalls") |
 | **Clinical** | 5 hidden tabs, two rival prescription doors | **DONE** — weaker Rx door deleted; the eye examination is its own page, **MERGED #1099** |
 | **Inventory** | 19 sections in one file, 3 in the menu | **DONE** — 17 real pages |
 | **Catalog** | Mostly split already; needs the review queue + photo work | **MERGED #1098** (review queue at `/catalog/review`, photo column, `/catalog/missing-photos`) + **#1096** (Add-a-Product) |
+
+**Wave 1/2 loose ends closed — MERGED #1111 + #1112 (2026-09-07):** the last
+`?tab=` links became real addresses (QuickAdd x2 -> `/inventory/stock?search=`,
+reports -> `/inventory/stock` and `/inventory/transfers`), `pages/catalogue`
+folded into `pages/catalog`, stale-doc banners on `docs/reference/*Feature_Status*`
+and `IMS2_COMPLETE_FEATURE_LIST.md`. The app now has ZERO live `?tab=`
+navigations — the mentions that remain are the forwarding shims in
+`routes/*Routes.tsx` and comments. Waves 3 and 5 (the file diets) are in
+section 4l; **all five waves of the 2026-08-30 page-split plan are on main.**
 
 ---
 
@@ -104,6 +113,9 @@ Sequence adjusted with reasons (Tasks needed decisions, HR was smallest).
 |---|---|
 | **Catalog** — review queue + the photo work | **MERGED #1098** + **#1096** (section 4i); MEASURED + REPAIRED on prod 2026-09-05: twins with a usable photo 6 -> 70 (64 repaired, nothing queued, publish still manual); 37 never-pushed products now qualify to go online; only 7 products have no photo anywhere; **first 6 pushed LIVE 2026-09-06** (section 4k) |
 | **Staff sign-in gate** — approved devices (WebAuthn passkeys); ADMIN/SUPERADMIN never gated | **BUILT, shipped OFF** — owner arms it |
+| **Website stock made real** — sync-audit gap 1: the 6 live products are untracked on Shopify and on sale at quantity 0 (section 4k) | **WIP** on branch `feat/shopify-online-stock` — NOT merged, no PR |
+| **Scheduled live sync** — products already on Shopify re-push on change at 01:00 and 09:00 IST, a "Sync live products now" button, Superadmin settings (owner ruling 09-06, section 6). First publish of a never-pushed product stays a human press | **WIP** on branch `feat/shopify-live-sync` — NOT merged, no PR |
+| **Sync-audit gaps 2-5**, in the owner's order: (2) delete/archive takes the product off sale; (3) photo + name changes reach live products; (4) tags; (5) missed-webhook catch-up | **TODO** — queued behind gap 1 |
 | Three screens each re-map the store's staff list their own way (`NewTaskModal`, `SalespersonPicker`, the new `useStoreStaff`) | small follow-up |
 
 ## 4c. Found and NOT fixed — recorded so they are not lost
@@ -223,6 +235,36 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 | 2026-09-05 | Catalog twins' `images` backfilled from the spine (dry-run measured first): twins with a usable photo **6 -> 70**; 37 never-pushed products now qualify; 7 have no photo anywhere; nothing queued |
 | 2026-09-06 | Root cause of every failed LIVE push: the installed Shopify app "BV Inventory-1" had 23 scopes and NO `write_publications` / `read_publications` — the store had never been asked to accept the July app version's scopes (legacy install flow). Fixed by opening the app's own OAuth authorize URL in the owner's admin; owner pressed Update; 25 scopes verified; backend redeployed to drop its cached token |
 | 2026-09-06 22:24 UTC | Owner authorised the assistant to press the Products "Push": **6 IMS products went LIVE on bettervision.in** (verified ACTIVE + published on Shopify), 4 refused for no photo — the first IMS-originated products on the storefront |
+| 2026-09-07 | Sync-path audit, read-only: all 6 IMS-pushed products are `tracked=false` on Shopify and on sale at quantity 0; **0 Shopify orders** since the 27 Aug webhook cut-over; 11 webhook subscriptions, all pointing at the IMS receiver. The audit's five gaps are the next queue, in the owner's order (section 4b) |
+
+## 4l. Merged 2026-09-07 — Waves 1-5 of the page-split plan closed (all squash-merged to main)
+
+| PR | What changed | Status |
+|---|---|---|
+| **#1110** clinical queue | Sales roles (`SALES_STAFF`, `SALES_CASHIER`; not bare `CASHIER`) may add a customer to today's eye-test queue (`_QUEUE_ADD_ROLES` in `clinical.py`); Rx create/edit stays closed to them. Closes the section-5 "Book eye test for sales roles" decision | **MERGED #1110** |
+| **#1111** Wave 1/2 loose ends | Last `?tab=` links -> real addresses; `pages/catalogue` folded into `pages/catalog`; stale-doc banners on the two reference lists. **Finding:** the Customers "split" had only moved the route registry — recalls was still an in-page tab | **MERGED #1111** |
+| **#1112** recalls | `/customers/recalls` is a real address (same `RecallManager`; in-page branch deleted; campaigns redirect moved into the shim table; nav row "Sales floor -> Recalls"). Zero live `?tab=` navigations remain — Wave 2 genuinely complete | **MERGED #1112** |
+| **#1113** Wave 3 | `QuickAddPage.tsx` 3,212 -> 229 lines; 12 block files under `pages/catalog/quickadd/`. Proof: unchanged tests, POSTed payloads identical key-for-key, rendered HTML byte-identical, line-multiset audit | **MERGED #1113** |
+| **#1114** Wave 3 | `JarvisPage.tsx` 2,215 -> 103 lines (11 files); same proof standard | **MERGED #1114** |
+| **#1115** Wave 3 | `WorkshopPage.tsx` 2,011 -> 114 lines (12 files); same proof standard. **Wave 3 complete** | **MERGED #1115** |
+| **#1116** Wave 5 | `routers/finance.py` 6,604 lines -> a 20-file package | **MERGED #1116** |
+| **#1117** Wave 5 | `routers/vendors.py` 6,850 -> 21 files | **MERGED #1117** |
+| **#1118** Wave 5 | `routers/reports.py` 6,483 -> 17 files | **MERGED #1118** |
+| **#1119** Wave 5 | `routers/inventory.py` 5,893 -> 23 files | **MERGED #1119** |
+| **#1120** Wave 5 | `routers/orders.py` 6,649 -> 21 files — the POS/money door, split with the owner's approval (section 5) | **MERGED #1120** |
+| **#1121** Wave 5 | `services/rbac_policy.py` 7,839 -> 22 files; 1,303 policy rows, registry identical | **MERGED #1121** |
+| **#1122** Wave 5 | `services/shopify_push.py` 3,499 -> 13 files. **Wave 5 complete — all five waves done** | **MERGED #1122** |
+
+Every Wave 5 split is a pure move: byte-identical API paths, an empty
+whole-app OpenAPI schema diff (1,084 paths), **1,313 routes** before and after
+(re-measured on main 2026-09-07), route tables in registration order, AST /
+line-multiset equality, no test assertion edited (only the BUG-104 allow-list
+paths re-pointed where a moved line sat), package-split tripwire tests
+(`test_finance_package_split.py`, `test_inventory_package_split.py`,
+`test_orders_package_split.py`, `test_shopify_push_package_split.py`), and
+`__init__.py` files that re-export the flat surface and forward monkeypatch
+writes into the sub-modules. The largest backend file is now
+`routers/returns.py` at 3,754 lines.
 
 ## 5. Waiting on the owner
 
@@ -230,7 +272,8 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
 |---|---|
 | **COD remittance door** — a courier's collection is never recorded as a payment, so a COD order stays unpaid in IMS after the customer has paid at the door | **DECIDED 2026-09-06: NOT NOW.** Courier COD orders stay unpaid in IMS until reconciled by hand; acceptable while there are no courier orders. `cod_amount` on the shipment doc is the figure a future reconcile would net against. Do not re-raise unless courier orders start |
 | **36px or 44px controls** — the app-wide `.input-field` is 36px; the Add-a-Product design assumed 44px touch targets | **DECIDED 2026-09-06: LEAVE AT 36px** until staff report the tablets are fiddly. Do not re-raise |
-| **"Book eye test" from the POS customer panel, for sales roles** — the one-tap booking calls `POST /clinical/queue`, which the server gates to ADMIN/STORE_MANAGER/OPTOMETRIST | **DECIDED 2026-09-06: LET SALES STAFF BOOK TOO.** Only the add-to-queue door opens to sales roles; Rx create/edit stays closed to them (control test). PR `feat/queue-add-sales-roles` in flight — mark MERGED with its number when it lands |
+| **"Book eye test" from the POS customer panel, for sales roles** — the one-tap booking calls `POST /clinical/queue`, which the server gates to ADMIN/STORE_MANAGER/OPTOMETRIST | **DECIDED 2026-09-06: LET SALES STAFF BOOK TOO.** Only the add-to-queue door opens to sales roles; Rx create/edit stays closed to them (control test). **MERGED #1110** |
+| **Split `orders.py` in Wave 5** — the POS/money door; POS work is ask-first | **DECIDED 2026-09-07: approved.** **MERGED #1120** — pure move, byte-identical API (section 4l) |
 | **`app.uniparallel.com` move** | Passkeys bind to the web address; the device gate must not be enrolled before a domain change |
 | **Commission Leaderboard** shows per-staff revenue and commission in rupees to 5 roles | **RULED 09-03**: ADMIN/SUPERADMIN see all; everyone else, managers included, sees own figures + rank. **MERGED #1104** — one trim (`points.self_only_rows`) on `/payroll/commission/leaderboard`, `/payroll/commission/summary`, `/analytics-v2/staff-leaderboard` (which had NO gate) and the `/incentive/points` boards; SALES_STAFF/CASHIER can now open `/incentive/leaderboard` for their own standing, still not `/hr/leaderboard` (finance-only mount) |
 | **Apply-for-leave has no screen** — nobody in the company can request leave | **BUILT — MERGED #1088**: apply form on `/my-work` (open to every operational role), feeding the approve/reject chain that was already running |
@@ -264,3 +307,11 @@ customer, but it counted holders' own Self rows -- the committed report finds 0 
   money is read-only in the panel; "Book eye test" is one tap onto today's
   queue; the WhatsApp reminder is the household recall (`PRESCRIPTION_EXPIRY`);
   "My day" shows the signed-in person's own figures only.
+- **Products already on Shopify sync automatically** (owner, 2026-09-06): a
+  scheduled run at 01:00 and 09:00 IST re-pushes every already-pushed product
+  that changed, plus a "Sync live products now" button. The FIRST publish of a
+  never-pushed product stays a human press. Build in flight on
+  `feat/shopify-live-sync` — not merged (section 4b).
+- **Sync-path audit order** (owner, 2026-09-07): website stock first, then
+  delete/archive takes the product off sale, then photo + name changes reach
+  live products, then tags, then missed-webhook catch-up (section 4b).
