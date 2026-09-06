@@ -35,6 +35,7 @@ vi.mock('../../../services/api/onlineStore', () => ({
   onlineStoreApi: { getSummary: vi.fn() },
   pushApi: {
     getStatus: vi.fn(),
+    getLocations: vi.fn().mockResolvedValue({ mode: 'SIMULATED', reason: null, locations: [] }),
     pushAllPending: vi.fn(),
     getHistory: vi.fn(),
     pushProduct: vi.fn(),

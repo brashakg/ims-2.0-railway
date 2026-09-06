@@ -24,6 +24,7 @@ const toastCalls: { kind: string; msg: string }[] = [];
 vi.mock('../../../services/api/onlineStore', () => ({
   pushApi: {
     getStatus: vi.fn(),
+    getLocations: vi.fn().mockResolvedValue({ mode: 'SIMULATED', reason: null, locations: [] }),
     pushAllPending: vi.fn(),
     getHistory: vi.fn(),
   },
