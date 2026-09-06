@@ -342,7 +342,7 @@ ALLOWED = {
         "MTD lower bound for the date_str column."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/analytics.py",
         "start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)",
     ): (
         "now is now_ist_naive() -- IST wall-clock. Used for date_str "
@@ -351,7 +351,7 @@ ALLOWED = {
         "below (see the BUG-104 comment at the site)."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/analytics.py",
         "start = (start - timedelta(days=1)).replace(day=1)",
     ): (
         "Walks further months back within the SAME IST wall-clock frame as "
@@ -439,7 +439,7 @@ ALLOWED = {
         "frame). One frame on both sides of the comparison."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/finance_ops.py",
         "start_date = datetime(year, month, 1)",
     ): (
         "Attendance month report: attendance rows are keyed on the "
@@ -448,14 +448,14 @@ ALLOWED = {
         "a calendar column."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/finance_ops.py",
         "end_date = datetime(year + 1, 1, 1)",
     ): (
         "December arm of the attendance calendar month bound above -- same "
         "ruling."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/finance_ops.py",
         "end_date = datetime(year, month + 1, 1)",
     ): (
         "Non-December arm of the attendance calendar month bound above -- "
@@ -517,7 +517,7 @@ ALLOWED = {
         "document; scheduled by nobody."
     ),
     (
-        "api/routers/reports.py",
+        "api/routers/reports/overview.py",
         "today = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)",
     ): (
         "Already the IST frame: now_ist() is the IST wall clock, so its "
