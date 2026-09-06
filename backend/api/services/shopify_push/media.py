@@ -241,16 +241,55 @@ def _same_file(ims_url: str, cdn_url: str) -> bool:
     return stem == cstem or stem == _COLLISION_SUFFIX.sub("", cstem, count=1)
 
 
+# R3b (OPT-IN, owner 2026-09-06): the Ray-Ban Meta connector names every
+# upload '<shopify product id>__<nn>__<source file name>'. Measured on the
+# 36 connector products: 23 carry exactly one media whose source name is the
+# IMS photo's name with the extension re-encoded (4_1.jpeg -> 4_1.png).
+_CONNECTOR_NAME = re.compile(r"^(\d+)__\d+__(.+)$")
+MATCH_RULES = ("exact", "connector_prefix")
+
+
+def _numeric_id(gid: Any) -> str:
+    """'gid://shopify/Product/123' or '123' -> '123'; '' when not numeric."""
+    tail = str(gid or "").rsplit("/", 1)[-1]
+    # isascii too: str.isdigit accepts Unicode digits ("\u00b2"), not an id
+    return tail if tail.isascii() and tail.isdigit() else ""
+
+
+def _connector_file(ims_url: str, cdn_url: str, own_id: str) -> bool:
+    """R3b: the CDN name is '<own_id>__<nn>__<basename>' where own_id is THIS
+    product's own Shopify numeric id (a foreign id, or no prefix, never
+    matches) and <basename>'s stem equals the IMS file's stem exactly -- no
+    case folding, no ``_<uuid>`` strip, no size suffix; the EXTENSION is
+    ignored (the connector re-encodes). The index <nn> is not identity. Pure."""
+    m = _CONNECTOR_NAME.match(_file_name(cdn_url))
+    if not m or not own_id or m.group(1) != own_id:
+        return False
+    stem, _ext = _stem_ext(_file_name(ims_url))
+    cstem, _cext = _stem_ext(m.group(2))
+    return bool(stem) and stem == cstem
+
+
 def match_media_to_photos(
-    photos: List[str], shopify_media: List[Dict[str, Any]]
+    photos: List[str],
+    shopify_media: List[Dict[str, Any]],
+    *,
+    rules: tuple = ("exact",),
+    product_gid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """PURE: pair each IMS photo url with the ONE Shopify media that positively
     identifies as that photograph -- the adoption rule for products that went
     live before ``ecom.media_map`` existed (scripts/adopt_shopify_media_map.py).
 
-    A media is the photo when (either suffices, both are exact equality):
+    Under the default ``rules=('exact',)`` a media is the photo when (either
+    suffices, both are exact equality):
       R1  its ``originalSource.url`` IS the IMS url (the source we handed over);
       R3  its CDN file name IS the IMS url's file name (``_same_file``).
+    ``'connector_prefix'`` in ``rules`` (OPT-IN; needs ``product_gid``, the
+    product's own Shopify gid, else ValueError) adds
+      R3b the CDN name is '<this product's own numeric id>__<nn>__<basename>'
+          and <basename> equals the IMS file name stem-for-stem, extension
+          ignored (``_connector_file``). A foreign id never matches.
     There is deliberately NO alt rule: IMS's own attach sends alt '' for
     every photo (``build_media_inputs``), so an alt equal to an IMS url or
     file name can only be a human's edit on a media IMS did not attach, and
@@ -265,6 +304,14 @@ def match_media_to_photos(
     claimed -- hand uploads, connector media -- left exactly where it is),
     names: {media id: CDN file name} (the evidence a dry-run prints)}.
     Adopt only when ``unmatched_photos`` is empty and ``map`` is not."""
+    unknown = [r for r in rules if r not in MATCH_RULES]
+    if unknown:
+        raise ValueError("unknown match rule(s) %s; known: %s" % (unknown, MATCH_RULES))
+    exact = "exact" in rules
+    connector = "connector_prefix" in rules
+    own_id = _numeric_id(product_gid)
+    if connector and not own_id:
+        raise ValueError("the connector_prefix rule needs the product's own Shopify gid")
     nodes = []
     for n in shopify_media or []:
         if not isinstance(n, dict) or not n.get("id"):
@@ -278,7 +325,12 @@ def match_media_to_photos(
         )
     photos = list(dict.fromkeys(photos))
     hits: Dict[str, List[str]] = {
-        url: [mid for mid, src, cdn in nodes if (src and src == url) or _same_file(url, cdn)]
+        url: [
+            mid
+            for mid, src, cdn in nodes
+            if (exact and ((src and src == url) or _same_file(url, cdn)))
+            or (connector and _connector_file(url, cdn, own_id))
+        ]
         for url in photos
     }
     claimed = Counter(mid for ids in hits.values() for mid in ids)
