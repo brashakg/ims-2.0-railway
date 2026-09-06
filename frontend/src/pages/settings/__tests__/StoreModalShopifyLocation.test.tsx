@@ -14,6 +14,11 @@
 //   * a mapped shop keeps its mapping even when the locations read is DARK
 //     (the current gid is its own option) and shows the name as a badge;
 //   * an ONLINE store has no badge and no dropdown.
+// The useToast mock is ONE hoisted object: OrganizationPage memoises load()
+// on [toast], so a per-render mock re-ran load() forever (probe: 112
+// orgStoreApi.list calls in ~400 ms) and any spinner frame remounted
+// StoreModal -- the cold-run "getLocations called 2 times" flake. One object
+// => one load, one locations read, so toHaveBeenCalledTimes(1) is exact.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -28,9 +33,8 @@ vi.mock('../../../services/api/stores', () => ({
 vi.mock('../../../services/api/onlineStore', () => ({
   pushApi: { getLocations: vi.fn() },
 }));
-vi.mock('../../../context/ToastContext', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
-}));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }));
+vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
 
 import OrganizationPage from '../OrganizationPage';
 import { entitiesApi } from '../../../services/api/entities';
