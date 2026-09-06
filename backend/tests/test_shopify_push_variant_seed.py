@@ -857,7 +857,7 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     # no publish (the product is unpriced -- publish stays withheld).
     assert spy.count_for("productCreateMedia") == 1
     assert spy.count_for("publishablePublish") == 0
-    assert len(spy.calls) == 2
+    assert len(spy.calls) == 3  # + the stock step's one `locations` lookup (2026-09-07)
 
 
 # ===========================================================================

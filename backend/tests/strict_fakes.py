@@ -523,10 +523,16 @@ class StrictCollection:
 
 
 def _field_value(doc, expr):
-    """Resolve a $group accumulator argument (``"$field"`` or a literal)."""
+    """Resolve a $group accumulator argument (``"$field"``, a literal, or the
+    one expression the on-hand aggregate uses: ``{"$ifNull": [expr, default]}``)."""
     if isinstance(expr, str) and expr.startswith("$"):
         v = _get_path(doc, expr[1:])
         return None if v is _MISSING else v
+    if isinstance(expr, dict):
+        if set(expr) == {"$ifNull"} and isinstance(expr["$ifNull"], list) and len(expr["$ifNull"]) == 2:
+            v = _field_value(doc, expr["$ifNull"][0])
+            return _field_value(doc, expr["$ifNull"][1]) if v is None else v
+        raise UnsupportedMongoFeature(f"$group expression {expr!r} not implemented")
     return expr
 
 
