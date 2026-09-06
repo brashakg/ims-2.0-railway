@@ -25,8 +25,14 @@ This script:
      validator (routers/stores._validate_store_payload: gid form, ONLINE
      refusal, duplicate refusal) and the store repository -- no second rule --
      copying the display name from Shopify's locations read when the push
-     gates are live. Writes only with --apply; one refusal stops the run
-     before any write (mappings first, then the registry $unset).
+     gates are live. Two --set rows naming the same location in one run are
+     refused too (the router's duplicate check reads DB state, which neither
+     row has written yet). Writes only with --apply; one refusal stops the
+     run before any write (exit 2). Mappings are written first, then the
+     registry $unset; a doc that already carries exactly the planned gid +
+     name is skipped and reported "already identical" (the repository stamps
+     updated_at into every $set, so its modified_count cannot tell); a write
+     the repository refused stops the run (exit 1) BEFORE the $unset.
 
 THE ONLY --set TO RUN NOW (design section 7, critic finding 1):
     --set BV-BOK-02=58793230523     Better Vision Sector 4 (Bokaro): 0 units on
@@ -142,21 +148,27 @@ def print_table(db) -> List[Dict[str, Any]]:
 
 
 def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> List[Dict[str, Any]]:
-    """One row per --set: ``{code, store_id, gid, name, error}``. The gid is
-    normalised and refused by the router's own validator (ONE rule); ``error``
-    carries the refusal text. Pune is refused here (PUNE_REFUSAL) unless
-    ``allow_pune`` -- the --i-know-pune flag. Nothing is written here."""
+    """One row per --set: ``{code, store_id, gid, name, same, error}``. The gid
+    is normalised and refused by the router's own validator (ONE rule);
+    ``error`` carries the refusal text. Pune is refused here (PUNE_REFUSAL)
+    unless ``allow_pune`` -- the --i-know-pune flag. Two --set rows naming the
+    SAME location in one run: the second is refused here -- the router's
+    duplicate check reads DB state, which neither row has written yet, so
+    without this both would pass and one shelf would land on two stores.
+    ``same`` is True when the doc already carries exactly this gid + name
+    (an idempotent re-run): apply_sets skips it. Nothing is written here."""
     coll = db.get_collection("stores")
     out: List[Dict[str, Any]] = []
+    seen: Dict[str, str] = {}  # normalised gid -> the store_code that claimed it in THIS run
     for code, raw in sets:
         if pune_guarded(code, raw) and not allow_pune:
             out.append({"code": code, "store_id": None, "gid": raw, "name": None,
-                        "error": PUNE_REFUSAL})
+                        "same": False, "error": PUNE_REFUSAL})
             continue
         doc = coll.find_one({"store_code": code})
         if doc is None:
             out.append({"code": code, "store_id": None, "gid": raw, "name": None,
-                        "error": "no store with that store_code"})
+                        "same": False, "error": "no store with that store_code"})
             continue
         data: Dict[str, Any] = {"shopify_location_id": raw}
         try:
@@ -165,28 +177,49 @@ def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> L
             )
         except HTTPException as exc:
             out.append({"code": code, "store_id": doc.get("store_id"), "gid": raw,
-                        "name": None, "error": f"{exc.status_code}: {exc.detail}"})
+                        "name": None, "same": False, "error": f"{exc.status_code}: {exc.detail}"})
             continue
         gid = data["shopify_location_id"]
+        if gid and gid in seen:
+            out.append({"code": code, "store_id": doc.get("store_id"), "gid": gid, "name": None,
+                        "same": False,
+                        "error": f"409: duplicate within this run -- also --set for {seen[gid]}"})
+            continue
+        if gid:
+            seen[gid] = code
         name = asyncio.run(stores_router._shopify_location_name(db, gid)) if gid else None
+        if name is None and doc.get("shopify_location_id") == gid:
+            # Gates dark, gid unchanged: keep the name the doc already shows
+            # rather than blanking it (the router keeps the client's text).
+            name = doc.get("shopify_location_name") or None
+        same = (doc.get("shopify_location_id") or "") == (gid or "") and (
+            doc.get("shopify_location_name") or None
+        ) == name
         out.append({"code": code, "store_id": doc.get("store_id"), "gid": gid,
-                    "name": name, "error": None})
+                    "name": name, "same": same, "error": None})
     return out
 
 
-def apply_sets(db, plan: List[Dict[str, Any]]) -> int:
+def apply_sets(db, plan: List[Dict[str, Any]]) -> Dict[str, int]:
     """Write every planned row through the store repository (the router's
-    door). Caller guarantees the plan has no refusals. Returns how many docs
-    actually changed: re-applying an identical mapping counts 0."""
+    door). Caller guarantees the plan has no refusals. Returns ``{written,
+    identical, failed}``. A row whose doc already carries exactly this gid +
+    name (``same``) is NOT written and counts as identical -- the repository
+    stamps ``updated_at`` into every $set, so its own modified_count cannot
+    tell an idempotent re-apply from a change. ``failed`` counts rows the
+    repository refused (it swallows the Mongo error and returns False)."""
     repo = StoreRepository(db.get_collection("stores"))
-    written = 0
+    counts = {"written": 0, "identical": 0, "failed": 0}
     for row in plan:
+        if row.get("same"):
+            counts["identical"] += 1
+            continue
         ok = repo.update(
             row["store_id"],
             {"shopify_location_id": row["gid"], "shopify_location_name": row["name"]},
         )
-        written += int(bool(ok))
-    return written
+        counts["written" if ok else "failed"] += 1
+    return counts
 
 
 def unset_registry(db) -> int:
@@ -214,23 +247,45 @@ def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple
               "Only correct once the 49 opening-stock units are committed at Pune. ***")
     plan = plan_sets(db, sets, allow_pune=allow_pune)
     for row in plan:
-        verdict = f"REFUSED {row['error']}" if row["error"] else f"-> {row['gid']} ({row['name'] or 'name unknown: gates dark'})"
+        if row["error"]:
+            verdict = f"REFUSED {row['error']}"
+        else:
+            verdict = f"-> {row['gid']} ({row['name'] or 'name unknown: gates dark'})"
+            if row["same"]:
+                verdict += " [already identical: nothing to write]"
         print(f"  --set {row['code']:12} {verdict}")
     refused = [r for r in plan if r["error"]]
 
     if not apply:
         print("\nDRY RUN - nothing written. Re-run with --apply to write.")
-        return {"stores": len(plan), "refused": len(refused), "written": 0, "unset": 0}
+        return {"stores": len(plan), "refused": len(refused), "written": 0, "identical": 0,
+                "failed": 0, "unset": 0}
     if refused:
         print(f"\nREFUSED {len(refused)} --set(s); nothing written (all-or-nothing).")
         raise SystemExit(2)
 
-    written = apply_sets(db, plan)
-    unset = unset_registry(db)
-    print(f"\nWROTE {written} of {len(plan)} store mapping(s) ({len(plan) - written} already identical); "
-          f"UNSET registry pooled location on {unset} row(s)")
+    result = apply_plan(db, plan)
     print_table(db)
-    return {"stores": len(plan), "refused": 0, "written": written, "unset": unset}
+    return {"stores": len(plan), "refused": 0, **result}
+
+
+def apply_plan(db, plan: List[Dict[str, Any]]) -> Dict[str, int]:
+    """The --apply step, after a refusal-free plan: mappings FIRST, then the
+    registry $unset. A mapping write the repository refused stops the run
+    (exit 1) BEFORE the $unset, so the #1125 pooled row is never removed
+    while a store is left unmapped; an idempotent re-run finishes the job."""
+    counts = apply_sets(db, plan)
+    print(
+        f"\nWROTE {counts['written']} store mapping(s), {counts['identical']} already identical "
+        f"(not written), {counts['failed']} FAILED"
+    )
+    if counts["failed"]:
+        print("A mapping write failed; the registry pooled row is left in place. "
+              "Fix the error above and re-run --apply.")
+        raise SystemExit(1)
+    unset = unset_registry(db)
+    print(f"UNSET registry pooled location on {unset} row(s)")
+    return {**counts, "unset": unset}
 
 
 def main():
