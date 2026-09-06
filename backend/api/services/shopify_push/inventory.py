@@ -487,6 +487,16 @@ def _file_unmapped_task(db, store: Dict[str, Any]) -> None:
         logger.debug("[SHOPIFY_STOCK] unmapped-store task skipped: %s", exc)
 
 
+def _labels(stores: Iterable[Dict[str, Any]], store_ids: Iterable[str]) -> List[str]:
+    """Shop CODES for a list of store_ids (Pune's id is a UUID; the owner reads
+    codes). ``unknown_stores`` itself stays the machine list of ids."""
+    by = {
+        str(s.get("store_id") or ""): str(s.get("store_code") or s.get("store_name") or s.get("store_id") or "")
+        for s in stores
+    }
+    return [by.get(sid) or sid for sid in store_ids]
+
+
 def _unknown_error(names: List[str]) -> str:
     return (
         f"on-hand unknown at {', '.join(names)} -- written nowhere this pass "
@@ -613,7 +623,7 @@ async def push_skus_stock(
             summary["quantities"].setdefault(sku, {})[sid] = int(per[sid])
 
     if summary["unknown_stores"] and not summary["error"]:
-        summary["error"] = _unknown_error(summary["unknown_stores"])
+        summary["error"] = _unknown_error(_labels(stores, summary["unknown_stores"]))
     live, reason = _live_or_reason(db)
     if not live or dry_run:
         summary["mode"] = MODE_SIMULATED
@@ -816,7 +826,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         if holders:
             return STORE_UNMAPPED, _unmapped_error(holders)
         if unknown:
-            return STOCK_ONHAND_UNKNOWN, _unknown_error(sorted(unknown))
+            return STOCK_ONHAND_UNKNOWN, _unknown_error(_labels(stores, sorted(unknown)))
         return None, None
 
     live, reason = _live_or_reason(db)

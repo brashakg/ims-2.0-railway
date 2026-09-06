@@ -1535,6 +1535,18 @@ export interface LiveSyncRun {
   limit?: number | null;
   limit_reached?: boolean | null;
   failures?: LiveSyncFailure[] | null;
+  /** The stock pass the run ends with (sync_stock_levels -- per-shop
+   *  quantities at each shop's Shopify location). `ok=false` with a code
+   *  (STORE_UNMAPPED / STOCK_ONHAND_UNKNOWN / ...) is the only trace a
+   *  scheduled tick leaves besides the task it files. */
+  stock?: {
+    ok?: boolean | null;
+    changed?: number | null;
+    synced?: number | null;
+    failed?: number | null;
+    code?: string | null;
+    error?: string | null;
+  } | null;
 }
 
 export interface LiveSyncStatus {

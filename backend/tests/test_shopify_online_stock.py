@@ -1030,11 +1030,17 @@ def test_T11b_preview_first_names_a_mapped_shop_whose_read_failed(monkeypatch):
     says so exactly as the live pass would -- ok=False, STOCK_ONHAND_UNKNOWN
     naming it -- never a green 'nothing sent'."""
     db = _listed(_db(a=2, b=1, c=0))
+    # B's store_id and store_code differ (Pune's id is a UUID on prod): the
+    # payload key stays the id, the line the owner reads names the CODE.
+    db.get_collection("stores").update_one({"store_id": "BV-B"}, {"$set": {"store_code": "HIRAPUR-DHN"}})
     _break_shop(db, "BV-B")
     _live(monkeypatch, _explode)
     res = _run(shopify_push.sync_stock_levels(db, dry_run=True))
     assert res.mode == "SIMULATED" and res.ok is False, res
-    assert res.code == shopify_push.STOCK_ONHAND_UNKNOWN and "BV-B" in (res.error or "")
+    assert res.code == shopify_push.STOCK_ONHAND_UNKNOWN and "HIRAPUR-DHN" in (res.error or "")
     assert res.payload["unknown_stores"] == ["BV-B"]
+    # ...and the POS door's summary names the code the same way.
+    s = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    assert s["unknown_stores"] == ["BV-B"] and "HIRAPUR-DHN" in (s.get("error") or "")
     assert res.payload["plan"][0]["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
     assert _baseline(db) is None

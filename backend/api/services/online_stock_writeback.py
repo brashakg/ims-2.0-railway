@@ -465,6 +465,8 @@ async def writeback_skus(
         summary["simulated"] = len(written_skus)
     if res.get("code"):
         summary["code"] = res["code"]
+    if res.get("error"):
+        summary["error"] = res["error"]
 
     # SKUs with no online mapping (present in distinct but not targets).
     if unmapped:

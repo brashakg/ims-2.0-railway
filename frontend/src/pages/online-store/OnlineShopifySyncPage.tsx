@@ -512,6 +512,20 @@ export default function OnlineShopifySyncPage() {
   const liveSync = status?.live_sync ?? null;
   const lastRun = liveSync?.last_run ?? null;
   const stockPayload = (stockResult?.payload ?? null) as Record<string, any> | null;
+  // The plan's inner keys are store_ids (Pune's is a UUID); the owner reads
+  // shop codes. mode.stores is the same store list the writer maps from.
+  const shopLabel = (sid: string) =>
+    (mode?.stores ?? []).find((s) => s.store_id === sid)?.store_code || sid;
+  // A Shopify location that fulfils online orders but maps to NO shop keeps
+  // selling whatever number it holds -- IMS never writes it (the pooled
+  // phantom the migration runbook warns about). Visible here, not only in
+  // the runbook. Empty when DARK (the locations read is [] then).
+  const mappedLocationIds = new Set(
+    (mode?.stores ?? []).map((s) => s.shopify_location_id).filter((id): id is string => !!id),
+  );
+  const unmappedFulfilling = locations.filter(
+    (l) => l.isActive !== false && l.fulfillsOnlineOrders && !mappedLocationIds.has(l.id),
+  );
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -659,6 +673,21 @@ export default function OnlineShopifySyncPage() {
             </table>
           </div>
         )}
+        {unmappedFulfilling.length > 0 && (
+          <p
+            className="mt-2 inline-flex items-start gap-1 text-[11px] text-amber-800"
+            data-testid="unmapped-fulfilling-locations"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Fulfils online orders but maps to no shop:{' '}
+              {unmappedFulfilling.map((l) => l.name || l.id).join(', ')} — Shopify keeps selling
+              from it with whatever number it holds; IMS never writes it. Map it to its shop on
+              the Organization page, or untick &quot;Fulfill online orders&quot; on it in Shopify
+              admin &gt; Locations.
+            </span>
+          </p>
+        )}
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <label className="inline-flex items-center gap-1.5 text-xs text-gray-700">
             <input
@@ -696,7 +725,10 @@ export default function OnlineShopifySyncPage() {
           </span>
         </div>
         {stockResult && (
-          <div className={'mt-2 text-[11px] ' + (stockResult.ok ? 'text-gray-600' : 'text-amber-800')}>
+          <div
+            className={'mt-2 text-[11px] ' + (stockResult.ok ? 'text-gray-600' : 'text-amber-800')}
+            data-testid="stock-pass-result"
+          >
             <p>
               Last stock pass ({stockResult.mode === 'LIVE' ? 'LIVE' : 'preview'}):{' '}
               {stockPayload?.changed ?? 0} of {stockPayload?.candidates ?? 0} listings changed
@@ -722,7 +754,7 @@ export default function OnlineShopifySyncPage() {
             {Array.isArray(stockPayload?.unknown_stores) && stockPayload.unknown_stores.length > 0 && (
               <p className="mt-1">
                 On-hand unknown this pass (written nowhere, never as 0):{' '}
-                {(stockPayload.unknown_stores as string[]).join(', ')}
+                {(stockPayload.unknown_stores as string[]).map(shopLabel).join(', ')}
               </p>
             )}
             {Array.isArray(stockPayload?.plan) && stockPayload.plan.length > 0 && (
@@ -740,7 +772,7 @@ export default function OnlineShopifySyncPage() {
                     return acc;
                   }, {}),
                 )
-                  .map(([store, units]) => `${store}: ${units}`)
+                  .map(([store, units]) => `${shopLabel(store)}: ${units}`)
                   .join(' · ') || 'no rows'}
                 {stockPayload.plan.length >= 50 ? ' (first 50 listings)' : ''}
               </p>
@@ -834,6 +866,23 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
+            {lastRun.stock && (
+              <p
+                className={'mt-1 ' + (lastRun.stock.ok === false ? 'text-amber-800' : '')}
+                data-testid="live-sync-stock-line"
+              >
+                <span className="font-medium">Stock pass:</span>{' '}
+                {lastRun.stock.ok === false ? 'NOT ok' : 'ok'} · {fmt(lastRun.stock.changed)} changed ·{' '}
+                {fmt(lastRun.stock.synced)} written · {fmt(lastRun.stock.failed)} failed
+                {lastRun.stock.code && (
+                  <>
+                    {' '}
+                    · <code className="rounded bg-amber-50 px-1 text-[11px]">{lastRun.stock.code}</code>
+                  </>
+                )}
+                {lastRun.stock.error && <> · {lastRun.stock.error}</>}
+              </p>
+            )}
             {(lastRun.failures?.length ?? 0) > 0 && (
               <ul className="mt-2 space-y-1" aria-label="Live sync failures">
                 {lastRun.failures!.map((f, i) => (
