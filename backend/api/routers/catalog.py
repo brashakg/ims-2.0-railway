@@ -29,6 +29,7 @@ from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
 from ..services import online_delist as _delist
+from ..services.shopify_push import is_variant_of as _is_variant_of
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
@@ -1300,6 +1301,34 @@ def _all_catalog_products() -> List[Dict]:
     return list(CATALOG_PRODUCTS.values())
 
 
+def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
+    """The billing SPINE's product_id for a catalog twin -- the ONE resolver
+    both catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
+    DELETE is_active) key their `products` write on.
+
+    A legacy / convergence twin shares the spine id. A DOOR-created twin
+    (product_master.create_product: 71 of 77 live products on the 08-30
+    census, and every size variant) is keyed by the spine's pim_product_id
+    -- a DIFFERENT uuid -- so the id lookup misses, and the ONE product-per-
+    SKU rule resolves it by sku: the mirror image of the spine PUT's
+    pim_product_id-first twin lookup (product_master.mirror_update_to_
+    catalog_twin). Until this, both doors' `_pr.update(<catalog id>, ...)`
+    silently matched NO spine on a door-created product: the drawer's
+    deactivate / the Delete button never reached the spine a soft-deleted
+    product is sold from at POS, and for a size variant -- whose only
+    off-sale marker is the spine's is_active (online_stock_writeback lists
+    an inactive spine at 0) -- the next stock pass put the size straight
+    back on sale. None when there is no spine (a BVI-only twin)."""
+    if repo is None or not catalog_doc:
+        return None
+    spine = None
+    if catalog_doc.get("id"):
+        spine = repo.find_by_id(catalog_doc["id"])
+    if spine is None and catalog_doc.get("sku"):
+        spine = repo.find_by_sku(catalog_doc["sku"])
+    return (spine or {}).get("product_id")
+
+
 def _next_sku_counter(prefix: str, db=None) -> int:
     """Next monotonic SKU counter for a category prefix.
 
@@ -2220,7 +2249,8 @@ async def update_catalog_product(
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
-        if _pr is not None:
+        _spine_id = _spine_product_id(_pr, existing)
+        if _pr is not None and _spine_id:
             _pricing = existing.get("pricing") or {}
             _tier = _pricing.get("discount_category")
             _patch = {
@@ -2233,7 +2263,7 @@ async def update_catalog_product(
                 "is_active": existing.get("is_active", True),
             }
             _patch = {k: v for k, v in _patch.items() if v is not None}
-            _pr.update(product_id, _patch)
+            _pr.update(_spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
@@ -2620,8 +2650,9 @@ async def delete_catalog_product(
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
-        if _pr is not None:
-            _pr.update(product_id, {"is_active": False})
+        _spine_id = _spine_product_id(_pr, product)
+        if _pr is not None and _spine_id:
+            _pr.update(_spine_id, {"is_active": False})
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine deactivate on delete skipped for %s",
