@@ -6,7 +6,7 @@
 // A store's GSTIN is derived server-side from its entity by state, so it is
 // shown read-only here.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
 import {
   Building2, Plus, Pencil, ChevronDown, ChevronRight, MapPin, X, Loader2,
   Store as StoreIcon, Landmark, FileText, AlertTriangle,
@@ -429,10 +429,6 @@ function StoreModal({
 }: { entity: Entity; store: Store | null; meta: OrgMeta; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
   const [saving, setSaving] = useState(false);
-  // Re-entry guard: `disabled={saving}` only lands after the re-render, so a
-  // second click event in the same tick (seen under CI load) would submit the
-  // store twice. A ref closes that window without a second state.
-  const inFlight = useRef(false);
   const [form, setForm] = useState<StorePayload>(() => store ?? {
     entity_id: entity.entity_id, brand: BRANDS[0], store_type: 'RETAIL',
     geofence_radius_m: 500, enabled_categories: [],
@@ -484,8 +480,6 @@ function StoreModal({
       validateGeoRadius(form.geofence_radius_m),
     );
     if (fieldErr) { toast.error(fieldErr); return; }
-    if (inFlight.current) return;
-    inFlight.current = true;
     setSaving(true);
     try {
       if (store) await orgStoreApi.update(store.store_id, form);
@@ -494,7 +488,7 @@ function StoreModal({
       onSaved();
     } catch (e) {
       toast.error(errMsg(e, 'Failed to save store'));
-    } finally { inFlight.current = false; setSaving(false); }
+    } finally { setSaving(false); }
   };
 
   return (
