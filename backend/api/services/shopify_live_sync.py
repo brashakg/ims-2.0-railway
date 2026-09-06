@@ -207,6 +207,13 @@ def select_dirty_products(db) -> Tuple[List[Dict], int]:
         ecom = doc.get("ecom")
         if not (ecom and ecom.get("locally_modified")):
             continue
+        # A size variant (is_variant_of) owns no listing: it is never a
+        # "live" row, never "awaiting first publish", never swept. Its price
+        # and stock ride the PARENT's pass. (Needed even though the create
+        # door births it clean: a drawer edit or the discount engine's
+        # product-level pass can dirty the child twin.)
+        if shopify_push.is_variant_of(doc):
+            continue
         if ecom.get("taken_down_at"):
             taken_down_skipped += 1
             continue

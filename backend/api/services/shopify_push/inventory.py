@@ -58,6 +58,7 @@ from ._shared import (
     MODE_SIMULATED,
     PushResult,
     _live_or_reason,
+    is_variant_of,
     logger,
 )
 from .transport import _graphql, _now, _user_error_codes, _user_errors
@@ -721,10 +722,14 @@ def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str,
     """Every catalog product already on Shopify, with its variant rows."""
     out: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
     try:
+        # A size variant (is_variant_of) never owns a listing: its SKU rides
+        # the parent's row set below. Filtered even if a repair script ever
+        # stamps the parent gid on the child twin (a double stock write and a
+        # second ledger otherwise).
         products = [
             d
             for d in db["catalog_products"].find({})
-            if (d.get("ecom") or {}).get("shopify_product_id")
+            if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
         ]
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] catalog read failed: %s", exc)

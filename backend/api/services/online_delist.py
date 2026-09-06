@@ -35,6 +35,7 @@ has a gid: a never-pushed product's FIRST publish stays a human press.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Dict, Optional
 
@@ -53,16 +54,26 @@ DELIST_KEYS = ("online_state", "delisted_at", "delist_reason", "delist_error")
 
 
 def _raw_db(db):
-    """Accept the dependencies.get_db() connection wrapper OR a raw db."""
+    """Accept the dependencies.get_db() connection wrapper OR a raw db.
+
+    The wrapper (DatabaseConnection / the guarded connection / a test
+    double) carries ``db`` as a REAL attribute: a class property or an
+    instance attribute. A raw pymongo Database synthesises EVERY attribute
+    name as a collection (Database.__getattr__), so ``hasattr(db,
+    "is_connected")`` is True there, ``db.db`` is the collection named "db",
+    and a Collection's truth test RAISES (pymongo 4). The catalog doors pass
+    the raw db (catalog._get_db()), so the old hasattr check made every
+    drawer deactivate / Delete take-down raise into delist_if_live's
+    fail-soft except -- nothing ever reached Shopify from those doors. Only a
+    static lookup (no __getattr__, no descriptor call) tells the two apart."""
     if db is None:
         return None
-    if hasattr(db, "is_connected"):
-        if not db.is_connected:
-            return None
-        inner = getattr(db, "db", None)
-        if inner is not None:
-            return inner
-    return db
+    if inspect.getattr_static(db, "db", None) is None:
+        return db  # a raw database: nothing to unwrap
+    if not getattr(db, "is_connected", True):
+        return None
+    inner = getattr(db, "db", None)
+    return inner if inner is not None else db
 
 
 def _resolve_twin(db, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -129,9 +140,18 @@ async def delist_if_live(
         db = _raw_db(db)
         twin = _resolve_twin(db, product or {})
         gid = ((twin or {}).get("ecom") or {}).get("shopify_product_id")
-        if not gid:
+        if shopify_push.is_variant_of(twin or {}):
+            # A size variant owns no listing: take ITS Shopify variant off
+            # sale (DENY + 0) on the parent's listing, never the parent's
+            # status. is_active is the marker; the quantity rule lists an
+            # inactive spine at 0 so every later stock pass agrees.
+            result = await shopify_push._delist_variant_row(db, twin)
+            if result.action == "noop":
+                return None  # never mapped -> nothing on Shopify, nothing recorded
+        elif not gid:
             return None
-        result = await shopify_push.push_product_delist(db, twin)
+        else:
+            result = await shopify_push.push_product_delist(db, twin)
         data = result.to_dict()
         data["trigger"] = reason
         twin_id = twin.get("id") or twin.get("product_id")
@@ -170,6 +190,18 @@ def mark_for_republish(db, product: Dict[str, Any]) -> bool:
     try:
         db = _raw_db(db)
         twin = _resolve_twin(db, product or {})
+        if shopify_push.is_variant_of(twin or {}):
+            # A size variant is never queued as a listing (nothing to
+            # publish); only the take-down marks are lifted. Its stock comes
+            # back through the parent's next stock pass: is_active on ->
+            # pooled units vs the 0 the delist recorded -> re-sent.
+            _stamp(
+                db,
+                twin.get("id") or twin.get("product_id"),
+                taken_down_at=None,
+                **{k: None for k in DELIST_KEYS},
+            )
+            return True
         if not ((twin or {}).get("ecom") or {}).get("shopify_product_id"):
             return False
         _stamp(

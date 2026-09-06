@@ -509,8 +509,10 @@ def test_listing_copy_is_generated_at_create_only():
         if "_build_pim_doc(" in line and not line.strip().startswith("def ")
     ]
     assert callers, "the listing builder lost its call site"
+    # (the variant-of `parent=` kwarg rides the same two calls -- still the
+    # create door only)
     assert all(
-        c.startswith("pim_doc = _build_pim_doc(spine)") for c in callers
+        c.startswith("pim_doc = _build_pim_doc(spine") for c in callers
     ), callers
     # ...and those two helpers are only ever called from create_product.
     assert src.count("_write_mirror(") == 2  # def + the create_product call
