@@ -91,7 +91,7 @@ ALLOWED = {
         "payout._month_window's docstring). Calendar frame is correct."
     ),
     (
-        "api/routers/orders.py",
+        "api/routers/orders/create.py",
         "expected_delivery = datetime.combine(",
     ): (
         "WRITE of the operator-promised delivery DATE (a business day the "
@@ -99,7 +99,7 @@ ALLOWED = {
         "names this exact site as the business-date frame example."
     ),
     (
-        "api/routers/orders.py",
+        "api/routers/orders/create.py",
         "order.delivery_date, datetime.min.time()",
     ): (
         "Continuation line of the expected_delivery write above -- same "
