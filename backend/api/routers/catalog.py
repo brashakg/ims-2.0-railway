@@ -2269,6 +2269,35 @@ async def update_catalog_product(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
 
+    # A SIZE VARIANT (variant-of rule, owner 2026-09-06) owns no listing: its
+    # price and barcode reach the website through its catalog_variants ROW on
+    # the PARENT's price push (product_input._resolve_variant_pricing reads the
+    # row, never this twin), and the engine recompute below finds no rows for
+    # a child twin (its row's parent_product_id is the PARENT). So the drawer's
+    # mrp / gtin edit goes through the ONE row writer -- the same one the spine
+    # PUT's mirror uses -- which also re-derives the online price and queues
+    # the PARENT. Without it the edit was silently inert on the website.
+    # Fail-soft: the catalog save stands.
+    if _is_variant_of(existing):
+        _row_patch: Dict[str, Any] = {}
+        if product.pricing is not None and product.pricing.mrp is not None:
+            _row_patch["mrp"] = product.pricing.mrp
+        if product.attributes and "gtin" in product.attributes:
+            _row_patch["attributes"] = {
+                "gtin": (existing.get("attributes") or {}).get("gtin")
+            }
+        if _row_patch:
+            try:
+                _pm._mirror_variant_row_update(
+                    current=existing, patch=_row_patch, db=_get_db()
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[CATALOG] variant row mirror skipped for %s",
+                    product_id,
+                    exc_info=True,
+                )
+
     # Online discount engine: re-derive the ONLINE storefront price after an edit
     # (MRP / brand / category changes can move the winning rule). ADDITIVE +
     # FAIL-SOFT; ONLINE-only (never touches the in-store offer_price). DARK.
