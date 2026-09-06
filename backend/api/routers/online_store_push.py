@@ -620,6 +620,11 @@ async def push_all_pending(
             bucket["noop"] += 1
         elif data.get("ok"):
             bucket["pushed"] += 1
+            if data.get("code") == shopify_push.PRICE_NOT_SYNCED:
+                # Live, but the price step failed: the product IS on the
+                # storefront (so it is pushed), at the OLD price (so it gets
+                # its own line and stays queued -- see push_product).
+                bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
         else:
             bucket["failed"] += 1
         results.append(data)

@@ -117,8 +117,10 @@ def write_push_audit(result: Dict[str, Any], current_user: dict) -> None:
         mode = result.get("mode")
         ok = result.get("ok")
         # A failed push (live or dry-run) is a WARNING so it surfaces in the
-        # warnings/critical audit views; a clean push is INFO.
-        severity = "INFO" if ok else "WARNING"
+        # warnings/critical audit views; a clean push is INFO. A push that
+        # carries a `code` while ok (PRICE_NOT_SYNCED: live at the OLD price)
+        # is something the operator must act on, so it is a WARNING too.
+        severity = "INFO" if ok and not result.get("code") else "WARNING"
         audit.create(
             {
                 "action": "ONLINE_STORE_PUSH",
@@ -148,6 +150,9 @@ def write_push_audit(result: Dict[str, Any], current_user: dict) -> None:
                     # The publish side channel keeps the RAW vendor error
                     # (`error` above is the plain-language line).
                     "publication": result.get("publication"),
+                    # The price side channel keeps its RAW vendor error the
+                    # same way (PRICE_NOT_SYNCED rides `code` + `error`).
+                    "variant_prices": result.get("variant_prices"),
                 },
             }
         )
@@ -496,6 +501,11 @@ async def sync_live_products(
     pushed_ok = sum(1 for r in results if r.get("ok"))
     refused_no_photo = sum(1 for r in results if r.get("reason") == "no_photo")
     publish_withheld = sum(1 for r in results if r.get("reason") == "publish_withheld")
+    # Live, but at the OLD price (ok=True + code): its own count, and it rides
+    # the failures list so the last-run panel names the product.
+    price_not_synced = sum(
+        1 for r in results if r.get("code") == shopify_push.PRICE_NOT_SYNCED
+    )
     failed = sum(
         1
         for r in results
@@ -504,7 +514,7 @@ async def sync_live_products(
     by_id = {(d.get("id") or d.get("product_id")): d for d in live}
     failures = []
     for r in results:
-        if r.get("ok"):
+        if r.get("ok") and not r.get("code"):
             continue
         doc = by_id.get(r.get("target_id"), {})
         failures.append(
@@ -541,6 +551,7 @@ async def sync_live_products(
         "failed": failed,
         "refused_no_photo": refused_no_photo,
         "publish_withheld": publish_withheld,
+        "price_not_synced": price_not_synced,
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
         "blocked_skipped": batch["blocked_skipped"],
@@ -563,9 +574,9 @@ async def sync_live_products(
     run.update(summary)
     logger.info(
         "[LIVE-SYNC] %s run (%s) mode=%s selected=%s ok=%s failed=%s "
-        "refused=%s withheld=%s awaiting_first_publish=%s",
+        "refused=%s withheld=%s price_not_synced=%s awaiting_first_publish=%s",
         trigger, slot, mode, len(live), pushed_ok, failed,
-        refused_no_photo, publish_withheld, awaiting_first_publish,
+        refused_no_photo, publish_withheld, price_not_synced, awaiting_first_publish,
     )
     return _serialise_run(run)
 

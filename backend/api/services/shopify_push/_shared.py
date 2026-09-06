@@ -130,6 +130,19 @@ class PushResult:
         return asdict(self)
 
 
+# The product is LIVE but the price step of the SAME press failed (sync audit
+# gap #7). ok stays True -- the product IS on the storefront, and a false
+# "failed" would read as a Shopify breakage over a listing that exists -- but
+# the row STAYS QUEUED and the result carries this code so the operator sees
+# the website is selling at the OLD price.
+PRICE_NOT_SYNCED = "PRICE_NOT_SYNCED"
+_PRICE_NOT_SYNCED_MSG = (
+    "Live on the website at the OLD price: the price change did not reach "
+    "Shopify. The product stays queued -- press again, or the next scheduled "
+    "sync retries it."
+)
+
+
 # ===========================================================================
 # Gating -- the single source of truth for "are we DARK or LIVE?"
 # ===========================================================================
