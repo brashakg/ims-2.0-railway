@@ -19,6 +19,7 @@ from ._shared import (
     PushResult,
     _blocked_result,
     _live_or_reason,
+    is_variant_of,
     price_on_update_enabled,
     push_lock_reason,
 )
@@ -41,7 +42,14 @@ from .variants import (
     push_variant_prices,
 )
 from .publish import _publish_to_online_store
-from .inventory import plan_product_stock, sync_product_stock
+from .inventory import (
+    _set_variant_tracking,
+    plan_product_stock,
+    resolve_online_location_id,
+    set_inventory_quantities,
+    sync_product_stock,
+    zero_stock_ledger_entry,
+)
 from .media import plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
 
@@ -78,6 +86,30 @@ async def push_product(
     _lock = push_lock_reason(db, "product", product)
     if _lock:
         return _blocked_result("product", pid, _lock)
+    # VARIANT-OF (owner ruling 2026-09-06): a size variant owns NO listing. Its
+    # price, barcode and stock ride the PARENT's push (push_variant_prices /
+    # sync_product_stock over the parent's catalog_variants rows); every
+    # listing-level field is the parent's alone. Refused HERE, the one
+    # chokepoint every product-push door funnels through -- before the block
+    # classifier, the photo refusal, productCreate/productUpdate, tags,
+    # metafields, seeding, media, stock and publish -- so no path, dry-run or
+    # live, can ever mint a second listing for a size. Same result shape as
+    # the no_photo refusal, so the screen renders it the same way.
+    if is_variant_of(product):
+        link = (product.get("ecom") or {}).get("variant_of") or {}
+        parent = link.get("sku") if isinstance(link, dict) else link
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error=(
+                f"size variant of {parent}: its price, barcode and stock ride "
+                "the parent's listing -- push the parent"
+            ),
+            reason="variant_of",
+        )
     # SUPERADMIN "block collection from online" (BVI-retirement): a product that
     # belongs to AT LEAST ONE online_sync_blocked collection is a HARD block --
     # it must NEVER be created/updated on Shopify regardless of its other
@@ -529,6 +561,27 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
     pid = product.get("id") or product.get("product_id")
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
+    if is_variant_of(product):
+        # A size variant has no listing to draft, and a manual take-down of
+        # ONE size has no persistent marker of its own: the next stock pass
+        # would put it straight back (its spine is still active, so the
+        # quantity rule reports its units). So this door REPORTS instead of
+        # writing: the ONE way to stop selling a size is to deactivate the
+        # product (online_delist.delist_if_live -> _delist_variant_row, where
+        # is_active is the marker and the quantity rule lists 0), or to take
+        # down the parent. Zero network. NEVER productUpdate on the parent.
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="product",
+            action="noop",
+            target_id=pid,
+            ok=True,
+            reason="variant_of",
+            error=(
+                "size variant rides the parent's listing -- deactivate the "
+                "product to stop selling this size, or take down the parent"
+            ),
+        )
     if not existing_gid:
         # Not on Shopify -> nothing to take down (a clean no-op, not an error).
         return PushResult(
@@ -594,3 +647,129 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
             error=str(e),
         )
 
+
+
+async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
+    """Take ONE size variant off sale WITHOUT touching the parent's listing:
+    inventoryPolicy DENY + quantity 0 on the child's own Shopify variant (the
+    parent's listing stays ACTIVE, every other size keeps selling). The
+    retire hook's door for a variant-of product (online_delist.delist_if_live
+    when the child spine's is_active flips off) -- is_active is then the ONLY
+    marker, and the quantity rule (online_stock_writeback._on_hand_for_skus:
+    an inactive spine lists 0) keeps every later stock pass at 0 until the
+    product is reactivated. NEVER productUpdate, never a status change.
+
+    Reads the bridge, never a second link: the child's catalog_variants row
+    by ``sku`` gives the variant + inventory-item gids AND parent_product_id
+    (the parent twin), whose ecom.shopify_product_id is the productId the
+    bulk-update needs. Any of the three missing -> the same clean noop as an
+    un-pushed product (nothing on Shopify to take down). DARK -> SIMULATED
+    plan, zero network. LIVE -> the two existing stock primitives
+    (_set_variant_tracking, set_inventory_quantities) at the resolved online
+    location, then the child's entry in the PARENT's stock ledger is zeroed
+    so a reactivation (pooled 1 vs sent 0) diffs and is re-sent. Fail-soft."""
+    pid = product.get("id") or product.get("product_id")
+    sku = str(product.get("sku") or "").strip()
+    row: Dict[str, Any] = {}
+    parent_gid = None
+    parent_twin_id = None
+    try:
+        row = (db["catalog_variants"].find_one({"sku": sku}) if sku else None) or {}
+        parent_twin_id = row.get("parent_product_id")
+        parent = (
+            db["catalog_products"].find_one({"id": parent_twin_id}) if parent_twin_id else None
+        ) or {}
+        parent_gid = (parent.get("ecom") or {}).get("shopify_product_id")
+    except Exception as exc:  # noqa: BLE001 -- a lookup blip is reported, never raised
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="variant",
+            action="delist",
+            target_id=pid,
+            ok=False,
+            error=f"variant lookup failed: {exc}",
+        )
+    variant_gid = row.get("shopify_variant_id")
+    inventory_item_gid = row.get("shopify_inventory_item_id")
+    if not (parent_gid and variant_gid and inventory_item_gid):
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="variant",
+            action="noop",
+            target_id=pid,
+            ok=True,
+            reason="not on Shopify -- nothing to delist",
+        )
+    variant_gid = _as_shopify_gid(variant_gid, "ProductVariant")
+    payload: Dict[str, Any] = {
+        "productId": _as_shopify_gid(parent_gid, "Product"),
+        "variantId": variant_gid,
+        "inventoryItemId": _as_shopify_gid(inventory_item_gid, "InventoryItem"),
+        "inventoryPolicy": "DENY",
+        "quantity": 0,
+    }
+    live, reason = _live_or_reason(db)
+    if not live:
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="variant",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=variant_gid,
+            payload=payload,
+            reason=reason,
+        )
+    try:
+        loc = await resolve_online_location_id(db)
+        if not loc.get("location_id"):
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="variant",
+                action="delist",
+                target_id=pid,
+                ok=False,
+                shopify_id=variant_gid,
+                payload=payload,
+                code=loc.get("code"),
+                error=loc.get("error"),
+            )
+        payload["locationId"] = loc["location_id"]
+        tracked = await _set_variant_tracking(db, payload["productId"], [variant_gid], "DENY")
+        written = await set_inventory_quantities(
+            db, loc["location_id"], {payload["inventoryItemId"]: 0}
+        )
+        errors = list(tracked.get("errors") or []) + list(written.get("errors") or [])
+        if errors:
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="variant",
+                action="delist",
+                target_id=pid,
+                ok=False,
+                shopify_id=variant_gid,
+                payload=payload,
+                error="; ".join(str(e) for e in errors[:3]),
+            )
+        if parent_twin_id and sku:
+            zero_stock_ledger_entry(db, parent_twin_id, sku)
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=variant_gid,
+            payload=payload,
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant",
+            action="delist",
+            target_id=pid,
+            ok=False,
+            shopify_id=variant_gid,
+            payload=payload,
+            error=str(e),
+        )

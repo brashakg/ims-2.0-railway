@@ -156,6 +156,7 @@ from ._shared import (  # noqa: F401
     _live_or_reason,
     push_lock_reason,
     _blocked_result,
+    is_variant_of,
     PRICE_NOT_SYNCED,
     _PRICE_NOT_SYNCED_MSG,
 )
@@ -300,6 +301,7 @@ from .writeback import (  # noqa: F401
 from .product import (  # noqa: F401
     push_product,
     push_product_delist,
+    _delist_variant_row,
 )
 from .webhooks import (  # noqa: F401
     _WEBHOOK_SUBSCRIPTIONS_QUERY,

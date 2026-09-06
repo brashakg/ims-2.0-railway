@@ -298,6 +298,22 @@ def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def is_variant_of(doc: Any) -> bool:
+    """THE variant-of predicate (owner ruling 2026-09-06): True for a catalog
+    twin that is a SIZE VARIANT of another product. Such a product is its own
+    spine (own SKU, own stock, own POS sale) but owns NO Shopify listing: its
+    price, barcode and stock ride the PARENT's listing through its
+    catalog_variants row (parent_product_id = the parent twin), and every
+    listing-level field (title, description, media, tags, status, options) is
+    the parent's alone. Written once by the create door
+    (product_master._build_pim_doc) as ``ecom.variant_of = {product_id: parent
+    spine id, twin_id: parent twin id, sku: parent sku}``; read by every
+    dirty-keyed door so a child is never pushed, queued, counted or drafted as
+    a listing. Pure; a spine row (no ecom) is never a variant."""
+    ecom = (doc or {}).get("ecom") if isinstance(doc, dict) else None
+    return bool(isinstance(ecom, dict) and ecom.get("variant_of"))
+
+
 def _blocked_result(entity: str, target_id: Optional[str], reason: str) -> "PushResult":
     """A fail-closed push refusal (brand/collection push-locked)."""
     return PushResult(

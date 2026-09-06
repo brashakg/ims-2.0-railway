@@ -814,6 +814,10 @@ def _product_counts(db) -> Dict[str, int]:
         ecom = doc.get("ecom")
         if not ecom:
             continue
+        # A size variant is neither staged nor pending -- it has no listing
+        # of its own (its row rides the parent's counts).
+        if shopify_push.is_variant_of(doc):
+            continue
         staged += 1
         if ecom.get("shopify_product_id"):
             pushed += 1
