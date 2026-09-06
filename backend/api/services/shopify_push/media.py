@@ -7,8 +7,11 @@ helpers.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 import os
+import re
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -194,6 +197,108 @@ def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
     return out
 
 
+# Shopify keeps the SOURCE file name on the CDN copy (adding an extension
+# when the source had none: the in-app uploader's bare ObjectId url comes
+# back as <oid>.png) and appends ``_<uuid>`` when that name collides with a
+# file already in Files. That suffix is Shopify's own marker that the file
+# is a DIFFERENT upload with the same base name, so it is stripped on the
+# CDN side ONLY -- an IMS url that itself carries one (a cdn.shopify.com
+# photo on a bvi_import twin) names one specific upload, and another upload
+# of the same base name is not that photograph. Measured on the 42 (09-06):
+# 0 of 180 CDN names carry ``_WxH`` or a bare-hex suffix, so nothing else is
+# stripped; a human's "front_600x600.png" is a different file from
+# "front.png". Extensions are a fixed image whitelist so ".v2" is not one;
+# nothing is case-folded: "front.JPG" and "front.jpg" are two names.
+_IMAGE_EXT = re.compile(r"\.(jpe?g|png|gif|webp|avif|heic|heif|bmp|tiff?|svg)$", re.I)
+_COLLISION_SUFFIX = re.compile(
+    r"_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _file_name(url: str) -> str:
+    """The path's basename, query dropped ('' when the url has none). Pure."""
+    return urlsplit(str(url or "")).path.rsplit("/", 1)[-1]
+
+
+def _stem_ext(name: str) -> tuple:
+    """(stem, ext) of a file name; ext is '' unless it is an image extension.
+    The extension is RECOGNISED case-insensitively (so '.JPG' is an extension
+    and not part of a stem) but returned as written: comparison is exact."""
+    m = _IMAGE_EXT.search(name)
+    return (name[: m.start()], m.group(0)) if m else (name, "")
+
+
+def _same_file(ims_url: str, cdn_url: str) -> bool:
+    """R3: the CDN copy carries the IMS file's name -- the name equal, the
+    CDN side allowed Shopify's ``_<uuid>`` collision suffix (once), and the
+    extension equal -- exactly, no case folding -- whenever the IMS name has
+    one (an extension-less IMS name, of ANY shape, not only an ObjectId,
+    matches whichever image extension Shopify gave the copy). Pure."""
+    stem, ext = _stem_ext(_file_name(ims_url))
+    cstem, cext = _stem_ext(_file_name(cdn_url))
+    if not stem or (ext and ext != cext):
+        return False
+    return stem == cstem or stem == _COLLISION_SUFFIX.sub("", cstem, count=1)
+
+
+def match_media_to_photos(
+    photos: List[str], shopify_media: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """PURE: pair each IMS photo url with the ONE Shopify media that positively
+    identifies as that photograph -- the adoption rule for products that went
+    live before ``ecom.media_map`` existed (scripts/adopt_shopify_media_map.py).
+
+    A media is the photo when (either suffices, both are exact equality):
+      R1  its ``originalSource.url`` IS the IMS url (the source we handed over);
+      R3  its CDN file name IS the IMS url's file name (``_same_file``).
+    There is deliberately NO alt rule: IMS's own attach sends alt '' for
+    every photo (``build_media_inputs``), so an alt equal to an IMS url or
+    file name can only be a human's edit on a media IMS did not attach, and
+    claiming it would let the photo pass delete that media later.
+    NEVER position or count: a claimed media can later be DELETED by the photo
+    pass when IMS drops the photo, so a guess is never a claim. A photo that
+    fits two media, or a media that two photos fit, is ambiguous and stays
+    unmatched (1:1 only). A url repeated in ``photos`` counts once.
+
+    Returns {map: [{url, id}] in IMS order for the photos that matched,
+    unmatched_photos: [url], unmanaged: [media id] (every media no photo
+    claimed -- hand uploads, connector media -- left exactly where it is),
+    names: {media id: CDN file name} (the evidence a dry-run prints)}.
+    Adopt only when ``unmatched_photos`` is empty and ``map`` is not."""
+    nodes = []
+    for n in shopify_media or []:
+        if not isinstance(n, dict) or not n.get("id"):
+            continue
+        nodes.append(
+            (
+                str(n["id"]),
+                str((n.get("originalSource") or {}).get("url") or "").strip(),
+                str((n.get("image") or {}).get("url") or "").strip(),
+            )
+        )
+    photos = list(dict.fromkeys(photos))
+    hits: Dict[str, List[str]] = {
+        url: [mid for mid, src, cdn in nodes if (src and src == url) or _same_file(url, cdn)]
+        for url in photos
+    }
+    claimed = Counter(mid for ids in hits.values() for mid in ids)
+    media_map: List[Dict[str, str]] = []
+    unmatched: List[str] = []
+    for url in photos:
+        ids = hits[url]
+        if len(ids) == 1 and claimed[ids[0]] == 1:
+            media_map.append({"url": url, "id": ids[0]})
+        else:
+            unmatched.append(url)
+    owned_ids = {r["id"] for r in media_map}
+    return {
+        "map": media_map,
+        "unmatched_photos": unmatched,
+        "unmanaged": [mid for mid, _s, _c in nodes if mid not in owned_ids],
+        "names": {mid: _file_name(cdn) for mid, _s, cdn in nodes},
+    }
+
+
 def plan_product_media(
     product: Dict[str, Any],
     photos: List[str],
@@ -273,21 +378,25 @@ def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) 
     )
 
 
-def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> None:
+def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> bool:
     """Persist ecom.media_map (read-merge-write of the ecom sub-doc, the
-    _writeback_product idiom). NEVER touches locally_modified. Fail-soft."""
+    _writeback_product idiom). NEVER touches locally_modified. Fail-soft;
+    True when the twin now holds ``media_map``, False when it could not be
+    located or written (the adoption runbook reports on it)."""
     try:
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
         if doc is None:
-            return
+            return False
         ecom = dict(doc.get("ecom") or {})
         if ecom.get("media_map") == media_map:
-            return
+            return True
         ecom["media_map"] = media_map
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_PUSH] media_map write-back failed %s: %s", product_id, exc)
+        return False
 
 
 def _in_ims_order(owned: List[Dict[str, str]], photos: List[str]) -> List[Dict[str, str]]:
