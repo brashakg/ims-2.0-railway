@@ -633,6 +633,11 @@ class ProductCreate(BaseModel):
 
 
 class ProductUpdate(BaseModel):
+    # An explicit rename. The display name is minted at create and never
+    # re-derived on edit; this is the one door that moves it, and the mirror
+    # (product_master.mirror_update_to_catalog_twin) carries it to the twin's
+    # title -> Shopify (sync audit gap #3).
+    name: Optional[str] = None
     category: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
