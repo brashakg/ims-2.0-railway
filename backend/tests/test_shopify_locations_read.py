@@ -12,7 +12,10 @@ per-store "Shopify location" dropdown. Pinned here, each REVERT-PROOF:
   3. The route joins each location to the shop already holding it through the
      ONE store reader (mapped_store_id / mapped_store_code).
   4. The rbac row is {ADMIN, SUPERADMIN} and the module :read union is
-     unchanged; the query page is 50 wide and carries shipsInventory/address.
+     unchanged; BOTH locations queries page 50 wide; the dropdown's own
+     query (_LOCATIONS_LIST_QUERY) carries shipsInventory/address while the
+     picker's (_LOCATIONS_QUERY, the live Push-stock path) keeps #1125's
+     shape -- the read used here is the list query.
 
 Every Shopify call is MOCKED at shopify_push._graphql. No Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_shopify_locations_read.py -q
@@ -34,7 +37,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from strict_fakes import StrictDB  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
 from api.services import shopify_push  # noqa: E402
-from api.services.shopify_push.queries import _LOCATIONS_QUERY  # noqa: E402
+from api.services.shopify_push.queries import _LOCATIONS_LIST_QUERY, _LOCATIONS_QUERY  # noqa: E402
 
 BOKARO = "gid://shopify/Location/58793230523"
 PUNE = "gid://shopify/Location/76684427513"
@@ -108,7 +111,7 @@ def test_live_maps_every_node_and_promotes_a_bare_id(monkeypatch):
     _live(monkeypatch, spy)
     out = _run(shopify_push.list_locations(StrictDB()))
     assert out["mode"] == "LIVE" and out["reason"] is None
-    assert len(spy.calls) == 1 and "imsLocations" in spy.calls[0]
+    assert spy.calls == [_LOCATIONS_LIST_QUERY]  # the dropdown's query, not the picker's
     assert out["locations"] == [
         {"id": BOKARO, "name": "Better Vision Sector 4", "isActive": True, "fulfillsOnlineOrders": True,
          "shipsInventory": True, "city": "Bokaro", "province": "Jharkhand"},
@@ -217,8 +220,10 @@ def test_rbac_row_is_admin_superadmin_and_the_read_union_is_unchanged():
     }
 
 
-def test_locations_query_pages_fifty_wide_with_the_dropdown_fields():
-    assert "first: 50" in _LOCATIONS_QUERY
-    assert "first: 10" not in _LOCATIONS_QUERY
+def test_locations_queries_page_fifty_wide_and_the_picker_shape_is_untouched():
+    for q in (_LOCATIONS_QUERY, _LOCATIONS_LIST_QUERY):
+        assert "first: 50" in q and "first: 10" not in q
     for field in ("shipsInventory", "address", "city", "province"):
-        assert field in _LOCATIONS_QUERY
+        assert field in _LOCATIONS_LIST_QUERY
+        assert field not in _LOCATIONS_QUERY  # the live stock path's read shape is #1125's
+    assert "{ nodes { id name isActive fulfillsOnlineOrders } }" in _LOCATIONS_QUERY

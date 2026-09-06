@@ -59,6 +59,7 @@ from .transport import _graphql, _now, _user_errors
 from .queries import (
     _INVENTORY_SET_MAX,
     _INVENTORY_SET_QUANTITIES,
+    _LOCATIONS_LIST_QUERY,
     _LOCATIONS_QUERY,
     _VARIANTS_INVENTORY_UPDATE,
     _VARIANTS_PER_CALL,
@@ -250,7 +251,7 @@ async def list_locations(db) -> Dict[str, Any]:
     if not live:
         return {"mode": MODE_SIMULATED, "reason": reason, "locations": []}
     try:
-        body = await _graphql(db, _LOCATIONS_QUERY, {})
+        body = await _graphql(db, _LOCATIONS_LIST_QUERY, {})
     except Exception as exc:  # noqa: BLE001 -- fail-soft read
         return {"mode": MODE_LIVE, "reason": f"location lookup failed: {exc}", "locations": []}
     nodes = ((body.get("data") or {}).get("locations") or {}).get("nodes") or []

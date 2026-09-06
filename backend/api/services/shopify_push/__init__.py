@@ -191,6 +191,7 @@ from .queries import (  # noqa: F401
     _ONLINE_STORE_PUBLICATION_NAME,
     _publication_id_cache,
     _LOCATIONS_QUERY,
+    _LOCATIONS_LIST_QUERY,
     _VARIANTS_INVENTORY_UPDATE,
     _INVENTORY_SET_QUANTITIES,
     _INVENTORY_SET_MAX,

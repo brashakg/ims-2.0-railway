@@ -192,11 +192,22 @@ _MEDIA_LIMIT = 250
 #   * inventorySetQuantities -- the ABSOLUTE available quantity at that
 #     location (idempotent on retry; needs write_inventory).
 # first: 50 -- every location the shop has (per-store locations, owner ruling
-# 2026-09-06: one per physical shop, so the page must never truncate the list
-# the Organization dropdown is fed from). address.city/province ride along so
-# the dropdown can tell two same-named locations apart; read-only.
+# 2026-09-06: one per physical shop, so neither read below may truncate).
+# The picker's read (resolve_online_location_id, the live Push-stock path)
+# is otherwise byte-identical to #1125 -- its shape is not this PR's to
+# change; the picker itself dies in PR 2 and _LOCATIONS_LIST_QUERY becomes
+# the only locations read.
 _LOCATIONS_QUERY = """
 query imsLocations {
+  locations(first: 50) { nodes { id name isActive fulfillsOnlineOrders } }
+}
+"""
+
+# The Organization page's dropdown read (list_locations, GET /push/locations):
+# shipsInventory + address.city/province ride along so the dropdown can tell
+# two same-named locations apart. Read-only (read_locations).
+_LOCATIONS_LIST_QUERY = """
+query imsLocationList {
   locations(first: 50) {
     nodes { id name isActive fulfillsOnlineOrders shipsInventory address { city province } }
   }
