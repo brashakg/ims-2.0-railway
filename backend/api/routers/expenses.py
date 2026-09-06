@@ -1715,7 +1715,7 @@ async def get_reimbursement_aging(
     Stripping here would therefore buy no secrecy from anybody while breaking
     the accountant's own chase-list -- an unpaid reimbursement they cannot see
     is one they cannot pay. See services/salary_visibility.py for the rule and
-    routers/finance.py::get_cash_flow for the strip's shape if this gate ever
+    routers/finance/cash_flow.py::get_cash_flow for the strip's shape if this gate ever
     widens below ACCOUNTANT.
     """
     expense_repo = get_expense_repository()
