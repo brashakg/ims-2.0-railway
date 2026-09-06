@@ -2540,9 +2540,20 @@ def create_product(
 
 
 def mirror_update_to_catalog_twin(
-    *, product_id: str, current: Dict[str, Any], patch: Dict[str, Any], db=None
+    *,
+    product_id: str,
+    current: Dict[str, Any],
+    patch: Dict[str, Any],
+    db=None,
+    mark_dirty: bool = True,
 ) -> None:
     """THE spine-edit -> catalog-twin mirror rule (products convergence).
+
+    ``mark_dirty=False`` is the explicit opt-out (the catalog door's
+    _save_catalog_product idiom): the fields still mirror, but the twin is
+    NOT queued for the Online Store push -- for a write that only makes IMS
+    agree with what Shopify already shows (scripts/adopt_shopify_media_map.py
+    --replace-photos-from-shopify), where a push would change nothing.
 
     This rule used to live TWICE -- inline in the PUT /products route AND
     inside update_product below -- and the two copies drifted (PR #1029
@@ -2634,7 +2645,7 @@ def mirror_update_to_catalog_twin(
         # reads it off the twin (see _build_pim_doc).
         if "images" in patch:
             cat_patch["images"] = _spine_images({"images": patch["images"]})
-        if any(
+        if mark_dirty and any(
             k in patch
             for k in (
                 "mrp", "offer_price", "description", "images",
@@ -2660,7 +2671,8 @@ def mirror_update_to_catalog_twin(
             if new_name and new_name != (twin.get("title") or twin.get("name")):
                 cat_patch["name"] = new_name
                 cat_patch["title"] = new_name
-                cat_patch["ecom.locally_modified"] = True
+                if mark_dirty:
+                    cat_patch["ecom.locally_modified"] = True
         if not cat_patch:
             return
         if cat_patch.get("ecom.locally_modified"):
@@ -2684,6 +2696,7 @@ def update_product(
     product_repo=None,
     audit_repo=None,
     db=None,
+    mark_dirty: bool = True,
 ) -> Dict[str, Any]:
     """Update a product's mutable fields. Enforces offer<=MRP in BOTH directions
     (raise offer above existing MRP, OR lower MRP below existing offer) by
@@ -2691,7 +2704,8 @@ def update_product(
 
     Mirrors the spine update to the catalog twin via
     mirror_update_to_catalog_twin (the ONE mirror rule, shared with the
-    PUT /products route). Writes a before/after audit row.
+    PUT /products route); ``mark_dirty`` passes through to it (False = the
+    twin follows but is not queued). Writes a before/after audit row.
     """
     if product_repo is None:
         raise ProductMasterError("No product repository.", status=500)
@@ -2759,7 +2773,8 @@ def update_product(
 
     # Mirror to the catalog twin -- the ONE shared rule (see its docstring).
     mirror_update_to_catalog_twin(
-        product_id=product_id, current=updated, patch=clean, db=db
+        product_id=product_id, current=updated, patch=clean, db=db,
+        mark_dirty=mark_dirty,
     )
 
     if audit_repo is not None:
