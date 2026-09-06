@@ -48,6 +48,7 @@ import {
   pushApi,
   syncHealthApi,
   type PushStatus,
+  type PushResult,
   type PushSweepResult,
   type PushHistoryResult,
   type SyncHealth,
@@ -192,6 +193,10 @@ export default function OnlineShopifySyncPage() {
   const [sweeps, setSweeps] = useState<Partial<Record<EntityKey, PushSweepResult>>>({});
   const [goingLive, setGoingLive] = useState(false);
   const [syncingLive, setSyncingLive] = useState(false);
+  // STOCK (2026-09-07, make website quantities real): the one-button pass
+  // that writes the pooled quantity of every listing whose number changed.
+  const [pushingStock, setPushingStock] = useState(false);
+  const [stockResult, setStockResult] = useState<PushResult | null>(null);
   // Variant-prices paged resync progress (OS-017): {done, total} while looping.
   const [resyncProgress, setResyncProgress] = useState<{ done: number; total: number | null } | null>(null);
 
@@ -461,9 +466,33 @@ export default function OnlineShopifySyncPage() {
     }
   };
 
+  const pushStock = async () => {
+    setPushingStock(true);
+    try {
+      const res = await pushApi.pushStock();
+      setStockResult(res);
+      const p = (res.payload ?? {}) as Record<string, any>;
+      const where = res.mode === 'LIVE' ? 'LIVE' : 'simulated';
+      if (res.ok) {
+        toast.success(
+          `Stock (${where}): ${p.changed ?? 0} of ${p.candidates ?? 0} listings changed` +
+            (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent (dry-run)'),
+        );
+      } else {
+        toast.warning(`Stock not written — ${res.error || res.code || 'see result'}`);
+      }
+      refreshAll();
+    } catch (e: any) {
+      toast.error(`Stock push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+    } finally {
+      setPushingStock(false);
+    }
+  };
+
   const mode = status?.mode;
   const liveSync = status?.live_sync ?? null;
   const lastRun = liveSync?.last_run ?? null;
+  const stockPayload = (stockResult?.payload ?? null) as Record<string, any> | null;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -551,7 +580,64 @@ export default function OnlineShopifySyncPage() {
                 : 'NOT resolved — presses will publish nothing'
             }
           />
+          {/* THE FOURTH DOOR (2026-09-07): where the website's quantity lives.
+              Unresolved => every stock write refuses with a code; never guessed. */}
+          <GateChip
+            label="Online stock location"
+            on={!!mode?.online_location_id}
+            detail={
+              mode?.online_location_id
+                ? `location ${mode.online_location_source ?? 'resolved'}`
+                : mode?.online_location_code
+                  ? mode.online_location_code
+                  : 'NOT resolved — stock will not be written'
+            }
+          />
         </div>
+        {mode?.is_live && !mode?.online_location_id && (
+          <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {mode?.online_location_error ||
+                'No Shopify location fulfils online orders, so quantities cannot be written. Enable one in Shopify admin (Settings > Locations) or pin SHOPIFY_ONLINE_LOCATION_ID.'}
+            </span>
+          </p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={pushStock}
+            disabled={pushingStock || loading || !canGoLive}
+            className={
+              'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium border disabled:opacity-60 ' +
+              (isLive
+                ? 'bg-green-600 text-white border-green-600 hover:bg-green-700'
+                : 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800')
+            }
+            title={
+              isLive
+                ? 'Write the pooled quantity of every changed listing (LIVE)'
+                : 'Preview the stock pass (SIMULATED — no Shopify call)'
+            }
+          >
+            {pushingStock ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Package className="w-3.5 h-3.5" />}
+            {isLive ? 'Push stock' : 'Dry-run stock'}
+          </button>
+          <span className="text-[11px] text-gray-500">
+            Pooled on-hand of every physical shop, per SKU, written to Shopify for listings whose
+            number changed since the last send. A product push and the all-pending press run this too.
+          </span>
+        </div>
+        {stockResult && (
+          <p className={'mt-2 text-[11px] ' + (stockResult.ok ? 'text-gray-600' : 'text-amber-800')}>
+            Last stock pass ({stockResult.mode}): {stockPayload?.changed ?? 0} of {stockPayload?.candidates ?? 0}{' '}
+            listings changed
+            {stockResult.mode === 'LIVE'
+              ? `, ${stockPayload?.synced ?? 0} written, ${stockPayload?.failed ?? 0} failed`
+              : ' (dry-run, nothing sent)'}
+            {stockResult.error ? ` — ${stockResult.error}` : ''}
+          </p>
+        )}
         {mode?.is_live && !mode?.online_store_publication_id && (
           <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
