@@ -511,7 +511,7 @@ async def shopify_set_inventory_available(
             kind="push",
             error="shop_url or access_token not configured",
         )
-    written = await set_inventory_quantities(db, loc_gid, {inv_gid: qty})
+    written = await set_inventory_quantities(db, [(inv_gid, loc_gid, qty)])
     if written.get("errors"):
         return SyncResult(
             ok=False,

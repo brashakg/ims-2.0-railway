@@ -55,13 +55,12 @@ catalog_variants.shopify_inventory_item_id per variant row, plus
 ecom.shopify_inventory_item_id for a product with NO catalog_variants rows
 (its single "Default Title" variant IS the product). Those are exactly the two
 fields the stock write-back resolver reads
-(online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
-online_sync_health._inventory_item_id_for_sku): without them a product IMS
-creates on Shopify can never have its listed quantity synced down after an
-in-store sale -- unguardable against oversell. shopify_location_id is NOT
-captured here: the create/update response carries no location (this push never
-sets stock), and the resolver sources the location from
-SHOPIFY_ONLINE_LOCATION_ID / the integrations config.
+(online_catalog.inventory_items_for_skus, online_sync_health.
+_inventory_item_id_for_sku): without them a product IMS creates on Shopify can
+never have its listed quantity synced down after an in-store sale --
+unguardable against oversell. No location is captured here: the location is
+per SHOP (stores.shopify_location_id, owner ruling 2026-09-06), never per
+variant.
 
 Optional env flags (all default OFF -- nothing changes unless the owner sets them):
   SHOPIFY_PUSH_PRICE_ON_UPDATE=1  also seed price/sku + capture variant gids on
@@ -168,6 +167,7 @@ from .transport import (  # noqa: F401
     _post_once,
     _graphql,
     _user_errors,
+    _user_error_codes,
     PUBLISH_SCOPE_MISSING,
     _PUBLISH_SCOPE_MISSING_MSG,
     _is_access_denied,
@@ -190,28 +190,28 @@ from .queries import (  # noqa: F401
     _PUBLICATIONS_QUERY,
     _ONLINE_STORE_PUBLICATION_NAME,
     _publication_id_cache,
-    _LOCATIONS_QUERY,
     _LOCATIONS_LIST_QUERY,
     _VARIANTS_INVENTORY_UPDATE,
     _INVENTORY_SET_QUANTITIES,
     _INVENTORY_SET_MAX,
-    _online_location_cache,
+    _INVENTORY_ACTIVATE,
 )
 from .inventory import (  # noqa: F401
-    ONLINE_LOCATION_UNRESOLVED,
-    ONLINE_LOCATION_AMBIGUOUS,
     STOCK_ONHAND_UNKNOWN,
     STOCK_TARGET_MISSING,
-    stored_online_location_id,
-    pick_online_location,
-    resolve_online_location_id,
+    STORE_UNMAPPED,
+    STOCK_ACTIVATION_FAILED,
+    ITEM_NOT_STOCKED_AT_LOCATION,
     list_locations,
     inventory_policy_for,
     product_skus,
     product_variant_gids,
     stock_changed,
+    mapped_slice,
+    unmapped_holders,
     plan_product_stock,
     set_inventory_quantities,
+    push_skus_stock,
     sync_product_stock,
     sync_stock_levels,
 )
@@ -358,3 +358,14 @@ class _ShopifyPushNamespace(types.ModuleType):
 
 
 sys.modules[__name__].__class__ = _ShopifyPushNamespace
+
+# Per-store locations (owner ruling 2026-09-06): the single-location env pin
+# is read by NOTHING any more (tests/test_no_single_online_location.py). If an
+# operator still sets it, say so once at import instead of letting it look
+# like a knob.
+if (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip():
+    logger.warning(
+        "[SHOPIFY_PUSH] SHOPIFY_ONLINE_LOCATION_ID is set but IGNORED since "
+        "per-store locations: each shop's Shopify location lives on its store "
+        "record (Organization page). Unset the variable."
+    )

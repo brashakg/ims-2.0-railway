@@ -31,7 +31,6 @@ Design rules (unchanged from the old bridge contract):
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -415,66 +414,6 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
             inv = normalize_sku((doc.get("ecom") or {}).get("shopify_inventory_item_id"))
             if inv:
                 out[key] = inv
-    return out
-
-
-def _online_location_id(db) -> str:
-    """The Shopify location gid stock write-backs target: the
-    SHOPIFY_ONLINE_LOCATION_ID env wins (authoritative single online location),
-    else the integrations.shopify config's online_location_id. Fail-soft ''."""
-    env_val = (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip()
-    if env_val:
-        return env_val
-    try:
-        # The ONE stored reader (shopify_push.inventory): the registry row a
-        # previous `locations` lookup persisted. Nothing else ever set the old
-        # integrations.shopify online_location_id field (the writer was dead).
-        from .shopify_push.inventory import stored_online_location_id
-
-        return normalize_sku(stored_online_location_id(db)[0])
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def online_variant_targets_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Return {requested_key: {inventory_item_id, location_id}} for identifiers
-    that map to an online variant carrying a Shopify InventoryItem gid -- the
-    targets the POS-sale -> Shopify stock write-back pushes to.
-
-    Source is IMS Mongo (catalog_variants.shopify_inventory_item_id, with the
-    catalog_products ecom fallback). The location gid resolves, in priority
-    order: SHOPIFY_ONLINE_LOCATION_ID env -> the variant's own
-    shopify_location_id -> integrations.shopify online_location_id. A key with
-    no usable location is skipped (the caller treats a missing target as "not
-    online" -- but see online_stock_writeback's guard-gap alert, which now
-    makes that loud for genuinely-online SKUs). Empty dict on any failure."""
-    keys = _clean_keys(skus)
-    if not keys or db is None:
-        return {}
-    env_location = (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip()
-    fallback_location = "" if env_location else _online_location_id(db)
-
-    out: Dict[str, Dict[str, Any]] = {}
-    variants = _variants_by_key(db, keys)
-    for key, var in variants.items():
-        inv = normalize_sku(var.get("shopify_inventory_item_id"))
-        if not inv:
-            continue
-        loc = env_location or normalize_sku(var.get("shopify_location_id")) or fallback_location
-        if not loc:
-            continue
-        out[key] = {"inventory_item_id": inv, "location_id": loc}
-
-    remaining = [k for k in keys if k not in out]
-    if remaining:
-        loc = env_location or fallback_location
-        if loc:
-            for key, doc in _products_by_key(db, remaining).items():
-                inv = normalize_sku(
-                    (doc.get("ecom") or {}).get("shopify_inventory_item_id")
-                )
-                if inv:
-                    out[key] = {"inventory_item_id": inv, "location_id": loc}
     return out
 
 

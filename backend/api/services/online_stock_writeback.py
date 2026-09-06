@@ -1,46 +1,48 @@
 """
 IMS 2.0 - IMS -> Shopify stock write-back (oversell guard)   [Council B11]
 ==========================================================================
-IMS is the inventory MASTER. When a unit is sold in-store (POS) the website
-must not be able to sell the same unit. This module pushes the REDUCED
-available quantity for the affected SKUs up to Shopify so the online listing
-can never oversell.
+IMS is the inventory MASTER. When a unit leaves a shop's shelf (POS sale,
+online-order claim, transfer ship, quarantine, stock-count write-off, any
+ledger transition off on-hand) the website must not be able to sell it. This
+module recomputes THE ONE RULE for the affected SKUs and hands the rows to THE
+ONE WRITER (shopify_push.inventory.push_skus_stock).
+
+THE ONE RULE (owner ruling 2026-09-06, per-store Shopify locations):
+
+    quantity Shopify shows for SKU s at location L
+      = recommend_allocation( on_hand(s, store(L)), safety_buffer )
+
+``online_quantities_for_skus`` -> ``{sku: {store_id: qty}}`` over every
+ACTIVE PHYSICAL shop (stores_util.physical_stores; ONLINE stores are never in
+the loop, so a phantom unit on BV-ONLINE-01 counts nowhere), each shop read
+through the STRICT ``_on_hand_for_skus(db, skus, store_id)``: a shop whose
+read failed is ABSENT from every SKU's inner dict (unknown is never written
+as 0; every other shop's true numbers still go out).
 
 Flow on a sale:
   1. The POS create-order path flips serialized stock_units to SOLD, then calls
-     writeback_after_sale(db, items_data, store_id).
-  2. For each sold SKU we recompute the POOLED IMS on-hand: AVAILABLE
-     stock_units across ALL stores, MINUS a safety buffer, via the canonical
-     stock_allocation.recommend_allocation. The online store owns no stock and
-     sells from every shop combined (owner decision 2026-07-20), so the
-     caller's store_id is CONTEXT ONLY (logging/summary) and never scopes the
-     quantity -- selling one store's last unit must not zero a listing that
-     still has stock elsewhere. This is the same pooled math the nightly
-     shopify_stock_parity check compares against.
-  3. We look up the SKU's Shopify InventoryItem GID + location GID in IMS Mongo
-     (online_catalog.online_variant_targets_for_skus over
-     catalog_variants.shopify_inventory_item_id -- BVI + its Postgres were
-     deleted 2026-07-20; IMS is the sole Shopify writer). No mapping -> NO-OP
-     for a product that simply isn't online, but a SKU that IS listed online
-     and cannot be targeted is a GUARD GAP: it is logged loudly and files a
-     deduped SYSTEM task (never a silent fake success).
-  4. We call the Shopify GraphQL inventorySetQuantities setter with the ABSOLUTE
-     quantity (idempotent on retry).
+     writeback_after_sale(db, items_data, store_id). Every other door that
+     removes availability calls writeback_after_restock /
+     writeback_after_units_left the same way (fire-and-forget, fail-soft).
+  2. writeback_skus resolves the SKUs' Shopify InventoryItem gids
+     (online_catalog.inventory_items_for_skus). No mapping -> NO-OP for a
+     product that simply isn't online, but a SKU that IS listed online and
+     cannot be targeted is a GUARD GAP: logged loudly + a deduped SYSTEM task.
+  3. push_skus_stock writes one ABSOLUTE row per (mapped shop, SKU) -- an
+     explicit 0 included -- and updates the SAME ecom.online_stock baseline the
+     scheduled pass diffs against, so the next 01:00 / 09:00 pass is a noop.
 
-Contract (mirrors the rest of the consolidation bridge + the NEXUS providers):
+Contract (mirrors the rest of the consolidation bridge):
 - 100% FAIL-SOFT. A Shopify/Mongo failure is caught + logged and NEVER
-  propagates into (or slows/blocks) the sale. The sale already happened; the
-  write-back is best-effort.
-- GATED. shopify_set_inventory_available enforces IMS_SHOPIFY_WRITES +
-  DISPATCH_MODE. With DISPATCH_MODE unset/off the behaviour is byte-identical
-  to today: no live Shopify write (the setter returns a SIMULATED result).
+  propagates into (or slows/blocks) the sale. The write-back is best-effort.
+- GATED by the shopify_push gates (IMS_SHOPIFY_WRITES + DISPATCH_MODE +
+  creds). DARK -> a SIMULATED plan, zero network.
 - The async push is fire-and-forget (scheduled on the running loop) so the HTTP
   round-trip is fully off the request path. If no loop is running (sync /
   test context) it runs inline and still never raises.
 
-Returns / restock: when stock goes back UP (a GOOD-condition return is
-re-shelved) the same writeback_skus path re-pushes the higher available count,
-so the online listing recovers too.
+Returns / restock: when stock goes back UP the same path re-pushes the higher
+count, so the online listing recovers too.
 """
 
 from __future__ import annotations
@@ -166,11 +168,11 @@ def _online_store_ids(db) -> List[str]:
 
 
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
-    """Map each SKU -> IMS on-hand (AVAILABLE stock_units). store_id=None (the
-    ONLY value the write-back uses) means POOLED across all PHYSICAL stores --
-    the quantity the online listing must reflect. Units sitting on an ONLINE
-    store are excluded (see _online_store_ids): that store has no shelf and no
-    POS, so counting them would publish stock nobody can pick.
+    """Map each SKU -> IMS on-hand (AVAILABLE stock_units) at ONE store -- the
+    per-shop half of THE ONE RULE (online_quantities_for_skus calls this once
+    per physical shop). store_id=None is the POOLED count across all PHYSICAL
+    stores and is kept ONLY for shopify_stock_parity._pooled_availability
+    until PR 4 rewrites parity per location; no writer reads it.
 
     STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
     WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
@@ -226,10 +228,10 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
         if store_id:
             match["store_id"] = store_id
         else:
-            # POOLED count: every PHYSICAL shop's on-hand, but never a unit
-            # stranded on a stockless ONLINE store. Belt-and-braces for the
-            # returns/restock mint door (F9) and a self-heal for any phantom
-            # unit an earlier build already minted there.
+            # POOLED count -- PARITY ONLY (shopify_stock_parity._pooled_
+            # availability) until PR 4 compares per location; deleted with it.
+            # Every PHYSICAL shop's on-hand, never a unit stranded on a
+            # stockless ONLINE store.
             online_ids = _online_store_ids(db)
             if online_ids:
                 match["store_id"] = {"$nin": online_ids}
@@ -263,22 +265,60 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
 
 def online_quantities_for_skus(
     db, skus: List[str], *, safety_buffer: Optional[int] = None
-) -> Dict[str, int]:
-    """THE online quantity rule -- the ONE number the website lists for a SKU:
-    pooled on-hand across every PHYSICAL store (never the stockless online
-    store's own rows) minus the oversell safety buffer, floored at 0. Used by
-    the POS-sale write-back, the product push's stock step and the whole-
-    catalogue stock sync; the nightly parity check compares against the same
-    pooled on-hand. STRICT: a SKU absent from the result has UNKNOWN on-hand
-    (spine/stock read failed) and must never be written as 0; an empty dict
-    for a non-empty request means the whole read failed."""
-    on_hand = _on_hand_for_skus(db, [s for s in dict.fromkeys(skus or []) if s], None)
-    if not on_hand:
+) -> Dict[str, Dict[str, int]]:
+    """THE online quantity rule -- what the website lists for a SKU at EACH
+    shop's Shopify location: ``{sku: {store_id: recommend_allocation(on_hand
+    at that shop, safety_buffer)}}`` for every ACTIVE PHYSICAL shop
+    (stores_util.physical_stores -- mapped or not; the writer decides what to
+    do with an unmapped holder). ONLINE stores are excluded structurally: they
+    are never in the loop. The buffer applies PER SHOP (Shopify routes per
+    shelf).
+
+    STRICT, per shop: a shop whose ``_on_hand_for_skus`` call returned ``{}``
+    for a non-empty request is ABSENT from every SKU's inner dict (unknown ->
+    never written as 0; the other shops still go out). A SKU absent from the
+    result has no spine row (unknown). ``{}`` for a non-empty request means
+    the shop list could not be read or EVERY shop failed -- the whole-batch
+    abort. Zero physical shops -> ``{sku: {}}`` (known, nothing to list).
+
+    ponytail: one aggregate per shop (six small indexed reads twice a day
+    plus one per sale) -- the strict fake refuses a composite $group and the
+    per-shop STRICT contract comes free; one composite aggregate + a
+    strict_fakes extension if a pass ever measures slow."""
+    clean = [s for s in dict.fromkeys(skus or []) if s]
+    if db is None or not clean:
+        return {}
+    try:
+        from .stores_util import physical_stores
+
+        stores = physical_stores(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_WRITEBACK] shop list unknown (STRICT -> batch abort): %s", exc)
         return {}
     from . import stock_allocation
 
     buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
-    return {sku: stock_allocation.recommend_allocation(q, buf) for sku, q in on_hand.items()}
+    out: Dict[str, Dict[str, int]] = {}
+    known_store = False
+    for store in stores:
+        sid = str(store.get("store_id") or "").strip()
+        if not sid:
+            continue
+        on_hand = _on_hand_for_skus(db, clean, sid)
+        if not on_hand:
+            logger.warning(
+                "[STOCK_WRITEBACK] on-hand UNKNOWN at %s -- that shop is written "
+                "nowhere this pass", sid,
+            )
+            continue
+        known_store = True
+        for sku, q in on_hand.items():
+            out.setdefault(sku, {})[sid] = stock_allocation.recommend_allocation(q, buf)
+    if stores and not known_store:
+        return {}
+    if not stores:
+        return {sku: {} for sku in clean}
+    return out
 
 
 async def writeback_skus(
@@ -289,28 +329,32 @@ async def writeback_skus(
     source: str = "sale",
     safety_buffer: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Core: push the POOLED (on_hand - buffer) available quantity to Shopify
-    for each SKU that maps to an online variant. Gated + fail-soft. Returns a
-    summary dict (pushed / skipped / failed / simulated). NEVER raises.
+    """Core: recompute THE ONE RULE for each SKU that maps to an online
+    inventory item and hand the per-shop rows to THE ONE WRITER
+    (shopify_push.inventory.push_skus_stock). Gated + fail-soft. Returns a
+    summary dict (pushed / skipped / failed / simulated / unmapped_stores).
+    NEVER raises.
 
-    ``store_id`` is CONTEXT ONLY (recorded on the summary for logging); the
-    pushed quantity is always the ALL-store pooled on-hand -- the online store
-    sells from every shop combined, so scoping to the selling store would zero
-    a listing that still has stock elsewhere (audit fix-round P0).
+    ``store_id`` is CONTEXT ONLY (recorded on the summary for logging);
+    quantities are per shop by construction, so the shop that lost the unit
+    is the one whose location goes down and every other shop's row is re-sent
+    unchanged.
 
     Safety rules for the absolute write:
     - A SKU with no Shopify InventoryItem mapping is skipped -- and when it IS
       sellable online (PUBLISHED / live variant) that is a GUARD GAP alerted
       LOUDLY (_alert_unmapped_online), never a silent fake success.
-    - UNKNOWN on-hand is NEVER written as 0: a SKU absent from the on-hand map
-      is skipped (skipped_no_onhand), and an entirely-empty on-hand result for
-      a non-empty target set aborts the batch with a WARNING + not-ok
-      sync_runs row (audit fix-round P1). A SKU PRESENT with on-hand 0 still
-      pushes 0 -- that IS the oversell guard.
+    - UNKNOWN on-hand is NEVER written as 0: a shop whose read failed is
+      written nowhere (unknown_stores), an entirely-unknown batch aborts with
+      a WARNING + not-ok sync_runs row. A shop PRESENT with on-hand 0 still
+      gets 0 -- that IS the oversell guard.
+    - A shop that HOLDS a listed unit but has no Shopify location is reported
+      (STORE_UNMAPPED, not-ok run, deduped task); the mapped shops are still
+      written.
     """
     summary: Dict[str, Any] = {
         "source": source,
-        "store_id": store_id,  # context only -- quantities are pooled
+        "store_id": store_id,  # context only -- quantities are per shop
         "candidates": 0,
         "pushed": 0,
         "simulated": 0,
@@ -318,6 +362,8 @@ async def writeback_skus(
         "skipped_no_onhand": 0,
         "failed": 0,
         "unmapped_online": 0,
+        "unmapped_stores": [],
+        "unknown_stores": [],
         "online_configured": False,
     }
     db = _resolve_db(db)
@@ -330,42 +376,39 @@ async def writeback_skus(
     # sibling service is broken.
     try:
         from . import online_catalog
-        from agents.nexus_providers import shopify_set_inventory_available
+        from .shopify_push.inventory import push_skus_stock
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] deps unavailable: %s", exc)
         return summary
 
     summary["online_configured"] = online_catalog.online_mapping_available(db)
 
-    # 1. Resolve Shopify targets (inventory-item + location GIDs) from the IMS
-    #    Mongo mapping. A SKU with no target is skipped -- and checked below for
-    #    the online-but-unmapped guard gap.
-    targets = online_catalog.online_variant_targets_for_skus(db, distinct)
+    # 1. Resolve the Shopify inventory-item targets from the IMS Mongo mapping
+    #    (the ONE target reader). A SKU with no target is skipped -- and
+    #    checked below for the online-but-unmapped guard gap.
+    targets = online_catalog.inventory_items_for_skus(db, distinct)
     if not targets:
         summary["skipped_no_mapping"] = len(distinct)
         _alert_unmapped_online(db, distinct, summary)
         _record_run(db, summary)
         return summary
 
-    # 2. Compute the listed quantity once for the targeted SKUs -- THE ONE
-    #    rule (pooled across ALL physical stores minus the buffer; store_id
-    #    deliberately NOT passed: the online listing reflects the whole
-    #    chain's availability, never one shop's).
-    on_hand = online_quantities_for_skus(
+    # 2. THE ONE rule, per shop, for the targeted SKUs.
+    quantities = online_quantities_for_skus(
         db, list(targets.keys()), safety_buffer=safety_buffer
     )
-    if not on_hand:
-        # UNKNOWN on-hand for the whole batch (lookup/aggregate failed or no
-        # spine rows). An absolute stock WRITER must never fail soft to 0 --
-        # writing 0 would delist every sold SKU that is physically in stock.
-        # Abort loudly.
+    unmapped = [s for s in distinct if s not in targets]
+    summary["skipped_no_mapping"] = len(unmapped)
+    if not quantities:
+        # UNKNOWN on-hand for the whole batch (shop list / lookup / aggregate
+        # failed or no spine rows). An absolute stock WRITER must never fail
+        # soft to 0 -- writing 0 would delist every sold SKU that is
+        # physically in stock. Abort loudly.
         summary["skipped_no_onhand"] = len(targets)
-        unmapped = [s for s in distinct if s not in targets]
-        summary["skipped_no_mapping"] = len(unmapped)
         logger.warning(
-            "[STOCK_WRITEBACK] on-hand UNKNOWN for all %d targeted SKU(s) "
-            "(lookup failed or products spine has no rows) -- aborting the "
-            "push batch; NOT writing 0 to the live listing. SKUs: %s",
+            "[STOCK_WRITEBACK] on-hand UNKNOWN for all %d targeted SKU(s) at "
+            "every shop -- aborting the push batch; NOT writing 0 to the live "
+            "listing. SKUs: %s",
             len(targets),
             ", ".join(sorted(targets.keys())[:20]),
         )
@@ -379,8 +422,9 @@ async def writeback_skus(
 
     # SUPERADMIN "block a collection from online sale": a product that belongs to
     # an online_sync_blocked collection must NEVER be sellable online even if it
-    # is physically in stock, so we push available=0 for it (a delist-by-
-    # availability). Fail-soft -> no SKUs treated as blocked on any error.
+    # is physically in stock, so we push available=0 for it at every shop (a
+    # delist-by-availability). Fail-soft -> no SKUs treated as blocked on any
+    # error.
     try:
         from . import online_block
 
@@ -389,40 +433,33 @@ async def writeback_skus(
         logger.debug("[STOCK_WRITEBACK] block lookup skipped: %s", exc)
         blocked = set()
     summary["blocked_online"] = 0
-
-    for sku, tgt in targets.items():
+    if blocked:
         try:
-            if sku in blocked:
-                # Deliberate delist: 0 regardless of on-hand.
-                qty = 0
+            from .stores_util import physical_stores
+
+            every_shop = [str(s.get("store_id") or "") for s in physical_stores(db)]
+        except Exception:  # noqa: BLE001
+            every_shop = []
+        for sku in blocked:
+            if sku in targets:
                 summary["blocked_online"] += 1
-            elif sku not in on_hand:
-                # UNKNOWN on-hand for this SKU: skip, never write 0. (A SKU
-                # present with value 0 falls through and pushes 0 -- correct.)
-                summary["skipped_no_onhand"] += 1
-                continue
-            else:
-                qty = on_hand[sku]
-            res = await shopify_set_inventory_available(
-                db, tgt.get("inventory_item_id"), tgt.get("location_id"), qty
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Defensive: the setter is already fail-soft, but a SKU's failure
-            # must never abort the remaining pushes.
-            logger.warning("[STOCK_WRITEBACK] push raised for %s: %s", sku, exc)
-            summary["failed"] += 1
-            continue
-        if not res.ok:
-            summary["failed"] += 1
-        elif res.items_synced and res.items_synced > 0:
-            summary["pushed"] += 1
-        else:
-            # ok but no live write -> SIMULATED (off/test) or RETIRED skip.
-            summary["simulated"] += 1
+                quantities[sku] = {sid: 0 for sid in every_shop if sid}
+
+    # 3. THE ONE writer: one row per (mapped shop, SKU), explicit 0 included.
+    res = await push_skus_stock(db, list(targets.keys()), quantities=quantities, source=source)
+    summary["unmapped_stores"] = list(res.get("unmapped_stores") or [])
+    summary["unknown_stores"] = list(res.get("unknown_stores") or [])
+    summary["skipped_no_onhand"] = sum(1 for s in targets if s not in quantities)
+    written_skus = [s for s, rows in (res.get("quantities") or {}).items() if rows]
+    if res.get("mode") == "LIVE":
+        summary["pushed"] = len(written_skus) if res.get("set") else 0
+        summary["failed"] = len(res.get("errors") or [])
+    else:
+        summary["simulated"] = len(written_skus)
+    if res.get("code"):
+        summary["code"] = res["code"]
 
     # SKUs with no online mapping (present in distinct but not targets).
-    unmapped = [s for s in distinct if s not in targets]
-    summary["skipped_no_mapping"] = len(unmapped)
     if unmapped:
         _alert_unmapped_online(db, unmapped, summary)
 
@@ -543,13 +580,31 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
         or summary.get("failed")
         or summary.get("unmapped_online")
         or summary.get("skipped_no_onhand")
+        or summary.get("unmapped_stores")
+        or summary.get("unknown_stores")
     ):
         return
     unmapped_online = int(summary.get("unmapped_online", 0) or 0)
     skipped_no_onhand = int(summary.get("skipped_no_onhand", 0) or 0)
+    unmapped_stores = list(summary.get("unmapped_stores") or [])
+    unknown_stores = list(summary.get("unknown_stores") or [])
     errors = []
     if summary.get("failed"):
         errors.append(f"{summary.get('failed')} push(es) failed")
+    if unmapped_stores:
+        names = ", ".join(
+            str(s.get("store_code") or s.get("store_name") or s.get("store_id"))
+            for s in unmapped_stores
+        )
+        errors.append(
+            f"STORE_UNMAPPED: {names} hold listed stock with no Shopify location "
+            f"(invisible online until mapped)"
+        )
+    if unknown_stores:
+        errors.append(
+            f"on-hand UNKNOWN at {', '.join(unknown_stores)} (written nowhere, "
+            f"never as 0)"
+        )
     if unmapped_online:
         errors.append(
             f"{unmapped_online} online SKU(s) had no Shopify inventory mapping "
@@ -572,6 +627,8 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
                     summary.get("failed", 0) == 0
                     and unmapped_online == 0
                     and skipped_no_onhand == 0
+                    and not unmapped_stores
+                    and not unknown_stores
                 ),
                 "items_synced": int(summary.get("pushed", 0)),
                 "error": ("; ".join(errors) if errors else None),
@@ -614,8 +671,8 @@ def _swallow_task_result(task: "asyncio.Task") -> None:
 def writeback_after_sale(db, items_data: List[dict], store_id: Optional[str]) -> None:
     """Fail-soft entrypoint for the POS create-order path. Schedules a Shopify
     stock push for the sold SKUs and returns IMMEDIATELY -- the sale is never
-    blocked or slowed. store_id is context only; the pushed quantity is always
-    the ALL-store pooled on-hand. NEVER raises."""
+    blocked or slowed. store_id is context only; quantities are per shop by
+    construction (the selling shop's own location goes down). NEVER raises."""
     try:
         skus = skus_from_items(items_data)
         if not skus:
@@ -637,3 +694,26 @@ def writeback_after_restock(
         _dispatch(writeback_skus(db, clean, store_id, source=source))
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] after-restock skipped: %s", exc)
+
+
+def writeback_after_units_left(
+    db, product_ids: List[str], store_id: Optional[str], *, source: str
+) -> None:
+    """Fail-soft entrypoint for the doors that know the PRODUCT, not the SKU
+    (transfer ship, quarantine-in, stock-count write-off, the item_events
+    ledger's on-hand -> not-on-hand hook): resolve the spine SKUs and dispatch
+    the same write-back. NEVER raises."""
+    try:
+        pids = [str(p) for p in dict.fromkeys(product_ids or []) if p]
+        handle = _resolve_db(db)
+        if not pids or handle is None:
+            return
+        skus = [
+            str(p.get("sku") or "").strip()
+            for p in handle.get_collection("products").find(
+                {"product_id": {"$in": pids}}, {"_id": 0, "sku": 1}
+            )
+        ]
+        writeback_after_restock(handle, [s for s in skus if s], store_id, source=source)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] after-units-left skipped: %s", exc)
