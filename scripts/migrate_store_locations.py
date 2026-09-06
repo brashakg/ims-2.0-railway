@@ -40,6 +40,10 @@ push writes IMS's Pune count over Shopify's 49 -- no button involved;
 "Preview first" gates only the button. Pune is mapped ONLY AFTER the 49
 opening-stock units are committed at Pune (owner ruling 2026-09-06 evening,
 memory work_queue_2026_09_07.md) and the dry-run plan shows Pune ~49.
+ENFORCED, not just documented: a --set naming BV-PUN-01 or location
+76684427513 (on any code) is REFUSED at plan time -- dry-run and --apply
+alike, nothing written -- unless --i-know-pune is passed. Pass it only once
+the ledger shows the 49 at Pune.
 
 USAGE
 -----
@@ -77,6 +81,24 @@ _REGISTRY_KEYS = (
     "online_location_name",
     "online_location_resolved_at",
 )
+
+# Gangadham Pune: the store code AND the Shopify location number (either one
+# in a --set trips the guard, so a typo'd code cannot smuggle the gid in).
+PUNE_STORE_CODE = "BV-PUN-01"
+PUNE_LOCATION_NUMBER = "76684427513"
+PUNE_REFUSAL = (
+    "Gangadham Pune (BV-PUN-01 / location 76684427513) must NOT be "
+    "mapped before the 49 opening-stock units are committed at Pune -- a "
+    "mapped Pune plus PR 2 writes IMS's Pune count over Shopify's 49 at the "
+    "next schedule tick, sweep or product push. Re-run with --i-know-pune "
+    "once the ledger shows them."
+)
+
+
+def pune_guarded(code: str, raw: str) -> bool:
+    """Pure: True when a --set names Pune's store code or Pune's location
+    number (bare or as a gid)."""
+    return code == PUNE_STORE_CODE or raw.rstrip("/").rsplit("/", 1)[-1] == PUNE_LOCATION_NUMBER
 
 
 def resolve_mongo_uri(explicit: Optional[str]) -> Optional[str]:
@@ -118,13 +140,18 @@ def print_table(db) -> List[Dict[str, Any]]:
     return rows
 
 
-def plan_sets(db, sets: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> List[Dict[str, Any]]:
     """One row per --set: ``{code, store_id, gid, name, error}``. The gid is
     normalised and refused by the router's own validator (ONE rule); ``error``
-    carries the refusal text. Nothing is written here."""
+    carries the refusal text. Pune is refused here (PUNE_REFUSAL) unless
+    ``allow_pune`` -- the --i-know-pune flag. Nothing is written here."""
     coll = db.get_collection("stores")
     out: List[Dict[str, Any]] = []
     for code, raw in sets:
+        if pune_guarded(code, raw) and not allow_pune:
+            out.append({"code": code, "store_id": None, "gid": raw, "name": None,
+                        "error": PUNE_REFUSAL})
+            continue
         doc = coll.find_one({"store_code": code})
         if doc is None:
             out.append({"code": code, "store_id": None, "gid": raw, "name": None,
@@ -167,7 +194,8 @@ def unset_registry(db) -> int:
     return int(getattr(res, "modified_count", 0) or 0)
 
 
-def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple[str, str]]) -> Dict[str, Any]:
+def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple[str, str]],
+        allow_pune: bool = False) -> Dict[str, Any]:
     if not mongo_uri:
         raise SystemExit(
             "No Mongo connection. Set MONGO_PUBLIC_URL / MONGODB_URI, pass "
@@ -179,7 +207,10 @@ def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple
     db = client[db_name]
     print_table(db)
 
-    plan = plan_sets(db, sets)
+    if allow_pune:
+        print("\n*** --i-know-pune: the Gangadham Pune guard is OFF for this run. "
+              "Only correct once the 49 opening-stock units are committed at Pune. ***")
+    plan = plan_sets(db, sets, allow_pune=allow_pune)
     for row in plan:
         verdict = f"REFUSED {row['error']}" if row["error"] else f"-> {row['gid']} ({row['name'] or 'name unknown: gates dark'})"
         print(f"  --set {row['code']:12} {verdict}")
@@ -213,12 +244,18 @@ def main():
         metavar="STORE_CODE=LOCATION_ID",
         help="Map a store to a Shopify location gid or bare id (repeatable). See the Pune warning at the top of this file.",
     )
+    parser.add_argument(
+        "--i-know-pune",
+        action="store_true",
+        help="Lift the Gangadham Pune refusal. ONLY after the 49 opening-stock units are committed at Pune.",
+    )
     args = parser.parse_args()
     run(
         mongo_uri=resolve_mongo_uri(args.mongo_uri),
         db_name=args.db,
         apply=args.apply,
         sets=parse_sets(args.set),
+        allow_pune=args.i_know_pune,
     )
 
 
