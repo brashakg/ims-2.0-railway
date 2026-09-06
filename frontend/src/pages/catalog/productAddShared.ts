@@ -783,6 +783,16 @@ const str = (v: unknown): string => {
   return s === 'NaN' ? '' : s;
 };
 
+/** The catalog twin's tag list -- ecom.seo.tags, the ONE spelling every door
+ *  writes and the Shopify push reads (sync audit gap #4); the BVI import's
+ *  top-level `tags` only when that is absent. Mirrors product_master.twin_tags. */
+export function docTags(doc: Record<string, unknown>): string[] {
+  const ecom = doc.ecom as Record<string, unknown> | null | undefined;
+  const seo = ecom?.seo as Record<string, unknown> | null | undefined;
+  const raw = Array.isArray(seo?.tags) ? seo.tags : doc.tags;
+  return Array.isArray(raw) ? (raw as unknown[]).map((t) => str(t)).filter(Boolean) : [];
+}
+
 // A product doc as returned by GET /products/{id} (only the fields we read).
 export interface ProductDoc {
   category?: string;
@@ -940,9 +950,7 @@ export function catalogDocToFormValues(doc: CatalogProductDoc): ProductFormValue
     images: images.length > 0 ? images : imageUrl ? [imageUrl] : [],
     // Review extras: display name (name wins, title fallback) + tags.
     name: str(doc.name) || str(doc.title),
-    tags: Array.isArray(doc.tags)
-      ? (doc.tags as unknown[]).map((t) => str(t)).filter(Boolean)
-      : [],
+    tags: docTags(doc),
     // Online flags are meaningless on an imported doc (BVI owns Shopify).
     syncToShopify: false,
     shopifyTags: [],

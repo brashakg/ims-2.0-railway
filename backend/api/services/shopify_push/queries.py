@@ -38,6 +38,7 @@ mutation imsProductCreate($input: ProductInput!) {
     product {
       id
       handle
+      tags
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
@@ -58,11 +59,36 @@ mutation imsProductUpdate($input: ProductInput!) {
     product {
       id
       handle
+      tags
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
       media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
+    userErrors { field message }
+  }
+}
+"""
+
+# TAG OWNERSHIP (sync audit gap #4, owner 2026-09-06): an existing product's
+# tags are never sent through productUpdate (which REPLACES the whole list and
+# wiped hand-added admin tags). The diff of what IMS wants against what IMS
+# last sent goes through these two -- both idempotent, both `userErrors`.
+# `tags` rides the create/update response selection above (read-only) so the
+# pass can see what is on Shopify with no extra query.
+_TAGS_ADD = """
+mutation imsTagsAdd($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node { id }
+    userErrors { field message }
+  }
+}
+"""
+
+_TAGS_REMOVE = """
+mutation imsTagsRemove($id: ID!, $tags: [String!]!) {
+  tagsRemove(id: $id, tags: $tags) {
+    node { id }
     userErrors { field message }
   }
 }
