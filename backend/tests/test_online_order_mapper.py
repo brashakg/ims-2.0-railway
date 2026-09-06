@@ -76,6 +76,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$lte":
                     if actual is None or actual > op_val:
                         return False
+                elif op == "$in":
+                    if actual not in (op_val or []):
+                        return False
                 else:
                     return False
         else:

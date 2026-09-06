@@ -16,8 +16,10 @@ Shared patterns from claude_client / providers.py:
 - Every call is async, uses httpx, and fails soft.
 - DISPATCH_MODE (reused from providers.py) gates destructive writes
   (Shopify product updates, Razorpay refunds). Read-only syncs (pull
-  orders, pull tracking) are allowed in any mode since they don't
-  affect external systems.
+  tracking) are allowed in any mode since they don't affect external
+  systems. The Shopify ORDER pull is no longer read-only: it books missed
+  orders into IMS, so it is gated on shopify_dispatch_mode()=='live' and
+  only records what it would have booked otherwise.
 - Credentials read from env / MongoDB integrations collection. If a
   credential is missing, the call returns a structured "not_configured"
   result and the caller records that in sync_runs.
@@ -26,8 +28,10 @@ Shared patterns from claude_client / providers.py:
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
+import copy
 import logging
 import os
+import re
 from xml.sax.saxutils import escape
 
 import httpx
@@ -138,8 +142,133 @@ def ims_shopify_writes_enabled() -> bool:
 # ============================================================================
 
 
-async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
-    """Pull Shopify orders created in the last N hours for fulfillment routing."""
+# --- Order pull = missed-webhook catch-up (sync audit gap #5) ---------------
+#
+# The window always reaches back at least SHOPIFY_PULL_FLOOR_HOURS, and further
+# when the last watermark-advancing run is older (the agent was down). The
+# watermark is read from NEXUS's own sync_runs ledger -- the only per-integration
+# state NEXUS keeps -- so there is no second state document and no new writer.
+SHOPIFY_PULL_FLOOR_HOURS = 48
+SHOPIFY_PULL_PAGE_LIMIT = 100
+# ponytail: 10 pages x 100 = 1,000 orders per run is the ceiling. Beyond it the
+# run reports complete=False and holds the watermark; the same first pages come
+# back next hour, so a backlog past 1,000 unseen orders would stall. Upgrade
+# path if that ever happens: GraphQL orders(sortKey: UPDATED_AT) cursor paging.
+SHOPIFY_PULL_MAX_PAGES = 10
+
+_LINK_NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+
+def _shopify_pull_watermark(db) -> Optional[datetime]:
+    """Start time of the newest shopify pull that advanced the watermark (a live
+    run that fetched its whole window). None when there has never been one."""
+    try:
+        rows = list(
+            db.get_collection("sync_runs")
+            .find({"integration": "shopify", "kind": "pull"})
+            .sort("ran_at", -1)
+            .limit(50)
+        )
+    except Exception:  # noqa: BLE001 - a missing ledger just means "use the floor"
+        return None
+    for row in rows:
+        if row.get("ok") and (row.get("payload") or {}).get("watermark_advanced"):
+            try:
+                mark = datetime.fromisoformat(str(row.get("ran_at")))
+            except ValueError:
+                return None
+            return mark if mark.tzinfo else mark.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _shopify_pull_since(db, floor_hours: int) -> datetime:
+    """Window start: the watermark, but never later than `floor_hours` ago."""
+    floor = datetime.now(timezone.utc) - timedelta(hours=floor_hours)
+    mark = _shopify_pull_watermark(db) if db is not None else None
+    return min(mark, floor) if mark else floor
+
+
+async def _shopify_fetch_orders(
+    shop_url: str, access_token: str, *, created_at_min: str
+) -> tuple:
+    """REST orders.json (status=any, created_at_min), following Link rel=next.
+    Returns (orders, complete). REST on purpose: the REST Order resource IS the
+    webhook body shape the mapper was written against, so a pulled order feeds
+    the mapper byte-for-byte like a delivered one (a GraphQL pull would need a
+    shape translator = a second implementation of the order contract)."""
+    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
+    params: Optional[Dict[str, Any]] = {
+        "status": "any",
+        "created_at_min": created_at_min,
+        "limit": SHOPIFY_PULL_PAGE_LIMIT,
+    }
+    headers = {"X-Shopify-Access-Token": access_token}
+    orders: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+        for _ in range(SHOPIFY_PULL_MAX_PAGES):
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                raise httpx.HTTPStatusError(
+                    f"status {resp.status_code}: {resp.text[:200]}",
+                    request=resp.request,
+                    response=resp,
+                )
+            orders.extend(resp.json().get("orders", []))
+            nxt = _LINK_NEXT.search(resp.headers.get("link", "") or "")
+            if not nxt:
+                return orders, True
+            url, params = nxt.group(1), None  # page_info URLs carry their own query
+    return orders, False
+
+
+def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
+    """One pulled order -> (bucket, reason). Bucket is one of already_in_ims /
+    skipped_dark / mapped / failed. Never raises."""
+    if not sid:
+        return "failed", "no_shopify_order_id"
+    try:
+        # Same key the mapper/ingest dedupe on (orders.shopify_order_id).
+        if db.get_collection("orders").find_one({"shopify_order_id": sid}, {"_id": 1}):
+            return "already_in_ims", None
+        if not live:
+            return "skipped_dark", None
+        from api.services.online_order_mapper import map_shopify_order
+
+        # webhook_id stays None on purpose: ingest's layer-2 guard registers any
+        # id on first sight and answers "replayed" forever after, so a pull-side
+        # id would turn one transient booking failure into a permanent stall.
+        # The hard layer-1 order-id guard (pre-checked above, re-checked inside)
+        # is what makes this idempotent against a later real webhook.
+        result = map_shopify_order(order, db, webhook_id=None, topic="orders/create")
+        status = result.get("status")
+        if status == "created":
+            # The orders/updated delivery that already followed on Shopify's
+            # side: lands paid / cancelled / fulfilled onto the fresh order.
+            map_shopify_order(order, db, webhook_id=None, topic="orders/updated")
+            return "mapped", None
+        if status in ("duplicate", "replayed") and result.get("order_id"):
+            return "already_in_ims", None  # booked between the pre-check and the mapper
+        detail = result.get("reason") or result.get("error") or ""
+        return "failed", f"{status}:{detail}".rstrip(":")
+    except Exception as e:  # noqa: BLE001 - one bad order never aborts the run
+        return "failed", f"{type(e).__name__}: {e}"
+
+
+async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -> SyncResult:
+    """Missed-webhook catch-up: fetch every Shopify order CREATED in the window
+    and feed each one not yet in IMS through the SAME mapper the webhook path
+    uses (api.services.online_order_mapper.map_shopify_order). Orders already
+    in IMS are counted and skipped. Gated on shopify_dispatch_mode()=='live'
+    exactly like every other unattended Shopify write in this module: when not
+    live the run records what it WOULD have mapped (skipped_dark) and maps
+    nothing. Every attempted order is also written to webhook_inbox (source=
+    shopify_pull) so the FAILED queue and the remap door work for pulled orders.
+
+    SyncResult.payload: {fetched, already_in_ims, mapped: [ids], skipped_dark:
+    [ids], failed: [ids], failed_reasons: {id: why}, since, complete,
+    watermark_advanced}. Per-order failures never abort the run (ok stays
+    True); the watermark advances only on a live run that fetched its whole
+    window, so a failed/partial/dark run is re-covered next time."""
     # Resolve creds via the shared resolver (OAuth client-credentials preferred;
     # the stored Mongo token is stale/401s). Lazy import avoids an import cycle
     # (shopify_auth imports this module for its vault fallback).
@@ -155,34 +284,69 @@ async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
             kind="pull",
             error="shop_url or access_token not configured",
         )
+    if db is None:
+        return SyncResult(ok=True, provider="shopify", kind="pull",
+                          notes="SIMULATED -- no db, nothing to catch up")
 
-    since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
-    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
-    params = {"status": "any", "updated_at_min": since, "limit": 100}
-    headers = {"X-Shopify-Access-Token": access_token}
-
+    since = _shopify_pull_since(db, since_hours)
     try:
-        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
-            resp = await client.get(url, params=params, headers=headers)
-        if resp.status_code != 200:
-            return SyncResult(
-                ok=False,
-                provider="shopify",
-                kind="pull",
-                error=f"status {resp.status_code}: {resp.text[:200]}",
-            )
-        orders = resp.json().get("orders", [])
-        return SyncResult(
-            ok=True,
-            provider="shopify",
-            kind="pull",
-            items_synced=len(orders),
-            payload={"order_ids": [o.get("id") for o in orders[:10]]},  # sample
+        orders, complete = await _shopify_fetch_orders(
+            shop_url, access_token, created_at_min=since.isoformat()
         )
     except httpx.TimeoutException:
         return SyncResult(ok=False, provider="shopify", kind="pull", error="timeout")
     except (httpx.HTTPError, ValueError) as e:
         return SyncResult(ok=False, provider="shopify", kind="pull", error=str(e))
+
+    live = shopify_dispatch_mode() == "live"
+    tally: Dict[str, Any] = {
+        "fetched": len(orders),
+        "already_in_ims": 0,
+        "mapped": [],
+        "skipped_dark": [],
+        "failed": [],
+        "failed_reasons": {},
+        "since": since.isoformat(),
+        "complete": complete,
+        "watermark_advanced": bool(complete and live),
+    }
+    from api.routers.webhooks import record_pulled_order
+
+    for order in orders:
+        sid = str(order.get("id") or "").strip()
+        raw = copy.deepcopy(order)  # the mapper stamps _ims_* keys; the inbox keeps Shopify's body
+        bucket, reason = _catch_up_one(db, order, sid, live)
+        if bucket == "already_in_ims":
+            tally[bucket] += 1
+            continue
+        tally[bucket].append(sid)
+        if reason:
+            tally["failed_reasons"][sid] = reason
+        record_pulled_order(
+            db,
+            raw,
+            webhook_id=f"pull:{sid}:{raw.get('updated_at') or ''}",
+            topic="orders/create",
+            skipped_reason=(
+                None if live
+                else f"shopify_dispatch_mode={shopify_dispatch_mode()} -- not live, order not booked"
+            ),
+            handler_error=reason,
+        )
+
+    return SyncResult(
+        ok=True,
+        provider="shopify",
+        kind="pull",
+        items_synced=len(tally["mapped"]),
+        notes=(
+            f"since {tally['since']}: fetched {tally['fetched']}, "
+            f"already in IMS {tally['already_in_ims']}, mapped {len(tally['mapped'])}, "
+            f"dark {len(tally['skipped_dark'])}, failed {len(tally['failed'])}"
+            + ("" if complete else " (TRUNCATED -- watermark held)")
+        ),
+        payload=tally,
+    )
 
 
 async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
