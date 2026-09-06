@@ -31,6 +31,7 @@ Mounted at /api/v1/online-store/push:
   POST /collection/{collection_id} push an ecom_collections doc (+ smart ruleSet)
   POST /menu/{menu_id}            push an ecom_menus doc (the nav / mega-menu)
   POST /image/{image_id}          push ONE APPROVED product image (productCreateMedia)
+  POST /stock                     write the pooled quantity of every changed listing
   GET  /status                    per-entity pushed-vs-pending + the current mode
 
 Everything is FAIL-SOFT: no DB -> writes 503 (not a false 200); reads degrade to
@@ -255,6 +256,21 @@ async def push_image(
     data = result.to_dict()
     _write_audit(data, current_user)
     return {"result": data}
+
+
+@router.post("/stock")
+async def push_stock(
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Write the pooled quantity of every product already on Shopify whose
+    number changed since it was last sent (owner ruling 2026-09-07 -- make
+    website quantities real). Products only; never publishes anything. DARK
+    -> a SIMULATED plan and zero network. ONE chained audit row per run (the
+    per-product outcome is in its payload). No DB -> 503."""
+    db = _require_db()
+    data = (await shopify_push.sync_stock_levels(db)).to_dict()
+    _write_audit(data, current_user)
+    return data
 
 
 @router.get("/status")
@@ -570,6 +586,7 @@ async def push_all_pending(
     results: List[Dict[str, Any]] = []
     summary: Dict[str, Dict[str, int]] = {}
     cap_reached = False
+    stock: Optional[Dict[str, Any]] = None
 
     def _tally(entity: str, data: Dict[str, Any]) -> None:
         bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "noop": 0})
@@ -641,6 +658,14 @@ async def push_all_pending(
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "taken_down_skipped"
             ] = taken_down_skipped
+        # A press also pushes STOCK (owner ruling 2026-09-07): every listing
+        # whose pooled quantity changed since it was last sent, in one pass,
+        # AFTER the product pushes so a product this press just created is
+        # covered too. Its OWN key (not a `results` row): `results` and
+        # `pushed_count` are per-object pushes, and a stock pass is neither a
+        # listing nor a slot against the batch cap. One audit row per run.
+        stock = (await shopify_push.sync_stock_levels(db)).to_dict()
+        _write_audit(stock, current_user)
 
     # OPT-IN price/barcode resync (never in the default set -- the product
     # sweep above already pushes prices as part of each product push). Targets
@@ -737,6 +762,10 @@ async def push_all_pending(
         "next_offset": next_offset,
         "eligible_total": eligible_total,
         "summary": summary,
+        # The stock pass that rode this press (products selected only); None
+        # when no products were swept. {mode, action, ok, payload{changed,
+        # synced, failed, location_id, ...}, code, error}.
+        "stock": stock,
         "results": results,
     }
 
