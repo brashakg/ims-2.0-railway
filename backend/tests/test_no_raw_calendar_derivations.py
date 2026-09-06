@@ -111,7 +111,7 @@ ALLOWED = {
         "move the opposite way."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/bank_statement.py",
         'pmt_date = (pmt.get("payment_date") or pmt.get("created_at") or "")[:10]',
     ): (
         "Bank-reconciliation fuzzy matcher. The primary source is the "

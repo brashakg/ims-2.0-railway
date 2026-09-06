@@ -262,7 +262,7 @@ ALLOWED = {
         "one calendar frame on both sides."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/cash_flow.py",
         "start = ist_day_start_utc(today.replace(day=1))",
     ): (
         "today is ist_today(); BOUND rule applied correctly (occurs in "
@@ -270,7 +270,15 @@ ALLOWED = {
         "both)."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/pnl.py",
+        "start = ist_day_start_utc(today.replace(day=1))",
+    ): (
+        "today is ist_today(); BOUND rule applied correctly (occurs in "
+        "get_revenue and the cash-flow month window; exact-line key matches "
+        "both)."
+    ),
+    (
+        "api/routers/finance/pnl.py",
         "prev_first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)",
     ): (
         "The round-4 MoM FIX: previous month derived in the CALENDAR frame "
@@ -279,7 +287,7 @@ ALLOWED = {
         "test_revenue_mom_previous_window_tiles_with_the_current_month."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/cash_flow.py",
         "start = ist_day_start_utc(now.replace(day=1).date())",
     ): (
         "now is now_ist_naive() -- IST WALL-CLOCK, not a shifted UTC "
@@ -287,7 +295,15 @@ ALLOWED = {
         "then the BOUND rule converts. Correct frame (AR/AP + P&L monthly)."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/survival.py",
+        "start = ist_day_start_utc(now.replace(day=1).date())",
+    ): (
+        "now is now_ist_naive() -- IST WALL-CLOCK, not a shifted UTC "
+        "instant; .replace(day=1).date() lands on the 1st of the IST month, "
+        "then the BOUND rule converts. Correct frame (AR/AP + P&L monthly)."
+    ),
+    (
+        "api/routers/finance/cash_recon.py",
         'start_day = (from_date or today.replace(day=1).isoformat())[:10]',
     ): (
         "Default for a DATE-STRING filter over date_str columns (day-book): "
@@ -376,7 +392,7 @@ ALLOWED = {
         "duration, never a query bound."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/gst.py",
         "bill_start = datetime(y, m, 1)",
     ): (
         "ITC register: bill_date is an operator-typed CALENDAR date (the "
@@ -384,14 +400,14 @@ ALLOWED = {
         "comment at the site rules the frame. Calendar bounds are correct."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/gst.py",
         "bill_end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)",
     ): (
         "Upper half of the bill_date calendar month bound above -- same "
         "ruling."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/cash_flow.py",
         "event_date = datetime(y, m, 1)",
     ): (
         "Cash-flow FORECAST: a projected future first-of-month used only as "
@@ -399,7 +415,7 @@ ALLOWED = {
         "never compared against a stored instant."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/budget.py",
         "start = datetime(y, m, 1)",
     ): (
         "Budget actuals: expenses are dated on expense_date, a date-only "
@@ -408,14 +424,14 @@ ALLOWED = {
         "frame on both sides."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/budget.py",
         "end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)",
     ): (
         "Upper half of the budget-actuals expense_date calendar bound above "
         "-- same ruling."
     ),
     (
-        "api/routers/finance.py",
+        "api/routers/finance/journal_entries.py",
         "fy_start = datetime(fy_year, 4, 1)",
     ): (
         "Journal-entry FY guard: compared against _je_cal_day(s), which is "
