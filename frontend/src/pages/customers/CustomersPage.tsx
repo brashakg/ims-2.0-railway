@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams, useNavigate, Navigate } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Plus,
   Users,
@@ -48,7 +48,6 @@ import {
   type OwnAccountConflict,
 } from '../../services/api/customers';
 import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
-import { RecallManager } from '../../components/crm/RecallManager';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
 import { PrescriptionForm } from '../../components/pos/PrescriptionForm';
@@ -59,7 +58,6 @@ import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
 
 type ViewMode = 'list' | 'detail';
-type CRMTab = 'customers' | 'recalls' | 'campaigns';
 
 // Address lives in two shapes on a customer record: flat top-level fields
 // (address/city/state/pincode) and a structured `billing_address` object.
@@ -83,15 +81,12 @@ export function CustomersPage() {
   const [searchParams] = useSearchParams();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // CRM Tab routing from URL params.
-  // The early-return for `recalls` / `campaigns` must happen AFTER
-  // all hooks have run — otherwise React crashes with "Rendered fewer
-  // hooks than expected" when `?tab=` flips between values mid-session
-  // (every state hook below this point would only run for the
-  // 'customers' tab). The actual return statements live at the bottom
-  // of the function, just before the main return.
-  const tabParam = searchParams.get('tab') as CRMTab | null;
-  const activeTab: CRMTab = tabParam && ['recalls', 'campaigns'].includes(tabParam) ? tabParam : 'customers';
+  // Recalls and campaigns are REAL addresses now (/customers/recalls and
+  // /customers/campaigns); the legacy ?tab= links forward in CustomersIndex,
+  // in routes/customerRoutes.tsx, BEFORE this page mounts. That also retired
+  // the hook-ordering hazard this file used to carry: the two early returns
+  // had to sit below every hook or React crashed with "Rendered fewer hooks
+  // than expected" whenever ?tab= flipped mid-session.
 
   // Auto-focus search when navigated with ?search=true
   useEffect(() => {
@@ -99,6 +94,21 @@ export function CustomersPage() {
       searchInputRef.current.focus();
     }
   }, [searchParams]);
+
+  // Warm the recalls chunk once the browser is idle (Wave 1 template). Recalls
+  // used to be compiled INTO this page's bundle by its static import, so the
+  // Send Recall button opened it with no spinner; now that it is a route of
+  // its own that chunk is separate, and this keeps the click as instant as it
+  // was. Vite dedupes this against the route-level lazy() import.
+  useEffect(() => {
+    const idle: (cb: () => void) => void =
+      'requestIdleCallback' in window
+        ? (cb) => (window as Window & { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(cb)
+        : (cb) => { setTimeout(cb, 1500); };
+    idle(() => {
+      void import('../../components/crm/RecallManager');
+    });
+  }, []);
 
   // Data state
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -703,19 +713,6 @@ export function CustomersPage() {
     Email: { icon: Mail, color: 'text-blue-600', bg: 'bg-blue-50' },
   };
 
-  // CRM sub-tab routing — runs AFTER all hooks above so React's hook
-  // ordering stays stable across tab changes.
-  if (activeTab === 'recalls') {
-    return <RecallManager />;
-  }
-  if (activeTab === 'campaigns') {
-    // The old ?tab=campaigns view rendered a dead-duplicate promotion builder
-    // (no backend). The real, fully-wired campaign tooling lives at
-    // /customers/campaigns (CampaignManager). Redirect there so a single
-    // source of truth handles campaigns.
-    return <Navigate to="/customers/campaigns" replace />;
-  }
-
   // Customer Detail View
   return (
     <div className="space-y-4">
@@ -747,7 +744,7 @@ export function CustomersPage() {
         {/* Quick Action Buttons */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => navigate('/customers?tab=recalls')}
+            onClick={() => navigate('/customers/recalls')}
             className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
             title="Send Recall"
             aria-label="Send Recall"

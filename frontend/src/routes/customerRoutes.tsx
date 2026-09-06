@@ -1,8 +1,19 @@
 // Customers / CRM + promotions + marketing routes. Moved verbatim from App.tsx
 // (route-registry split); paths, elements and role gates are unchanged.
+//
+// Wave 2 finish (2026-09-06): CustomersPage held the app's LAST in-page tab.
+// `?tab=recalls` early-returned <RecallManager /> from inside the customer
+// list -- a whole screen with no address, no bookmark and no menu row -- and
+// `?tab=campaigns` was already redirecting out to /customers/campaigns. Both
+// are real addresses now; CustomersIndex below forwards the old query-string
+// links (the Send Recall button, staff bookmarks) via ONE table-driven shim in
+// pages/customers/legacyTabRedirect.ts, and CustomersPage no longer knows what
+// a tab is. Role gate on /customers/recalls is the /customers gate,
+// character-for-character: that is what the in-page tab was gated with.
 import { lazy } from 'react';
-import { Route } from 'react-router-dom';
+import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { legacyTabTarget } from '../pages/customers/legacyTabRedirect';
 
 const CustomersPage = lazy(() => import('../pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const Customer360Dashboard = lazy(() => import('../pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
@@ -13,6 +24,7 @@ const LapsedReactivationPage = lazy(() => import('../pages/customers/LapsedReact
 const LoyaltyProgram = lazy(() => import('../pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
 const LoyaltyLedger = lazy(() => import('../pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('../pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
+const RecallManager = lazy(() => import('../components/crm/RecallManager').then(m => ({ default: m.RecallManager })));
 const PromotionsPage = lazy(() => import('../pages/promotions/PromotionsPage'));
 const PromotionsReportPage = lazy(() => import('../pages/promotions/PromotionsReportPage'));
 const ReferralTracker = lazy(() => import('../pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
@@ -24,6 +36,15 @@ const WhatsAppInboxPage = lazy(() => import('../pages/customers/WhatsAppInboxPag
 // CRM-16: Ad Performance (agency oversight dashboard)
 const AdPerformancePage = lazy(() => import('../pages/marketing/AdPerformancePage').then(m => ({ default: m.AdPerformancePage })));
 
+// Legacy ?tab= mapper - logic in pages/customers/legacyTabRedirect.ts so it is
+// testable without mounting the router. Unlike /inventory and /reports this is
+// NOT an index redirect: with no legacy tab the customer list renders in place.
+function CustomersIndex() {
+  const [searchParams] = useSearchParams();
+  const target = legacyTabTarget(searchParams);
+  return target ? <Navigate to={target} replace /> : <CustomersPage />;
+}
+
 export const customerRoutes = (
   <>
     {/* Customers */}
@@ -33,7 +54,7 @@ export const customerRoutes = (
         <ProtectedRoute
           allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
         >
-          <CustomersPage />
+          <CustomersIndex />
         </ProtectedRoute>
       }
     />
@@ -176,6 +197,21 @@ export const customerRoutes = (
           allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']}
         >
           <LoyaltyLedger />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* CRM: Recalls & reminders - Rx renewals due in the next 90 days.
+        Was `/customers?tab=recalls`, an in-page branch of the customer list.
+        Same RecallManager component, one implementation, now with an address.
+        Gate = the /customers gate the in-page tab inherited, unchanged. */}
+    <Route
+      path="customers/recalls"
+      element={
+        <ProtectedRoute
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
+        >
+          <RecallManager />
         </ProtectedRoute>
       }
     />

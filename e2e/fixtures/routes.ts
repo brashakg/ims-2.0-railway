@@ -69,6 +69,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/customers/family-wallet' },
   { path: '/customers/cl-refill' },
   { path: '/customers/loyalty' },
+  { path: '/customers/recalls' },
   { path: '/customers/campaigns' },
   { path: '/promotions' },
   { path: '/reports/promotions' },
