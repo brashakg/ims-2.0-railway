@@ -1622,6 +1622,31 @@ export interface PushHistoryResult {
   failure?: OnlineStoreLoadFailure | null;
 }
 
+/** One Shopify location (GET /push/locations, owner ruling 2026-09-06: every
+ *  physical shop is a location). `mapped_store_id` / `mapped_store_code` name
+ *  the IMS shop already holding it (joined server-side against the one store
+ *  reader), null when free. */
+export interface ShopifyLocation {
+  id: string;
+  name?: string | null;
+  isActive?: boolean;
+  fulfillsOnlineOrders?: boolean;
+  shipsInventory?: boolean;
+  city?: string | null;
+  province?: string | null;
+  mapped_store_id?: string | null;
+  mapped_store_code?: string | null;
+}
+
+/** The locations read. DARK (a push gate off) or a failed read => `locations`
+ *  is [] and `reason` says why; the dropdown must then keep whatever mapping
+ *  the store already has instead of clearing it. */
+export interface ShopifyLocationsRead {
+  mode: 'LIVE' | 'SIMULATED';
+  reason?: string | null;
+  locations: ShopifyLocation[];
+}
+
 const PUSH_BASE = '/online-store/push';
 // The client's 10 s default is a CORS-fail-fast bound; a push is a live Shopify
 // round-trip per object (the sweep pages up to 100). A timeout here is mapped to
@@ -1647,6 +1672,24 @@ function _pushResultFrom(data: any): PushResult {
 }
 
 export const pushApi = {
+  /** Shopify's locations for the Organization page's per-store dropdown
+   *  (GET /push/locations). NEVER throws: a 403 / stale deploy / network error
+   *  resolves to an empty SIMULATED read with reason 'unavailable' so the
+   *  modal keeps the store's existing mapping instead of clearing it. */
+  getLocations: async (): Promise<ShopifyLocationsRead> => {
+    try {
+      const res = await api.get(`${PUSH_BASE}/locations`);
+      const data = (res?.data ?? {}) as Partial<ShopifyLocationsRead>;
+      return {
+        mode: data.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
+        reason: data.reason ?? null,
+        locations: Array.isArray(data.locations) ? (data.locations as ShopifyLocation[]) : [],
+      };
+    } catch {
+      return { mode: 'SIMULATED', reason: 'unavailable', locations: [] };
+    }
+  },
+
   /** Read the CURRENT push posture + per-entity counts. NEVER throws: any error
    *  (404 stale deploy / 403 non-admin / network) -> the DARK placeholder so the
    *  banner always renders as "writes OFF". */

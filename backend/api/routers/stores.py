@@ -4,9 +4,13 @@ IMS 2.0 - Stores Router
 Store management endpoints
 """
 
+import re
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
+
+from agents.nexus_providers import _as_shopify_gid
 
 from .auth import get_current_user, require_roles
 
@@ -23,6 +27,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import org_validation as ov
+from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
 
 router = APIRouter()
 
@@ -90,6 +95,16 @@ class StoreCreate(BaseModel):
     invoice_header: Optional[str] = None
     invoice_footer: Optional[str] = None
     invoice_terms: Optional[str] = None
+    # --- Shopify location (owner ruling 2026-09-06: every physical shop is a
+    # Shopify location and IMS writes that shop's own on-hand there). The gid
+    # `gid://shopify/Location/<n>`; bare digits are promoted; "" clears.
+    # Refused on an ONLINE store (it holds no stock) and when another store
+    # already carries the same gid (one shelf, one location). The name is
+    # display only, copied from Shopify's locations read on save when the
+    # push gates are live. Validated in _validate_store_payload -- the ONE
+    # validator -- which scripts/migrate_store_locations.py also calls.
+    shopify_location_id: Optional[str] = None
+    shopify_location_name: Optional[str] = None
 
 
 class StoreUpdate(BaseModel):
@@ -123,6 +138,16 @@ class StoreUpdate(BaseModel):
     invoice_footer: Optional[str] = None
     invoice_terms: Optional[str] = None
     is_active: Optional[bool] = None
+    # --- Shopify location (owner ruling 2026-09-06: every physical shop is a
+    # Shopify location and IMS writes that shop's own on-hand there). The gid
+    # `gid://shopify/Location/<n>`; bare digits are promoted; "" clears.
+    # Refused on an ONLINE store (it holds no stock) and when another store
+    # already carries the same gid (one shelf, one location). The name is
+    # display only, copied from Shopify's locations read on save when the
+    # push gates are live. Validated in _validate_store_payload -- the ONE
+    # validator -- which scripts/migrate_store_locations.py also calls.
+    shopify_location_id: Optional[str] = None
+    shopify_location_name: Optional[str] = None
 
 
 # ============================================================================
@@ -176,8 +201,41 @@ def _derive_store_gstin(
     return None
 
 
-def _validate_store_payload(data: dict) -> None:
-    """Block (HTTP 400) on malformed store fields. Validates only present keys."""
+_LOCATION_GID_RE = re.compile(r"^gid://shopify/Location/\d+$")
+
+
+def _location_holder(db, gid: str) -> Optional[dict]:
+    """The ACTIVE PHYSICAL store already carrying ``gid``, else None -- read
+    through stores_util.physical_stores, the ONE reader the locations dropdown
+    (GET /online-store/push/locations) joins against, so the validator and the
+    dropdown can never disagree about who holds a location: an inactive or
+    ONLINE doc holds nothing. No DB handle -> [] -> None."""
+    return next(
+        (s for s in physical_stores(db) if s.get("shopify_location_id") == gid), None
+    )
+
+
+def _validate_store_payload(
+    data: dict,
+    *,
+    db=None,
+    store_id: Optional[str] = None,
+    existing: Optional[dict] = None,
+) -> None:
+    """Block (HTTP 400) on malformed store fields. Validates only present keys.
+
+    ``shopify_location_id`` (when present) is NORMALISED in place -- bare
+    digits become ``gid://shopify/Location/<n>`` -- and refused with 400 when
+    malformed. Clearing ("") also clears the display name. Then, on the gid
+    the doc will carry AFTER this write (the payload's, else ``existing``'s):
+    400 when the store is ONLINE (``store_type`` in the payload or on
+    ``existing``, or a known online id) -- so flipping a mapped shop to ONLINE
+    is refused until the mapping is cleared; 409 when an ACTIVE PHYSICAL store
+    already carries it (``_location_holder``), checked whenever the doc enters
+    the physical list with a gid: a gid in the payload, or ``is_active: True``.
+    ``store_id`` is the doc's own id on an update (create passes none and the
+    known-id check falls back to ``store_code``).
+    """
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
     if data.get("phone") and not ov.validate_phone(data["phone"]):
@@ -200,6 +258,68 @@ def _validate_store_payload(data: dict) -> None:
         raise HTTPException(
             status_code=400, detail=f"Unknown categories: {', '.join(bad)}"
         )
+    declared = "shopify_location_id" in data
+    if declared:
+        gid = _as_shopify_gid(data.get("shopify_location_id"), "Location")
+        if gid and not _LOCATION_GID_RE.match(gid):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "shopify_location_id must be gid://shopify/Location/<n> "
+                    "or the bare location number"
+                ),
+            )
+        data["shopify_location_id"] = gid
+        if not gid:
+            data["shopify_location_name"] = None
+    # The gid the doc carries AFTER this write, whichever side of the rule the
+    # payload touches (a new gid, a store_type flip, a reactivation).
+    gid = (
+        data["shopify_location_id"]
+        if declared
+        else str((existing or {}).get("shopify_location_id") or "")
+    )
+    if not gid:
+        return
+    sid = store_id or data.get("store_code")
+    if declared or "store_type" in data:
+        declared_type = str(
+            data.get("store_type") or (existing or {}).get("store_type") or ""
+        ).strip().upper()
+        if declared_type == ONLINE_STORE_TYPE or is_online_store(db, sid):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Online stores hold no stock and take no Shopify location "
+                    "(clear the Shopify location first)"
+                ),
+            )
+    if declared or data.get("is_active") is True:
+        holder = _location_holder(db, gid)
+        if holder and holder.get("store_id") != sid:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "That Shopify location is already mapped to store "
+                    f"{holder.get('store_code') or holder.get('store_id')}"
+                ),
+            )
+
+
+async def _shopify_location_name(db, gid: str) -> Optional[str]:
+    """The display name Shopify holds for ``gid``, from the ONE locations read
+    (shopify_push.list_locations -- DARK gates return [] with zero network).
+    None when dark, unknown or on any error: the name is display only."""
+    try:
+        from ..services import shopify_push
+
+        read = await shopify_push.list_locations(db)
+        for row in read.get("locations") or []:
+            if row.get("id") == gid:
+                return row.get("name") or None
+    except Exception:  # noqa: BLE001 -- display only, never blocks a save
+        return None
+    return None
 
 
 def _store_active_dependents(db, store_id: str) -> Optional[str]:
@@ -511,7 +631,8 @@ async def create_store(
                 detail="entity_id does not match a known legal entity",
             )
 
-    _validate_store_payload(store.model_dump())
+    store_data = store.model_dump()
+    _validate_store_payload(store_data, db=db)
 
     # The store CODE is the store's identity. Every consumer -- users[].store_ids,
     # store-scope checks, the topbar store pill, order/invoice store context --
@@ -541,8 +662,13 @@ async def create_store(
         state_code = _state_code_for(store.state_code, store.state)
         derived_gstin = _derive_store_gstin(db, store.entity_id, state_code)
 
+        if store_data.get("shopify_location_id"):
+            store_data["shopify_location_name"] = (
+                await _shopify_location_name(db, store_data["shopify_location_id"])
+                or store_data.get("shopify_location_name")
+            )
+
         # Persist every supplied field, then stamp derived / server values.
-        store_data = store.model_dump()
         store_data.update(
             {
                 "store_code": code,
@@ -726,8 +852,15 @@ async def update_store(
             raise HTTPException(status_code=404, detail="Store not found")
 
         update_data = store.model_dump(exclude_unset=True)
-        _validate_store_payload(update_data)
         db = _get_db()
+        _validate_store_payload(
+            update_data, db=db, store_id=store_id, existing=existing
+        )
+        if update_data.get("shopify_location_id"):
+            update_data["shopify_location_name"] = (
+                await _shopify_location_name(db, update_data["shopify_location_id"])
+                or update_data.get("shopify_location_name")
+            )
 
         # Integrity: block deactivation while the store still holds stock, has
         # open orders, or has staff assigned to it.

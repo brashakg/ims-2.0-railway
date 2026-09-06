@@ -20,7 +20,7 @@ catches the live online stores even with the DB down.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 ONLINE_STORE_TYPE = "ONLINE"
 
@@ -42,6 +42,15 @@ def _resolve_db(db):
         return getattr(conn, "db", None)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _doc_is_online(store_id: str, doc: Optional[Dict[str, Any]]) -> bool:
+    """THE rule, in one place: a known online id, or a doc whose store_type is
+    ONLINE. ``is_online_store`` (one id, one lookup) and ``physical_stores``
+    (the whole list, no per-row lookup) both decide through this."""
+    if store_id in KNOWN_ONLINE_STORE_IDS:
+        return True
+    return str((doc or {}).get("store_type") or "").strip().upper() == ONLINE_STORE_TYPE
 
 
 def is_online_store(db, store_id: Optional[str]) -> bool:
@@ -69,4 +78,45 @@ def is_online_store(db, store_id: Optional[str]) -> bool:
         return False
     if doc is None:
         return False
-    return str(doc.get("store_type") or "").strip().upper() == ONLINE_STORE_TYPE
+    return _doc_is_online(sid, doc)
+
+
+# The fields every reader of "which shops hold stock" needs. store_id is
+# whatever the doc carries (Pune's is a UUID, memory infrastructure.md:32) --
+# it is the key stock_units.store_id is matched on, so it is never rewritten.
+_PHYSICAL_PROJECTION = {
+    "_id": 0,
+    "store_id": 1,
+    "store_code": 1,
+    "store_name": 1,
+    "store_type": 1,
+    "shopify_location_id": 1,
+    "shopify_location_name": 1,
+}
+
+
+def physical_stores(db) -> List[Dict[str, Any]]:
+    """THE one reader of the physical shops (per-store Shopify locations,
+    owner ruling 2026-09-06): every ACTIVE store that is not ONLINE, sorted by
+    store_code, projected to ``{store_id, store_code, store_name, store_type,
+    shopify_location_id, shopify_location_name}``.
+
+    "Physical" has exactly one definition: ``is_active`` AND not
+    ``_doc_is_online``. Every writer and reader derives ``{store_id: gid}``
+    and its reverse from this list with a comprehension -- no second registry.
+    No process cache: eight docs, one indexed read per call, so a mapping
+    change is live on the next call with no redeploy. No DB handle -> ``[]``;
+    a Mongo error propagates (a caller that wants fail-soft wraps it -- an
+    unknown store list must never silently read as "no shops").
+    """
+    handle = _resolve_db(db)
+    if handle is None:
+        return []
+    rows = handle.get_collection("stores").find({"is_active": True}, _PHYSICAL_PROJECTION)
+    out = [
+        dict(r)
+        for r in rows
+        if isinstance(r, dict) and not _doc_is_online(str(r.get("store_id") or ""), r)
+    ]
+    out.sort(key=lambda r: str(r.get("store_code") or ""))
+    return out

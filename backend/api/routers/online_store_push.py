@@ -33,6 +33,7 @@ Mounted at /api/v1/online-store/push:
   POST /image/{image_id}          push ONE APPROVED product image (productCreateMedia)
   POST /stock                     write the pooled quantity of every changed listing
   GET  /status                    per-entity pushed-vs-pending + the current mode
+  GET  /locations                 Shopify's locations, joined to the shop each maps to
 
 Everything is FAIL-SOFT: no DB -> writes 503 (not a false 200); reads degrade to
 zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
@@ -47,6 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from .auth import require_roles
 from ..services import shopify_push
 from ..services import shopify_live_sync as live_sync
+from ..services.stores_util import physical_stores
 # The DB / audit / doc helpers and the product-sweep core live in the
 # live-sync service so the manual sweep and the scheduled sync run ONE code
 # path; re-imported by their old names so nothing else here moved.
@@ -270,6 +272,34 @@ async def push_stock(
     db = _require_db()
     data = (await shopify_push.sync_stock_levels(db)).to_dict()
     _write_audit(data, current_user)
+    return data
+
+
+@router.get("/locations")
+async def push_locations(
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Shopify's locations for the Organization page's per-store "Shopify
+    location" dropdown (owner ruling 2026-09-06: every physical shop is a
+    location). Each row carries ``mapped_store_id`` / ``mapped_store_code``
+    from the ONE store reader (stores_util.physical_stores) so the dropdown
+    can show which shop already holds a location. DARK -> ``locations: []``
+    plus the gate reason and ZERO network. Read-only; nothing persisted.
+    No DB -> 503."""
+    db = _require_db()
+    data = await shopify_push.list_locations(db)
+    try:
+        by_gid = {
+            s["shopify_location_id"]: s
+            for s in physical_stores(db)
+            if s.get("shopify_location_id")
+        }
+    except Exception:  # noqa: BLE001 -- the join is a convenience, the list is the point
+        by_gid = {}
+    for row in data["locations"]:
+        holder = by_gid.get(row["id"])
+        row["mapped_store_id"] = holder.get("store_id") if holder else None
+        row["mapped_store_code"] = holder.get("store_code") if holder else None
     return data
 
 
