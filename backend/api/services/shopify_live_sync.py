@@ -464,8 +464,10 @@ async def sync_live_products(
     slot: str = MANUAL_SLOT,
     limit: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Re-push every product that is already on Shopify AND dirty. Products
-    only. Never publishes a gid-less product (counted, not pushed). Runs the
+    """Re-push every product that is already on Shopify AND dirty, then run
+    the stock pass (sync_stock_levels) over every listing whose pooled
+    quantity changed. Never publishes a gid-less product (counted, not
+    pushed). Runs the
     engine behind the same three gates (DARK => SIMULATED, no network), writes
     the per-product audit rows with ``actor`` as user_id, and persists ONE
     run-summary doc in ``online_sync_runs``.
@@ -516,6 +518,19 @@ async def sync_live_products(
             }
         )
 
+    # STOCK, AFTER THE PRODUCT PASS (#1125 folded in): the same
+    # sync_stock_levels the manual sweep runs, so quantities are refreshed
+    # twice daily too. Its counts ride the run summary (the run ledger IS the
+    # record here; the per-product audit rows stay per-product). Fail-soft:
+    # the product pushes already happened, a stock error is recorded, never
+    # raised.
+    try:
+        stock = (await shopify_push.sync_stock_levels(db)).to_dict()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LIVE-SYNC] stock pass failed: %s", e)
+        stock = {"ok": False, "error": str(e), "payload": {}}
+    stock_payload = stock.get("payload") or {}
+
     summary = {
         "finished_at": _utc_now(),
         "status": "done",
@@ -532,6 +547,14 @@ async def sync_live_products(
         "limit": limit,
         "limit_reached": batch["limit_reached"],
         "failures": failures,
+        "stock": {
+            "ok": bool(stock.get("ok")),
+            "changed": stock_payload.get("changed", 0),
+            "synced": stock_payload.get("synced", 0),
+            "failed": stock_payload.get("failed", 0),
+            "code": stock.get("code"),
+            "error": stock.get("error"),
+        },
     }
     try:
         db[RUNS_COLLECTION].update_one({"run_id": run["run_id"]}, {"$set": summary})
