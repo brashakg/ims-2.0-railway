@@ -442,6 +442,17 @@ def _ledger_transfer_event(event_type_name: str, stock_id, from_state, to_state,
         logger.warning("[TRANSFER] item-event ledger emit skipped: %s", exc)
 
 
+def _writeback_units_left(product_ids: List[str], store_id, source: str) -> None:
+    """Online stock write-back for units that left a shop's shelf. NEVER
+    raises into the transfer path."""
+    try:
+        from ..services.online_stock_writeback import writeback_after_units_left
+
+        writeback_after_units_left(_get_db(), product_ids, store_id, source=source)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[TRANSFER] online stock write-back skipped: %s", exc)
+
+
 def _create_receive_mismatch_task(transfer: Dict, discrepancy: Dict) -> Optional[str]:
     """BUG-019: raise a follow-up task when a receive does not match the shipment.
 
@@ -532,6 +543,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
 
     from_store = transfer.get("from_location_id")
     moved_total = 0
+    moved_pids: List[str] = []
     for line in transfer.get("items", []):
         product_id = line.get("product_id")
         want = _line_ship_qty(line)
@@ -624,6 +636,16 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
         # didn't hold enough AVAILABLE units - we never move phantom stock).
         line["quantity_shipped"] = len(moved_ids)
         moved_total += len(moved_ids)
+        if moved_ids and product_id not in moved_pids:
+            moved_pids.append(product_id)
+
+    if moved_pids:
+        # Per-store online stock (owner ruling 2026-09-06): the units left the
+        # SOURCE shelf (TRANSFERRED -- at neither location while in transit),
+        # so that shop's Shopify location goes down now, like a POS sale.
+        # Fire-and-forget, fail-soft; the destination rises on receive through
+        # the next scheduled pass.
+        _writeback_units_left(moved_pids, from_store, "transfer_ship")
 
     transfer["stock_shipped"] = True
     transfer["stock_units_moved_out"] = moved_total

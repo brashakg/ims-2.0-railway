@@ -464,6 +464,15 @@ def record_event(
         except Exception as e:  # noqa: BLE001
             logger.warning("[ITEM_EVENTS] stock CAS failed for %s: %s", stock_id, e)
             return None
+        # Per-store online stock (owner ruling 2026-09-06): a unit that just
+        # LEFT on-hand at this shop (AVAILABLE -> SOLD / QUARANTINED / ...)
+        # lowers that shop's Shopify location at once, exactly like the POS
+        # sale's call. The ONE hook for every ledger door -- quarantine-in,
+        # /items/{id}/sell, and any door added later. Fire-and-forget,
+        # fail-soft; a unit coming BACK on hand is picked up by the next
+        # scheduled pass (an undersell, never an oversell).
+        if not is_on_hand(to) and (frm is None or is_on_hand(frm)):
+            _writeback_left_on_hand(db, product_id, store_id, event_type)
 
     # 2. Insert the immutable ledger row (append-only; no update/delete path).
     doc = {
@@ -498,6 +507,20 @@ def record_event(
         _write_audit_row(et, doc)
 
     return doc
+
+
+def _writeback_left_on_hand(db, product_id, store_id, event_type) -> None:
+    """Hand the unit's product to the online stock write-back. NEVER raises
+    into the ledger path."""
+    try:
+        from .online_stock_writeback import writeback_after_units_left
+
+        name = event_type.value if isinstance(event_type, ItemEventType) else str(event_type)
+        writeback_after_units_left(
+            db, [product_id] if product_id else [], store_id, source=f"ledger:{name}"
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[ITEM_EVENTS] online stock write-back skipped: %s", e)
 
 
 def record_event_atomic(db, **kw) -> Tuple[bool, Optional[dict]]:
