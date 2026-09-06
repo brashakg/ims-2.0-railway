@@ -1619,11 +1619,14 @@ _MIRROR_FLAG_KEY = "pm.mirror_enabled"
 
 
 def mirror_enabled() -> bool:
-    """Is the catalog/external mirror turned on?  OFF by default.
+    """Is the catalog/external mirror turned on?  ON by default (the registry
+    spec pm.mirror_enabled defaults to True; the external Postgres/Shopify legs
+    are additionally gated by DISPATCH_MODE).
 
     Resolved via E2 get_policy (so it is store/entity/global scoped + env
-    overridable). Defaults to False so a fresh deploy NEVER mirrors. Fail-soft:
-    any error -> False (no mirror).
+    overridable). The `default=False` below applies only if the registry does
+    not know the key. Fail-soft: any error -> the PM_MIRROR_ENABLED env, else
+    False (no mirror).
     """
     try:
         from .policy_engine import get_policy
@@ -2648,7 +2651,7 @@ def _resolve_variant_parent(
 
 
 def _mirror_variant_row_update(
-    *, current: Dict[str, Any], patch: Dict[str, Any], db
+    *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True
 ) -> None:
     """The SIZE-VARIANT half of the spine-edit mirror: a child's mrp / gtin
     live on its catalog_variants row (the price push reads the ROW, never the
@@ -2658,7 +2661,10 @@ def _mirror_variant_row_update(
     the unique sku), let the engine -- the owner of discounted_price /
     compare_at_price -- recompute the parent so a stale discounted_price
     never ships the OLD price with the NEW mrp as compare-at, then queue the
-    PARENT twin. The child twin is never queued. Fail-soft."""
+    PARENT twin. The child twin is never queued. ``mark_dirty=False`` (the
+    #1137 opt-out: a write that only makes IMS agree with Shopify) still
+    mirrors the row but skips the engine AND the queue -- the engine queues
+    the parent itself, so it waits for its next product-level pass. Fail-soft."""
     if "mrp" not in patch and "gtin" not in (patch.get("attributes") or {}):
         return
     sku = current.get("sku")
@@ -2671,6 +2677,8 @@ def _mirror_variant_row_update(
         row_patch["gtin"] = patch["attributes"].get("gtin") or None
     variants = db.get_collection("catalog_variants")
     variants.update_one({"sku": sku}, {"$set": row_patch})
+    if not mark_dirty:
+        return
     row = variants.find_one({"sku": sku}) or {}
     parent_twin_id = row.get("parent_product_id")
     if not parent_twin_id:
@@ -2683,7 +2691,11 @@ def _mirror_variant_row_update(
         try:
             from .online_discount_engine import recompute_online_price
 
-            recompute_online_price(parent_twin, db=db)
+            # The engine subscripts db[...] (fail-soft: a wrapper without
+            # __getitem__ makes every load/persist a silent no-op). Both real
+            # doors pass the DatabaseConnection wrapper; hand it the raw db.
+            raw_db = db if hasattr(type(db), "__getitem__") else getattr(db, "db", db)
+            recompute_online_price(parent_twin, db=raw_db)
         except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
             logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
     cat.update_one({"id": parent_twin_id}, {"$set": {"ecom.locally_modified": True}})
@@ -2829,7 +2841,9 @@ def mirror_update_to_catalog_twin(
             # its price / barcode reach the storefront through its
             # catalog_variants row on the PARENT's next push.
             cat_patch.pop("ecom.locally_modified", None)
-            _mirror_variant_row_update(current=current, patch=patch, db=db)
+            _mirror_variant_row_update(
+                current=current, patch=patch, db=db, mark_dirty=mark_dirty
+            )
         if not cat_patch:
             return
         if cat_patch.get("ecom.locally_modified"):
