@@ -25,7 +25,8 @@ This script:
      validator (routers/stores._validate_store_payload: gid form, ONLINE
      refusal, duplicate refusal) and the store repository -- no second rule --
      copying the display name from Shopify's locations read when the push
-     gates are live. Writes only with --apply; all-or-nothing when several.
+     gates are live. Writes only with --apply; one refusal stops the run
+     before any write (mappings first, then the registry $unset).
 
 THE ONLY --set TO RUN NOW (design section 7, critic finding 1):
     --set BV-BOK-02=58793230523     Better Vision Sector 4 (Bokaro): 0 units on
@@ -51,7 +52,7 @@ Dry-run (DEFAULT - prints the store table and what --set would do; writes nothin
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" scripts/migrate_store_locations.py
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" scripts/migrate_store_locations.py --set BV-BOK-02=58793230523
 
-Apply (unsets the registry row, then writes every --set):
+Apply (writes every --set, then unsets the registry row):
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" scripts/migrate_store_locations.py --apply --set BV-BOK-02=58793230523
 
 Connection resolution: --mongo-uri, else MONGO_PUBLIC_URL, else MONGODB_URI,
@@ -175,7 +176,8 @@ def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> L
 
 def apply_sets(db, plan: List[Dict[str, Any]]) -> int:
     """Write every planned row through the store repository (the router's
-    door). Caller guarantees the plan has no refusals."""
+    door). Caller guarantees the plan has no refusals. Returns how many docs
+    actually changed: re-applying an identical mapping counts 0."""
     repo = StoreRepository(db.get_collection("stores"))
     written = 0
     for row in plan:
@@ -223,9 +225,10 @@ def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple
         print(f"\nREFUSED {len(refused)} --set(s); nothing written (all-or-nothing).")
         raise SystemExit(2)
 
-    unset = unset_registry(db)
     written = apply_sets(db, plan)
-    print(f"\nUNSET registry pooled location on {unset} row(s); WROTE {written} store mapping(s)")
+    unset = unset_registry(db)
+    print(f"\nWROTE {written} of {len(plan)} store mapping(s) ({len(plan) - written} already identical); "
+          f"UNSET registry pooled location on {unset} row(s)")
     print_table(db)
     return {"stores": len(plan), "refused": 0, "written": written, "unset": unset}
 
