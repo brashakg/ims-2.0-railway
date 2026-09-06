@@ -58,7 +58,9 @@ export interface CatalogProductDoc {
   [k: string]: unknown;
 }
 
-export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED';
+// DELIST_FAILED: IMS retired the product (deleted / deactivated) but the
+// automatic Shopify take-down failed -- it is STILL LIVE on the storefront.
+export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED' | 'DELIST_FAILED';
 export type PhotoFilter = 'has' | 'missing';
 
 export interface CatalogProductListResponse {
