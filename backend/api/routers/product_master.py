@@ -29,6 +29,7 @@ from ..dependencies import (
     get_db,
 )
 from ..services import product_master as pm
+from ..services import online_delist as _delist
 
 router = APIRouter()
 
@@ -215,18 +216,41 @@ async def update_master_product(
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Update mutable product fields. Enforces offer<=MRP in both directions."""
+    patch = body.model_dump(exclude_none=True)
+    repo = get_product_repository()
+    # Sync audit gap #2: the pre-edit row, read only when this edit moves
+    # is_active, so the take-down / republish rule below sees the transition.
+    before = (
+        repo.find_by_id(product_id)
+        if "is_active" in patch and repo is not None
+        else None
+    )
+    # Snapshot the flag BEFORE the write (an in-memory repo hands back the
+    # live dict, which the update below mutates).
+    was_active = before.get("is_active", True) if before is not None else None
     try:
         updated = pm.update_product(
             product_id=product_id,
-            patch=body.model_dump(exclude_none=True),
+            patch=patch,
             actor=_actor(current_user),
             actor_name=current_user.get("username"),
-            product_repo=get_product_repository(),
+            product_repo=repo,
             audit_repo=get_audit_repository(),
             db=get_db(),
         )
     except pm.ProductMasterError as err:
         _raise(err)
+    if before is not None:
+        # is_active off -> take the twin OFF Shopify; back on -> queue it for
+        # the next live sync. The ONE rule (services/online_delist), shared
+        # with the catalog drawer and PUT /products. Fail-soft.
+        await _delist.on_active_flip(
+            get_db(),
+            before,
+            was_active=was_active,
+            now_active=patch["is_active"],
+            actor=current_user,
+        )
     return {
         "product_id": product_id,
         "mrp": updated.get("mrp"),
