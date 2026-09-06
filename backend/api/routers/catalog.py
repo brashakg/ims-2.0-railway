@@ -28,6 +28,7 @@ from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
+from ..services import online_delist as _delist
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
@@ -2108,6 +2109,20 @@ async def update_catalog_product(
     else:
         _save_catalog_product(to_write)
 
+    # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
+    # Shopify; back on -> queue it for the next press / live sync. The ONE
+    # rule lives in services/online_delist; runs AFTER the save (the full-doc
+    # $set above would clobber the take-down's own ecom write-back).
+    # Fail-soft: the catalog save stands even if Shopify says no.
+    if product.is_active is not None:
+        await _delist.on_active_flip(
+            _get_db(),
+            to_write,
+            was_active=pre_edit.get("is_active", True),
+            now_active=product.is_active,
+            actor=current_user,
+        )
+
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep
     # the two in sync (no shared helper: routers deliberately don't import each
@@ -2597,6 +2612,16 @@ async def delete_catalog_product(
             product_id,
             exc_info=True,
         )
+
+    # Sync audit gap #2 (owner, 2026-09-06): a deleted product must stop being
+    # SOLD ONLINE too. The ONE take-down rule (services/online_delist ->
+    # the existing push_product_delist; DRAFT on Shopify, gid kept). Runs
+    # AFTER the write above on purpose: the soft delete keeps the row and its
+    # gid, and the full-doc $set would clobber the take-down's own ecom
+    # write-back. Fail-soft: the delete stands even if Shopify says no.
+    await _delist.delist_if_live(
+        _get_db(), product, reason="deleted", actor=current_user
+    )
 
     return {"message": "Product deleted successfully"}
 

@@ -111,6 +111,12 @@ const ONLINE_LABEL: Record<OnlineState, { text: string; cls: string; title: stri
   QUEUED: { text: 'Queued', cls: 'chip info', title: 'Waiting for a human to press push' },
   OFF: { text: 'Off', cls: 'chip', title: 'Not online, not queued' },
   BLOCKED: { text: 'Blocked', cls: 'chip', title: 'No usable photo — cannot go online' },
+  DELIST_FAILED: {
+    text: 'Still live',
+    cls: 'chip err',
+    title:
+      'Still live on Shopify - take-down failed. Retired in IMS but the automatic take-down did not land; press Take down on the Online Store screen.',
+  },
 };
 
 function OnlineChip({ state }: { state: OnlineState | undefined }) {

@@ -90,6 +90,10 @@ def _writeback_product(
                 ecom["taken_down_at"] = _now()
             elif status == "PUBLISHED":
                 ecom.pop("taken_down_at", None)
+                # Live again -> no longer delisted / no failed take-down to
+                # report (services/online_delist stamps these on retire).
+                for key in ("online_state", "delisted_at", "delist_reason", "delist_error"):
+                    ecom.pop(key, None)
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})

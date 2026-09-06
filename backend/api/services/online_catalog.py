@@ -540,7 +540,11 @@ def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
                    are all "no photo", exactly as the publish gate sees them)
       queued    -- ecom.locally_modified, the ONE flag the push sweep walks
                    and the pending count reads
-      online    -- LIVE     on Shopify (_ecom_online: gid present or PUBLISHED)
+      online    -- DELIST_FAILED  IMS retired it (deleted / deactivated) but
+                                  the automatic take-down failed: STILL LIVE
+                                  on Shopify (services/online_delist)
+                   LIVE     on Shopify (_ecom_online: gid present or PUBLISHED)
+                            and not taken down by the retire hook
                    BLOCKED  not live and no usable photo: the push refuses it
                    QUEUED   has a photo, waiting for a human to press push
                    OFF      not live, not queued
@@ -554,7 +558,10 @@ def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
     ecom = doc.get("ecom") if isinstance(doc.get("ecom"), dict) else {}
     has_photo = bool(product_photo_urls(doc))
     queued = bool(ecom.get("locally_modified"))
-    if _ecom_online(ecom):
+    delist_state = str(ecom.get("online_state") or "").upper()
+    if delist_state == "DELIST_FAILED":
+        online = "DELIST_FAILED"
+    elif _ecom_online(ecom) and delist_state != "DELISTED":
         online = "LIVE"
     elif not has_photo:
         online = "BLOCKED"

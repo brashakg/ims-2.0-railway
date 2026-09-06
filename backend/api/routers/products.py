@@ -3372,6 +3372,9 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+        # Pre-write snapshot for the take-down / republish rule below: read
+        # BEFORE repo.update (an in-memory repo hands back the live dict).
+        _was_active = existing.get("is_active", True)
 
         # The HSN decides the rate on EDIT too, not just at create. Without
         # this, the create door derived gst_rate from hsn_code and a later PUT
@@ -3555,6 +3558,22 @@ async def update_product(
                     "[PRODUCTS] catalog mirror on update skipped for %s",
                     product_id,
                     exc_info=True,
+                )
+            # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take the
+            # twin OFF Shopify; back on -> queue it for the next live sync.
+            # The ONE rule lives in services/online_delist (same call as the
+            # catalog drawer and the /products/master door). Fail-soft: the
+            # product save stands even if Shopify says no.
+            if "is_active" in update_data:
+                from ..dependencies import get_db as _gdb_delist
+                from ..services import online_delist as _delist
+
+                await _delist.on_active_flip(
+                    _gdb_delist(),
+                    existing,
+                    was_active=_was_active,
+                    now_active=update_data["is_active"],
+                    actor=current_user,
                 )
             # Step-13: recompute SMART collections (fail-soft). Use the merged doc
             # so the resolver sees the post-update tags/category/brand + status.

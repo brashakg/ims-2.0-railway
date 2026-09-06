@@ -142,6 +142,9 @@ def write_push_audit(result: Dict[str, Any], current_user: dict) -> None:
                     "error": result.get("error"),
                     "reason": result.get("reason"),
                     "code": result.get("code"),
+                    # What IMS did to cause an automatic take-down
+                    # (deleted / deactivated) -- services/online_delist.
+                    "trigger": result.get("trigger"),
                     # The publish side channel keeps the RAW vendor error
                     # (`error` above is the plain-language line).
                     "publication": result.get("publication"),
