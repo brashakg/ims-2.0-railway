@@ -1044,3 +1044,47 @@ def test_T11b_preview_first_names_a_mapped_shop_whose_read_failed(monkeypatch):
     assert s["unknown_stores"] == ["BV-B"] and "HIRAPUR-DHN" in (s.get("error") or "")
     assert res.payload["plan"][0]["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
     assert _baseline(db) is None
+
+
+def test_a_retired_size_variant_is_zeroed_at_every_mapped_location(monkeypatch):
+    """P4 (merge with feat/variant-of-rule): deactivating ONE size writes 0 for
+    its inventory item at EVERY mapped shop's location through the one
+    writer -- a 0 at one location would leave the size on sale from the other
+    shops -- and the PARENT's nested baseline records the 0 per shop, so a
+    reactivation diffs. DENY on the child's own variant, never a
+    productUpdate on the parent."""
+    child = {
+        "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
+        "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
+    }
+    db = _db(a=2, b=1, c=0, sku="SP-1-L")
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
+    db.seed(
+        "catalog_variants",
+        [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/52",
+          "shopify_inventory_item_id": INV_ROW}],
+    )
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push._delist_variant_row(db, child))
+    assert res.ok is True and res.mode == "LIVE" and res.action == "delist", res
+    assert spy.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}
+    assert res.payload["rows"] == {"SP-1-L": {"BV-A": 0, "BV-B": 0, "BV-C": 0}} and res.payload["stores_mapped"] == 3
+    tracking = spy.calls_for("productVariantsBulkUpdate")
+    assert len(tracking) == 1 and tracking[0]["variables"]["variants"] == [
+        {"id": "gid://shopify/ProductVariant/52", "inventoryPolicy": "DENY", "inventoryItem": {"tracked": True}}
+    ]
+    assert spy.calls_for("productUpdate(") == []
+    assert _baseline(db)["quantities"] == {"SP-1-L": {"BV-A": 0, "BV-B": 0, "BV-C": 0}}
+    assert "online_stock" not in db.get_collection("catalog_products").find_one({"id": "cat-1-L"})["ecom"]
+    # No shop mapped at all: nothing can be written -- said so, not ok.
+    bare = _db(a=1, b=0, c=0, sku="SP-1-L")
+    bare.get_collection("stores").update_many({}, {"$unset": {"shopify_location_id": ""}})
+    bare.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
+    bare.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
+                                    "shopify_variant_id": "gid://shopify/ProductVariant/52",
+                                    "shopify_inventory_item_id": INV_ROW}])
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    res2 = _run(shopify_push._delist_variant_row(bare, child))
+    assert res2.ok is False and res2.code == shopify_push.STORE_UNMAPPED and spy2.rows() == set()
