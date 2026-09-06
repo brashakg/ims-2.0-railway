@@ -39,7 +39,10 @@ Then, once for all rows:
      routes run (repositories, role gate, EAN-13 counter, online-store guard,
      batch doc, audit row): 1 unit per Large product at BV-PUN-01. Preview
      must say 11 WILL_ADD / 0 skip / 0 error before the commit.
-  5. Print the REVERSAL LIST (every doc this run minted).
+  5. Print the REVERSAL LIST (every doc this run minted). It is built from
+     the INPUT skus (find by sku), not from the rows that returned, so a row
+     that raised AFTER the door wrote is in it; ANY exception in the apply
+     loop prints it and lands in the run record.
 
 Nothing is pushed to Shopify. The Large variants already exist there at
 qty 1 / DENY; the next parent stock pass carries {base: pooled, base-L: 1}
@@ -50,6 +53,9 @@ FENCES (each exits before any write)
   INPUT   the file must hash to INPUT_SHA256 and hold exactly 11 rows, one
           per "-L" sku, every row shaped as expected
   CLOCK   the door stamps naive datetime.now(); the box must be UTC
+  MIRROR  pm.mirror_enabled() must be ON (registry default True): OFF, the
+          door writes the spine + twin but NO catalog_variants row, and the
+          gid stamp would then insert an orphan row
   STORE   4dc49c44-... must be BV-PUN-01 / RETAIL on this database
   ACTOR   a real active users doc, ADMIN/SUPERADMIN (or Pune in store_ids)
   ROWS    for every row: the parent spine exists by product_id with that sku,
@@ -76,6 +82,9 @@ Dry-run (DEFAULT, read-only):
 Apply:
     TZ=UTC railway run --service ims-2.0-railway -- ".venv\\Scripts\\python.exe" scripts/create_large_variants.py --apply --actor <username>
 Optional: --input <large_11.json> (must match INPUT_SHA256), --out <response json>.
+DEFAULT_INPUT is the session scratchpad copy of the approved file -- a temp
+directory. If it is gone, --input a copy that still hashes to INPUT_SHA256
+(a different file is a NEW approval: re-pin after reading it).
 
 REVERSAL (printed by the run; do it in this order, only while every minted
 unit is still AVAILABLE -- never after a sale; audit rows stay; NEVER touch
@@ -148,6 +157,9 @@ def utc_naive():
 
 
 def load_input(path: str) -> List[Dict[str, Any]]:
+    if not os.path.isfile(path):
+        sys.exit(f"input {path} does not exist (the scratchpad copy is gone?) -- pass --input <a copy that "
+                 f"hashes to {INPUT_SHA256}>. Nothing done.")
     with open(path, "rb") as fh:
         raw = fh.read()
     digest = hashlib.sha256(raw).hexdigest()
@@ -242,6 +254,9 @@ def build_payload(row: Dict[str, Any]):
 def row_fences(db, rows: List[Dict[str, Any]], product_repo) -> List[str]:
     """Every per-row precondition, read-only. Returns the problems (empty = ok)."""
     problems: List[str] = []
+    if not pm.mirror_enabled():
+        problems.append("pm.mirror_enabled is OFF: the door would write the spine + twin but NO catalog_variants "
+                        "row, and the gid stamp would insert an orphan row. Turn the policy on first.")
     large_skus = {r["large_sku"] for r in rows}
     for r in rows:
         sku, parent = r["large_sku"], r["parent"]
@@ -383,19 +398,59 @@ def opening_stock(rows: List[Dict[str, Any]], current_user: Dict[str, Any], appl
     return {"preview": preview, "commit": result}
 
 
-def reversal_list(db, created: List[Dict[str, Any]], batch_id=None) -> Dict[str, Any]:
+def reversal_list(db, skus: List[str], batch_id=None) -> Dict[str, Any]:
     """Every doc this run minted, in the order to delete them (only while
-    every unit is still AVAILABLE; never Shopify)."""
+    every unit is still AVAILABLE; never Shopify). Found by the INPUT skus,
+    never by what create_variant_of returned: a row that raised after the
+    door wrote (or before opening stock reported its batch) is listed too."""
     out = {"note": "delete in this order, only while every unit is AVAILABLE; audit rows stay; NEVER touch Shopify",
            "stock_units": [], "opening_stock_batches": [batch_id] if batch_id else [],
-           "catalog_variants_sku": [c["sku"] for c in created],
-           "catalog_products_id": [c["twin_id"] for c in created],
-           "products_product_id": [c["product_id"] for c in created]}
-    for c in created:
-        for u in db["stock_units"].find({"product_id": c["product_id"], "source": "OPENING_STOCK"},
+           "catalog_variants_sku": [], "catalog_products_id": [], "products_product_id": []}
+    for sku in skus:
+        if db["catalog_variants"].find_one({"sku": sku}) is not None:
+            out["catalog_variants_sku"].append(sku)
+        twin = db["catalog_products"].find_one({"sku": sku}, {"_id": 0, "id": 1})
+        if twin is not None:
+            out["catalog_products_id"].append(twin.get("id"))
+        spine = db["products"].find_one({"sku": sku}, {"_id": 0, "product_id": 1})
+        if spine is None:
+            continue
+        out["products_product_id"].append(spine["product_id"])
+        for u in db["stock_units"].find({"product_id": spine["product_id"], "source": "OPENING_STOCK"},
                                         {"_id": 0, "stock_id": 1, "barcode": 1, "status": 1}):
-            out["stock_units"].append({"product_id": c["product_id"], **u})
+            out["stock_units"].append({"product_id": spine["product_id"], **u})
+    if not batch_id:
+        for batch in db["opening_stock_batches"].find({}, {"_id": 0, "batch_id": 1, "lines": 1}):
+            if any(ln.get("sku") in skus for ln in (batch.get("lines") or [])):
+                out["opening_stock_batches"].append(batch.get("batch_id"))
     return out
+
+
+def apply_run(db, rows: List[Dict[str, Any]], current_user: Dict[str, Any], *,
+              product_repo, variant_repo, audit_repo, record: Dict[str, Any]) -> Dict[str, Any]:
+    """The writes, in order, into `record` (the caller persists it in a
+    finally): every create, then opening stock, then the reversal list. ANY
+    failure (assert, door 4xx/5xx, a Mongo error, a sys.exit) records the
+    error + the reversal list built from the input skus, then re-raises."""
+    created: List[Dict[str, Any]] = []
+    record["created"] = created
+    skus = [r["large_sku"] for r in rows]
+    try:
+        for r in rows:
+            created.append(create_variant_of(db, r, current_user, product_repo=product_repo,
+                                             variant_repo=variant_repo, audit_repo=audit_repo))
+            print(f"CREATED {r['large_sku']} product_id={created[-1]['product_id']} twin={created[-1]['twin_id']}")
+        stock = opening_stock(rows, current_user, apply=True)
+        record["opening_stock"] = stock
+        record["reversal"] = reversal_list(db, skus, stock["commit"]["summary"].get("batch_id"))
+    except (Exception, SystemExit) as exc:
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        record["reversal"] = reversal_list(db, skus)
+        print(f"STOPPED after {len(created)} product(s) returned: {record['error']}")
+        print("REVERSAL LIST (partial run -- the sku fence will refuse a re-run until these are gone):")
+        print(json.dumps(record["reversal"], indent=1, default=str))
+        raise
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -446,33 +501,21 @@ def main(argv=None):
         print("DRY-RUN OK -- nothing written. Re-run with --apply --actor <username> to create.")
         return 0
 
-    created: List[Dict[str, Any]] = []
     record: Dict[str, Any] = {"actor": current_user["user_id"], "started_at_utc": utc_naive().isoformat(),
-                              "input_sha256": INPUT_SHA256, "created": created}
+                              "input_sha256": INPUT_SHA256}
     try:
-        for r in rows:
-            created.append(create_variant_of(db, r, current_user, product_repo=product_repo,
-                                             variant_repo=variant_repo, audit_repo=audit_repo))
-            print(f"CREATED {r['large_sku']} product_id={created[-1]['product_id']} twin={created[-1]['twin_id']}")
-        stock = opening_stock(rows, current_user, apply=True)
-        record["opening_stock"] = stock
-        record["reversal"] = reversal_list(db, created, stock["commit"]["summary"].get("batch_id"))
-    except (AssertionError, SystemExit) as exc:
-        record["error"] = str(exc)
-        record["reversal"] = reversal_list(db, created)
-        print(f"STOPPED after {len(created)} product(s): {exc}")
-        print("REVERSAL LIST (partial run -- the sku fence will refuse a re-run until these are gone):")
-        print(json.dumps(record["reversal"], indent=1, default=str))
-        raise
+        apply_run(db, rows, current_user, product_repo=product_repo, variant_repo=variant_repo,
+                  audit_repo=audit_repo, record=record)
     finally:
         record["finished_at_utc"] = utc_naive().isoformat()
         with open(a.out, "w", encoding="utf-8") as fh:
             json.dump(record, fh, indent=1, default=str, ensure_ascii=False)
         print("WROTE", a.out)
+    summary = record["opening_stock"]["commit"]["summary"]
     print("REVERSAL LIST:")
     print(json.dumps(record["reversal"], indent=1, default=str))
-    print(f"APPLY OK  {len(created)} products, {stock['commit']['summary']['units_added']} units, "
-          f"batch {stock['commit']['summary']['batch_id']}. Parents left CLEAN; nothing pushed to Shopify.")
+    print(f"APPLY OK  {len(record['created'])} products, {summary['units_added']} units, "
+          f"batch {summary['batch_id']}. Parents left CLEAN; nothing pushed to Shopify.")
     return 0
 
 

@@ -19,8 +19,10 @@ the test red -- table in the PR body):
      child even if a repair script stamps the parent gid on its twin
   3. the child's OWN price and barcode ride the parent's price push (the row
      minted by the create door carries the child's mrp / gtin); an mrp edit
-     lands on the row, the engine re-derives the online price (never the
-     stale discounted_price) and the PARENT is queued
+     through the DatabaseConnection-shaped wrapper both real doors pass
+     (get_collection, no __getitem__) lands on the row, the engine re-derives
+     the online price (never the stale discounted_price) and the PARENT is
+     queued; mark_dirty=False mirrors the row and queues nothing
   4. deactivating a child DENIES + zeroes ITS variant on the parent's listing
      -- never productUpdate; the parent twin is untouched; the take-down
      route on a child REPORTS with zero network
@@ -39,6 +41,10 @@ the test red -- table in the PR body):
      parent-is-a-child are 422s
   9. _needs_repair is True until the child row has gids (pins the runbook's
      create -> stamp order); a parent update never re-sends productOptions
+ 10. the runbook: creates + links + seeds opening stock through the doors;
+     a second press is refused; a row that raises AFTER the door wrote (and
+     any exception, not only an assert) still lands in the reversal list,
+     built from the input skus; the mirror-off and missing-input fences
 
 Every Shopify call is a spy or a raiser. No network, no Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_variant_of_rule.py -q
@@ -485,14 +491,19 @@ def test_child_price_and_barcode_ride_the_parents_price_push(monkeypatch):
     assert "productOptions" not in json.dumps(spy.calls)
 
     # an mrp EDIT on the child: the row moves, the engine re-derives the online
-    # price (a stale discounted_price must never ship), the PARENT is queued
+    # price (a stale discounted_price must never ship), the PARENT is queued.
+    # Through _Conn -- the DatabaseConnection shape BOTH real doors pass
+    # (get_collection, NO __getitem__): the engine subscripts db[...] inside
+    # fail-soft excepts, so an un-unwrapped wrapper makes the recompute a
+    # silent no-op and the next push ships the stale 45700 with mrp 47000.
     db["catalog_variants"].update_one(
         {"sku": CHILD_SKU},
         {"$set": {"discounted_price": 45700.0, "compare_at_price": 45700.0,
                   "online_price_meta": {"source": "rule", "pct": 0}}},
     )
+    assert not hasattr(_Conn, "__getitem__")
     pm.mirror_update_to_catalog_twin(
-        product_id=child_id, current=_spine(db, child_id), patch={"mrp": 47000.0}, db=db
+        product_id=child_id, current=_spine(db, child_id), patch={"mrp": 47000.0}, db=_Conn(db)
     )
     row = _row(db, CHILD_SKU)
     assert row["mrp"] == 47000.0 and row["discounted_price"] == 47000.0
@@ -640,6 +651,14 @@ def test_media_and_title_are_hands_off_for_a_child(monkeypatch):
     )
     assert _row(db, CHILD_SKU)["mrp"] == 47000.0
     assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True
+    assert _twin(db, "tw-child")["ecom"]["locally_modified"] is False
+    # the #1137 opt-out: the row still mirrors, NOTHING is queued
+    db["catalog_products"].update_one({"id": "tw-parent"}, {"$set": {"ecom.locally_modified": False}})
+    pm.mirror_update_to_catalog_twin(
+        product_id="sp-child", current=_spine(db, "sp-child"), patch={"mrp": 48000.0}, db=db, mark_dirty=False
+    )
+    assert _row(db, CHILD_SKU)["mrp"] == 48000.0
+    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is False
     assert _twin(db, "tw-child")["ecom"]["locally_modified"] is False
 
 
@@ -839,9 +858,12 @@ def test_runbook_creates_links_and_seeds_opening_stock_through_the_doors(monkeyp
     assert units[0]["source"] == "OPENING_STOCK" and units[0]["created_by"] == "u-admin"
     assert db["opening_stock_batches"].find_one({"batch_id": out["commit"]["summary"]["batch_id"]})["lines"][0]["sku"] == CHILD_SKU
     assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: 1, CHILD_SKU: 1}
-    rev = runbook.reversal_list(db, [made], out["commit"]["summary"]["batch_id"])
+    rev = runbook.reversal_list(db, [CHILD_SKU], out["commit"]["summary"]["batch_id"])
     assert rev["products_product_id"] == [made["product_id"]] and rev["catalog_variants_sku"] == [CHILD_SKU]
+    assert rev["catalog_products_id"] == [made["twin_id"]]
     assert len(rev["stock_units"]) == 1 and rev["opening_stock_batches"] == [out["commit"]["summary"]["batch_id"]]
+    # without the batch id in hand the batch is found by its lines
+    assert runbook.reversal_list(db, [CHILD_SKU])["opening_stock_batches"] == [out["commit"]["summary"]["batch_id"]]
 
     # a second press is REFUSED by the fences (sku + gid + batch line)
     problems = runbook.row_fences(db, [_large_row()], product_repo)
@@ -861,3 +883,57 @@ def test_runbook_fences_refuse_a_dirty_parent_and_a_wrong_gid():
     assert any("!= the Large variant's product" in p for p in runbook.row_fences(db, [wrong], product_repo))
     assert runbook.in_sync_window(datetime(2026, 9, 6, 19, 40, tzinfo=timezone.utc))  # 01:10 IST
     assert not runbook.in_sync_window(datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc))  # 17:30 IST
+
+
+def _runbook_repos(db):
+    return dict(product_repo=ProductRepository(db["products"]),
+                variant_repo=CatalogVariantRepository(db["catalog_variants"]),
+                audit_repo=AuditRepository(db["audit_logs"]))
+
+
+def test_runbook_partial_run_lists_the_row_that_raised_after_the_door_wrote(monkeypatch):
+    """create_variant_of raises on a post-write drift AFTER the spine + twin +
+    row exist: the reversal list must still name them (built from the input
+    skus, never from the rows that returned) and the sku fence must then
+    refuse a re-run."""
+    db = _world(seed_child=False)
+    _wire_door(monkeypatch, db)
+    user = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"], "active_store_id": PUNE}
+    monkeypatch.setattr(runbook, "variants_for_product", lambda db, twin: [])  # the drift
+    record = {}
+    with pytest.raises(AssertionError):
+        runbook.apply_run(db, [_large_row()], user, record=record, **_runbook_repos(db))
+    assert record["created"] == [] and record["error"].startswith("AssertionError")
+    spine = db["products"].find_one({"sku": CHILD_SKU})
+    assert spine is not None, "the door wrote before the assert fired"
+    rev = record["reversal"]
+    assert rev["products_product_id"] == [spine["product_id"]]
+    assert rev["catalog_products_id"] == [spine["pim_product_id"]]
+    assert rev["catalog_variants_sku"] == [CHILD_SKU]
+    assert rev["stock_units"] == [] and rev["opening_stock_batches"] == []
+    assert any("already holds this sku" in p for p in runbook.row_fences(db, [_large_row()], ProductRepository(db["products"])))
+
+
+def test_runbook_records_the_reversal_on_any_exception_not_only_an_assert(monkeypatch):
+    db = _world(seed_child=False)
+    user = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"], "active_store_id": PUNE}
+
+    def _refuse(*a, **k):
+        raise pm.ProductMasterError("mirror target lost", status=503)
+
+    monkeypatch.setattr(pm, "create_via_door", _refuse)
+    record = {}
+    with pytest.raises(pm.ProductMasterError):
+        runbook.apply_run(db, [_large_row()], user, record=record, **_runbook_repos(db))
+    assert record["error"] == "ProductMasterError: mirror target lost"
+    assert record["reversal"]["products_product_id"] == [] and "note" in record["reversal"]
+
+
+def test_runbook_fences_refuse_mirror_off_and_a_missing_input(monkeypatch, tmp_path):
+    db = _world(seed_child=False)
+    monkeypatch.setattr(pm, "mirror_enabled", lambda: False)
+    problems = runbook.row_fences(db, [_large_row()], ProductRepository(db["products"]))
+    assert any("mirror_enabled is OFF" in p for p in problems)
+    with pytest.raises(SystemExit) as exc:
+        runbook.load_input(str(tmp_path / "gone.json"))
+    assert "does not exist" in str(exc.value) and runbook.INPUT_SHA256 in str(exc.value)
