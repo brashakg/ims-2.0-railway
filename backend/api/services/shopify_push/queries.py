@@ -177,6 +177,21 @@ mutation imsProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
   }
 }
 """
+# READ-ONLY: the media a live product carries today, for the adoption
+# runbook (scripts/adopt_shopify_media_map.py) that claims pre-media_map media
+# as IMS-owned by a positive identity match (media.match_media_to_photos).
+# originalSource is the url Shopify was handed at attach; image.url the CDN
+# copy (its file name is the only trace of the source name); alt as set.
+_PRODUCT_MEDIA_QUERY = """
+query imsProductMedia($id: ID!) {
+  product(id: $id) {
+    id
+    media(first: 250) {
+      nodes { id alt ... on MediaImage { image { url } originalSource { url } } }
+    }
+  }
+}
+"""
 # Shopify refuses the 251st media on a product ("Limit of 250 media per product
 # reached" -- a July re-press hit it). The pass refuses BEFORE the call, with a
 # code the sweep can show, instead of piling up to the wall.

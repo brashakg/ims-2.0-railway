@@ -8,7 +8,9 @@ helpers.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 import os
+import re
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -194,6 +196,98 @@ def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
     return out
 
 
+# Shopify renames a file that collides with one already in Files
+# ("rb-front.jpg" -> "rb-front_<uuid>.jpg", older uploads "_<hex>") and serves
+# resized copies as "<name>_600x600[@2x]"; none of those suffixes is part of
+# the photograph's identity.
+_STEM_SUFFIX = re.compile(
+    r"(_\d+x\d+(@2x)?"
+    r"|_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|_[0-9a-f]{16,40})$",
+    re.I,
+)
+
+
+def _file_stem(url: str) -> str:
+    """The FILE-NAME identity of a url: the path's basename with the query,
+    the extension and Shopify's collision / size suffixes stripped. '' when
+    there is no basename. Pure."""
+    name = urlsplit(str(url or "")).path.rsplit("/", 1)[-1]
+    name = re.sub(r"\.[a-z0-9]{2,5}$", "", name, flags=re.I)
+    while True:
+        stripped = _STEM_SUFFIX.sub("", name)
+        if stripped == name:
+            return name
+        name = stripped
+
+
+def match_media_to_photos(
+    photos: List[str], shopify_media: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """PURE: pair each IMS photo url with the ONE Shopify media that positively
+    identifies as that photograph -- the adoption rule for products that went
+    live before ``ecom.media_map`` existed (scripts/adopt_shopify_media_map.py).
+
+    A media is the photo when (any one suffices, all are exact equality):
+      R1  its ``originalSource.url`` IS the IMS url (the source we handed over);
+      R2  its ``alt`` IS the IMS url or the IMS file name;
+      R3  its CDN file name and the IMS url's file name have the same stem
+          (``_file_stem``: extension, query, ``_WxH`` / ``_uuid`` collision
+          suffixes ignored) -- the in-app uploader's ObjectId names survive
+          the round trip that way.
+    NEVER position or count: a claimed media can later be DELETED by the photo
+    pass when IMS drops the photo, so a guess is never a claim. A photo that
+    fits two media, or a media that two photos fit, is ambiguous and stays
+    unmatched (1:1 only).
+
+    Returns {map: [{url, id}] in IMS order for the photos that matched,
+    unmatched_photos: [url], unmanaged: [media id] (every media no photo
+    claimed -- hand uploads, connector media -- left exactly where it is)}.
+    Adopt only when ``unmatched_photos`` is empty and ``map`` is not."""
+    nodes = []
+    for n in shopify_media or []:
+        if not isinstance(n, dict) or not n.get("id"):
+            continue
+        cdn = str((n.get("image") or {}).get("url") or "").strip()
+        nodes.append(
+            (
+                str(n["id"]),
+                str((n.get("originalSource") or {}).get("url") or "").strip(),
+                str(n.get("alt") or "").strip(),
+                _file_stem(cdn),
+            )
+        )
+    hits: Dict[str, List[str]] = {}
+    for url in photos:
+        name = urlsplit(url).path.rsplit("/", 1)[-1]
+        stem = _file_stem(url)
+        hits[url] = [
+            mid
+            for mid, src, alt, mstem in nodes
+            if (src and src == url)
+            or (alt and alt in (url, name))
+            or (stem and stem == mstem)
+        ]
+    claimed: Dict[str, int] = {}
+    for ids in hits.values():
+        for mid in ids:
+            claimed[mid] = claimed.get(mid, 0) + 1
+    media_map: List[Dict[str, str]] = []
+    unmatched: List[str] = []
+    for url in photos:
+        ids = hits[url]
+        if len(ids) == 1 and claimed[ids[0]] == 1:
+            media_map.append({"url": url, "id": ids[0]})
+        else:
+            unmatched.append(url)
+    owned_ids = {r["id"] for r in media_map}
+    return {
+        "map": media_map,
+        "unmatched_photos": unmatched,
+        "unmanaged": [mid for mid, _s, _a, _m in nodes if mid not in owned_ids],
+    }
+
+
 def plan_product_media(
     product: Dict[str, Any],
     photos: List[str],
@@ -273,21 +367,25 @@ def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) 
     )
 
 
-def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> None:
+def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> bool:
     """Persist ecom.media_map (read-merge-write of the ecom sub-doc, the
-    _writeback_product idiom). NEVER touches locally_modified. Fail-soft."""
+    _writeback_product idiom). NEVER touches locally_modified. Fail-soft;
+    True when the twin now holds ``media_map``, False when it could not be
+    located or written (the adoption runbook reports on it)."""
     try:
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
         if doc is None:
-            return
+            return False
         ecom = dict(doc.get("ecom") or {})
         if ecom.get("media_map") == media_map:
-            return
+            return True
         ecom["media_map"] = media_map
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_PUSH] media_map write-back failed %s: %s", product_id, exc)
+        return False
 
 
 def _in_ims_order(owned: List[Dict[str, str]], photos: List[str]) -> List[Dict[str, str]]:
