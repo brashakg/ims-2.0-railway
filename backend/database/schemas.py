@@ -107,6 +107,11 @@ STORE_SCHEMA = {
         },
         "is_active": {"bsonType": "bool"},
         "is_hq": {"bsonType": "bool"},
+        # Per-store Shopify location (owner ruling 2026-09-06): the gid the shop's
+        # own on-hand is written at, and its display name. Absent / "" = unmapped.
+        # Never set on an ONLINE store; unique across stores (routers/stores.py).
+        "shopify_location_id": {"bsonType": "string"},
+        "shopify_location_name": {"bsonType": ["string", "null"]},
         "created_at": {"bsonType": "date"}
     }
 }
