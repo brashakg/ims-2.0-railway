@@ -418,6 +418,15 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/sync-live",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # SHOPIFY LOCATIONS READ (owner ruling 2026-09-06 -- one location per
+    # physical shop): feeds the Organization page's per-store dropdown. Same
+    # {ADMIN, SUPERADMIN} set as every other row in this push family, a strict
+    # subset of the module's :read union, so no capability broadening.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/push/locations",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/catalogue ---  (Share collection as PDF + temp collections)
     # Catalogue sharing is a broad staff activity (anyone helping a customer),
     # so these are AUTHENTICATED -- the same posture as the internal catalogue

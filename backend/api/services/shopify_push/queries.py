@@ -191,9 +191,15 @@ _MEDIA_LIMIT = 250
 #     exactly what the six live products were doing);
 #   * inventorySetQuantities -- the ABSOLUTE available quantity at that
 #     location (idempotent on retry; needs write_inventory).
+# first: 50 -- every location the shop has (per-store locations, owner ruling
+# 2026-09-06: one per physical shop, so the page must never truncate the list
+# the Organization dropdown is fed from). address.city/province ride along so
+# the dropdown can tell two same-named locations apart; read-only.
 _LOCATIONS_QUERY = """
 query imsLocations {
-  locations(first: 10) { nodes { id name isActive fulfillsOnlineOrders } }
+  locations(first: 50) {
+    nodes { id name isActive fulfillsOnlineOrders shipsInventory address { city province } }
+  }
 }
 """
 

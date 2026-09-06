@@ -235,6 +235,44 @@ async def resolve_online_location_id(db) -> Dict[str, Any]:
     return {"location_id": gid, "source": "looked_up", "name": node.get("name")}
 
 
+async def list_locations(db) -> Dict[str, Any]:
+    """Every Shopify location, for the Organization page's per-store "Shopify
+    location" dropdown (GET /online-store/push/locations) and the store save
+    that copies the display name: ``{mode, reason, locations: [{id, name,
+    isActive, fulfillsOnlineOrders, shipsInventory, city, province}]}``.
+
+    DARK (any of the three gates off) -> ``locations == []`` plus the gate
+    reason and ZERO network. A Shopify error -> ``[]`` plus the error text;
+    never raises. Read-only (read_locations); nothing is cached or persisted
+    -- the mapping lives on the store record, not here.
+    """
+    live, reason = _live_or_reason(db)
+    if not live:
+        return {"mode": MODE_SIMULATED, "reason": reason, "locations": []}
+    try:
+        body = await _graphql(db, _LOCATIONS_QUERY, {})
+    except Exception as exc:  # noqa: BLE001 -- fail-soft read
+        return {"mode": MODE_LIVE, "reason": f"location lookup failed: {exc}", "locations": []}
+    nodes = ((body.get("data") or {}).get("locations") or {}).get("nodes") or []
+    out: List[Dict[str, Any]] = []
+    for n in nodes:
+        if not isinstance(n, dict) or not n.get("id"):
+            continue
+        addr = n.get("address") if isinstance(n.get("address"), dict) else {}
+        out.append(
+            {
+                "id": _as_shopify_gid(n["id"], "Location"),
+                "name": n.get("name"),
+                "isActive": bool(n.get("isActive")),
+                "fulfillsOnlineOrders": bool(n.get("fulfillsOnlineOrders")),
+                "shipsInventory": bool(n.get("shipsInventory")),
+                "city": addr.get("city"),
+                "province": addr.get("province"),
+            }
+        )
+    return {"mode": MODE_LIVE, "reason": None, "locations": out}
+
+
 # ---------------------------------------------------------------------------
 # Per-product helpers (pure)
 # ---------------------------------------------------------------------------

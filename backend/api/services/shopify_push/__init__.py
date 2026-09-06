@@ -204,6 +204,7 @@ from .inventory import (  # noqa: F401
     stored_online_location_id,
     pick_online_location,
     resolve_online_location_id,
+    list_locations,
     inventory_policy_for,
     product_skus,
     product_variant_gids,
