@@ -28,6 +28,10 @@ from typing import Dict
 # precondition): the InventoryItem gid is what the stock write-back resolver
 # needs (catalog_variants.shopify_inventory_item_id) to sync the listed
 # quantity down after an in-store sale. Read-only; no extra network call.
+# media(first: 250) -- EVERY media id (+ the CDN url of an image) rides on
+# the create/update response so the photo pass (media.sync_product_media)
+# can diff IMS's photo list against what is on Shopify with NO extra query.
+# 250 is Shopify's per-product media ceiling, so the page is always complete.
 _PRODUCT_CREATE = """
 mutation imsProductCreate($input: ProductInput!) {
   productCreate(input: $input) {
@@ -38,7 +42,7 @@ mutation imsProductCreate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
-      media(first: 1) { nodes { id } }
+      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -59,7 +63,7 @@ mutation imsProductUpdate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
-      media(first: 1) { nodes { id } }
+      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -151,6 +155,32 @@ mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
   }
 }
 """
+
+# The photo pass (sync audit gap #3, owner 2026-09-06: "replacing or removing a
+# photo updates Shopify"). Delete takes the media ids IMS attached and no
+# longer wants; reorder moves the IMS-owned media to IMS's display order.
+# Both use `mediaUserErrors` (like productCreateMedia), not `userErrors`.
+_PRODUCT_DELETE_MEDIA = """
+mutation imsProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
+  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+    deletedMediaIds
+    mediaUserErrors { field message code }
+  }
+}
+"""
+
+_PRODUCT_REORDER_MEDIA = """
+mutation imsProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
+  productReorderMedia(id: $id, moves: $moves) {
+    job { id }
+    mediaUserErrors { field message code }
+  }
+}
+"""
+# Shopify refuses the 251st media on a product ("Limit of 250 media per product
+# reached" -- a July re-press hit it). The pass refuses BEFORE the call, with a
+# code the sweep can show, instead of piling up to the wall.
+_MEDIA_LIMIT = 250
 
 # Online STOCK (owner ruling 2026-09-07, sync-audit gap #1 "make website
 # quantities real"). Three documents:

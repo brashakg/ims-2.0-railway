@@ -1748,6 +1748,15 @@ def _sku_conflict_target(
     )
 
 
+def pim_display_name(spine: Dict[str, Any]) -> Optional[str]:
+    """THE twin's display name / Shopify title, from the spine: the spine's own
+    ``name`` (minted at create by product_naming, or set by a rename), else the
+    deterministic builder. ONE formula -- _build_pim_doc uses it at create and
+    mirror_update_to_catalog_twin re-derives it after an edit (sync audit gap
+    #3: a rename never reached Shopify's title). Pure; never raises."""
+    return spine.get("name") or build_product_name(spine) or None
+
+
 def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     """Project the spine + its attributes into a catalog_products PIM doc.
 
@@ -1765,7 +1774,7 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     manual Online Store push (see the comment on that field below).
     """
     attrs = dict(spine.get("attributes") or {})
-    name = spine.get("name") or build_product_name(spine)
+    name = pim_display_name(spine)
     seo_title = build_seo_title(spine)
     handle = build_handle(spine)
     seo_description = build_seo_description(spine)
@@ -2560,10 +2569,11 @@ def mirror_update_to_catalog_twin(
         description (descriptionHtml), images (the photograph the push
         attaches and the publish gate reads), brand (vendor + brand_ tag),
         category (productType), attributes (ims.* metafields + filter tags)
-        or tags. A description-only edit DOES queue -- the pending count must
-        be truthful about copy changes. cost / tier / hsn / gst / is_active /
-        model are in NO pushed payload: queuing on them would send a push
-        that changes nothing on Shopify.
+        or tags, or when the re-derived display name (pim_display_name --
+        the Shopify title) differs from the twin's. A description-only edit
+        DOES queue -- the pending count must be truthful about copy changes.
+        cost / tier / hsn / gst / is_active / model are in NO pushed payload:
+        queuing on them would send a push that changes nothing on Shopify.
       * twin key: current.pim_product_id first (door-created products key the
         twin on that separate uuid), spine product_id as the legacy /
         convergence fallback.
@@ -2632,11 +2642,30 @@ def mirror_update_to_catalog_twin(
             )
         ):
             cat_patch["ecom.locally_modified"] = True
+        twin_id = current.get("pim_product_id") or product_id
+        # THE NAME (sync audit gap #3, owner 2026-09-06: "renaming updates
+        # Shopify"). The twin's name/title is what build_product_input sends
+        # as the Shopify title, and no edit ever recomputed it. On an explicit
+        # rename re-derive it with the SAME formula the create door uses
+        # (pim_display_name) and queue the twin only when the title actually
+        # changed. ONLY a rename: the spine never recomputes `name` on a
+        # brand / model edit (product_naming honours a set name verbatim), so
+        # nothing else can move the title.
+        twin: Optional[Dict[str, Any]] = None
+        if "name" in patch:
+            twin = cat.find_one({"id": twin_id}) or {}
+            new_name = pim_display_name({**current, **patch})
+            # Compare against what Shopify actually shows: build_product_input
+            # reads the twin's `title` first, then `name`.
+            if new_name and new_name != (twin.get("title") or twin.get("name")):
+                cat_patch["name"] = new_name
+                cat_patch["title"] = new_name
+                cat_patch["ecom.locally_modified"] = True
         if not cat_patch:
             return
-        twin_id = current.get("pim_product_id") or product_id
         if cat_patch.get("ecom.locally_modified"):
-            twin = cat.find_one({"id": twin_id}) or {}
+            if twin is None:
+                twin = cat.find_one({"id": twin_id}) or {}
             if not (twin.get("ecom") or {}).get("status"):
                 cat_patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": cat_patch})

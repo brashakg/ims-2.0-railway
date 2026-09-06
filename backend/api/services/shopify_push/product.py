@@ -40,7 +40,7 @@ from .variants import (
 )
 from .publish import _publish_to_online_store
 from .inventory import plan_product_stock, sync_product_stock
-from .media import _attach_product_photos, product_photo_urls
+from .media import plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -194,6 +194,7 @@ async def push_product(
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
             stock=plan_product_stock(db, product, variants),
+            photos=plan_product_media(product, photos),
             tags=plan_product_tags(product, ims_tags),
         )
 
@@ -294,24 +295,26 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
-        # THE PHOTOGRAPH, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
+        # THE PHOTOGRAPHS, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
         # photo on Shopify" are different questions, and only the second one
         # protects the storefront -- photographs used to push on a SEPARATE,
         # LATER press (push_image over the design queue), so a product could go
         # visible before its photo arrived. The refusal above proved IMS has a
         # photograph; this puts it on Shopify before anything is published.
         #
-        # Only when the Shopify product carries NO media yet (read straight off
-        # the create/update response's media selection -- no extra call): that
-        # covers the create, repairs a product an OLDER press put up bare, and
-        # can never pile a duplicate copy onto an already-photographed listing.
-        photo_summary = None
+        # Sync audit gap #3 (owner 2026-09-06): the pass now DIFFS IMS's photo
+        # list against the media IMS owns on Shopify (read straight off the
+        # create/update response's media selection -- no extra query) --
+        # attaching what is missing, deleting what IMS dropped, reordering to
+        # IMS order -- instead of attaching only onto a bare product. The
+        # ownership rule (media.py) keeps hand-uploaded media untouched.
         existing_media = ((prod.get("media") or {}).get("nodes")) or []
-        if new_gid and not existing_media:
-            photo_summary = await _attach_product_photos(db, new_gid, photos)
-        photo_on_shopify = bool(existing_media) or bool(
-            (photo_summary or {}).get("attached")
-        )
+        photo_summary = None
+        if new_gid:
+            photo_summary = await sync_product_media(
+                db, product, new_gid, photos, existing_media
+            )
+        photo_on_shopify = bool((photo_summary or {}).get("on_shopify"))
         # STOCK, IN THIS SAME PRESS, BEFORE THE PUBLISH (owner ruling
         # 2026-09-07 -- the website sells only what the shops can ship). Every
         # variant gid this press knows -- the response nodes, whatever seeding
