@@ -440,9 +440,11 @@ function StoreModal({
   // is a Shopify location; IMS writes that shop's own on-hand there). ONE read
   // of Shopify's locations; DARK => [] and the store's current mapping is kept
   // as its own option so a Save cannot clear it by accident. The preselect is
-  // FE-only and only for a shop with NO mapping yet: exactly one location whose
-  // name equals the store's name or code (utils/shopifyLocationMatch -- never a
-  // substring). Nothing reaches the backend until the owner presses Save.
+  // FE-only and only for a shop with NO mapping yet: exactly one FREE location
+  // (not already held by another shop -- that option is disabled and a Save
+  // would 409) whose name equals the store's name or code
+  // (utils/shopifyLocationMatch -- never a substring). Nothing reaches the
+  // backend until the owner presses Save.
   const online = isOnlineStore({ store_id: store?.store_id, store_type: form.store_type });
   const [locRead, setLocRead] = useState<ShopifyLocationsRead | null>(null);
   const locs = locRead?.locations ?? [];
@@ -454,7 +456,7 @@ function StoreModal({
       setLocRead(r);
       setForm((p) => {
         if (p.shopify_location_id) return p;
-        const hit = exactLocationMatch(r.locations, p);
+        const hit = exactLocationMatch(r.locations.filter((l) => !l.mapped_store_id), p);
         if (!hit) return p;
         return { ...p, shopify_location_id: hit, shopify_location_name: r.locations.find((l) => l.id === hit)?.name ?? null };
       });

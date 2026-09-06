@@ -9,6 +9,8 @@
 //     insensitive) opens with that location preselected, and Save sends it;
 //   * a shop whose name is only a SUBSTRING of a location name opens on
 //     "not mapped" -- never a hint-picker word match;
+//   * a location ANOTHER shop already holds is never preselected, even on an
+//     exact name match (it is offered disabled; a Save would 409);
 //   * a mapped shop keeps its mapping even when the locations read is DARK
 //     (the current gid is its own option) and shows the name as a badge;
 //   * an ONLINE store has no badge and no dropdown.
@@ -45,6 +47,7 @@ const STORES = [
   { ...base, store_id: 'BV-BOK-03', store_code: 'BV-BOK-03', store_name: 'Sector 4' },
   { ...base, store_id: 'BV-BOK-02', store_code: 'BV-BOK-02', store_name: 'Sec 4 Bokaro',
     shopify_location_id: BOKARO, shopify_location_name: 'Better Vision Sector 4' },
+  { ...base, store_id: 'BV-RNC-01', store_code: 'BV-RNC-01', store_name: 'Ranchi Main' },
   { ...base, store_id: 'BV-ONLINE-01', store_code: 'BV-ONLINE-01', store_name: 'Web', store_type: 'ONLINE' },
 ];
 
@@ -55,6 +58,8 @@ const LOCATIONS = {
     { id: BOKARO, name: 'Better Vision Sector 4', isActive: true, city: 'Bokaro', mapped_store_id: 'BV-BOK-02', mapped_store_code: 'BV-BOK-02' },
     { id: DHN, name: 'hirapur-dhn', isActive: true, city: 'Dhanbad', mapped_store_id: null },
     { id: 'gid://shopify/Location/2', name: 'Gangadham Pune', isActive: true, mapped_store_id: null },
+    // exact name match for BV-RNC-01, but ANOTHER shop already holds it
+    { id: 'gid://shopify/Location/5', name: 'Ranchi Main', isActive: true, mapped_store_id: 'BV-RNC-02', mapped_store_code: 'BV-RNC-02' },
   ],
 };
 
@@ -101,6 +106,16 @@ describe('StoreModal Shopify location', () => {
     const taken = screen.getByRole('option', { name: /Better Vision Sector 4/ }) as HTMLOptionElement;
     expect(taken.disabled).toBe(true);
     expect(taken.textContent).toContain('mapped to BV-BOK-02');
+  });
+
+  it('never preselects a location another shop already holds, even on an exact name match', async () => {
+    render(<OrganizationPage />);
+    await openStore('Ranchi Main');
+    const select = (await screen.findByLabelText('Shopify location')) as HTMLSelectElement;
+    const taken = (await screen.findByRole('option', { name: /Ranchi Main/ })) as HTMLOptionElement;
+    expect(taken.disabled).toBe(true);
+    expect(taken.textContent).toContain('mapped to BV-RNC-02');
+    expect(select.value).toBe('');
   });
 
   it('keeps an existing mapping when the read is DARK and shows it as a badge', async () => {
