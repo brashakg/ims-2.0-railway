@@ -22,7 +22,11 @@ each REVERT-PROOF (revert the named piece and the test goes red):
   7. scripts/migrate_store_locations.py --set routes through the router's
      validator (ONE rule): the same ONLINE / duplicate refusals; a clean plan
      writes through the store repository; Gangadham Pune (by code OR by
-     location number) is refused at plan time unless --i-know-pune.
+     location number) is refused at plan time unless --i-know-pune; two --set
+     rows naming the same location in one run are refused (the router's
+     check reads DB state neither row has written yet); an identical
+     re-apply is skipped and counted, not re-stamped by the REAL repository;
+     a refused write exits 1 before the registry $unset.
   8. ONE holder reader: the validator's "who holds this gid" is
      stores_util.physical_stores -- the same list the dropdown joins against
      -- so an ONLINE or inactive doc carrying a gid blocks nobody; flipping a
@@ -375,7 +379,7 @@ def test_script_clean_plan_promotes_digits_and_writes_through_the_repo(monkeypat
     plan = mod.plan_sets(db, mod.parse_sets(["BV-BOK-02=58793230523"]))
     assert [r["error"] for r in plan] == [None]
     assert plan[0]["gid"] == BOKARO and plan[0]["store_id"] == "BV-BOK-02"
-    assert mod.apply_sets(db, plan) == 1
+    assert mod.apply_sets(db, plan) == {"written": 1, "identical": 0, "failed": 0}
     assert db.get_collection("stores").find_one({"store_code": "BV-BOK-02"})["shopify_location_id"] == BOKARO
     # Pune untouched: the script maps only what it is told to
     assert "shopify_location_id" not in db.get_collection("stores").find_one({"store_code": "BV-PUN-01"})
@@ -405,7 +409,7 @@ def test_script_refuses_pune_by_code_or_by_location_number(monkeypatch):
     assert "49 opening-stock" in mod.PUNE_REFUSAL and "--i-know-pune" in mod.PUNE_REFUSAL
     assert all(r["store_id"] is None for r in plan)
     # a refused row never reaches the repository
-    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == 0
+    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == {"written": 0, "identical": 0, "failed": 0}
     for code in ("BV-PUN-01", "BV-DHN-02"):
         assert "shopify_location_id" not in db.get_collection("stores").find_one({"store_code": code})
 
@@ -422,6 +426,86 @@ def test_script_i_know_pune_lifts_the_guard_but_not_the_routers_rules(monkeypatc
     )
     assert plan[0]["error"] is None and plan[0]["gid"] == PUNE and plan[0]["store_id"] == PUNE_UUID
     assert plan[1]["error"].startswith("400") and "Online stores" in plan[1]["error"]
+
+
+def test_script_refuses_a_duplicate_gid_within_one_run(monkeypatch):
+    """Two --set rows naming the SAME location in one run: the router's
+    duplicate check reads DB state, which neither row has written yet, so
+    both would pass it and apply would put one shelf on two stores. The plan
+    refuses the second row (normalised compare: bare digits vs gid form)."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    mod = _script()
+    db = StrictDB()
+    db.seed("stores", [_store("BV-BOK-02"), _store("BV-DHN-02"), _store("WIZ-DHN-01")])
+    plan = mod.plan_sets(db, mod.parse_sets([
+        "BV-BOK-02=58793230523",
+        "BV-DHN-02=gid://shopify/Location/58793230523",   # same shelf, gid form
+        "WIZ-DHN-01=1",                                    # unrelated, stays clean
+    ]))
+    first, dup, other = plan
+    assert first["error"] is None and first["gid"] == BOKARO
+    assert dup["error"].startswith("409") and "duplicate within this run" in dup["error"]
+    assert "BV-BOK-02" in dup["error"]
+    assert other["error"] is None
+    # a refused row never reaches the repository; the clean rows write one shelf each
+    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == {"written": 2, "identical": 0, "failed": 0}
+    holders = [d["store_code"] for d in db.get_collection("stores").find({"shopify_location_id": BOKARO})]
+    assert holders == ["BV-BOK-02"]
+
+
+def test_script_identical_re_apply_is_skipped_not_rewritten(monkeypatch):
+    """The REAL StoreRepository stamps updated_at into every $set, so its
+    modified_count reports True on an idempotent re-apply. The plan compares
+    the doc first: an identical gid + name is skipped, counted 'identical',
+    and the doc (updated_at included) is untouched. With the gates dark the
+    name read answers None; a doc whose gid is unchanged keeps the name it
+    already shows instead of having it blanked."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    mod = _script()
+    db = StrictDB()
+    db.seed("stores", [
+        _store("BV-BOK-02"),
+        _store("BV-DHN-02", shopify_location_id="gid://shopify/Location/77", shopify_location_name="HIRAPUR-DHN"),
+    ])
+    db.seed("storefronts", [{"storefront_id": "BV", "online_location_id": BOKARO}])
+    sets = mod.parse_sets(["BV-BOK-02=58793230523", "BV-DHN-02=77"])
+    plan = mod.plan_sets(db, sets)
+    assert [r["same"] for r in plan] == [False, True]
+    assert plan[1]["name"] == "HIRAPUR-DHN"  # kept from the doc, not blanked by the dark read
+    assert mod.apply_plan(db, plan) == {"written": 1, "identical": 1, "failed": 0, "unset": 1}
+    stores = db.get_collection("stores")
+    bok_after_first = dict(stores.find_one({"store_code": "BV-BOK-02"}))
+    assert bok_after_first["shopify_location_id"] == BOKARO and "updated_at" in bok_after_first
+    dhn = dict(stores.find_one({"store_code": "BV-DHN-02"}))
+    assert dhn["shopify_location_name"] == "HIRAPUR-DHN" and "updated_at" not in dhn
+
+    plan2 = mod.plan_sets(db, sets)
+    assert [r["same"] for r in plan2] == [True, True]
+    second = mod.apply_plan(db, plan2)
+    # `unset` is not pinned on the re-run: StrictDB's update_one reports
+    # modified_count 1 for ANY matched doc (real Mongo says 0 for a no-op $unset).
+    assert {k: second[k] for k in ("written", "identical", "failed")} == {"written": 0, "identical": 2, "failed": 0}
+    assert dict(stores.find_one({"store_code": "BV-BOK-02"})) == bok_after_first
+    row = db.get_collection("storefronts").find_one({"storefront_id": "BV"})
+    assert not any(k in row for k in mod._REGISTRY_KEYS)
+
+
+def test_script_failed_write_stops_before_the_registry_unset(monkeypatch):
+    """A mapping write the repository refused (it swallows the Mongo error and
+    returns False) exits 1 BEFORE the registry $unset, so the #1125 pooled
+    row is never removed while a store is left unmapped."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    mod = _script()
+    monkeypatch.setattr(mod.StoreRepository, "update", lambda self, *_a, **_k: False)
+    db = StrictDB()
+    db.seed("stores", [_store("BV-BOK-02")])
+    db.seed("storefronts", [{"storefront_id": "BV", "online_location_id": BOKARO}])
+    plan = mod.plan_sets(db, mod.parse_sets(["BV-BOK-02=58793230523"]))
+    assert plan[0]["error"] is None and not plan[0]["same"]
+    with pytest.raises(SystemExit) as exc:
+        mod.apply_plan(db, plan)
+    assert exc.value.code == 1
+    assert db.get_collection("storefronts").find_one({"storefront_id": "BV"})["online_location_id"] == BOKARO
 
 
 # ---------------------------------------------------------------------------
