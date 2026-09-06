@@ -397,10 +397,11 @@ def test_script_refuses_pune_by_code_or_by_location_number(monkeypatch):
     db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-DHN-02")])
     plan = mod.plan_sets(db, mod.parse_sets([
         "BV-PUN-01=76684427513",                          # Pune's code
+        "BV-PUN-01=1",                                    # Pune's code with a FOREIGN number: the code branch alone
         "bv-dhn-02=76684427513",                          # Pune's number on another code
         "BV-DHN-02=gid://shopify/Location/76684427513",   # the gid form
     ]))
-    assert [r["error"] for r in plan] == [mod.PUNE_REFUSAL] * 3
+    assert [r["error"] for r in plan] == [mod.PUNE_REFUSAL] * 4
     assert "49 opening-stock" in mod.PUNE_REFUSAL and "--i-know-pune" in mod.PUNE_REFUSAL
     assert all(r["store_id"] is None for r in plan)
     # a refused row never reaches the repository
