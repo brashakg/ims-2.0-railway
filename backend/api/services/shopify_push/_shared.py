@@ -108,10 +108,11 @@ class PushResult:
     # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
     # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
     membership: Optional[Any] = None
-    # Product pushes only: the photograph side channel ({attached: n} or
-    # {attached: 0, error}). Set when THIS press attached the product's photos
-    # to Shopify (productCreateMedia); None when the Shopify product already
-    # carried media, or the push never got that far.
+    # Product pushes only: the photograph side channel. SIMULATED -> the
+    # media diff plan {attach, delete, reorder, unmanaged, hands_off}; LIVE ->
+    # {attached, deleted, reordered, unmanaged, on_shopify, hands_off, error?,
+    # code?} from media.sync_product_media. None when the push never got that
+    # far (refusal, transport error).
     photos: Optional[Any] = None
     # Product pushes only: the STOCK side channel (owner ruling 2026-09-07 --
     # make website quantities real). SIMULATED -> the plan {policy, quantities,

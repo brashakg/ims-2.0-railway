@@ -262,8 +262,13 @@ from .menus import (  # noqa: F401
 )
 from .media import (  # noqa: F401
     _APP_IMAGE_PATH,
+    TOMBSTONES_COLLECTION,
+    MEDIA_LIMIT_CODE,
     product_photo_urls,
     _attach_product_photos,
+    owned_media,
+    plan_product_media,
+    sync_product_media,
     build_media_inputs,
     push_image,
     _user_errors_media,
