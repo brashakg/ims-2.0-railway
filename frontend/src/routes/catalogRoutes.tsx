@@ -37,7 +37,7 @@ const BuyDeskPage = lazy(() => import('../pages/catalog/BuyDeskPage'));
 const CataloguingScorecardPage = lazy(() => import('../pages/catalog/CataloguingScorecardPage'));
 // /catalog/quick-share — pick products -> share as a branded PDF / save a
 // temporary (auto-expiring) set. Broad staff surface (anyone helping a customer).
-const QuickSharePage = lazy(() => import('../pages/catalogue/QuickSharePage'));
+const QuickSharePage = lazy(() => import('../pages/catalog/QuickSharePage'));
 const PricingOffersPage = lazy(() => import('../pages/pricing/PricingOffersPage'));
 
 export const catalogRoutes = (

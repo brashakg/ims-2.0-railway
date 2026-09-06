@@ -10,6 +10,12 @@
 // used to open the GSTR-1 MODAL; it now navigates to the GSTR-1 PAGE. The
 // daily/monthly-sales "View" used to flip a useState tab; it now navigates to
 // the Sales URL and scrolls to the same element.
+//
+// The two inventory cards linked `/inventory?tab=transfers` / `?tab=stock`
+// until the Wave 2 split gave those sections real addresses; they now link
+// /inventory/transfers and /inventory/stock directly (?tab=stock was never a
+// valid tab and always fell through to the stock ledger, which is where the
+// legacy redirect still sends it).
 
 import { useNavigate } from 'react-router-dom';
 import {
@@ -207,7 +213,7 @@ export function ReportCardsGrid({ category }: { category: ReportSection }) {
                     </button>
                   ) : report.id === 'stock-report' || report.id === 'stock-movement' ? (
                     <button
-                      onClick={() => navigate(report.id === 'stock-movement' ? '/inventory?tab=transfers' : '/inventory?tab=stock')}
+                      onClick={() => navigate(report.id === 'stock-movement' ? '/inventory/transfers' : '/inventory/stock')}
                       className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
                     >
                       <Eye className="w-4 h-4" />

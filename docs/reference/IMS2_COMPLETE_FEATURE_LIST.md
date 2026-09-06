@@ -1,3 +1,7 @@
+> **STALE — do not cite for what exists.**
+> This file was last rebuilt 2026-05-29.
+> The live status is `PLAN_STATUS.md` at the repo root; verify a screen by grepping `frontend/src/routes/*.tsx`.
+
 # IMS 2.0 — COMPLETE FEATURE LIST
 ## Everything Avinash Requested Across All Conversations
 
