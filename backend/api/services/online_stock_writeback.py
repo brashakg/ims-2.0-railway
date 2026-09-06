@@ -261,6 +261,26 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     return out
 
 
+def online_quantities_for_skus(
+    db, skus: List[str], *, safety_buffer: Optional[int] = None
+) -> Dict[str, int]:
+    """THE online quantity rule -- the ONE number the website lists for a SKU:
+    pooled on-hand across every PHYSICAL store (never the stockless online
+    store's own rows) minus the oversell safety buffer, floored at 0. Used by
+    the POS-sale write-back, the product push's stock step and the whole-
+    catalogue stock sync; the nightly parity check compares against the same
+    pooled on-hand. STRICT: a SKU absent from the result has UNKNOWN on-hand
+    (spine/stock read failed) and must never be written as 0; an empty dict
+    for a non-empty request means the whole read failed."""
+    on_hand = _on_hand_for_skus(db, [s for s in dict.fromkeys(skus or []) if s], None)
+    if not on_hand:
+        return {}
+    from . import stock_allocation
+
+    buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
+    return {sku: stock_allocation.recommend_allocation(q, buf) for sku, q in on_hand.items()}
+
+
 async def writeback_skus(
     db,
     skus: List[str],
@@ -310,15 +330,12 @@ async def writeback_skus(
     # sibling service is broken.
     try:
         from . import online_catalog
-        from . import stock_allocation
         from agents.nexus_providers import shopify_set_inventory_available
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] deps unavailable: %s", exc)
         return summary
 
     summary["online_configured"] = online_catalog.online_mapping_available(db)
-
-    buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
 
     # 1. Resolve Shopify targets (inventory-item + location GIDs) from the IMS
     #    Mongo mapping. A SKU with no target is skipped -- and checked below for
@@ -330,10 +347,13 @@ async def writeback_skus(
         _record_run(db, summary)
         return summary
 
-    # 2. Compute on-hand once for the targeted SKUs -- POOLED across ALL stores
-    #    (store_id deliberately NOT passed: the online listing reflects the
-    #    whole chain's availability, never one shop's).
-    on_hand = _on_hand_for_skus(db, list(targets.keys()), None)
+    # 2. Compute the listed quantity once for the targeted SKUs -- THE ONE
+    #    rule (pooled across ALL physical stores minus the buffer; store_id
+    #    deliberately NOT passed: the online listing reflects the whole
+    #    chain's availability, never one shop's).
+    on_hand = online_quantities_for_skus(
+        db, list(targets.keys()), safety_buffer=safety_buffer
+    )
     if not on_hand:
         # UNKNOWN on-hand for the whole batch (lookup/aggregate failed or no
         # spine rows). An absolute stock WRITER must never fail soft to 0 --
@@ -382,7 +402,7 @@ async def writeback_skus(
                 summary["skipped_no_onhand"] += 1
                 continue
             else:
-                qty = stock_allocation.recommend_allocation(on_hand[sku], buf)
+                qty = on_hand[sku]
             res = await shopify_set_inventory_available(
                 db, tgt.get("inventory_item_id"), tgt.get("location_id"), qty
             )

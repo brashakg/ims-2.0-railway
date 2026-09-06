@@ -51,6 +51,17 @@ async def push_mode_status_resolved(db) -> Dict[str, Any]:
         if gid:
             status["online_store_publication_id"] = gid
             status["online_store_publication_source"] = "looked_up"
+    if status["is_live"] and not status.get("online_location_id"):
+        # Same argument for the stock location: the tile must be TRUE, and the
+        # answer lands in the cache + registry row the stock writers read.
+        from .inventory import resolve_online_location_id
+
+        loc = await resolve_online_location_id(db)
+        status["online_location_id"] = loc.get("location_id")
+        status["online_location_source"] = loc.get("source") or "unresolved"
+        if loc.get("code"):
+            status["online_location_code"] = loc["code"]
+            status["online_location_error"] = loc.get("error")
     return status
 
 

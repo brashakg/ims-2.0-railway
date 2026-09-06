@@ -111,6 +111,7 @@ from . import (
     menus,
     media,
     writeback,
+    inventory,
     product,
     webhooks,
 )
@@ -186,6 +187,28 @@ from .queries import (  # noqa: F401
     _PUBLICATIONS_QUERY,
     _ONLINE_STORE_PUBLICATION_NAME,
     _publication_id_cache,
+    _LOCATIONS_QUERY,
+    _VARIANTS_INVENTORY_UPDATE,
+    _INVENTORY_SET_QUANTITIES,
+    _INVENTORY_SET_MAX,
+    _online_location_cache,
+)
+from .inventory import (  # noqa: F401
+    ONLINE_LOCATION_UNRESOLVED,
+    ONLINE_LOCATION_AMBIGUOUS,
+    STOCK_ONHAND_UNKNOWN,
+    STOCK_TARGET_MISSING,
+    stored_online_location_id,
+    pick_online_location,
+    resolve_online_location_id,
+    inventory_policy_for,
+    product_skus,
+    product_variant_gids,
+    stock_changed,
+    plan_product_stock,
+    set_inventory_quantities,
+    sync_product_stock,
+    sync_stock_levels,
 )
 from .product_input import (  # noqa: F401
     build_product_input,
@@ -283,6 +306,7 @@ _SUBMODULES = (
     menus,
     media,
     writeback,
+    inventory,
     product,
     webhooks,
 )

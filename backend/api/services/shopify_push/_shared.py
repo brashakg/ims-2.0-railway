@@ -113,6 +113,11 @@ class PushResult:
     # to Shopify (productCreateMedia); None when the Shopify product already
     # carried media, or the push never got that far.
     photos: Optional[Any] = None
+    # Product pushes only: the STOCK side channel (owner ruling 2026-09-07 --
+    # make website quantities real). SIMULATED -> the plan {policy, quantities,
+    # location}; LIVE -> {ok, tracked, set, quantities, location_id, errors}.
+    # None when the push never reached it (refusal, ARCHIVED, transport error).
+    stock: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -169,7 +174,15 @@ def push_mode_status(db) -> Dict[str, Any]:
     live = bool(writes and disp == "live" and creds)
     pinned = (os.getenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID") or "").strip()
     pub_id = pinned or _publication_id_cache.get(_ONLINE_STORE_PUBLICATION_NAME)
+    # THE FOURTH DOOR: the Shopify location the online quantity is written at.
+    # Read without a network call (pinned env / the persisted registry row);
+    # push_mode_status_resolved asks Shopify once when LIVE and unknown.
+    from .inventory import stored_online_location_id  # lazy: inventory imports here
+
+    loc_id, loc_source = stored_online_location_id(db)
     return {
+        "online_location_id": loc_id,
+        "online_location_source": loc_source or "unresolved",
         "publishes_to_online_store": True,
         "online_store_publication_id": pub_id or None,
         "online_store_publication_source": (

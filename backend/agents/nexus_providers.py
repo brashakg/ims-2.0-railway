@@ -330,96 +330,42 @@ async def shopify_set_inventory_available(
             },
         )
 
-    # Keyed to the default BV storefront (Phase 0). Backward-compatible: the
-    # untagged live Shopify doc still matches, so BV behaves byte-identically.
-    cfg = _load_integration_config(db, "shopify", storefront_id="BV")
-    shop_url = cfg.get("shop_url")
-    access_token = cfg.get("access_token")
-    if not shop_url or not access_token:
+    # ONE inventorySetQuantities implementation: the shopify_push package's
+    # (2026-09-07). It resolves LIVE credentials through shopify_auth (OAuth
+    # client-credentials, the working path) instead of the stale vault token
+    # this function used to read raw -- which is why every POS-sale write-back
+    # 401'd silently -- and rides the package's retry/backoff transport. The
+    # SyncResult contract here is unchanged.
+    from api.services.shopify_auth import resolve_shopify_credentials
+    from api.services.shopify_push.inventory import set_inventory_quantities
+
+    creds = resolve_shopify_credentials(db, "BV") or {}
+    if not creds.get("shop_url") or not creds.get("access_token"):
         return SyncResult(
             ok=False,
             provider="shopify",
             kind="push",
             error="shop_url or access_token not configured",
         )
-
-    # inventorySetQuantities atomically sets the on-hand/available count to an
-    # absolute value. `ignoreCompareQuantity` lets us set without supplying the
-    # current value (we are the source of truth and just overwrite).
-    mutation = """
-    mutation imsSetInventory($input: InventorySetQuantitiesInput!) {
-      inventorySetQuantities(input: $input) {
-        inventoryAdjustmentGroup { createdAt reason }
-        userErrors { field message }
-      }
-    }
-    """
-    variables = {
-        "input": {
-            "name": "available",
-            "reason": "correction",
-            "ignoreCompareQuantity": True,
-            "quantities": [
-                {
-                    "inventoryItemId": inv_gid,
-                    "locationId": loc_gid,
-                    "quantity": qty,
-                }
-            ],
-        }
-    }
-    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-    headers = {
-        "X-Shopify-Access-Token": access_token,
-        "content-type": "application/json",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
-            resp = await client.post(
-                url, headers=headers, json={"query": mutation, "variables": variables}
-            )
-        if resp.status_code not in (200, 201):
-            return SyncResult(
-                ok=False,
-                provider="shopify",
-                kind="push",
-                error=f"status {resp.status_code}: {resp.text[:200]}",
-            )
-        body = resp.json() or {}
-        # GraphQL transport-200 can still carry top-level `errors` or per-field
-        # userErrors -- treat both as failures so the caller can record them.
-        if body.get("errors"):
-            return SyncResult(
-                ok=False,
-                provider="shopify",
-                kind="push",
-                error=f"graphql errors: {str(body['errors'])[:200]}",
-            )
-        result = (body.get("data") or {}).get("inventorySetQuantities") or {}
-        user_errors = result.get("userErrors") or []
-        if user_errors:
-            return SyncResult(
-                ok=False,
-                provider="shopify",
-                kind="push",
-                error=f"userErrors: {str(user_errors)[:200]}",
-            )
+    written = await set_inventory_quantities(db, loc_gid, {inv_gid: qty})
+    if written.get("errors"):
         return SyncResult(
-            ok=True,
+            ok=False,
             provider="shopify",
             kind="push",
-            items_synced=1,
-            payload={
-                "inventory_item_id": inv_gid,
-                "location_id": loc_gid,
-                "available": qty,
-            },
+            error=str(written["errors"][0])[:200],
         )
-    except httpx.TimeoutException:
-        return SyncResult(ok=False, provider="shopify", kind="push", error="timeout")
-    except (httpx.HTTPError, ValueError) as e:
-        return SyncResult(ok=False, provider="shopify", kind="push", error=str(e))
+    return SyncResult(
+        ok=True,
+        provider="shopify",
+        kind="push",
+        items_synced=1,
+        payload={
+            "inventory_item_id": inv_gid,
+            "location_id": loc_gid,
+            "available": qty,
+        },
+    )
 
 
 def _as_shopify_gid(value: Any, kind: str) -> str:

@@ -37,6 +37,7 @@ from .variants import (
     push_variant_prices,
 )
 from .publish import _publish_to_online_store
+from .inventory import plan_product_stock, sync_product_stock
 from .media import _attach_product_photos, product_photo_urls
 from .writeback import _requeue_unpublished, _writeback_product
 
@@ -185,6 +186,7 @@ async def push_product(
             metafields=metafields or None,
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
+            stock=plan_product_stock(db, product, variants),
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -253,8 +255,8 @@ async def push_product(
         # Idempotent + fail-soft.
         seed_summary = None
         seeded = False
+        variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
         if new_gid and (full_reseed or repair_only):
-            variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
             seed_summary = await _seed_variants_after_write(
                 db, product, variants, new_gid, variant_nodes,
                 repair_only=repair_only,
@@ -292,6 +294,24 @@ async def push_product(
         photo_on_shopify = bool(existing_media) or bool(
             (photo_summary or {}).get("attached")
         )
+        # STOCK, IN THIS SAME PRESS, BEFORE THE PUBLISH (owner ruling
+        # 2026-09-07 -- the website sells only what the shops can ship). Every
+        # variant gid this press knows -- the response nodes, whatever seeding
+        # just created, the stored ones -- gets tracked=true + the DENY policy,
+        # and each SKU's pooled quantity is written at the online location.
+        # Fail-soft side channel: reported on the result and the audit row,
+        # never flips ok and never withholds the publish (first-publish
+        # behaviour is unchanged; the stock pass retries it on the next sync).
+        stock_summary = None
+        if new_gid:
+            stock_summary = await sync_product_stock(
+                db,
+                product,
+                variants,
+                new_gid,
+                extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
+                + list((seed_summary or {}).get("variant_gids") or []),
+            )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
         # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
@@ -416,6 +436,7 @@ async def push_product(
             variants_seeded=seed_summary,
             publication=pub_summary,
             photos=photo_summary,
+            stock=stock_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
