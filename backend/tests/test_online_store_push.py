@@ -267,8 +267,9 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
     # The network boundary WAS hit: the product, then its photograph (the
-    # photo rides the SAME press since 2026-08-25).
-    assert len(spy.calls) == 2
+    # photo rides the SAME press since 2026-08-25), then the stock step's one
+    # `locations` lookup (2026-09-07; unresolved on this spy, so it stops there).
+    assert len(spy.calls) == 3
     assert "imsProductCreate(" in spy.calls[0]["query"]
     assert "productCreateMedia" in spy.calls[1]["query"]
 
@@ -716,9 +717,13 @@ def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patc
     assert body["summary"]["collections"]["pushed"] == 1
     assert body["summary"]["menus"]["pushed"] == 1
     assert body["summary"]["images"]["pushed"] == 1
-    # Every push is a dry-run + every push wrote an audit row.
+    # Every push is a dry-run + every push wrote an audit row. The STOCK pass
+    # that rides every products press (2026-09-07) writes its own row under
+    # entity_type "stock" and reports on its own key, never in `results`.
     assert all(res["mode"] == "SIMULATED" for res in body["results"])
-    assert len(audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})) == 4
+    rows = audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})
+    assert len([r for r in rows if r.get("entity_type") != "stock"]) == 4
+    assert body["stock"]["mode"] == "SIMULATED" and body["stock"]["entity"] == "stock"
 
 
 def test_push_all_pending_entities_filter(client, auth_headers, patched_db, monkeypatch):
@@ -957,9 +962,10 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
     assert res.mode == "LIVE"
     # (Unpriced fixture -> the publish is withheld; the metafield side channel
     # below is what this test is about.)
-    # Three network calls: productCreate, ONE metafieldsSet chunk, then the
-    # photograph (which rides the same press since 2026-08-25).
-    assert len(spy.calls) == 3
+    # Four network calls: productCreate, ONE metafieldsSet chunk, the
+    # photograph (which rides the same press since 2026-08-25), then the stock
+    # step's one `locations` lookup (2026-09-07).
+    assert len(spy.calls) == 4
     assert "metafieldsSet" in spy.calls[1]["query"]
     assert "productCreateMedia" in spy.calls[2]["query"]
     mfs = spy.calls[1]["variables"]["metafields"]
@@ -1003,7 +1009,7 @@ def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
     assert "boom" not in (res.error or "")
     assert res.metafields["set"] == 0
     assert any("boom" in e for e in res.metafields["errors"])
-    assert len(spy.calls) == 3  # + the photograph
+    assert len(spy.calls) == 4  # + the photograph + the stock `locations` lookup
 
 
 # ---------------------------------------------------------------------------

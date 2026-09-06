@@ -426,10 +426,12 @@ def _online_location_id(db) -> str:
     if env_val:
         return env_val
     try:
-        from agents.nexus_providers import _load_integration_config
+        # The ONE stored reader (shopify_push.inventory): the registry row a
+        # previous `locations` lookup persisted. Nothing else ever set the old
+        # integrations.shopify online_location_id field (the writer was dead).
+        from .shopify_push.inventory import stored_online_location_id
 
-        cfg = _load_integration_config(db, "shopify") or {}
-        return normalize_sku(cfg.get("online_location_id"))
+        return normalize_sku(stored_online_location_id(db)[0])
     except Exception:  # noqa: BLE001
         return ""
 

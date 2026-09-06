@@ -398,6 +398,16 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/all-pending",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # STOCK (owner ruling 2026-09-07 -- make website quantities real): write
+    # the pooled quantity of every changed listing. Same {ADMIN, SUPERADMIN}
+    # set as every other row in this push family, so the module grant-union
+    # is UNCHANGED (no capability broadening). The literal /stock suffix is
+    # more specific than the /{entity}/{id} POST routes and resolves alone.
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/push/stock",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # LIVE-PRODUCT SYNC BY HAND (owner ruling 2026-09-06): the same function
     # the 01:00 / 09:00 IST schedule runs -- re-push every product already on
     # Shopify that was edited in IMS; never a first publish. Same {ADMIN,

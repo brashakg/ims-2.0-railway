@@ -1428,6 +1428,16 @@ export interface PushMode {
   /** 'pinned' (SHOPIFY_ONLINE_STORE_PUBLICATION_ID), 'looked_up', or
    *  'unresolved'. */
   online_store_publication_source?: string | null;
+  /** THE FOURTH DOOR (2026-09-07, make website quantities real): the Shopify
+   *  location the pooled quantity is written at. null => every stock write
+   *  refuses with a stable code (never guessed). */
+  online_location_id?: string | null;
+  /** 'pinned' (SHOPIFY_ONLINE_LOCATION_ID), 'stored' (a previous lookup,
+   *  persisted), 'looked_up', or 'unresolved'. */
+  online_location_source?: string | null;
+  /** ONLINE_LOCATION_UNRESOLVED | ONLINE_LOCATION_AMBIGUOUS when unresolved. */
+  online_location_code?: string | null;
+  online_location_error?: string | null;
   /** Advisory note (the single-writer / cutover explanation). */
   single_writer_note?: string | null;
 }
@@ -1649,6 +1659,10 @@ export const pushApi = {
           api_version: mode.api_version ?? null,
           online_store_publication_id: mode.online_store_publication_id ?? null,
           online_store_publication_source: mode.online_store_publication_source ?? null,
+          online_location_id: mode.online_location_id ?? null,
+          online_location_source: mode.online_location_source ?? null,
+          online_location_code: mode.online_location_code ?? null,
+          online_location_error: mode.online_location_error ?? null,
           single_writer_note: mode.single_writer_note ?? null,
         },
         db_connected: !!data.db_connected,
@@ -1758,6 +1772,15 @@ export const pushApi = {
       summary: (data.summary ?? {}) as PushSweepResult['summary'],
       results: Array.isArray(data.results) ? (data.results as PushResult[]) : [],
     };
+  },
+
+  /** Write the pooled quantity of every listing whose number changed since it
+   *  was last sent (POST /push/stock, 2026-09-07). Products already on Shopify
+   *  only; publishes nothing. SIMULATED (a plan, no Shopify call) when the
+   *  gates are dark. Throws on HTTP failure so the caller can toast. */
+  pushStock: async (): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/stock`, undefined, SWEEP_TIMEOUT);
+    return (res?.data ?? {}) as PushResult;
   },
 
   /** Read the push HISTORY ledger (GET /push/history — OS-047). Read-only;

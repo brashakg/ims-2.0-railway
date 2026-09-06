@@ -126,6 +126,44 @@ mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
 }
 """
 
+# Online STOCK (owner ruling 2026-09-07, sync-audit gap #1 "make website
+# quantities real"). Three documents:
+#   * the location lookup -- which Shopify location the online quantity lives
+#     at, when SHOPIFY_ONLINE_LOCATION_ID is not pinned (needs read_locations);
+#   * the variant inventory update -- tracked=true + inventoryPolicy on every
+#     variant the product owns (an UNTRACKED item sells without limit, which is
+#     exactly what the six live products were doing);
+#   * inventorySetQuantities -- the ABSOLUTE available quantity at that
+#     location (idempotent on retry; needs write_inventory).
+_LOCATIONS_QUERY = """
+query imsLocations {
+  locations(first: 10) { nodes { id name isActive fulfillsOnlineOrders } }
+}
+"""
+
+_VARIANTS_INVENTORY_UPDATE = """
+mutation imsVariantInventoryUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id inventoryPolicy inventoryItem { id tracked } }
+    userErrors { field message }
+  }
+}
+"""
+
+_INVENTORY_SET_QUANTITIES = """
+mutation imsInventorySetQuantities($input: InventorySetQuantitiesInput!) {
+  inventorySetQuantities(input: $input) {
+    inventoryAdjustmentGroup { createdAt reason }
+    userErrors { field message }
+  }
+}
+"""
+# Shopify caps one inventorySetQuantities call at 250 quantity entries.
+_INVENTORY_SET_MAX = 250
+# Resolved once per process (a location gid is stable for the shop); keyed by
+# storefront id, same style as _publication_id_cache.
+_online_location_cache: Dict[str, str] = {}
+
 # Variant price/barcode push (owner priority: "change MRP in IMS -> website
 # updates"). Shopify retired productVariantUpdate; the current path is
 # productVariantsBulkUpdate keyed on the PARENT product gid (mirrors BVI's
