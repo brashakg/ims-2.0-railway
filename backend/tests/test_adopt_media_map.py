@@ -30,7 +30,11 @@ id / no prefix never match, stems are exact, still 1:1, and the default rules
 exclude it; --replace-photos-from-shopify writes the ONE Shopify image as the
 photo list through the spine door (product_master.update_product, the mirror,
 mark_dirty=False so nothing queues) then adopts it, refusing media count != 1,
-an existing map and a twin the door cannot clear; dry-run writes nothing.
+an existing map, a twin the door cannot clear, a twin outside the ruling
+(not bvi_import / a non-cdn photo) and a spine the door cannot mirror to THIS
+twin (unkeyed, or pim_product_id elsewhere) -- all BEFORE any write; the
+reversal file holds the whole plan BEFORE the first write (a crash between two
+products, or a twin that did not follow, loses nothing); dry-run writes nothing.
 
 No emoji (Windows cp1252).
 """
@@ -520,6 +524,8 @@ def test_connector_rule_needs_the_own_gid_and_unknown_rules_are_refused():
         match_media_to_photos([RB], media, rules=R3B)
     with pytest.raises(ValueError):
         match_media_to_photos([RB], media, rules=R3B, product_gid="gid://shopify/Product/")
+    with pytest.raises(ValueError):  # a Unicode digit is not an id (str.isdigit alone would take it)
+        match_media_to_photos([RB], media, rules=R3B, product_gid="gid://shopify/Product/\u00b2")
     with pytest.raises(ValueError):
         match_media_to_photos([RB], media, rules=("exact", "position"), product_gid=OWN)
     # the exact rules never needed the gid and still do not
@@ -576,6 +582,8 @@ def test_parse_args_rule_and_replace_doors():
     args = script.parse_args(["--ids", "P1", "--rule", "connector-prefix"])
     assert script.RULES[args.rule] == R3B and args.replace_photos_from_shopify is False
     assert script.parse_args(["--ids", "P1", "--replace-photos-from-shopify"]).replace_photos_from_shopify is True
+    assert script.parse_args(["--ids", "P1"]).reversal_dir == "."
+    assert script.parse_args(["--ids", "P1", "--reversal-dir", "C:/rev"]).reversal_dir == "C:/rev"
     for argv in (
         ["--rule", "connector-prefix"],
         ["--replace-photos-from-shopify"],
@@ -602,17 +610,19 @@ ONE = CDN + ONE_NAME + "?v=1785322878"
 ONE_NODE = {"id": _m(1), "alt": "front view", "image": {"url": ONE}, "originalSource": {"url": "https://x/y.png"}}
 
 
-def _seed_bvi(db, photos=STALE, spine=True, media_map=None, **twin_extra):
-    ecom = {"shopify_product_id": BVI, "locally_modified": False, "source": "bvi_import", "status": "PUBLISHED"}
+def _seed_bvi(db, photos=STALE, spine=True, media_map=None, pid="P1", spine_id="SP1", source="bvi_import", **twin_extra):
+    ecom = {"shopify_product_id": BVI, "locally_modified": False, "status": "PUBLISHED"}
+    if source is not None:
+        ecom["source"] = source
     if media_map is not None:
         ecom["media_map"] = media_map
-    db["catalog_products"].insert_one({"id": "P1", "sku": "SKU1", "images": list(photos), "ecom": ecom, **twin_extra})
+    db["catalog_products"].insert_one({"id": pid, "sku": "SKU1", "images": list(photos), "ecom": ecom, **twin_extra})
     if spine:
         db["products"].insert_one(
             {
-                "product_id": "SP1",
-                "id": "SP1",
-                "pim_product_id": "P1",
+                "product_id": spine_id,
+                "id": spine_id,
+                "pim_product_id": pid,
                 "sku": "SKU1",
                 "brand": "Ray-Ban",
                 "category": "SMARTGLASSES",
@@ -666,12 +676,14 @@ def test_replace_writes_through_the_spine_door_without_queuing(db, monkeypatch, 
     assert "REVERSAL saved to " + path in printed
     with open(path, encoding="utf-8") as fh:
         saved = json.load(fh)
+    assert saved["applied"] == ["P1"]
     assert saved["products"] == [
         {
             "product_id": "P1",
             "spine_id": "SP1",
             "spine_images": STALE,
             "twin_photos": STALE,
+            "twin_images": STALE,
             "media_map_before": None,
             "photo_after": ONE,
             "media_map_after": [{"url": ONE, "id": _m(1)}],
@@ -785,19 +797,126 @@ def test_replace_dry_run_writes_nothing(db, monkeypatch, tmp_path, capsys):
     assert "DRY RUN - nothing written" in capsys.readouterr().out
 
 
-def test_replace_never_adopts_when_the_twin_did_not_follow(db, monkeypatch, tmp_path, capsys):
-    """The post-write gate: a spine whose pim_product_id points elsewhere
-    mirrors to a twin that is not this one, so the twin's photo list is not
-    the one image -- the map is NOT adopted (it would name a photo the pass
-    cannot see) and the product is reported."""
+def test_replace_refuses_a_spine_that_mirrors_elsewhere(db, monkeypatch, tmp_path):
+    """A spine keyed on this twin's id whose pim_product_id names ANOTHER
+    twin would carry the photo to that foreign product (the mirror keys the
+    twin on pim_product_id first) -- refused BEFORE the Shopify query and
+    before any write: this twin, the foreign twin and the spine keep their
+    lists, no map, no audit, no reversal file. (Round-2 verifier: the
+    post-write gate used to catch this only AFTER the spine and the foreign
+    twin were overwritten.)"""
     monkeypatch.chdir(tmp_path)
-    _wire(monkeypatch, [ONE_NODE])
+    shop = _wire(monkeypatch, [ONE_NODE])
     _seed_bvi(db, spine=False)
+    foreign = {"id": "ELSEWHERE", "sku": "SKU9", "images": ["https://a/i/real.jpg"], "ecom": {"locally_modified": False}}
+    db["catalog_products"].insert_one(copy.deepcopy(foreign))
     db["products"].insert_one(
         {"product_id": "P1", "id": "P1", "pim_product_id": "ELSEWHERE", "sku": "SKU1", "mrp": 1.0, "offer_price": 1.0, "images": list(STALE), "is_active": True}
     )
     out = _run(db, apply=True, replace=True)
-    assert out["rows"][0]["spine_id"] == "P1" and out["written"] == [] and out["reversal_path"] is None
+    row = out["rows"][0]
+    assert row["status"] == "spine_points_elsewhere" and row["spine_id"] is None
+    assert out["written"] == [] and out["reversal_path"] is None and shop.calls == []
+    assert db["products"].find_one({"product_id": "P1"})["images"] == STALE, "the spine must be left alone"
+    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    kept = {k: v for k, v in db["catalog_products"].find_one({"id": "ELSEWHERE"}).items() if k != "_id"}
+    assert kept == foreign, "a foreign product's photo must never move"
+    assert list(db["audit_logs"].find({})) == [] and _no_reversal_file(tmp_path)
+
+
+def test_replace_refuses_an_unkeyed_spine(db, monkeypatch, tmp_path):
+    """A products row reachable only by pim_product_id and lacking product_id
+    cannot go through the door; falling through to the twin-only mirror
+    would leave the spine's stale list to overwrite the twin on its next
+    edit -- refused, nothing written, no Shopify call."""
+    monkeypatch.chdir(tmp_path)
+    shop = _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db, spine=False)
+    db["products"].insert_one({"pim_product_id": "P1", "sku": "SKU1", "images": list(STALE)})
+    out = _run(db, apply=True, replace=True)
+    assert out["rows"][0]["status"] == "spine_unkeyed" and out["written"] == [] and shop.calls == []
+    assert db["products"].find_one({"pim_product_id": "P1"})["images"] == STALE
+    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"] and _no_reversal_file(tmp_path)
+
+
+def test_replace_refuses_products_outside_the_ruling(monkeypatch, tmp_path):
+    """SCOPE: only an old-app twin (ecom.source bvi_import) whose photos are
+    ALL cdn.shopify.com links. A live product with a real in-app photo and
+    one Shopify media (prod aa7d0ed2 -- exactly the shape a pasted-wrong id
+    hands over), a bvi_import twin with a non-cdn photo, and one with no
+    photo at all are refused before the Shopify query; the real photo stays
+    on the spine and the twin."""
+    monkeypatch.chdir(tmp_path)
+    for photos, source, status in [
+        ([U1], None, "not_bvi_import"),
+        (STALE, "ims", "not_bvi_import"),
+        ([U1], "bvi_import", "photos_not_cdn"),
+        (STALE + [U1], "bvi_import", "photos_not_cdn"),
+        ([], "bvi_import", "photos_not_cdn"),
+    ]:
+        db = _DB()
+        shop = _wire(monkeypatch, [ONE_NODE])
+        _seed_bvi(db, photos=photos, source=source)
+        out = _run(db, apply=True, replace=True)
+        assert out["rows"][0]["status"] == status and out["written"] == [], (photos, source)
+        assert shop.calls == []
+        assert _spine(db)["images"] == list(photos) and _twin(db)["images"] == list(photos)
+        assert "media_map" not in _twin(db)["ecom"] and list(db["audit_logs"].find({})) == []
+    assert _no_reversal_file(tmp_path)
+
+
+def test_replace_reversal_is_on_disk_before_the_write_and_a_twin_that_did_not_follow_is_not_adopted(
+    db, monkeypatch, tmp_path, capsys
+):
+    """The mirror is fail-soft (a twin error is logged, the spine save
+    stands) -- simulated by a mirror that does nothing. The spine moves (the
+    known half-state, reported as such), the twin does not, the map is NOT
+    adopted, no audit -- and the reversal file, written BEFORE the spine
+    write, already holds the previous spine list with applied=[]."""
+    monkeypatch.chdir(tmp_path)
+    _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db)
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", lambda **kw: None)
+    out = _run(db, apply=True, replace=True)
+    assert out["rows"][0]["status"] == "replace" and out["written"] == []
+    assert _spine(db)["images"] == [ONE]
     assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
     assert list(db["audit_logs"].find({})) == []
-    assert "PHOTOS NOT REPLACED P1" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "TWIN DID NOT FOLLOW P1" in printed and "spine written to [" + ONE + "]" in printed
+    with open(out["reversal_path"], encoding="utf-8") as fh:
+        saved = json.load(fh)
+    assert saved["applied"] == []
+    assert saved["products"][0]["spine_id"] == "SP1" and saved["products"][0]["spine_images"] == STALE
+
+
+def test_replace_reversal_file_survives_a_crash_between_products(db, monkeypatch, tmp_path):
+    """Two products; an un-caught raise on the second aborts run() after the
+    first was fully applied. The reversal file was written into
+    --reversal-dir BEFORE the first write, so it holds BOTH planned entries:
+    the applied product's previous lists are on disk, not only in the
+    scrollback -- and nothing landed in the working directory."""
+    monkeypatch.chdir(tmp_path)
+    _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db)
+    _seed_bvi(db, pid="P2", spine_id="SP2")
+    real = script._replace
+
+    def crash_on_second(db_, row):
+        if row["product_id"] == "P2":
+            raise RuntimeError("simulated crash between products")
+        return real(db_, row)
+
+    monkeypatch.setattr(script, "_replace", crash_on_second)
+    rev = tmp_path / "rev"
+    with pytest.raises(RuntimeError):
+        _run(db, apply=True, ids=("P1", "P2"), replace=True, reversal_dir=str(rev))
+    files = [p for p in os.listdir(rev) if p.startswith("adopt_replace_reversal_")]
+    assert len(files) == 1 and _no_reversal_file(tmp_path)
+    with open(rev / files[0], encoding="utf-8") as fh:
+        saved = json.load(fh)
+    assert [p["product_id"] for p in saved["products"]] == ["P1", "P2"] and saved["applied"] == []
+    assert all(p["spine_images"] == STALE and p["twin_images"] == STALE for p in saved["products"])
+    assert _spine(db)["images"] == [ONE] and _twin(db)["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert db["products"].find_one({"product_id": "SP2"})["images"] == STALE
+    assert db["catalog_products"].find_one({"id": "P2"})["images"] == STALE
