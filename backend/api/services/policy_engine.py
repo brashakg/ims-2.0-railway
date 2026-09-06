@@ -291,6 +291,11 @@ def _validate_value(spec: reg.PolicySpec, value: Any) -> Any:
     if t == "json":
         if not isinstance(value, (list, dict)):
             raise PolicyError(f"{spec.key} must be a JSON array or object")
+        if spec.validator is not None:
+            try:
+                return spec.validator(value)
+            except ValueError as exc:
+                raise PolicyError(f"{spec.key}: {exc}")
         return value
     if t == "text":
         return str(value)

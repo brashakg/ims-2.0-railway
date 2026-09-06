@@ -446,15 +446,23 @@ class StrictCollection:
                 "find_one_and_update(sort=...) is not implemented -- the fake "
                 "has no stable ordering to sort by"
             )
-        if upsert:
-            raise UnsupportedMongoFeature(
-                "find_one_and_update(upsert=True) is not implemented"
-            )
         for d in self.docs:
             if matches(d, filter):
                 before = copy.deepcopy(d)
                 self._apply(d, update or {})
                 return _project(d if return_document else before, projection)
+        if upsert:
+            # The atomic CLAIM shape (an upsert keyed on a unique field with
+            # $setOnInsert): nothing matched, so the doc is inserted from the
+            # filter's equality fields + $setOnInsert, and -- exactly as pymongo
+            # -- BEFORE returns None (the caller reads "None => I inserted it,
+            # the slot is mine"; a doc => someone got there first). Mirrors
+            # update_one's upsert path above.
+            seed = {k: v for k, v in (filter or {}).items() if not isinstance(v, dict)}
+            seed.update((update or {}).get("$setOnInsert") or {})
+            self._apply(seed, {k: v for k, v in (update or {}).items() if k != "$setOnInsert"})
+            self.docs.append(seed)
+            return _project(seed, projection) if return_document else None
         return None
 
     def update_many(self, filter, update, **kwargs):

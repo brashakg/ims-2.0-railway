@@ -41,6 +41,7 @@ const PrinterSettingsPage = lazy(() => import('../pages/settings/SettingsPrinter
 const ApprovalWorkflows = lazy(() => import('../components/settings/ApprovalWorkflows').then(m => ({ default: m.ApprovalWorkflows })));
 const AgentControlPanel = lazy(() => import('../components/settings/AgentControlPanel').then(m => ({ default: m.AgentControlPanel })));
 const FeatureToggles = lazy(() => import('../components/settings/FeatureToggles').then(m => ({ default: m.FeatureToggles })));
+const ShopifyLiveSyncSection = lazy(() => import('../pages/settings/SettingsShopifyLiveSync').then(m => ({ default: m.ShopifyLiveSyncSection })));
 const AuditLogSettingsPage = lazy(() => import('../pages/settings/SettingsAuditLogs').then(m => ({ default: m.AuditLogSettingsPage })));
 const SystemSettingsPage = lazy(() => import('../pages/settings/SettingsSystem').then(m => ({ default: m.SystemSettingsPage })));
 
@@ -90,6 +91,7 @@ const SECTION_ELEMENTS: Record<SettingsTab, React.ReactElement> = {
   approvals: <ApprovalWorkflows />,
   agents: <AgentControlPanel />,
   'feature-toggles': <FeatureTogglesSectionPage />,
+  'shopify-live-sync': <ShopifyLiveSyncSection />,
   'audit-logs': <AuditLogSettingsPage />,
   system: <SystemSettingsPage />,
 };

@@ -17,7 +17,7 @@ No emoji in this file (Windows cp1252).
 """
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 # N8: the survival-view seed list lives with its pure service (a stdlib-only
 # module, so this import is feather-weight and cycle-proof). Importing the
@@ -57,6 +57,11 @@ class PolicySpec:
     # For pricing.category_caps.* : the code-constant key in pricing_caps that this
     # override may only LOWER (never raise). None for all other keys.
     lower_only_vs_category: Optional[str] = None
+    # Extra WRITE-time validation for a `json` key whose shape the type system
+    # cannot express (e.g. a list of "HH:MM" clock faces). Called by
+    # policy_engine._validate_value AFTER the type check with the raw value;
+    # returns the cleaned value or raises ValueError (surfaced as a 400).
+    validator: Optional[Callable[[Any], Any]] = None
 
 
 def _spec(**kw) -> PolicySpec:
@@ -66,6 +71,43 @@ def _spec(**kw) -> PolicySpec:
 # ---------------------------------------------------------------------------
 # THE REGISTRY -- dotted-namespace keys (ENGINES.md sec 69)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Shopify live-product sync (owner ruling 2026-09-06): "anytime a product that
+# has already been pushed to shopify, edited or changed in our ims, it should
+# automatically reflect on shopify. if needed a sync everyday twice should be
+# done. one before store opening around 9 am and next at 1 am." -- plus a
+# SUPERADMIN settings section to tweak it. Read by services/shopify_live_sync
+# on EVERY scheduler tick (no restart needed). SUPERADMIN-only, global scope.
+# ---------------------------------------------------------------------------
+
+LIVE_SYNC_ENABLED_KEY = "shopify.live_sync.enabled"
+LIVE_SYNC_SLOTS_KEY = "shopify.live_sync.slots"
+LIVE_SYNC_MAX_KEY = "shopify.live_sync.max_products_per_run"
+LIVE_SYNC_DEFAULT_SLOTS = ["01:00", "09:00"]
+LIVE_SYNC_MAX_SLOTS = 6
+
+
+def validate_live_sync_slots(value: Any) -> List[str]:
+    """1..6 distinct "HH:MM" IST clock faces (24h), returned sorted + zero-padded.
+    Raises ValueError on anything else ("25:00", "9", 7 entries, a non-list)."""
+    if not isinstance(value, list):
+        raise ValueError("slots must be a list of \"HH:MM\" times (IST)")
+    if not 1 <= len(value) <= LIVE_SYNC_MAX_SLOTS:
+        raise ValueError(f"slots must hold 1 to {LIVE_SYNC_MAX_SLOTS} times, got {len(value)}")
+    clean = set()
+    for raw in value:
+        text = str(raw).strip()
+        parts = text.split(":")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            raise ValueError(f"slot {text!r} is not an HH:MM time")
+        hh, mm = int(parts[0]), int(parts[1])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError(f"slot {text!r} is not a valid 24h time")
+        clean.add(f"{hh:02d}:{mm:02d}")
+    return sorted(clean)
+
 
 _REGISTRY_LIST: List[PolicySpec] = [
     # --- Refunds & Returns (DECISIONS sec 6) -- paisa ---
@@ -1162,6 +1204,45 @@ _REGISTRY_LIST: List[PolicySpec] = [
         help="Counted-vs-expected gap within which an EOD petty-cash "
         "settlement closes BALANCED. 0 = exact match required.",
         minimum=0,
+    ),
+    # --- Shopify live sync (owner ruling 2026-09-06; see the block above) ---
+    _spec(
+        key=LIVE_SYNC_ENABLED_KEY,
+        type="bool",
+        default=True,
+        scopes=("global",),
+        write_roles=("SUPERADMIN",),
+        group="Shopify live sync",
+        label="Scheduled live-product sync enabled",
+        help="Re-push every product ALREADY on Shopify that was edited in IMS, at "
+        "the configured IST times. Never publishes a new product (that stays a "
+        "human press). OFF = only the manual button syncs.",
+    ),
+    _spec(
+        key=LIVE_SYNC_SLOTS_KEY,
+        type="json",
+        default=list(LIVE_SYNC_DEFAULT_SLOTS),
+        scopes=("global",),
+        write_roles=("SUPERADMIN",),
+        group="Shopify live sync",
+        label="Sync times (IST, HH:MM)",
+        help="1 to 6 daily run times on the IST clock, e.g. [\"01:00\", \"09:00\"]. "
+        "A slot missed while the server was down runs on the next tick within "
+        "55 minutes, never twice.",
+        validator=validate_live_sync_slots,
+    ),
+    _spec(
+        key=LIVE_SYNC_MAX_KEY,
+        type="int",
+        default=200,
+        scopes=("global",),
+        write_roles=("SUPERADMIN",),
+        group="Shopify live sync",
+        label="Max products per run",
+        help="Ceiling on products re-pushed in one run (scheduled or manual). A "
+        "run that hits it reports limit_reached; the rest go next run.",
+        minimum=1,
+        maximum=2000,
     ),
 ]
 

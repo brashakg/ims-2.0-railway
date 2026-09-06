@@ -106,6 +106,14 @@ const ENTITIES: EntityDef[] = [
   },
 ];
 
+/** An aware ISO instant rendered on the IST clock (the business calendar),
+ *  never the viewer's browser zone. */
+function fmtIST(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) + ' IST';
+}
+
 function fmt(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
   try {
@@ -183,6 +191,7 @@ export default function OnlineShopifySyncPage() {
   const [running, setRunning] = useState<EntityKey | null>(null);
   const [sweeps, setSweeps] = useState<Partial<Record<EntityKey, PushSweepResult>>>({});
   const [goingLive, setGoingLive] = useState(false);
+  const [syncingLive, setSyncingLive] = useState(false);
   // Variant-prices paged resync progress (OS-017): {done, total} while looping.
   const [resyncProgress, setResyncProgress] = useState<{ done: number; total: number | null } | null>(null);
 
@@ -418,7 +427,43 @@ export default function OnlineShopifySyncPage() {
     }
   };
 
+  // "Sync live products now" (owner ruling 2026-09-06): the SAME function the
+  // 01:00 / 09:00 IST schedule runs. Re-pushes only products ALREADY on
+  // Shopify that were edited in IMS; never a first publish. SIMULATED when
+  // the gates are off, so it is always safe; a LIVE press confirms first.
+  const syncLiveNow = async () => {
+    if (!canGoLive || syncingLive) return;
+    if (isLive) {
+      const ok = window.confirm(
+        'LIVE sync — every product already on bettervision.in that was edited in IMS will be ' +
+          'updated on Shopify now. Products never pushed are left alone. Continue?',
+      );
+      if (!ok) return;
+    }
+    setSyncingLive(true);
+    try {
+      const { run } = await pushApi.syncLiveNow();
+      const where = run?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
+      toast.success(
+        `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.failed ?? 0} failed, ` +
+          `${run?.awaiting_first_publish ?? 0} awaiting first publish`,
+      );
+      if (run?.limit_reached) {
+        toast.info(`Stopped at the per-run cap (${run.limit ?? '?'} products) — run again to continue.`);
+      }
+      loadStatus();
+      loadHistory();
+      bannerRef.current?.refresh();
+    } catch (e: any) {
+      toast.error(`Live sync failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+    } finally {
+      setSyncingLive(false);
+    }
+  };
+
   const mode = status?.mode;
+  const liveSync = status?.live_sync ?? null;
+  const lastRun = liveSync?.last_run ?? null;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -529,6 +574,98 @@ export default function OnlineShopifySyncPage() {
             <AlertTriangle className="w-3.5 h-3.5" /> Push store unavailable (no DB) — counts show zero.
           </p>
         )}
+      </section>
+
+      {/* ---- Live sync: the scheduled re-push of already-live products ------ */}
+      <section className="mb-6 rounded-xl border border-gray-200 bg-white p-4" data-testid="live-sync-card">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" /> Live sync
+              <span className="text-[11px] font-normal text-gray-400">
+                (edited products already on Shopify — never a first publish)
+              </span>
+            </h2>
+            {liveSync ? (
+              <p className="mt-1 text-xs text-gray-600">
+                {liveSync.enabled ? (
+                  <>
+                    Schedule ON — daily at {liveSync.slots.join(', ')} IST. Next run:{' '}
+                    <strong>{liveSync.next_slot?.label ?? '—'}</strong>.
+                  </>
+                ) : (
+                  <>Schedule OFF — only the button below syncs.</>
+                )}{' '}
+                Up to {liveSync.max_products_per_run} products per run.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-gray-400">Schedule status unavailable.</p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={syncLiveNow}
+            disabled={!canGoLive || syncingLive || loading}
+            title={
+              !canGoLive
+                ? 'Only an Admin or Superadmin can run the sync'
+                : isLive
+                  ? 'Re-push every edited product already on the live storefront'
+                  : 'Gates not armed — runs as a SIMULATED dry-run'
+            }
+            className="btn-primary text-sm"
+          >
+            {syncingLive ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+            {syncingLive ? 'Syncing…' : 'Sync live products now'}
+          </button>
+        </div>
+
+        {lastRun ? (
+          <div className="mt-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
+            <p>
+              <span className="font-medium">Last run:</span>{' '}
+              {lastRun.started_at ? fmtIST(lastRun.started_at) : '—'} · {lastRun.trigger === 'scheduled' ? 'scheduled' : 'manual'}
+              {lastRun.actor && lastRun.trigger !== 'scheduled' ? ` by ${lastRun.actor}` : ''} ·{' '}
+              {lastRun.mode === 'LIVE' ? 'LIVE' : 'dry-run'}
+            </p>
+            <p className="mt-1">
+              <span className="font-medium">{fmt(lastRun.pushed_ok)}</span> updated ·{' '}
+              <span className={(lastRun.failed ?? 0) > 0 ? 'font-medium text-red-700' : 'font-medium'}>
+                {fmt(lastRun.failed)}
+              </span>{' '}
+              failed · <span className="font-medium">{fmt(lastRun.awaiting_first_publish)}</span> awaiting first publish
+              {(lastRun.refused_no_photo ?? 0) > 0 && <> · {fmt(lastRun.refused_no_photo)} refused (no photo)</>}
+              {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
+              {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
+            </p>
+            {(lastRun.failures?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1" aria-label="Live sync failures">
+                {lastRun.failures!.map((f, i) => (
+                  <li key={f.product_id ?? i} className="flex flex-wrap items-baseline gap-x-2 text-red-700">
+                    <XCircle className="w-3.5 h-3.5 shrink-0 self-center" />
+                    <span className="font-medium">{f.sku || f.product_id || '?'}</span>
+                    {f.name && <span className="text-gray-600">{f.name}</span>}
+                    {f.code && <code className="rounded bg-red-50 px-1 text-[11px]">{f.code}</code>}
+                    <span>{f.error || f.reason || 'failed'}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-gray-400">No live sync has run yet.</p>
+        )}
+        <p className="mt-2 text-[11px] text-gray-400">
+          Configured in{' '}
+          {hasRole(['SUPERADMIN']) ? (
+            <Link to="/settings/shopify-live-sync" className="text-blue-700 hover:underline">
+              Settings &gt; Shopify live sync
+            </Link>
+          ) : (
+            <>Settings &gt; Shopify live sync (Superadmin)</>
+          )}
+          .
+        </p>
       </section>
 
       {/* ---- Per-entity counts + DRY-RUN buttons --------------------------- */}

@@ -229,12 +229,47 @@ class AgentScheduler:
                 if enabled:
                     self._add_fallback_task(agent, schedule_type, schedule_value)
 
+        # System job (not an agent): the twice-daily Shopify live-product sync.
+        self._add_live_sync_job()
+
         if APSCHEDULER_AVAILABLE and self._scheduler:
             if not getattr(self._scheduler, "running", False):
                 self._scheduler.start()
             logger.info(f"[SCHEDULER] APScheduler started with {len(self._scheduler.get_jobs())} jobs")
         else:
             logger.info(f"[SCHEDULER] Fallback scheduler started with {len(self._fallback_tasks)} tasks")
+
+    def _add_live_sync_job(self):
+        """Schedule the Shopify live-product sync tick (owner ruling 2026-09-06).
+        One interval job every POLL_MINUTES under BOTH scheduler modes; the
+        tick itself reads the IST slots from Settings and the slot lock
+        (services/shopify_live_sync) makes one slot run once, so the cadence
+        only exists to catch a slot the :00 tick missed (worker asleep /
+        redeploying). Imported lazily: the service pulls in shopify_push, and
+        this module is imported by agents/__init__ (a top-level import would
+        be circular). Fail-soft: never lets a scheduling error take down the
+        agent jobs."""
+        try:
+            from api.services import shopify_live_sync as _sync
+
+            if APSCHEDULER_AVAILABLE and self._scheduler:
+                self._scheduler.add_job(
+                    _sync.scheduled_tick,
+                    trigger=IntervalTrigger(minutes=_sync.POLL_MINUTES),
+                    id=_sync.JOB_ID,
+                    name="Shopify live-product sync",
+                    replace_existing=True,
+                )
+                logger.info(
+                    "[SCHEDULER] %s: scheduled (every %s min; IST slots from Settings)",
+                    _sync.JOB_ID, _sync.POLL_MINUTES,
+                )
+            else:
+                self._add_fallback_loop(
+                    _sync.JOB_ID, _sync.scheduled_tick, _sync.POLL_MINUTES * 60
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[SCHEDULER] live-sync job not scheduled: {e}", exc_info=True)
 
     def _start_leader_wait_loop(self):
         """Spawn the background leadership-retry task (idempotent)."""
@@ -536,17 +571,27 @@ class AgentScheduler:
             seconds = 3600  # Default to hourly for cron agents in fallback mode
         else:
             return
+        self._add_fallback_loop(agent.agent_id, agent.background_tick, seconds)
+
+    def _add_fallback_loop(self, job_id: str, fn, seconds: int):
+        """Run ``await fn()`` every ``seconds`` while the scheduler runs. One
+        loop per job id: a re-schedule (reseed / takeover) replaces the old
+        loop instead of leaving two ticking."""
+        old = self._fallback_tasks.get(job_id)
+        if old is not None and not old.done():
+            old.cancel()
 
         async def _loop():
             while self._running:
                 try:
-                    await agent.background_tick()
+                    await fn()
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"[SCHEDULER] Fallback loop error for {agent.agent_id}: {e}")
+                    logger.error(f"[SCHEDULER] Fallback loop error for {job_id}: {e}")
                 await asyncio.sleep(seconds)
 
         task = asyncio.create_task(_loop())
-        self._fallback_tasks[agent.agent_id] = task
-        logger.info(f"[SCHEDULER] {agent.agent_id}: fallback loop every {seconds}s")
+        self._fallback_tasks[job_id] = task
+        logger.info(f"[SCHEDULER] {job_id}: fallback loop every {seconds}s")
+

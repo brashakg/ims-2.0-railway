@@ -849,6 +849,22 @@ class DatabaseConnection:
             background=True,
         )
 
+        # online_sync_runs (the Shopify live-product sync ledger): the
+        # scheduled run-once lock is an upsert keyed on lock_key = "<job>:<IST
+        # slot>"; the UNIQUE index is what makes two workers claiming the same
+        # slot in the same instant lose all but one (DuplicateKeyError). Sparse
+        # because manual runs carry no lock_key. The status read sorts on
+        # started_at.
+        _idx(
+            "online_sync_runs",
+            "lock_key",
+            unique=True,
+            sparse=True,
+            name="uniq_online_sync_lock",
+            background=True,
+        )
+        _idx("online_sync_runs", [("job", 1), ("started_at", -1)], background=True)
+
         if failures:
             print(
                 "[WARN] %d index(es) could not build (non-fatal, others OK):"

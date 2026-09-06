@@ -39,13 +39,22 @@ zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from .auth import require_roles
 from ..services import shopify_push
+from ..services import shopify_live_sync as live_sync
+# The DB / audit / doc helpers and the product-sweep core live in the
+# live-sync service so the manual sweep and the scheduled sync run ONE code
+# path; re-imported by their old names so nothing else here moved.
+from ..services.shopify_live_sync import (  # noqa: F401
+    all_docs as _all_docs,
+    connected_db as _get_db,
+    variants_for_product as _get_variants_for_product,
+    write_push_audit as _write_audit,
+)
 
 router = APIRouter()
 
@@ -104,20 +113,6 @@ def _queue_order(doc: Dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def _get_db():
-    """Underlying DB object (real pymongo Database or seeded MockDatabase) when
-    connected, else None. Subscript access (db[name]) works on both."""
-    try:
-        from ..dependencies import get_db
-
-        conn = get_db()
-        if conn is not None and getattr(conn, "is_connected", False):
-            return conn.db
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
 def _require_db():
     db = _get_db()
     if db is None:
@@ -126,55 +121,6 @@ def _require_db():
             status_code=503, detail="Online Store push unavailable (no DB)"
         )
     return db
-
-
-def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
-    """Write a chained audit row for a push ATTEMPT (live OR dry-run). Captures
-    the mode + entity + target + ok + shopify_id + error so the owner has an
-    immutable record of every push. Fail-soft: any audit error is swallowed so it
-    can never undo/block the push (mirrors online_store_images._write_audit)."""
-    try:
-        from ..dependencies import get_audit_repository
-
-        audit = get_audit_repository()
-        if audit is None:
-            return
-        mode = result.get("mode")
-        ok = result.get("ok")
-        # A failed push (live or dry-run) is a WARNING so it surfaces in the
-        # warnings/critical audit views; a clean push is INFO.
-        severity = "INFO" if ok else "WARNING"
-        audit.create(
-            {
-                "action": "ONLINE_STORE_PUSH",
-                "entity_type": result.get("entity"),
-                "entity_id": result.get("target_id"),
-                "user_id": current_user.get("user_id"),
-                "severity": severity,
-                # Stamp `timestamp` (the field the rest of audit_logs + its
-                # (action, timestamp) compound index sort on -- see
-                # database/connection.ensure_indexes). AuditRepository.create
-                # only sets created_at/updated_at, so without this every
-                # ONLINE_STORE_PUSH row was invisible to the timestamp-sorted
-                # Activity Log views AND forced the history read (below) onto an
-                # unindexed created_at sort. Set to the audit-write instant.
-                "timestamp": datetime.now(),
-                "details": {
-                    "mode": mode,
-                    "push_action": result.get("action"),
-                    "ok": ok,
-                    "shopify_id": result.get("shopify_id"),
-                    "error": result.get("error"),
-                    "reason": result.get("reason"),
-                    "code": result.get("code"),
-                    # The publish side channel keeps the RAW vendor error
-                    # (`error` above is the plain-language line).
-                    "publication": result.get("publication"),
-                },
-            }
-        )
-    except Exception:  # noqa: BLE001 -- audit must never break the push
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +274,12 @@ async def push_status(
     # shop after every deploy (see push_mode_status_resolved).
     mode = await shopify_push.push_mode_status_resolved(db)
     if db is None:
-        return {"mode": mode, "db_connected": False, "counts": _empty_counts()}
+        return {
+            "mode": mode,
+            "db_connected": False,
+            "counts": _empty_counts(),
+            "live_sync": live_sync.status_block(None),
+        }
 
     # Counts are computed in Python over the (bounded) ecom collections rather
     # than via nested `ecom.*` / `$exists` Mongo queries. Reasons: (1) the in-memory
@@ -344,7 +295,13 @@ async def push_status(
         "menus": _doc_counts(db, "ecom_menus", "shopify_menu_id"),
         "images": _image_counts(db),
     }
-    return {"mode": mode, "db_connected": True, "counts": counts}
+    return {
+        "mode": mode,
+        "db_connected": True,
+        "counts": counts,
+        # The scheduled live-product sync: settings, last run, next IST slot.
+        "live_sync": live_sync.status_block(db),
+    }
 
 
 def _audit_collection_is_real_mongo(audit) -> bool:
@@ -367,6 +324,27 @@ def _audit_collection_is_real_mongo(audit) -> bool:
         return getattr(getattr(audit, "collection", None), "database", None) is not None
     except Exception:  # noqa: BLE001
         return False
+
+
+@router.post("/sync-live")
+async def sync_live_now(
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """The human's "Sync live products now" button (owner ruling 2026-09-06).
+
+    Runs EXACTLY what the 01:00 / 09:00 IST scheduled sync runs
+    (services/shopify_live_sync.sync_live_products): every product ALREADY on
+    Shopify that was edited in IMS is re-pushed through the same engine and
+    the same three gates (DARK => SIMULATED, no network). A dirty product that
+    was never pushed is counted as awaiting_first_publish and NOT published --
+    first publish stays a human press on the product itself. Honours the
+    max_products_per_run setting; one audit row per product with the caller
+    as actor; one run-summary doc in online_sync_runs. No DB -> 503."""
+    db = _require_db()
+    run = await live_sync.sync_live_products(
+        db, trigger="manual", actor=current_user.get("user_id") or "unknown"
+    )
+    return {"run": run, "live_sync": live_sync.status_block(db)}
 
 
 @router.get("/history")
@@ -632,71 +610,33 @@ async def push_all_pending(
     # The sweep order mirrors a dependency-safe cutover: products (+ variants)
     # first, then the collections/menus that reference them, then images last.
     if "products" in selected:
-        from ..services import online_block
-
-        # Collect the dirty products ONCE, then hoist the block classification for
-        # the whole batch (findings #17 + #20):
-        #  * A BLOCKED product is EXCLUDED here -- it never consumes a limit slot
-        #    or writes a junk MODE_BLOCKED audit row on every sweep (which would
-        #    otherwise starve the cutover queue-drain -- finding #17).
-        #  * Non-blocked products are pushed with a PRECOMPUTED blocked=False, so
-        #    push_product does not re-scan the block config per product (kills the
-        #    ~2-Mongo-queries-per-product N+1 over 4.4k products -- finding #20).
-        #  * If the block CONFIG is unreadable (verifiable=False) we cannot verify
-        #    anything -> FAIL CLOSED: pass blocked=None so push_product skips each
-        #    (never ship a possibly-banned product on a DB blip -- finding #18).
-        dirty_products: List[Dict] = []
-        # TAKEN DOWN BY HAND -> a bulk sweep NEVER puts it back. The take-down
-        # writes DRAFT and clears the flag, but any catalogue edit re-queues the
-        # row and the mapper sends everything except ARCHIVED as ACTIVE -- so
-        # without this the owner pulls a bad listing, someone edits it to fix
-        # it, and the next queue-drain re-lists it mid-fix. Only an explicit
-        # per-product press clears the marker (a successful publish does).
-        taken_down_skipped = 0
-        for doc in _all_docs(db, "catalog_products"):
-            ecom = doc.get("ecom")
-            if not (ecom and ecom.get("locally_modified")):
-                continue
-            if ecom.get("taken_down_at"):
-                taken_down_skipped += 1
-                continue
-            dirty_products.append(doc)
+        # ONE product-sweep core, shared with the scheduled live sync
+        # (services/shopify_live_sync): dirty minus taken-down, the block
+        # classification hoisted once per batch (findings #17/#18/#20), one
+        # audit row per push. Only the ORDER and the CAPS are this door's:
+        dirty_products, taken_down_skipped = live_sync.select_dirty_products(db)
         # THE QUEUE MUST DRAIN. See _queue_order: without this the same first 25
         # stuck rows are retried on every press and nothing behind them ever
         # reaches bettervision.in.
         dirty_products.sort(key=_queue_order)
-        dirty_skus = [d.get("sku") for d in dirty_products if d.get("sku")]
-        blocked_set, block_verifiable = online_block.classify_blocked_skus(
-            db, dirty_skus
-        )
-        blocked_skipped = 0
         # THE BATCH CAP: at most PRODUCT_BATCH_CAP products actually go out
         # per press. A photo-less REFUSAL does not count against it -- it
         # never reached Shopify and nothing went live, and spending the whole
         # cap on refusals would publish nothing at all.
-        sent = 0
-        for doc in dirty_products:
-            if len(results) >= limit or sent >= PRODUCT_BATCH_CAP:
-                cap_reached = cap_reached or sent >= PRODUCT_BATCH_CAP
-                break
-            if block_verifiable and doc.get("sku") in blocked_set:
-                blocked_skipped += 1
-                continue
-            variants = _get_variants_for_product(db, doc)
-            precomputed = False if block_verifiable else None
-            data = (
-                await shopify_push.push_product(
-                    db, doc, variants, blocked=precomputed
-                )
-            ).to_dict()
-            _write_audit(data, current_user)
+        batch = await live_sync.push_product_docs(
+            db,
+            dirty_products,
+            current_user=current_user,
+            max_results=limit,
+            max_sent=PRODUCT_BATCH_CAP,
+        )
+        for data in batch["results"]:
             _tally("products", data)
-            if data.get("reason") != "no_photo":
-                sent += 1
-        if blocked_skipped:
+        cap_reached = batch["cap_reached"]
+        if batch["blocked_skipped"]:
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "blocked_skipped"
-            ] = blocked_skipped
+            ] = batch["blocked_skipped"]
         if taken_down_skipped:
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "taken_down_skipped"
@@ -801,18 +741,6 @@ async def push_all_pending(
     }
 
 
-def _all_docs(db, name: str) -> List[Dict]:
-    """All docs in a collection (Mongo _id stripped). Fail-soft -> []."""
-    try:
-        rows = list(db[name].find({}, {"_id": 0}))
-        for r in rows:
-            if isinstance(r, dict):
-                r.pop("_id", None)
-        return rows
-    except Exception:  # noqa: BLE001
-        return []
-
-
 def _product_counts(db) -> Dict[str, int]:
     """staged = catalog_products carrying an `ecom` sub-doc; pushed = those whose
     ecom has a shopify_product_id; pending = those whose ecom is dirty
@@ -896,23 +824,6 @@ def _get_catalog_product(db, product_id: str) -> Optional[Dict]:
         return doc
     except Exception:  # noqa: BLE001
         return None
-
-
-def _get_variants_for_product(db, product: Dict) -> List[Dict]:
-    """All catalog_variants whose parent is this product (by parent_product_id or
-    parent_sku). Fail-soft -> []."""
-    try:
-        from database.repositories import CatalogVariantRepository
-
-        repo = CatalogVariantRepository(db["catalog_variants"])
-        pid = product.get("id") or product.get("product_id")
-        rows = repo.list_by_parent(pid) if pid else []
-        if not rows and product.get("sku"):
-            # Fall back to parent_sku linkage when the id link wasn't set.
-            rows = repo.find_many({"parent_sku": product.get("sku")})
-        return rows or []
-    except Exception:  # noqa: BLE001
-        return []
 
 
 def _collection_repo(db):

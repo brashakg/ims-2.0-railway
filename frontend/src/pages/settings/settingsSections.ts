@@ -15,7 +15,7 @@ import {
   Users, Tag, Percent, Database, BookOpenCheck,
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer,
-  Shield, Bot, Award, Sliders, RotateCcw, ToggleLeft,
+  Shield, Bot, Award, Sliders, RotateCcw, ToggleLeft, RefreshCw,
 } from 'lucide-react';
 import type { SettingsTab } from './settingsTypes';
 
@@ -45,6 +45,9 @@ export const SETTINGS_SECTIONS = [
   { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules; set your approval PIN', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
   { id: 'agents' as SettingsTab, label: 'AI Agents', icon: Bot, description: 'JARVIS agent control panel', role: ['SUPERADMIN'] },
   { id: 'feature-toggles' as SettingsTab, label: 'Feature Toggles', icon: ToggleLeft, description: 'Enable/disable system features per store', role: ['SUPERADMIN'] },
+  // Owner ruling 2026-09-06: the twice-daily re-push of already-live products.
+  // Backend keys are SUPERADMIN write-only (policy registry), so the tab matches.
+  { id: 'shopify-live-sync' as SettingsTab, label: 'Shopify live sync', icon: RefreshCw, description: 'When edited products already on Shopify are re-pushed (IST times, on/off, per-run cap)', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
@@ -80,6 +83,7 @@ export const SETTINGS_GROUP_OF: Record<SettingsTab, GroupId> = {
   approvals: 'system',
   agents: 'system',
   'feature-toggles': 'system',
+  'shopify-live-sync': 'system',
   'audit-logs': 'system',
   system: 'system',
 };
