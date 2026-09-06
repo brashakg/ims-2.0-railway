@@ -143,9 +143,11 @@ class NexusAgent(JarvisAgent):
 
         try:
             if integ_type == "shopify":
-                # Pull recent orders from Shopify for fulfillment routing.
-                # Catalog push happens via explicit product-updated events.
-                result = await shopify_pull_orders(self.db, since_hours=2)
+                # Missed-webhook catch-up: every Shopify order created in the
+                # window (>= 48 h, further back when the last live pull is
+                # older) that is not yet in IMS is fed through the SAME mapper
+                # the webhook path uses. See nexus_providers.shopify_pull_orders.
+                result = await shopify_pull_orders(self.db)
             elif integ_type == "razorpay":
                 # Reconcile payments — read-only, safe in any DISPATCH_MODE
                 result = await razorpay_list_payments(self.db, since_hours=2)

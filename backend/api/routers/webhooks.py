@@ -407,8 +407,8 @@ def _ensure_index(coll, keys, **kwargs) -> bool:
         return False
 
 
-def _get_inbox_collection():
-    db = _get_db()
+def _get_inbox_collection(db=None):
+    db = db if db is not None else _get_db()
     if db is None:
         return None
     try:
@@ -468,6 +468,51 @@ def _get_inbox_collection():
     except Exception as e:
         logger.warning(f"[WEBHOOKS] webhook_inbox collection unavailable: {e}")
         return None
+
+
+def record_pulled_order(
+    db,
+    payload: Dict[str, Any],
+    *,
+    webhook_id: str,
+    topic: str,
+    skipped_reason: Optional[str] = None,
+    handler_error: Optional[str] = None,
+) -> bool:
+    """Record an order the NEXUS catch-up pull fetched from Shopify's Admin API
+    (a delivery that never arrived as a webhook) in the SAME inbox, with the
+    same row vocabulary, so the online-orders FAILED queue and POST
+    /online-store/orders/remap/{id} work for pulled orders exactly as for
+    received ones. Distinguishing marks: source='shopify_pull', a deterministic
+    _id (one row per Shopify order + updated_at; a re-pull just refreshes it)
+    and signature_verified=False -- the trust basis is our own authenticated
+    API call, not an HMAC, so no reader may count these as verified
+    deliveries. Fail-soft: never raises; True when the row was written."""
+    coll = _get_inbox_collection(db)
+    if coll is None:
+        return False
+    now = datetime.now(timezone.utc)
+    row = {
+        "webhook_id": webhook_id,
+        "vendor": "shopify",
+        "received_at": now,
+        "headers": {"x-shopify-topic": topic, "x-shopify-webhook-id": webhook_id},
+        "payload": payload,
+        "raw_body_size": 0,
+        "processed": True,
+        "processed_at": now,
+        "skipped_reason": skipped_reason,
+        "handler_error": handler_error,
+        "event_id": webhook_id,
+        "signature_verified": False,
+        "source": "shopify_pull",
+    }
+    try:
+        coll.update_one({"_id": webhook_id}, {"$set": row}, upsert=True)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[WEBHOOKS] could not record pulled shopify order %s: %s", webhook_id, e)
+        return False
 
 
 def _load_secret(vendor: str) -> tuple[Optional[str], bool]:
