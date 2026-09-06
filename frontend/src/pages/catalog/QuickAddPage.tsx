@@ -108,6 +108,14 @@ const PRICING_ERROR_KEYS: ReadonlySet<string> = new Set(['mrp', 'offer_price', '
 const sectionOfError = (key: string): SectionId =>
   PRICING_ERROR_KEYS.has(key) ? 'pricing' : 'identity';
 
+/** Where "open the existing product" lands. There is no per-product detail
+ *  route yet; the Inventory stock ledger is the canonical product list and it
+ *  seeds its search box from `?search=`. This used to link the mega-page tab
+ *  `/inventory?tab=catalog`, which the Wave 2 split turned into a redirect —
+ *  the real address is linked directly now (the shim stays for bookmarks). */
+export const productListPath = (sku?: string | null): string =>
+  `/inventory/stock${sku ? `?search=${encodeURIComponent(sku)}` : ''}`;
+
 // The page's edit target, discriminated by which collection it edits:
 //   kind='spine'   — /catalog/add?edit=<id>: EDIT-IN-PLACE of a billing
 //                    `products` row (one validated PUT /products/{id}).
@@ -549,15 +557,12 @@ export function QuickAddPage() {
     }
   }, [dupInfo, enterVariantMode, toast]);
 
-  // Rescue popup: open the existing product in the catalog list. There is no
-  // per-product detail route yet; the Inventory catalog tab is the canonical
-  // product list (the search param pre-scopes it once the list supports it).
+  // Rescue popup: open the existing product in the stock ledger (see
+  // productListPath) pre-scoped to its SKU.
   const handleDupOpenExisting = useCallback(() => {
     const sku = dupInfo?.sku;
     setDupInfo(null);
-    navigate(
-      `/inventory?tab=catalog${sku ? `&search=${encodeURIComponent(sku)}` : ''}`
-    );
+    navigate(productListPath(sku));
   }, [dupInfo, navigate]);
 
   // ---- Similar-products strip (Phase 2) -------------------------------------
@@ -579,9 +584,7 @@ export function QuickAddPage() {
 
   const handleSimilarOpen = useCallback(
     (sku?: string | null) => {
-      navigate(
-        `/inventory?tab=catalog${sku ? `&search=${encodeURIComponent(sku)}` : ''}`
-      );
+      navigate(productListPath(sku));
     },
     [navigate]
   );
