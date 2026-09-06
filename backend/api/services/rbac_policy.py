@@ -975,10 +975,15 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {"method": "GET", "path": "/api/v1/clinical/queue", "allowed": "AUTHENTICATED"},
+    # Owner ruling 2026-09-06: sales roles may add a customer to today's queue
+    # from the POS customer panel (clinical._QUEUE_ADD_ROLES). Every other
+    # clinical write row below is unchanged. Stays on the clinical:write
+    # capability: that union already carries AUTHENTICATED (manufacturability-
+    # check), so this row broadens no grant union -- see test_misc_gating.
     {
         "method": "POST",
         "path": "/api/v1/clinical/queue",
-        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "OPTOMETRIST", "SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
     {
         "method": "GET",

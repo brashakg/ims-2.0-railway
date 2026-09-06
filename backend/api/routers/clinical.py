@@ -84,6 +84,15 @@ def _audit_clinical(
 # frontend Clinical route guard. SUPERADMIN auto-passes via require_roles.
 _CLINICAL_ROLES = ("ADMIN", "STORE_MANAGER", "OPTOMETRIST")
 
+# Owner ruling 2026-09-06 ("let sales staff book too"): the counter may put a
+# customer into TODAY's eye-test queue from the POS customer panel. ONLY the
+# add door widens -- start/status/remove and every exam/Rx write stay on
+# _CLINICAL_ROLES. SALES_CASHIER is normalised to SALES_STAFF at decode_token;
+# listed anyway so the gate reads the same as its rbac_policy row. Bare CASHIER
+# (payment-only) stays out: the button lives behind the family-Rx read, which
+# CASHIER already cannot make (_RX_READ_ROLES).
+_QUEUE_ADD_ROLES = _CLINICAL_ROLES + ("SALES_STAFF", "SALES_CASHIER")
+
 # Roles permitted to READ the saved lens-power combos (CLI-9). The clinical
 # write roles plus AREA_MANAGER, who is a supervisory clinical READER across
 # this router (cf. _ABUSE_VIEW_ROLES / _CONVERSION_VIEW_ROLES) but never a
@@ -903,7 +912,7 @@ async def get_queue(
 @router.post("/queue")
 async def add_to_queue(
     item: QueueItemCreate,
-    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
+    current_user: dict = Depends(require_roles(*_QUEUE_ADD_ROLES)),
 ):
     """Add a patient to the eye test queue"""
     queue_repo = get_eye_test_queue_repository()
