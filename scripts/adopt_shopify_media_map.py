@@ -67,10 +67,19 @@ ROUND 2 (owner rulings 2026-09-06) -- two OPT-IN doors, each REQUIRES --ids
     (ecom.source=bvi_import) that hold 2-3 STALE cdn.shopify.com screenshot
     links as IMS photos while Shopify holds ONE connector image. Their IMS
     photo list is REPLACED with that one Shopify image (the media's CDN url)
-    and the map adopted as {url: that cdn url, id: media gid}. Refused when
-    the product's Shopify media count != 1, when a map already exists, or
-    when the twin carries a singular image_url/image the door cannot clear.
-    Nothing changes on the storefront: Shopify already shows that image.
+    and the map adopted as {url: that cdn url, id: media gid}. Refused,
+    BEFORE the Shopify query and before any write, when the twin is not an
+    old-app twin (ecom.source != bvi_import), when any of its photos is not
+    a cdn.shopify.com link (a real in-app photo is never overwritten here --
+    prod aa7d0ed2 has exactly the one-media shape a pasted-wrong id would
+    hand over), when a map already exists, when the twin carries a singular
+    image_url/image the door cannot clear, when its spine row lacks a
+    product_id (the door cannot key it; falling through to a twin-only
+    write is exactly what the next spine edit would undo), or when the spine's
+    pim_product_id names ANOTHER twin (the mirror keys the twin on that
+    field first, so the door would move a foreign product's photo); and,
+    after the query, when the Shopify media count != 1. Nothing changes on
+    the storefront: Shopify already shows that image.
 
     HOW THE PHOTO IS WRITTEN. Photos live on the billing SPINE
     (products.images[]) and are mirrored to the catalog twin by the ONE
@@ -84,13 +93,20 @@ ROUND 2 (owner rulings 2026-09-06) -- two OPT-IN doors, each REQUIRES --ids
     a second twin writer. After the write the twin is re-read and the map
     is adopted ONLY when product_photo_urls(twin) is exactly [that cdn url].
 
-    REVERSAL. Every applied product's previous photo list (spine images,
-    twin photo list, previous map) is printed AND saved to
-    ``adopt_replace_reversal_<UTC stamp>.json`` in the working directory
-    (the script prints the path). To reverse: put the saved ``spine_images``
-    back through the same door (PUT /products/{spine_id} images=[...]) and
-    $unset ecom.media_map; a twin without a spine takes its
-    ``twin_photos`` back on catalog_products.images directly.
+    REVERSAL. Every PLANNED product's previous photo list (spine images,
+    twin photo list + raw twin images[], previous map) is saved to
+    ``adopt_replace_reversal_<UTC stamp>.json`` under --reversal-dir
+    (default: the working directory; pass a directory OUTSIDE the git
+    checkout under the prod recipe) BEFORE the first write, and printed per
+    product; the file is rewritten after the loop with ``applied`` = the ids
+    that moved. So an un-caught failure between two products, or a mirror
+    that swallowed a twin error (fail-soft) after the spine moved -- printed
+    as 'TWIN DID NOT FOLLOW', the map NOT adopted -- still leaves the
+    before-state on disk. To reverse: put the saved ``spine_images`` back
+    through the same door (PUT /products/{spine_id} images=[...]; a null
+    means the spine had no images key) and $unset ecom.media_map; a twin
+    without a spine takes its ``twin_images`` back on
+    catalog_products.images directly.
 
 SCOPE
 -----
@@ -130,7 +146,7 @@ Apply:
     ... scripts/adopt_shopify_media_map.py --ids <id>,<id> --apply
 Round 2:
     ... --ids <id>,<id> --rule connector-prefix [--apply]
-    ... --ids <id>,<id> --replace-photos-from-shopify [--apply]
+    ... --ids <id>,<id> --replace-photos-from-shopify [--reversal-dir <dir>] [--apply]
 
 REVERSAL (map only): $unset ecom.media_map on the printed ids --
     db.catalog_products.updateMany({id: {$in: [<ids>]}}, {$unset: {"ecom.media_map": ""}})
@@ -149,6 +165,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "backend"))
@@ -289,18 +306,23 @@ def _spine_of(db, twin_id: str) -> Optional[Dict[str, Any]]:
 
 async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
     """READ-ONLY plan for --replace-photos-from-shopify. status: replace |
-    already_mapped | not_one_media | twin_has_image_url | no_cdn_url |
-    missing | not_on_shopify | shopify_missing | graphql_error. ``photos`` is
-    the twin's CURRENT list (the before), ``map`` the one row to adopt."""
+    already_mapped | twin_has_image_url | not_bvi_import | photos_not_cdn |
+    spine_unkeyed | spine_points_elsewhere | not_one_media | no_cdn_url |
+    missing | not_on_shopify | shopify_missing | graphql_error -- every
+    refusal but the media ones is decided BEFORE the Shopify query, and all
+    of them before any write. ``photos`` is the twin's CURRENT list (the
+    before), ``map`` the one row to adopt."""
     row = _row(product_id)
-    row.update({"spine_id": None, "spine_images": None})
+    row.update({"spine_id": None, "spine_images": None, "twin_images": None})
     twin = db["catalog_products"].find_one({"id": product_id})
     if twin is None:
         return row
+    ecom = twin.get("ecom") or {}
     row["sku"] = twin.get("sku") or "-"
-    row["before_map"] = (twin.get("ecom") or {}).get("media_map")
+    row["before_map"] = ecom.get("media_map")
     row["photos"] = product_photo_urls(twin)
-    gid = _as_shopify_gid((twin.get("ecom") or {}).get("shopify_product_id"), "Product")
+    row["twin_images"] = twin.get("images")
+    gid = _as_shopify_gid(ecom.get("shopify_product_id"), "Product")
     if not gid:
         row["status"] = "not_on_shopify"
         return row
@@ -312,6 +334,28 @@ async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
     if any(twin.get(k) for k in ("image_url", "image")):
         row["status"] = "twin_has_image_url"
         return row
+    # SCOPE (the ruling): an old-app twin whose photos are ALL stale
+    # cdn.shopify.com links. A real in-app photo is never overwritten here.
+    if ecom.get("source") != "bvi_import":
+        row["status"] = "not_bvi_import"
+        return row
+    if not row["photos"] or any(urlsplit(u).netloc != "cdn.shopify.com" for u in row["photos"]):
+        row["status"] = "photos_not_cdn"
+        return row
+    # The spine the door writes MUST mirror to THIS twin (the mirror keys the
+    # twin on spine.pim_product_id first): a spine pointing elsewhere would
+    # move a foreign product's photo; a row without product_id cannot go
+    # through the door at all and would fall through to a twin-only write.
+    spine = _spine_of(db, product_id)
+    if spine is not None:
+        if not spine.get("product_id"):
+            row["status"] = "spine_unkeyed"
+            return row
+        if spine.get("pim_product_id") and spine["pim_product_id"] != product_id:
+            row["status"] = "spine_points_elsewhere"
+            return row
+        row["spine_id"] = spine["product_id"]
+        row["spine_images"] = spine.get("images")
     nodes = await _media_nodes(db, gid, row)
     if nodes is None:
         return row
@@ -329,10 +373,6 @@ async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
         row["status"] = "no_cdn_url"
         return row
     row["map"] = [{"url": cdn, "id": str(nodes[0]["id"])}]
-    spine = _spine_of(db, product_id)
-    if spine is not None:
-        row["spine_id"] = spine.get("product_id")
-        row["spine_images"] = spine.get("images")
     row["status"] = "replace"
     return row
 
@@ -340,7 +380,9 @@ async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
 def _replace(db, row: Dict[str, Any]) -> bool:
     """Write the one Shopify image as the product's photo list through the
     product edit door (spine -> mirror -> twin, nothing queued), verify the
-    twin now shows exactly that photo, then adopt the map."""
+    twin now shows exactly that photo, then adopt the map. Never raises:
+    every failure is reported per product, and this product's reversal
+    entry is already on disk (run() saves the plan before the first write)."""
     pid = row["product_id"]
     cdn = row["map"][0]["url"]
     try:
@@ -357,18 +399,55 @@ def _replace(db, row: Dict[str, Any]) -> bool:
             pm.mirror_update_to_catalog_twin(
                 product_id=pid, current={}, patch={"images": [cdn]}, db=_Conn(db), mark_dirty=False
             )
+        now = product_photo_urls(db["catalog_products"].find_one({"id": pid}) or {})
+        if now != [cdn]:
+            # ponytail: the mirror is fail-soft, so a swallowed twin error
+            # leaves the spine (when there is one) already at [cdn] -- said
+            # so here, the before-list is in the reversal file. Upgrade: put
+            # spine_images back through the same door right here.
+            print(
+                f"  TWIN DID NOT FOLLOW {pid}: twin holds {now}, spine "
+                f"{'written to [' + cdn + ']' if row['spine_id'] else 'none'} -- map not adopted; "
+                "restore spine_images from the reversal file"
+            )
+            return False
+        if not _writeback_media_map(db, pid, row["map"]):
+            print(f"  WRITE FAILED {pid}: media_map -- photos moved; restore from the reversal file")
+            return False
+        return True
     except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
-        print(f"  WRITE FAILED {pid}: {_redact(exc)}")
+        print(f"  WRITE FAILED {pid}: {_redact(exc)} -- see the reversal file")
         return False
-    twin = db["catalog_products"].find_one({"id": pid}) or {}
-    now = product_photo_urls(twin)
-    if now != [cdn]:
-        print(f"  PHOTOS NOT REPLACED {pid}: twin now holds {now} -- map not adopted")
-        return False
-    if not _writeback_media_map(db, pid, row["map"]):
-        print(f"  WRITE FAILED {pid}: media_map")
-        return False
-    return True
+
+
+def _save_reversal(path: str, plan: List[Dict[str, Any]], applied: List[str]) -> None:
+    """The before-state of every PLANNED product. Written BEFORE the first
+    write (applied=[]) and again after the loop (applied=the ids that moved),
+    so a crash between two products never loses the first one's lists."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "created_at": datetime.now(tz=timezone.utc).isoformat(),
+                "how": "put spine_images back through PUT /products/{spine_id} (or twin_images on "
+                "catalog_products.images when spine_id is null) and $unset ecom.media_map",
+                "applied": list(applied),
+                "products": [
+                    {
+                        "product_id": r["product_id"],
+                        "spine_id": r["spine_id"],
+                        "spine_images": r["spine_images"],
+                        "twin_photos": r["photos"],
+                        "twin_images": r["twin_images"],
+                        "media_map_before": r["before_map"],
+                        "photo_after": r["map"][0]["url"],
+                        "media_map_after": r["map"],
+                    }
+                    for r in plan
+                ],
+            },
+            fh,
+            indent=1,
+        )
 
 
 def _audit(db, row: Dict[str, Any], *, action: str, before: Dict[str, Any], after: Dict[str, Any], reversal: str) -> None:
@@ -420,7 +499,15 @@ def _print_row(r: Dict[str, Any]) -> None:
         print(f"      - unmanaged {mid} ({names.get(mid, '?')}) -- left where it is")
 
 
-async def run(db, ids: List[str], apply: bool, *, rules: tuple = ("exact",), replace: bool = False) -> Dict[str, Any]:
+async def run(
+    db,
+    ids: List[str],
+    apply: bool,
+    *,
+    rules: tuple = ("exact",),
+    replace: bool = False,
+    reversal_dir: str = ".",
+) -> Dict[str, Any]:
     if replace:
         rows = [await inspect_replace(db, pid) for pid in ids]
     else:
@@ -432,19 +519,17 @@ async def run(db, ids: List[str], apply: bool, *, rules: tuple = ("exact",), rep
     written: List[str] = []
     reversal_path: Optional[str] = None
     if apply and replace:
-        saved: List[Dict[str, Any]] = []
-        for r in rows:
-            if r["status"] != "replace":
-                continue
-            entry = {
-                "product_id": r["product_id"],
-                "spine_id": r["spine_id"],
-                "spine_images": r["spine_images"],
-                "twin_photos": r["photos"],
-                "media_map_before": r["before_map"],
-                "photo_after": r["map"][0]["url"],
-                "media_map_after": r["map"],
-            }
+        plan = [r for r in rows if r["status"] == "replace"]
+        if plan:
+            os.makedirs(reversal_dir, exist_ok=True)
+            reversal_path = os.path.abspath(
+                os.path.join(
+                    reversal_dir,
+                    f"adopt_replace_reversal_{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json",
+                )
+            )
+            _save_reversal(reversal_path, plan, applied=[])  # BEFORE the first write
+        for r in plan:
             if _replace(db, r):
                 _audit(
                     db,
@@ -455,26 +540,13 @@ async def run(db, ids: List[str], apply: bool, *, rules: tuple = ("exact",), rep
                     reversal="restore spine_images via PUT /products/{spine_id} images=[...]; $unset ecom.media_map",
                 )
                 written.append(r["product_id"])
-                saved.append(entry)
                 print(f"      previous photos {r['product_id']}: {r['photos']}")
-        if saved:
-            reversal_path = os.path.abspath(
-                f"adopt_replace_reversal_{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-            )
-            with open(reversal_path, "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "created_at": datetime.now(tz=timezone.utc).isoformat(),
-                        "how": "put spine_images back through PUT /products/{spine_id} (or twin_photos on "
-                        "catalog_products.images when spine_id is null) and $unset ecom.media_map",
-                        "products": saved,
-                    },
-                    fh,
-                    indent=1,
-                )
+        if plan:
+            _save_reversal(reversal_path, plan, applied=written)
         print(f"\nproducts={len(rows)} {totals} written={len(written)}")
+        if reversal_path:
+            print(f"REVERSAL saved to {reversal_path} (the plan, written before the first write; 'applied' = what moved)")
         if written:
-            print(f"REVERSAL saved to {reversal_path}")
             print(
                 "REVERSAL (map only): db.catalog_products.updateMany({id: {$in: %s}}, "
                 '{$unset: {"ecom.media_map": ""}})' % written
@@ -525,6 +597,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="Replace the IMS photo list with the product's ONE Shopify image and adopt it (refused when media count != 1).",
     )
+    parser.add_argument(
+        "--reversal-dir",
+        default=".",
+        help="Where --replace-photos-from-shopify --apply saves adopt_replace_reversal_<UTC>.json (default: cwd; "
+        "under the prod recipe pass a directory outside the git checkout).",
+    )
     args = parser.parse_args(argv)
     if args.replace_photos_from_shopify and args.rule != "exact":
         parser.error("--replace-photos-from-shopify takes no --rule: the single Shopify image is adopted as-is.")
@@ -559,7 +637,14 @@ def main(argv=None):
     sys.stdout.reconfigure(errors="backslashreplace")
     db = _connect()
     asyncio.run(
-        run(db, ids, apply=args.apply, rules=RULES[args.rule], replace=args.replace_photos_from_shopify)
+        run(
+            db,
+            ids,
+            apply=args.apply,
+            rules=RULES[args.rule],
+            replace=args.replace_photos_from_shopify,
+            reversal_dir=args.reversal_dir,
+        )
     )
 
 

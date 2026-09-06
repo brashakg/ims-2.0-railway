@@ -252,7 +252,8 @@ MATCH_RULES = ("exact", "connector_prefix")
 def _numeric_id(gid: Any) -> str:
     """'gid://shopify/Product/123' or '123' -> '123'; '' when not numeric."""
     tail = str(gid or "").rsplit("/", 1)[-1]
-    return tail if tail.isdigit() else ""
+    # isascii too: str.isdigit accepts Unicode digits ("\u00b2"), not an id
+    return tail if tail.isascii() and tail.isdigit() else ""
 
 
 def _connector_file(ims_url: str, cdn_url: str, own_id: str) -> bool:
