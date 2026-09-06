@@ -23,11 +23,21 @@ write, position / count never match, dry-run = no write, --ids required,
 already-mapped skipped (an empty map is not a map), transport failure
 reported not fatal.
 
+ROUND 2 (owner rulings 2026-09-06), both OPT-IN: R3b (--rule connector-prefix)
+claims a media named '<the product's OWN Shopify id>__<nn>__<basename>' when
+<basename> equals the IMS file stem-for-stem, extension ignored -- a foreign
+id / no prefix never match, stems are exact, still 1:1, and the default rules
+exclude it; --replace-photos-from-shopify writes the ONE Shopify image as the
+photo list through the spine door (product_master.update_product, the mirror,
+mark_dirty=False so nothing queues) then adopts it, refusing media count != 1,
+an existing map and a twin the door cannot clear; dry-run writes nothing.
+
 No emoji (Windows cp1252).
 """
 
 import asyncio
 import copy
+import json
 import os
 import sys
 
@@ -42,8 +52,10 @@ os.environ.setdefault("ENVIRONMENT", "test")
 import pytest  # noqa: E402
 
 import adopt_shopify_media_map as script  # noqa: E402
+from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push.media import match_media_to_photos  # noqa: E402
+from database.repositories.product_repository import ProductRepository  # noqa: E402
 from test_online_push_dirty_flag import _DB  # noqa: E402
 
 GID = "gid://shopify/Product/900"
@@ -93,8 +105,8 @@ def _seed(db, photos, media_map=None):
     db["catalog_products"].insert_one({"id": "P1", "sku": "SKU1", "images": list(photos), "ecom": ecom})
 
 
-def _run(db, apply, ids=("P1",)):
-    return asyncio.run(script.run(db, list(ids), apply=apply))
+def _run(db, apply, ids=("P1",), **kw):
+    return asyncio.run(script.run(db, list(ids), apply=apply, **kw))
 
 
 def _twin(db):
@@ -410,3 +422,382 @@ def test_extension_case_is_not_folded():
     assert match_media_to_photos(["https://a/i/front.JPG"], [{"id": _m(1), "image": {"url": CDN + "front.JPG"}}])["map"] == [
         {"url": "https://a/i/front.JPG", "id": _m(1)}
     ]
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2 -- R3b, the connector-prefix rule (opt-in)
+# ---------------------------------------------------------------------------
+
+OWN_ID = "10153760784633"
+OWN = "gid://shopify/Product/" + OWN_ID
+RB = "https://india.ray-ban.com/media/catalog/product/cache/9c388a/4/_/4_1.jpeg"
+R3B = ("exact", "connector_prefix")
+
+
+def _conn(pid, nn, base):
+    return "%s__%02d__%s" % (pid, nn, base)
+
+
+def _cdn(n, name):
+    return {"id": _m(n), "image": {"url": CDN + name}}
+
+
+def test_connector_prefix_claims_only_the_own_id_media():
+    """R3b: '<own id>__00__4_1.png' IS the IMS photo 4_1.jpeg (stem equal,
+    extension ignored); the other connector media on the product carry other
+    basenames and stay unmanaged. The index is not identity (__04__ on the
+    prod product 0d0f04f9 is the match, not __00__)."""
+    media = [
+        _cdn(1, _conn(OWN_ID, 1, "5.png")),
+        _cdn(2, _conn(OWN_ID, 4, "4_1.png") + "?v=1785323542"),
+        _cdn(3, _conn(OWN_ID, 2, "2.png")),
+    ]
+    out = match_media_to_photos([RB], media, rules=R3B, product_gid=OWN)
+    assert out["map"] == [{"url": RB, "id": _m(2)}] and out["unmatched_photos"] == []
+    assert out["unmanaged"] == [_m(1), _m(3)]
+    # a bare numeric id names the product just as well as its gid
+    assert match_media_to_photos([RB], media, rules=R3B, product_gid=OWN_ID)["map"] == out["map"]
+
+
+def test_connector_prefix_never_matches_a_foreign_id_or_no_prefix():
+    """The prefix MUST be this product's own id: another product's id, a
+    truncated / extended own id, no prefix at all (R3b silent; exact refuses
+    the jpeg->png change), an empty prefix and a single-underscore spelling
+    all leave the media unmanaged."""
+    for cdn in [
+        _conn("8840328872185", 0, "4_1.png"),
+        _conn(OWN_ID[:-1], 0, "4_1.png"),
+        _conn(OWN_ID + "1", 0, "4_1.png"),
+        "4_1.png",
+        "__00__4_1.png",
+        "%s_00_4_1.png" % OWN_ID,
+    ]:
+        out = match_media_to_photos([RB], [_cdn(1, cdn)], rules=R3B, product_gid=OWN)
+        assert out["map"] == [] and out["unmanaged"] == [_m(1)], cdn
+
+
+def test_connector_prefix_stem_is_exact_extension_is_not():
+    """Stem-for-stem, nothing folded: a size suffix, a longer stem, case,
+    Shopify's uuid or a non-image tail is a different name. Positive
+    controls: jpeg->png, an extension-less IMS name, the same extension, a
+    case-only extension change."""
+    for ims, base in [
+        ("4_1.jpeg", "4_1_600x600.png"),
+        ("4_1.jpeg", "4_10.png"),
+        ("Front.jpeg", "front.png"),
+        ("front.jpeg", "front_89ffbc2c-6001-45c1-804a-2e4d838a4627.png"),
+        ("4_1.jpeg", "4_1.png.bak"),
+    ]:
+        out = match_media_to_photos(["https://a/i/" + ims], [_cdn(1, _conn(OWN_ID, 0, base))], rules=R3B, product_gid=OWN)
+        assert out["map"] == [] and out["unmanaged"] == [_m(1)], (ims, base)
+    for ims, base in [("4_1.jpeg", "4_1.png"), ("front", "front.webp"), ("4_1.jpeg", "4_1.jpeg"), ("front.JPG", "front.jpg")]:
+        out = match_media_to_photos(["https://a/i/" + ims], [_cdn(1, _conn(OWN_ID, 0, base))], rules=R3B, product_gid=OWN)
+        assert out["map"] == [{"url": "https://a/i/" + ims, "id": _m(1)}], (ims, base)
+
+
+def test_default_rules_exclude_the_connector_prefix():
+    """rules=('exact',) is the default: the own-id media is NOT claimed unless
+    the caller opted in, even when the product gid is handed over."""
+    media = [_cdn(1, _conn(OWN_ID, 0, "4_1.png"))]
+    assert match_media_to_photos([RB], media, product_gid=OWN)["map"] == []
+    assert match_media_to_photos([RB], media, rules=("exact",), product_gid=OWN)["map"] == []
+    assert match_media_to_photos([RB], media, rules=("connector_prefix",), product_gid=OWN)["map"] == [{"url": RB, "id": _m(1)}]
+
+
+def test_exact_stays_extension_strict_when_the_connector_rule_is_on():
+    """Extension-agnostic ONLY under R3b: with both rules on, a prefix-less
+    name still needs the same extension (exact), and the same name with the
+    same extension is still claimed by exact."""
+    out = match_media_to_photos(["https://a/i/front.jpeg"], [_cdn(1, "front.png")], rules=R3B, product_gid=OWN)
+    assert out["map"] == [] and out["unmanaged"] == [_m(1)]
+    out = match_media_to_photos(["https://a/i/front.png"], [_cdn(1, "front.png")], rules=R3B, product_gid=OWN)
+    assert out["map"] == [{"url": "https://a/i/front.png", "id": _m(1)}]
+
+
+def test_connector_rule_needs_the_own_gid_and_unknown_rules_are_refused():
+    media = [_cdn(1, _conn(OWN_ID, 0, "4_1.png"))]
+    with pytest.raises(ValueError):
+        match_media_to_photos([RB], media, rules=R3B)
+    with pytest.raises(ValueError):
+        match_media_to_photos([RB], media, rules=R3B, product_gid="gid://shopify/Product/")
+    with pytest.raises(ValueError):
+        match_media_to_photos([RB], media, rules=("exact", "position"), product_gid=OWN)
+    # the exact rules never needed the gid and still do not
+    assert match_media_to_photos([RB], media)["map"] == []
+
+
+def test_connector_prefix_is_one_to_one():
+    """Two own-id media with the same basename fit the one photo: ambiguous,
+    neither is claimed; two photos that fit one media claim nothing."""
+    out = match_media_to_photos(
+        [RB], [_cdn(1, _conn(OWN_ID, 0, "4_1.png")), _cdn(2, _conn(OWN_ID, 1, "4_1.jpg"))], rules=R3B, product_gid=OWN
+    )
+    assert out["map"] == [] and out["unmatched_photos"] == [RB] and out["unmanaged"] == [_m(1), _m(2)]
+    out = match_media_to_photos(
+        [RB, "https://b/4_1.png"], [_cdn(1, _conn(OWN_ID, 0, "4_1.png"))], rules=R3B, product_gid=OWN
+    )
+    assert out["map"] == [] and len(out["unmatched_photos"]) == 2
+
+
+def test_script_rule_connector_prefix_adopts_and_leaves_the_rest_unmanaged(db, monkeypatch, capsys):
+    """--rule connector-prefix end to end through the fake Shopify (a query,
+    never a mutation): the same product adopts nothing under the default
+    rule, then adopts the one own-id media under R3b -- map written through
+    the one writer, the 4 other connector media unmanaged and PRINTED,
+    locally_modified untouched, an audit row."""
+    nodes = [_node(1, _conn(OWN_ID, 0, "4_1.png"), alt="Ray-Ban front")] + [
+        _node(n, _conn(OWN_ID, n - 1, base)) for n, base in ((2, "5.png"), (3, "2.png"), (4, "3.png"), (5, "1st.png"))
+    ]
+    shop = _wire(monkeypatch, nodes)
+    db["catalog_products"].insert_one(
+        {"id": "P1", "sku": "SKU1", "images": [RB], "ecom": {"shopify_product_id": OWN, "locally_modified": False}}
+    )
+    out = _run(db, apply=True)
+    assert out["rows"][0]["status"] == "unmatched" and out["written"] == []
+    assert "media_map" not in _twin(db)["ecom"]
+    out = _run(db, apply=True, rules=R3B)
+    row = out["rows"][0]
+    assert row["status"] == "adopt" and row["map"] == [{"url": RB, "id": _m(1)}]
+    assert row["unmanaged"] == [_m(2), _m(3), _m(4), _m(5)] and out["written"] == ["P1"]
+    twin = _twin(db)
+    assert twin["ecom"]["media_map"] == [{"url": RB, "id": _m(1)}]
+    assert twin["ecom"]["locally_modified"] is False and twin["images"] == [RB]
+    assert shop.calls == [{"id": OWN}, {"id": OWN}]
+    audit = list(db["audit_logs"].find({}))
+    assert len(audit) == 1 and audit[0]["action"] == "MEDIA_MAP_ADOPT"
+    printed = capsys.readouterr().out
+    assert "+ %s -> %s (%s)" % (RB, _m(1), _conn(OWN_ID, 0, "4_1.png")) in printed
+    assert "- unmanaged %s (%s)" % (_m(5), _conn(OWN_ID, 4, "1st.png")) in printed
+
+
+def test_parse_args_rule_and_replace_doors():
+    assert script.parse_args(["--ids", "P1"]).rule == "exact"
+    assert script.RULES["exact"] == ("exact",)
+    args = script.parse_args(["--ids", "P1", "--rule", "connector-prefix"])
+    assert script.RULES[args.rule] == R3B and args.replace_photos_from_shopify is False
+    assert script.parse_args(["--ids", "P1", "--replace-photos-from-shopify"]).replace_photos_from_shopify is True
+    for argv in (
+        ["--rule", "connector-prefix"],
+        ["--replace-photos-from-shopify"],
+        ["--ids", "P1", "--rule", "position"],
+        ["--ids", "P1", "--replace-photos-from-shopify", "--rule", "connector-prefix"],
+    ):
+        with pytest.raises(SystemExit):
+            script.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2 -- --replace-photos-from-shopify (the six bvi_import twins)
+# ---------------------------------------------------------------------------
+
+BVI_ID = "8922161348857"
+BVI = "gid://shopify/Product/" + BVI_ID
+STALE = [
+    CDN + "Screenshot_2025-08-20_170151.png?v=1755689540",
+    CDN + "Screenshot_2025-08-20_170156.png?v=1755689539",
+    CDN + "Screenshot_2025-08-20_170201.png?v=1755689540",
+]
+ONE_NAME = _conn(BVI_ID, 0, "0rw4006__601_71__p21__shad__fr.png")
+ONE = CDN + ONE_NAME + "?v=1785322878"
+ONE_NODE = {"id": _m(1), "alt": "front view", "image": {"url": ONE}, "originalSource": {"url": "https://x/y.png"}}
+
+
+def _seed_bvi(db, photos=STALE, spine=True, media_map=None, **twin_extra):
+    ecom = {"shopify_product_id": BVI, "locally_modified": False, "source": "bvi_import", "status": "PUBLISHED"}
+    if media_map is not None:
+        ecom["media_map"] = media_map
+    db["catalog_products"].insert_one({"id": "P1", "sku": "SKU1", "images": list(photos), "ecom": ecom, **twin_extra})
+    if spine:
+        db["products"].insert_one(
+            {
+                "product_id": "SP1",
+                "id": "SP1",
+                "pim_product_id": "P1",
+                "sku": "SKU1",
+                "brand": "Ray-Ban",
+                "category": "SMARTGLASSES",
+                "mrp": 29900.0,
+                "offer_price": 29900.0,
+                "images": list(photos),
+                "is_active": True,
+                "catalog_status": "ACTIVE",
+            }
+        )
+
+
+def _spine(db):
+    return copy.deepcopy(db["products"].find_one({"product_id": "SP1"}))
+
+
+def _no_reversal_file(tmp_path):
+    return not [p for p in os.listdir(tmp_path) if p.startswith("adopt_replace_reversal_")]
+
+
+def test_replace_writes_through_the_spine_door_without_queuing(db, monkeypatch, tmp_path, capsys):
+    """The one Shopify image becomes the photo list ON THE SPINE (the door),
+    the mirror copies it to the twin, the twin is NOT queued
+    (mark_dirty=False), the map lands as {url: cdn url, id: gid}, an audit
+    row carries the before list, and the reversal is printed AND saved."""
+    monkeypatch.chdir(tmp_path)
+    shop = _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db)
+    out = _run(db, apply=True, replace=True)
+    row = out["rows"][0]
+    assert row["status"] == "replace" and row["spine_id"] == "SP1" and row["photos"] == STALE
+    assert row["map"] == [{"url": ONE, "id": _m(1)}] and out["written"] == ["P1"]
+    assert _spine(db)["images"] == [ONE], "the spine must move -- a twin-only write is overwritten by the next edit"
+    twin = _twin(db)
+    assert twin["images"] == [ONE], "the mirror must have copied it"
+    assert twin["ecom"]["locally_modified"] is False, "nothing may queue: Shopify already shows this image"
+    assert twin["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert twin["ecom"]["status"] == "PUBLISHED"
+    assert shop.calls == [{"id": BVI}]
+    audit = list(db["audit_logs"].find({}))
+    assert len(audit) == 1 and audit[0]["action"] == "PHOTOS_REPLACED_FROM_SHOPIFY"
+    assert audit[0]["before_state"] == {"photos": STALE, "spine_images": STALE, "media_map": None}
+    assert audit[0]["after_state"] == {"photos": [ONE], "media_map": [{"url": ONE, "id": _m(1)}]}
+    printed = capsys.readouterr().out
+    for u in STALE:
+        assert "before " + u in printed
+    assert "after  %s -> %s (%s)" % (ONE, _m(1), ONE_NAME) in printed
+    assert "previous photos P1: %s" % STALE in printed
+    path = out["reversal_path"]
+    assert path and os.path.isfile(path) and os.path.basename(path).startswith("adopt_replace_reversal_")
+    assert "REVERSAL saved to " + path in printed
+    with open(path, encoding="utf-8") as fh:
+        saved = json.load(fh)
+    assert saved["products"] == [
+        {
+            "product_id": "P1",
+            "spine_id": "SP1",
+            "spine_images": STALE,
+            "twin_photos": STALE,
+            "media_map_before": None,
+            "photo_after": ONE,
+            "media_map_after": [{"url": ONE, "id": _m(1)}],
+        }
+    ]
+
+
+def test_the_dirty_opt_out_is_what_keeps_the_twin_unqueued(db):
+    """Positive control for mark_dirty: the SAME spine door with its default
+    queues the twin (a human photo edit must), so the explicit False in the
+    script is the one thing standing between the replace and a push. The
+    bare mirror helper honours the same opt-out."""
+    _seed_bvi(db)
+    pm.update_product(
+        product_id="SP1", patch={"images": [ONE]}, actor="t", product_repo=ProductRepository(db["products"]), db=script._Conn(db)
+    )
+    assert _twin(db)["images"] == [ONE] and _twin(db)["ecom"]["locally_modified"] is True
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom.locally_modified": False}})
+    pm.update_product(
+        product_id="SP1",
+        patch={"images": STALE},
+        actor="t",
+        product_repo=ProductRepository(db["products"]),
+        db=script._Conn(db),
+        mark_dirty=False,
+    )
+    assert _twin(db)["images"] == STALE and _twin(db)["ecom"]["locally_modified"] is False
+    pm.mirror_update_to_catalog_twin(product_id="P1", current={}, patch={"images": [ONE]}, db=script._Conn(db), mark_dirty=False)
+    assert _twin(db)["images"] == [ONE] and _twin(db)["ecom"]["locally_modified"] is False
+
+
+def test_replace_without_a_spine_uses_the_same_mirror_helper(db, monkeypatch, tmp_path):
+    """A twin with no spine row (the archived sixth) is written through the
+    SAME mirror helper with an empty spine -- never a second twin writer,
+    never an upsert of a spine row."""
+    monkeypatch.chdir(tmp_path)
+    _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db, spine=False)
+    calls = []
+    real = pm.mirror_update_to_catalog_twin
+
+    def spy(**kw):
+        calls.append({k: v for k, v in kw.items() if k != "db"})
+        return real(**kw)
+
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", spy)
+    out = _run(db, apply=True, replace=True)
+    row = out["rows"][0]
+    assert row["status"] == "replace" and row["spine_id"] is None and out["written"] == ["P1"]
+    assert calls == [{"product_id": "P1", "current": {}, "patch": {"images": [ONE]}, "mark_dirty": False}]
+    twin = _twin(db)
+    assert twin["images"] == [ONE] and twin["ecom"]["locally_modified"] is False
+    assert twin["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert db["products"].find_one({"pim_product_id": "P1"}) is None
+    with open(out["reversal_path"], encoding="utf-8") as fh:
+        assert json.load(fh)["products"][0]["spine_id"] is None
+
+
+def test_replace_refuses_a_media_count_other_than_one(monkeypatch, tmp_path, capsys):
+    """The ruling covers ONE connector image per product: zero or two media
+    is not that product -- reported (each media's name printed), nothing
+    written on the spine, the twin or the map."""
+    monkeypatch.chdir(tmp_path)
+    two = [ONE_NODE, _node(2, _conn(BVI_ID, 1, "0rw4006__601_71__p21__shad__lt.png"))]
+    for nodes in ([], two):
+        db = _DB()
+        _wire(monkeypatch, nodes)
+        _seed_bvi(db)
+        out = _run(db, apply=True, replace=True)
+        row = out["rows"][0]
+        assert row["status"] == "not_one_media" and row["media"] == len(nodes) and row["map"] == []
+        assert out["written"] == [] and out["reversal_path"] is None
+        assert _spine(db)["images"] == STALE and _twin(db)["images"] == STALE
+        assert "media_map" not in _twin(db)["ecom"] and list(db["audit_logs"].find({})) == []
+    assert _no_reversal_file(tmp_path)
+    printed = capsys.readouterr().out
+    assert "- media %s (%s)" % (_m(2), _conn(BVI_ID, 1, "0rw4006__601_71__p21__shad__lt.png")) in printed
+
+
+def test_replace_refuses_an_existing_map_and_a_twin_the_door_cannot_clear(monkeypatch, tmp_path):
+    """A map already there means the attach (or round 1) owns the answer; a
+    singular image_url would survive the door's images[] write and the list
+    would not be the one photo. Both are refused BEFORE the Shopify query."""
+    monkeypatch.chdir(tmp_path)
+    db = _DB()
+    shop = _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db, media_map=[{"url": STALE[0], "id": _m(9)}])
+    out = _run(db, apply=True, replace=True)
+    assert out["rows"][0]["status"] == "already_mapped" and out["written"] == []
+    assert _twin(db)["ecom"]["media_map"] == [{"url": STALE[0], "id": _m(9)}] and _spine(db)["images"] == STALE
+    db = _DB()
+    _seed_bvi(db, image_url=STALE[0])
+    out = _run(db, apply=True, replace=True)
+    assert out["rows"][0]["status"] == "twin_has_image_url" and out["written"] == []
+    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    assert shop.calls == []
+    assert _no_reversal_file(tmp_path)
+
+
+def test_replace_dry_run_writes_nothing(db, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db)
+    out = _run(db, apply=False, replace=True)
+    row = out["rows"][0]
+    assert row["status"] == "replace" and row["map"] == [{"url": ONE, "id": _m(1)}] and row["photos"] == STALE
+    assert out["written"] == [] and out["reversal_path"] is None
+    assert _spine(db)["images"] == STALE and _twin(db)["images"] == STALE
+    assert "media_map" not in _twin(db)["ecom"] and _twin(db)["ecom"]["locally_modified"] is False
+    assert list(db["audit_logs"].find({})) == [] and _no_reversal_file(tmp_path)
+    assert "DRY RUN - nothing written" in capsys.readouterr().out
+
+
+def test_replace_never_adopts_when_the_twin_did_not_follow(db, monkeypatch, tmp_path, capsys):
+    """The post-write gate: a spine whose pim_product_id points elsewhere
+    mirrors to a twin that is not this one, so the twin's photo list is not
+    the one image -- the map is NOT adopted (it would name a photo the pass
+    cannot see) and the product is reported."""
+    monkeypatch.chdir(tmp_path)
+    _wire(monkeypatch, [ONE_NODE])
+    _seed_bvi(db, spine=False)
+    db["products"].insert_one(
+        {"product_id": "P1", "id": "P1", "pim_product_id": "ELSEWHERE", "sku": "SKU1", "mrp": 1.0, "offer_price": 1.0, "images": list(STALE), "is_active": True}
+    )
+    out = _run(db, apply=True, replace=True)
+    assert out["rows"][0]["spine_id"] == "P1" and out["written"] == [] and out["reversal_path"] is None
+    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    assert list(db["audit_logs"].find({})) == []
+    assert "PHOTOS NOT REPLACED P1" in capsys.readouterr().out
