@@ -29,7 +29,9 @@ from .product_input import (
     build_product_input,
     build_product_metafields,
     build_variant_price_inputs,
+    ims_product_tags,
 )
+from .tags import plan_product_tags, sync_product_tags
 from .variants import (
     _needs_repair,
     _seed_variants_after_write,
@@ -139,6 +141,11 @@ async def push_product(
 
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
+    # THE TAGS (sync audit gap #4): the create input carries the full list;
+    # an update carries none -- the diff against what IMS last sent runs
+    # after the write (tags.sync_product_tags), so hand-added admin tags
+    # survive. Computed once so the plan, the input and the ledger agree.
+    ims_tags = ims_product_tags(product)
     # Attribute -> metafield side channel (owner 2026-07-05): planned in the
     # dry-run, upserted via metafieldsSet after a LIVE product write succeeds.
     metafields = build_product_metafields(product)
@@ -187,6 +194,7 @@ async def push_product(
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
             stock=plan_product_stock(db, product, variants),
+            tags=plan_product_tags(product, ims_tags),
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -231,6 +239,16 @@ async def push_product(
             )
         if new_gid and pid:
             _writeback_product(db, pid, new_gid)
+        # TAGS, RIGHT AFTER THE WRITE. The update sent no `tags`, so the
+        # response's tag list is what Shopify holds now; the pass adds /
+        # removes only the tags IMS itself sent and records the ledger.
+        # Fail-soft: reported on the result, never flips ok, never withholds
+        # the publish.
+        tag_summary = None
+        if new_gid:
+            tag_summary = await sync_product_tags(
+                db, product, new_gid, ims_tags, prod.get("tags")
+            )
         # Metafields ride AFTER the product write so the gid always exists.
         # Fail-soft: their errors are reported on the result, never flip ok.
         mf_summary = None
@@ -437,6 +455,7 @@ async def push_product(
             publication=pub_summary,
             photos=photo_summary,
             stock=stock_summary,
+            tags=tag_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(

@@ -929,10 +929,13 @@ def test_spine_put_carries_brand_attributes_and_tags_onto_the_twin_and_queues(
     )
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
-    # ...and the payload the next press sends now carries them.
+    # ...and the payload the next press sends now carries them. The tag
+    # itself travels through the tag pass, not the productUpdate input
+    # (sync audit gap #4: an update's `tags` REPLACES Shopify's list).
     inp = shopify_push.build_product_input(saved, [])
     assert inp["vendor"] == "Oakley"
-    assert "polarised" in inp["tags"]
+    assert "tags" not in inp
+    assert "polarised" in shopify_push.ims_product_tags(saved)
     mf = {m["key"]: m["value"] for m in shopify_push.build_product_metafields(saved)}
     assert mf["frame_color"].lower() == "matte black"
 
