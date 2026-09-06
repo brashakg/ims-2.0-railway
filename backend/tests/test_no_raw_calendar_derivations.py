@@ -166,7 +166,7 @@ ALLOWED = {
         "shifting df/dt, which would break points_log MTD."
     ),
     (
-        "api/routers/vendors.py",
+        "api/routers/vendors/performance.py",
         'when = str(b.get("bill_date") or b.get("created_at") or "")[:7]',
     ): (
         "Vendor month-to-date spend. The primary source `bill_date` is already "

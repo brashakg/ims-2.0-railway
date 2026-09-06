@@ -446,7 +446,7 @@ ALLOWED = {
         "same ruling."
     ),
     (
-        "api/routers/vendors.py",
+        "api/routers/vendors/tds.py",
         "fy_start = datetime(target_fy, 4, 1)",
     ): (
         "26Q TDS export: payment_date is a date-only ISO STRING; the bound "
@@ -454,7 +454,7 @@ ALLOWED = {
         "comment at the site records the defect this fixed). Calendar frame."
     ),
     (
-        "api/routers/vendors.py",
+        "api/routers/vendors/tds.py",
         "fy_end = datetime(target_fy + 1, 3, 31, 23, 59, 59)",
     ): (
         "Upper half of the 26Q payment_date calendar FY bound above -- a "
