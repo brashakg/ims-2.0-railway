@@ -45,6 +45,20 @@ the test red -- table in the PR body):
      a second press is refused; a row that raises AFTER the door wrote (and
      any exception, not only an assert) still lands in the reversal list,
      built from the input skus; the mirror-off and missing-input fences
+ 11. the CATALOG doors reach the child SPINE (round-2 P1): the drawer's
+     is_active toggle and the Delete button key their spine write on the
+     catalog id, which for a door-created product is pim_product_id -- so
+     the spine stayed active and the next stock pass put the size back on
+     sale; now resolved by sku, the pass keeps 0, and the drawer's
+     reactivation brings the 1 back
+ 12. the drawer's mrp / gtin edit on a child lands on its ROW and queues the
+     PARENT (round-2 P2): the engine recompute finds no rows for a child
+     twin, so the edit was silently inert on the website
+ 13. push_image never attaches a child's photo to the parent's listing, even
+     when a twin repair stamps the parent gid on the child twin (round-2 P3)
+ 14. online_delist._raw_db passes a real pymongo Database through (the
+     catalog doors hand it the raw db; the old hasattr check raised on
+     pymongo's attribute factory, so no catalog-door take-down ever ran)
 
 Every Shopify call is a spy or a raiser. No network, no Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_variant_of_rule.py -q
@@ -66,6 +80,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 from strict_fakes import StrictDB  # noqa: E402
 from api import dependencies as deps  # noqa: E402
+from api.routers import catalog as cat  # noqa: E402
 from api.routers import online_store_push as osp  # noqa: E402
 from api.services import online_delist  # noqa: E402
 from api.services import online_stock_writeback as wb  # noqa: E402
@@ -73,6 +88,7 @@ from api.services import policy_engine as pe  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as ls  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from api.services.shopify_push import media as _media  # noqa: E402
 from api.services.online_catalog import catalog_counts, product_online_state  # noqa: E402
 from database.repositories.audit_repository import AuditRepository  # noqa: E402
 from database.repositories.catalog_variant_repository import (  # noqa: E402
@@ -937,3 +953,166 @@ def test_runbook_fences_refuse_mirror_off_and_a_missing_input(monkeypatch, tmp_p
     with pytest.raises(SystemExit) as exc:
         runbook.load_input(str(tmp_path / "gone.json"))
     assert "does not exist" in str(exc.value) and runbook.INPUT_SHA256 in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 11-13. the catalog doors (round-2 verifier P1 / P2 / P3)
+# ---------------------------------------------------------------------------
+
+
+def _wire_catalog(monkeypatch, db):
+    """The catalog router's doors over the fixture db: _get_db raw (the
+    pymongo shape), the repo factory off attributes (ProductRepository(
+    db.products) via _DoorConn), the audit repo, LIVE gates + spy."""
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    monkeypatch.setattr(cat, "_get_db", lambda: db)
+    monkeypatch.setattr(cat, "_catalog_coll", lambda: db["catalog_products"])
+    monkeypatch.setattr(deps, "get_db", lambda: _DoorConn(db))
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: AuditRepository(db["audit_logs"]))
+    return spy
+
+
+def _set_quantities(spy):
+    return [
+        (q["inventoryItemId"], q["quantity"])
+        for c in spy.calls_for("inventorySetQuantities")
+        for q in c["variables"]["input"]["quantities"]
+    ]
+
+
+@pytest.mark.parametrize("door", ["drawer", "delete"])
+def test_catalog_door_deactivation_reaches_the_child_spine_so_the_next_pass_keeps_0(monkeypatch, door):
+    """P1: the twin id of a DOOR-created product is its pim_product_id, not
+    the spine product_id (11/11 Large parents on prod). Both catalog doors
+    keyed their spine write on the catalog id -> no spine matched -> the
+    child spine stayed active -> the quantity rule reported its unit -> the
+    next stock pass (01:00/09:00 live sync, the Push-stock button, any
+    /all-pending press) wrote 1 back and the size was on sale again."""
+    ledger = {"tracked": True, "quantities": {PARENT_SKU: 1, CHILD_SKU: 1}, "location_id": LOC, "policy": "DENY"}
+    db = _world(ledger=ledger)
+    assert _spine(db, "sp-child")["product_id"] != _twin(db, "tw-child")["id"], "door-created shape"
+    spy = _wire_catalog(monkeypatch, db)
+
+    if door == "drawer":
+        _run(cat.update_catalog_product("tw-child", cat.ProductUpdateInput(is_active=False), current_user=ADMIN))
+    else:
+        _run(cat.delete_catalog_product("tw-child", current_user=ADMIN))
+
+    assert _twin(db, "tw-child")["is_active"] is False
+    assert _spine(db, "sp-child")["is_active"] is False, "the catalog door must reach the SPINE -- the variant rule's only marker"
+    assert _set_quantities(spy) == [(B_INV, 0)] and not spy.calls_for("productUpdate(")
+    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == 0
+    assert _twin(db, "tw-child")["ecom"]["online_state"] == "DELISTED"
+
+    spy.calls.clear()
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.action == "noop" and spy.calls == [], f"{door}: the next stock pass put the size back on sale"
+    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: 1, CHILD_SKU: 0}
+
+    if door == "drawer":
+        # the drawer's reactivation reaches the spine too: pooled 1 vs sent 0 -> re-sent
+        _run(cat.update_catalog_product("tw-child", cat.ProductUpdateInput(is_active=True), current_user=ADMIN))
+        assert _spine(db, "sp-child")["is_active"] is True
+        assert "online_state" not in _twin(db, "tw-child")["ecom"]
+        res = _run(shopify_push.sync_stock_levels(db))
+        assert res.action == "sync" and res.ok
+        assert dict(_set_quantities(spy))[B_INV] == 1
+        assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == 1
+
+
+def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_parent(monkeypatch):
+    """P2: the drawer PUT wrote the child TWIN's mrp and asked the engine to
+    recompute the child twin -- whose _load_variants finds no rows (the
+    child's row belongs to the PARENT) -- so the row the parent's price
+    push reads kept the old mrp and nothing was queued: a silent no-op on
+    bettervision.in. The ONE row writer (the spine mirror's) now serves
+    this door too."""
+    db = _world()
+    spy = _wire_catalog(monkeypatch, db)
+    db["catalog_variants"].update_one(
+        {"sku": CHILD_SKU},
+        {"$set": {"discounted_price": 45700.0, "compare_at_price": 45700.0,
+                  "online_price_meta": {"source": "rule", "pct": 0}}},
+    )
+
+    _run(cat.update_catalog_product(
+        "tw-child",
+        cat.ProductUpdateInput(pricing=cat.PricingPatchInput(mrp=47000.0, offer_price=47000.0)),
+        current_user=ADMIN,
+    ))
+
+    row = _row(db, CHILD_SKU)
+    assert row["mrp"] == 47000.0 and row["discounted_price"] == 47000.0, "row moved, stale online price re-derived"
+    assert _spine(db, "sp-child")["mrp"] == 47000.0, "the spine follows (the P1 resolver)"
+    assert _twin(db, "tw-child")["mrp"] == 47000.0
+    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True, "the PARENT carries the price"
+    dirty, _ = ls.select_dirty_products(db)
+    assert [d["id"] for d in dirty] == ["tw-parent"], "the child twin is never a listing"
+
+    spy.calls.clear()
+    parent = _twin(db, "tw-parent")
+    res = _run(shopify_push.push_variant_prices(db, parent, ls.variants_for_product(db, parent)))
+    sent = _bulk_price_rows(spy)
+    assert res.ok and sent[B_GID]["price"] == "47000.00" and sent[A_GID]["price"] == "39900.00"
+
+    # a gtin edit through the drawer rides the same writer (barcode on the row)
+    new_gtin = "4006381333931"  # valid EAN-13, not GS1 20-29
+    _run(cat.update_catalog_product(
+        "tw-child", cat.ProductUpdateInput(attributes={"gtin": new_gtin}), current_user=ADMIN
+    ))
+    assert _row(db, CHILD_SKU)["gtin"] == new_gtin
+    spy.calls.clear()
+    _run(shopify_push.push_variant_prices(db, parent, ls.variants_for_product(db, parent)))
+    assert _bulk_price_rows(spy)[B_GID]["barcode"] == new_gtin
+
+
+def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeypatch):
+    """P3: push_image resolves the media target from the image's product
+    twin. Invariant 1 (a child twin never carries a gid) is enforced
+    nowhere, so a twin repair that stamps the parent gid on the child twin
+    would attach the child's APPROVED image to the PARENT's listing through
+    productCreateMedia. The gid resolver now reads a child twin as None."""
+    db = _world()
+    spy = _Spy({**_responses(), "productCreateMedia": _ok("productCreateMedia", media=[{"id": "gid://shopify/MediaImage/9"}])})
+    _live(monkeypatch, spy)
+    child = db["catalog_products"].find_one({"id": "tw-child"})
+    child["ecom"]["shopify_product_id"] = P_GID  # what a twin-repair-by-SKU script would do
+    assert _media._resolve_product_gid(db, "tw-parent") == P_GID, "the parent's own image still resolves"
+    assert _media._resolve_product_gid(db, "tw-child") is None
+
+    image = {"image_id": "img-child", "product_id": "tw-child", "status": "APPROVED", "url": CHILD_PHOTO}
+    res = _run(shopify_push.push_image(db, image))
+    assert (res.action, res.ok) == ("skip", False) and spy.calls == [], "zero network"
+    assert "not on Shopify" in (res.error or "")
+    assert res.payload["productId"] is None
+
+    # the parent's image goes through as before
+    parent_image = {**image, "image_id": "img-parent", "product_id": "tw-parent", "url": PARENT_PHOTO}
+    db["product_images"].insert_one(dict(parent_image))
+    res = _run(shopify_push.push_image(db, parent_image))
+    assert res.ok and res.action == "create"
+    assert [c["variables"]["productId"] for c in spy.calls_for("productCreateMedia")] == [P_GID]
+
+
+def test_raw_db_unwraps_the_connection_wrapper_and_passes_a_pymongo_database_through():
+    """The catalog doors hand online_delist the RAW db (catalog._get_db()).
+    pymongo's Database synthesises every attribute as a collection, so the
+    old ``hasattr(db, "is_connected")`` check took the wrapper branch,
+    ``db.db`` became the collection named "db", and pymongo 4's Collection
+    refuses truth-testing: NotImplementedError inside delist_if_live's
+    fail-soft except -- the drawer's deactivate / Delete never reached
+    Shopify. Pinned on a real (lazy, never-connecting) pymongo Database."""
+    import pymongo
+
+    raw = pymongo.MongoClient("mongodb://localhost:1/", connect=False, serverSelectionTimeoutMS=10)["ims_pin"]
+    assert online_delist._raw_db(raw) is raw
+    strict = StrictDB()
+    assert online_delist._raw_db(strict) is strict, "a faithful raw double is not unwrapped"
+    assert online_delist._raw_db(_Conn(strict)) is strict, "the connection wrapper is"
+
+    class _Down(_Conn):
+        is_connected = False
+
+    assert online_delist._raw_db(_Down(strict)) is None
+    assert online_delist._raw_db(None) is None
