@@ -33,6 +33,12 @@ each REVERT-PROOF (revert the named piece and the test goes red):
      mapped shop to ONLINE is 400 until the mapping is cleared; reactivating
      a doc whose gid an active shop now holds is 409 (an unrelated edit on
      the inactive doc is not).
+  9. A shop that still HOLDS units cannot clear or change its location (400,
+     the deactivation "units must leave first" rule): the stock writer never
+     touches a location the store list no longer maps, so the old location
+     would show those units on Shopify for ever. A first mapping while
+     holding units is the go-live step and stays allowed; once the units
+     have left, clearing / re-mapping is allowed.
 
 TestClient + StrictDB; no Mongo, no network (the locations read is DARK).
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_store_shopify_location.py -q
@@ -560,3 +566,52 @@ def test_reactivating_a_doc_whose_gid_an_active_shop_holds_is_409(monkeypatch):
     r = c.put("/api/v1/stores/BV-OLD-01", json={"city": "Ranchi"})
     assert r.status_code == 200, r.text
     assert _saved(db, "BV-OLD-01")["city"] == "Ranchi"
+
+
+# ---------------------------------------------------------------------------
+# 9: a shop holding units keeps its location (phantom stock guard)
+# ---------------------------------------------------------------------------
+
+
+def _unit(store_id, status="AVAILABLE"):
+    return {"stock_id": f"u-{store_id}-{status}", "product_id": "p1", "store_id": store_id, "status": status}
+
+
+def test_clearing_or_changing_the_location_is_refused_while_the_shop_holds_units(monkeypatch):
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-02")])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    for new in ("", PUNE, "76684427513"):
+        r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": new})
+        assert r.status_code == 400, (new, r.text)
+        assert "1 on-hand stock unit(s)" in r.json()["detail"]
+        assert "Shopify location" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    # Re-saving the SAME gid alongside another edit is not a change.
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": BOKARO, "city": "Bokaro"})
+    assert r.status_code == 200, r.text
+    # ...and the script's --set (the same validator) is refused the same way.
+    with pytest.raises(stores.HTTPException) as exc:
+        stores._validate_store_payload(
+            {"shopify_location_id": PUNE}, db=db, store_id="BV-BOK-02", existing=_saved(db, "BV-BOK-02")
+        )
+    assert exc.value.status_code == 400 and "on-hand stock unit" in exc.value.detail
+
+
+def test_location_can_be_cleared_or_changed_once_the_units_have_left(monkeypatch):
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02", status="SOLD")])  # gone from the shelf
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": ""})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == ""
+
+
+def test_a_first_mapping_is_allowed_while_the_shop_holds_units(monkeypatch):
+    """Mapping a shop that already holds stock IS the go-live step."""
+    c, db = _world(monkeypatch, [_store("BV-DHN-02")])
+    db.seed("stock_units", [_unit("BV-DHN-02")])
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-DHN-02")["shopify_location_id"] == BOKARO

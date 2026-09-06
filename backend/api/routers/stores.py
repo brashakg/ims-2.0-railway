@@ -234,7 +234,11 @@ def _validate_store_payload(
     already carries it (``_location_holder``), checked whenever the doc enters
     the physical list with a gid: a gid in the payload, or ``is_active: True``.
     ``store_id`` is the doc's own id on an update (create passes none and the
-    known-id check falls back to ``store_code``).
+    known-id check falls back to ``store_code``). Clearing or CHANGING a gid
+    the doc already carries is 400 while the shop still holds units
+    (``_store_on_hand_units`` -- the deactivation rule): the per-store stock
+    writer only touches locations the store list maps, so the old location
+    would keep showing those units on Shopify forever.
     """
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
@@ -272,6 +276,18 @@ def _validate_store_payload(
         data["shopify_location_id"] = gid
         if not gid:
             data["shopify_location_name"] = None
+        old = _as_shopify_gid((existing or {}).get("shopify_location_id"), "Location")
+        if old and gid != old:
+            held = _store_on_hand_units(db, store_id or (existing or {}).get("store_id"))
+            if held:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot change or clear the Shopify location while the shop "
+                        f"still holds {held}: its old location on Shopify would keep "
+                        f"showing them. Transfer the units out first."
+                    ),
+                )
     # The gid the doc carries AFTER this write, whichever side of the rule the
     # payload touches (a new gid, a store_type flip, a reactivation).
     gid = (
@@ -322,9 +338,12 @@ async def _shopify_location_name(db, gid: str) -> Optional[str]:
     return None
 
 
-def _store_active_dependents(db, store_id: str) -> Optional[str]:
-    """Human description if a store still has stock / open orders / staff, so
-    deactivation can be blocked. Fail-soft."""
+def _store_on_hand_units(db, store_id: str) -> Optional[str]:
+    """Human description of the stock a store still holds ("3 on-hand stock
+    unit(s)"), else None -- the ONE "units must leave first" rule, behind
+    deactivation AND behind clearing / changing the store's Shopify location
+    (a location the store list no longer maps is never written again, so
+    whatever it showed would outlive every stock pass). Fail-soft."""
     if db is None:
         return None
     for coll in ("stock", "stock_units"):
@@ -339,6 +358,17 @@ def _store_active_dependents(db, store_id: str) -> Optional[str]:
                 return f"{n} on-hand stock unit(s)"
         except Exception:
             pass
+    return None
+
+
+def _store_active_dependents(db, store_id: str) -> Optional[str]:
+    """Human description if a store still has stock / open orders / staff, so
+    deactivation can be blocked. Fail-soft."""
+    if db is None:
+        return None
+    held = _store_on_hand_units(db, store_id)
+    if held:
+        return held
     try:
         n = db.get_collection("orders").count_documents(
             {

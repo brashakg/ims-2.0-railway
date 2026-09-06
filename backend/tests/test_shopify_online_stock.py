@@ -817,6 +817,11 @@ def test_the_three_doors_and_the_pos_call_feed_the_writer():
     ingest = _src("api", "services", "shopify_ingest.py")
     assert "_mark_units_sold(" in ingest and "writeback_after_sale(" in ingest
     assert "writeback_after_sale(" in _src("api", "routers", "orders", "create.py")
+    # POST /orders/{id}/items flips AVAILABLE -> SOLD too (an API client adding
+    # a line to a DRAFT order): the same fail-soft call, or a ~16 h oversell.
+    items = _src("api", "routers", "orders", "items.py")
+    assert "_mark_units_sold(order_id, [item_data], _store_id)" in items
+    assert "writeback_after_sale(None, [item_data], _store_id)" in items
     assert "_writeback_left_on_hand(db, product_id, store_id, event_type)" in _src("api", "services", "item_events.py")
 
 
