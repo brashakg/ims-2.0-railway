@@ -59,6 +59,7 @@ import {
 } from '../../utils/categoryNormalize';
 import {
   CANONICAL_TO_PICKER,
+  docTags,
   getCategoryFields,
   loadCategoryRegistry,
   type CategoryField,
@@ -669,16 +670,16 @@ export function CatalogProductDrawer({
           )}
 
           {/* Tags */}
-          {Array.isArray(doc.tags) && (doc.tags as unknown[]).length > 0 && (
+          {docTags(doc).length > 0 && (
             <>
               <GroupTitle>Tags</GroupTitle>
               <div className="flex flex-wrap gap-1.5">
-                {(doc.tags as unknown[]).map((t, i) => (
+                {docTags(doc).map((t, i) => (
                   <span
-                    key={`${str(t)}-${i}`}
+                    key={`${t}-${i}`}
                     className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600"
                   >
-                    {str(t)}
+                    {t}
                   </span>
                 ))}
               </div>
