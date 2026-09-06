@@ -18,16 +18,26 @@ THE RULE (owner ticked "Adopt live products' photos")
 A claimed media can later be DELETED by the photo pass when IMS drops that
 photo, so adoption claims a media ONLY on a POSITIVE identity match
 (shopify_push.media.match_media_to_photos, the one rule the tests share):
-the media's originalSource url IS the IMS url, or its alt IS the IMS url /
-file name, or the two file names have the same stem. Never position, never
-count. A product is adopted ONLY when EVERY IMS photo matched a distinct
-media 1:1; a partial match is reported and nothing is written. Media no
-photo claimed (hand uploads, connector media) is never touched -- it stays
-unmanaged, exactly where it is.
+  R1  the media's originalSource url IS the IMS url, or
+  R3  the media's CDN file name IS the IMS url's file name -- Shopify's own
+      ``_<uuid>`` collision suffix is ignored on the CDN side only, the
+      extension must agree whenever the IMS name has one, nothing else is
+      normalised (no ``_WxH``, no case folding, no bare-hex strip).
+Never position, never count, and NO alt rule (dropped 09-06 on the
+verifier's finding: IMS attaches every photo with alt '', so an alt equal
+to an IMS url / file name can only be a human's edit on a media IMS did not
+attach -- it fired 0 times on the 42 and could only ever claim wrongly).
+A product is adopted ONLY when EVERY IMS photo matched a distinct media 1:1;
+a partial match is reported and nothing is written. Media no photo claimed
+(hand uploads, connector media) is never touched -- it stays unmanaged,
+exactly where it is, and the dry-run prints its file name so a wrong pairing
+is visible BEFORE --apply.
 
-Measured on prod 2026-09-06 (API 2024-10, 42 twins, 180 media): the stem
-rule adopts the six 09-05 IMS-pushed products (15 media, 1:1, no unmanaged
-left); the 36 Ray-Ban Meta products match under no safe rule.
+Measured on prod 2026-09-06 (API 2024-10, 42 twins, 180 media): R3 adopts
+the six 09-05 IMS-pushed products (15 media, ObjectId <-> ObjectId.png/jpg/
+webp, 1:1, no unmanaged left); R1 fires on nothing (originalSource is
+always Shopify's own storage copy); the 36 Ray-Ban Meta products match
+under no rule. The 42 hold 0 same-base-name/different-uuid pairs.
 
 SCOPE
 -----
@@ -35,7 +45,9 @@ SCOPE
     the product's media on Shopify -- a QUERY, never a mutation
   - writes ONLY ecom.media_map, through the ONE writer the photo pass uses
     (media._writeback_media_map); never locally_modified, never the photos
-  - a twin that already carries a map is skipped (the attach wrote it)
+  - a twin that already carries a map is skipped (the attach wrote it); a
+    map that is [] or holds only malformed rows counts as NO map (owned_media
+    drops such rows -- the pass pruned it or never wrote it) and is adopted
   - one audit_logs row per adopted product (action MEDIA_MAP_ADOPT)
   - --ids is REQUIRED and explicit; 'all' is refused
 
@@ -58,6 +70,7 @@ Shopify creds resolve from the same injected env. Nothing secret is printed.
 import argparse
 import asyncio
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -80,6 +93,13 @@ from api.services.shopify_push.queries import _PRODUCT_MEDIA_QUERY  # noqa: E402
 
 ACTOR = "system:adopt_shopify_media_map"
 DB_NAME = "ims_2_0"
+_URL = re.compile(r"https?://\S+|\S*myshopify\.com\S*")
+
+
+def _redact(exc: BaseException) -> str:
+    """A transport failure's message with any url blanked: the shop url is an
+    injected env value and this output is pasted into reports."""
+    return f"{type(exc).__name__}: {_URL.sub('<url>', str(exc))[:200]}"
 
 
 def parse_ids(raw: str) -> List[str]:
@@ -94,7 +114,10 @@ def parse_ids(raw: str) -> List[str]:
 async def inspect(db, product_id: str) -> Dict[str, Any]:
     """READ-ONLY: the twin, its IMS photos, its media on Shopify and the
     match. status: adopt | partial | unmatched | no_photos | already_mapped |
-    missing | not_on_shopify | shopify_missing | graphql_error."""
+    missing | not_on_shopify | shopify_missing | graphql_error (a GraphQL
+    error body OR the transport giving up -- reported, never fatal, so the
+    other ids in the run still get their report). already_mapped means
+    owned_media(twin) is non-empty; an empty or all-malformed map is not."""
     row: Dict[str, Any] = {
         "product_id": product_id,
         "sku": "-",
@@ -104,6 +127,7 @@ async def inspect(db, product_id: str) -> Dict[str, Any]:
         "map": [],
         "unmatched": [],
         "unmanaged": [],
+        "names": {},
     }
     twin = db["catalog_products"].find_one({"id": product_id})
     if twin is None:
@@ -120,7 +144,12 @@ async def inspect(db, product_id: str) -> Dict[str, Any]:
     if not row["photos"]:
         row["status"] = "no_photos"
         return row
-    body = await shopify_push._graphql(db, _PRODUCT_MEDIA_QUERY, {"id": gid})
+    try:
+        body = await shopify_push._graphql(db, _PRODUCT_MEDIA_QUERY, {"id": gid})
+    except Exception as exc:  # noqa: BLE001 -- retries spent / non-retryable 4xx / connect error
+        row["status"] = "graphql_error"
+        row["error"] = _redact(exc)
+        return row
     if body.get("errors"):
         row["status"] = "graphql_error"
         row["error"] = str(body["errors"])[:300]
@@ -135,6 +164,7 @@ async def inspect(db, product_id: str) -> Dict[str, Any]:
     row["map"] = match["map"]
     row["unmatched"] = match["unmatched_photos"]
     row["unmanaged"] = match["unmanaged"]
+    row["names"] = match["names"]
     if match["map"] and not match["unmatched_photos"]:
         row["status"] = "adopt"
     elif match["map"]:
@@ -176,10 +206,13 @@ async def run(db, ids: List[str], apply: bool) -> Dict[str, Any]:
             f"media={r['media']} matched={len(r['map'])} unmanaged={len(r['unmanaged'])}"
             + (f" error={r['error']}" if r.get("error") else "")
         )
+        names = r["names"]
         for m in r["map"]:
-            print(f"      + {m['url']} -> {m['id']}")
+            print(f"      + {m['url']} -> {m['id']} ({names.get(m['id'], '?')})")
         for u in r["unmatched"]:
             print(f"      ? unmatched {u}")
+        for mid in r["unmanaged"]:
+            print(f"      - unmanaged {mid} ({names.get(mid, '?')}) -- left where it is")
     counts = {s: sum(1 for r in rows if r["status"] == s) for s in sorted({r["status"] for r in rows})}
     totals = " ".join(f"{k}={v}" for k, v in counts.items())
     written: List[str] = []

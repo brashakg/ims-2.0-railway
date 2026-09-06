@@ -7,6 +7,7 @@ helpers.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 import os
@@ -196,29 +197,44 @@ def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
     return out
 
 
-# Shopify renames a file that collides with one already in Files
-# ("rb-front.jpg" -> "rb-front_<uuid>.jpg", older uploads "_<hex>") and serves
-# resized copies as "<name>_600x600[@2x]"; none of those suffixes is part of
-# the photograph's identity.
-_STEM_SUFFIX = re.compile(
-    r"(_\d+x\d+(@2x)?"
-    r"|_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|_[0-9a-f]{16,40})$",
-    re.I,
+# Shopify keeps the SOURCE file name on the CDN copy (adding an extension
+# when the source had none: the in-app uploader's bare ObjectId url comes
+# back as <oid>.png) and appends ``_<uuid>`` when that name collides with a
+# file already in Files. That suffix is Shopify's own marker that the file
+# is a DIFFERENT upload with the same base name, so it is stripped on the
+# CDN side ONLY -- an IMS url that itself carries one (a cdn.shopify.com
+# photo on a bvi_import twin) names one specific upload, and another upload
+# of the same base name is not that photograph. Measured on the 42 (09-06):
+# 0 of 180 CDN names carry ``_WxH`` or a bare-hex suffix, so nothing else is
+# stripped; a human's "front_600x600.png" is a different file from
+# "front.png". Extensions are a fixed image whitelist so ".v2" is not one.
+_IMAGE_EXT = re.compile(r"\.(jpe?g|png|gif|webp|avif|heic|heif|bmp|tiff?|svg)$", re.I)
+_COLLISION_SUFFIX = re.compile(
+    r"_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 
 
-def _file_stem(url: str) -> str:
-    """The FILE-NAME identity of a url: the path's basename with the query,
-    the extension and Shopify's collision / size suffixes stripped. '' when
-    there is no basename. Pure."""
-    name = urlsplit(str(url or "")).path.rsplit("/", 1)[-1]
-    name = re.sub(r"\.[a-z0-9]{2,5}$", "", name, flags=re.I)
-    while True:
-        stripped = _STEM_SUFFIX.sub("", name)
-        if stripped == name:
-            return name
-        name = stripped
+def _file_name(url: str) -> str:
+    """The path's basename, query dropped ('' when the url has none). Pure."""
+    return urlsplit(str(url or "")).path.rsplit("/", 1)[-1]
+
+
+def _stem_ext(name: str) -> tuple:
+    """(stem, ext) of a file name; ext is '' unless it is an image extension."""
+    m = _IMAGE_EXT.search(name)
+    return (name[: m.start()], m.group(0).lower()) if m else (name, "")
+
+
+def _same_file(ims_url: str, cdn_url: str) -> bool:
+    """R3: the CDN copy carries the IMS file's name -- the name equal, the
+    CDN side allowed Shopify's ``_<uuid>`` collision suffix (once), and the
+    extension equal whenever the IMS name has one (an extension-less IMS
+    name matches whichever image extension Shopify gave the copy). Pure."""
+    stem, ext = _stem_ext(_file_name(ims_url))
+    cstem, cext = _stem_ext(_file_name(cdn_url))
+    if not stem or (ext and ext != cext):
+        return False
+    return stem == cstem or stem == _COLLISION_SUFFIX.sub("", cstem, count=1)
 
 
 def match_media_to_photos(
@@ -228,50 +244,40 @@ def match_media_to_photos(
     identifies as that photograph -- the adoption rule for products that went
     live before ``ecom.media_map`` existed (scripts/adopt_shopify_media_map.py).
 
-    A media is the photo when (any one suffices, all are exact equality):
+    A media is the photo when (either suffices, both are exact equality):
       R1  its ``originalSource.url`` IS the IMS url (the source we handed over);
-      R2  its ``alt`` IS the IMS url or the IMS file name;
-      R3  its CDN file name and the IMS url's file name have the same stem
-          (``_file_stem``: extension, query, ``_WxH`` / ``_uuid`` collision
-          suffixes ignored) -- the in-app uploader's ObjectId names survive
-          the round trip that way.
+      R3  its CDN file name IS the IMS url's file name (``_same_file``).
+    There is deliberately NO alt rule: IMS's own attach sends alt '' for
+    every photo (``build_media_inputs``), so an alt equal to an IMS url or
+    file name can only be a human's edit on a media IMS did not attach, and
+    claiming it would let the photo pass delete that media later.
     NEVER position or count: a claimed media can later be DELETED by the photo
     pass when IMS drops the photo, so a guess is never a claim. A photo that
     fits two media, or a media that two photos fit, is ambiguous and stays
-    unmatched (1:1 only).
+    unmatched (1:1 only). A url repeated in ``photos`` counts once.
 
     Returns {map: [{url, id}] in IMS order for the photos that matched,
     unmatched_photos: [url], unmanaged: [media id] (every media no photo
-    claimed -- hand uploads, connector media -- left exactly where it is)}.
+    claimed -- hand uploads, connector media -- left exactly where it is),
+    names: {media id: CDN file name} (the evidence a dry-run prints)}.
     Adopt only when ``unmatched_photos`` is empty and ``map`` is not."""
     nodes = []
     for n in shopify_media or []:
         if not isinstance(n, dict) or not n.get("id"):
             continue
-        cdn = str((n.get("image") or {}).get("url") or "").strip()
         nodes.append(
             (
                 str(n["id"]),
                 str((n.get("originalSource") or {}).get("url") or "").strip(),
-                str(n.get("alt") or "").strip(),
-                _file_stem(cdn),
+                str((n.get("image") or {}).get("url") or "").strip(),
             )
         )
-    hits: Dict[str, List[str]] = {}
-    for url in photos:
-        name = urlsplit(url).path.rsplit("/", 1)[-1]
-        stem = _file_stem(url)
-        hits[url] = [
-            mid
-            for mid, src, alt, mstem in nodes
-            if (src and src == url)
-            or (alt and alt in (url, name))
-            or (stem and stem == mstem)
-        ]
-    claimed: Dict[str, int] = {}
-    for ids in hits.values():
-        for mid in ids:
-            claimed[mid] = claimed.get(mid, 0) + 1
+    photos = list(dict.fromkeys(photos))
+    hits: Dict[str, List[str]] = {
+        url: [mid for mid, src, cdn in nodes if (src and src == url) or _same_file(url, cdn)]
+        for url in photos
+    }
+    claimed = Counter(mid for ids in hits.values() for mid in ids)
     media_map: List[Dict[str, str]] = []
     unmatched: List[str] = []
     for url in photos:
@@ -284,7 +290,8 @@ def match_media_to_photos(
     return {
         "map": media_map,
         "unmatched_photos": unmatched,
-        "unmanaged": [mid for mid, _s, _a, _m in nodes if mid not in owned_ids],
+        "unmanaged": [mid for mid, _s, _c in nodes if mid not in owned_ids],
+        "names": {mid: _file_name(cdn) for mid, _s, cdn in nodes},
     }
 
 

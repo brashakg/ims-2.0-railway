@@ -14,10 +14,13 @@ EXPLODES on any mutation; the adoption is a query, never a write to Shopify.
 *****
 
 Discriminating power (each test goes red when its rule is removed -- table in
-the PR): stem equality (R3), originalSource url (R1), alt (R2), IMS order,
-1:1 (ambiguity refused), hand uploads unmanaged, partial = no write, position
-/ count never match, dry-run = no write, --ids required, already-mapped
-skipped.
+the PR): file name equality (R3) and its edges (CDN-side ``_<uuid>`` only,
+extension agreement, no ``_WxH`` / bare-hex / ``.v2`` normalising),
+originalSource url (R1), NO alt rule, IMS order, 1:1 (ambiguity refused),
+repeated url counts once, hand uploads unmanaged and PRINTED, partial = no
+write, position / count never match, dry-run = no write, --ids required,
+already-mapped skipped (an empty map is not a map), transport failure
+reported not fatal.
 
 No emoji (Windows cp1252).
 """
@@ -147,35 +150,57 @@ def test_original_source_url_matches(db, monkeypatch):
     assert row["status"] == "adopt" and row["map"] == [{"url": photo, "id": _m(7)}]
 
 
-def test_alt_matches_url_or_file_name(db, monkeypatch):
-    """R2: alt IS the IMS url, or IS the IMS file name."""
+def test_alt_never_matches(db, monkeypatch):
+    """NO alt rule (verifier 2026-09-06): IMS attaches every photo with alt ''
+    (build_media_inputs), so an alt equal to the IMS url or file name is a
+    HUMAN'S edit on a media IMS did not attach; claiming it would let the
+    pass delete a hand upload later. Both spellings stay unmanaged."""
     p_url = "https://photos.example.com/rb/front.jpg"
     p_name = "https://photos.example.com/rb/side.jpg"
-    _wire(
-        monkeypatch,
-        [_node(1, "shop-a_a1b2c3d4e5f6a7b8c9d0.png", alt=p_url), _node(2, "shop-b_a1b2c3d4e5f6a7b8c9d1.png", alt="side.jpg")],
-    )
+    _wire(monkeypatch, [_node(1, "hero-by-hand.png", alt=p_url), _node(2, "other-by-hand.png", alt="side.jpg")])
     _seed(db, [p_url, p_name])
-    row = _run(db, apply=False)["rows"][0]
-    assert row["status"] == "adopt"
-    assert row["map"] == [{"url": p_url, "id": _m(1)}, {"url": p_name, "id": _m(2)}]
+    row = _run(db, apply=True)["rows"][0]
+    assert row["status"] == "unmatched" and row["map"] == []
+    assert row["unmanaged"] == [_m(1), _m(2)]
+    assert "media_map" not in _twin(db)["ecom"]
 
 
-def test_stem_ignores_extension_query_and_shopify_suffixes():
-    """R3 stem: extension swap, ?v= query, _WxH and the _uuid collision
-    suffix are not part of the identity; a bare word is."""
-    photos = ["https://a/i/rb-front.jpeg", "https://a/i/rb-side.jpg"]
-    nodes = [
-        {"id": _m(1), "image": {"url": CDN + "rb-front_89ffbc2c-6001-45c1-804a-2e4d838a4627.png?v=1"}},
-        {"id": _m(2), "image": {"url": CDN + "rb-side_600x600@2x.jpg"}},
+def test_file_name_rule_edges():
+    """R3 is the FILE NAME, not a stem: the ?v= query and Shopify's own
+    ``_<uuid>`` collision suffix on the CDN side are not identity; an IMS
+    name with no extension (the uploader's bare ObjectId) matches whichever
+    image extension Shopify gave the copy; an IMS name WITH an extension
+    must find the same one (jpeg vs png is a different file); and a size
+    suffix is a human's file name, not Shopify's (image.url never carries
+    one) -- so it is not stripped."""
+    ok = match_media_to_photos(
+        ["https://a/i/rb-front.png", U1, "https://a/i/photo.v2"],
+        [
+            {"id": _m(1), "image": {"url": CDN + "rb-front_89ffbc2c-6001-45c1-804a-2e4d838a4627.png?v=1"}},
+            {"id": _m(2), "image": {"url": CDN + OID1 + ".webp?v=2"}},
+            {"id": _m(3), "image": {"url": CDN + "photo.v2.png"}},
+        ],
+    )
+    assert ok["map"] == [
+        {"url": "https://a/i/rb-front.png", "id": _m(1)},
+        {"url": U1, "id": _m(2)},
+        {"url": "https://a/i/photo.v2", "id": _m(3)},
     ]
-    out = match_media_to_photos(photos, nodes)
-    assert out["map"] == [{"url": photos[0], "id": _m(1)}, {"url": photos[1], "id": _m(2)}]
+    no = match_media_to_photos(
+        ["https://a/i/rb-front.jpeg", "https://a/i/rb-side.jpg"],
+        [
+            {"id": _m(1), "image": {"url": CDN + "rb-front.png?v=1"}},
+            {"id": _m(2), "image": {"url": CDN + "rb-side_600x600@2x.jpg"}},
+        ],
+    )
+    assert no["map"] == [] and no["unmanaged"] == [_m(1), _m(2)]
 
 
-def test_hand_upload_stays_unmanaged(db, monkeypatch):
+def test_hand_upload_stays_unmanaged(db, monkeypatch, capsys):
     """A media no photo claims is never in the map: it stays exactly where it
-    is, and the product still adopts (every IMS photo matched)."""
+    is, and the product still adopts (every IMS photo matched). The report
+    PRINTS the CDN file name behind every pair and every unmanaged media --
+    the evidence an operator reads before --apply."""
     _wire(monkeypatch, [_node(9, "hero-shot-by-hand.png", alt="Ray-Ban front view"), _node(1, OID1 + ".png")])
     _seed(db, [U1])
     out = _run(db, apply=True)
@@ -183,6 +208,9 @@ def test_hand_upload_stays_unmanaged(db, monkeypatch):
     assert row["status"] == "adopt"
     assert row["map"] == [{"url": U1, "id": _m(1)}]
     assert row["unmanaged"] == [_m(9)]
+    printed = capsys.readouterr().out
+    assert "+ %s -> %s (%s.png)" % (U1, _m(1), OID1) in printed
+    assert "- unmanaged %s (hero-shot-by-hand.png)" % _m(9) in printed
     assert _twin(db)["ecom"]["media_map"] == [{"url": U1, "id": _m(1)}]
     assert _m(9) not in str(_twin(db)["ecom"]["media_map"])
 
@@ -219,12 +247,15 @@ def test_ambiguity_is_not_a_claim():
     claimed (1:1 only). And two photos that fit one media claim nothing."""
     two_media = match_media_to_photos(
         ["https://a/i/front.jpg"],
-        [{"id": _m(1), "image": {"url": CDN + "front.png"}}, {"id": _m(2), "image": {"url": CDN + "front_600x600.png"}}],
+        [
+            {"id": _m(1), "image": {"url": CDN + "front.jpg"}},
+            {"id": _m(2), "image": {"url": CDN + "front_89ffbc2c-6001-45c1-804a-2e4d838a4627.jpg"}},
+        ],
     )
     assert two_media["map"] == [] and two_media["unmatched_photos"] == ["https://a/i/front.jpg"]
     assert two_media["unmanaged"] == [_m(1), _m(2)]
     two_photos = match_media_to_photos(
-        ["https://a/i/front.jpg", "https://b/i/front.png"],
+        ["https://a/i/front.png", "https://b/i/front.png"],
         [{"id": _m(1), "image": {"url": CDN + "front.png"}}],
     )
     assert two_photos["map"] == [] and len(two_photos["unmatched_photos"]) == 2
@@ -276,3 +307,76 @@ def test_missing_twin_and_no_photos_are_reported_not_written(db, monkeypatch):
     out = _run(db, apply=True, ids=("P1", "NOPE"))
     assert [r["status"] for r in out["rows"]] == ["no_photos", "missing"]
     assert out["written"] == [] and shop.calls == []
+
+
+def test_a_different_shopify_upload_with_the_same_base_name_is_not_the_photo():
+    """VERIFIER (2026-09-06): Shopify appends ``_<uuid>`` to a file whose base
+    name collides with one already in Files -- Shopify's OWN marker that this
+    is a DIFFERENT file. When the IMS photo is itself a Shopify CDN url (the
+    bvi_import twins: 15 of the 57 IMS photos on the 42 carry one) with one
+    uuid and the media carries ANOTHER, they are two uploads both named
+    '1.jpg', not one photograph. _file_stem strips the uuid on BOTH sides, so
+    R3 claims it -- and the pass may later DELETE a media IMS never attached."""
+    mine = CDN + "1_89ffbc2c-6001-45c1-804a-2e4d838a4627.jpg?v=1749636658"
+    other = {"id": _m(1), "image": {"url": CDN + "1_75f933af-3342-42b3-801f-f1f73ff7c0d8.jpg?v=1749636658"}}
+    same = {"id": _m(2), "image": {"url": CDN + "1_89ffbc2c-6001-45c1-804a-2e4d838a4627.jpg?v=1788000000"}}
+    # positive control: the SAME file (same uuid, newer ?v=) IS the photo
+    assert match_media_to_photos([mine], [same])["map"] == [{"url": mine, "id": _m(2)}]
+    out = match_media_to_photos([mine], [other])
+    assert out["map"] == [], "a different upload that collided on the base name was claimed"
+    assert out["unmatched_photos"] == [mine] and out["unmanaged"] == [_m(1)]
+
+
+def test_generic_names_are_not_claimed():
+    """VERIFIER probes: a rule that normalises too much claims a human's file.
+    Same word, different extension; a size suffix in a human's name; a hex
+    tail on either side that is not Shopify's uuid; a '.v2' that is not an
+    extension (the name is 'photo.v2'); case and percent-encoding are not
+    folded either. Same-extension pairs on purpose: the extension rule must
+    not be what saves them."""
+    for ims, cdn in [
+        ("1.jpg", "1.png"),
+        ("front.png", "front_600x600.png"),
+        ("front_0123456789ABCDEF.png", "front.png"),
+        ("front.png", "front_0123456789abcdef.png"),
+        ("photo.v2", "photo.png"),
+        ("Front.JPG", "front.jpg"),
+        ("rb%20front.jpg", "rb_front.jpg"),
+    ]:
+        out = match_media_to_photos(["https://a/i/" + ims], [{"id": _m(1), "image": {"url": CDN + cdn}}])
+        assert out["map"] == [] and out["unmanaged"] == [_m(1)], (ims, cdn)
+
+
+def test_repeated_photo_url_counts_once():
+    """The pure contract: a url listed twice is one photo -> one map row."""
+    out = match_media_to_photos([U1, U1], [{"id": _m(1), "image": {"url": CDN + OID1 + ".png"}}])
+    assert out["map"] == [{"url": U1, "id": _m(1)}] and out["unmatched_photos"] == []
+
+
+def test_empty_or_malformed_map_is_not_already_mapped(db, monkeypatch):
+    """ecom.media_map == [] (the pass pruned it) or rows without url/id are
+    NO map: owned_media drops them, so the twin is adopted, not skipped."""
+    shop = _wire(monkeypatch, [_node(1, OID1 + ".png")])
+    _seed(db, [U1], media_map=[{"id": "no-url"}, "junk"])
+    out = _run(db, apply=True)
+    assert out["rows"][0]["status"] == "adopt" and out["written"] == ["P1"]
+    assert _twin(db)["ecom"]["media_map"] == [{"url": U1, "id": _m(1)}]
+    assert shop.calls == [{"id": GID}]
+
+
+def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
+    """_graphql gave up (retries spent / a 4xx): the product is reported as
+    graphql_error with the shop url blanked, nothing is written, and the
+    NEXT id in the same run still gets its report."""
+
+    async def boom(db, query, variables):
+        raise ValueError("status 401: https://better-vision.myshopify.com/admin said no")
+
+    monkeypatch.setattr(shopify_push, "_graphql", boom)
+    _seed(db, [U1])
+    db["catalog_products"].insert_one({"id": "P2", "sku": "SKU2", "images": [], "ecom": {"shopify_product_id": GID}})
+    out = _run(db, apply=True, ids=("P1", "P2"))
+    assert [r["status"] for r in out["rows"]] == ["graphql_error", "no_photos"]
+    assert out["rows"][0]["error"].startswith("ValueError: status 401: <url>")
+    assert "myshopify" not in out["rows"][0]["error"]
+    assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
