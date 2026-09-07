@@ -168,6 +168,12 @@ def _pooled_availability(db, skus: List[str]) -> Dict[str, int]:
     """POOLED (all-shops-combined) IMS on-hand per SKU. Reuses the online layer's
     own helper (online_stock_writeback._on_hand_for_skus) with store_id=None so
     the number matches what the write-back pushes online. Fail-soft -> {}."""
+    # PR 4 (per-location parity) -- this is the SECOND quantity rule and it
+    # already disagrees with the writer in two ways: a SUPERADMIN-blocked SKU
+    # is written 0 at every location but read here at its shelf count (a false
+    # drift row + task), and with a safety buffer B the writer sends
+    # sum(max(0, q_s - B)) which is not max(0, pooled - B) -- up to
+    # (shops - 1) * B of drift. Prod buffer is 0, so nothing fires today.
     if not skus:
         return {}
     try:

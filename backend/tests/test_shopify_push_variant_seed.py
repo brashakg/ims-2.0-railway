@@ -21,9 +21,9 @@ THE FIX (covered here):
     that gid is persisted too -- catalog_variants.shopify_inventory_item_id per
     variant row, ecom.shopify_inventory_item_id for a no-variant-row product --
     the exact fields the stock write-back resolver reads
-    (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
-    online_sync_health._inventory_item_id_for_sku). Section 6 proves the
-    resolver finds a freshly pushed product's inventory item.
+    (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus).
+    Section 6 proves the resolver finds a freshly pushed product's inventory
+    item.
   * ADVERSARIAL-PANEL MUST-FIXES (sections 5 + 7): publish-on-create is
     WITHHELD unless seeding succeeded with a PRICED row (an ACTIVE product can
     never go live at 0.00); variant matching is gid-FIRST so an option-label
@@ -872,7 +872,7 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     # no publish (the product is unpriced -- publish stays withheld).
     assert spy.count_for("productCreateMedia") == 1
     assert spy.count_for("publishablePublish") == 0
-    assert len(spy.calls) == 3  # + the stock step's one `locations` lookup (2026-09-07)
+    assert len(spy.calls) == 3  # + the stock step's tracking update (2026-09-07)
 
 
 # ===========================================================================
@@ -1255,8 +1255,8 @@ _BULK_UPDATE_OK = {
 
 class _ProjColl(MockCollection):
     """MockCollection that ALSO accepts pymongo's (filter, projection) call
-    shape -- online_sync_health._inventory_item_id_for_sku passes a projection,
-    which the plain MockCollection.find_one signature rejects."""
+    shape -- the online_catalog resolvers pass a projection, which the plain
+    MockCollection.find_one signature rejects."""
 
     def find_one(self, filter=None, projection=None, *a, **k):  # noqa: A002
         return super().find_one(filter or {})
@@ -1503,13 +1503,12 @@ def test_repush_is_idempotent_for_the_inventory_item_mapping(monkeypatch):
 
 def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
     """END-TO-END against the REAL resolvers (the point of the whole change):
-    after a LIVE push, online_catalog's variant-target resolver and
-    online_sync_health's per-SKU lookup -- the two paths the oversell-guard
-    stock write-back uses -- both find the inventory item, for BOTH shapes:
-    a variant-row product (catalog_variants mapping) and a no-variant product
+    after a LIVE push, online_catalog's variant-target resolver AND its
+    per-SKU inventory-item lookup -- the paths the oversell-guard stock
+    write-back uses -- both find the inventory item, for BOTH shapes: a
+    variant-row product (catalog_variants mapping) and a no-variant product
     (ecom fallback)."""
     from api.services import online_catalog
-    from api.services import online_sync_health
 
     db = _ProjDB()
     # Product A: no catalog_variants rows (the common eyewear case).
@@ -1575,15 +1574,6 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
     assert items["S-BLK"] == "gid://shopify/InventoryItem/7002"
     assert items["BV-RB-0001"] == "gid://shopify/InventoryItem/7001"
 
-    # --- online_sync_health: the oversell re-push sweep's per-SKU lookup ---
-    assert (
-        online_sync_health._inventory_item_id_for_sku(db, "S-BLK")
-        == "gid://shopify/InventoryItem/7002"
-    )
-    assert (
-        online_sync_health._inventory_item_id_for_sku(db, "BV-RB-0001")
-        == "gid://shopify/InventoryItem/7001"
-    )
 
 
 # ===========================================================================

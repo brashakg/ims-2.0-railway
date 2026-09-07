@@ -35,6 +35,13 @@ Fail loud, never pool, never silently skip:
   * STOCK_TARGET_MISSING -- the SKU has no Shopify inventory item yet.
   * STOCK_ACTIVATION_FAILED -- Shopify said ITEM_NOT_STOCKED_AT_LOCATION, the
     item was activated at the chunk's locations, and the retry still failed.
+  * STORE_LOCATION_DUPLICATE -- two shops claim one location. Neither is
+    written (one shop's count would silently become the other's).
+  * STOCK_STORE_ORPHAN -- on-hand parked at a store_id no shop record matches
+    (the UUID-vs-code hazard): those units reach no location at all.
+  * STORE_UNMAPPED with NO shop mapped at all -- nothing is written and the
+    variant's tracking is left alone (tracked=true + DENY behind no quantity
+    is a listing that reads SOLD OUT).
 
 The last-sent baseline is ``ecom.online_stock.quantities = {sku: {store_id:
 qty}}`` over the MAPPED shops only, diffed by ``stock_changed`` (nested dicts
@@ -78,6 +85,12 @@ STOCK_ONHAND_UNKNOWN = "STOCK_ONHAND_UNKNOWN"
 STOCK_TARGET_MISSING = "STOCK_TARGET_MISSING"
 STORE_UNMAPPED = "STORE_UNMAPPED"
 STOCK_ACTIVATION_FAILED = "STOCK_ACTIVATION_FAILED"
+# Two shops claiming ONE Shopify location: Shopify takes one quantity per
+# (item, location), so one shop's count would silently become the other's.
+STORE_LOCATION_DUPLICATE = "STORE_LOCATION_DUPLICATE"
+# On-hand parked at a store_id the `stores` collection does not know (the
+# UUID-vs-code hazard): those units are published NOWHERE.
+STOCK_STORE_ORPHAN = "STOCK_STORE_ORPHAN"
 
 # Shopify's own userErrors code when an inventory item is not stocked at the
 # location a quantity was set for (InventorySetQuantitiesUserErrorCode).
@@ -104,14 +117,39 @@ def _stores(db) -> List[Dict[str, Any]]:
     return physical_stores(db)
 
 
+def _location_conflicts(stores: Iterable[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """``{location_gid: [store_id, ...]}`` for a location claimed by MORE THAN
+    ONE shop. Shopify takes exactly one quantity per (inventory item,
+    location): two shops on one gid put a DUPLICATE pair in the same
+    inventorySetQuantities call, and whichever survives becomes that
+    location's number AND the baseline's -- the other shop's true count is
+    lost and the diff re-sends the product forever. The Organization page
+    refuses it (409, routers/stores.py ``_location_holder``); this is the
+    writer's own backstop for a doc written around that door."""
+    by_gid: Dict[str, List[str]] = {}
+    for s in stores:
+        gid = str(s.get("shopify_location_id") or "").strip()
+        sid = str(s.get("store_id") or "").strip()
+        if sid and gid:
+            by_gid.setdefault(_as_shopify_gid(gid, "Location"), []).append(sid)
+    return {gid: sids for gid, sids in by_gid.items() if len(sids) > 1}
+
+
 def _mapped(stores: Iterable[Dict[str, Any]]) -> Dict[str, str]:
-    """``{store_id: location_gid}`` for the mapped shops."""
+    """``{store_id: location_gid}`` for the mapped shops -- THE definition of
+    "this shop has a usable Shopify location" (``unmapped_holders`` asks it
+    too). A location two shops claim maps NEITHER of them: unwritten and
+    reported beats one shop's number silently overwriting the other's."""
+    stores = list(stores)
+    conflicted = set(_location_conflicts(stores))
     out: Dict[str, str] = {}
     for s in stores:
         gid = str(s.get("shopify_location_id") or "").strip()
         sid = str(s.get("store_id") or "").strip()
         if sid and gid:
-            out[sid] = _as_shopify_gid(gid, "Location")
+            gid = _as_shopify_gid(gid, "Location")
+            if gid not in conflicted:
+                out[sid] = gid
     return out
 
 
@@ -241,16 +279,19 @@ def unmapped_holders(
     quantities: Dict[str, Dict[str, int]],
     stores: Iterable[Dict[str, Any]],
     skus: Iterable[str],
+    mapped: Dict[str, str],
 ) -> List[Dict[str, Any]]:
-    """The UNMAPPED shops that hold at least one unit of any of ``skus``:
-    ``[{store_id, store_code, store_name, units}]``. A shop holding nothing
-    is not listed (it never blocks)."""
+    """The shops with no usable location that hold at least one unit of any of
+    ``skus``: ``[{store_id, store_code, store_name, units}]``. A shop holding
+    nothing is not listed (it never blocks). ``mapped`` is the ONE definition
+    of "has a location", so a shop sharing its gid with another shop (written
+    nowhere) is reported here rather than vanishing from every guard."""
     skus = list(skus)
     out: List[Dict[str, Any]] = []
     for s in stores:
-        if str(s.get("shopify_location_id") or "").strip():
-            continue
         sid = str(s.get("store_id") or "")
+        if sid in mapped:
+            continue
         units = sum(int((quantities.get(sku) or {}).get(sid, 0) or 0) for sku in skus)
         if units > 0:
             out.append(
@@ -267,12 +308,14 @@ def unmapped_holders(
 def _unknown_stores(
     quantities: Dict[str, Dict[str, int]], mapped: Dict[str, str], skus: Iterable[str]
 ) -> List[str]:
-    """Mapped shops absent from EVERY listed SKU's row -- their on-hand read
-    failed this pass (the rule omits a shop it could not read)."""
+    """Mapped shops absent from ANY listed SKU's row -- their on-hand read
+    failed this pass (the rule omits a shop it could not read). ANY, not
+    EVERY: one SKU that carries the shop (a SUPERADMIN-blocked row, say)
+    must not clear a shop the pass could not read for the others."""
     skus = [s for s in skus if s in quantities]
     if not skus:
         return []
-    return sorted(sid for sid in mapped if all(sid not in quantities[s] for s in skus))
+    return sorted(sid for sid in mapped if any(sid not in quantities[s] for s in skus))
 
 
 def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -295,7 +338,7 @@ def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict
         "quantities": mapped_slice(quantities, mapped, skus),
         "stores_mapped": len(mapped),
         "stores_total": len(stores),
-        "unmapped_stores": unmapped_holders(quantities, stores, skus),
+        "unmapped_stores": unmapped_holders(quantities, stores, skus, mapped),
     }
 
 
@@ -504,11 +547,53 @@ def _unknown_error(names: List[str]) -> str:
     )
 
 
+def _duplicate_error(conflicts: Dict[str, List[str]]) -> str:
+    pairs = "; ".join(f"{gid} <- {', '.join(sorted(sids))}" for gid, sids in sorted(conflicts.items()))
+    return (
+        f"two shops share one Shopify location ({pairs}) -- neither was written "
+        f"(one shop's count would overwrite the other's); give each shop its own "
+        f"location on the Organization page"
+    )
+
+
+def _orphan_error(store_ids: List[str]) -> str:
+    return (
+        f"on-hand units sit at store id(s) no shop record matches "
+        f"({', '.join(store_ids)}) -- they are published NOWHERE, so the website "
+        f"under-sells; move them to a real shop or add the shop"
+    )
+
+
+def _no_mapping_error() -> str:
+    return (
+        "no shop has a Shopify location -- nothing written; the listing keeps its "
+        "last quantity on Shopify until a shop is mapped on the Organization page"
+    )
+
+
 def _unmapped_error(holders: List[Dict[str, Any]]) -> str:
     names = ", ".join(str(h.get("store_code") or h.get("store_name") or h.get("store_id")) for h in holders)
     return (
         f"shops holding listed stock with no Shopify location: {names} -- map them "
         f"on the Organization page (their stock is invisible online until then)"
+    )
+
+
+def _rows_ok(
+    summary: Dict[str, Any],
+    holders: List[Dict[str, Any]],
+    conflicts: Dict[str, List[str]],
+    mapped: Dict[str, str],
+) -> bool:
+    """ONE verdict for the SIMULATED and the LIVE branch: every guard counts,
+    not just the two lists (a preview that reads green must mean a press would
+    too, and "no shop mapped" means nothing was written at all)."""
+    return bool(mapped) and not (
+        summary["errors"]
+        or holders
+        or conflicts
+        or summary["unknown_stores"]
+        or summary["orphan_stores"]
     )
 
 
@@ -535,7 +620,7 @@ async def push_skus_stock(
     ``ok`` is False on any error OR an unmapped holder (STORE_UNMAPPED) --
     the mapped rows are written either way. Never raises."""
     from ..online_catalog import inventory_items_for_skus, listings_for_skus
-    from ..online_stock_writeback import online_quantities_for_skus
+    from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
     distinct = [s for s in dict.fromkeys(skus or []) if s]
     summary: Dict[str, Any] = {
@@ -552,6 +637,7 @@ async def push_skus_stock(
         "stores_mapped": 0,
         "unmapped_stores": [],
         "unknown_stores": [],
+        "orphan_stores": [],
         "target_missing": [],
     }
     if not distinct:
@@ -566,6 +652,10 @@ async def push_skus_stock(
     mapped = _mapped(stores)
     summary["stores_total"] = len(stores)
     summary["stores_mapped"] = len(mapped)
+    conflicts = _location_conflicts(stores)
+    if conflicts:
+        summary["code"] = STORE_LOCATION_DUPLICATE
+        summary["error"] = _duplicate_error(conflicts)
 
     if quantities is None:
         quantities = online_quantities_for_skus(db, distinct)
@@ -578,12 +668,26 @@ async def push_skus_stock(
         )
         return summary
 
-    holders = unmapped_holders(quantities, stores, distinct)
+    holders = unmapped_holders(quantities, stores, distinct, mapped)
     summary["unmapped_stores"] = holders
     summary["unknown_stores"] = _unknown_stores(quantities, mapped, distinct)
+    orphans = orphan_stock_stores(db, distinct)
+    summary["orphan_stores"] = orphans
+    # One priority order, the same one sync_stock_levels' _verdict uses.
     if holders:
-        summary["code"] = STORE_UNMAPPED
-        summary["error"] = _unmapped_error(holders)
+        summary["code"] = summary["code"] or STORE_UNMAPPED
+        summary["error"] = summary["error"] or _unmapped_error(holders)
+    if orphans:
+        summary["code"] = summary["code"] or STOCK_STORE_ORPHAN
+        summary["error"] = summary["error"] or _orphan_error(orphans)
+    if not mapped:
+        # THE guard, hoisted out of the delist door (product._delist_variant_row)
+        # so the button, the sweep, the schedule, every product push and the POS
+        # write-back all get it: with no location to write there is nothing to
+        # say but "nothing written". A green run here is how a caller comes to
+        # flip tracked=true + DENY behind no quantity and report "1 written".
+        summary["code"] = summary["code"] or STORE_UNMAPPED
+        summary["error"] = summary["error"] or _no_mapping_error()
 
     targets = inventory_items_for_skus(db, distinct)
     rows: List[Tuple[str, str, int]] = []
@@ -628,7 +732,7 @@ async def push_skus_stock(
     if not live or dry_run:
         summary["mode"] = MODE_SIMULATED
         summary["reason"] = reason if not live else "dry_run (Preview first)"
-        summary["ok"] = not summary["errors"] and not holders and not summary["unknown_stores"]
+        summary["ok"] = _rows_ok(summary, holders, conflicts, mapped)
         if summary["errors"] and not summary["error"]:
             summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
         return summary
@@ -636,6 +740,8 @@ async def push_skus_stock(
     summary["mode"] = MODE_LIVE
     for h in holders:
         _file_unmapped_task(db, h)
+    if not mapped:
+        return summary  # nothing writable -- code + error already say so
     written_per_sku: Dict[str, Dict[str, int]] = {}
     if rows:
         written = await set_inventory_quantities(db, rows)
@@ -659,7 +765,11 @@ async def push_skus_stock(
             rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
             if rows_for:
                 _writeback_stock(db, pid, rows_for, policy=policy, tracked=tracked)
-    summary["ok"] = not summary["errors"] and not holders and not summary["unknown_stores"]
+    # What Shopify ACCEPTED, not what was planned: the sync page prints these
+    # as the per-shop "last written" numbers, and a refused chunk must not
+    # read as written (the baseline above already only takes the accepted rows).
+    summary["quantities"] = written_per_sku
+    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped)
     if summary["errors"] and not summary["error"]:
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
@@ -685,6 +795,10 @@ async def sync_product_stock(
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
     tracked: Dict[str, Any] = {"updated": 0, "errors": []}
+    # Tracking + DENY go on even when no quantity can follow (no shop mapped):
+    # an UNTRACKED item sells without limit, which is the worse failure. The
+    # listing then reads sold out and push_skus_stock says so, loudly, instead
+    # of reporting a write that never happened.
     if gids:
         tracked = await _set_variant_tracking(db, product_gid, gids, policy)
     else:
@@ -764,7 +878,8 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     too. Never raises. entity="stock", action="sync" (or "noop" when nothing
     changed). The ONE function behind the Push-stock button, the all-pending
     sweep and the 01:00 / 09:00 scheduled sync."""
-    from ..online_stock_writeback import online_quantities_for_skus
+    from ..online_catalog import inventory_items_for_skus
+    from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
     pairs = _gid_products_with_variants(db)
     all_skus: List[str] = []
@@ -804,7 +919,20 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         mine = mapped_slice(quantities, mapped, skus)
         if stock_changed(product, mine):
             changed.append((product, variants, skus, mine))
-    holders = unmapped_holders(quantities, stores, all_skus)
+    holders = unmapped_holders(quantities, stores, all_skus, mapped)
+    conflicts = _location_conflicts(stores)
+    orphans = orphan_stock_stores(db, all_skus)
+    # What the LIVE press would refuse, resolved in the PREVIEW too: the
+    # dry-run branch never talks to Shopify, so a listing with no inventory
+    # item can only be caught here (over the CHANGED products -- the ones a
+    # press would actually send).
+    changed_skus = [s for _p, _v, sks, _q in changed for s in sks]
+    try:
+        have = inventory_items_for_skus(db, changed_skus) if changed_skus else {}
+    except Exception as exc:  # noqa: BLE001 -- a plan never raises
+        logger.warning("[SHOPIFY_STOCK] target lookup failed for the plan: %s", exc)
+        have = {}
+    missing = sorted({s for s in changed_skus if not have.get(s)})
     payload: Dict[str, Any] = {
         "candidates": len(pairs),
         "changed": len(changed),
@@ -813,21 +941,36 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         "stores_mapped": len(mapped),
         "unmapped_stores": holders,
         "unknown_stores": _unknown_stores(quantities, mapped, all_skus),
+        "orphan_stores": orphans,
+        "target_missing": missing,
         "plan": [
             {"product_id": p.get("id") or p.get("product_id"), "quantities": q}
             for p, _v, _s, q in changed[:50]
         ],
     }
     unknown = set(payload["unknown_stores"])
+    no_mapping = bool(changed) and not mapped
 
     def _verdict() -> Tuple[Optional[str], Optional[str]]:
-        # Holders first (the mapped shops were still written), then an unknown
-        # shop -- the SAME verdict for the preview and the live pass.
+        # Nothing writable first, then holders (the mapped shops were still
+        # written), then an unknown shop, an orphan store id and a missing
+        # Shopify target -- the SAME verdict for the preview and the live pass.
+        if no_mapping:
+            return STORE_UNMAPPED, _no_mapping_error()
+        if conflicts:
+            return STORE_LOCATION_DUPLICATE, _duplicate_error(conflicts)
         if holders:
             return STORE_UNMAPPED, _unmapped_error(holders)
         if unknown:
             return STOCK_ONHAND_UNKNOWN, _unknown_error(_labels(stores, sorted(unknown)))
+        if orphans:
+            return STOCK_STORE_ORPHAN, _orphan_error(orphans)
+        if missing:
+            return STOCK_TARGET_MISSING, f"no Shopify inventory item mapped for: {', '.join(missing[:5])}"
         return None, None
+
+    def _all_ok() -> bool:
+        return not (no_mapping or conflicts or holders or unknown or orphans or missing)
 
     live, reason = _live_or_reason(db)
     if not live or dry_run:
@@ -836,12 +979,17 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             mode=MODE_SIMULATED,
             entity="stock",
             action="sync" if changed else "noop",
-            ok=not holders and not unknown,
+            ok=_all_ok(),
             payload=payload,
             reason=reason if not live else "dry_run (Preview first)",
             code=code,
             error=error,
         )
+    # The mitigation the design promises is a TASK, not a summary line: a
+    # steady state where nothing changed still has to reach the task board
+    # (push_skus_stock only files one for a product it is actually sending).
+    for h in holders:
+        _file_unmapped_task(db, h)
     synced = 0
     failed = 0
     errors: List[str] = []
@@ -851,7 +999,10 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         # No snapshot: the rule runs again inside, right before this write.
         res = await sync_product_stock(db, product, variants, _as_shopify_gid(gid, "Product"))
         unknown.update(res.get("unknown_stores") or [])
-        if res.get("errors"):
+        # Nothing writable is a FAILED product, never a "synced" one: with no
+        # mapped shop the page used to report "1 of 1 written" having written
+        # nothing at all.
+        if res.get("errors") or not res.get("stores_mapped"):
             failed += 1
             pid = product.get("id") or product.get("product_id")
             errors.append(f"{pid}: {res.get('error') or 'stock not written'}")
@@ -872,7 +1023,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         mode=MODE_LIVE,
         entity="stock",
         action="sync" if changed else "noop",
-        ok=failed == 0 and not holders and not unknown,
+        ok=failed == 0 and _all_ok(),
         payload=payload,
         code=code,
         error=error,

@@ -33,6 +33,8 @@ Flow on a sale:
   3. push_skus_stock writes one ABSOLUTE row per (mapped shop, SKU) -- an
      explicit 0 included -- and updates the SAME ecom.online_stock baseline the
      scheduled pass diffs against, so the next 01:00 / 09:00 pass is a noop.
+     With NO shop mapped it writes nothing and says so (STORE_UNMAPPED): a
+     green run there would mean the listing shows SOLD OUT.
 
 Contract (mirrors the rest of the consolidation bridge):
 - 100% FAIL-SOFT. A Shopify/Mongo failure is caught + logged and NEVER
@@ -169,6 +171,95 @@ def _online_store_ids(db) -> List[str]:
     return sorted(ids)
 
 
+def _sku_to_pid(db, skus: List[str]):
+    """``({sku: product_id}, {sku deactivated in IMS})`` from the spine, or
+    ``None`` when the lookup itself failed (UNKNOWN, never an empty result).
+
+    A product IMS stopped selling (is_active False -- the retire hook's
+    marker) lists 0 online whatever its shelves hold: written as 0, the
+    oversell-guard contract, never "unknown". A MISSING flag is active (the
+    purchasable rule every other reader applies) -- `is False`, never `not`.
+    This is what keeps a deactivated size variant off sale after
+    online_delist wrote its 0, and what brings it back on reactivation."""
+    try:
+        prod_coll = db.get_collection("products")
+    except Exception:  # noqa: BLE001
+        return None
+    if prod_coll is None:
+        return None
+    sku_to_pid: Dict[str, str] = {}
+    inactive: set = set()
+    try:
+        for p in prod_coll.find(
+            {"sku": {"$in": list(skus)}},
+            {"_id": 0, "product_id": 1, "sku": 1, "is_active": 1},
+        ):
+            sku = str(p.get("sku") or "").strip()
+            pid = p.get("product_id")
+            if sku and pid and sku not in sku_to_pid:
+                sku_to_pid[sku] = pid
+                if p.get("is_active") is False:
+                    inactive.add(sku)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] sku->product lookup failed: %s", exc)
+        return None
+    return sku_to_pid, inactive
+
+
+def orphan_stock_stores(db, skus: List[str]) -> List[str]:
+    """The store ids that HOLD on-hand units of these SKUs but match no row in
+    ``stores`` -- the design's #1 data hazard (a unit stamped with a store CODE
+    where the shop's id is a UUID, or a shop deleted under its stock). Those
+    units belong to no Shopify location, so they are published NOWHERE: the
+    website goes sold out while every other guard reads green. ONE $group over
+    the same on-hand match the rule uses. Fail-soft -> [] (a tripwire must
+    never block a write). ponytail: one extra indexed aggregate per pass."""
+    clean = [s for s in dict.fromkeys(skus or []) if s]
+    if db is None or not clean:
+        return []
+    try:
+        from .item_events import on_hand_match
+
+        resolved = _sku_to_pid(db, clean)
+        if not resolved or not resolved[0]:
+            return []
+        stores_coll = db.get_collection("stores")
+        stock_coll = db.get_collection("stock_units")
+        if stores_coll is None or stock_coll is None:
+            return []
+        # EVERY store row, not just the physical/active ones: a shop that is
+        # closed or online is a known place for a unit to be, just not a
+        # published one. Only an id that matches NO shop at all is an orphan.
+        known = {
+            str((r or {}).get("store_id") or "").strip()
+            for r in stores_coll.find({}, {"_id": 0, "store_id": 1})
+        }
+        out = []
+        for row in stock_coll.aggregate(
+            [
+                {
+                    "$match": {
+                        "product_id": {"$in": list(resolved[0].values())},
+                        **on_hand_match(),
+                    }
+                },
+                {"$group": {"_id": "$store_id", "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+            ]
+        ):
+            sid = str(row.get("_id") or "").strip()
+            if sid and sid not in known and int(row.get("n", 0) or 0) > 0:
+                out.append(sid)
+        if out:
+            logger.warning(
+                "[STOCK_WRITEBACK] on-hand at unknown store id(s) %s -- published "
+                "nowhere (the website under-sells)", ", ".join(sorted(out)),
+            )
+        return sorted(out)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] orphan-store check skipped: %s", exc)
+        return []
+
+
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
     """Map each SKU -> IMS on-hand (AVAILABLE stock_units) at ONE store -- the
     per-shop half of THE ONE RULE (online_quantities_for_skus calls this once
@@ -189,35 +280,10 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     only then defaults to 0."""
     if db is None or not skus:
         return {}
-    try:
-        raw = db.get_collection("products")
-        prod_coll = raw
-    except Exception:  # noqa: BLE001
+    resolved = _sku_to_pid(db, skus)
+    if resolved is None:
         return {}
-    if prod_coll is None:
-        return {}
-    sku_to_pid: Dict[str, str] = {}
-    # A product IMS stopped selling (is_active False -- the retire hook's
-    # marker) lists 0 online whatever its shelves hold: written as 0, the
-    # oversell-guard contract, never "unknown". A MISSING flag is active (the
-    # purchasable rule every other reader applies) -- `is False`, never
-    # `not`. This is what keeps a deactivated size variant off sale after
-    # online_delist wrote its 0, and what brings it back on reactivation.
-    inactive: set = set()
-    try:
-        for p in prod_coll.find(
-            {"sku": {"$in": list(skus)}},
-            {"_id": 0, "product_id": 1, "sku": 1, "is_active": 1},
-        ):
-            sku = str(p.get("sku") or "").strip()
-            pid = p.get("product_id")
-            if sku and pid and sku not in sku_to_pid:
-                sku_to_pid[sku] = pid
-                if p.get("is_active") is False:
-                    inactive.add(sku)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] sku->product lookup failed: %s", exc)
-        return {}
+    sku_to_pid, inactive = resolved
     if not sku_to_pid:
         return {}
 
@@ -326,7 +392,7 @@ def online_quantities_for_skus(
 
     buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
     out: Dict[str, Dict[str, int]] = {}
-    known_store = False
+    read: List[str] = []
     for store in stores:
         sid = str(store.get("store_id") or "").strip()
         if not sid:
@@ -338,14 +404,18 @@ def online_quantities_for_skus(
                 "nowhere this pass", sid,
             )
             continue
-        known_store = True
+        read.append(sid)
         for sku, q in on_hand.items():
             out.setdefault(sku, {})[sid] = stock_allocation.recommend_allocation(q, buf)
-    if stores and not known_store:
+    if stores and not read:
         return {}
-    sids = [str(s.get("store_id") or "").strip() for s in stores]
+    # The block writes 0 -- but ONLY where the pass actually read the shelf. A
+    # shop whose read failed stays absent from EVERY sku (unknown is never
+    # written, not even as a blocked 0): otherwise one blocked SKU in the batch
+    # makes that shop look read and clears it out of unknown_stores, and the
+    # other SKUs are then never written there at all.
     for sku in _blocked_online(db, clean):
-        out[sku] = {sid: 0 for sid in sids if sid}
+        out[sku] = {sid: 0 for sid in read}
     if not stores:
         return {sku: {} for sku in clean}
     return out
@@ -457,9 +527,11 @@ async def writeback_skus(
     summary["unmapped_stores"] = list(res.get("unmapped_stores") or [])
     summary["unknown_stores"] = list(res.get("unknown_stores") or [])
     summary["skipped_no_onhand"] = sum(1 for s in targets if s not in quantities)
+    # res["quantities"] is what Shopify ACCEPTED on a LIVE pass (the plan only
+    # in a SIMULATED one), so a refused chunk never counts as pushed.
     written_skus = [s for s, rows in (res.get("quantities") or {}).items() if rows]
     if res.get("mode") == "LIVE":
-        summary["pushed"] = len(written_skus) if res.get("set") else 0
+        summary["pushed"] = len(written_skus)
         summary["failed"] = len(res.get("errors") or [])
     else:
         summary["simulated"] = len(written_skus)
@@ -591,6 +663,7 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
         or summary.get("skipped_no_onhand")
         or summary.get("unmapped_stores")
         or summary.get("unknown_stores")
+        or summary.get("code")
     ):
         return
     unmapped_online = int(summary.get("unmapped_online", 0) or 0)
@@ -624,6 +697,12 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
             f"{skipped_no_onhand} SKU(s) skipped: on-hand UNKNOWN "
             f"(never written as 0)"
         )
+    # Any machine code the writer reported (no shop mapped, two shops on one
+    # location, an orphan store id) is a not-ok run: the row must never say the
+    # website was corrected when the writer refused to write.
+    code = str(summary.get("code") or "")
+    if code and not any(code in e for e in errors):
+        errors.append(f"{code}: {summary.get('error') or 'nothing written'}")
     try:
         coll = db.get_collection("sync_runs")
         if coll is None:
@@ -638,6 +717,7 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
                     and skipped_no_onhand == 0
                     and not unmapped_stores
                     and not unknown_stores
+                    and not code
                 ),
                 "items_synced": int(summary.get("pushed", 0)),
                 "error": ("; ".join(errors) if errors else None),

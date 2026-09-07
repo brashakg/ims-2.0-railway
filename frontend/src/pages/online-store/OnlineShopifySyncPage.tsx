@@ -517,9 +517,10 @@ export default function OnlineShopifySyncPage() {
   const shopLabel = (sid: string) =>
     (mode?.stores ?? []).find((s) => s.store_id === sid)?.store_code || sid;
   // A Shopify location that fulfils online orders but maps to NO shop keeps
-  // selling whatever number it holds -- IMS never writes it (the pooled
-  // phantom the migration runbook warns about). Visible here, not only in
-  // the runbook. Empty when DARK (the locations read is [] then).
+  // selling whatever number it holds -- IMS never writes it (the phantom
+  // location the migration runbook warns about; IMS writes per shop, never a
+  // pooled total). Visible here, not only in the runbook. Empty when DARK
+  // (the locations read is [] then).
   const mappedLocationIds = new Set(
     (mode?.stores ?? []).map((s) => s.shopify_location_id).filter((id): id is string => !!id),
   );

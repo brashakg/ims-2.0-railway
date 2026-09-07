@@ -101,8 +101,13 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     store_code, projected to ``{store_id, store_code, store_name, store_type,
     shopify_location_id, shopify_location_name}``.
 
-    "Physical" has exactly one definition: ``is_active`` AND not
-    ``_doc_is_online``. Every writer and reader derives ``{store_id: gid}``
+    "Physical" has exactly one definition: ACTIVE and not ``_doc_is_online``,
+    where active is ``is_active != False`` -- a MISSING flag is active, the
+    spelling routers/stores.py already uses for a legacy doc. It used to be
+    ``is_active: True``, so a legacy shop with no flag fell out of this list
+    entirely: its shelf stock was published nowhere AND it could never be
+    reported as an unmapped holder, i.e. a silent green pass.
+    Every writer and reader derives ``{store_id: gid}``
     and its reverse from this list with a comprehension -- no second registry.
     No process cache: eight docs, one indexed read per call, so a mapping
     change is live on the next call with no redeploy. No DB handle -> ``[]``;
@@ -112,7 +117,9 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     handle = _resolve_db(db)
     if handle is None:
         return []
-    rows = handle.get_collection("stores").find({"is_active": True}, _PHYSICAL_PROJECTION)
+    rows = handle.get_collection("stores").find(
+        {"is_active": {"$ne": False}}, _PHYSICAL_PROJECTION
+    )
     out = [
         dict(r)
         for r in rows

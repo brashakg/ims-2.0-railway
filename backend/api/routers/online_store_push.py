@@ -702,7 +702,7 @@ async def push_all_pending(
                 "taken_down_skipped"
             ] = taken_down_skipped
         # A press also pushes STOCK (owner ruling 2026-09-07): every listing
-        # whose pooled quantity changed since it was last sent, in one pass,
+        # whose PER-SHOP quantities changed since they were last sent, in one pass,
         # AFTER the product pushes so a product this press just created is
         # covered too. Its OWN key (not a `results` row): `results` and
         # `pushed_count` are per-object pushes, and a stock pass is neither a

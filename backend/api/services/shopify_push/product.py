@@ -43,7 +43,6 @@ from .variants import (
 )
 from .publish import _publish_to_online_store
 from .inventory import (
-    STORE_UNMAPPED,
     _set_variant_tracking,
     _stores,
     plan_product_stock,
@@ -742,12 +741,11 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         payload["stores_mapped"] = written.get("stores_mapped", 0)
         errors = list(tracked.get("errors") or []) + list(written.get("errors") or [])
         code = written.get("code")
-        if not written.get("stores_mapped"):
-            code = code or STORE_UNMAPPED
-            errors.append(
-                "no shop has a Shopify location -- nothing written; the size keeps "
-                "its last quantity on Shopify until a shop is mapped"
-            )
+        # "No shop mapped" is the WRITER's rule now (push_skus_stock returns
+        # STORE_UNMAPPED + the error and writes nothing), not a second copy
+        # here -- every other door goes through the same guard.
+        if code and not written.get("errors") and written.get("error"):
+            errors.append(written["error"])
         if errors:
             return PushResult(
                 mode=MODE_LIVE,

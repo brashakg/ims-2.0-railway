@@ -477,7 +477,7 @@ async def sync_live_products(
     limit: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Re-push every product that is already on Shopify AND dirty, then run
-    the stock pass (sync_stock_levels) over every listing whose pooled
+    the stock pass (sync_stock_levels) over every listing whose per-shop
     quantity changed. Never publishes a gid-less product (counted, not
     pushed). Runs the
     engine behind the same three gates (DARK => SIMULATED, no network), writes
