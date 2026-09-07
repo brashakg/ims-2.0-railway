@@ -21,6 +21,7 @@ from ._shared import (
     PushResult,
     _blocked_result,
     _live_or_reason,
+    is_variant_of,
     logger,
     push_lock_reason,
 )
@@ -739,12 +740,16 @@ def _resolve_product_doc(db, product_id: Optional[str]) -> Optional[Dict[str, An
 
 def _resolve_product_gid(db, product_id: Optional[str]) -> Optional[str]:
     """Look up the parent catalog_products' ecom.shopify_product_id (the gid the
-    image media attaches to). Fail-soft -> None."""
+    image media attaches to). A SIZE VARIANT's twin resolves to None whatever
+    it carries: it owns no listing, so its image must never attach to the
+    PARENT's (a twin repair that stamps the parent gid on a child twin would
+    otherwise route the child's APPROVED photo onto the parent's media through
+    push_image / the images sweep). Fail-soft -> None."""
     if not product_id:
         return None
     try:
         doc = db["catalog_products"].find_one({"id": product_id})
-        if doc is None:
+        if doc is None or is_variant_of(doc):
             return None
         gid = (doc.get("ecom") or {}).get("shopify_product_id")
         return _as_shopify_gid(gid, "Product") if gid else None

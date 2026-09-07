@@ -193,14 +193,24 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     if prod_coll is None:
         return {}
     sku_to_pid: Dict[str, str] = {}
+    # A product IMS stopped selling (is_active False -- the retire hook's
+    # marker) lists 0 online whatever its shelves hold: written as 0, the
+    # oversell-guard contract, never "unknown". A MISSING flag is active (the
+    # purchasable rule every other reader applies) -- `is False`, never
+    # `not`. This is what keeps a deactivated size variant off sale after
+    # online_delist wrote its 0, and what brings it back on reactivation.
+    inactive: set = set()
     try:
         for p in prod_coll.find(
-            {"sku": {"$in": list(skus)}}, {"_id": 0, "product_id": 1, "sku": 1}
+            {"sku": {"$in": list(skus)}},
+            {"_id": 0, "product_id": 1, "sku": 1, "is_active": 1},
         ):
             sku = str(p.get("sku") or "").strip()
             pid = p.get("product_id")
             if sku and pid and sku not in sku_to_pid:
                 sku_to_pid[sku] = pid
+                if p.get("is_active") is False:
+                    inactive.add(sku)
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] sku->product lookup failed: %s", exc)
         return {}
@@ -257,7 +267,7 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     # The aggregate COMPLETED: a pid it omitted genuinely has zero on-hand.
     out: Dict[str, int] = {}
     for sku, pid in sku_to_pid.items():
-        out[sku] = int(on_hand_by_pid.get(pid, 0) or 0)
+        out[sku] = 0 if sku in inactive else int(on_hand_by_pid.get(pid, 0) or 0)
     return out
 
 
