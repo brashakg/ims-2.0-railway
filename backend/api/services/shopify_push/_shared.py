@@ -215,12 +215,23 @@ def push_mode_status(db) -> Dict[str, Any]:
             }
             for r in rows
         ]
+        # ONE spelling of "this shop has a usable Shopify location": the
+        # WRITER's (inventory._mapped), which drops every shop whose gid is
+        # claimed by more than one shop -- Shopify takes one quantity per
+        # (item, location), so neither of those shops is ever written. Counting
+        # raw gids here instead turned the pre-press "Stock locations" gate
+        # chip GREEN ("3 of 3 shops mapped") in exactly the case the writer's
+        # own backstop refuses (STORE_LOCATION_DUPLICATE, nothing written):
+        # the gate that exists to be read BEFORE the press was the one lying.
+        from .inventory import _mapped
+
+        mapped = _mapped(rows)
         stores_total = len(stores)
-        stores_mapped = sum(1 for r in stores if r["shopify_location_id"])
+        stores_mapped = len(mapped)
         unmapped_stores = [
             {k: r[k] for k in ("store_id", "store_code", "store_name")}
             for r in stores
-            if not r["shopify_location_id"]
+            if r["store_id"] not in mapped
         ]
     except Exception as exc:  # noqa: BLE001 -- a status read never raises
         logger.warning("[SHOPIFY_PUSH] store list read failed for status: %s", exc)

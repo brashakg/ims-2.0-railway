@@ -400,38 +400,32 @@ def test_script_parse_sets_rejects_a_bare_code():
         mod.parse_sets(["BV-BOK-02"])
 
 
-def test_script_refuses_pune_by_code_or_by_location_number(monkeypatch):
+def test_R3_the_script_maps_pune_like_any_other_shop(monkeypatch):
+    """Round-3 ops P1. The script refused any --set naming BV-PUN-01 or
+    location 76684427513 because Shopify held 49 units at Gangadham Pune and
+    the IMS ledger held 1. On 2026-09-07 the owner deleted the entire
+    catalogue -- 43 Shopify products, and IMS products / catalog_products /
+    catalog_variants / stock_units -- so the 49 no longer exist and the
+    precondition the refusal demanded ("re-run once the ledger shows them")
+    could never be met: the operator's only routes were to defeat the guard by
+    asserting something untrue, or to skip the script for the Organization
+    dropdown, which carries no such guard at all. Restore PUNE_REFUSAL ->
+    plan_sets returns an error row -> this fails."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     mod = _script()
+    assert not hasattr(mod, "PUNE_REFUSAL") and not hasattr(mod, "pune_guarded")
     db = StrictDB()
     db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-DHN-02")])
-    plan = mod.plan_sets(db, mod.parse_sets([
-        "BV-PUN-01=76684427513",                          # Pune's code
-        "BV-PUN-01=1",                                    # Pune's code with a FOREIGN number: the code branch alone
-        "bv-dhn-02=76684427513",                          # Pune's number on another code
-        "BV-DHN-02=gid://shopify/Location/76684427513",   # the gid form
-    ]))
-    assert [r["error"] for r in plan] == [mod.PUNE_REFUSAL] * 4
-    assert "49 opening-stock" in mod.PUNE_REFUSAL and "--i-know-pune" in mod.PUNE_REFUSAL
-    assert all(r["store_id"] is None for r in plan)
-    # a refused row never reaches the repository
-    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == {"written": 0, "identical": 0, "failed": 0}
-    for code in ("BV-PUN-01", "BV-DHN-02"):
-        assert "shopify_location_id" not in db.get_collection("stores").find_one({"store_code": code})
-
-
-def test_script_i_know_pune_lifts_the_guard_but_not_the_routers_rules(monkeypatch):
-    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
-    mod = _script()
-    db = StrictDB()
-    db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-ONLINE-01", store_type="ONLINE")])
-    plan = mod.plan_sets(
-        db,
-        mod.parse_sets(["BV-PUN-01=76684427513", "BV-ONLINE-01=76684427513"]),
-        allow_pune=True,
-    )
-    assert plan[0]["error"] is None and plan[0]["gid"] == PUNE and plan[0]["store_id"] == PUNE_UUID
-    assert plan[1]["error"].startswith("400") and "Online stores" in plan[1]["error"]
+    plan = mod.plan_sets(db, mod.parse_sets(["BV-PUN-01=76684427513", "BV-DHN-02=58793230523"]))
+    assert [r["error"] for r in plan] == [None, None]
+    assert plan[0]["store_id"] == PUNE_UUID and plan[0]["gid"] == PUNE
+    assert mod.apply_sets(db, plan) == {"written": 2, "identical": 0, "failed": 0}
+    assert _saved(db, PUNE_UUID)["shopify_location_id"] == PUNE
+    # ...and the router's own rules still bite: a second shop cannot claim it.
+    with pytest.raises(stores.HTTPException) as exc:
+        stores._validate_store_payload({"shopify_location_id": PUNE}, db=db, store_id="BV-DHN-02",
+                                       existing=_saved(db, "BV-DHN-02"))
+    assert exc.value.status_code == 409
 
 
 def test_script_refuses_a_duplicate_gid_within_one_run(monkeypatch):
@@ -577,13 +571,25 @@ def _unit(store_id, status="AVAILABLE"):
     return {"stock_id": f"u-{store_id}-{status}", "product_id": "p1", "store_id": store_id, "status": status}
 
 
+def _list_it(db, pid="p1", sku="SP-1"):
+    """Put ``pid``'s product ON THE WEBSITE. Only listed stock can leave a
+    phantom at the old Shopify location, so only listed stock blocks a remap."""
+    db.seed("products", [{"product_id": pid, "sku": sku}])
+    db.seed(
+        "catalog_products",
+        [{"id": "cat-1", "sku": sku, "ecom": {"shopify_inventory_item_id": "gid://shopify/InventoryItem/9"}}],
+    )
+    return db
+
+
 def test_clearing_or_changing_the_location_is_refused_while_the_shop_holds_units(monkeypatch):
     c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-02")])
     db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
     for new in ("", PUNE, "76684427513"):
         r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": new})
         assert r.status_code == 400, (new, r.text)
-        assert "1 on-hand stock unit(s)" in r.json()["detail"]
+        assert "1 on-hand stock unit(s) listed on the website" in r.json()["detail"]
         assert "Shopify location" in r.json()["detail"]
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
     # Re-saving the SAME gid alongside another edit is not a change.
@@ -597,9 +603,93 @@ def test_clearing_or_changing_the_location_is_refused_while_the_shop_holds_units
     assert exc.value.status_code == 400 and "on-hand stock unit" in exc.value.detail
 
 
+def test_R3_P4_stock_that_is_on_no_listing_never_locks_a_mis_mapped_shop(monkeypatch):
+    """Round-3 ops P4. The dropdown pre-selects only on an EXACT name match,
+    which no current Shopify location satisfies, so a mis-map is a plausible
+    first move -- and blocking on ANY unit meant the shop could never be
+    corrected once it took ONE GRN unit of anything (deactivation is blocked
+    by the same rule: no escape hatch at all). The rule exists because the OLD
+    location would keep showing the units; a product on no listing shows
+    nowhere. Revert `_store_listed_on_hand_units` back to
+    `_store_on_hand_units` in _validate_store_payload -> 400 -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-DHN-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-DHN-02")])
+    db.seed("products", [{"product_id": "p1", "sku": "SP-1"}])  # never pushed: no ecom row
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-DHN-02")["shopify_location_id"] == PUNE
+    # ...and the moment that product IS on the website, the phantom is real again.
+    _list_it(db)
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 400 and "listed on the website" in r.json()["detail"]
+
+
+def test_R3_P5_a_remap_is_refused_when_the_shelf_cannot_be_read(monkeypatch):
+    """Round-3 P5: the ONE door that reopened the remap phantom. The on-hand
+    count was wrapped in `except: pass` -> None, which every caller reads as
+    "the shop holds nothing", so a Mongo blip waved the remap through and the
+    old location advertised its units forever. stores_util propagates a Mongo
+    error for exactly this reason. Revert to `except: pass` -> 200 -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02"), _unit("BV-BOK-02", status="RESERVED")])
+    _list_it(db)
+
+    class _Dead(type(db.get_collection("stock_units"))):
+        def count_documents(self, *a, **k):
+            raise RuntimeError("stock read died")
+
+        def distinct(self, *a, **k):
+            raise RuntimeError("stock read died")
+
+    db._collections["stock_units"] = _Dead("stock_units", [])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text
+    assert "Cannot read this shop" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    # The deactivation door reads the same shelf and refuses the same way.
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"is_active": False})
+    assert r.status_code == 503, r.text
+
+
+def test_R3_a_dead_catalog_never_reads_as_nothing_is_listed(monkeypatch):
+    """inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} means
+    "nothing is listed" -- which would wave the remap through. Revert the
+    strict `catalog.find_one({}, ...)` touch -> 200 -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+
+    class _DeadCatalog(type(db.get_collection("catalog_products"))):
+        def find_one(self, *a, **k):
+            raise RuntimeError("catalog read died")
+
+        def find(self, *a, **k):
+            raise RuntimeError("catalog read died")
+
+    db._collections["catalog_products"] = _DeadCatalog("catalog_products", [])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_R3_on_hand_here_is_item_events_on_hand_match(monkeypatch):
+    """One spelling of on-hand. The hand-typed
+    {"status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]}} counted a VOID /
+    DAMAGED / RTV unit as on hand (none of those is in the $nin set, and two of
+    its three tokens are not even StockState members). Revert to the $nin
+    query -> the VOID unit blocks -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02", status="VOID")])
+    _list_it(db)
+    assert stores._store_on_hand_units(db, "BV-BOK-02") is None
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+
+
 def test_location_can_be_cleared_or_changed_once_the_units_have_left(monkeypatch):
     c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
     db.seed("stock_units", [_unit("BV-BOK-02", status="SOLD")])  # gone from the shelf
+    _list_it(db)
     r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
     assert r.status_code == 200, r.text
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE

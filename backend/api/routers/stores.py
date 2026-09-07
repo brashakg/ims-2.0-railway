@@ -4,6 +4,7 @@ IMS 2.0 - Stores Router
 Store management endpoints
 """
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -28,6 +29,8 @@ from ..dependencies import (
 )
 from ..services import org_validation as ov
 from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -235,10 +238,12 @@ def _validate_store_payload(
     the physical list with a gid: a gid in the payload, or ``is_active: True``.
     ``store_id`` is the doc's own id on an update (create passes none and the
     known-id check falls back to ``store_code``). Clearing or CHANGING a gid
-    the doc already carries is 400 while the shop still holds units
-    (``_store_on_hand_units`` -- the deactivation rule): the per-store stock
-    writer only touches locations the store list maps, so the old location
-    would keep showing those units on Shopify forever.
+    the doc already carries is 400 while the shop still holds stock the WEBSITE
+    LISTS (``_store_listed_on_hand_units``): the per-store stock writer only
+    touches locations the store list maps, so the old location would keep
+    showing those units on Shopify forever. Stock on no listing does not block
+    -- it leaves no phantom, and blocking on it locked a mis-mapped shop out of
+    correction for its first GRN unit of anything.
     """
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
@@ -278,7 +283,9 @@ def _validate_store_payload(
             data["shopify_location_name"] = None
         old = _as_shopify_gid((existing or {}).get("shopify_location_id"), "Location")
         if old and gid != old:
-            held = _store_on_hand_units(db, store_id or (existing or {}).get("store_id"))
+            held = _store_listed_on_hand_units(
+                db, store_id or (existing or {}).get("store_id")
+            )
             if held:
                 raise HTTPException(
                     status_code=400,
@@ -338,27 +345,104 @@ async def _shopify_location_name(db, gid: str) -> Optional[str]:
     return None
 
 
+_STOCK_UNREADABLE = (
+    "Cannot read this shop's stock right now, so nothing was changed. "
+    "Try again in a moment."
+)
+
+
+def _stock_unreadable(exc: Exception) -> HTTPException:
+    """STRICT. The stock read behind the location and deactivation rules used
+    to be wrapped in ``except: pass`` -> None, which every caller reads as
+    "the shop holds nothing" -- the ONE door that lets a remap through while
+    the old Shopify location keeps advertising units nothing will ever zero
+    again. services/stores_util.py propagates a Mongo error for exactly this
+    reason ("an unknown store list must never silently read as no shops"); an
+    unknown SHELF must not read as an empty one either."""
+    logger.warning("[STORES] stock read failed (STRICT -> refuse): %s", exc)
+    return HTTPException(status_code=503, detail=_STOCK_UNREADABLE)
+
+
+def _on_hand_count(db, extra: dict) -> int:
+    """On-hand units matching ``extra``. "On hand" is
+    ``item_events.on_hand_match()`` -- the SAME question the writer and eleven
+    other readers ask. It used to be hand-typed here as ``{"status": {"$nin":
+    ["SOLD", "RETURNED", "SCRAPPED"]}}`` over a legacy ``stock`` collection
+    that was never provisioned: two of those tokens are not even StockState
+    members, and a second spelling of on-hand is how the same unit comes to be
+    here for one reader and gone for the next."""
+    if db is None:
+        return 0
+    from ..services.item_events import on_hand_match
+
+    try:
+        coll = db.get_collection("stock_units")
+        if coll is None:
+            return 0
+        return int(coll.count_documents({**extra, **on_hand_match()}))
+    except Exception as exc:  # noqa: BLE001 -- re-raised as 503, never swallowed
+        raise _stock_unreadable(exc) from exc
+
+
 def _store_on_hand_units(db, store_id: str) -> Optional[str]:
     """Human description of the stock a store still holds ("3 on-hand stock
-    unit(s)"), else None -- the ONE "units must leave first" rule, behind
-    deactivation AND behind clearing / changing the store's Shopify location
-    (a location the store list no longer maps is never written again, so
-    whatever it showed would outlive every stock pass). Fail-soft."""
+    unit(s)"), else None -- the "units must leave first" rule behind
+    DEACTIVATION. Raises 503 when the shelf cannot be read."""
+    n = _on_hand_count(db, {"store_id": store_id})
+    return f"{n} on-hand stock unit(s)" if n else None
+
+
+def _store_listed_on_hand_units(db, store_id: str) -> Optional[str]:
+    """The stock this shop holds that the WEBSITE LISTS ("2 on-hand stock
+    unit(s) listed on the website"), else None -- the "units must leave first"
+    rule behind CHANGING or CLEARING the shop's Shopify location.
+
+    Narrower than ``_store_on_hand_units`` ON PURPOSE, because the rule's whole
+    reason is that the OLD location would keep showing those units on Shopify
+    forever (the per-store writer only touches locations the store list maps)
+    -- and a unit of a product that is on no listing is shown nowhere and
+    leaves no phantom. Blocking on ANY unit locked a mis-mapped shop out of
+    ever being corrected the moment it received one GRN unit of anything, with
+    deactivation blocked by the same rule: no escape hatch at all. Raises 503
+    on any read it cannot answer."""
     if db is None:
         return None
-    for coll in ("stock", "stock_units"):
-        try:
-            n = db.get_collection(coll).count_documents(
-                {
-                    "store_id": store_id,
-                    "status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]},
-                }
+    from ..services.online_catalog import inventory_items_for_skus
+
+    try:
+        from ..services.item_events import on_hand_match
+
+        units = db.get_collection("stock_units")
+        products = db.get_collection("products")
+        catalog = db.get_collection("catalog_products")
+        if units is None or products is None or catalog is None:
+            return None
+        pids = [
+            p
+            for p in units.distinct("product_id", {"store_id": store_id, **on_hand_match()})
+            if p
+        ]
+        if not pids:
+            return None
+        sku_of = {
+            str(d.get("product_id")): str(d.get("sku") or "")
+            for d in products.find(
+                {"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "sku": 1}
             )
-            if n:
-                return f"{n} on-hand stock unit(s)"
-        except Exception:
-            pass
-    return None
+        }
+        # inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} here
+        # would read as "nothing is listed" and wave the remap through. One
+        # strict touch of the catalog first, so a collection that cannot be
+        # read refuses instead of answering "no".
+        catalog.find_one({}, {"_id": 1})
+    except Exception as exc:  # noqa: BLE001
+        raise _stock_unreadable(exc) from exc
+    listed = set(inventory_items_for_skus(db, [s for s in sku_of.values() if s]))
+    listed_pids = [pid for pid, sku in sku_of.items() if sku in listed]
+    if not listed_pids:
+        return None
+    n = _on_hand_count(db, {"store_id": store_id, "product_id": {"$in": listed_pids}})
+    return f"{n} on-hand stock unit(s) listed on the website" if n else None
 
 
 def _store_active_dependents(db, store_id: str) -> Optional[str]:

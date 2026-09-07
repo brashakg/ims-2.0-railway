@@ -15,8 +15,10 @@ Contract (mirrors the rest of the Shopify bridge):
   * 100% FAIL-SOFT, end to end. No creds / no DB / Shopify error -> a structured
     reason, never a raise. It must NEVER take down the SENTINEL scheduler.
   * READ-ONLY vs Shopify (single boundary: shopify_push._graphql, injectable).
-  * Pooled availability reuses the SAME helper the online write-back layer uses
-    (online_stock_writeback._on_hand_for_skus with store_id=None = all shops).
+  * Pooled availability reuses THE ONE RULE the writer uses
+    (online_stock_writeback.online_quantities_for_skus at buffer 0), summed over
+    the shops the writer actually writes (shopify_push.inventory._mapped) --
+    the Shopify side only has inventory levels at those locations.
   * The comparator is a PURE function (compare_variant_parity) so drift logic is
     unit-tested without a DB or Shopify.
 """
@@ -165,21 +167,32 @@ def _sample_variants(db, limit: int = _DEFAULT_SAMPLE) -> List[Dict[str, Any]]:
 
 
 def _pooled_availability(db, skus: List[str]) -> Dict[str, int]:
-    """POOLED (all-shops-combined) IMS on-hand per SKU. Reuses the online layer's
-    own helper (online_stock_writeback._on_hand_for_skus) with store_id=None so
-    the number matches what the write-back pushes online. Fail-soft -> {}."""
-    # PR 4 (per-location parity) -- this is the SECOND quantity rule and it
-    # already disagrees with the writer in two ways: a SUPERADMIN-blocked SKU
-    # is written 0 at every location but read here at its shelf count (a false
-    # drift row + task), and with a safety buffer B the writer sends
-    # sum(max(0, q_s - B)) which is not max(0, pooled - B) -- up to
-    # (shops - 1) * B of drift. Prod buffer is 0, so nothing fires today.
+    """POOLED (all-shops-combined) IMS on-hand per SKU, summed over the SHOPS
+    THE WRITER WRITES -- ``online_quantities_for_skus`` at buffer 0, restricted
+    to ``inventory._mapped``. Compared against the sum of a SKU's Shopify
+    inventoryLevels. Fail-soft -> {}.
+
+    It is still the SECOND quantity rule until PR 4 compares per location, but
+    running it through the writer's own rule removes two of its three
+    divergences: a SUPERADMIN-blocked SKU (written 0 everywhere, previously
+    read here at its shelf count) and a shop with NO Shopify location (its
+    units are in no inventoryLevel, so counting them was a false drift row and
+    a deduped task on a correct system). What remains is the safety buffer:
+    the writer sends sum(max(0, q_s - B)) which is not max(0, pooled - B), up
+    to (shops - 1) * B of drift -- read at buffer 0 here, so a non-zero buffer
+    makes IMS read HIGH. Prod buffer is 0, so nothing fires today."""
     if not skus:
         return {}
     try:
-        from .online_stock_writeback import _on_hand_for_skus
+        from .online_stock_writeback import online_quantities_for_skus
+        from .shopify_push.inventory import _mapped, _stores
 
-        return _on_hand_for_skus(db, list(skus), None) or {}
+        mapped = _mapped(_stores(db))
+        per = online_quantities_for_skus(db, list(skus), safety_buffer=0) or {}
+        return {
+            sku: sum(int(q) for sid, q in rows.items() if sid in mapped)
+            for sku, rows in per.items()
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] pooled availability failed: %s", exc)
         return {}

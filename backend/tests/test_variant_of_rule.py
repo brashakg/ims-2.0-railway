@@ -154,6 +154,13 @@ class _Spy:
     def calls_for(self, marker):
         return [c for c in self.calls if marker in c["query"]]
 
+    def writes(self):
+        """Every call that is not the READ-ONLY locations list. A LIVE stock
+        pass reads Shopify's locations once (invariant 2: a location that
+        fulfils online orders and maps to no shop keeps selling its own
+        number), so "zero network" assertions are about WRITES."""
+        return [c for c in self.calls if "imsLocationList" not in c["query"]]
+
 
 def _ok(field, **extra):
     return {"data": {field: {"userErrors": [], **extra}}}
@@ -472,9 +479,9 @@ def test_parent_stock_pass_carries_the_child_sku(monkeypatch):
     # the ledger lives on the PARENT twin, keyed by SKU; the child twin has none
     assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"] == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}
     assert "online_stock" not in _twin(db, "tw-child")["ecom"]
-    # a clean second pass is a noop with zero network
-    n = len(spy.calls)
-    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and len(spy.calls) == n
+    # a clean second pass is a noop that writes nothing
+    n = len(spy.writes())
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and len(spy.writes()) == n
 
 
 def test_gid_door_ignores_a_child_even_if_a_repair_stamps_the_parent_gid_on_it():
@@ -630,7 +637,7 @@ def test_flip_off_then_on_with_no_pass_between_resends_the_child(monkeypatch):
     _run(online_delist.on_active_flip(conn, _spine(db, "sp-child"), was_active=True, now_active=False, actor=ADMIN))
     # while off, the quantity rule agrees with the delist: a pass re-sends nothing
     spy.calls.clear()
-    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and spy.calls == []
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and spy.writes() == []
 
     # on again, NO pass in between: the next pass must carry the child's 1
     db["products"].update_one({"product_id": "sp-child"}, {"$set": {"is_active": True}})
@@ -1019,7 +1026,7 @@ def test_catalog_door_deactivation_reaches_the_child_spine_so_the_next_pass_keep
 
     spy.calls.clear()
     res = _run(shopify_push.sync_stock_levels(db))
-    assert res.action == "noop" and spy.calls == [], f"{door}: the next stock pass put the size back on sale"
+    assert res.action == "noop" and spy.writes() == [], f"{door}: the next stock pass put the size back on sale"
     assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 0}}
 
     if door == "drawer":

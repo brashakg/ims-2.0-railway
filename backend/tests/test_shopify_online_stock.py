@@ -48,6 +48,16 @@ Pinned here, each REVERT-PROOF (revert the named piece and the test fails):
       no-op (P2 + the fresh-catalogue first press); a store-read failure is
       UNKNOWN, never "no shops"; the summary counts what Shopify ACCEPTED
       (P6/P7); Preview-first names a missing Shopify target (R3).
+  Panel round 3 (2026-09-07): one dead Shopify location never freezes every
+      other shop's number (P1, the split-per-location retry); the pre-press
+      gate chip counts "mapped" the way the WRITER does (P2); the dry-run
+      product plan carries the writer's own code (P3); a shop holding exactly
+      the safety buffer is still an unmapped holder (P4); a SKU that left the
+      product never marks it changed forever (P6); a Shopify location that
+      fulfils online orders with no shop behind it is never a green run
+      (invariant 2, backend); a first publish whose stock was refused is not a
+      clean success (ops P5); the blocked-SKU whole-batch abort; parity never
+      counts a shop Shopify cannot see.
   Panel round (2026-09-07): a POS sale landing while the sweep is mid-loop
   is written, not overwritten with the snapshot; the SUPERADMIN block is
   IN the rule so the schedule agrees with the POS door; ONE sku -> listing
@@ -126,6 +136,12 @@ class _Spy:
             for r in c["variables"]["input"]["quantities"]:
                 out.add((r["inventoryItemId"], r["locationId"], r["quantity"]))
         return out
+
+    def writes(self):
+        """Every call that is not the READ-ONLY locations list. A LIVE stock
+        pass reads Shopify's locations once (invariant 2), so "zero network"
+        pins are about WRITES."""
+        return [c for c in self.calls if "imsLocationList" not in c["query"]]
 
     def order(self, *markers):
         return [next(m for m in markers if m in c["query"]) for c in self.calls if any(m in c["query"] for m in markers)]
@@ -496,7 +512,10 @@ def test_T11_preview_first_returns_the_per_store_plan_with_zero_network(monkeypa
     assert "dry_run" in (res.reason or "")
     assert res.payload["plan"] == [{"product_id": "cat-1", "quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}}]
     assert res.payload["stores_mapped"] == 3
-    assert spy.calls == [], "Preview first must never touch Shopify"
+    assert spy.writes() == [], "Preview first must never WRITE to Shopify"
+    # ...and it runs invariant 2's read, so the preview and the press cannot
+    # disagree about a Shopify location that sells with no shop behind it.
+    assert len(spy.calls_for("imsLocationList")) == 1
     assert _baseline(db) is None
 
 
@@ -556,12 +575,16 @@ def test_T7b_second_failure_is_stock_activation_failed_and_no_third_set(monkeypa
 
 
 def test_T7c_an_unrelated_user_error_never_activates(monkeypatch):
+    """An error that is NOT ITEM_NOT_STOCKED_AT_LOCATION never activates -- but
+    it IS retried split per location (round-3 P1) and it IS coded."""
     spy = _Spy(_responses(**{"inventorySetQuantities": _set_error("INVALID_QUANTITY", "bad")}))
     _live(monkeypatch, spy)
     out = _run(shopify_push.set_inventory_quantities(None, _rows3()))
-    assert out["set"] == 0 and out["code"] is None and len(out["errors"]) == 1
+    assert out["set"] == 0 and out["code"] == shopify_push.STOCK_WRITE_FAILED
+    assert len(out["errors"]) == 1, "a split never inflates the caller's failure count"
     assert spy.calls_for("inventoryBulkToggleActivation") == []
-    assert len(spy.calls_for("inventorySetQuantities")) == 1
+    # the whole chunk, then one call per location (nothing landed either way)
+    assert len(spy.calls_for("inventorySetQuantities")) == 4
 
 
 def test_writer_chunks_at_shopifys_cap_and_records_only_accepted_rows(monkeypatch):
@@ -729,6 +752,11 @@ def test_dark_push_plans_per_store_stock_with_zero_network(monkeypatch):
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
     assert res.mode == "SIMULATED"
     assert res.stock == {
+        "ok": False,
+        "code": shopify_push.STORE_UNMAPPED,
+        "error": shopify_push.inventory._unmapped_error(
+            [{"store_id": "BV-D", "store_code": "BV-D", "store_name": "Shop BV-D", "units": 1}]
+        ),
         "tracked": True,
         "policy": "DENY",
         "quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}},
@@ -1351,3 +1379,296 @@ def test_preview_first_names_a_missing_shopify_target_the_press_would_refuse(mon
     live = _run(shopify_push.sync_stock_levels(db))
     assert live.ok is False and live.code == shopify_push.STOCK_TARGET_MISSING
     assert spy.calls_for("inventorySetQuantities") == []
+
+
+# ---------------------------------------------------------------------------
+# 10. Panel round 3 (2026-09-07)
+# ---------------------------------------------------------------------------
+
+
+class _DeadLocation(_Spy):
+    """Shopify refuses ANY inventorySetQuantities call that touches ``bad`` --
+    a location the owner deleted, deactivated or renamed while its shop is
+    still mapped. Nothing in such a call is applied."""
+
+    def __init__(self, responses, bad):
+        super().__init__(responses)
+        self.bad = bad
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query and any(
+            r["locationId"] == self.bad for r in variables["input"]["quantities"]
+        ):
+            self.calls.append({"query": query, "variables": variables})
+            return {
+                "data": {
+                    "inventorySetQuantities": {
+                        "inventoryAdjustmentGroup": None,
+                        "userErrors": [
+                            {
+                                "field": ["input", "quantities", "2", "locationId"],
+                                "message": "Location does not exist",
+                                "code": "INVALID",
+                            }
+                        ],
+                    }
+                }
+            }
+        return await super().__call__(db, query, variables)
+
+
+def test_R3_P1_one_dead_location_never_freezes_every_other_shops_number(monkeypatch):
+    """R3 P1 (REAL OVERSELL). ONE inventorySetQuantities call carried up to 250
+    rows across every mapped shop, and a chunk Shopify refused for any reason
+    other than ITEM_NOT_STOCKED_AT_LOCATION applied NOT ONE of them. So a
+    single Shopify location the owner deleted or deactivated froze EVERY other
+    shop's number at its pre-sale value: the unit walks out of BV-A, the write
+    is refused wholesale, and bettervision.in keeps selling it -- repeated by
+    every later sale and every 01:00 / 09:00 pass until a human reads the
+    sync_runs row. The writer already refuses to withhold mapped rows for the
+    STORE_UNMAPPED case; this is the same rule.
+
+    Revert the per-location split in `_write_chunk` -> written is empty, the
+    baseline is None and BV-A keeps its pre-sale 1 -> every assert below fails.
+    """
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+    spy = _DeadLocation(_responses(), LOC_C)
+    _live(monkeypatch, spy)
+    # the sale: BV-A's last unit walks out
+    db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-A-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+    out = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    # the survivors landed -- A's 0 above all
+    assert spy.rows() >= {(INV_GID, LOC_A, 0), (INV_GID, LOC_B, 1)}
+    assert out["pushed"] == 1 and out["failed"] == 1
+    assert out["code"] == shopify_push.STOCK_WRITE_FAILED, "a refused write is never codeless"
+    assert "Location does not exist" in (out.get("error") or "")
+    base = _baseline(db)["quantities"]["SP-1"]
+    assert base == {"BV-A": 0, "BV-B": 1}, "the dead location is omitted, so the next pass re-sends it"
+    # one call for the whole chunk, then one per location: only LOC_C is lost
+    assert len(spy.calls_for("inventorySetQuantities")) == 4
+
+
+def test_R3_P2_the_pre_press_gate_counts_mapped_the_way_the_writer_does(monkeypatch):
+    """R3 P2: two spellings of "mapped". push_mode_status counted raw gids
+    while the writer's _mapped drops BOTH shops of a location two shops claim,
+    so the "Stock locations" gate chip -- the one the runbook makes the owner
+    read BEFORE the first press -- went GREEN ("3 of 3 shops mapped") in
+    exactly the case the press refuses (STORE_LOCATION_DUPLICATE, one row
+    written). Revert to `sum(1 for r if r["shopify_location_id"])` -> 3 -> fails."""
+    monkeypatch.setattr(shopify_push, "_graphql", _explode)
+    db = _db()
+    db.get_collection("stores").update_one(
+        {"store_id": "BV-B"}, {"$set": {"shopify_location_id": LOC_A}}
+    )
+    status = shopify_push.push_mode_status(db)
+    assert status["stores_total"] == 3 and status["stores_mapped"] == 1
+    assert sorted(s["store_id"] for s in status["unmapped_stores"]) == ["BV-A", "BV-B"]
+    # ...which is exactly what the press then does.
+    out = _run(shopify_push.push_skus_stock(_listed(db), ["SP-1"], source="button", dry_run=True))
+    assert out["ok"] is False and out["code"] == shopify_push.STORE_LOCATION_DUPLICATE
+    assert out["stores_mapped"] == 1
+
+
+def test_R3_P3_the_dry_run_product_plan_carries_the_writers_own_code(monkeypatch):
+    """R3 P3: plan_product_stock swallowed a store-list failure into
+    `stores = []` and returned no code at all -- and that dict IS the `stock`
+    block of the dry-run product push, the preview an operator reads before a
+    first publish, while the live press returns STOCK_ONHAND_UNKNOWN and
+    writes nothing. Round 2 fixed this preview-vs-press divergence for
+    sync_stock_levels and left the per-product plan behind. Revert the
+    code/error/stores_total=None branch -> code is None -> fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    _dark(monkeypatch)
+    from api.services.shopify_push import inventory as inv
+
+    def _dead(_db_):
+        raise RuntimeError("store list died")
+
+    monkeypatch.setattr(inv, "_stores", _dead)
+    plan = inv.plan_product_stock(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), [])
+    assert plan["ok"] is False and plan["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "store read failed" in plan["error"]
+    assert plan["stores_total"] is None, "unknown is never 0"
+    # ...and the plain "no shop mapped at all" case is coded too.
+    monkeypatch.setattr(inv, "_stores", lambda _d: [])
+    plan2 = inv.plan_product_stock(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), [])
+    assert plan2["ok"] is False and plan2["code"] == shopify_push.STORE_UNMAPPED
+    assert plan2["stores_total"] == 0
+
+
+def test_R3_P4_a_shop_holding_exactly_the_buffer_is_still_an_unmapped_holder(monkeypatch):
+    """R3 P4 (invariant 6, broken by the safety buffer): unmapped_holders summed
+    the POST-allocation quantities, so with buffer B a shop sitting on exactly
+    B units reported 0 units, was neither named nor tasked, and the run came
+    back fully green over a shop whose whole shelf is invisible online.
+    HOLDS is the shelf, not the published number. Revert unmapped_holders to
+    the buffered `quantities` -> unmapped_stores [] and ok True -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
+    db = _listed(_db(a=2, b=1, c=0, d=1))  # BV-D unmapped, holding exactly the buffer
+    assert wb.online_quantities_for_skus(db, ["SP-1"])["SP-1"]["BV-D"] == 0  # publishes nothing
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STORE_UNMAPPED
+    assert [h["store_id"] for h in res.payload["unmapped_stores"]] == ["BV-D"]
+    assert res.payload["unmapped_stores"][0]["units"] == 1
+    assert "shopify-store-unmapped:BV-D" in [
+        t.get("source_ref") for t in db.get_collection("tasks").find({})
+    ]
+
+
+def test_R3_P6_a_sku_that_left_the_product_never_marks_it_changed_forever(monkeypatch):
+    """R3 P6: stock_changed compared the WHOLE baseline against a slice built
+    only from the product's CURRENT SKUs, so a retired size row -- or, far more
+    commonly, a SKU Shopify never accepted (the baseline records only accepted
+    SKUs while the slice offers every one) -- left a key that can never match.
+    The product then read as changed on EVERY 01:00 / 09:00 pass forever, which
+    is exactly the "changed products only" property the schedule rests on and
+    the noise that buries a real STORE_UNMAPPED report. Revert the `skus`
+    restriction in stock_changed -> action "sync", changed 1 -> fails."""
+    db = _listed(
+        _db(a=2, b=1, c=0),
+        online_stock={
+            "tracked": True,
+            "quantities": {
+                "SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0},
+                "GONE-SKU": {"BV-A": 1},  # a size row retired off the parent
+            },
+        },
+    )
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.action == "noop" and res.payload["changed"] == 0
+    assert spy.calls_for("inventorySetQuantities") == []
+    # ...and a REAL change still re-sends (the diff is not simply disarmed).
+    db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-A-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+    assert _run(shopify_push.sync_stock_levels(db)).payload["changed"] == 1
+
+
+def _locations(*nodes):
+    return {"data": {"locations": {"nodes": list(nodes)}}}
+
+
+def _loc(gid, name, *, fulfils=True, active=True):
+    return {
+        "id": gid,
+        "name": name,
+        "isActive": active,
+        "fulfillsOnlineOrders": fulfils,
+        "shipsInventory": True,
+        "address": {"city": "Bokaro", "province": "Jharkhand"},
+    }
+
+
+def test_R3_a_fulfilling_shopify_location_with_no_shop_is_never_a_green_run(monkeypatch):
+    """R3 (invariant 2, HIGH): a Shopify location that FULFILS ONLINE ORDERS
+    but maps to no IMS shop keeps routing and selling whatever number it holds,
+    and IMS -- which writes per shop, never a pooled total -- never touches it.
+    That rule existed ONLY in React (an amber line a SUPERADMIN had to be
+    looking at): no backend verdict mentioned Shopify's own location list, so
+    the 01:00 / 09:00 pass recorded a fully green run beside it and filed no
+    task. Revert the `stray_locations` term in _all_ok / _verdict -> ok True,
+    code None -> fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    spy = _Spy(_responses(**{
+        "imsLocationList": _locations(
+            _loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"),
+            _loc("gid://shopify/Location/76684427513", "GANGADHAM- PUNE"),
+        )
+    }))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_LOCATION_UNMAPPED
+    assert "GANGADHAM- PUNE" in res.error
+    assert res.payload["unmapped_locations"] == [
+        {"id": "gid://shopify/Location/76684427513", "name": "GANGADHAM- PUNE"}
+    ]
+    assert "shopify-location-unmapped:gid://shopify/Location/76684427513" in [
+        t.get("source_ref") for t in db.get_collection("tasks").find({})
+    ]
+    # ...the mapped shops were still written (never withhold a real number)...
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
+    # ...and a location that does NOT fulfil online orders is nobody's problem.
+    db2 = _listed(_db(a=2, b=1, c=0))
+    spy2 = _Spy(_responses(**{
+        "imsLocationList": _locations(
+            _loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"),
+            _loc("gid://shopify/Location/999", "Warehouse", fulfils=False),
+        )
+    }))
+    _live(monkeypatch, spy2)
+    assert _run(shopify_push.sync_stock_levels(db2)).ok is True
+
+
+def test_R3_a_first_publish_whose_stock_was_refused_is_not_a_clean_success(monkeypatch):
+    """R3 ops P5: the owner's FIRST "Send to website" press on the rebuilt
+    catalogue, before any shop is mapped. The press switches tracking on with
+    the DENY policy and publishes -- a listing LIVE on bettervision.in reading
+    sold out at every location -- while the stock sub-summary carries
+    STORE_UNMAPPED and nothing renders it: formatPushResult reads only the
+    top-level ok / code / error, so the toast was green. ok stays True (the
+    product IS live, exactly like PRICE_NOT_SYNCED) but the code and the plain
+    line now come out where every screen reads them. Revert the
+    stock_not_written branch -> code None -> fails."""
+    db = StrictDB()
+    db.seed("stores", [_store("BV-A"), _store("BV-ONLINE-01", store_type="ONLINE")])
+    db.seed("products", [{"product_id": "spine-1", "sku": "SP-1"}])
+    db.seed("stock_units", [{"stock_id": "u0", "product_id": "spine-1", "store_id": "BV-A", "status": "AVAILABLE"}])
+    _listed(db)
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res.ok is True and res.mode == "LIVE", "the publish itself is never withheld for stock"
+    assert res.code == shopify_push.STORE_UNMAPPED
+    assert "with no Shopify location: BV-A" in res.error
+    assert res.stock["ok"] is False and res.stock["set"] == 0
+
+
+def test_R3_a_blocked_sku_in_a_dead_batch_is_still_the_strict_abort():
+    """R3 (suite gap): online_quantities_for_skus' whole-batch abort
+    (`if stores and not read: return {}`) survived being mutated to
+    `if False:` with the whole suite green -- it is only observable when a
+    SUPERADMIN-blocked SKU is in the batch AND every shop's on-hand read
+    failed, because the block loop then builds a TRUTHY {sku: {}} that
+    push_skus_stock reads as "known" instead of aborting. Mutate the guard away
+    -> {"SP-1": {}} != {} -> this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    db.seed("collections", [{"collection_id": "c1", "online_blocked": True, "product_ids": ["cat-1"]}])
+
+    class _DeadStock(StrictCollection):
+        def aggregate(self, *a, **k):
+            raise RuntimeError("every shop's read died")
+
+    db._collections["stock_units"] = _DeadStock("stock_units", [])
+    import api.services.online_block as ob
+
+    original = ob.blocked_skus
+    try:
+        ob.blocked_skus = lambda _db, skus: list(skus)  # the SUPERADMIN block
+        assert wb.online_quantities_for_skus(db, ["SP-1"]) == {}, "UNKNOWN, never a known 0"
+    finally:
+        ob.blocked_skus = original
+
+
+def test_R3_parity_never_counts_a_shop_shopify_cannot_see(monkeypatch):
+    """R3 (parity's known second rule): _pooled_availability summed on-hand
+    over ALL physical shops and compared it against the sum of a SKU's Shopify
+    inventoryLevels -- which only exist at MAPPED locations. An unmapped shop
+    holding 3 units of a listed SKU therefore read as 3 units of drift on a
+    perfectly correct system: past the default tolerance of 2, a false drift
+    row and the deduped shopify-stock-parity-drift task. Running it through
+    online_quantities_for_skus at buffer 0, restricted to inventory._mapped,
+    also fixes the SUPERADMIN-blocked divergence the comment already named.
+    Revert to `_on_hand_for_skus(db, skus, None)` -> 3 -> fails."""
+    from api.services import shopify_stock_parity as parity
+
+    db = _listed(_db(a=0, b=0, c=0, sold=0, d=3))  # every mapped shop empty, BV-D unmapped
+    assert parity._pooled_availability(db, ["SP-1"]) == {"SP-1": 0}
+    # a mapped shop's units DO count
+    db2 = _listed(_db(a=2, b=1, c=0, sold=0, d=3))
+    assert parity._pooled_availability(db2, ["SP-1"]) == {"SP-1": 3}

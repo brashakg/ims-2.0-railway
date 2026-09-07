@@ -34,23 +34,15 @@ This script:
      updated_at into every $set, so its modified_count cannot tell); a write
      the repository refused stops the run (exit 1) BEFORE the $unset.
 
-THE ONLY --set TO RUN NOW (design section 7, critic finding 1):
-    --set BV-BOK-02=58793230523     Better Vision Sector 4 (Bokaro): 0 units on
-                                    both sides, so its first write is the
-                                    explicit 0 it already shows.
-
-*** DO NOT --set BV-PUN-01 (Gangadham Pune, 76684427513) YET. ***
-Shopify holds 49 units at Gangadham Pune; the IMS ledger holds 1. IMS is
-master: the moment Pune is mapped AND PR 2 (the per-store writer) is deployed,
-the next 01:00/09:00 IST scheduled sync, the all-pending sweep or ANY product
-push writes IMS's Pune count over Shopify's 49 -- no button involved;
-"Preview first" gates only the button. Pune is mapped ONLY AFTER the 49
-opening-stock units are committed at Pune (owner ruling 2026-09-06 evening,
-memory work_queue_2026_09_07.md) and the dry-run plan shows Pune ~49.
-ENFORCED, not just documented: a --set naming BV-PUN-01 or location
-76684427513 (on any code) is REFUSED at plan time -- dry-run and --apply
-alike, nothing written -- unless --i-know-pune is passed. Pass it only once
-the ledger shows the 49 at Pune.
+GANGADHAM PUNE: THE 49-UNIT REFUSAL IS GONE (2026-09-07). It refused any --set
+naming BV-PUN-01 or location 76684427513 because Shopify held 49 units there
+against 1 in the IMS ledger, and mapping Pune would have written IMS's 1 over
+Shopify's 49 at the next schedule tick. On 2026-09-07 the owner deleted the
+ENTIRE catalogue -- all 43 Shopify products, and IMS products /
+catalog_products / catalog_variants / stock_units -- so there is no inventory
+level at Pune and no 49 to commit: the precondition the guard demanded could
+never be met again, and the guard blocked only the fresh setup it existed to
+protect. Every shop is now mapped the same way, in one run.
 
 USAGE
 -----
@@ -88,25 +80,6 @@ _REGISTRY_KEYS = (
     "online_location_name",
     "online_location_resolved_at",
 )
-
-# Gangadham Pune: the store code AND the Shopify location number (either one
-# in a --set trips the guard, so a typo'd code cannot smuggle the gid in).
-PUNE_STORE_CODE = "BV-PUN-01"
-PUNE_LOCATION_NUMBER = "76684427513"
-PUNE_REFUSAL = (
-    "Gangadham Pune (BV-PUN-01 / location 76684427513) must NOT be "
-    "mapped before the 49 opening-stock units are committed at Pune -- a "
-    "mapped Pune plus PR 2 writes IMS's Pune count over Shopify's 49 at the "
-    "next schedule tick, sweep or product push. Re-run with --i-know-pune "
-    "once the ledger shows them."
-)
-
-
-def pune_guarded(code: str, raw: str) -> bool:
-    """Pure: True when a --set names Pune's store code or Pune's location
-    number (bare or as a gid)."""
-    return code == PUNE_STORE_CODE or raw.rstrip("/").rsplit("/", 1)[-1] == PUNE_LOCATION_NUMBER
-
 
 def resolve_mongo_uri(explicit: Optional[str]) -> Optional[str]:
     return (
@@ -147,11 +120,10 @@ def print_table(db) -> List[Dict[str, Any]]:
     return rows
 
 
-def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> List[Dict[str, Any]]:
+def plan_sets(db, sets: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
     """One row per --set: ``{code, store_id, gid, name, same, error}``. The gid
     is normalised and refused by the router's own validator (ONE rule);
-    ``error`` carries the refusal text. Pune is refused here (PUNE_REFUSAL)
-    unless ``allow_pune`` -- the --i-know-pune flag. Two --set rows naming the
+    ``error`` carries the refusal text. Two --set rows naming the
     SAME location in one run: the second is refused here -- the router's
     duplicate check reads DB state, which neither row has written yet, so
     without this both would pass and one shelf would land on two stores.
@@ -161,10 +133,6 @@ def plan_sets(db, sets: List[Tuple[str, str]], *, allow_pune: bool = False) -> L
     out: List[Dict[str, Any]] = []
     seen: Dict[str, str] = {}  # normalised gid -> the store_code that claimed it in THIS run
     for code, raw in sets:
-        if pune_guarded(code, raw) and not allow_pune:
-            out.append({"code": code, "store_id": None, "gid": raw, "name": None,
-                        "same": False, "error": PUNE_REFUSAL})
-            continue
         doc = coll.find_one({"store_code": code})
         if doc is None:
             out.append({"code": code, "store_id": None, "gid": raw, "name": None,
@@ -229,8 +197,9 @@ def unset_registry(db) -> int:
     return int(getattr(res, "modified_count", 0) or 0)
 
 
-def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple[str, str]],
-        allow_pune: bool = False) -> Dict[str, Any]:
+def run(
+    *, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple[str, str]]
+) -> Dict[str, Any]:
     if not mongo_uri:
         raise SystemExit(
             "No Mongo connection. Set MONGO_PUBLIC_URL / MONGODB_URI, pass "
@@ -242,10 +211,7 @@ def run(*, mongo_uri: Optional[str], db_name: str, apply: bool, sets: List[Tuple
     db = client[db_name]
     print_table(db)
 
-    if allow_pune:
-        print("\n*** --i-know-pune: the Gangadham Pune guard is OFF for this run. "
-              "Only correct once the 49 opening-stock units are committed at Pune. ***")
-    plan = plan_sets(db, sets, allow_pune=allow_pune)
+    plan = plan_sets(db, sets)
     for row in plan:
         if row["error"]:
             verdict = f"REFUSED {row['error']}"
@@ -300,12 +266,7 @@ def main():
         action="append",
         default=[],
         metavar="STORE_CODE=LOCATION_ID",
-        help="Map a store to a Shopify location gid or bare id (repeatable). See the Pune warning at the top of this file.",
-    )
-    parser.add_argument(
-        "--i-know-pune",
-        action="store_true",
-        help="Lift the Gangadham Pune refusal. ONLY after the 49 opening-stock units are committed at Pune.",
+        help="Map a store to a Shopify location gid or bare id (repeatable).",
     )
     args = parser.parse_args()
     run(
@@ -313,7 +274,6 @@ def main():
         db_name=args.db,
         apply=args.apply,
         sets=parse_sets(args.set),
-        allow_pune=args.i_know_pune,
     )
 
 

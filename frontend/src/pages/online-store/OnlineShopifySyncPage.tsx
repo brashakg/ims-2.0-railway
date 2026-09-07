@@ -521,8 +521,15 @@ export default function OnlineShopifySyncPage() {
   // location the migration runbook warns about; IMS writes per shop, never a
   // pooled total). Visible here, not only in the runbook. Empty when DARK
   // (the locations read is [] then).
+  // "Mapped" is the WRITER's definition, which mode.unmapped_stores now carries
+  // (a location two shops claim maps NEITHER of them), so this line and the
+  // backend's own SHOPIFY_LOCATION_UNMAPPED verdict cannot disagree.
+  const unmappedShopIds = new Set((mode?.unmapped_stores ?? []).map((s) => s.store_id));
   const mappedLocationIds = new Set(
-    (mode?.stores ?? []).map((s) => s.shopify_location_id).filter((id): id is string => !!id),
+    (mode?.stores ?? [])
+      .filter((s) => !unmappedShopIds.has(s.store_id))
+      .map((s) => s.shopify_location_id)
+      .filter((id): id is string => !!id),
   );
   const unmappedFulfilling = locations.filter(
     (l) => l.isActive !== false && l.fulfillsOnlineOrders && !mappedLocationIds.has(l.id),

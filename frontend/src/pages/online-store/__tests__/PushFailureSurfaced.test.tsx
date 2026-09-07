@@ -88,7 +88,10 @@ vi.mock('react-router-dom', () => ({
 
 import OnlineProductsPage from '../OnlineProductsPage';
 import OnlineShopifySyncPage from '../OnlineShopifySyncPage';
-import { formatPushResult } from '../../../components/online-store/OnlineStoreSyncBanner';
+import {
+  formatPushResult,
+  pushToastLevel,
+} from '../../../components/online-store/OnlineStoreSyncBanner';
 import { onlineStoreApi, pushApi, syncHealthApi } from '../../../services/api/onlineStore';
 import { catalogProductsApi } from '../../../services/api/catalog';
 import { buildApiError } from '../../../services/api/client';
@@ -164,6 +167,23 @@ describe('formatPushResult', () => {
     const line = formatPushResult('Ray-Ban RB2140', OLD_PRICE);
     expect(line).toContain(OLD_PRICE_MSG);
     expect(line).toContain('[PRICE_NOT_SYNCED]');
+  });
+});
+
+describe('pushToastLevel', () => {
+  // Round 3, ops P5: the owner's first "Send to website" press on the rebuilt
+  // catalogue publishes a tracked + DENY listing whose stock write was refused
+  // (STORE_UNMAPPED: sold out at every location until a shop is mapped). The
+  // press comes back ok=True with a code, and `if (res.ok) toast.success(msg)`
+  // painted that green. Revert pushToastLevel's `r.code ? 'warning'` -> the
+  // second expectation fails.
+  it('green only for a clean push; a coded ok is a warning, not a success', () => {
+    expect(pushToastLevel({ ...OLD_PRICE, code: null, error: null } as any)).toBe('success');
+    expect(pushToastLevel(OLD_PRICE as any)).toBe('warning');
+    expect(
+      pushToastLevel({ ...OLD_PRICE, code: 'STORE_UNMAPPED', error: 'no shop mapped' } as any),
+    ).toBe('warning');
+    expect(pushToastLevel(DENIED as any)).toBe('error');
   });
 });
 

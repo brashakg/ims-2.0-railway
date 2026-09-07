@@ -470,6 +470,19 @@ async def push_product(
         # is re-queued and the result carries PRICE_NOT_SYNCED so the sync
         # page / audit say so and the next press or scheduled run retries.
         price_not_synced = bool(vp_summary) and not vp_summary["ok"]
+        # ...AND SO IS THE STOCK (same rule, same shape). The stock pass is a
+        # fail-soft side channel that never withholds the publish -- but on a
+        # fresh catalogue with no shop mapped yet it returns STORE_UNMAPPED
+        # having written nothing, while the press still switched tracking on
+        # with the DENY policy and published. That is a listing LIVE on
+        # bettervision.in reading sold out at every location, and every screen
+        # said it worked: nothing renders PushResult.stock, and formatPushResult
+        # reads only the top-level ok / code / error. ok stays True (the product
+        # IS live, exactly like PRICE_NOT_SYNCED) but the code and the plain
+        # line come out where the toast, the audit row and the sync page read
+        # them. No re-queue: the stock diff still sees this product as changed
+        # (nothing reached its baseline), so the next pass retries it.
+        stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
         # the wrong price. Either way the row goes BACK in the queue so the next
@@ -486,7 +499,11 @@ async def push_product(
             shopify_id=new_gid,
             payload=payload,
             error=(
-                (_PRICE_NOT_SYNCED_MSG if price_not_synced else None)
+                (
+                    _PRICE_NOT_SYNCED_MSG
+                    if price_not_synced
+                    else ((stock_summary or {}).get("error") if stock_not_written else None)
+                )
                 if published_ok
                 else (
                     (pub_summary or {}).get("message")
@@ -495,7 +512,11 @@ async def push_product(
                 )
             ),
             code=(
-                (PRICE_NOT_SYNCED if price_not_synced else None)
+                (
+                    PRICE_NOT_SYNCED
+                    if price_not_synced
+                    else ((stock_summary or {}).get("code") if stock_not_written else None)
+                )
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),
