@@ -139,7 +139,10 @@ describe('per-shop stock on the sync page', () => {
 
     const result = await screen.findByTestId('stock-pass-result');
     await waitFor(() => expect(pushApi.pushStock).toHaveBeenCalledWith(true));
-    expect(result).toHaveTextContent('Per shop: BV-BOK-02: 2 · BV-PUN-01: 1');
+    // A SIMULATED pass prints the PLAN; a LIVE one prints what Shopify
+    // ACCEPTED (round-4 P2 -- the backend replaces the plan with the
+    // accepted rows), so the label must say which it is.
+    expect(result).toHaveTextContent('Per shop, planned: BV-BOK-02: 2 · BV-PUN-01: 1');
     expect(result).toHaveTextContent(/On-hand unknown this pass .*: BV-PUN-01/);
     // The raw UUID appears nowhere on the result -- the owner reads shop codes.
     expect(within(result).queryByText(new RegExp(PUNE_UUID))).toBeNull();
@@ -187,8 +190,8 @@ describe('per-shop stock on the sync page', () => {
       mode: 'LIVE',
       reason: null,
       locations: [
-        { id: BOK, name: 'Better Vision Sector 4', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02' },
-        { id: PUNE_GID, name: 'Gangadham Pune', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: null },
+        { id: BOK, name: 'Better Vision Sector 4', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02', unmapped_online_fulfilling: false },
+        { id: PUNE_GID, name: 'Gangadham Pune', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: null, unmapped_online_fulfilling: true },
       ],
     } as any);
     render(<OnlineShopifySyncPage />);
@@ -203,7 +206,27 @@ describe('per-shop stock on the sync page', () => {
     vi.mocked(pushApi.getLocations).mockResolvedValue({
       mode: 'LIVE',
       reason: null,
-      locations: [{ id: BOK, name: 'Better Vision Sector 4', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02' }],
+      locations: [{ id: BOK, name: 'Better Vision Sector 4', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02', unmapped_online_fulfilling: false }],
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    await screen.findByRole('button', { name: /preview stock/i });
+    expect(screen.queryByTestId('unmapped-fulfilling-locations')).toBeNull();
+  });
+
+  // Round-4 P4: the rule is the BACKEND's (shopify_push.is_stray_fulfilling,
+  // stamped on every row by GET /push/locations), never re-derived here. The
+  // page's old TypeScript copy read `isActive !== false` where the backend
+  // reads truthy `isActive`, so a row with NO isActive field -- unmapped and
+  // fulfilling -- was reported here and called fine by the verdict. Restore the
+  // local derivation and this row is warned about again -> this fails.
+  it('never re-derives the rule: an unmapped row the backend cleared is not warned about', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status() as any);
+    vi.mocked(pushApi.getLocations).mockResolvedValue({
+      mode: 'LIVE',
+      reason: null,
+      locations: [
+        { id: PUNE_GID, name: 'Gangadham Pune', fulfillsOnlineOrders: true, mapped_store_id: null, unmapped_online_fulfilling: false },
+      ],
     } as any);
     render(<OnlineShopifySyncPage />);
     await screen.findByRole('button', { name: /preview stock/i });

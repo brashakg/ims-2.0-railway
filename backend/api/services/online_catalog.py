@@ -65,6 +65,93 @@ _VARIANT_KEY_FIELDS = ("sku", "store_barcode", "barcode", "gtin")
 _PRODUCT_KEY_FIELDS = ("sku", "barcode")
 
 
+def merge_variant_rows(*groups: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """THE union of catalog_variants rows found by DIFFERENT parent links,
+    de-duplicated on sku (then variant_id), ordered by sku.
+
+    A product's size rows are linked to it TWICE -- ``parent_product_id`` and
+    ``parent_sku`` -- and ``product_master._variant_row`` keys the first on
+    ``parent.pim_product_id or parent.product_id``, so a size created before
+    the parent's catalog twin existed carries the SPINE id and one created
+    after carries the CATALOG id. The three readers of these rows each wrote
+    ``by_pid ... or by_sku ...``, which is an EITHER/OR: one row under the id
+    link hid every row that only had the sku link. On the stock path that meant
+    a size whose inventory item was written at no location at all, under a run
+    that reported ok=True and synced=1 -- IMS silently stopped being the master
+    of that number. Union, not fallback, in ONE place."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for group in groups:
+        for row in group or []:
+            if not isinstance(row, dict):
+                continue
+            key = normalize_sku(row.get("sku")) or str(row.get("variant_id") or id(row))
+            out.setdefault(key, row)
+    return [out[k] for k in sorted(out)]
+
+
+def variant_rows_for_product(db, product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every catalog_variants row of ``product`` -- the UNION of its
+    ``parent_product_id`` and ``parent_sku`` links (see
+    :func:`merge_variant_rows`). Fail-soft -> []. Read-only; ``_id`` stripped."""
+    coll = _coll(db, "catalog_variants")
+    if coll is None or not isinstance(product, dict):
+        return []
+    pid = str(product.get("id") or product.get("product_id") or "")
+    sku = normalize_sku(product.get("sku"))
+    by_pid: List[Dict[str, Any]] = []
+    by_sku: List[Dict[str, Any]] = []
+    try:
+        if pid:
+            by_pid = list(coll.find({"parent_product_id": pid}))
+        if sku:
+            by_sku = list(coll.find({"parent_sku": sku}))
+    except Exception as exc:  # noqa: BLE001 -- a read never raises into a push
+        logger.warning("[ONLINE_CATALOG] variant read failed for %s: %s", pid or sku, exc)
+    rows = merge_variant_rows(by_pid, by_sku)
+    for r in rows:
+        r.pop("_id", None)
+    return rows
+
+
+def listed_skus_on_hand_at(db, store_id: str) -> List[str]:
+    """The SKUs this shop holds ON-HAND that the WEBSITE LISTS (they carry a
+    Shopify inventory item).
+
+    STRICT -- it RAISES on a read it cannot answer. Two doors hang off it (the
+    Organization page's "you cannot move the Shopify location while these units
+    are on the shelf" rule, and the location RELEASE that makes correcting a
+    mis-mapping possible), and for both of them "I could not read" answering as
+    "nothing is listed" is the failure: the first waves a remap through, the
+    second silently releases nothing."""
+    if db is None or not store_id:
+        return []
+    from .item_events import on_hand_match
+
+    units = _coll(db, "stock_units")
+    products = _coll(db, "products")
+    catalog = _coll(db, "catalog_products")
+    if units is None or products is None or catalog is None:
+        return []
+    pids = [p for p in units.distinct("product_id", {"store_id": store_id, **on_hand_match()}) if p]
+    if not pids:
+        return []
+    skus = sorted(
+        {
+            normalize_sku(d.get("sku"))
+            for d in products.find(
+                {"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "sku": 1}
+            )
+            if normalize_sku(d.get("sku"))
+        }
+    )
+    # inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} here would
+    # read as "nothing is listed". One strict touch of the catalog first, so a
+    # collection that cannot be read raises instead of answering "no".
+    catalog.find_one({}, {"_id": 1})
+    listed = set(inventory_items_for_skus(db, skus))
+    return [s for s in skus if s in listed]
+
+
 def _clean_keys(skus: Optional[List[str]]) -> List[str]:
     return sorted({normalize_sku(s) for s in (skus or []) if normalize_sku(s)})
 

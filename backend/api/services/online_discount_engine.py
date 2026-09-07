@@ -441,22 +441,16 @@ def _load_rules(db) -> List[Dict[str, Any]]:
 
 
 def _load_variants(db, product: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """catalog_variants for this product (by parent_product_id, then parent_sku).
-    Fail-soft -> []."""
+    """catalog_variants for this product -- the UNION of the parent_product_id
+    and parent_sku links (online_catalog.variant_rows_for_product, the ONE
+    reader; this used to fall back from one to the other and drop the rows that
+    only carry the sku link). Fail-soft -> []."""
     if db is None:
         return []
-    pid = product.get("id") or product.get("product_id")
     try:
-        coll = db["catalog_variants"]
-        rows: List[Dict[str, Any]] = []
-        if pid:
-            rows = list(coll.find({"parent_product_id": pid}))
-        if not rows and product.get("sku"):
-            rows = list(coll.find({"parent_sku": product.get("sku")}))
-        for r in rows:
-            if isinstance(r, dict):
-                r.pop("_id", None)
-        return rows
+        from .online_catalog import variant_rows_for_product
+
+        return variant_rows_for_product(db, product)
     except Exception:  # noqa: BLE001
         return []
 

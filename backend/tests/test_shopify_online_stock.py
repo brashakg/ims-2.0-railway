@@ -556,15 +556,24 @@ def test_T7_item_not_stocked_activates_per_item_at_the_chunks_locations_then_ret
     assert set(out["written"]) == set(_rows3())
 
 
-def test_T7b_second_failure_is_stock_activation_failed_and_no_third_set(monkeypatch):
+def test_T7b_a_failed_activation_is_retried_split_per_location_and_coded(monkeypatch):
+    """T7b, REWRITTEN for round-4 P1. It used to pin `set == 0`, `written == []`
+    and exactly TWO inventorySetQuantities calls over a THREE-location chunk --
+    i.e. it pinned the hole: `_write_chunk` skipped the per-location split on
+    the activation branch, which is the branch a dead location most often takes
+    (bulk activation is one call per ITEM across all its locations, so ONE dead
+    location poisons the activation for every location). Here EVERY location is
+    genuinely dead, so nothing lands either way -- but the split must still have
+    run, one recovery per location."""
     spy = _Spy(_responses(**{"inventorySetQuantities": _set_error("ITEM_NOT_STOCKED_AT_LOCATION")}))
     _live(monkeypatch, spy)
     out = _run(shopify_push.set_inventory_quantities(None, _rows3()))
     assert out["set"] == 0 and out["written"] == []
     assert out["code"] == shopify_push.STOCK_ACTIVATION_FAILED
-    assert len(out["errors"]) == 1 and out["errors"][0].startswith("STOCK_ACTIVATION_FAILED")
-    assert len(spy.calls_for("inventorySetQuantities")) == 2
-    assert len(spy.calls_for("inventoryBulkToggleActivation")) == 1
+    assert len(out["errors"]) == 1, "a split never inflates the caller's failure count"
+    # whole chunk (set, activate, set) + one full recovery per location
+    assert len(spy.calls_for("inventorySetQuantities")) == 2 + 2 * 3
+    assert len(spy.calls_for("inventoryBulkToggleActivation")) == 1 + 3
     # ...and it surfaces on the press as the run's code.
     db = _listed(_db(a=2, b=1, c=0))
     spy2 = _Spy(_responses(**{"inventorySetQuantities": _set_error("ITEM_NOT_STOCKED_AT_LOCATION")}))
@@ -572,6 +581,77 @@ def test_T7b_second_failure_is_stock_activation_failed_and_no_third_set(monkeypa
     res = _run(shopify_push.sync_stock_levels(db))
     assert res.ok is False and res.code == shopify_push.STOCK_ACTIVATION_FAILED
     assert _baseline(db) is None, "nothing accepted -> nothing in the baseline"
+
+
+class _DeadLocationActivation(_Spy):
+    """The shape round-4 P1 names. ``bad``'s Shopify location was DELETED in
+    admin under a live mapping, so (a) any inventorySetQuantities call touching
+    it answers ITEM_NOT_STOCKED_AT_LOCATION, and (b) the inventoryBulkToggle-
+    Activation for an item whose update list includes it answers a userError --
+    Shopify activates one ITEM across all of its locations in a single call, so
+    one dead location poisons the activation for EVERY location."""
+
+    def __init__(self, responses, bad):
+        super().__init__(responses)
+        self.bad = bad
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query and any(
+            r["locationId"] == self.bad for r in variables["input"]["quantities"]
+        ):
+            self.calls.append({"query": query, "variables": variables})
+            return _set_error(shopify_push.ITEM_NOT_STOCKED_AT_LOCATION)
+        if "inventoryBulkToggleActivation" in query and any(
+            u["locationId"] == self.bad for u in variables["inventoryItemUpdates"]
+        ):
+            self.calls.append({"query": query, "variables": variables})
+            return {
+                "data": {
+                    "inventoryBulkToggleActivation": {
+                        "inventoryItem": None,
+                        "userErrors": [{"field": ["locationId"], "message": "Location does not exist"}],
+                    }
+                }
+            }
+        return await super().__call__(db, query, variables)
+
+
+def test_R4_P1_a_dead_locations_activation_never_freezes_every_other_shop(monkeypatch):
+    """ROUND-4 P1, REAL OVERSELL. Three mapped shops; BV-C's Shopify location
+    was deleted in admin. The first set is refused with
+    ITEM_NOT_STOCKED_AT_LOCATION, recovery 1's bulk activation is refused
+    because it covers that same dead location, and the retry is refused again.
+    `_write_chunk` then said `split and NOT activation`, so the per-location
+    split -- the very thing its own docstring says exists to stop one dead
+    location freezing every other shop -- was skipped on exactly this branch:
+    set=0, written=[], BV-A and BV-B NEVER written. After a POS sale at BV-A the
+    website kept selling the unit that had walked out, on every later sale and
+    every 01:00 / 09:00 pass (the baseline stays None, so it re-fails forever).
+
+    Revert to `if split and not activation and ...` -> A and B are unwritten,
+    pushed 0, the baseline is None -> every assert below fails."""
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+    spy = _DeadLocationActivation(_responses(), LOC_C)
+    _live(monkeypatch, spy)
+    # the sale: BV-A's last unit walks out
+    db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-A-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+    out = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    assert spy.rows() >= {(INV_GID, LOC_A, 0), (INV_GID, LOC_B, 1)}, "the live shops were written"
+    assert out["pushed"] == 1 and out["failed"] == 1
+    assert out["code"] == shopify_push.STOCK_ACTIVATION_FAILED
+    base = _baseline(db)["quantities"]["SP-1"]
+    assert base == {"BV-A": 0, "BV-B": 1}, "only the dead location is omitted"
+    # ...and through the SCHEDULE, the same run is not-ok but the shops are live.
+    spy2 = _DeadLocationActivation(_responses(), LOC_C)
+    _live(monkeypatch, spy2)
+    db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-B-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STOCK_ACTIVATION_FAILED
+    assert (INV_GID, LOC_B, 0) in spy2.rows(), "B's post-sale 0 still reached Shopify"
 
 
 def test_T7c_an_unrelated_user_error_never_activates(monkeypatch):
@@ -1625,7 +1705,10 @@ def test_R3_a_first_publish_whose_stock_was_refused_is_not_a_clean_success(monke
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
     assert res.ok is True and res.mode == "LIVE", "the publish itself is never withheld for stock"
     assert res.code == shopify_push.STORE_UNMAPPED
-    assert "with no Shopify location: BV-A" in res.error
+    # Round-4 P2: the line the operator gets is the one that MATTERS -- nothing
+    # was written anywhere -- not "BV-A holds stock, map it" (true, but it
+    # leaves him thinking the other shops went out).
+    assert "no shop has a Shopify location -- nothing written" in res.error
     assert res.stock["ok"] is False and res.stock["set"] == 0
 
 
@@ -1672,3 +1755,316 @@ def test_R3_parity_never_counts_a_shop_shopify_cannot_see(monkeypatch):
     # a mapped shop's units DO count
     db2 = _listed(_db(a=2, b=1, c=0, sold=0, d=3))
     assert parity._pooled_availability(db2, ["SP-1"]) == {"SP-1": 3}
+
+
+# ---------------------------------------------------------------------------
+# Panel round 4 (2026-09-07)
+# ---------------------------------------------------------------------------
+
+
+def test_R4_P2_a_parent_with_mixed_variant_keys_writes_every_size(monkeypatch):
+    """ROUND-4 P2, SILENT phantom stock. The sweep indexed catalog_variants
+    TWICE (by parent_product_id, by parent_sku) and then picked
+    `by_pid.get(pid) OR by_sku.get(sku)` -- an EITHER/OR over two indexes that
+    are not alternatives. product_master._variant_row keys a size row on
+    `parent.pim_product_id or parent.product_id`, so a size created BEFORE the
+    parent's catalog twin existed carries the SPINE id and one created after
+    carries the CATALOG id: a mixed set for one parent. The ONE row that landed
+    in by_pid then hid EVERY row that only landed in by_sku -- that size's
+    inventory item was written at NO location, while the run reported ok=True,
+    synced=1, no task, no unknown_stores, no target_missing. IMS silently
+    stopped being the master of that number, so a sale of it oversells forever.
+
+    Revert `merge_variant_rows(...)` to `by_pid.get(pid) or by_sku.get(sku)`
+    -> InventoryItem/88 is never sent -> this fails."""
+    med_item = "gid://shopify/InventoryItem/88"
+    db = StrictDB()
+    db.seed("stores", [_store("BV-A", LOC_A)])
+    db.seed(
+        "products",
+        [
+            {"product_id": "sp-parent", "sku": "RB-META"},
+            {"product_id": "sp-large", "sku": "RB-META-L"},
+            {"product_id": "sp-medium", "sku": "RB-META-M"},
+        ],
+    )
+    db.seed(
+        "stock_units",
+        [
+            {"stock_id": "p0", "product_id": "sp-parent", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "l0", "product_id": "sp-large", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "l1", "product_id": "sp-large", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "m0", "product_id": "sp-medium", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "m1", "product_id": "sp-medium", "store_id": "BV-A", "status": "AVAILABLE"},
+            {"stock_id": "m2", "product_id": "sp-medium", "store_id": "BV-A", "status": "AVAILABLE"},
+        ],
+    )
+    db.seed("catalog_products", [_catalog_row("cat-parent", "RB-META", gid=True)])
+    db.seed(
+        "catalog_variants",
+        [
+            # created AFTER the catalog twin -> the CATALOG id
+            {
+                "variant_id": "v-l",
+                "sku": "RB-META-L",
+                "parent_product_id": "cat-parent",
+                "parent_sku": "RB-META",
+                "shopify_inventory_item_id": "gid://shopify/InventoryItem/77",
+            },
+            # created BEFORE it -> the SPINE id, same parent
+            {
+                "variant_id": "v-m",
+                "sku": "RB-META-M",
+                "parent_product_id": "sp-parent",
+                "parent_sku": "RB-META",
+                "shopify_inventory_item_id": med_item,
+            },
+        ],
+    )
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.payload["candidates"] == 1 and res.payload["changed"] == 1
+    rows = spy.rows()
+    assert (med_item, LOC_A, 3) in rows, "the sku-linked size was written, not silently dropped"
+    assert ("gid://shopify/InventoryItem/77", LOC_A, 2) in rows
+    assert (INV_GID, LOC_A, 1) in rows, "the parent's own item still goes out"
+    assert _baseline(db, "cat-parent")["quantities"] == {
+        "RB-META-L": {"BV-A": 2},
+        "RB-META-M": {"BV-A": 3},
+        "RB-META": {"BV-A": 1},
+    }
+
+
+def test_R4_P2_the_union_is_ONE_rule_the_price_push_and_the_engine_share():
+    """The identical exclusive-fallback shape was COPIED into
+    shopify_live_sync.variants_for_product (the PRICE push -- the same size
+    then ships at the parent's price) and online_discount_engine._load_variants.
+    All three now read online_catalog.variant_rows_for_product /
+    merge_variant_rows. Revert either copy to `if not rows: rows = ...` and the
+    sku-linked row disappears from that caller -> this fails."""
+    from api.services import online_catalog, online_discount_engine, shopify_live_sync
+
+    db = StrictDB()
+    parent = {"id": "cat-parent", "sku": "RB-META"}
+    db.seed("catalog_products", [parent])
+    db.seed(
+        "catalog_variants",
+        [
+            {"variant_id": "v-l", "sku": "RB-META-L", "parent_product_id": "cat-parent"},
+            {"variant_id": "v-m", "sku": "RB-META-M", "parent_sku": "RB-META"},
+        ],
+    )
+    want = ["RB-META-L", "RB-META-M"]
+    assert [v["sku"] for v in online_catalog.variant_rows_for_product(db, parent)] == want
+    assert [v["sku"] for v in shopify_live_sync.variants_for_product(db, parent)] == want
+    assert [v["sku"] for v in online_discount_engine._load_variants(db, parent)] == want
+
+
+def test_R4_P1_a_dry_run_with_no_shop_mapped_is_never_ok(monkeypatch):
+    """ROUND-4 P1 (HOLLOW GUARD -- nothing pinned it; deleting `bool(mapped)
+    and` from `_rows_ok` left the whole stock suite green). That clause is the
+    ONLY carrier of ok=False for the SIMULATED / dry-run verdict when no shop is
+    mapped: the LIVE branch is carried by a DIFFERENT guard (`if not mapped:
+    return summary`, before `_rows_ok` is ever called), so this clause governs
+    the PREVIEW alone -- precisely the preview-vs-press divergence its own
+    docstring exists to prevent, and precisely the state prod is in after the
+    2026-09-07 catalogue deletion. Without it the preview reads ok=True with the
+    failure code still set, and the first publish's toast is green over a
+    listing that went tracked=true + DENY with no quantity anywhere.
+
+    Delete `bool(mapped) and` -> ok True -> this fails."""
+    db = _listed(_db(a=0, b=0, c=0, sold=0))
+    db.get_collection("stores").update_many({}, {"$unset": {"shopify_location_id": ""}})
+    db.get_collection("stock_units").delete_many({})
+    _live(monkeypatch, _Spy(_responses()))
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="sale", dry_run=True))
+    assert out["stores_mapped"] == 0 and out["code"] == shopify_push.STORE_UNMAPPED
+    assert out["ok"] is False, "a green preview must mean a press would write something"
+
+
+def test_R4_P2_no_shop_mapped_says_nothing_was_written_not_only_map_them(monkeypatch):
+    """ROUND-4 P2: the copy was TRUE but not the TRUE THING. push_skus_stock
+    assigned its code/error with `or`, so the HOLDERS line ("shops holding
+    listed stock with no Shopify location: ... map them") always won whenever
+    any unmapped shop held a listed unit -- which, on a fresh catalogue with
+    zero shops mapped, is true the moment stock exists. `_no_mapping_error()`,
+    the line that matters, could never fire, so the operator was never told that
+    NOTHING was written at all while the press had already switched the variant
+    to tracked=true + DENY. sync_stock_levels' own ladder already put "nothing
+    writable" first: there is ONE ladder now, `_verdict_for`.
+
+    Revert to the `or` assignments -> the holders line -> this fails."""
+    db = _listed(_db(a=2, b=0, c=0, sold=0))
+    db.get_collection("stores").update_many({}, {"$unset": {"shopify_location_id": ""}})
+    _live(monkeypatch, _Spy(_responses()))
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert out["code"] == shopify_push.STORE_UNMAPPED and out["set"] == 0
+    assert "no shop has a Shopify location -- nothing written" in out["error"]
+    # the sweep's verdict says the same thing, from the same ladder
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.code == shopify_push.STORE_UNMAPPED
+    assert res.error == out["error"]
+
+
+def test_R4_P2_an_unmapped_shop_whose_read_died_is_reported_not_scored_zero():
+    """ROUND-4 P2 (silent fallback). BV-D has no Shopify location, holds 3 units
+    of a listed SKU, and its on-hand aggregate dies this pass. The rule omits a
+    shop it could not read, `unmapped_holders` then scored it 0 units ("not a
+    holder"), and `_unknown_stores` only ever looked at the MAPPED shops -- so
+    no guard mentioned D at all and the run was green over 3 units invisible
+    online. Invariant 6 is ONE rule: a shop the pass could not read is named,
+    mapped or not, and an unreadable shelf is never scored 0.
+
+    Revert `_unknown_stores` to iterate `mapped`, or restore the
+    `held = quantities` fallback in `unmapped_holders` -> ok True -> fails."""
+    db = _listed(_db(a=2, b=1, c=0, d=3))
+    _break_shop(db, "BV-D")
+    quantities = wb.online_quantities_for_skus(db, ["SP-1"])
+    assert "BV-D" not in quantities["SP-1"], "the rule omits the shop it could not read"
+    out = _run(
+        shopify_push.push_skus_stock(
+            db, ["SP-1"], quantities=quantities, source="sale", dry_run=True
+        )
+    )
+    assert "BV-D" in out["unknown_stores"]
+    assert out["ok"] is False
+    # ...and it is reported as an unmapped shop of UNKNOWN size, never as 0.
+    holder = next(h for h in out["unmapped_stores"] if h["store_id"] == "BV-D")
+    assert holder["units"] is None
+
+
+def test_R4_P3_a_dead_buffer_read_never_scores_an_unmapped_shop_zero(monkeypatch):
+    """ROUND-4 P3 (latent). `unmapped_holders` re-reads the shelf at buffer 0 so
+    a shop sitting on exactly the safety buffer is still a holder -- but the
+    re-read was wrapped in try/except with `held = quantities` as the fallback,
+    i.e. straight back to the POST-allocation numbers the re-read exists to
+    avoid. On the day the owner sets the buffer to 1 (Q6(b)), a shop holding
+    exactly 1 unit publishes 0, is not named, is not tasked and the run is fully
+    green over a shop whose entire shelf is invisible online -- the very rule
+    test_R3_P4 forbids, restored by an exception.
+
+    Restore `held = quantities` -> BV-D scores 0, is not a holder -> fails."""
+    db = _listed(_db(a=2, b=1, c=0, d=1))
+    real = wb.online_quantities_for_skus
+
+    def _buffer0_dies(_db, skus, *, safety_buffer=None):
+        if safety_buffer == 0:
+            raise RuntimeError("the buffer-0 re-read died")
+        return real(_db, skus, safety_buffer=safety_buffer)
+
+    monkeypatch.setattr(wb, "online_quantities_for_skus", _buffer0_dies)
+    quantities = real(db, ["SP-1"], safety_buffer=1)
+    assert quantities["SP-1"]["BV-D"] == 0, "post-allocation, the holder looks empty"
+    out = _run(
+        shopify_push.push_skus_stock(
+            db, ["SP-1"], quantities=quantities, source="sale", dry_run=True
+        )
+    )
+    holder = next((h for h in out["unmapped_stores"] if h["store_id"] == "BV-D"), None)
+    assert holder is not None and holder["units"] is None
+    assert out["ok"] is False and out["code"] == shopify_push.STORE_UNMAPPED
+
+
+def test_R4_P3_a_stray_location_makes_the_sales_own_run_row_not_ok(monkeypatch):
+    """ROUND-4 P3: a green run over a live oversell. `push_skus_stock` never
+    runs invariant 2's stray-location guard (it lives in `sync_stock_levels`,
+    which reads Shopify's locations once per run), so a POS sale wrote its SKU,
+    reported code None and filed a sync_runs row saying `ok: True,
+    items_synced: 1` -- while Shopify kept routing online orders to a fourth
+    location no IMS shop carries and selling whatever number it holds. A
+    per-sale locations read is not worth it (a stray location only appears when
+    a human edits Shopify admin), so the sale CARRIES the last sweep's verdict.
+
+    Revert the `_last_stray_locations` block in `_record_run` -> ok True ->
+    this fails."""
+    db = _listed(_db(a=2, b=1, c=0, sold=0))
+    stray = {"id": "gid://shopify/Location/1004", "name": "Gangadham Pune"}
+    nodes = [
+        {"id": LOC_A, "name": "A", "isActive": True, "fulfillsOnlineOrders": True},
+        {"id": LOC_B, "name": "B", "isActive": True, "fulfillsOnlineOrders": True},
+        {"id": LOC_C, "name": "C", "isActive": True, "fulfillsOnlineOrders": True},
+        {**stray, "isActive": True, "fulfillsOnlineOrders": True},
+    ]
+    locations = {"imsLocationList": {"data": {"locations": {"nodes": nodes}}}}
+    _live(monkeypatch, _Spy(_responses(**locations)))
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.code == shopify_push.SHOPIFY_LOCATION_UNMAPPED
+    assert shopify_push.last_stray_locations(db) == [stray]
+    # now the SALE -- one write, no locations read of its own
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-A-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+    out = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    assert out["pushed"] == 1 and spy.calls_for("imsLocationList") == []
+    row = db.get_collection("sync_runs").find_one({"kind": "stock_writeback"})
+    assert row["ok"] is False, "the row a sale produced must not say the website was corrected"
+    assert "SHOPIFY_LOCATION_UNMAPPED" in row["error"] and "Gangadham Pune" in row["error"]
+
+
+def test_R4_P2_the_live_payload_prints_what_shopify_accepted_not_the_plan(monkeypatch):
+    """ROUND-4 P2 (money-adjacent copy). `payload['plan']` was built from the
+    PRE-write mapped slice and the LIVE branch never replaced it, while
+    push_skus_stock has replaced its own summary["quantities"] with the ACCEPTED
+    rows since round 2 -- and the sync page renders `plan`, not that summary,
+    under "Per shop:". With BV-C's Shopify location deleted, the page read
+    "0 written, 1 failed" and then printed BV-C's 3 as a number that never
+    reached Shopify.
+
+    Revert the `"plan": accepted[:50]` line -> BV-C is printed -> this fails."""
+    db = _listed(_db(a=2, b=1, c=3, sold=0))
+    spy = _DeadLocation(_responses(), LOC_C)
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STOCK_WRITE_FAILED
+    printed = res.payload["plan"][0]["quantities"]["SP-1"]
+    assert printed == {"BV-A": 2, "BV-B": 1}, "the refused location is not printed as written"
+
+
+def test_R4_P3_the_first_night_over_an_empty_catalogue_files_no_location_task(monkeypatch):
+    """ROUND-4 P3 (ops noise). The 01:00 tick after the 2026-09-07 catalogue
+    deletion: zero listings, zero shops mapped, Shopify still holding its two
+    online-fulfilling locations. Both stray-location statements are true, but
+    with `candidates == 0` no listing can oversell from them, so the owner's
+    first night handed him a red sync page AND two unassigned P1 SYSTEM tasks
+    about a system with nothing on it. The VERDICT still reports it; only the
+    TASK waits until there is something to sell.
+
+    Remove the `if pairs:` gate -> two tasks -> this fails."""
+    db = _db(a=0, b=0, c=0, sold=0)  # no catalog_products at all
+    nodes = [
+        {"id": "gid://shopify/Location/2001", "name": "Sector 4", "isActive": True,
+         "fulfillsOnlineOrders": True},
+        {"id": "gid://shopify/Location/2002", "name": "Pune", "isActive": True,
+         "fulfillsOnlineOrders": True},
+    ]
+    locations = {"imsLocationList": {"data": {"locations": {"nodes": nodes}}}}
+    _live(monkeypatch, _Spy(_responses(**locations)))
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.payload["candidates"] == 0
+    assert res.code == shopify_push.SHOPIFY_LOCATION_UNMAPPED, "the verdict still says it"
+    assert list(db.get_collection("tasks").find({})) == []
+    # ...and the moment there IS a listing, the tasks are filed.
+    _listed(db)
+    _live(monkeypatch, _Spy(_responses(**locations)))
+    _run(shopify_push.sync_stock_levels(db))
+    assert len(list(db.get_collection("tasks").find({}))) == 2
+
+
+def test_R4_P4_the_stray_location_rule_is_the_backends_not_the_pages():
+    """ROUND-4 P4 (one rule, two implementations -- display echo). The sync page
+    re-derived "fulfils online orders and maps to no IMS shop" in TypeScript,
+    and the two spellings already differed: the backend requires `isActive`
+    truthy, the page used `isActive !== false`, so a location with no isActive
+    field was reported on the page and fine in the verdict. GET /push/locations
+    now stamps the WRITER's own predicate on every row and the page renders
+    that. Loosen `is_stray_fulfilling` to the page's `!== false` -> the
+    no-isActive row flips -> this fails."""
+    have = {LOC_A}
+    ok = shopify_push.is_stray_fulfilling
+    assert ok({"id": LOC_B, "isActive": True, "fulfillsOnlineOrders": True}, have) is True
+    assert ok({"id": LOC_A, "isActive": True, "fulfillsOnlineOrders": True}, have) is False
+    assert ok({"id": LOC_B, "fulfillsOnlineOrders": True}, have) is False, "no isActive is not active"
+    assert ok({"id": LOC_B, "isActive": True}, have) is False

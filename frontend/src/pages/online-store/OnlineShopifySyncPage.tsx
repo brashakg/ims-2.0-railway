@@ -519,21 +519,14 @@ export default function OnlineShopifySyncPage() {
   // A Shopify location that fulfils online orders but maps to NO shop keeps
   // selling whatever number it holds -- IMS never writes it (the phantom
   // location the migration runbook warns about; IMS writes per shop, never a
-  // pooled total). Visible here, not only in the runbook. Empty when DARK
-  // (the locations read is [] then).
-  // "Mapped" is the WRITER's definition, which mode.unmapped_stores now carries
-  // (a location two shops claim maps NEITHER of them), so this line and the
-  // backend's own SHOPIFY_LOCATION_UNMAPPED verdict cannot disagree.
-  const unmappedShopIds = new Set((mode?.unmapped_stores ?? []).map((s) => s.store_id));
-  const mappedLocationIds = new Set(
-    (mode?.stores ?? [])
-      .filter((s) => !unmappedShopIds.has(s.store_id))
-      .map((s) => s.shopify_location_id)
-      .filter((id): id is string => !!id),
-  );
-  const unmappedFulfilling = locations.filter(
-    (l) => l.isActive !== false && l.fulfillsOnlineOrders && !mappedLocationIds.has(l.id),
-  );
+  // pooled total). The rule is the BACKEND's (shopify_push.is_stray_fulfilling,
+  // the same predicate behind the SHOPIFY_LOCATION_UNMAPPED verdict and the
+  // deduped task), stamped on every row of the locations read; this page only
+  // renders it. It used to be spelled a second time here in TypeScript, and the
+  // two spellings already differed: `isActive !== false` reported a location
+  // with no isActive field that the backend called fine. Empty when DARK (the
+  // locations read is [] then).
+  const unmappedFulfilling = locations.filter((l) => l.unmapped_online_fulfilling);
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -753,8 +746,16 @@ export default function OnlineShopifySyncPage() {
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                 <span>
                   Not mapped, stock invisible online until mapped:{' '}
+                  {/* units === null means the shelf could not be read this pass
+                      (round-4 P2/P3) -- say so; "0 unit(s)" is the silent
+                      phantom-stock line the backend refuses to print. */}
                   {(stockPayload.unmapped_stores as Array<Record<string, any>>)
-                    .map((s) => `${s.store_code || s.store_name || s.store_id} (${s.units ?? 0} unit(s))`)
+                    .map(
+                      (s) =>
+                        `${s.store_code || s.store_name || s.store_id} (` +
+                        (s.units == null ? 'an unknown number of units' : `${s.units} unit(s)`) +
+                        ')',
+                    )
                     .join(', ')}
                 </span>
               </p>
@@ -767,7 +768,10 @@ export default function OnlineShopifySyncPage() {
             )}
             {Array.isArray(stockPayload?.plan) && stockPayload.plan.length > 0 && (
               <p className="mt-1 text-gray-600">
-                Per shop:{' '}
+                {/* LIVE: what Shopify ACCEPTED (the backend replaces the plan with
+                    the accepted rows after the write, so a refused location never
+                    prints as written). Preview: what a press WOULD send. */}
+                {stockResult?.mode === 'LIVE' ? 'Per shop, written to Shopify:' : 'Per shop, planned:'}{' '}
                 {Object.entries(
                   (stockPayload.plan as Array<{ quantities?: Record<string, Record<string, number>> }>).reduce<
                     Record<string, number>

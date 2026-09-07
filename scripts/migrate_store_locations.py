@@ -140,9 +140,23 @@ def plan_sets(db, sets: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
             continue
         data: Dict[str, Any] = {"shopify_location_id": raw}
         try:
-            stores_router._validate_store_payload(
+            release_old = stores_router._validate_store_payload(
                 data, db=db, store_id=doc.get("store_id"), existing=doc
             )
+            if release_old:
+                # The shop is moving off a location that still advertises its
+                # units. Only the async PUT door releases them (it zeroes the
+                # old location through THE writer first); this script writes
+                # straight to the repository, so it must refuse instead of
+                # stranding numbers on an orphaned location.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{code} still holds stock the website lists at its current "
+                        f"location {release_old}; change it on the Organization page "
+                        f"(that door zeroes the old location on Shopify first)"
+                    ),
+                )
         except HTTPException as exc:
             out.append({"code": code, "store_id": doc.get("store_id"), "gid": raw,
                         "name": None, "same": False, "error": f"{exc.status_code}: {exc.detail}"})

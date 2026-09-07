@@ -224,8 +224,10 @@ def _validate_store_payload(
     db=None,
     store_id: Optional[str] = None,
     existing: Optional[dict] = None,
-) -> None:
+) -> Optional[str]:
     """Block (HTTP 400) on malformed store fields. Validates only present keys.
+    Returns the OLD Shopify location gid the caller must RELEASE before saving
+    (see below), else None.
 
     ``shopify_location_id`` (when present) is NORMALISED in place -- bare
     digits become ``gid://shopify/Location/<n>`` -- and refused with 400 when
@@ -237,14 +239,22 @@ def _validate_store_payload(
     already carries it (``_location_holder``), checked whenever the doc enters
     the physical list with a gid: a gid in the payload, or ``is_active: True``.
     ``store_id`` is the doc's own id on an update (create passes none and the
-    known-id check falls back to ``store_code``). Clearing or CHANGING a gid
-    the doc already carries is 400 while the shop still holds stock the WEBSITE
-    LISTS (``_store_listed_on_hand_units``): the per-store stock writer only
-    touches locations the store list maps, so the old location would keep
-    showing those units on Shopify forever. Stock on no listing does not block
-    -- it leaves no phantom, and blocking on it locked a mis-mapped shop out of
-    correction for its first GRN unit of anything.
+    known-id check falls back to ``store_code``).
+
+    CHANGING or CLEARING a gid the doc already carries while the shop still
+    holds stock the WEBSITE LISTS (``_store_listed_on_hand_units``) is NOT
+    refused any more -- it is RELEASED. The per-store writer only touches
+    locations the store list maps, so the old location would otherwise keep
+    showing those units on Shopify forever; refusing the save was the wrong
+    remedy, because on a fresh setup the FIRST wrong pick from a dropdown of
+    four similarly-named locations then became permanent the moment the shop
+    received one GRN unit of a listed product ("transfer the units out first"
+    is not a thing an optical shop can do). This returns that old gid so the
+    async caller can zero it through THE writer
+    (``shopify_push.release_store_location``) and only then save. Stock on no
+    listing never triggers it -- it leaves no phantom.
     """
+    release_old: Optional[str] = None
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
     if data.get("phone") and not ov.validate_phone(data["phone"]):
@@ -283,18 +293,11 @@ def _validate_store_payload(
             data["shopify_location_name"] = None
         old = _as_shopify_gid((existing or {}).get("shopify_location_id"), "Location")
         if old and gid != old:
-            held = _store_listed_on_hand_units(
+            # STRICT read: raises 503 rather than answering "holds nothing".
+            if _store_listed_on_hand_units(
                 db, store_id or (existing or {}).get("store_id")
-            )
-            if held:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Cannot change or clear the Shopify location while the shop "
-                        f"still holds {held}: its old location on Shopify would keep "
-                        f"showing them. Transfer the units out first."
-                    ),
-                )
+            ):
+                release_old = old
     # The gid the doc carries AFTER this write, whichever side of the rule the
     # payload touches (a new gid, a store_type flip, a reactivation).
     gid = (
@@ -303,7 +306,7 @@ def _validate_store_payload(
         else str((existing or {}).get("shopify_location_id") or "")
     )
     if not gid:
-        return
+        return release_old
     sid = store_id or data.get("store_code")
     if declared or "store_type" in data:
         declared_type = str(
@@ -327,6 +330,7 @@ def _validate_store_payload(
                     f"{holder.get('store_code') or holder.get('store_id')}"
                 ),
             )
+    return release_old
 
 
 async def _shopify_location_name(db, gid: str) -> Optional[str]:
@@ -407,38 +411,27 @@ def _store_listed_on_hand_units(db, store_id: str) -> Optional[str]:
     on any read it cannot answer."""
     if db is None:
         return None
-    from ..services.online_catalog import inventory_items_for_skus
+    from ..services.online_catalog import listed_skus_on_hand_at
 
     try:
-        from ..services.item_events import on_hand_match
-
-        units = db.get_collection("stock_units")
-        products = db.get_collection("products")
-        catalog = db.get_collection("catalog_products")
-        if units is None or products is None or catalog is None:
-            return None
-        pids = [
-            p
-            for p in units.distinct("product_id", {"store_id": store_id, **on_hand_match()})
-            if p
-        ]
-        if not pids:
-            return None
-        sku_of = {
-            str(d.get("product_id")): str(d.get("sku") or "")
-            for d in products.find(
-                {"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "sku": 1}
-            )
-        }
-        # inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} here
-        # would read as "nothing is listed" and wave the remap through. One
-        # strict touch of the catalog first, so a collection that cannot be
-        # read refuses instead of answering "no".
-        catalog.find_one({}, {"_id": 1})
+        skus = listed_skus_on_hand_at(db, store_id)
     except Exception as exc:  # noqa: BLE001
         raise _stock_unreadable(exc) from exc
-    listed = set(inventory_items_for_skus(db, [s for s in sku_of.values() if s]))
-    listed_pids = [pid for pid, sku in sku_of.items() if sku in listed]
+    if not skus:
+        return None
+    products = db.get_collection("products")
+    if products is None:
+        return None
+    try:
+        listed_pids = [
+            str(d.get("product_id"))
+            for d in products.find(
+                {"sku": {"$in": skus}}, {"_id": 0, "product_id": 1, "sku": 1}
+            )
+            if d.get("product_id")
+        ]
+    except Exception as exc:  # noqa: BLE001
+        raise _stock_unreadable(exc) from exc
     if not listed_pids:
         return None
     n = _on_hand_count(db, {"store_id": store_id, "product_id": {"$in": listed_pids}})
@@ -967,9 +960,28 @@ async def update_store(
 
         update_data = store.model_dump(exclude_unset=True)
         db = _get_db()
-        _validate_store_payload(
+        release_old = _validate_store_payload(
             update_data, db=db, store_id=store_id, existing=existing
         )
+        if release_old:
+            # The shop is moving off a Shopify location while it still holds
+            # units that location advertises. Zero them THERE first, through
+            # THE writer -- once the gid is gone from the store list, nothing
+            # ever writes that location again. The save only happens if Shopify
+            # accepted the release, so a failure leaves the mapping as it was
+            # instead of stranding numbers on an orphaned location.
+            from ..services import shopify_push as _push
+
+            released = await _push.release_store_location(db, store_id, release_old)
+            if not released.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Could not zero this shop's units at its old Shopify location, "
+                        "so the location was not changed (they would keep showing on "
+                        f"the website): {released.get('error') or 'Shopify refused the write'}"
+                    ),
+                )
         if update_data.get("shopify_location_id"):
             update_data["shopify_location_name"] = (
                 await _shopify_location_name(db, update_data["shopify_location_id"])

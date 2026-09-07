@@ -1659,6 +1659,12 @@ export interface ShopifyLocation {
   province?: string | null;
   mapped_store_id?: string | null;
   mapped_store_code?: string | null;
+  /** THE verdict, computed by the writer's own predicate
+   *  (shopify_push.is_stray_fulfilling): this location sells online and maps to
+   *  no IMS shop, so Shopify keeps selling whatever number it holds there and
+   *  IMS never writes it. Re-deriving it here in TypeScript is what made the
+   *  page and the backend disagree on a location with no `isActive` field. */
+  unmapped_online_fulfilling?: boolean;
 }
 
 /** The locations read. DARK (a push gate off) or a failed read => `locations`

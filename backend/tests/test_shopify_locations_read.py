@@ -180,6 +180,24 @@ def test_route_joins_mapped_store_through_physical_stores(client, world, monkeyp
     assert rows["gid://shopify/Location/3"]["mapped_store_id"] is None
 
 
+def test_R4_P4_the_route_stamps_the_writers_own_stray_location_verdict(client, world, monkeypatch):
+    """ROUND-4 P4 (one rule, two implementations -- display echo). The sync page
+    re-derived "fulfils online orders and maps to no IMS shop" in TypeScript
+    from the raw locations plus the shop list, duplicating
+    inventory.unmapped_fulfilling_locations -- and the two already differed
+    (`isActive !== false` on the page, truthy `isActive` in the backend). The
+    route now stamps the WRITER's own predicate on every row and the page just
+    renders it. Drop `unmapped_online_fulfilling` from the route -> fails."""
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    rows = {row["id"]: row for row in r.json()["locations"]}
+    assert rows[BOKARO]["unmapped_online_fulfilling"] is False, "BV-BOK-02 holds it"
+    assert rows[PUNE]["unmapped_online_fulfilling"] is True, (
+        "an ONLINE store carrying the gid by hand is not a shop, so Pune is stray"
+    )
+    assert rows["gid://shopify/Location/3"]["unmapped_online_fulfilling"] is False
+
+
 def test_route_dark_is_empty_with_reason_and_zero_network(client, world, monkeypatch):
     boom = _CountingBoom()
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)

@@ -33,12 +33,14 @@ each REVERT-PROOF (revert the named piece and the test goes red):
      mapped shop to ONLINE is 400 until the mapping is cleared; reactivating
      a doc whose gid an active shop now holds is 409 (an unrelated edit on
      the inactive doc is not).
-  9. A shop that still HOLDS units cannot clear or change its location (400,
-     the deactivation "units must leave first" rule): the stock writer never
-     touches a location the store list no longer maps, so the old location
-     would show those units on Shopify for ever. A first mapping while
-     holding units is the go-live step and stays allowed; once the units
-     have left, clearing / re-mapping is allowed.
+  9. A shop that still holds stock the WEBSITE LISTS does not lose its
+     correction (round 4): clearing or changing its location RELEASES the old
+     one first -- zero at the old gid through THE writer, then the shop's rows
+     dropped from the last-sent baseline (which is keyed by store, not by
+     location), and only then the save. Shopify refusing the release refuses
+     the save. A first mapping releases nothing (the go-live step), stock on
+     no listing releases nothing (it leaves no phantom), and the migration
+     script -- which cannot run the async release -- refuses instead.
 
 TestClient + StrictDB; no Mongo, no network (the locations read is DARK).
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_store_shopify_location.py -q
@@ -582,46 +584,141 @@ def _list_it(db, pid="p1", sku="SP-1"):
     return db
 
 
-def test_clearing_or_changing_the_location_is_refused_while_the_shop_holds_units(monkeypatch):
+def _go_live(monkeypatch, responses):
+    """Flip the DARK world _world builds to LIVE with a canned Shopify. Returns
+    the transcript list (one entry per GraphQL call)."""
+    calls = []
+
+    async def _graphql(db, query, variables):  # noqa: ARG001
+        calls.append({"query": query, "variables": variables})
+        for marker, body in responses.items():
+            if marker in query:
+                return body
+        return {"data": {}}
+
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": True)
+    monkeypatch.setattr(shopify_push, "_graphql", _graphql)
+    return calls
+
+
+_SET_OK = {
+    "inventorySetQuantities": {
+        "data": {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": {"createdAt": "now"},
+                "userErrors": [],
+            }
+        }
+    },
+    "locations(": {"data": {"locations": {"nodes": []}}},
+}
+_SET_REFUSED = {
+    "inventorySetQuantities": {
+        "data": {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": None,
+                "userErrors": [{"field": ["input"], "message": "Location does not exist", "code": "INVALID"}],
+            }
+        }
+    },
+    "locations(": {"data": {"locations": {"nodes": []}}},
+}
+
+
+def test_R4_changing_the_location_releases_the_old_one_instead_of_refusing(monkeypatch):
+    """ROUND-4 P3 (ops trap, exactly the fresh-setup window). Any CHANGE or
+    CLEAR of shopify_location_id used to be a flat 400 while the shop held
+    stock the website lists -- "Transfer the units out first" -- with no
+    supported "zero the old location, then remap" path anywhere. On first setup
+    the owner picks one of four similarly-named locations from a dropdown that
+    pre-selects only on an EXACT name match; the first wrong pick then became
+    PERMANENT the moment the shop took one GRN unit of a listed product, and
+    Shopify kept showing Bokaro's numbers at the Pune location.
+
+    The remedy is the release, not the refusal: the door now zeroes the shop's
+    listed units AT THE OLD LOCATION through THE writer, forgets that shop's
+    baseline (which is keyed by STORE, not location, so the NEW location would
+    otherwise never be written at all), and only then saves.
+
+    Revert to `raise HTTPException(400, ...)` -> the PUT is refused -> fails."""
     c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-02")])
     db.seed("stock_units", [_unit("BV-BOK-02")])
     _list_it(db)
-    for new in ("", PUNE, "76684427513"):
-        r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": new})
-        assert r.status_code == 400, (new, r.text)
-        assert "1 on-hand stock unit(s) listed on the website" in r.json()["detail"]
-        assert "Shopify location" in r.json()["detail"]
-    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
-    # Re-saving the SAME gid alongside another edit is not a change.
-    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": BOKARO, "city": "Bokaro"})
+    # the baseline the old location was last written with
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"},
+        {"$set": {"ecom.online_stock": {"tracked": True, "quantities": {"SP-1": {"BV-BOK-02": 1, "BV-DHN-02": 4}}}}},
+    )
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
     assert r.status_code == 200, r.text
-    # ...and the script's --set (the same validator) is refused the same way.
-    with pytest.raises(stores.HTTPException) as exc:
-        stores._validate_store_payload(
-            {"shopify_location_id": PUNE}, db=db, store_id="BV-BOK-02", existing=_saved(db, "BV-BOK-02")
-        )
-    assert exc.value.status_code == 400 and "on-hand stock unit" in exc.value.detail
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    sets = [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]]
+    assert len(sets) == 1
+    assert sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ], "the OLD location is zeroed, so it stops advertising units nobody will write"
+    stock = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["online_stock"]
+    assert stock["quantities"] == {"SP-1": {"BV-DHN-02": 4}}, (
+        "the moved shop is dropped from the baseline so the NEW location is written next pass"
+    )
 
 
-def test_R3_P4_stock_that_is_on_no_listing_never_locks_a_mis_mapped_shop(monkeypatch):
-    """Round-3 ops P4. The dropdown pre-selects only on an EXACT name match,
-    which no current Shopify location satisfies, so a mis-map is a plausible
-    first move -- and blocking on ANY unit meant the shop could never be
-    corrected once it took ONE GRN unit of anything (deactivation is blocked
-    by the same rule: no escape hatch at all). The rule exists because the OLD
-    location would keep showing the units; a product on no listing shows
-    nowhere. Revert `_store_listed_on_hand_units` back to
-    `_store_on_hand_units` in _validate_store_payload -> 400 -> this fails."""
+def test_R4_a_remap_is_refused_when_shopify_refuses_the_release(monkeypatch):
+    """The release is the precondition, not a side effect: if Shopify refuses
+    the zeroing, the mapping must stay as it was rather than stranding the
+    numbers on a location nothing writes again. Revert the `if not
+    released.get("ok")` branch -> 200 with the old location live -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    _go_live(monkeypatch, _SET_REFUSED)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 400, r.text
+    assert "old Shopify location" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_R4_the_migration_script_still_refuses_an_unreleased_remap(monkeypatch):
+    """scripts/migrate_store_locations.py --set writes straight to the store
+    repository, so it cannot run the async release the PUT door runs. It must
+    REFUSE (409) rather than remap and strand the numbers. Delete the
+    `if release_old:` branch in the script -> a clean plan -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    plan = _script().plan_sets(db, [("BV-BOK-02", PUNE)])
+    assert plan[0]["error"].startswith("409:")
+    assert "Organization page" in plan[0]["error"]
+
+
+def test_R4_a_first_mapping_never_releases_anything(monkeypatch):
+    """A shop with NO location yet is the go-live step, not a correction: it
+    holds listed units and still saves with zero Shopify calls."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02")])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 200, r.text
+    assert [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]] == []
+
+
+def test_R4_stock_that_is_on_no_listing_still_never_touches_shopify(monkeypatch):
+    """Round-3 ops P4, still true: a product on NO listing shows nowhere, so
+    remapping a shop that only holds unlisted stock is a plain save -- no
+    release, no network. Revert `_store_listed_on_hand_units` to
+    `_store_on_hand_units` -> a pointless release call -> this fails."""
     c, db = _world(monkeypatch, [_store("BV-DHN-02", shopify_location_id=BOKARO)])
     db.seed("stock_units", [_unit("BV-DHN-02")])
     db.seed("products", [{"product_id": "p1", "sku": "SP-1"}])  # never pushed: no ecom row
+    calls = _go_live(monkeypatch, _SET_OK)
     r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": PUNE})
     assert r.status_code == 200, r.text
     assert _saved(db, "BV-DHN-02")["shopify_location_id"] == PUNE
-    # ...and the moment that product IS on the website, the phantom is real again.
-    _list_it(db)
-    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
-    assert r.status_code == 400 and "listed on the website" in r.json()["detail"]
+    assert [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]] == []
 
 
 def test_R3_P5_a_remap_is_refused_when_the_shelf_cannot_be_read(monkeypatch):

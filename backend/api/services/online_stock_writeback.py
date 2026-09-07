@@ -263,9 +263,17 @@ def orphan_stock_stores(db, skus: List[str]) -> List[str]:
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
     """Map each SKU -> IMS on-hand (AVAILABLE stock_units) at ONE store -- the
     per-shop half of THE ONE RULE (online_quantities_for_skus calls this once
-    per physical shop). store_id=None is the POOLED count across all PHYSICAL
-    stores and is kept ONLY for shopify_stock_parity._pooled_availability
-    until PR 4 rewrites parity per location; no writer reads it.
+    per physical shop).
+
+    ``store_id=None`` is the POOLED count across all PHYSICAL stores and now
+    has NO caller under backend/api or backend/agents at all: parity's
+    ``_pooled_availability`` was rewritten to go through
+    ``online_quantities_for_skus(..., safety_buffer=0)`` restricted to the
+    MAPPED shops, and only tests still exercise this branch. It is a LIVE TRAP,
+    not a feature: any future ``_on_hand_for_skus(db, skus, None)`` gets a
+    chain-pooled number that ignores the SUPERADMIN online block and the
+    per-shop buffer, with no guard naming it. Deleting it is PR 4's job (the
+    design defers it); until then, do not call it.
 
     STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
     WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
@@ -306,10 +314,9 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
         if store_id:
             match["store_id"] = store_id
         else:
-            # POOLED count -- PARITY ONLY (shopify_stock_parity._pooled_
-            # availability) until PR 4 compares per location; deleted with it.
-            # Every PHYSICAL shop's on-hand, never a unit stranded on a
-            # stockless ONLINE store.
+            # POOLED count -- NO production caller (see the docstring); every
+            # PHYSICAL shop's on-hand, never a unit stranded on a stockless
+            # ONLINE store. Deleted in PR 4.
             online_ids = _online_store_ids(db)
             if online_ids:
                 match["store_id"] = {"$nin": online_ids}
@@ -647,6 +654,17 @@ def _file_guard_gap_task(db, skus: List[str]) -> None:
         logger.debug("[STOCK_WRITEBACK] guard-gap task skipped: %s", exc)
 
 
+def _last_stray_locations(db) -> List[Dict[str, Any]]:
+    """The last LIVE stock sweep's stray-location verdict. Fail-soft -> []."""
+    try:
+        from .shopify_push.inventory import last_stray_locations
+
+        return last_stray_locations(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] stray-location verdict unavailable: %s", exc)
+        return []
+
+
 def _record_run(db, summary: Dict[str, Any]) -> None:
     """Best-effort sync_runs row so the SUPERADMIN online-store sync-health tile
     can see write-back activity. Never raises."""
@@ -703,6 +721,20 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
     code = str(summary.get("code") or "")
     if code and not any(code in e for e in errors):
         errors.append(f"{code}: {summary.get('error') or 'nothing written'}")
+    # INVARIANT 2 on the SALE path. The stray-location guard (a Shopify location
+    # that fulfils online orders and maps to no IMS shop) lives in the sweep,
+    # which reads Shopify's locations once per run; a per-sale read would buy
+    # nothing (a stray location only appears when a human edits Shopify admin).
+    # So the sale's row CARRIES the last sweep's verdict instead: without it the
+    # row a POS sale produced said the website had been corrected while Shopify
+    # kept routing online orders to a location IMS never writes.
+    stray = _last_stray_locations(db)
+    if stray:
+        errors.append(
+            "SHOPIFY_LOCATION_UNMAPPED: "
+            + ", ".join(str(loc.get("name") or loc.get("id")) for loc in stray)
+            + " fulfil online orders but map to no shop (IMS never writes them)"
+        )
     try:
         coll = db.get_collection("sync_runs")
         if coll is None:
@@ -718,6 +750,7 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
                     and not unmapped_stores
                     and not unknown_stores
                     and not code
+                    and not stray
                 ),
                 "items_synced": int(summary.get("pushed", 0)),
                 "error": ("; ".join(errors) if errors else None),
