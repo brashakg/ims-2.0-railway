@@ -319,3 +319,17 @@ export function formatPushResult(label: string, r: PushResult): string {
   const actionPart = r.action ? ` (${r.action})` : '';
   return `${label}: ${where}${actionPart}${idPart}`;
 }
+
+// ----------------------------------------------------------------------------
+// pushToastLevel — how LOUD that line should be, in ONE place. An ok result
+// carrying a code did all it could but not all it was pressed for: the product
+// is live at the OLD price (PRICE_NOT_SYNCED), or live with its stock refused
+// (STORE_UNMAPPED — tracked + DENY behind no quantity, i.e. sold out at every
+// location until a shop is mapped). formatPushResult already puts that on the
+// line; a GREEN toast over it is how the owner's first press on a fresh
+// catalogue read as a clean success.
+// ----------------------------------------------------------------------------
+export function pushToastLevel(r: PushResult): 'success' | 'warning' | 'error' {
+  if (!r.ok) return 'error';
+  return r.code ? 'warning' : 'success';
+}

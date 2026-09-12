@@ -101,9 +101,24 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     store_code, projected to ``{store_id, store_code, store_name, store_type,
     shopify_location_id, shopify_location_name}``.
 
-    "Physical" has exactly one definition: ``is_active`` AND not
-    ``_doc_is_online``. Every writer and reader derives ``{store_id: gid}``
+    "Physical" has exactly one definition: ACTIVE and not ``_doc_is_online``,
+    where active is ``is_active != False`` -- a MISSING flag is active, the
+    spelling routers/stores.py already uses for a legacy doc. It used to be
+    ``is_active: True``, so a legacy shop with no flag fell out of this list
+    entirely: its shelf stock was published nowhere AND it could never be
+    reported as an unmapped holder, i.e. a silent green pass.
+    Every writer and reader derives ``{store_id: gid}``
     and its reverse from this list with a comprehension -- no second registry.
+    THE GID IS NORMALISED HERE (round-5 P3), once, for all of them: the
+    writer's own ``_mapped`` / ``_location_conflicts`` promoted a bare
+    ``"58793230523"`` to ``gid://shopify/Location/58793230523`` while the
+    409 duplicate refusal (routers/stores.py ``_location_holder``) and the
+    dropdown's ``by_gid`` compared the RAW string against an already-normalised
+    gid -- so a doc carrying bare digits was MAPPED to the writer and UNMAPPED
+    to both of those: two shops could save the same location, and ``_mapped``
+    then wrote NEITHER of them (STORE_LOCATION_DUPLICATE), i.e. both shops'
+    stock invisible online. Normalising in the ONE reader fixes every
+    comprehension at once.
     No process cache: eight docs, one indexed read per call, so a mapping
     change is live on the next call with no redeploy. No DB handle -> ``[]``;
     a Mongo error propagates (a caller that wants fail-soft wraps it -- an
@@ -112,11 +127,19 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     handle = _resolve_db(db)
     if handle is None:
         return []
-    rows = handle.get_collection("stores").find({"is_active": True}, _PHYSICAL_PROJECTION)
+    rows = handle.get_collection("stores").find(
+        {"is_active": {"$ne": False}}, _PHYSICAL_PROJECTION
+    )
+    from agents.nexus_providers import _as_shopify_gid
+
     out = [
         dict(r)
         for r in rows
         if isinstance(r, dict) and not _doc_is_online(str(r.get("store_id") or ""), r)
     ]
+    for r in out:
+        raw = str(r.get("shopify_location_id") or "").strip()
+        if raw:
+            r["shopify_location_id"] = _as_shopify_gid(raw, "Location")
     out.sort(key=lambda r: str(r.get("store_code") or ""))
     return out

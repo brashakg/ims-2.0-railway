@@ -154,6 +154,13 @@ class _Spy:
     def calls_for(self, marker):
         return [c for c in self.calls if marker in c["query"]]
 
+    def writes(self):
+        """Every call that is not the READ-ONLY locations list. A LIVE stock
+        pass reads Shopify's locations once (invariant 2: a location that
+        fulfils online orders and maps to no shop keeps selling its own
+        number), so "zero network" assertions are about WRITES."""
+        return [c for c in self.calls if "imsLocationList" not in c["query"]]
+
 
 def _ok(field, **extra):
     return {"data": {field: {"userErrors": [], **extra}}}
@@ -266,12 +273,14 @@ def _world(*, seed_child=True, child_active=True, ledger=None, child_gids=True):
     """Parent LIVE on Shopify (gid P, its own row A / inv A), child spine +
     twin + parent-linked row (gid B / inv B, mrp 45700 vs parent 39900), one
     AVAILABLE unit each at a RETAIL store, a phantom unit on the online
-    store (never counted), the online location pinned by env."""
+    store (never counted); Pune is the one physical shop, mapped to LOC
+    (per-store Shopify locations, owner ruling 2026-09-06)."""
     db = StrictDB()
     db.seed(
         "stores",
         [
-            {"store_id": PUNE, "store_code": "BV-PUN-01", "name": "Better Vision Pune", "city": "Pune", "store_type": "RETAIL"},
+            {"store_id": PUNE, "store_code": "BV-PUN-01", "store_name": "Better Vision Pune", "city": "Pune",
+             "store_type": "RETAIL", "is_active": True, "shopify_location_id": LOC},
             {"store_id": "BV-ONLINE-01", "name": "Better Vision Online", "city": "Ranchi", "store_type": "ONLINE"},
         ],
     )
@@ -407,15 +416,12 @@ def _stamp_child_gids(db):
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
-    shopify_push._online_location_cache.clear()
     shopify_push._publication_id_cache.clear()
-    monkeypatch.setenv("SHOPIFY_ONLINE_LOCATION_ID", "77")
     monkeypatch.delenv("ONLINE_STOCK_SAFETY_BUFFER", raising=False)
     monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
     # The mirror (catalog_variants row) is ON on prod (policy default True).
     monkeypatch.setattr(pm, "mirror_enabled", lambda: True)
     yield
-    shopify_push._online_location_cache.clear()
     shopify_push._publication_id_cache.clear()
 
 
@@ -471,11 +477,11 @@ def test_parent_stock_pass_carries_the_child_sku(monkeypatch):
     assert written == {A_INV: 1, B_INV: 1}
     assert all(q["locationId"] == LOC for q in setq[0]["variables"]["input"]["quantities"])
     # the ledger lives on the PARENT twin, keyed by SKU; the child twin has none
-    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"] == {PARENT_SKU: 1, CHILD_SKU: 1}
+    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"] == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}
     assert "online_stock" not in _twin(db, "tw-child")["ecom"]
-    # a clean second pass is a noop with zero network
-    n = len(spy.calls)
-    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and len(spy.calls) == n
+    # a clean second pass is a noop that writes nothing
+    n = len(spy.writes())
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and len(spy.writes()) == n
 
 
 def test_gid_door_ignores_a_child_even_if_a_repair_stamps_the_parent_gid_on_it():
@@ -548,7 +554,7 @@ def test_child_price_and_barcode_ride_the_parents_price_push(monkeypatch):
 
 
 def test_deactivating_a_child_denies_its_variant_and_never_drafts_the_parent(monkeypatch):
-    ledger = {"tracked": True, "quantities": {PARENT_SKU: 1, CHILD_SKU: 1}, "location_id": LOC, "policy": "DENY"}
+    ledger = {"tracked": True, "quantities": {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}, "policy": "DENY"}
     db = _world(ledger=ledger)
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
@@ -568,14 +574,15 @@ def test_deactivating_a_child_denies_its_variant_and_never_drafts_the_parent(mon
     assert len(setq) == 1
     assert [(q["inventoryItemId"], q["quantity"]) for q in setq[0]["variables"]["input"]["quantities"]] == [(B_INV, 0)]
     assert not spy.calls_for("productUpdate("), "NEVER productUpdate on the parent"
-    assert len(spy.calls) == 2
+    assert len(spy.writes()) == 2
 
     child = _twin(db, "tw-child")
     assert child["ecom"]["online_state"] == "DELISTED" and child["ecom"]["delist_reason"] == "deactivated"
     parent = _twin(db, "tw-parent")
     assert parent["ecom"]["status"] == "PUBLISHED" and "taken_down_at" not in parent["ecom"]
     assert parent["ecom"]["locally_modified"] is False and parent["ecom"]["shopify_product_id"] == P_GID
-    assert parent["ecom"]["online_stock"]["quantities"] == {PARENT_SKU: 1, CHILD_SKU: 0}, "the parent ledger records the 0"
+    assert parent["ecom"]["online_stock"]["quantities"] == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 0}}, "the parent ledger records the 0 per shop"
+    assert out["payload"]["rows"] == {CHILD_SKU: {PUNE: 0}} and out["payload"]["stores_mapped"] == 1
     rows = _push_audit_rows(db)
     assert len(rows) == 1 and rows[0]["entity_type"] == "variant" and rows[0]["details"]["trigger"] == "deactivated"
 
@@ -612,13 +619,13 @@ def test_child_delist_is_dark_by_default_and_a_noop_when_unmapped(monkeypatch):
 
 def test_inactive_child_lists_zero_and_a_missing_flag_is_active():
     db = _world(child_active=False)
-    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: 1, CHILD_SKU: 0}
+    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 0}}
     db["products"].update_one({"product_id": "sp-child"}, {"$unset": {"is_active": ""}})
-    assert wb.online_quantities_for_skus(db, [CHILD_SKU]) == {CHILD_SKU: 1}, "a MISSING flag is active"
+    assert wb.online_quantities_for_skus(db, [CHILD_SKU]) == {CHILD_SKU: {PUNE: 1}}, "a MISSING flag is active"
 
 
 def test_flip_off_then_on_with_no_pass_between_resends_the_child(monkeypatch):
-    ledger = {"tracked": True, "quantities": {PARENT_SKU: 1, CHILD_SKU: 1}, "location_id": LOC, "policy": "DENY"}
+    ledger = {"tracked": True, "quantities": {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}, "policy": "DENY"}
     db = _world(ledger=ledger)
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
@@ -630,7 +637,7 @@ def test_flip_off_then_on_with_no_pass_between_resends_the_child(monkeypatch):
     _run(online_delist.on_active_flip(conn, _spine(db, "sp-child"), was_active=True, now_active=False, actor=ADMIN))
     # while off, the quantity rule agrees with the delist: a pass re-sends nothing
     spy.calls.clear()
-    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and spy.calls == []
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and spy.writes() == []
 
     # on again, NO pass in between: the next pass must carry the child's 1
     db["products"].update_one({"product_id": "sp-child"}, {"$set": {"is_active": True}})
@@ -643,7 +650,7 @@ def test_flip_off_then_on_with_no_pass_between_resends_the_child(monkeypatch):
     assert len(setq) == 1
     written = {q["inventoryItemId"]: q["quantity"] for q in setq[0]["variables"]["input"]["quantities"]}
     assert written[B_INV] == 1
-    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == 1
+    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == {PUNE: 1}
 
 
 # ---------------------------------------------------------------------------
@@ -885,7 +892,7 @@ def test_runbook_creates_links_and_seeds_opening_stock_through_the_doors(monkeyp
     assert len(units) == 1 and units[0]["store_id"] == PUNE and units[0]["status"] == "AVAILABLE"
     assert units[0]["source"] == "OPENING_STOCK" and units[0]["created_by"] == "u-admin"
     assert db["opening_stock_batches"].find_one({"batch_id": out["commit"]["summary"]["batch_id"]})["lines"][0]["sku"] == CHILD_SKU
-    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: 1, CHILD_SKU: 1}
+    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}
     rev = runbook.reversal_list(db, [CHILD_SKU], out["commit"]["summary"]["batch_id"])
     assert rev["products_product_id"] == [made["product_id"]] and rev["catalog_variants_sku"] == [CHILD_SKU]
     assert rev["catalog_products_id"] == [made["twin_id"]]
@@ -1001,7 +1008,7 @@ def test_catalog_door_deactivation_reaches_the_child_spine_so_the_next_pass_keep
     child spine stayed active -> the quantity rule reported its unit -> the
     next stock pass (01:00/09:00 live sync, the Push-stock button, any
     /all-pending press) wrote 1 back and the size was on sale again."""
-    ledger = {"tracked": True, "quantities": {PARENT_SKU: 1, CHILD_SKU: 1}, "location_id": LOC, "policy": "DENY"}
+    ledger = {"tracked": True, "quantities": {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 1}}, "policy": "DENY"}
     db = _world(ledger=ledger)
     assert _spine(db, "sp-child")["product_id"] != _twin(db, "tw-child")["id"], "door-created shape"
     spy = _wire_catalog(monkeypatch, db)
@@ -1014,13 +1021,13 @@ def test_catalog_door_deactivation_reaches_the_child_spine_so_the_next_pass_keep
     assert _twin(db, "tw-child")["is_active"] is False
     assert _spine(db, "sp-child")["is_active"] is False, "the catalog door must reach the SPINE -- the variant rule's only marker"
     assert _set_quantities(spy) == [(B_INV, 0)] and not spy.calls_for("productUpdate(")
-    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == 0
+    assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == {PUNE: 0}
     assert _twin(db, "tw-child")["ecom"]["online_state"] == "DELISTED"
 
     spy.calls.clear()
     res = _run(shopify_push.sync_stock_levels(db))
-    assert res.action == "noop" and spy.calls == [], f"{door}: the next stock pass put the size back on sale"
-    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: 1, CHILD_SKU: 0}
+    assert res.action == "noop" and spy.writes() == [], f"{door}: the next stock pass put the size back on sale"
+    assert wb.online_quantities_for_skus(db, [PARENT_SKU, CHILD_SKU]) == {PARENT_SKU: {PUNE: 1}, CHILD_SKU: {PUNE: 0}}
 
     if door == "drawer":
         # the drawer's reactivation reaches the spine too: pooled 1 vs sent 0 -> re-sent
@@ -1030,7 +1037,7 @@ def test_catalog_door_deactivation_reaches_the_child_spine_so_the_next_pass_keep
         res = _run(shopify_push.sync_stock_levels(db))
         assert res.action == "sync" and res.ok
         assert dict(_set_quantities(spy))[B_INV] == 1
-        assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == 1
+        assert _twin(db, "tw-parent")["ecom"]["online_stock"]["quantities"][CHILD_SKU] == {PUNE: 1}
 
 
 def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_parent(monkeypatch):

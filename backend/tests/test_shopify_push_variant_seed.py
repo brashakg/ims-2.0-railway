@@ -21,9 +21,9 @@ THE FIX (covered here):
     that gid is persisted too -- catalog_variants.shopify_inventory_item_id per
     variant row, ecom.shopify_inventory_item_id for a no-variant-row product --
     the exact fields the stock write-back resolver reads
-    (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
-    online_sync_health._inventory_item_id_for_sku). Section 6 proves the
-    resolver finds a freshly pushed product's inventory item.
+    (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus).
+    Section 6 proves the resolver finds a freshly pushed product's inventory
+    item.
   * ADVERSARIAL-PANEL MUST-FIXES (sections 5 + 7): publish-on-create is
     WITHHELD unless seeding succeeded with a PRICED row (an ACTIVE product can
     never go live at 0.00); variant matching is gid-FIRST so an option-label
@@ -108,6 +108,21 @@ class _RouterSpy:
 
     def count_for(self, marker):
         return sum(1 for c in self.calls if marker in c["query"])
+
+    def seed_count_for(self, marker):
+        """Calls for ``marker`` EXCLUDING the stock step's tracking/policy
+        update (rows carrying ``inventoryPolicy``): per-store locations set
+        tracked=true + DENY on every push whatever the location map says, so
+        a seeding-count assertion must not count that call."""
+        return sum(
+            1
+            for c in self.calls
+            if marker in c["query"]
+            and not any(
+                isinstance(r, dict) and "inventoryPolicy" in r
+                for r in ((c.get("variables") or {}).get("variants") or [])
+            )
+        )
 
 
 def _force_live(monkeypatch, responses):
@@ -788,7 +803,7 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
     )
     # ...and Black/Gold were NEVER resubmitted -- no bulk-update call at all,
     # they were not even part of this push's seed_rows.
-    assert spy2.count_for("productVariantsBulkUpdate") == 0
+    assert spy2.seed_count_for("productVariantsBulkUpdate") == 0
     assert spy2.count_for("productVariantsBulkCreate") == 1
 
     black2 = db["catalog_variants"].find_one({"sku": "S-BLK"})
@@ -852,12 +867,12 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     # No price and no SKU anywhere -> nothing to seed AND nothing publishable.
     assert res.ok is False and res.reason == "publish_withheld"
     assert res.variants_seeded is None
-    assert spy.count_for("productVariantsBulkUpdate") == 0
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 0
     # productCreate + the photograph. Nothing else: no seeding call, and
     # no publish (the product is unpriced -- publish stays withheld).
     assert spy.count_for("productCreateMedia") == 1
     assert spy.count_for("publishablePublish") == 0
-    assert len(spy.calls) == 3  # + the stock step's one `locations` lookup (2026-09-07)
+    assert len(spy.calls) == 3  # + the stock step's tracking update (2026-09-07)
 
 
 # ===========================================================================
@@ -962,7 +977,7 @@ def test_live_update_never_seeded_repairs_regardless_of_the_flag(monkeypatch):
     assert res.action == "update" and res.ok is True
     assert res.variants_seeded is not None
     assert res.variants_seeded["updated"] == 1
-    assert spy.count_for("productVariantsBulkUpdate") == 1
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 1
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
     assert (
@@ -1012,7 +1027,7 @@ def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):
     res = _run(shopify_push.push_product(db, product, []))
     assert res.action == "update"
     assert res.variants_seeded["updated"] == 1
-    assert spy.count_for("productVariantsBulkUpdate") == 1
+    assert spy.seed_count_for("productVariantsBulkUpdate") == 1
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
 
@@ -1240,8 +1255,8 @@ _BULK_UPDATE_OK = {
 
 class _ProjColl(MockCollection):
     """MockCollection that ALSO accepts pymongo's (filter, projection) call
-    shape -- online_sync_health._inventory_item_id_for_sku passes a projection,
-    which the plain MockCollection.find_one signature rejects."""
+    shape -- the online_catalog resolvers pass a projection, which the plain
+    MockCollection.find_one signature rejects."""
 
     def find_one(self, filter=None, projection=None, *a, **k):  # noqa: A002
         return super().find_one(filter or {})
@@ -1488,13 +1503,12 @@ def test_repush_is_idempotent_for_the_inventory_item_mapping(monkeypatch):
 
 def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
     """END-TO-END against the REAL resolvers (the point of the whole change):
-    after a LIVE push, online_catalog's variant-target resolver and
-    online_sync_health's per-SKU lookup -- the two paths the oversell-guard
-    stock write-back uses -- both find the inventory item, for BOTH shapes:
-    a variant-row product (catalog_variants mapping) and a no-variant product
+    after a LIVE push, online_catalog's variant-target resolver AND its
+    per-SKU inventory-item lookup -- the paths the oversell-guard stock
+    write-back uses -- both find the inventory item, for BOTH shapes: a
+    variant-row product (catalog_variants mapping) and a no-variant product
     (ecom fallback)."""
     from api.services import online_catalog
-    from api.services import online_sync_health
 
     db = _ProjDB()
     # Product A: no catalog_variants rows (the common eyewear case).
@@ -1560,29 +1574,6 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
     assert items["S-BLK"] == "gid://shopify/InventoryItem/7002"
     assert items["BV-RB-0001"] == "gid://shopify/InventoryItem/7001"
 
-    monkeypatch.setenv(
-        "SHOPIFY_ONLINE_LOCATION_ID", "gid://shopify/Location/11"
-    )
-    targets = online_catalog.online_variant_targets_for_skus(
-        db, ["S-BLK", "BV-RB-0001"]
-    )
-    assert targets["S-BLK"] == {
-        "inventory_item_id": "gid://shopify/InventoryItem/7002",
-        "location_id": "gid://shopify/Location/11",
-    }
-    assert targets["BV-RB-0001"]["inventory_item_id"] == (
-        "gid://shopify/InventoryItem/7001"
-    )
-
-    # --- online_sync_health: the oversell re-push sweep's per-SKU lookup ---
-    assert (
-        online_sync_health._inventory_item_id_for_sku(db, "S-BLK")
-        == "gid://shopify/InventoryItem/7002"
-    )
-    assert (
-        online_sync_health._inventory_item_id_for_sku(db, "BV-RB-0001")
-        == "gid://shopify/InventoryItem/7001"
-    )
 
 
 # ===========================================================================

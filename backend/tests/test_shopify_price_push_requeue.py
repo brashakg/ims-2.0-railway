@@ -54,6 +54,8 @@ from test_shopify_media_title_sync import (  # noqa: E402,F401
     gates,
 )
 
+from api.services.shopify_push import product as product_mod  # noqa: E402
+
 CODE = shopify_push.PRICE_NOT_SYNCED
 
 
@@ -94,6 +96,16 @@ def _flag(db, pid="P1"):
 def _install(monkeypatch, fail_prices):
     fake = _ShopifyPriceFails(_nodes(1), fail_prices=fail_prices)
     monkeypatch.setattr(shopify_push, "_graphql", fake)
+    # This file pins the PRICE side channel. Round 3 (ops P5) gave the STOCK
+    # side channel the same treatment -- an ok push whose stock write was
+    # refused now carries that code -- and these harnesses hold no shops at
+    # all, so a live stock pass would stamp STORE_UNMAPPED on every result here
+    # and bury the code under test. The stock code has its own file and its own
+    # fixtures (test_shopify_online_stock.py).
+    async def _stock_written(*_a, **_k):
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+
+    monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
     return fake
 
 

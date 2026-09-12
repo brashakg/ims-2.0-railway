@@ -199,29 +199,21 @@ query imsProductMedia($id: ID!) {
 _MEDIA_LIMIT = 250
 
 # Online STOCK (owner ruling 2026-09-07, sync-audit gap #1 "make website
-# quantities real"). Three documents:
-#   * the location lookup -- which Shopify location the online quantity lives
-#     at, when SHOPIFY_ONLINE_LOCATION_ID is not pinned (needs read_locations);
+# quantities real"; per-store locations, owner ruling 2026-09-06). Four
+# documents:
+#   * the locations list -- the Organization page's dropdown read (the ONLY
+#     locations read; the mapping lives on the store record);
 #   * the variant inventory update -- tracked=true + inventoryPolicy on every
 #     variant the product owns (an UNTRACKED item sells without limit, which is
 #     exactly what the six live products were doing);
-#   * inventorySetQuantities -- the ABSOLUTE available quantity at that
-#     location (idempotent on retry; needs write_inventory).
-# first: 50 -- every location the shop has (per-store locations, owner ruling
-# 2026-09-06: one per physical shop, so neither read below may truncate).
-# The picker's read (resolve_online_location_id, the live Push-stock path)
-# is otherwise byte-identical to #1125 -- its shape is not this PR's to
-# change; the picker itself dies in PR 2 and _LOCATIONS_LIST_QUERY becomes
-# the only locations read.
-_LOCATIONS_QUERY = """
-query imsLocations {
-  locations(first: 50) { nodes { id name isActive fulfillsOnlineOrders } }
-}
-"""
-
-# The Organization page's dropdown read (list_locations, GET /push/locations):
-# shipsInventory + address.city/province ride along so the dropdown can tell
-# two same-named locations apart. Read-only (read_locations).
+#   * inventorySetQuantities -- the ABSOLUTE available quantity per
+#     (inventory item, location) row: one row per mapped shop (idempotent on
+#     retry; needs write_inventory). `code` rides userErrors so the writer can
+#     key on ITEM_NOT_STOCKED_AT_LOCATION and activate;
+#   * inventoryBulkToggleActivation -- stock an item at the locations a chunk
+#     just failed at, then the chunk is retried ONCE (write_inventory).
+# first: 50 -- every location the shop has (one per physical shop), so the
+# read never truncates.
 _LOCATIONS_LIST_QUERY = """
 query imsLocationList {
   locations(first: 50) {
@@ -243,15 +235,21 @@ _INVENTORY_SET_QUANTITIES = """
 mutation imsInventorySetQuantities($input: InventorySetQuantitiesInput!) {
   inventorySetQuantities(input: $input) {
     inventoryAdjustmentGroup { createdAt reason }
-    userErrors { field message }
+    userErrors { field message code }
   }
 }
 """
 # Shopify caps one inventorySetQuantities call at 250 quantity entries.
 _INVENTORY_SET_MAX = 250
-# Resolved once per process (a location gid is stable for the shop); keyed by
-# storefront id, same style as _publication_id_cache.
-_online_location_cache: Dict[str, str] = {}
+
+_INVENTORY_ACTIVATE = """
+mutation imsInventoryActivate($inventoryItemId: ID!, $inventoryItemUpdates: [InventoryBulkToggleActivationInput!]!) {
+  inventoryBulkToggleActivation(inventoryItemId: $inventoryItemId, inventoryItemUpdates: $inventoryItemUpdates) {
+    inventoryItem { id }
+    userErrors { field message code }
+  }
+}
+"""
 
 # Variant price/barcode push (owner priority: "change MRP in IMS -> website
 # updates"). Shopify retired productVariantUpdate; the current path is

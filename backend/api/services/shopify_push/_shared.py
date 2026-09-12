@@ -194,15 +194,52 @@ def push_mode_status(db) -> Dict[str, Any]:
     live = bool(writes and disp == "live" and creds)
     pinned = (os.getenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID") or "").strip()
     pub_id = pinned or _publication_id_cache.get(_ONLINE_STORE_PUBLICATION_NAME)
-    # THE FOURTH DOOR: the Shopify location the online quantity is written at.
-    # Read without a network call (pinned env / the persisted registry row);
-    # push_mode_status_resolved asks Shopify once when LIVE and unknown.
-    from .inventory import stored_online_location_id  # lazy: inventory imports here
+    # THE FOURTH DOOR: every physical shop's Shopify location (owner ruling
+    # 2026-09-06, per-store locations). Mongo only -- no network, no process
+    # cache; a mapping change on the Organization page shows on the next read.
+    stores_total: Optional[int] = None
+    stores_mapped: Optional[int] = None
+    unmapped_stores: List[Dict[str, Any]] = []
+    stores: List[Dict[str, Any]] = []
+    try:
+        from ..stores_util import physical_stores
 
-    loc_id, loc_source = stored_online_location_id(db)
+        rows = physical_stores(db)
+        stores = [
+            {
+                "store_id": r.get("store_id"),
+                "store_code": r.get("store_code"),
+                "store_name": r.get("store_name"),
+                "shopify_location_id": r.get("shopify_location_id") or None,
+                "shopify_location_name": r.get("shopify_location_name") or None,
+            }
+            for r in rows
+        ]
+        # ONE spelling of "this shop has a usable Shopify location": the
+        # WRITER's (inventory._mapped), which drops every shop whose gid is
+        # claimed by more than one shop -- Shopify takes one quantity per
+        # (item, location), so neither of those shops is ever written. Counting
+        # raw gids here instead turned the pre-press "Stock locations" gate
+        # chip GREEN ("3 of 3 shops mapped") in exactly the case the writer's
+        # own backstop refuses (STORE_LOCATION_DUPLICATE, nothing written):
+        # the gate that exists to be read BEFORE the press was the one lying.
+        from .inventory import _mapped
+
+        mapped = _mapped(rows)
+        stores_total = len(stores)
+        stores_mapped = len(mapped)
+        unmapped_stores = [
+            {k: r[k] for k in ("store_id", "store_code", "store_name")}
+            for r in stores
+            if r["store_id"] not in mapped
+        ]
+    except Exception as exc:  # noqa: BLE001 -- a status read never raises
+        logger.warning("[SHOPIFY_PUSH] store list read failed for status: %s", exc)
     return {
-        "online_location_id": loc_id,
-        "online_location_source": loc_source or "unresolved",
+        "stores_total": stores_total,
+        "stores_mapped": stores_mapped,
+        "unmapped_stores": unmapped_stores,
+        "stores": stores,
         "publishes_to_online_store": True,
         "online_store_publication_id": pub_id or None,
         "online_store_publication_source": (

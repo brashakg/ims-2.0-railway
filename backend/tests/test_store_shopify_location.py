@@ -33,6 +33,24 @@ each REVERT-PROOF (revert the named piece and the test goes red):
      mapped shop to ONLINE is 400 until the mapping is cleared; reactivating
      a doc whose gid an active shop now holds is 409 (an unrelated edit on
      the inactive doc is not).
+  9. A shop that still holds stock the WEBSITE LISTS does not lose its
+     correction (round 4): clearing or changing its location RELEASES the old
+     one first -- zero at the old gid through THE writer, then the shop's rows
+     dropped from the last-sent baseline (which is keyed by store, not by
+     location), and only then the save. Shopify refusing the release refuses
+     the save. A first mapping releases nothing (the go-live step), stock on
+     no listing releases nothing (it leaves no phantom), and the migration
+     script -- which cannot run the async release -- refuses instead.
+
+ 10. Panel round 5: the baseline FORGET runs on EVERY mapping change and
+     covers EVERY listing (gated on the shelf, a re-map of a shop holding
+     nothing was a green NOOP that never wrote the new location; scoped to the
+     held SKUs, it re-armed ~1 of 121 listings). ONE spelling of "which listed
+     units does this shop hold" (release_store_location), so an unreadable
+     shelf is still a 503 and a padded `products.sku` no longer waves a remap
+     through; an unresolved collection RAISES. The gid is normalised in the ONE
+     store reader, so a bare-digit doc is one location to the writer, the 409
+     and the dropdown alike.
 
 TestClient + StrictDB; no Mongo, no network (the locations read is DARK).
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_store_shopify_location.py -q
@@ -394,38 +412,32 @@ def test_script_parse_sets_rejects_a_bare_code():
         mod.parse_sets(["BV-BOK-02"])
 
 
-def test_script_refuses_pune_by_code_or_by_location_number(monkeypatch):
+def test_R3_the_script_maps_pune_like_any_other_shop(monkeypatch):
+    """Round-3 ops P1. The script refused any --set naming BV-PUN-01 or
+    location 76684427513 because Shopify held 49 units at Gangadham Pune and
+    the IMS ledger held 1. On 2026-09-07 the owner deleted the entire
+    catalogue -- 43 Shopify products, and IMS products / catalog_products /
+    catalog_variants / stock_units -- so the 49 no longer exist and the
+    precondition the refusal demanded ("re-run once the ledger shows them")
+    could never be met: the operator's only routes were to defeat the guard by
+    asserting something untrue, or to skip the script for the Organization
+    dropdown, which carries no such guard at all. Restore PUNE_REFUSAL ->
+    plan_sets returns an error row -> this fails."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     mod = _script()
+    assert not hasattr(mod, "PUNE_REFUSAL") and not hasattr(mod, "pune_guarded")
     db = StrictDB()
     db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-DHN-02")])
-    plan = mod.plan_sets(db, mod.parse_sets([
-        "BV-PUN-01=76684427513",                          # Pune's code
-        "BV-PUN-01=1",                                    # Pune's code with a FOREIGN number: the code branch alone
-        "bv-dhn-02=76684427513",                          # Pune's number on another code
-        "BV-DHN-02=gid://shopify/Location/76684427513",   # the gid form
-    ]))
-    assert [r["error"] for r in plan] == [mod.PUNE_REFUSAL] * 4
-    assert "49 opening-stock" in mod.PUNE_REFUSAL and "--i-know-pune" in mod.PUNE_REFUSAL
-    assert all(r["store_id"] is None for r in plan)
-    # a refused row never reaches the repository
-    assert mod.apply_sets(db, [r for r in plan if not r["error"]]) == {"written": 0, "identical": 0, "failed": 0}
-    for code in ("BV-PUN-01", "BV-DHN-02"):
-        assert "shopify_location_id" not in db.get_collection("stores").find_one({"store_code": code})
-
-
-def test_script_i_know_pune_lifts_the_guard_but_not_the_routers_rules(monkeypatch):
-    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
-    mod = _script()
-    db = StrictDB()
-    db.seed("stores", [_store("BV-PUN-01", store_id=PUNE_UUID), _store("BV-ONLINE-01", store_type="ONLINE")])
-    plan = mod.plan_sets(
-        db,
-        mod.parse_sets(["BV-PUN-01=76684427513", "BV-ONLINE-01=76684427513"]),
-        allow_pune=True,
-    )
-    assert plan[0]["error"] is None and plan[0]["gid"] == PUNE and plan[0]["store_id"] == PUNE_UUID
-    assert plan[1]["error"].startswith("400") and "Online stores" in plan[1]["error"]
+    plan = mod.plan_sets(db, mod.parse_sets(["BV-PUN-01=76684427513", "BV-DHN-02=58793230523"]))
+    assert [r["error"] for r in plan] == [None, None]
+    assert plan[0]["store_id"] == PUNE_UUID and plan[0]["gid"] == PUNE
+    assert mod.apply_sets(db, plan) == {"written": 2, "identical": 0, "failed": 0}
+    assert _saved(db, PUNE_UUID)["shopify_location_id"] == PUNE
+    # ...and the router's own rules still bite: a second shop cannot claim it.
+    with pytest.raises(stores.HTTPException) as exc:
+        stores._validate_store_payload({"shopify_location_id": PUNE}, db=db, store_id="BV-DHN-02",
+                                       existing=_saved(db, "BV-DHN-02"))
+    assert exc.value.status_code == 409
 
 
 def test_script_refuses_a_duplicate_gid_within_one_run(monkeypatch):
@@ -534,6 +546,30 @@ def test_inactive_doc_carrying_a_gid_is_not_a_holder(monkeypatch):
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
 
 
+def test_R5_a_bare_digit_gid_on_a_doc_is_one_location_to_every_reader(monkeypatch):
+    """ROUND-5 P3 (latent, one rule / two spellings). The WRITER normalised
+    every store gid through `_as_shopify_gid` while the 409 duplicate refusal
+    (`_location_holder`) and the dropdown's `by_gid` compared the doc's RAW
+    string against an already-normalised gid. A doc carrying bare digits was
+    therefore MAPPED to the writer and UNMAPPED to both of those: two shops
+    could save one location, and `_mapped` then wrote NEITHER of them
+    (STORE_LOCATION_DUPLICATE) -- both shops' stock invisible online. Fixed in
+    the ONE reader (stores_util.physical_stores), so every comprehension over
+    it agrees. Revert the normalising loop there -> no 409 -> this fails."""
+    c, db = _world(monkeypatch, [
+        _store("BV-BOK-02", shopify_location_id="58793230523"),  # a direct DB write
+        _store("BV-DHN-02"),
+    ])
+    rows = {r["store_code"]: r for r in physical_stores(db)}
+    assert rows["BV-BOK-02"]["shopify_location_id"] == BOKARO, "one spelling for every reader"
+    assert shopify_push.mapped_store_locations(physical_stores(db)) == {"BV-BOK-02": BOKARO}
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 409, r.text
+    assert "BV-BOK-02" in r.json()["detail"]
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": "58793230523"})
+    assert r.status_code == 409, r.text
+
+
 def test_flipping_a_mapped_store_to_online_is_400_until_cleared(monkeypatch):
     c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
     r = c.put("/api/v1/stores/BV-BOK-02", json={"store_type": "ONLINE"})
@@ -560,3 +596,383 @@ def test_reactivating_a_doc_whose_gid_an_active_shop_holds_is_409(monkeypatch):
     r = c.put("/api/v1/stores/BV-OLD-01", json={"city": "Ranchi"})
     assert r.status_code == 200, r.text
     assert _saved(db, "BV-OLD-01")["city"] == "Ranchi"
+
+
+# ---------------------------------------------------------------------------
+# 9: a shop holding units keeps its location (phantom stock guard)
+# ---------------------------------------------------------------------------
+
+
+def _unit(store_id, status="AVAILABLE"):
+    return {"stock_id": f"u-{store_id}-{status}", "product_id": "p1", "store_id": store_id, "status": status}
+
+
+def _list_it(db, pid="p1", sku="SP-1"):
+    """Put ``pid``'s product ON THE WEBSITE. Only listed stock can leave a
+    phantom at the old Shopify location, so only listed stock blocks a remap."""
+    db.seed("products", [{"product_id": pid, "sku": sku}])
+    db.seed(
+        "catalog_products",
+        [{"id": "cat-1", "sku": sku, "ecom": {"shopify_inventory_item_id": "gid://shopify/InventoryItem/9"}}],
+    )
+    return db
+
+
+def _go_live(monkeypatch, responses):
+    """Flip the DARK world _world builds to LIVE with a canned Shopify. Returns
+    the transcript list (one entry per GraphQL call)."""
+    calls = []
+
+    async def _graphql(db, query, variables):  # noqa: ARG001
+        calls.append({"query": query, "variables": variables})
+        for marker, body in responses.items():
+            if marker in query:
+                return body
+        return {"data": {}}
+
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": True)
+    monkeypatch.setattr(shopify_push, "_graphql", _graphql)
+    return calls
+
+
+_SET_OK = {
+    "inventorySetQuantities": {
+        "data": {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": {"createdAt": "now"},
+                "userErrors": [],
+            }
+        }
+    },
+    "locations(": {"data": {"locations": {"nodes": []}}},
+}
+_SET_REFUSED = {
+    "inventorySetQuantities": {
+        "data": {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": None,
+                "userErrors": [{"field": ["input"], "message": "Location does not exist", "code": "INVALID"}],
+            }
+        }
+    },
+    "locations(": {"data": {"locations": {"nodes": []}}},
+}
+
+
+def test_R4_changing_the_location_releases_the_old_one_instead_of_refusing(monkeypatch):
+    """ROUND-4 P3 (ops trap, exactly the fresh-setup window). Any CHANGE or
+    CLEAR of shopify_location_id used to be a flat 400 while the shop held
+    stock the website lists -- "Transfer the units out first" -- with no
+    supported "zero the old location, then remap" path anywhere. On first setup
+    the owner picks one of four similarly-named locations from a dropdown that
+    pre-selects only on an EXACT name match; the first wrong pick then became
+    PERMANENT the moment the shop took one GRN unit of a listed product, and
+    Shopify kept showing Bokaro's numbers at the Pune location.
+
+    The remedy is the release, not the refusal: the door now zeroes the shop's
+    listed units AT THE OLD LOCATION through THE writer, forgets that shop's
+    baseline (which is keyed by STORE, not location, so the NEW location would
+    otherwise never be written at all), and only then saves.
+
+    Revert to `raise HTTPException(400, ...)` -> the PUT is refused -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-02")])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    # the baseline the old location was last written with
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"},
+        {"$set": {"ecom.online_stock": {"tracked": True, "quantities": {"SP-1": {"BV-BOK-02": 1, "BV-DHN-02": 4}}}}},
+    )
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    sets = [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]]
+    assert len(sets) == 1
+    assert sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ], "the OLD location is zeroed, so it stops advertising units nobody will write"
+    stock = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["online_stock"]
+    assert stock["quantities"] == {"SP-1": {"BV-DHN-02": 4}}, (
+        "the moved shop is dropped from the baseline so the NEW location is written next pass"
+    )
+
+
+def test_R4_a_remap_is_refused_when_shopify_refuses_the_release(monkeypatch):
+    """The release is the precondition, not a side effect: if Shopify refuses
+    the zeroing, the mapping must stay as it was rather than stranding the
+    numbers on a location nothing writes again. Revert the `if not
+    released.get("ok")` branch -> 200 with the old location live -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    _go_live(monkeypatch, _SET_REFUSED)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 400, r.text
+    assert "old Shopify location" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_R4_the_migration_script_still_refuses_an_unreleased_remap(monkeypatch):
+    """scripts/migrate_store_locations.py --set writes straight to the store
+    repository, so it cannot run the async release the PUT door runs. It must
+    REFUSE (409) rather than remap and strand the numbers. Delete the
+    `if release_old:` branch in the script -> a clean plan -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    plan = _script().plan_sets(db, [("BV-BOK-02", PUNE)])
+    assert plan[0]["error"].startswith("409:")
+    assert "Organization page" in plan[0]["error"]
+
+
+def test_R4_a_first_mapping_never_releases_anything(monkeypatch):
+    """A shop with NO location yet is the go-live step, not a correction: it
+    holds listed units and still saves with zero Shopify calls."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02")])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 200, r.text
+    assert [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]] == []
+
+
+def test_R4_stock_that_is_on_no_listing_still_never_touches_shopify(monkeypatch):
+    """Round-3 ops P4, still true: a product on NO listing shows nowhere, so
+    remapping a shop that only holds unlisted stock writes NOTHING to Shopify
+    (the baseline is still re-armed -- see the round-5 tests below). Widen the
+    zeroing in `release_store_location` from `listed_skus_on_hand_at` to every
+    on-hand unit -> a pointless inventorySetQuantities -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-DHN-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-DHN-02")])
+    db.seed("products", [{"product_id": "p1", "sku": "SP-1"}])  # never pushed: no ecom row
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-DHN-02")["shopify_location_id"] == PUNE
+    assert [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]] == []
+
+
+def test_R3_P5_a_remap_is_refused_when_the_shelf_cannot_be_read(monkeypatch):
+    """Round-3 P5: the ONE door that reopened the remap phantom. The on-hand
+    count was wrapped in `except: pass` -> None, which every caller reads as
+    "the shop holds nothing", so a Mongo blip waved the remap through and the
+    old location advertised its units forever. stores_util propagates a Mongo
+    error for exactly this reason. Revert to `except: pass` -> 200 -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02"), _unit("BV-BOK-02", status="RESERVED")])
+    _list_it(db)
+
+    class _Dead(type(db.get_collection("stock_units"))):
+        def count_documents(self, *a, **k):
+            raise RuntimeError("stock read died")
+
+        def distinct(self, *a, **k):
+            raise RuntimeError("stock read died")
+
+    db._collections["stock_units"] = _Dead("stock_units", [])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text
+    assert "Cannot read this shop" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    # The deactivation door reads the same shelf and refuses the same way.
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"is_active": False})
+    assert r.status_code == 503, r.text
+
+
+def test_R3_a_dead_catalog_never_reads_as_nothing_is_listed(monkeypatch):
+    """inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} means
+    "nothing is listed" -- which would wave the remap through. Revert the
+    strict `catalog.find_one({}, ...)` touch -> 200 -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+
+    class _DeadCatalog(type(db.get_collection("catalog_products"))):
+        def find_one(self, *a, **k):
+            raise RuntimeError("catalog read died")
+
+        def find(self, *a, **k):
+            raise RuntimeError("catalog read died")
+
+    db._collections["catalog_products"] = _DeadCatalog("catalog_products", [])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_R3_on_hand_here_is_item_events_on_hand_match(monkeypatch):
+    """One spelling of on-hand. The hand-typed
+    {"status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]}} counted a VOID /
+    DAMAGED / RTV unit as on hand (none of those is in the $nin set, and two of
+    its three tokens are not even StockState members). Revert to the $nin
+    query -> the VOID unit blocks -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02", status="VOID")])
+    _list_it(db)
+    assert stores._store_on_hand_units(db, "BV-BOK-02") is None
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+
+
+def test_location_can_be_cleared_or_changed_once_the_units_have_left(monkeypatch):
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02", status="SOLD")])  # gone from the shelf
+    _list_it(db)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": ""})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Panel round 5: the FORGET is unconditional, and covers every listing
+# ---------------------------------------------------------------------------
+
+
+def _baseline_of(db, pid="cat-1"):
+    return db.get_collection("catalog_products").find_one({"id": pid})["ecom"]["online_stock"]["quantities"]
+
+
+def test_R5_a_remap_of_a_shop_holding_nothing_still_re_arms_the_baseline(monkeypatch):
+    """ROUND-5 P1 (HIGH, oversell). The forget -- the ONLY thing that lets the
+    per-store diff see a mapping change -- sat behind "does this shop hold
+    listed units". A shop that holds NONE (every Jharkhand shop the owner
+    mapped on 09-06 while the catalogue was empty) therefore saved its new gid
+    with no release and no forget: the baseline still carried that store's row
+    on every listing, the next sweep matched it, reported action=noop / ok=True
+    / changed=0, and wrote the NEW Shopify location NOTHING -- it kept whatever
+    quantity Shopify held there, forever, with no guard naming it (the new
+    location IS mapped, so it is no stray; the shop reads 0 units, so it is no
+    unmapped holder).
+
+    Restore the `if _store_listed_on_hand_units(...)` gate around release_old,
+    or the `if not skus: return out` early exit in release_store_location ->
+    the baseline keeps BV-BOK-02 -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    _list_it(db)  # a listing, but the shop holds NO unit of it
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"},
+        {"$set": {"ecom.online_stock": {"tracked": True, "quantities": {"SP-1": {"BV-BOK-02": 0}}}}},
+    )
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    # Nothing to zero (no listed unit on that shelf) -- and nothing was written.
+    assert [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]] == []
+    assert _baseline_of(db) == {"SP-1": {}}, (
+        "the shop must be dropped from the baseline so the NEW location is written next pass"
+    )
+
+
+def test_R5_the_forget_covers_every_listing_not_just_the_skus_on_the_shelf(monkeypatch):
+    """ROUND-5 P2 (HIGH, oversell). The forget was scoped to the SKUs the shop
+    happens to hold, but the baseline holds a row for EVERY listed SKU at that
+    shop (an explicit 0 included). So a supported remap re-armed the one
+    listing on the shelf and left every other listing matching -> those
+    listings noop'd and the NEW location received no row for them at all. At
+    the production shape (121 listings rebuilt, one shop holding one unit) that
+    is ~1 listing re-armed and ~120 left advertising the old location.
+
+    Restore the `skus` argument of `_forget_store_baseline` -> cat-2 keeps
+    BV-BOK-02 -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-02")])
+    db.seed("stock_units", [_unit("BV-BOK-02")])  # one unit of SP-1 only
+    _list_it(db)
+    db.get_collection("catalog_products").insert_one(
+        {"id": "cat-2", "sku": "SP-2",
+         "ecom": {"shopify_inventory_item_id": "gid://shopify/InventoryItem/10",
+                  "online_stock": {"tracked": True,
+                                   "quantities": {"SP-2": {"BV-BOK-02": 0, "BV-DHN-02": 1}}}}}
+    )
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"},
+        {"$set": {"ecom.online_stock": {"tracked": True, "quantities": {"SP-1": {"BV-BOK-02": 1}}}}},
+    )
+    _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _baseline_of(db, "cat-1") == {"SP-1": {}}
+    assert _baseline_of(db, "cat-2") == {"SP-2": {"BV-DHN-02": 1}}, (
+        "every listing that carried this shop is re-armed, not only the ones it stocks"
+    )
+
+
+def test_R5_an_unreadable_shelf_still_refuses_the_remap_through_the_one_reader(monkeypatch):
+    """The strict read moved into release_store_location (ONE spelling of
+    "which listed units does this shop hold" -- the router's second spelling
+    re-resolved sku -> product_id through `products` and had two silent
+    "holds nothing" exits). It must still be a 503 that leaves the mapping
+    alone. Swallow the exception in release_store_location -> 200 -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+
+    class _Dead(type(db.get_collection("stock_units"))):
+        def distinct(self, *a, **k):
+            raise RuntimeError("stock read died")
+
+    db._collections["stock_units"] = _Dead("stock_units", [])
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text
+    assert "Cannot read this shop" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+
+
+def test_R5_a_whitespace_sku_no_longer_waves_a_remap_through(monkeypatch):
+    """The deleted second spelling queried `products` with the NORMALISED sku
+    while the row stored it with whitespace, so `listed_pids` came back empty
+    and the door answered "holds nothing": the remap saved with no release at
+    all and the old location kept advertising the unit. One spelling now --
+    `listed_skus_on_hand_at` resolves product -> sku, never back again.
+    Re-introduce the sku -> product_id round trip -> no release call -> fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    db.seed("products", [{"product_id": "p1", "sku": " SP-1 "}])  # legacy/imported row
+    db.seed("catalog_products", [
+        {"id": "cat-1", "sku": "SP-1",
+         "ecom": {"shopify_inventory_item_id": "gid://shopify/InventoryItem/9"}}
+    ])
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    sets = [c_ for c_ in calls if "inventorySetQuantities" in c_["query"]]
+    assert len(sets) == 1 and sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ], "the OLD location is zeroed even though the products row carries a padded sku"
+
+
+def test_R5_a_missing_collection_is_unknown_not_nothing(monkeypatch):
+    """`listed_skus_on_hand_at` is documented STRICT ("it RAISES on a read it
+    cannot answer") and answered [] when any of its three collections did not
+    resolve -- the exact exit its own docstring names as the failure. Revert to
+    `return []` -> no raise -> this fails."""
+    from api.services.online_catalog import listed_skus_on_hand_at
+
+    class _NoCollections:
+        """A handle that answers "that collection does not exist" -- what a
+        half-provisioned database looks like to `_coll`."""
+
+        def get_collection(self, name):  # noqa: ARG002
+            return None
+
+        def __getitem__(self, name):  # noqa: ARG002
+            raise KeyError(name)
+
+    with pytest.raises(RuntimeError):
+        listed_skus_on_hand_at(_NoCollections(), "BV-BOK-02")
+
+
+def test_a_first_mapping_is_allowed_while_the_shop_holds_units(monkeypatch):
+    """Mapping a shop that already holds stock IS the go-live step."""
+    c, db = _world(monkeypatch, [_store("BV-DHN-02")])
+    db.seed("stock_units", [_unit("BV-DHN-02")])
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-DHN-02")["shopify_location_id"] == BOKARO

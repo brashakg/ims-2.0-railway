@@ -44,11 +44,10 @@ from .variants import (
 from .publish import _publish_to_online_store
 from .inventory import (
     _set_variant_tracking,
+    _stores,
     plan_product_stock,
-    resolve_online_location_id,
-    set_inventory_quantities,
+    push_skus_stock,
     sync_product_stock,
-    zero_stock_ledger_entry,
 )
 from .media import plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
@@ -353,7 +352,8 @@ async def push_product(
         # 2026-09-07 -- the website sells only what the shops can ship). Every
         # variant gid this press knows -- the response nodes, whatever seeding
         # just created, the stored ones -- gets tracked=true + the DENY policy,
-        # and each SKU's pooled quantity is written at the online location.
+        # and each SKU's own on-hand PER SHOP is written at that shop's Shopify
+        # location (one row per mapped shop, an explicit 0 included).
         # Fail-soft side channel: reported on the result and the audit row,
         # never flips ok and never withholds the publish (first-publish
         # behaviour is unchanged; the stock pass retries it on the next sync).
@@ -470,6 +470,19 @@ async def push_product(
         # is re-queued and the result carries PRICE_NOT_SYNCED so the sync
         # page / audit say so and the next press or scheduled run retries.
         price_not_synced = bool(vp_summary) and not vp_summary["ok"]
+        # ...AND SO IS THE STOCK (same rule, same shape). The stock pass is a
+        # fail-soft side channel that never withholds the publish -- but on a
+        # fresh catalogue with no shop mapped yet it returns STORE_UNMAPPED
+        # having written nothing, while the press still switched tracking on
+        # with the DENY policy and published. That is a listing LIVE on
+        # bettervision.in reading sold out at every location, and every screen
+        # said it worked: nothing renders PushResult.stock, and formatPushResult
+        # reads only the top-level ok / code / error. ok stays True (the product
+        # IS live, exactly like PRICE_NOT_SYNCED) but the code and the plain
+        # line come out where the toast, the audit row and the sync page read
+        # them. No re-queue: the stock diff still sees this product as changed
+        # (nothing reached its baseline), so the next pass retries it.
+        stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
         # the wrong price. Either way the row goes BACK in the queue so the next
@@ -486,7 +499,11 @@ async def push_product(
             shopify_id=new_gid,
             payload=payload,
             error=(
-                (_PRICE_NOT_SYNCED_MSG if price_not_synced else None)
+                (
+                    _PRICE_NOT_SYNCED_MSG
+                    if price_not_synced
+                    else ((stock_summary or {}).get("error") if stock_not_written else None)
+                )
                 if published_ok
                 else (
                     (pub_summary or {}).get("message")
@@ -495,7 +512,11 @@ async def push_product(
                 )
             ),
             code=(
-                (PRICE_NOT_SYNCED if price_not_synced else None)
+                (
+                    PRICE_NOT_SYNCED
+                    if price_not_synced
+                    else ((stock_summary or {}).get("code") if stock_not_written else None)
+                )
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),
@@ -651,23 +672,26 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
 
 async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
     """Take ONE size variant off sale WITHOUT touching the parent's listing:
-    inventoryPolicy DENY + quantity 0 on the child's own Shopify variant (the
-    parent's listing stays ACTIVE, every other size keeps selling). The
-    retire hook's door for a variant-of product (online_delist.delist_if_live
-    when the child spine's is_active flips off) -- is_active is then the ONLY
-    marker, and the quantity rule (online_stock_writeback._on_hand_for_skus:
-    an inactive spine lists 0) keeps every later stock pass at 0 until the
-    product is reactivated. NEVER productUpdate, never a status change.
+    inventoryPolicy DENY + quantity 0 on the child's own Shopify variant AT
+    EVERY MAPPED SHOP'S LOCATION (the parent's listing stays ACTIVE, every
+    other size keeps selling). The retire hook's door for a variant-of
+    product (online_delist.delist_if_live when the child spine's is_active
+    flips off) -- is_active is then the ONLY marker, and the quantity rule
+    (online_stock_writeback._on_hand_for_skus: an inactive spine lists 0)
+    keeps every later stock pass at 0 until the product is reactivated.
+    NEVER productUpdate, never a status change.
 
     Reads the bridge, never a second link: the child's catalog_variants row
     by ``sku`` gives the variant + inventory-item gids AND parent_product_id
     (the parent twin), whose ecom.shopify_product_id is the productId the
     bulk-update needs. Any of the three missing -> the same clean noop as an
     un-pushed product (nothing on Shopify to take down). DARK -> SIMULATED
-    plan, zero network. LIVE -> the two existing stock primitives
-    (_set_variant_tracking, set_inventory_quantities) at the resolved online
-    location, then the child's entry in the PARENT's stock ledger is zeroed
-    so a reactivation (pooled 1 vs sent 0) diffs and is re-sent. Fail-soft."""
+    plan, zero network. LIVE -> ``_set_variant_tracking`` (DENY) then THE ONE
+    writer, ``push_skus_stock`` with the SKU forced to 0 at every physical
+    shop: one 0 row per MAPPED location (a size retired at one location
+    would keep selling from the other shops), and the PARENT's nested
+    baseline gets the 0 through the writer's own write-back so a
+    reactivation (on-hand 1 vs sent 0) diffs and is re-sent. Fail-soft."""
     pid = product.get("id") or product.get("product_id")
     sku = str(product.get("sku") or "").strip()
     row: Dict[str, Any] = {}
@@ -721,25 +745,28 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
             reason=reason,
         )
     try:
-        loc = await resolve_online_location_id(db)
-        if not loc.get("location_id"):
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="variant",
-                action="delist",
-                target_id=pid,
-                ok=False,
-                shopify_id=variant_gid,
-                payload=payload,
-                code=loc.get("code"),
-                error=loc.get("error"),
-            )
-        payload["locationId"] = loc["location_id"]
         tracked = await _set_variant_tracking(db, payload["productId"], [variant_gid], "DENY")
-        written = await set_inventory_quantities(
-            db, loc["location_id"], {payload["inventoryItemId"]: 0}
+        # 0 at EVERY physical shop (mapped or not): the writer slices the
+        # mapped ones into rows and there is no holder to report.
+        zero = {sku: {str(s.get("store_id")): 0 for s in _stores(db) if s.get("store_id")}}
+        written = await push_skus_stock(
+            db,
+            [sku],
+            quantities=zero,
+            source="variant_delist",
+            product_id=str(parent_twin_id) if parent_twin_id else None,
+            policy="DENY",
+            tracked=bool(tracked.get("updated")),
         )
+        payload["rows"] = written.get("quantities") or {}
+        payload["stores_mapped"] = written.get("stores_mapped", 0)
         errors = list(tracked.get("errors") or []) + list(written.get("errors") or [])
+        code = written.get("code")
+        # "No shop mapped" is the WRITER's rule now (push_skus_stock returns
+        # STORE_UNMAPPED + the error and writes nothing), not a second copy
+        # here -- every other door goes through the same guard.
+        if code and not written.get("errors") and written.get("error"):
+            errors.append(written["error"])
         if errors:
             return PushResult(
                 mode=MODE_LIVE,
@@ -749,10 +776,9 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
                 ok=False,
                 shopify_id=variant_gid,
                 payload=payload,
+                code=code,
                 error="; ".join(str(e) for e in errors[:3]),
             )
-        if parent_twin_id and sku:
-            zero_stock_ledger_entry(db, parent_twin_id, sku)
         return PushResult(
             mode=MODE_LIVE,
             entity="variant",

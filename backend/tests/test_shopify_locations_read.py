@@ -12,10 +12,10 @@ per-store "Shopify location" dropdown. Pinned here, each REVERT-PROOF:
   3. The route joins each location to the shop already holding it through the
      ONE store reader (mapped_store_id / mapped_store_code).
   4. The rbac row is {ADMIN, SUPERADMIN} and the module :read union is
-     unchanged; BOTH locations queries page 50 wide; the dropdown's own
-     query (_LOCATIONS_LIST_QUERY) carries shipsInventory/address while the
-     picker's (_LOCATIONS_QUERY, the live Push-stock path) keeps #1125's
-     shape -- the read used here is the list query.
+     unchanged; the ONE locations query (_LOCATIONS_LIST_QUERY -- #1125's
+     single-online-location picker is deleted, see
+     test_no_single_online_location.py) pages 50 wide and carries
+     shipsInventory/address for the dropdown.
 
 Every Shopify call is MOCKED at shopify_push._graphql. No Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_shopify_locations_read.py -q
@@ -37,7 +37,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from strict_fakes import StrictDB  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
 from api.services import shopify_push  # noqa: E402
-from api.services.shopify_push.queries import _LOCATIONS_LIST_QUERY, _LOCATIONS_QUERY  # noqa: E402
+from api.services.shopify_push.queries import _LOCATIONS_LIST_QUERY  # noqa: E402
 
 BOKARO = "gid://shopify/Location/58793230523"
 PUNE = "gid://shopify/Location/76684427513"
@@ -111,7 +111,7 @@ def test_live_maps_every_node_and_promotes_a_bare_id(monkeypatch):
     _live(monkeypatch, spy)
     out = _run(shopify_push.list_locations(StrictDB()))
     assert out["mode"] == "LIVE" and out["reason"] is None
-    assert spy.calls == [_LOCATIONS_LIST_QUERY]  # the dropdown's query, not the picker's
+    assert spy.calls == [_LOCATIONS_LIST_QUERY]  # the ONE locations query
     assert out["locations"] == [
         {"id": BOKARO, "name": "Better Vision Sector 4", "isActive": True, "fulfillsOnlineOrders": True,
          "shipsInventory": True, "city": "Bokaro", "province": "Jharkhand"},
@@ -180,6 +180,25 @@ def test_route_joins_mapped_store_through_physical_stores(client, world, monkeyp
     assert rows["gid://shopify/Location/3"]["mapped_store_id"] is None
 
 
+def test_R4_P4_the_route_stamps_the_writers_own_stray_location_verdict(client, world, monkeypatch):
+    """ROUND-4 P4 (one rule, two implementations -- display echo). The sync page
+    re-derived "fulfils online orders and maps to no IMS shop" in TypeScript
+    from the raw locations plus the shop list, duplicating
+    inventory.is_stray_fulfilling (the predicate behind location_verdict) --
+    and the two already differed
+    (`isActive !== false` on the page, truthy `isActive` in the backend). The
+    route now stamps the WRITER's own predicate on every row and the page just
+    renders it. Drop `unmapped_online_fulfilling` from the route -> fails."""
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    rows = {row["id"]: row for row in r.json()["locations"]}
+    assert rows[BOKARO]["unmapped_online_fulfilling"] is False, "BV-BOK-02 holds it"
+    assert rows[PUNE]["unmapped_online_fulfilling"] is True, (
+        "an ONLINE store carrying the gid by hand is not a shop, so Pune is stray"
+    )
+    assert rows["gid://shopify/Location/3"]["unmapped_online_fulfilling"] is False
+
+
 def test_route_dark_is_empty_with_reason_and_zero_network(client, world, monkeypatch):
     boom = _CountingBoom()
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
@@ -220,10 +239,11 @@ def test_rbac_row_is_admin_superadmin_and_the_read_union_is_unchanged():
     }
 
 
-def test_locations_queries_page_fifty_wide_and_the_picker_shape_is_untouched():
-    for q in (_LOCATIONS_QUERY, _LOCATIONS_LIST_QUERY):
-        assert "first: 50" in q and "first: 10" not in q
-    for field in ("shipsInventory", "address", "city", "province"):
+def test_the_one_locations_query_pages_fifty_wide_with_the_dropdown_fields():
+    assert "first: 50" in _LOCATIONS_LIST_QUERY and "first: 10" not in _LOCATIONS_LIST_QUERY
+    for field in ("shipsInventory", "address", "city", "province", "fulfillsOnlineOrders"):
         assert field in _LOCATIONS_LIST_QUERY
-        assert field not in _LOCATIONS_QUERY  # the live stock path's read shape is #1125's
-    assert "{ nodes { id name isActive fulfillsOnlineOrders } }" in _LOCATIONS_QUERY
+    # #1125's single-online-location picker query is GONE with its module.
+    from api.services.shopify_push import queries
+
+    assert not hasattr(queries, "_LOCATIONS_QUERY")

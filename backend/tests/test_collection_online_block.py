@@ -29,6 +29,8 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
@@ -321,42 +323,51 @@ def test_block_unknown_collection_is_404(client, auth_headers, patched_db):
 # ===========================================================================
 
 def test_writeback_forces_zero_available_for_blocked(monkeypatch):
+    """A blocked SKU is written as 0 at EVERY mapped shop whatever the shelves
+    hold (per-store locations, owner ruling 2026-09-06); an unblocked SKU gets
+    each shop's own number. The block is part of THE rule
+    (online_quantities_for_skus), so the same 0 reaches the schedule."""
+    from strict_fakes import StrictDB
     from api.services import online_stock_writeback as wb
     from api.services import online_catalog, stock_allocation
-    from agents import nexus_providers
 
-    db = _EngineDB()
-    db["ecom_collections"].insert_one(
+    db = StrictDB()
+    db.seed("ecom_collections", [
         {"collection_id": "C-BAN", "collection_type": "CUSTOM", "online_sync_blocked": True,
-         "products": [{"sku": "SKU-A", "position": 0}]}
-    )
+         "products": [{"sku": "SKU-A", "position": 0}]},
+    ])
+    db.seed("stores", [
+        {"store_id": "S1", "store_code": "S1", "store_name": "S1", "store_type": "RETAIL",
+         "is_active": True, "shopify_location_id": "gid://shopify/Location/1"},
+        {"store_id": "S2", "store_code": "S2", "store_name": "S2", "store_type": "RETAIL",
+         "is_active": True, "shopify_location_id": "gid://shopify/Location/2"},
+    ])
+    captured = []
 
-    captured = {}
+    async def _spy(db_, query, variables):
+        for r in variables["input"]["quantities"]:
+            captured.append((r["inventoryItemId"], r["locationId"], r["quantity"]))
+        return {"data": {"inventorySetQuantities": {"userErrors": [], "inventoryAdjustmentGroup": {}}}}
 
-    class _Res:
-        ok = True
-        items_synced = 1
-
-    async def _setter(db_, inv, loc, qty):
-        captured[inv] = qty
-        return _Res()
-
-    monkeypatch.setattr(nexus_providers, "shopify_set_inventory_available", _setter)
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": True)
+    monkeypatch.setattr(shopify_push, "_graphql", _spy)
     monkeypatch.setattr(online_catalog, "online_mapping_available", lambda db: True)
-    monkeypatch.setattr(
-        online_catalog, "online_variant_targets_for_skus",
-        lambda db, skus: {
-            "SKU-A": {"inventory_item_id": "iiA", "location_id": "L"},
-            "SKU-B": {"inventory_item_id": "iiB", "location_id": "L"},
-        },
-    )
+    monkeypatch.setattr(online_catalog, "inventory_items_for_skus",
+                        lambda db, skus: {"SKU-A": "iiA", "SKU-B": "iiB"})
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db_, skus, store: {"SKU-A": 5, "SKU-B": 7})
     monkeypatch.setattr(stock_allocation, "recommend_allocation", lambda oh, buf: oh)
 
     summary = _run(wb.writeback_skus(db, ["SKU-A", "SKU-B"], store_id="S1"))
-    assert captured["iiA"] == 0   # blocked -> forced 0 (never sellable online)
-    assert captured["iiB"] == 7   # not blocked -> its on-hand
-    assert summary["blocked_online"] == 1
+    assert summary["pushed"] == 2
+    rows = set(captured)
+    assert rows == {
+        ("iiA", "gid://shopify/Location/1", 0),  # blocked -> 0 everywhere
+        ("iiA", "gid://shopify/Location/2", 0),
+        ("iiB", "gid://shopify/Location/1", 7),  # not blocked -> its on-hand
+        ("iiB", "gid://shopify/Location/2", 7),
+    }
 
 
 # ===========================================================================

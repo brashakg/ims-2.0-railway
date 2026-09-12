@@ -4,6 +4,7 @@ IMS 2.0 - Stores Router
 Store management endpoints
 """
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -28,6 +29,8 @@ from ..dependencies import (
 )
 from ..services import org_validation as ov
 from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -209,7 +212,11 @@ def _location_holder(db, gid: str) -> Optional[dict]:
     through stores_util.physical_stores, the ONE reader the locations dropdown
     (GET /online-store/push/locations) joins against, so the validator and the
     dropdown can never disagree about who holds a location: an inactive or
-    ONLINE doc holds nothing. No DB handle -> [] -> None."""
+    ONLINE doc holds nothing. That reader NORMALISES the gid (round-5 P3), so
+    a doc carrying bare digits is held here exactly as the writer holds it --
+    compared raw, it was mapped to the writer and free to this refusal, and two
+    shops could claim one location (which the writer then wrote for NEITHER).
+    No DB handle -> [] -> None."""
     return next(
         (s for s in physical_stores(db) if s.get("shopify_location_id") == gid), None
     )
@@ -221,8 +228,10 @@ def _validate_store_payload(
     db=None,
     store_id: Optional[str] = None,
     existing: Optional[dict] = None,
-) -> None:
+) -> Optional[str]:
     """Block (HTTP 400) on malformed store fields. Validates only present keys.
+    Returns the OLD Shopify location gid the caller must RELEASE before saving
+    (see below), else None.
 
     ``shopify_location_id`` (when present) is NORMALISED in place -- bare
     digits become ``gid://shopify/Location/<n>`` -- and refused with 400 when
@@ -235,7 +244,22 @@ def _validate_store_payload(
     the physical list with a gid: a gid in the payload, or ``is_active: True``.
     ``store_id`` is the doc's own id on an update (create passes none and the
     known-id check falls back to ``store_code``).
+
+    CHANGING or CLEARING a gid the doc already carries is NOT refused any more
+    -- it is RELEASED. The per-store writer only touches locations the store
+    list maps, so the old location would otherwise keep showing that shop's
+    units on Shopify forever; refusing the save was the wrong remedy, because
+    on a fresh setup the FIRST wrong pick from a dropdown of four
+    similarly-named locations then became permanent the moment the shop
+    received one GRN unit of a listed product ("transfer the units out first"
+    is not a thing an optical shop can do). This returns the OLD gid on EVERY
+    change or clear so the async caller can run it through THE writer
+    (``shopify_push.release_store_location``) and only then save -- that door
+    zeroes the old location when (and only when) the shop holds listed units
+    there, and ALWAYS re-arms the per-store baseline, which is keyed by store
+    and therefore blind to a remap.
     """
+    release_old: Optional[str] = None
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
     if data.get("phone") and not ov.validate_phone(data["phone"]):
@@ -272,6 +296,18 @@ def _validate_store_payload(
         data["shopify_location_id"] = gid
         if not gid:
             data["shopify_location_name"] = None
+        old = _as_shopify_gid((existing or {}).get("shopify_location_id"), "Location")
+        if old and gid != old and db is not None:
+            # EVERY change and EVERY clear, whatever the shelf holds (round-5
+            # P1/P2). The last-sent baseline is keyed by STORE, not by
+            # location, so a remap is invisible to the diff and the NEW
+            # location would never be written at all. Gated on "does this shop
+            # hold listed units", a correction of a shop holding nothing was a
+            # fully green NOOP over a location Shopify keeps selling from.
+            # What the shelf holds decides only whether the OLD location is
+            # ZEROED, and release_store_location -- the ONE reader of that
+            # shelf, STRICT -- decides that there.
+            release_old = old
     # The gid the doc carries AFTER this write, whichever side of the rule the
     # payload touches (a new gid, a store_type flip, a reactivation).
     gid = (
@@ -280,7 +316,7 @@ def _validate_store_payload(
         else str((existing or {}).get("shopify_location_id") or "")
     )
     if not gid:
-        return
+        return release_old
     sid = store_id or data.get("store_code")
     if declared or "store_type" in data:
         declared_type = str(
@@ -304,6 +340,7 @@ def _validate_store_payload(
                     f"{holder.get('store_code') or holder.get('store_id')}"
                 ),
             )
+    return release_old
 
 
 async def _shopify_location_name(db, gid: str) -> Optional[str]:
@@ -322,23 +359,61 @@ async def _shopify_location_name(db, gid: str) -> Optional[str]:
     return None
 
 
+_STOCK_UNREADABLE = (
+    "Cannot read this shop's stock right now, so nothing was changed. "
+    "Try again in a moment."
+)
+
+
+def _stock_unreadable(exc: Exception) -> HTTPException:
+    """STRICT. The stock read behind the location and deactivation rules used
+    to be wrapped in ``except: pass`` -> None, which every caller reads as
+    "the shop holds nothing" -- the ONE door that lets a remap through while
+    the old Shopify location keeps advertising units nothing will ever zero
+    again. services/stores_util.py propagates a Mongo error for exactly this
+    reason ("an unknown store list must never silently read as no shops"); an
+    unknown SHELF must not read as an empty one either."""
+    logger.warning("[STORES] stock read failed (STRICT -> refuse): %s", exc)
+    return HTTPException(status_code=503, detail=_STOCK_UNREADABLE)
+
+
+def _on_hand_count(db, extra: dict) -> int:
+    """On-hand units matching ``extra``. "On hand" is
+    ``item_events.on_hand_match()`` -- the SAME question the writer and eleven
+    other readers ask. It used to be hand-typed here as ``{"status": {"$nin":
+    ["SOLD", "RETURNED", "SCRAPPED"]}}`` over a legacy ``stock`` collection
+    that was never provisioned: two of those tokens are not even StockState
+    members, and a second spelling of on-hand is how the same unit comes to be
+    here for one reader and gone for the next."""
+    if db is None:
+        return 0
+    from ..services.item_events import on_hand_match
+
+    try:
+        coll = db.get_collection("stock_units")
+        if coll is None:
+            return 0
+        return int(coll.count_documents({**extra, **on_hand_match()}))
+    except Exception as exc:  # noqa: BLE001 -- re-raised as 503, never swallowed
+        raise _stock_unreadable(exc) from exc
+
+
+def _store_on_hand_units(db, store_id: str) -> Optional[str]:
+    """Human description of the stock a store still holds ("3 on-hand stock
+    unit(s)"), else None -- the "units must leave first" rule behind
+    DEACTIVATION. Raises 503 when the shelf cannot be read."""
+    n = _on_hand_count(db, {"store_id": store_id})
+    return f"{n} on-hand stock unit(s)" if n else None
+
+
 def _store_active_dependents(db, store_id: str) -> Optional[str]:
     """Human description if a store still has stock / open orders / staff, so
     deactivation can be blocked. Fail-soft."""
     if db is None:
         return None
-    for coll in ("stock", "stock_units"):
-        try:
-            n = db.get_collection(coll).count_documents(
-                {
-                    "store_id": store_id,
-                    "status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]},
-                }
-            )
-            if n:
-                return f"{n} on-hand stock unit(s)"
-        except Exception:
-            pass
+    held = _store_on_hand_units(db, store_id)
+    if held:
+        return held
     try:
         n = db.get_collection("orders").count_documents(
             {
@@ -853,9 +928,34 @@ async def update_store(
 
         update_data = store.model_dump(exclude_unset=True)
         db = _get_db()
-        _validate_store_payload(
+        release_old = _validate_store_payload(
             update_data, db=db, store_id=store_id, existing=existing
         )
+        if release_old:
+            # The shop is moving off a Shopify location. THE writer zeroes the
+            # units that location advertises (once the gid is gone from the
+            # store list nothing ever writes it again) and re-arms the
+            # per-store baseline so the NEW location is written on the next
+            # pass. The save only happens if that succeeded, so a failure
+            # leaves the mapping as it was instead of stranding numbers on an
+            # orphaned location -- or saving a gid the diff will never send.
+            from ..services import shopify_push as _push
+
+            released = await _push.release_store_location(db, store_id, release_old)
+            if not released.get("ok"):
+                if released.get("code") == _push.STOCK_ONHAND_UNKNOWN:
+                    # STRICT: an unknown shelf is never "holds nothing".
+                    raise _stock_unreadable(
+                        RuntimeError(released.get("error") or "listed stock unreadable")
+                    )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Could not zero this shop's units at its old Shopify location, "
+                        "so the location was not changed (they would keep showing on "
+                        f"the website): {released.get('error') or 'Shopify refused the write'}"
+                    ),
+                )
         if update_data.get("shopify_location_id"):
             update_data["shopify_location_name"] = (
                 await _shopify_location_name(db, update_data["shopify_location_id"])

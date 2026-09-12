@@ -9,10 +9,15 @@ inventory targets the stock write-back needs -- reading ONLY the IMS catalog:
   catalog_products.ecom   -- status (DRAFT/PUBLISHED/ARCHIVED) +
                              shopify_product_id (set on first LIVE push)
   catalog_variants        -- sku / store_barcode / barcode / gtin identity +
-                             shopify_variant_id / shopify_inventory_item_id /
-                             shopify_location_id (the write-back mapping,
-                             the same fields online_sync_health + the parity
-                             monitor already consume)
+                             shopify_variant_id / shopify_inventory_item_id
+                             (the same fields online_sync_health + the parity
+                             monitor already consume). NOT
+                             shopify_location_id: the location is per SHOP on
+                             the store record (owner ruling 2026-09-06) and
+                             that per-variant column is dead -- it is no
+                             longer projected, so no reader can drift back to
+                             it while design 3.6 waits to drop the column in
+                             PR 3.
 
 Design rules (unchanged from the old bridge contract):
 - Fully FAIL-SOFT. Missing DB / collection -> empty result, never raise,
@@ -31,7 +36,6 @@ Design rules (unchanged from the old bridge contract):
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -66,6 +70,100 @@ _VARIANT_KEY_FIELDS = ("sku", "store_barcode", "barcode", "gtin")
 _PRODUCT_KEY_FIELDS = ("sku", "barcode")
 
 
+def merge_variant_rows(*groups: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """THE union of catalog_variants rows found by DIFFERENT parent links,
+    de-duplicated on sku (then variant_id), ordered by sku.
+
+    A product's size rows are linked to it TWICE -- ``parent_product_id`` and
+    ``parent_sku`` -- and ``product_master._variant_row`` keys the first on
+    ``parent.pim_product_id or parent.product_id``, so a size created before
+    the parent's catalog twin existed carries the SPINE id and one created
+    after carries the CATALOG id. The three readers of these rows each wrote
+    ``by_pid ... or by_sku ...``, which is an EITHER/OR: one row under the id
+    link hid every row that only had the sku link. On the stock path that meant
+    a size whose inventory item was written at no location at all, under a run
+    that reported ok=True and synced=1 -- IMS silently stopped being the master
+    of that number. Union, not fallback, in ONE place."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for group in groups:
+        for row in group or []:
+            if not isinstance(row, dict):
+                continue
+            key = normalize_sku(row.get("sku")) or str(row.get("variant_id") or id(row))
+            out.setdefault(key, row)
+    return [out[k] for k in sorted(out)]
+
+
+def variant_rows_for_product(db, product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every catalog_variants row of ``product`` -- the UNION of its
+    ``parent_product_id`` and ``parent_sku`` links (see
+    :func:`merge_variant_rows`). Fail-soft -> []. Read-only; ``_id`` stripped."""
+    coll = _coll(db, "catalog_variants")
+    if coll is None or not isinstance(product, dict):
+        return []
+    pid = str(product.get("id") or product.get("product_id") or "")
+    sku = normalize_sku(product.get("sku"))
+    by_pid: List[Dict[str, Any]] = []
+    by_sku: List[Dict[str, Any]] = []
+    try:
+        if pid:
+            by_pid = list(coll.find({"parent_product_id": pid}))
+        if sku:
+            by_sku = list(coll.find({"parent_sku": sku}))
+    except Exception as exc:  # noqa: BLE001 -- a read never raises into a push
+        logger.warning("[ONLINE_CATALOG] variant read failed for %s: %s", pid or sku, exc)
+    rows = merge_variant_rows(by_pid, by_sku)
+    for r in rows:
+        r.pop("_id", None)
+    return rows
+
+
+def listed_skus_on_hand_at(db, store_id: str) -> List[str]:
+    """The SKUs this shop holds ON-HAND that the WEBSITE LISTS (they carry a
+    Shopify inventory item).
+
+    STRICT -- it RAISES on a read it cannot answer. Two doors hang off it (the
+    Organization page's "you cannot move the Shopify location while these units
+    are on the shelf" rule, and the location RELEASE that makes correcting a
+    mis-mapping possible), and for both of them "I could not read" answering as
+    "nothing is listed" is the failure: the first waves a remap through, the
+    second silently releases nothing. A collection that does not resolve is the
+    one exit its own docstring named as the failure and it answered ``[]``
+    anyway (round-5 P2), so it RAISES now too; only "there is no database at
+    all" (db is None -- mock mode, nothing was ever published) answers ``[]``.
+    """
+    if db is None or not store_id:
+        return []
+    from .item_events import on_hand_match
+
+    units = _coll(db, "stock_units")
+    products = _coll(db, "products")
+    catalog = _coll(db, "catalog_products")
+    if units is None or products is None or catalog is None:
+        raise RuntimeError(
+            "stock_units / products / catalog_products did not resolve -- what "
+            "this shop holds is UNKNOWN, not 'nothing'"
+        )
+    pids = [p for p in units.distinct("product_id", {"store_id": store_id, **on_hand_match()}) if p]
+    if not pids:
+        return []
+    skus = sorted(
+        {
+            normalize_sku(d.get("sku"))
+            for d in products.find(
+                {"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "sku": 1}
+            )
+            if normalize_sku(d.get("sku"))
+        }
+    )
+    # inventory_items_for_skus is fail-SOFT ({} on a bad read) and {} here would
+    # read as "nothing is listed". One strict touch of the catalog first, so a
+    # collection that cannot be read raises instead of answering "no".
+    catalog.find_one({}, {"_id": 1})
+    listed = set(inventory_items_for_skus(db, skus))
+    return [s for s in skus if s in listed]
+
+
 def _clean_keys(skus: Optional[List[str]]) -> List[str]:
     return sorted({normalize_sku(s) for s in (skus or []) if normalize_sku(s)})
 
@@ -95,7 +193,6 @@ def _variants_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
                     "parent_sku": 1,
                     "shopify_variant_id": 1,
                     "shopify_inventory_item_id": 1,
-                    "shopify_location_id": 1,
                 },
             )
         )
@@ -398,8 +495,8 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
 def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
     """{requested_key: shopify_inventory_item_id} for identifiers that map to an
     online variant carrying an InventoryItem gid (catalog_variants first, then
-    the catalog_products ecom sub-doc fallback -- the same two sources
-    online_sync_health._inventory_item_id_for_sku reads). Fail-soft {}."""
+    the catalog_products ecom sub-doc fallback). ``listings_for_skus`` walks
+    the same two lookups to name the LISTING. Fail-soft {}."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
@@ -418,63 +515,37 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
     return out
 
 
-def _online_location_id(db) -> str:
-    """The Shopify location gid stock write-backs target: the
-    SHOPIFY_ONLINE_LOCATION_ID env wins (authoritative single online location),
-    else the integrations.shopify config's online_location_id. Fail-soft ''."""
-    env_val = (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip()
-    if env_val:
-        return env_val
-    try:
-        # The ONE stored reader (shopify_push.inventory): the registry row a
-        # previous `locations` lookup persisted. Nothing else ever set the old
-        # integrations.shopify online_location_id field (the writer was dead).
-        from .shopify_push.inventory import stored_online_location_id
-
-        return normalize_sku(stored_online_location_id(db)[0])
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def online_variant_targets_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Return {requested_key: {inventory_item_id, location_id}} for identifiers
-    that map to an online variant carrying a Shopify InventoryItem gid -- the
-    targets the POS-sale -> Shopify stock write-back pushes to.
-
-    Source is IMS Mongo (catalog_variants.shopify_inventory_item_id, with the
-    catalog_products ecom fallback). The location gid resolves, in priority
-    order: SHOPIFY_ONLINE_LOCATION_ID env -> the variant's own
-    shopify_location_id -> integrations.shopify online_location_id. A key with
-    no usable location is skipped (the caller treats a missing target as "not
-    online" -- but see online_stock_writeback's guard-gap alert, which now
-    makes that loud for genuinely-online SKUs). Empty dict on any failure."""
+def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
+    """``{catalog product id: [requested keys]}`` -- THE listing that carries
+    each key, for the stock baseline (``ecom.online_stock`` lives on the
+    listing): the PARENT of the catalog_variants row that matches it (a size
+    row rides its parent's listing), else the catalog_products row whose own
+    sku / barcode it is -- and a variant-of twin resolves to its PARENT twin
+    (``ecom.variant_of.twin_id``), never to itself: a size variant owns no
+    listing and must never carry a baseline the schedule never diffs. The
+    same two lookups ``inventory_items_for_skus`` resolves targets with, so
+    the target and the listing can never disagree. Fail-soft ``{}``."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
-    env_location = (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip()
-    fallback_location = "" if env_location else _online_location_id(db)
+    out: Dict[str, List[str]] = {}
 
-    out: Dict[str, Dict[str, Any]] = {}
+    def _add(pid: Any, key: str) -> None:
+        if pid and key not in out.setdefault(str(pid), []):
+            out[str(pid)].append(key)
+
     variants = _variants_by_key(db, keys)
+    parents = _parents_for_variants(db, list(variants.values()))
     for key, var in variants.items():
-        inv = normalize_sku(var.get("shopify_inventory_item_id"))
-        if not inv:
-            continue
-        loc = env_location or normalize_sku(var.get("shopify_location_id")) or fallback_location
-        if not loc:
-            continue
-        out[key] = {"inventory_item_id": inv, "location_id": loc}
-
-    remaining = [k for k in keys if k not in out]
-    if remaining:
-        loc = env_location or fallback_location
-        if loc:
-            for key, doc in _products_by_key(db, remaining).items():
-                inv = normalize_sku(
-                    (doc.get("ecom") or {}).get("shopify_inventory_item_id")
-                )
-                if inv:
-                    out[key] = {"inventory_item_id": inv, "location_id": loc}
+        parent = parents.get(str(var.get("parent_product_id") or "")) or parents.get(
+            normalize_sku(var.get("parent_sku"))
+        )
+        _add((parent or {}).get("id"), key)
+    remaining = [k for k in keys if k not in variants]
+    for key, doc in _products_by_key(db, remaining).items():
+        link = (doc.get("ecom") or {}).get("variant_of")
+        pid = (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")
+        _add(pid, key)
     return out
 
 
