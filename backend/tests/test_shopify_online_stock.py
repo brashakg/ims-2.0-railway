@@ -1069,17 +1069,51 @@ def test_T15_a_listing_with_size_rows_still_writes_its_own_inventory_item(monkey
     }
 
 
-def test_two_skus_on_one_inventory_item_write_it_once_and_name_the_second(monkeypatch):
-    """A mis-stamped mapping (two SKUs, one inventory item) must not send a
-    duplicate (item, location) pair -- Shopify would refuse the whole chunk."""
-    db = _listed(_db(a=2, b=1, c=0))
-    db.seed("products", [{"product_id": "spine-x", "sku": "SP-X"}])
-    db.seed("catalog_variants", [{"sku": "SP-X", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}])
+def test_R5_two_skus_on_one_inventory_item_write_NEITHER(monkeypatch):
+    """ROUND-5 (wrong number + permanent not-ok). A mis-stamped mapping (two
+    SKUs, one Shopify inventory item) must not send a duplicate (item,
+    location) pair -- Shopify refuses the whole chunk. It used to name the
+    SECOND SKU and write the FIRST, so ITERATION ORDER picked which shelf the
+    website showed: product_skus returns the variant rows (sorted by sku)
+    before the product's own SKU, so an alphabetically earlier size row won by
+    accident and Shopify showed 1 behind a variant IMS held 4 units for. The
+    baseline then carried only the winner while the diff compared both, so the
+    listing was "changed" with ok=False on EVERY 01:00 / 09:00 pass forever and
+    never self-healed.
+
+    Same answer as two shops on one location: NEITHER is written, once, loudly.
+    Restore the `item_of` winner-takes-first branch -> a row is written and the
+    code is None -> this fails."""
+    db = _listed(_db(a=3, b=0, c=0, sku="PARENT-1"), sku="PARENT-1")
+    db.seed("products", [{"product_id": "spine-x", "sku": "AAA-SIZE-L"}])
+    db.seed("stock_units", [{"stock_id": "x1", "product_id": "spine-x", "store_id": "BV-A", "status": "AVAILABLE"}])
+    db.seed("catalog_variants", [
+        {"sku": "AAA-SIZE-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}
+    ])
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
-    out = _run(shopify_push.push_skus_stock(db, ["SP-1", "SP-X"], source="test"))
-    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
-    assert out["ok"] is False and any("not written twice" in e and "SP-X" in e for e in out["errors"])
+    out = _run(shopify_push.push_skus_stock(db, ["AAA-SIZE-L", "PARENT-1"], source="test"))
+    assert spy.rows() == set(), "one quantity per (item, location): neither shelf is guessed at"
+    assert out["ok"] is False and out["code"] == shopify_push.STOCK_TARGET_DUPLICATE
+    assert "AAA-SIZE-L, PARENT-1" in out["error"] and INV_GID in out["error"]
+    assert _baseline(db) is None, "nothing was written, so nothing enters the baseline"
+    # The rule is spelled ONCE: the sweep's PREVIEW reports the same verdict as
+    # the press (no network at all on the preview).
+    _live(monkeypatch, _explode)
+    plan = _run(shopify_push.sync_stock_levels(db, dry_run=True))
+    assert plan.ok is False and plan.code == shopify_push.STOCK_TARGET_DUPLICATE
+    # ...and it never outranks a LIVE oversell report: an unmapped holder wins.
+    db2 = _listed(_db(a=3, b=0, c=0, d=2, sku="PARENT-1"), sku="PARENT-1")
+    db2.seed("catalog_variants", [
+        {"sku": "AAA-SIZE-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}
+    ])
+    db2.seed("products", [{"product_id": "spine-x", "sku": "AAA-SIZE-L"}])
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    out2 = _run(shopify_push.push_skus_stock(db2, ["AAA-SIZE-L", "PARENT-1"], source="test"))
+    assert out2["code"] == shopify_push.STORE_UNMAPPED, (
+        "a permanent data defect must never hide a shop whose stock is invisible online"
+    )
 
 
 def test_blocked_sku_is_zero_in_the_rule_so_the_schedule_agrees_with_the_pos_door(monkeypatch):

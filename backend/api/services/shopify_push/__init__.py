@@ -199,6 +199,7 @@ from .queries import (  # noqa: F401
 from .inventory import (  # noqa: F401
     STOCK_ONHAND_UNKNOWN,
     STOCK_TARGET_MISSING,
+    STOCK_TARGET_DUPLICATE,
     STORE_UNMAPPED,
     STORE_LOCATION_DUPLICATE,
     STOCK_STORE_ORPHAN,
@@ -209,6 +210,7 @@ from .inventory import (  # noqa: F401
     list_locations,
     unmapped_fulfilling_locations,
     is_stray_fulfilling,
+    duplicate_inventory_items,
     last_stray_locations,
     release_store_location,
     _mapped as mapped_store_locations,

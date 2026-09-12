@@ -93,6 +93,11 @@ from .queries import (
 # for the plain-language line).
 STOCK_ONHAND_UNKNOWN = "STOCK_ONHAND_UNKNOWN"
 STOCK_TARGET_MISSING = "STOCK_TARGET_MISSING"
+# Two IMS SKUs stamped on ONE Shopify inventory item: Shopify holds exactly one
+# quantity per (item, location), so one SKU's shelf would become the item's
+# number for both. NEITHER is written -- the same answer as two shops on one
+# location (STORE_LOCATION_DUPLICATE).
+STOCK_TARGET_DUPLICATE = "STOCK_TARGET_DUPLICATE"
 STORE_UNMAPPED = "STORE_UNMAPPED"
 STOCK_ACTIVATION_FAILED = "STOCK_ACTIVATION_FAILED"
 # Two shops claiming ONE Shopify location: Shopify takes one quantity per
@@ -830,6 +835,38 @@ def _duplicate_error(conflicts: Dict[str, List[str]]) -> str:
     )
 
 
+def duplicate_inventory_items(targets: Dict[str, Any]) -> Dict[str, List[str]]:
+    """``{inventory_item_gid: [sku, ...]}`` for a Shopify inventory item claimed
+    by MORE THAN ONE of ``targets``' SKUs -- the mirror of
+    ``_location_conflicts`` on the other axis of the same (item, location)
+    pair, spelled once so the writer and the preview cannot drift.
+
+    Shopify takes ONE quantity per (inventory item, location). The writer used
+    to name the SECOND SKU and skip it, so the winner was decided by iteration
+    order -- ``product_skus`` returns the variant rows (sorted by sku) before
+    the product's own SKU, so an alphabetically earlier size row won by
+    accident and Shopify showed ITS count for a variant IMS holds more units
+    for. The baseline then held only the winner while the diff compared both,
+    so the listing was "changed" with ok=False on every 01:00 / 09:00 pass
+    forever and never self-healed."""
+    claimed: Dict[str, List[str]] = {}
+    for sku, inv in (targets or {}).items():
+        if not inv:
+            continue
+        claimed.setdefault(_as_shopify_gid(inv, "InventoryItem"), []).append(str(sku))
+    return {gid: sorted(skus) for gid, skus in claimed.items() if len(skus) > 1}
+
+
+def _duplicate_target_error(duplicates: Dict[str, List[str]]) -> str:
+    pairs = "; ".join(f"{gid} <- {', '.join(skus)}" for gid, skus in sorted(duplicates.items()))
+    return (
+        f"two SKUs share one Shopify inventory item ({pairs}) -- neither was "
+        f"written (Shopify holds one quantity per item and location, so one "
+        f"SKU's count would become the other's); give each SKU its own Shopify "
+        f"variant, or clear the duplicated shopify_inventory_item_id"
+    )
+
+
 def _orphan_error(store_ids: List[str]) -> str:
     return (
         f"on-hand units sit at store id(s) no shop record matches "
@@ -878,6 +915,7 @@ def _verdict_for(
     stray_locations: Optional[List[Dict[str, Any]]] = None,
     unknown_error: Optional[str] = None,
     orphans: Optional[List[str]] = None,
+    duplicate_targets: Optional[Dict[str, List[str]]] = None,
     missing: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """THE priority ladder behind every stock verdict -- the per-product plan,
@@ -893,8 +931,11 @@ def _verdict_for(
 
     NOTHING WRITABLE first, then a duplicated location (neither shop written),
     then an unmapped holder (the mapped shops WERE written), then a stray
-    Shopify location, an unreadable shop, an orphan store id and last a missing
-    Shopify target."""
+    Shopify location, an unreadable shop, an orphan store id, a duplicated
+    Shopify inventory item and last a missing Shopify target. The two
+    data-defect rungs stay at the BOTTOM on purpose: they are permanent until a
+    human fixes the mapping, and a permanent code must never outrank -- and so
+    hide -- a live STORE_UNMAPPED report."""
     if no_mapping:
         return STORE_UNMAPPED, _no_mapping_error()
     if conflicts:
@@ -907,6 +948,8 @@ def _verdict_for(
         return STOCK_ONHAND_UNKNOWN, unknown_error
     if orphans:
         return STOCK_STORE_ORPHAN, _orphan_error(list(orphans))
+    if duplicate_targets:
+        return STOCK_TARGET_DUPLICATE, _duplicate_target_error(dict(duplicate_targets))
     if missing:
         missing = list(missing)
         return (
@@ -1015,6 +1058,16 @@ async def push_skus_stock(
     # write-back get it): with no location to write there is nothing to say but
     # "nothing written", and a green run here is how a caller comes to flip
     # tracked=true + DENY behind no quantity and report "1 written".
+    targets = inventory_items_for_skus(db, distinct)
+    # Two SKUs on ONE Shopify inventory item: NEITHER is written. Naming the
+    # second and writing the first let iteration order pick which shelf the
+    # website showed, and left the loser out of the baseline while the diff
+    # compared both -- ok=False and "changed" on every pass, forever.
+    duplicate_targets = duplicate_inventory_items(targets)
+    for _gid, _skus in sorted(duplicate_targets.items()):
+        summary["errors"].append(
+            f"{', '.join(_skus)}: one Shopify inventory item ({_gid}) -- neither written"
+        )
     summary["code"], summary["error"] = _verdict_for(
         no_mapping=not mapped,
         conflicts=conflicts,
@@ -1025,12 +1078,11 @@ async def push_skus_stock(
             else None
         ),
         orphans=orphans,
+        duplicate_targets=duplicate_targets,
     )
 
-    targets = inventory_items_for_skus(db, distinct)
     rows: List[Tuple[str, str, int]] = []
     key_of: Dict[Tuple[str, str], Tuple[str, str]] = {}
-    item_of: Dict[str, str] = {}
     for sku in distinct:
         inv = targets.get(sku)
         if not inv:
@@ -1044,16 +1096,8 @@ async def push_skus_stock(
             summary["errors"].append(f"{sku}: on-hand unknown -- not written")
             continue
         inv_gid = _as_shopify_gid(inv, "InventoryItem")
-        if inv_gid in item_of:
-            # Two SKUs on one inventory item (a mis-stamped mapping): Shopify
-            # refuses a duplicate (item, location) pair and the whole chunk
-            # would fail, so the second SKU is named and skipped instead.
-            summary["errors"].append(
-                f"{sku}: inventory item {inv_gid} is already carried by {item_of[inv_gid]} "
-                f"-- not written twice"
-            )
+        if inv_gid in duplicate_targets:
             continue
-        item_of[inv_gid] = sku
         for sid, loc in mapped.items():
             if sid not in per:
                 # That shop's read failed: written nowhere this pass (named in
@@ -1393,6 +1437,14 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         logger.warning("[SHOPIFY_STOCK] target lookup failed for the plan: %s", exc)
         have = {}
     missing = sorted({s for s in changed_skus if not have.get(s)})
+    # ...and the other half of the same (item, location) pair: two SKUs of ONE
+    # listing stamped on one Shopify inventory item. Resolved PER LISTING, the
+    # way the press resolves it, so the preview and the press agree exactly.
+    duplicate_targets: Dict[str, List[str]] = {}
+    for _p, _v, _sks, _q in changed:
+        duplicate_targets.update(
+            duplicate_inventory_items({s: have.get(s) for s in _sks})
+        )
     # INVARIANT 2, in the backend verdict and not only in the React page: a
     # Shopify location that fulfils online orders and maps to no shop keeps
     # selling its own stale number. ONE read; zero network when DARK, and the
@@ -1432,12 +1484,20 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
                 _unknown_error(_labels(stores, sorted(unknown))) if unknown else None
             ),
             orphans=orphans,
+            duplicate_targets=duplicate_targets,
             missing=missing,
         )
 
     def _all_ok() -> bool:
         return not (
-            no_mapping or conflicts or holders or stray_locations or unknown or orphans or missing
+            no_mapping
+            or conflicts
+            or holders
+            or stray_locations
+            or unknown
+            or orphans
+            or duplicate_targets
+            or missing
         )
 
     if not live or dry_run:
