@@ -149,6 +149,39 @@ describe('per-shop stock on the sync page', () => {
     expect(result.textContent).not.toContain(PUNE_UUID + ':');
   });
 
+  // Round 5 (first-push): the toast said "Stock not written" over a press that
+  // WROTE. The else arm fired for every not-ok code except STORE_UNMAPPED and
+  // dropped the count line entirely, so a LIVE press returning ok=false /
+  // SHOPIFY_LOCATION_UNMAPPED with synced=1 told the owner nothing had reached
+  // Shopify while three shops' numbers had just gone out. Restore
+  // `Stock not written — ...` and this fails.
+  it('a not-ok press that DID write says what it wrote, then why it is not ok', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status() as any);
+    vi.mocked(pushApi.pushStock).mockResolvedValue({
+      mode: 'LIVE',
+      entity: 'stock',
+      action: 'sync',
+      ok: false,
+      code: 'SHOPIFY_LOCATION_UNMAPPED',
+      error:
+        'Shopify location(s) that fulfil online orders but map to no shop: Gangadham Pune',
+      payload: { candidates: 1, changed: 1, synced: 1, failed: 0, unmapped_stores: [] },
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    // "Preview first" is on by default; the LIVE press is the one that writes.
+    const preview = await screen.findByRole('checkbox');
+    await userEvent.click(preview);
+    const button = await screen.findByRole('button', { name: /push stock/i });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    await userEvent.click(button);
+
+    await waitFor(() => expect(pushApi.pushStock).toHaveBeenCalledWith(false));
+    const warn = toastCalls.find((t) => t.kind === 'warning');
+    expect(warn?.msg).toContain('1 of 1 listings changed, 1 written');
+    expect(warn?.msg).toContain('Gangadham Pune');
+    expect(toastCalls.map((t) => t.msg).join(' ')).not.toContain('Stock not written');
+  });
+
   it("shows the scheduled run's stock verdict on the Live sync card", async () => {
     const run = {
       run_id: 'r1',

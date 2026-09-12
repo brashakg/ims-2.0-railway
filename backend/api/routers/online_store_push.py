@@ -265,8 +265,10 @@ async def push_stock(
     dry_run: bool = Query(
         False,
         description=(
-            "Preview first: return the SIMULATED per-store plan with zero "
-            "network even when the gates are LIVE."
+            "Preview first: return the SIMULATED per-store plan -- no WRITE of "
+            "any kind, even when the gates are LIVE. A LIVE-gated preview makes "
+            "the ONE read-only locations query the press makes, so preview and "
+            "press give the same verdict."
         ),
     ),
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
@@ -274,9 +276,11 @@ async def push_stock(
     """Write each shop's own quantity of every product already on Shopify
     whose per-store numbers changed since they were last sent (owner ruling
     2026-09-06 -- every physical shop is a Shopify location). Products only;
-    never publishes anything. DARK or ``?dry_run=true`` -> a SIMULATED plan
-    and zero network. ONE chained audit row per run (the per-product outcome
-    is in its payload). No DB -> 503."""
+    never publishes anything. DARK -> a SIMULATED plan and zero network;
+    ``?dry_run=true`` with LIVE gates -> the same SIMULATED plan with NO WRITE,
+    plus the ONE read-only locations query the press makes (invariant 2 -- a
+    preview that reads green must mean a press would too). ONE chained audit
+    row per run (the per-product outcome is in its payload). No DB -> 503."""
     db = _require_db()
     data = (await shopify_push.sync_stock_levels(db, dry_run=dry_run)).to_dict()
     _write_audit(data, current_user)

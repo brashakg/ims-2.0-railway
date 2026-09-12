@@ -492,13 +492,20 @@ export default function OnlineShopifySyncPage() {
         (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent');
       if (res.ok) {
         toast.success(line);
-      } else if (res.code === 'STORE_UNMAPPED' && unmapped.length) {
-        toast.warning(
-          `${line}. Not mapped, stock invisible online: ` +
-            unmapped.map((s) => s.store_code || s.store_name).join(', '),
-        );
       } else {
-        toast.warning(`Stock not written — ${res.error || res.code || 'see result'}`);
+        // ONE rule: the count line ALWAYS comes first, then the reason. A
+        // not-ok pass still writes every mapped row it can (STORE_UNMAPPED,
+        // SHOPIFY_LOCATION_UNMAPPED, SHOPIFY_LOCATION_NOT_SELLING,
+        // STOCK_ONHAND_UNKNOWN, STOCK_TARGET_MISSING/DUPLICATE,
+        // STOCK_STORE_ORPHAN, STORE_LOCATION_DUPLICATE), so the old
+        // "Stock not written" arm told the owner nothing had gone to Shopify
+        // over a press that had just written three shops' numbers.
+        const why =
+          res.code === 'STORE_UNMAPPED' && unmapped.length
+            ? 'not mapped, stock invisible online: ' +
+              unmapped.map((s) => s.store_code || s.store_name).join(', ')
+            : res.error || res.code || 'see result';
+        toast.warning(`${line}. ${why}`);
       }
       refreshAll();
     } catch (e: any) {

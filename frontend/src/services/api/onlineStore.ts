@@ -1855,10 +1855,11 @@ export const pushApi = {
   /** Write each shop's own quantity, per SKU, at that shop's Shopify location
    *  for every listing whose per-store numbers changed since they were last
    *  sent (POST /push/stock; owner ruling 2026-09-06). Products already on
-   *  Shopify only; publishes nothing. SIMULATED (a plan, no Shopify call) when
-   *  the gates are dark OR when `dryRun` is set ("Preview first" -- the plan
-   *  with zero network even while LIVE). Throws on HTTP failure so the caller
-   *  can toast. */
+   *  Shopify only; publishes nothing. SIMULATED (a plan, NO write of any kind)
+   *  when the gates are dark OR when `dryRun` is set ("Preview first"). Dark
+   *  means zero network; a LIVE-gated preview still makes the ONE read-only
+   *  locations query the press makes, so both give the same verdict. Throws on
+   *  HTTP failure so the caller can toast. */
   pushStock: async (dryRun = false): Promise<PushResult> => {
     const res = await api.post(
       `${PUSH_BASE}/stock${dryRun ? '?dry_run=true' : ''}`,
