@@ -188,6 +188,57 @@ def target_for(db: FakeDB, twin_id: str = TWIN_ID) -> Dict[str, Any]:
 # Pure helpers
 # ---------------------------------------------------------------------------
 
+_MONGO_VARS = ("MONGO_PUBLIC_URL", "MONGODB_URI", "MONGODB_URL", "MONGO_URL")
+
+
+def _only(monkeypatch, **set_vars):
+    """Clear every Mongo var, then set exactly the ones named."""
+    for var in _MONGO_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for var, value in set_vars.items():
+        monkeypatch.setenv(var, value)
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        # The runbook is always launched FROM a developer machine through
+        # `railway run --service ims-2.0-railway`, which injects
+        # MONGO_PUBLIC_URL. The MongoDB service injects only
+        # mongodb.railway.internal, which does not resolve off-platform -- so
+        # a reachable address must win over an internal one, never the reverse.
+        ({"MONGO_PUBLIC_URL": "public", "MONGODB_URL": "internal"}, "public"),
+        ({"MONGO_PUBLIC_URL": "public", "MONGO_URL": "internal"}, "public"),
+        ({"MONGODB_URI": "uri", "MONGODB_URL": "internal"}, "uri"),
+        ({"MONGODB_URL": "only"}, "only"),
+        ({"MONGO_URL": "only"}, "only"),
+    ],
+)
+def test_connect_prefers_the_reachable_address(monkeypatch, env, expected):
+    _only(monkeypatch, **env)
+    seen = {}
+
+    class _FakeClient:
+        def __init__(self, url, **_kw):
+            seen["url"] = url
+            self.admin = self
+
+        def command(self, _name):
+            return {"ok": 1}
+
+        def __getitem__(self, name):
+            return {"db": name}
+
+    monkeypatch.setitem(sys.modules, "pymongo", type("M", (), {"MongoClient": _FakeClient}))
+    assert script.connect() is not None
+    assert seen["url"] == expected
+
+
+def test_connect_refuses_with_no_address_at_all(monkeypatch):
+    _only(monkeypatch)
+    assert script.connect() is None
+
+
 def test_parse_csv_option_trims_and_drops_blanks():
     assert script.parse_csv_option(" a , b ,, c ") == ["a", "b", "c"]
     assert script.parse_csv_option("") == []

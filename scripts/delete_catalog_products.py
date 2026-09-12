@@ -47,7 +47,9 @@ SAFETY CONTRACT
   first delete, and --commit aborts if the snapshot cannot be written.
 - --all requires --expect N and aborts unless exactly N products are targeted.
 - One `audit_logs` row records the run (action `catalog.product.hard_deleted`).
-- Reads MONGODB_URL (preferred) or MONGO_URL from env.
+- Reads MONGO_PUBLIC_URL, else MONGODB_URI, else MONGODB_URL / MONGO_URL
+  (the order scripts/migrate_store_locations.py uses, so `railway run
+  --service ims-2.0-railway` works from a developer machine).
 - pymongo lazy-imported. No emojis -- Windows cp1252 safe.
 
 Usage
@@ -151,9 +153,22 @@ def unavailable_units(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def connect() -> Optional[Any]:
     """Return a pymongo Database or None (fail-soft, same contract as
     scripts/prod_data_cleanup.py)."""
-    mongo_url = os.environ.get("MONGODB_URL") or os.environ.get("MONGO_URL")
+    # Same resolution order as scripts/migrate_store_locations.py: a runbook is
+    # always run FROM a developer machine through `railway run`, and the service
+    # that injects a reachable address is the backend (MONGO_PUBLIC_URL). The
+    # MongoDB service injects only mongodb.railway.internal, which does not
+    # resolve off-platform -- preferring it first made this script unrunnable.
+    mongo_url = (
+        os.environ.get("MONGO_PUBLIC_URL")
+        or os.environ.get("MONGODB_URI")
+        or os.environ.get("MONGODB_URL")
+        or os.environ.get("MONGO_URL")
+    )
     if not mongo_url:
-        logger.error("MONGODB_URL / MONGO_URL not set -- nothing to connect to.")
+        logger.error(
+            "No Mongo connection. Set MONGO_PUBLIC_URL / MONGODB_URI / MONGODB_URL, "
+            "or run via `railway run --service ims-2.0-railway` so the vars are injected."
+        )
         return None
 
     try:
