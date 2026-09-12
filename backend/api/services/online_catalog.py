@@ -122,7 +122,11 @@ def listed_skus_on_hand_at(db, store_id: str) -> List[str]:
     are on the shelf" rule, and the location RELEASE that makes correcting a
     mis-mapping possible), and for both of them "I could not read" answering as
     "nothing is listed" is the failure: the first waves a remap through, the
-    second silently releases nothing."""
+    second silently releases nothing. A collection that does not resolve is the
+    one exit its own docstring named as the failure and it answered ``[]``
+    anyway (round-5 P2), so it RAISES now too; only "there is no database at
+    all" (db is None -- mock mode, nothing was ever published) answers ``[]``.
+    """
     if db is None or not store_id:
         return []
     from .item_events import on_hand_match
@@ -131,7 +135,10 @@ def listed_skus_on_hand_at(db, store_id: str) -> List[str]:
     products = _coll(db, "products")
     catalog = _coll(db, "catalog_products")
     if units is None or products is None or catalog is None:
-        return []
+        raise RuntimeError(
+            "stock_units / products / catalog_products did not resolve -- what "
+            "this shop holds is UNKNOWN, not 'nothing'"
+        )
     pids = [p for p in units.distinct("product_id", {"store_id": store_id, **on_hand_match()}) if p]
     if not pids:
         return []

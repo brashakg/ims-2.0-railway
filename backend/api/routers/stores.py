@@ -241,18 +241,19 @@ def _validate_store_payload(
     ``store_id`` is the doc's own id on an update (create passes none and the
     known-id check falls back to ``store_code``).
 
-    CHANGING or CLEARING a gid the doc already carries while the shop still
-    holds stock the WEBSITE LISTS (``_store_listed_on_hand_units``) is NOT
-    refused any more -- it is RELEASED. The per-store writer only touches
-    locations the store list maps, so the old location would otherwise keep
-    showing those units on Shopify forever; refusing the save was the wrong
-    remedy, because on a fresh setup the FIRST wrong pick from a dropdown of
-    four similarly-named locations then became permanent the moment the shop
+    CHANGING or CLEARING a gid the doc already carries is NOT refused any more
+    -- it is RELEASED. The per-store writer only touches locations the store
+    list maps, so the old location would otherwise keep showing that shop's
+    units on Shopify forever; refusing the save was the wrong remedy, because
+    on a fresh setup the FIRST wrong pick from a dropdown of four
+    similarly-named locations then became permanent the moment the shop
     received one GRN unit of a listed product ("transfer the units out first"
-    is not a thing an optical shop can do). This returns that old gid so the
-    async caller can zero it through THE writer
-    (``shopify_push.release_store_location``) and only then save. Stock on no
-    listing never triggers it -- it leaves no phantom.
+    is not a thing an optical shop can do). This returns the OLD gid on EVERY
+    change or clear so the async caller can run it through THE writer
+    (``shopify_push.release_store_location``) and only then save -- that door
+    zeroes the old location when (and only when) the shop holds listed units
+    there, and ALWAYS re-arms the per-store baseline, which is keyed by store
+    and therefore blind to a remap.
     """
     release_old: Optional[str] = None
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
@@ -292,12 +293,17 @@ def _validate_store_payload(
         if not gid:
             data["shopify_location_name"] = None
         old = _as_shopify_gid((existing or {}).get("shopify_location_id"), "Location")
-        if old and gid != old:
-            # STRICT read: raises 503 rather than answering "holds nothing".
-            if _store_listed_on_hand_units(
-                db, store_id or (existing or {}).get("store_id")
-            ):
-                release_old = old
+        if old and gid != old and db is not None:
+            # EVERY change and EVERY clear, whatever the shelf holds (round-5
+            # P1/P2). The last-sent baseline is keyed by STORE, not by
+            # location, so a remap is invisible to the diff and the NEW
+            # location would never be written at all. Gated on "does this shop
+            # hold listed units", a correction of a shop holding nothing was a
+            # fully green NOOP over a location Shopify keeps selling from.
+            # What the shelf holds decides only whether the OLD location is
+            # ZEROED, and release_store_location -- the ONE reader of that
+            # shelf, STRICT -- decides that there.
+            release_old = old
     # The gid the doc carries AFTER this write, whichever side of the rule the
     # payload touches (a new gid, a store_type flip, a reactivation).
     gid = (
@@ -394,48 +400,6 @@ def _store_on_hand_units(db, store_id: str) -> Optional[str]:
     DEACTIVATION. Raises 503 when the shelf cannot be read."""
     n = _on_hand_count(db, {"store_id": store_id})
     return f"{n} on-hand stock unit(s)" if n else None
-
-
-def _store_listed_on_hand_units(db, store_id: str) -> Optional[str]:
-    """The stock this shop holds that the WEBSITE LISTS ("2 on-hand stock
-    unit(s) listed on the website"), else None -- the "units must leave first"
-    rule behind CHANGING or CLEARING the shop's Shopify location.
-
-    Narrower than ``_store_on_hand_units`` ON PURPOSE, because the rule's whole
-    reason is that the OLD location would keep showing those units on Shopify
-    forever (the per-store writer only touches locations the store list maps)
-    -- and a unit of a product that is on no listing is shown nowhere and
-    leaves no phantom. Blocking on ANY unit locked a mis-mapped shop out of
-    ever being corrected the moment it received one GRN unit of anything, with
-    deactivation blocked by the same rule: no escape hatch at all. Raises 503
-    on any read it cannot answer."""
-    if db is None:
-        return None
-    from ..services.online_catalog import listed_skus_on_hand_at
-
-    try:
-        skus = listed_skus_on_hand_at(db, store_id)
-    except Exception as exc:  # noqa: BLE001
-        raise _stock_unreadable(exc) from exc
-    if not skus:
-        return None
-    products = db.get_collection("products")
-    if products is None:
-        return None
-    try:
-        listed_pids = [
-            str(d.get("product_id"))
-            for d in products.find(
-                {"sku": {"$in": skus}}, {"_id": 0, "product_id": 1, "sku": 1}
-            )
-            if d.get("product_id")
-        ]
-    except Exception as exc:  # noqa: BLE001
-        raise _stock_unreadable(exc) from exc
-    if not listed_pids:
-        return None
-    n = _on_hand_count(db, {"store_id": store_id, "product_id": {"$in": listed_pids}})
-    return f"{n} on-hand stock unit(s) listed on the website" if n else None
 
 
 def _store_active_dependents(db, store_id: str) -> Optional[str]:
@@ -964,16 +928,22 @@ async def update_store(
             update_data, db=db, store_id=store_id, existing=existing
         )
         if release_old:
-            # The shop is moving off a Shopify location while it still holds
-            # units that location advertises. Zero them THERE first, through
-            # THE writer -- once the gid is gone from the store list, nothing
-            # ever writes that location again. The save only happens if Shopify
-            # accepted the release, so a failure leaves the mapping as it was
-            # instead of stranding numbers on an orphaned location.
+            # The shop is moving off a Shopify location. THE writer zeroes the
+            # units that location advertises (once the gid is gone from the
+            # store list nothing ever writes it again) and re-arms the
+            # per-store baseline so the NEW location is written on the next
+            # pass. The save only happens if that succeeded, so a failure
+            # leaves the mapping as it was instead of stranding numbers on an
+            # orphaned location -- or saving a gid the diff will never send.
             from ..services import shopify_push as _push
 
             released = await _push.release_store_location(db, store_id, release_old)
             if not released.get("ok"):
+                if released.get("code") == _push.STOCK_ONHAND_UNKNOWN:
+                    # STRICT: an unknown shelf is never "holds nothing".
+                    raise _stock_unreadable(
+                        RuntimeError(released.get("error") or "listed stock unreadable")
+                    )
                 raise HTTPException(
                     status_code=400,
                     detail=(

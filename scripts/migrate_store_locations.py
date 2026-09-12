@@ -144,17 +144,20 @@ def plan_sets(db, sets: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
                 data, db=db, store_id=doc.get("store_id"), existing=doc
             )
             if release_old:
-                # The shop is moving off a location that still advertises its
-                # units. Only the async PUT door releases them (it zeroes the
-                # old location through THE writer first); this script writes
-                # straight to the repository, so it must refuse instead of
-                # stranding numbers on an orphaned location.
+                # The shop is moving OFF a location it already carries. Only
+                # the async PUT door can release it: that door zeroes the units
+                # the old location advertises through THE writer AND re-arms
+                # the per-store baseline (which is keyed by store, so the diff
+                # cannot see a remap and would never write the NEW location).
+                # This script writes straight to the repository, so it must
+                # refuse instead of stranding numbers on an orphaned location
+                # or saving a mapping nothing will ever send.
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        f"{code} still holds stock the website lists at its current "
-                        f"location {release_old}; change it on the Organization page "
-                        f"(that door zeroes the old location on Shopify first)"
+                        f"{code} already carries Shopify location {release_old}; change "
+                        f"it on the Organization page (that door zeroes the old location "
+                        f"on Shopify and re-arms the stock baseline)"
                     ),
                 )
         except HTTPException as exc:

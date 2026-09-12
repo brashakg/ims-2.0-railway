@@ -1111,29 +1111,36 @@ async def push_skus_stock(
     return summary
 
 
-def _forget_store_baseline(db, store_id: str, skus: List[str]) -> int:
-    """Drop ``store_id`` from the last-sent baseline of every listing carrying
-    one of ``skus``, so the next pass re-sends that shop.
+def _forget_store_baseline(db, store_id: str) -> int:
+    """Drop ``store_id`` from the last-sent baseline of EVERY listing, so the
+    next pass re-sends that shop at whatever location it now carries.
 
     The baseline is keyed by STORE id, not by LOCATION. Remapping a shop to a
     different Shopify location therefore changes nothing the diff can see, and
     the NEW location would never be written at all -- it would sit at whatever
     Shopify had (usually nothing, i.e. sold out) until some unrelated edit
-    happened to move that shop's number. Fail-soft; returns the listings
-    touched."""
-    from ..online_catalog import listings_for_skus
+    happened to move that shop's number.
 
+    EVERY listing, never "the SKUs the shop happens to hold" (round-5 P2): the
+    baseline carries a row for every listed SKU at that shop INCLUDING an
+    explicit 0 (``_writeback_stock`` writes one per mapped shop and SKU), so
+    forgetting only the HELD SKUs left the store key in place on every other
+    listing -- those listings then matched the diff, noop'd, and the new
+    location received no row for them at all. On the rebuilt 121-listing
+    catalogue a corrected remap would re-arm one listing and leave ~120
+    advertising the old location's numbers. Fail-soft; returns the listings
+    touched."""
     touched = 0
     try:
-        by_product = listings_for_skus(db, list(skus)) if skus else {}
         coll = db["catalog_products"]
-        for pid, pid_skus in by_product.items():
-            doc = coll.find_one({"id": pid})
-            if doc is None:
-                continue
+        # Keyed by STORE, so the store id is the only thing to look for -- no
+        # SKU list, no listing resolver.
+        docs = list(coll.find({"ecom.online_stock.quantities": {"$exists": True}}))
+        for doc in docs:
+            pid = doc.get("id")
             ecom = dict(doc.get("ecom") or {})
             stock = ecom.get("online_stock")
-            if not isinstance(stock, dict):
+            if pid is None or not isinstance(stock, dict):
                 continue
             quantities = {
                 sku: {sid: q for sid, q in dict(rows).items() if sid != store_id}
@@ -1152,21 +1159,32 @@ def _forget_store_baseline(db, store_id: str, skus: List[str]) -> int:
 
 async def release_store_location(db, store_id: str, location_gid: str) -> Dict[str, Any]:
     """Write 0 at ``location_gid`` for every listed SKU ``store_id`` holds, and
-    forget that shop's baseline -- the supported way to CORRECT a mis-mapped
-    shop.
+    ALWAYS forget that shop's baseline -- the ONE door behind every change or
+    clear of ``stores.shopify_location_id``.
 
-    Without it the Organization page could only refuse the correction ("transfer
-    the units out first"), because the old location, once out of ``_mapped``, is
-    written by nobody and keeps advertising the shop's units forever. On a fresh
-    setup that made the first wrong pick from a dropdown of similarly-named
-    locations permanent: the owner maps BV-BOK-02 to Gangadham Pune, presses
-    Push stock, and after the first GRN of a listed product has no way back.
+    Two separate jobs, two different conditions (round-5 P1/P2 -- they were one
+    condition, and it was the wrong one):
+      * the WRITE of 0 at the OLD location happens only when the shop holds
+        listed units there; nothing else could leave a phantom. Without it the
+        Organization page could only refuse the correction ("transfer the units
+        out first"), so on a fresh setup the first wrong pick from a dropdown of
+        similarly-named locations became permanent.
+      * the FORGET happens on EVERY mapping change, whatever the shelf holds.
+        The baseline is keyed by STORE, so the diff cannot see a remap: gated on
+        the shelf, a re-map of a shop holding no listed stock was a fully green
+        NOOP that never wrote the NEW location at all.
 
-    DARK -> ok with zero network (a dark system never published a quantity).
-    Returns ``{ok, mode, set, skus, error}``; never raises."""
+    DARK -> ok with zero network (a dark system never published a quantity), the
+    baseline still re-armed. Returns ``{ok, mode, set, skus, forgot, code,
+    error}``; never raises. ``code`` is STOCK_ONHAND_UNKNOWN when the shelf
+    could not be read (the caller refuses the save) and the writer's own code
+    when Shopify refused the zeroing."""
     from ..online_catalog import inventory_items_for_skus, listed_skus_on_hand_at
 
-    out: Dict[str, Any] = {"ok": True, "mode": MODE_SIMULATED, "set": 0, "skus": [], "error": None}
+    out: Dict[str, Any] = {
+        "ok": True, "mode": MODE_SIMULATED, "set": 0, "skus": [],
+        "forgot": 0, "code": None, "error": None,
+    }
     gid = _as_shopify_gid(location_gid, "Location") if location_gid else ""
     if not gid or not store_id:
         return out
@@ -1174,27 +1192,32 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
         skus = listed_skus_on_hand_at(db, store_id)
     except Exception as exc:  # noqa: BLE001 -- STRICT read: refuse, never "nothing"
         out["ok"] = False
+        out["code"] = STOCK_ONHAND_UNKNOWN
         out["error"] = f"could not read this shop's listed stock: {exc}"
         return out
     out["skus"] = skus
-    if not skus:
-        return out
     live, reason = _live_or_reason(db)
     if not live:
         out["reason"] = reason
-        _forget_store_baseline(db, store_id, skus)
+        out["forgot"] = _forget_store_baseline(db, store_id)
         return out
     out["mode"] = MODE_LIVE
-    targets = inventory_items_for_skus(db, skus)
-    rows = [(_as_shopify_gid(inv, "InventoryItem"), gid, 0) for inv in dict.fromkeys(targets.values()) if inv]
-    if rows:
-        written = await set_inventory_quantities(db, rows)
-        out["set"] = written["set"]
-        if written["errors"]:
-            out["ok"] = False
-            out["error"] = "; ".join(str(e) for e in written["errors"][:3])
-            return out
-    _forget_store_baseline(db, store_id, skus)
+    if skus:
+        targets = inventory_items_for_skus(db, skus)
+        rows = [
+            (_as_shopify_gid(inv, "InventoryItem"), gid, 0)
+            for inv in dict.fromkeys(targets.values())
+            if inv
+        ]
+        if rows:
+            written = await set_inventory_quantities(db, rows)
+            out["set"] = written["set"]
+            if written["errors"]:
+                out["ok"] = False
+                out["code"] = written.get("code") or STOCK_WRITE_FAILED
+                out["error"] = "; ".join(str(e) for e in written["errors"][:3])
+                return out
+    out["forgot"] = _forget_store_baseline(db, store_id)
     return out
 
 
