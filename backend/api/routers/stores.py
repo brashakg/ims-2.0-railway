@@ -212,7 +212,11 @@ def _location_holder(db, gid: str) -> Optional[dict]:
     through stores_util.physical_stores, the ONE reader the locations dropdown
     (GET /online-store/push/locations) joins against, so the validator and the
     dropdown can never disagree about who holds a location: an inactive or
-    ONLINE doc holds nothing. No DB handle -> [] -> None."""
+    ONLINE doc holds nothing. That reader NORMALISES the gid (round-5 P3), so
+    a doc carrying bare digits is held here exactly as the writer holds it --
+    compared raw, it was mapped to the writer and free to this refusal, and two
+    shops could claim one location (which the writer then wrote for NEITHER).
+    No DB handle -> [] -> None."""
     return next(
         (s for s in physical_stores(db) if s.get("shopify_location_id") == gid), None
     )

@@ -9,10 +9,15 @@ inventory targets the stock write-back needs -- reading ONLY the IMS catalog:
   catalog_products.ecom   -- status (DRAFT/PUBLISHED/ARCHIVED) +
                              shopify_product_id (set on first LIVE push)
   catalog_variants        -- sku / store_barcode / barcode / gtin identity +
-                             shopify_variant_id / shopify_inventory_item_id /
-                             shopify_location_id (the write-back mapping,
-                             the same fields online_sync_health + the parity
-                             monitor already consume)
+                             shopify_variant_id / shopify_inventory_item_id
+                             (the same fields online_sync_health + the parity
+                             monitor already consume). NOT
+                             shopify_location_id: the location is per SHOP on
+                             the store record (owner ruling 2026-09-06) and
+                             that per-variant column is dead -- it is no
+                             longer projected, so no reader can drift back to
+                             it while design 3.6 waits to drop the column in
+                             PR 3.
 
 Design rules (unchanged from the old bridge contract):
 - Fully FAIL-SOFT. Missing DB / collection -> empty result, never raise,
@@ -188,7 +193,6 @@ def _variants_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
                     "parent_sku": 1,
                     "shopify_variant_id": 1,
                     "shopify_inventory_item_id": 1,
-                    "shopify_location_id": 1,
                 },
             )
         )

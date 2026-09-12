@@ -536,6 +536,30 @@ def test_inactive_doc_carrying_a_gid_is_not_a_holder(monkeypatch):
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
 
 
+def test_R5_a_bare_digit_gid_on_a_doc_is_one_location_to_every_reader(monkeypatch):
+    """ROUND-5 P3 (latent, one rule / two spellings). The WRITER normalised
+    every store gid through `_as_shopify_gid` while the 409 duplicate refusal
+    (`_location_holder`) and the dropdown's `by_gid` compared the doc's RAW
+    string against an already-normalised gid. A doc carrying bare digits was
+    therefore MAPPED to the writer and UNMAPPED to both of those: two shops
+    could save one location, and `_mapped` then wrote NEITHER of them
+    (STORE_LOCATION_DUPLICATE) -- both shops' stock invisible online. Fixed in
+    the ONE reader (stores_util.physical_stores), so every comprehension over
+    it agrees. Revert the normalising loop there -> no 409 -> this fails."""
+    c, db = _world(monkeypatch, [
+        _store("BV-BOK-02", shopify_location_id="58793230523"),  # a direct DB write
+        _store("BV-DHN-02"),
+    ])
+    rows = {r["store_code"]: r for r in physical_stores(db)}
+    assert rows["BV-BOK-02"]["shopify_location_id"] == BOKARO, "one spelling for every reader"
+    assert shopify_push.mapped_store_locations(physical_stores(db)) == {"BV-BOK-02": BOKARO}
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
+    assert r.status_code == 409, r.text
+    assert "BV-BOK-02" in r.json()["detail"]
+    r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": "58793230523"})
+    assert r.status_code == 409, r.text
+
+
 def test_flipping_a_mapped_store_to_online_is_400_until_cleared(monkeypatch):
     c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
     r = c.put("/api/v1/stores/BV-BOK-02", json={"store_type": "ONLINE"})
