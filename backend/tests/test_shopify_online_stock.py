@@ -58,6 +58,15 @@ Pinned here, each REVERT-PROOF (revert the named piece and the test fails):
       (invariant 2, backend); a first publish whose stock was refused is not a
       clean success (ops P5); the blocked-SKU whole-batch abort; parity never
       counts a shop Shopify cannot see.
+  Panel round 5 (2026-09-12): a re-map of a shop holding no listed stock is
+      still seen by the diff and the NEW location still written (P1, in
+      test_store_shopify_location.py); two SKUs on one Shopify inventory item
+      write NEITHER, with a code at the BOTTOM of the ladder so it cannot hide
+      a live STORE_UNMAPPED; ONE locations read answers BOTH questions -- a
+      MAPPED shop whose location cannot sell online (unticked / deactivated /
+      gone) is never a green run, and an EMPTY locations answer is UNKNOWN, not
+      "every shop dead"; the PRODUCT press carries invariant 2 too (recorded
+      verdict, and the one read itself on day 1).
   Panel round (2026-09-07): a POS sale landing while the sweep is mid-loop
   is written, not overwritten with the snapshot; the SUPERADMIN block is
   IN the rule so the schedule agrees with the POS door; ONE sku -> listing

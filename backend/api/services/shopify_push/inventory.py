@@ -45,6 +45,15 @@ Fail loud, never pool, never silently skip:
   * SHOPIFY_LOCATION_UNMAPPED -- a Shopify location that FULFILS ONLINE ORDERS
     maps to no IMS shop: Shopify routes orders there and sells whatever number
     it holds, and IMS never writes it.
+  * SHOPIFY_LOCATION_NOT_SELLING -- the MIRROR: a shop IS mapped, but its
+    Shopify location is not ticked to fulfil online orders, is deactivated, or
+    is gone from Shopify's list. Shopify counts online availability only at
+    ticked locations, so every number IMS writes there is invisible and the
+    listing reads SOLD OUT (and a vanished location refuses the write outright).
+    ONE read answers both questions (``location_verdict``).
+  * STOCK_TARGET_DUPLICATE -- two SKUs on one Shopify inventory item. Neither
+    is written (Shopify holds one quantity per item and location, so one SKU's
+    count would become the other's).
   * STORE_LOCATION_DUPLICATE -- two shops claim one location. Neither is
     written (one shop's count would silently become the other's).
   * STOCK_STORE_ORPHAN -- on-hand parked at a store_id no shop record matches

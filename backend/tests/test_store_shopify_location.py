@@ -42,6 +42,16 @@ each REVERT-PROOF (revert the named piece and the test goes red):
      no listing releases nothing (it leaves no phantom), and the migration
      script -- which cannot run the async release -- refuses instead.
 
+ 10. Panel round 5: the baseline FORGET runs on EVERY mapping change and
+     covers EVERY listing (gated on the shelf, a re-map of a shop holding
+     nothing was a green NOOP that never wrote the new location; scoped to the
+     held SKUs, it re-armed ~1 of 121 listings). ONE spelling of "which listed
+     units does this shop hold" (release_store_location), so an unreadable
+     shelf is still a 503 and a padded `products.sku` no longer waves a remap
+     through; an unresolved collection RAISES. The gid is normalised in the ONE
+     store reader, so a bare-digit doc is one location to the writer, the 409
+     and the dropdown alike.
+
 TestClient + StrictDB; no Mongo, no network (the locations read is DARK).
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_store_shopify_location.py -q
 """
