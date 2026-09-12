@@ -1719,6 +1719,120 @@ def test_R3_a_fulfilling_shopify_location_with_no_shop_is_never_a_green_run(monk
     assert _run(shopify_push.sync_stock_levels(db2)).ok is True
 
 
+def test_R5_a_mapped_location_that_cannot_sell_online_is_never_a_green_run(monkeypatch):
+    """ROUND-5 P1 (HIGH, one rule / one read). The locations read answered four
+    facts and exactly ONE was ever asked: "fulfils online orders AND maps to no
+    shop". The MIRROR -- a shop IS mapped, but its location does not fulfil
+    online orders, or is deactivated, or is not in Shopify's list at all -- was
+    asked NOWHERE in the backend: no code existed, no rung, no term in _all_ok.
+
+    That is the state the design's own runbook creates (section 6 step 4: tick
+    "fulfil online orders" for Gangadham Pune ONLY) and prod's three mapped
+    shops ARE the Jharkhand ones. Shopify counts online availability only at
+    ticked locations, so IMS wrote 2/1/0 at three locations the storefront does
+    not sell from and reported ok=True, code=None, no task -- over a
+    bettervision.in reading SOLD OUT on all 121 products.
+
+    Delete the `dead_locations` rung in _verdict_for or its term in _all_ok ->
+    ok True, code None -> this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    unticked = _Spy(_responses(**{
+        "imsLocationList": _locations(
+            _loc(LOC_A, "Bokaro", fulfils=False),
+            _loc(LOC_B, "Dhanbad", fulfils=False),
+            _loc(LOC_C, "Sector 4", fulfils=False),
+        )
+    }))
+    _live(monkeypatch, unticked)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert "Bokaro" in res.error and "fulfil online orders" in res.error
+    assert [d["store_id"] for d in res.payload["dead_locations"]] == ["BV-A", "BV-B", "BV-C"]
+    # ...the real numbers still went out (never withhold a true number)...
+    assert unticked.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
+    # A DEACTIVATED location reads the same way.
+    db2 = _listed(_db(a=2, b=1, c=0))
+    _live(monkeypatch, _Spy(_responses(**{
+        "imsLocationList": _locations(
+            _loc(LOC_A, "Bokaro", active=False), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"),
+        )
+    })))
+    res2 = _run(shopify_push.sync_stock_levels(db2))
+    assert res2.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert res2.payload["dead_locations"][0]["reason"] == "deactivated in Shopify"
+    # ...and a gid Shopify does not list at all is the sharpest case: the PRESS
+    # would be refused, so the PREVIEW must not read green either (this module
+    # promises twice that a green preview means a green press).
+    db3 = _listed(_db(a=2, b=1, c=0))
+    gone = {"imsLocationList": _locations(_loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"))}
+    _live(monkeypatch, _Spy(_responses(**gone)))
+    preview = _run(shopify_push.sync_stock_levels(db3, dry_run=True))
+    assert preview.ok is False and preview.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert preview.payload["dead_locations"] == [
+        {"store_id": "BV-A", "location_id": LOC_A, "name": None,
+         "reason": "Shopify does not list this location any more"}
+    ]
+
+
+def test_R5_an_empty_locations_read_is_unknown_not_every_shop_dead(monkeypatch):
+    """The guard on the guard. A shop ALWAYS has at least one Shopify location,
+    so an empty list means the read told us nothing -- concluding "Shopify
+    lists none of your mapped locations" from it would flag every shop on every
+    pass. `read` is False for a dark, failed or empty answer. Drop the
+    `or not rows` term -> every mapped shop is reported dead -> this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    _live(monkeypatch, _Spy(_responses(**{"imsLocationList": _locations()})))
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is True and res.code is None, res.error
+    assert res.payload["dead_locations"] == []
+
+
+def test_R5_the_product_press_carries_invariant_2(monkeypatch):
+    """FIRST-PUSH P1 (HIGH). `push_skus_stock` -- the door all 121 first
+    publishes go through (sync_product_stock) and every POS sale goes through
+    (writeback_skus) -- never called the locations read at all, and `_rows_ok`
+    had no stray term. So with prod's exact shape (three shops mapped,
+    Gangadham Pune mapped to nobody and ticked to fulfil online orders) a
+    publish press returned ok=True / code=None / ZERO locations reads, and the
+    listing went live showing Pune's stale number while IMS wrote three
+    locations Shopify does not sell from.
+
+    Round 4 fixed this for the POS door by CARRYING the sweep's recorded
+    verdict; the product door was left out. Delete the `locations` argument of
+    either _rows_ok call, or the stray/dead terms in _rows_ok -> ok True ->
+    this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    pune = _loc("gid://shopify/Location/76684427513", "Gangadham Pune")
+    all_locs = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"), pune,
+    )}
+    # 1. A sweep has recorded the verdict: the press carries it, zero reads.
+    _live(monkeypatch, _Spy(_responses(**all_locs)))
+    _run(shopify_push.sync_stock_levels(db))
+    spy = _Spy(_responses())  # no locations answer -- and none is needed
+    _live(monkeypatch, spy)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert spy.calls_for("imsLocationList") == [], "the recorded verdict is carried, not re-read"
+    assert out["ok"] is False and out["code"] == shopify_push.SHOPIFY_LOCATION_UNMAPPED
+    assert out["unmapped_locations"] == [{"id": pune["id"], "name": "Gangadham Pune"}]
+    assert out["set"] == 3, "the mapped shops' numbers still went out"
+    # 2. DAY ONE: nothing has ever been recorded, so the press makes the ONE
+    #    read itself -- otherwise the owner's very first publish is green over
+    #    a location Shopify is already selling from.
+    fresh = _listed(_db(a=2, b=1, c=0))
+    spy2 = _Spy(_responses(**all_locs))
+    _live(monkeypatch, spy2)
+    res = _run(shopify_push.push_product(
+        fresh, fresh.get_collection("catalog_products").find_one({"id": "cat-1"}), []
+    ))
+    assert len(spy2.calls_for("imsLocationList")) == 1
+    assert res.stock["ok"] is False
+    assert res.stock["code"] == shopify_push.SHOPIFY_LOCATION_UNMAPPED
+    assert shopify_push.last_stray_locations(fresh) == [
+        {"id": pune["id"], "name": "Gangadham Pune"}
+    ], "the read it had to make is recorded, so the next press carries it"
+
+
 def test_R3_a_first_publish_whose_stock_was_refused_is_not_a_clean_success(monkeypatch):
     """R3 ops P5: the owner's FIRST "Send to website" press on the rebuilt
     catalogue, before any shop is mapped. The press switches tracking on with

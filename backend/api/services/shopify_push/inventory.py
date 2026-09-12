@@ -114,6 +114,13 @@ STOCK_WRITE_FAILED = "STOCK_WRITE_FAILED"
 # A Shopify location that FULFILS ONLINE ORDERS but maps to no IMS shop:
 # Shopify keeps routing and selling its own number and IMS never writes it.
 SHOPIFY_LOCATION_UNMAPPED = "SHOPIFY_LOCATION_UNMAPPED"
+# The MIRROR of it: an IMS shop IS mapped, but the Shopify location it points
+# at cannot sell online (not ticked for online orders, deactivated, or gone
+# from Shopify's list). Every number IMS writes there is invisible to the
+# storefront, which reads SOLD OUT -- and for a location Shopify no longer
+# lists, the write itself is refused, so a green preview would become a failed
+# press.
+SHOPIFY_LOCATION_NOT_SELLING = "SHOPIFY_LOCATION_NOT_SELLING"
 
 # Shopify's own userErrors code when an inventory item is not stocked at the
 # location a quantity was set for (InventorySetQuantitiesUserErrorCode).
@@ -427,16 +434,24 @@ def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict
     mapped = _mapped(stores)
     conflicts = _location_conflicts(stores)
     holders = unmapped_holders(db, quantities, stores, skus, mapped)
-    code: Optional[str] = None
-    error: Optional[str] = None
+    # The LAST pass's location verdict, read from Mongo -- this plan is
+    # zero-network by contract, and a preview that reads green must mean a
+    # press would too (the press asks the same two questions).
+    locations = last_location_verdict(db) or {}
     if read_error:
-        code, error = STOCK_ONHAND_UNKNOWN, read_error
-    elif conflicts:
-        code, error = STORE_LOCATION_DUPLICATE, _duplicate_error(conflicts)
-    elif holders:
-        code, error = STORE_UNMAPPED, _unmapped_error(holders)
-    elif not mapped and skus:
-        code, error = STORE_UNMAPPED, _no_mapping_error()
+        # An unknown SHOP LIST outranks the ladder, exactly as it does in the
+        # writer (which returns before it): with no list, "no shop is mapped"
+        # would be a guess dressed as a fact.
+        code: Optional[str] = STOCK_ONHAND_UNKNOWN
+        error: Optional[str] = read_error
+    else:
+        code, error = _verdict_for(
+            no_mapping=bool(skus) and not mapped,
+            conflicts=conflicts,
+            holders=holders,
+            stray_locations=list(locations.get("stray") or []),
+            dead_locations=list(locations.get("dead") or []),
+        )
     return {
         "ok": code is None,
         "code": code,
@@ -733,30 +748,79 @@ def _file_unmapped_location_task(db, location: Dict[str, Any]) -> None:
     )
 
 
-async def unmapped_fulfilling_locations(db, mapped: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Shopify locations that FULFIL ONLINE ORDERS but map to NO IMS shop:
-    ``[{id, name}]``. Shopify keeps routing and selling their own numbers
-    there while IMS -- which writes per shop and never a pooled total -- never
-    touches them, so the website oversells from a shelf nothing updates. This
-    rule used to live ONLY in the React sync page (an amber line a SUPERADMIN
-    had to be looking at), so the 01:00 / 09:00 pass recorded a fully green run
-    beside it. It also covers a MAPPED but DEACTIVATED shop: physical_stores
-    drops it, so its location is written by nobody and reported by no other
-    guard -- but Shopify still lists it.
+async def location_verdict(db, mapped: Dict[str, str]) -> Dict[str, Any]:
+    """ONE read-only locations query, BOTH questions it can answer:
 
-    ONE read-only locations query (``list_locations``: [] and ZERO network when
-    any gate is DARK). Fail-soft -> [] (a tripwire never blocks a write)."""
+      * ``stray`` -- Shopify locations that FULFIL ONLINE ORDERS but map to NO
+        IMS shop (``is_stray_fulfilling``). Shopify keeps routing and selling
+        their own numbers there while IMS -- which writes per shop and never a
+        pooled total -- never touches them, so the website oversells from a
+        shelf nothing updates. It also covers a MAPPED but DEACTIVATED shop:
+        physical_stores drops it, so its location is written by nobody and
+        reported by no other guard -- but Shopify still lists it.
+      * ``dead`` -- the MIRROR, which used to be asked NOWHERE in the backend
+        (round-5 P1): a shop IS mapped, but its Shopify location cannot sell
+        online (``dead_mapped_reason``). The design's own section 6 step 4 tells
+        the owner to tick "fulfil online orders" for Gangadham Pune ONLY, and
+        prod's three mapped shops are the Jharkhand ones -- so the state the
+        runbook creates was a fully GREEN run (ok=True, code=None, no task)
+        over a storefront showing all 121 products SOLD OUT, because Shopify
+        counts online availability only at ticked locations.
+
+    ``read`` is False when the query was dark, failed, or came back with no
+    locations at all: a shop always has at least one location, so an empty list
+    means the read told us NOTHING -- concluding "Shopify does not list any of
+    your mapped locations" from it would be a guess, and a loud one.
+
+    Fail-soft (a tripwire never blocks a write); zero network when DARK."""
+    empty: Dict[str, Any] = {"stray": [], "dead": [], "read": False}
     try:
         read = await list_locations(db)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] locations read failed for the verdict: %s", exc)
-        return []
+        return empty
+    rows = [r for r in (read.get("locations") or []) if isinstance(r, dict) and r.get("id")]
+    if read.get("reason") or not rows:
+        return empty
     have = set(mapped.values())
-    return [
-        {"id": loc.get("id"), "name": loc.get("name")}
-        for loc in read.get("locations") or []
-        if is_stray_fulfilling(loc, have)
-    ]
+    by_gid = {r["id"]: r for r in rows}
+    dead: List[Dict[str, Any]] = []
+    for sid, gid in sorted(mapped.items()):
+        why = dead_mapped_reason(by_gid.get(gid))
+        if why:
+            dead.append(
+                {
+                    "store_id": sid,
+                    "location_id": gid,
+                    "name": (by_gid.get(gid) or {}).get("name"),
+                    "reason": why,
+                }
+            )
+    return {
+        "stray": [
+            {"id": r.get("id"), "name": r.get("name")} for r in rows if is_stray_fulfilling(r, have)
+        ],
+        "dead": dead,
+        "read": True,
+    }
+
+
+def dead_mapped_reason(location: Optional[Dict[str, Any]]) -> Optional[str]:
+    """THE mirror of ``is_stray_fulfilling``, spelled once: why this MAPPED
+    shop's Shopify location cannot sell what IMS writes there, else None.
+
+    ``location`` is the row from Shopify's own list, or None when Shopify does
+    not list that gid at all -- which is the sharpest case, because the write
+    itself will be refused and a green preview would then turn into a failed
+    press (this module promises twice that a preview reading green means a
+    press would too)."""
+    if location is None:
+        return "Shopify does not list this location any more"
+    if not location.get("isActive"):
+        return "deactivated in Shopify"
+    if not location.get("fulfillsOnlineOrders"):
+        return "not ticked to fulfil online orders, so the storefront reads sold out"
+    return None
 
 
 def is_stray_fulfilling(location: Dict[str, Any], mapped_gids: Iterable[str]) -> bool:
@@ -774,39 +838,76 @@ def is_stray_fulfilling(location: Dict[str, Any], mapped_gids: Iterable[str]) ->
     )
 
 
-# The LAST LIVE sweep's stray-location verdict, so a per-sale write-back can
-# carry it without reading Shopify's locations on every sale.
+# The LAST LIVE sweep's location verdict, so a per-product press or a per-sale
+# write-back can carry it without reading Shopify's locations every time.
 _SYNC_STATE_COLLECTION = "online_sync_state"
 _STRAY_LOCATIONS_DOC = "shopify_stray_locations"
 
 
-def record_stray_locations(db, locations: List[Dict[str, Any]]) -> None:
-    """Remember what the sweep just found (an empty list CLEARS it, so the
-    verdict is only ever as old as the last LIVE pass). Fail-soft."""
+def record_location_verdict(db, verdict: Dict[str, Any]) -> None:
+    """Remember what the sweep just found (an empty verdict CLEARS it, so what
+    is stored is only ever as old as the last LIVE pass). Fail-soft."""
     try:
         db[_SYNC_STATE_COLLECTION].update_one(
             {"_id": _STRAY_LOCATIONS_DOC},
-            {"$set": {"locations": list(locations or []), "at": _now()}},
+            {
+                "$set": {
+                    "locations": list(verdict.get("stray") or []),
+                    "dead": list(verdict.get("dead") or []),
+                    "at": _now(),
+                }
+            },
             upsert=True,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[SHOPIFY_STOCK] stray-location state not recorded: %s", exc)
+        logger.debug("[SHOPIFY_STOCK] location verdict not recorded: %s", exc)
 
 
-def last_stray_locations(db) -> List[Dict[str, Any]]:
-    """The last LIVE sweep's stray-location verdict, for a caller that must not
-    make a Shopify read of its own -- the POS write-back runs once per sale, and
-    a stray location only appears when a human edits Shopify admin, so a fresh
-    read per sale buys nothing. Carrying the sweep's verdict is what stops the
-    sale's own sync_runs row from saying the website was corrected while Shopify
-    keeps routing orders to a location IMS never writes. Fail-soft -> []."""
+def last_location_verdict(db) -> Optional[Dict[str, Any]]:
+    """The last LIVE pass's location verdict, or None when NO pass has ever
+    recorded one -- for a caller that must not read Shopify's locations every
+    time: the POS write-back runs once per sale and the product press once per
+    publish, while a stray or unticked location only appears when a human edits
+    Shopify admin, so a fresh read each time buys nothing. Carrying the sweep's
+    verdict is what stops a sale's or a press's own row from saying the website
+    was corrected while Shopify routes orders to a location IMS never writes.
+
+    None (not an empty verdict) matters: on day 1 no sweep has run yet, and
+    "nothing recorded" must make the first publish press do the one read itself
+    rather than read as "all clear". Fail-soft -> None."""
     try:
         doc = db[_SYNC_STATE_COLLECTION].find_one({"_id": _STRAY_LOCATIONS_DOC})
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[SHOPIFY_STOCK] stray-location state unreadable: %s", exc)
-        return []
-    rows = (doc or {}).get("locations") or []
-    return [r for r in rows if isinstance(r, dict)]
+        logger.debug("[SHOPIFY_STOCK] location verdict unreadable: %s", exc)
+        return None
+    if not doc:
+        return None
+    return {
+        "stray": [r for r in (doc.get("locations") or []) if isinstance(r, dict)],
+        "dead": [r for r in (doc.get("dead") or []) if isinstance(r, dict)],
+        "read": True,
+    }
+
+
+def last_stray_locations(db) -> List[Dict[str, Any]]:
+    """Just the stray half of ``last_location_verdict`` (the POS write-back's
+    sync_runs line). Fail-soft -> []."""
+    return (last_location_verdict(db) or {}).get("stray") or []
+
+
+async def writer_location_verdict(db, mapped: Dict[str, str]) -> Dict[str, Any]:
+    """The verdict for a writer that runs PER PRODUCT or PER SALE: the last
+    LIVE pass's recorded one, or -- when nothing has ever been recorded (day 1,
+    the owner's first "Send to website" press) -- ONE read of its own, recorded
+    for the next caller. Zero network in the steady state, because the sweep
+    records before it loops."""
+    stored = last_location_verdict(db)
+    if stored is not None:
+        return stored
+    verdict = await location_verdict(db, mapped)
+    if verdict.get("read"):
+        record_location_verdict(db, verdict)
+    return verdict
 
 
 def _labels(stores: Iterable[Dict[str, Any]], store_ids: Iterable[str]) -> List[str]:
@@ -875,6 +976,22 @@ def _orphan_error(store_ids: List[str]) -> str:
     )
 
 
+def _dead_location_error(dead: List[Dict[str, Any]]) -> str:
+    names = "; ".join(
+        f"{d.get('store_id')} -> {d.get('name') or d.get('location_id')} "
+        f"({d.get('reason')})"
+        for d in dead
+    )
+    return (
+        f"mapped shop(s) whose Shopify location cannot sell online: {names} -- the "
+        f"numbers IMS writes there are invisible to bettervision.in (Shopify counts "
+        f"online availability only at locations ticked to fulfil online orders), so "
+        f"the listings read SOLD OUT; tick 'Fulfil online orders' and re-activate "
+        f"the location in Shopify admin > Locations, or re-map the shop on the "
+        f"Organization page"
+    )
+
+
 def _stray_location_error(locations: List[Dict[str, Any]]) -> str:
     names = ", ".join(str(loc.get("name") or loc.get("id")) for loc in locations)
     return (
@@ -913,6 +1030,7 @@ def _verdict_for(
     conflicts: Dict[str, List[str]],
     holders: List[Dict[str, Any]],
     stray_locations: Optional[List[Dict[str, Any]]] = None,
+    dead_locations: Optional[List[Dict[str, Any]]] = None,
     unknown_error: Optional[str] = None,
     orphans: Optional[List[str]] = None,
     duplicate_targets: Optional[Dict[str, List[str]]] = None,
@@ -931,7 +1049,9 @@ def _verdict_for(
 
     NOTHING WRITABLE first, then a duplicated location (neither shop written),
     then an unmapped holder (the mapped shops WERE written), then a stray
-    Shopify location, an unreadable shop, an orphan store id, a duplicated
+    Shopify location, a MAPPED location that cannot sell online (the mirror of
+    the stray -- the rung that did not exist at all until round 5), an
+    unreadable shop, an orphan store id, a duplicated
     Shopify inventory item and last a missing Shopify target. The two
     data-defect rungs stay at the BOTTOM on purpose: they are permanent until a
     human fixes the mapping, and a permanent code must never outrank -- and so
@@ -944,6 +1064,8 @@ def _verdict_for(
         return STORE_UNMAPPED, _unmapped_error(holders)
     if stray_locations:
         return SHOPIFY_LOCATION_UNMAPPED, _stray_location_error(list(stray_locations))
+    if dead_locations:
+        return SHOPIFY_LOCATION_NOT_SELLING, _dead_location_error(list(dead_locations))
     if unknown_error:
         return STOCK_ONHAND_UNKNOWN, unknown_error
     if orphans:
@@ -964,16 +1086,24 @@ def _rows_ok(
     holders: List[Dict[str, Any]],
     conflicts: Dict[str, List[str]],
     mapped: Dict[str, str],
+    locations: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """ONE verdict for the SIMULATED and the LIVE branch: every guard counts,
     not just the two lists (a preview that reads green must mean a press would
-    too, and "no shop mapped" means nothing was written at all)."""
+    too, and "no shop mapped" means nothing was written at all). ``locations``
+    is the stray/dead verdict -- invariant 2 was in the sweep's ``_all_ok``
+    only, so the product press (the door all 121 first publishes go through)
+    and the POS write-back reported green beside a Shopify location IMS never
+    writes."""
+    locations = locations or {}
     return bool(mapped) and not (
         summary["errors"]
         or holders
         or conflicts
         or summary["unknown_stores"]
         or summary["orphan_stores"]
+        or locations.get("stray")
+        or locations.get("dead")
     )
 
 
@@ -996,9 +1126,12 @@ async def push_skus_stock(
 
     Summary: ``{ok, mode, source, candidates, quantities (rows written or
     planned, {sku: {store_id: qty}}), set, errors, code, error, stores_total,
-    stores_mapped, unmapped_stores, unknown_stores, target_missing}``.
-    ``ok`` is False on any error OR an unmapped holder (STORE_UNMAPPED) --
-    the mapped rows are written either way. Never raises."""
+    stores_mapped, unmapped_stores, unknown_stores, target_missing,
+    unmapped_locations, dead_locations}``. ``ok`` is False on any error, an
+    unmapped holder (STORE_UNMAPPED) or either location verdict -- the mapped
+    rows are written either way. A LIVE call carries the last sweep's location
+    verdict (zero network) and makes the ONE read-only locations query itself
+    only when no pass has ever recorded one. Never raises."""
     from ..online_catalog import inventory_items_for_skus, listings_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
@@ -1019,6 +1152,8 @@ async def push_skus_stock(
         "unknown_stores": [],
         "orphan_stores": [],
         "target_missing": [],
+        "unmapped_locations": [],
+        "dead_locations": [],
     }
     if not distinct:
         summary["ok"] = True
@@ -1068,10 +1203,23 @@ async def push_skus_stock(
         summary["errors"].append(
             f"{', '.join(_skus)}: one Shopify inventory item ({_gid}) -- neither written"
         )
+    # INVARIANT 2, on THIS door too (round-5 P1 + first-push P1). This is the
+    # door every first publish goes through (sync_product_stock) and every POS
+    # sale goes through (writeback_skus), and it never asked Shopify's own
+    # location list at all: a location that fulfils online orders with no shop
+    # behind it, or a mapped shop whose location cannot sell online, came out
+    # here as ok=True / code=None. The sweep's recorded verdict is carried (no
+    # extra network) and read once when nothing was ever recorded.
+    live, reason = _live_or_reason(db)
+    locations = await writer_location_verdict(db, mapped) if live else {}
+    summary["unmapped_locations"] = list(locations.get("stray") or [])
+    summary["dead_locations"] = list(locations.get("dead") or [])
     summary["code"], summary["error"] = _verdict_for(
         no_mapping=not mapped,
         conflicts=conflicts,
         holders=holders,
+        stray_locations=summary["unmapped_locations"],
+        dead_locations=summary["dead_locations"],
         unknown_error=(
             _unknown_error(_labels(stores, summary["unknown_stores"]))
             if summary["unknown_stores"]
@@ -1108,11 +1256,10 @@ async def push_skus_stock(
             key_of[(inv_gid, loc)] = (sku, sid)
             summary["quantities"].setdefault(sku, {})[sid] = int(per[sid])
 
-    live, reason = _live_or_reason(db)
     if not live or dry_run:
         summary["mode"] = MODE_SIMULATED
         summary["reason"] = reason if not live else "dry_run (Preview first)"
-        summary["ok"] = _rows_ok(summary, holders, conflicts, mapped)
+        summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
         if summary["errors"] and not summary["error"]:
             summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
         return summary
@@ -1149,7 +1296,7 @@ async def push_skus_stock(
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).
     summary["quantities"] = written_per_sku
-    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped)
+    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
     if summary["errors"] and not summary["error"]:
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
@@ -1450,7 +1597,9 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # selling its own stale number. ONE read; zero network when DARK, and the
     # preview runs it too so "Preview first" and the press agree.
     live, reason = _live_or_reason(db)
-    stray_locations = await unmapped_fulfilling_locations(db, mapped) if live else []
+    locations = await location_verdict(db, mapped) if live else {}
+    stray_locations = list(locations.get("stray") or [])
+    dead_locations = list(locations.get("dead") or [])
     payload: Dict[str, Any] = {
         "candidates": len(pairs),
         "changed": len(changed),
@@ -1464,6 +1613,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         "orphan_stores": orphans,
         "target_missing": missing,
         "unmapped_locations": stray_locations,
+        "dead_locations": dead_locations,
         "plan": [
             {"product_id": p.get("id") or p.get("product_id"), "quantities": q}
             for p, _v, _s, q in changed[:50]
@@ -1480,6 +1630,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             conflicts=conflicts,
             holders=holders,
             stray_locations=stray_locations,
+            dead_locations=dead_locations,
             unknown_error=(
                 _unknown_error(_labels(stores, sorted(unknown))) if unknown else None
             ),
@@ -1494,6 +1645,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             or conflicts
             or holders
             or stray_locations
+            or dead_locations
             or unknown
             or orphans
             or duplicate_targets
@@ -1515,7 +1667,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # The mitigation the design promises is a TASK, not a summary line: a
     # steady state where nothing changed still has to reach the task board
     # (push_skus_stock only files one for a product it is actually sending).
-    record_stray_locations(db, stray_locations)
+    record_location_verdict(db, locations)
     for h in holders:
         _file_unmapped_task(db, h)
     # The stray-location TASK (not the verdict) waits until there is something

@@ -90,6 +90,13 @@ class _Spy:
             raise RuntimeError("shopify exploded")
         return {"data": {"inventorySetQuantities": {"userErrors": [], "inventoryAdjustmentGroup": {}}}}
 
+    def writes(self):
+        """Every call that is not the READ-ONLY locations list. A LIVE sale
+        carries the last sweep's location verdict, and makes that ONE
+        read-only query itself when no pass has ever recorded one (invariant 2
+        on the sale door), so "one call" pins are about WRITES."""
+        return [c for c in self.calls if "imsLocationList" not in c["query"]]
+
     def rows(self):
         out = set()
         for c in self.calls:
@@ -148,7 +155,7 @@ def test_sale_pushes_each_shops_own_on_hand_minus_buffer_at_its_own_location(mon
     db = _db(a=3, b=1)
     summary = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
     assert summary["pushed"] == 1 and summary["failed"] == 0, summary
-    assert len(spy.calls) == 1
+    assert len(spy.writes()) == 1
     # 3 - 1 at A, 1 - 1 at B: the buffer applies per shop.
     assert spy.rows() == {(INV, LOC_A, 2), (INV, LOC_B, 0)}
 
@@ -498,7 +505,7 @@ def test_transport_exception_does_not_propagate(monkeypatch):
     summary = _run(wb.writeback_skus(_db(), ["SP-1"], "BV-A"))
     assert summary["failed"] == 1   # recorded, not raised
     assert summary["pushed"] == 0
-    assert len(spy.calls) == 1
+    assert len(spy.writes()) == 1
 
 
 def test_after_sale_never_raises_into_sale_path(monkeypatch):

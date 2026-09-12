@@ -574,7 +574,7 @@ def test_deactivating_a_child_denies_its_variant_and_never_drafts_the_parent(mon
     assert len(setq) == 1
     assert [(q["inventoryItemId"], q["quantity"]) for q in setq[0]["variables"]["input"]["quantities"]] == [(B_INV, 0)]
     assert not spy.calls_for("productUpdate("), "NEVER productUpdate on the parent"
-    assert len(spy.calls) == 2
+    assert len(spy.writes()) == 2
 
     child = _twin(db, "tw-child")
     assert child["ecom"]["online_state"] == "DELISTED" and child["ecom"]["delist_reason"] == "deactivated"
