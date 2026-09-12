@@ -184,7 +184,8 @@ def test_R4_P4_the_route_stamps_the_writers_own_stray_location_verdict(client, w
     """ROUND-4 P4 (one rule, two implementations -- display echo). The sync page
     re-derived "fulfils online orders and maps to no IMS shop" in TypeScript
     from the raw locations plus the shop list, duplicating
-    inventory.unmapped_fulfilling_locations -- and the two already differed
+    inventory.is_stray_fulfilling (the predicate behind location_verdict) --
+    and the two already differed
     (`isActive !== false` on the page, truthy `isActive` in the backend). The
     route now stamps the WRITER's own predicate on every row and the page just
     renders it. Drop `unmapped_online_fulfilling` from the route -> fails."""
