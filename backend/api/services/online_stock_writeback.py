@@ -348,16 +348,29 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     return out
 
 
-def _blocked_online(db, skus: List[str]) -> set:
-    """The SKUs in a SUPERADMIN online-blocked collection. Fail-soft: an
-    error blocks nothing (never wrongly delists a sellable SKU)."""
+def _blocked_online(db, skus: List[str]) -> Optional[set]:
+    """The SKUs in a SUPERADMIN online-blocked collection, or None when the
+    block state could not be read.
+
+    None, never ``set()`` (audit round-6 P4). The block is IN the rule now, so
+    it is the ONLY thing holding a blocked collection at 0 online -- and read
+    fail-open it had the OPPOSITE polarity to every other read in this module,
+    where unknown is never written as a number. One Mongo blip and the next
+    pass published the SHELF count for a blocked SKU as an absolute quantity,
+    recorded it as the baseline, and the diff then saw the product as
+    unchanged: back on sale until a human noticed. Unknown here is UNKNOWN --
+    the batch aborts and the next pass retries."""
     try:
         from . import online_block
 
-        return set(online_block.blocked_skus(db, list(skus)))
+        return set(online_block.blocked_skus(db, list(skus), strict=True))
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] block lookup skipped: %s", exc)
-        return set()
+        logger.warning(
+            "[STOCK_WRITEBACK] online-block state unreadable (STRICT -> batch abort, "
+            "never 'not blocked'): %s",
+            exc,
+        )
+        return None
 
 
 def online_quantities_for_skus(
@@ -421,7 +434,10 @@ def online_quantities_for_skus(
     # written, not even as a blocked 0): otherwise one blocked SKU in the batch
     # makes that shop look read and clears it out of unknown_stores, and the
     # other SKUs are then never written there at all.
-    for sku in _blocked_online(db, clean):
+    blocked = _blocked_online(db, clean)
+    if blocked is None:
+        return {}  # the block is part of the rule: unknown -> the rule is unknown
+    for sku in blocked:
         out[sku] = {sid: 0 for sid in read}
     if not stores:
         return {sku: {} for sku in clean}
