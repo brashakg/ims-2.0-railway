@@ -130,6 +130,17 @@ SHOPIFY_LOCATION_UNMAPPED = "SHOPIFY_LOCATION_UNMAPPED"
 # lists, the write itself is refused, so a green preview would become a failed
 # press.
 SHOPIFY_LOCATION_NOT_SELLING = "SHOPIFY_LOCATION_NOT_SELLING"
+# A RETRACTION could not be sent because the system is DARK. Only the release
+# door raises it: everywhere else dark is a legitimate no-op, but a shop whose
+# location is being taken away while Shopify is still advertising its units has
+# a number that MUST come down first, and "we are dark" is not "there is
+# nothing to retract" for a system that was live yesterday.
+SHOPIFY_UNREACHABLE = "SHOPIFY_UNREACHABLE"
+# The retraction reached Shopify but IMS could not reset its OWN last-sent
+# record for that shop. Transient and retryable -- and never a silent ok: with
+# a stale baseline every listing that still carries the shop noops on the diff
+# and the NEW location is written by nobody.
+STOCK_BASELINE_NOT_RESET = "STOCK_BASELINE_NOT_RESET"
 
 # Shopify's own userErrors code when an inventory item is not stocked at the
 # location a quantity was set for (InventorySetQuantitiesUserErrorCode).
@@ -416,10 +427,11 @@ def _unknown_stores(
     )
 
 
-def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
     """The dry-run stock plan (SIMULATED branch): policy, the per-store
     quantity rows that WOULD be written at each mapped shop, and the shops
-    that hold listed units but have no location. Read-only, zero network.
+    that hold listed units but have no location. Read-only; zero network
+    except the ONE locations read the press would make on day 1.
 
     It carries the WRITER'S OWN code/error (round 2 fixed this preview-vs-press
     divergence for ``sync_stock_levels`` and left the per-product plan behind):
@@ -443,10 +455,15 @@ def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict
     mapped = _mapped(stores)
     conflicts = _location_conflicts(stores)
     holders = unmapped_holders(db, quantities, stores, skus, mapped)
-    # The LAST pass's location verdict, read from Mongo -- this plan is
-    # zero-network by contract, and a preview that reads green must mean a
-    # press would too (the press asks the same two questions).
-    locations = last_location_verdict(db) or {}
+    # EXACTLY the press's line (round-6 P3): the plan used to read the recorded
+    # verdict with NO day-1 fallback while the press read Shopify itself when
+    # nothing had ever been recorded, so on the rebuilt catalogue the preview
+    # came back green (ok=True, code=None) over a press that codes
+    # SHOPIFY_LOCATION_UNMAPPED. This module promises twice that a preview
+    # reading green means a press would too; it has to ask the same question of
+    # the same source.
+    live, _reason = _live_or_reason(db)
+    locations = await writer_location_verdict(db, mapped) if live else {}
     if read_error:
         # An unknown SHOP LIST outranks the ladder, exactly as it does in the
         # writer (which returns before it): with no list, "no shop is mapped"
@@ -782,15 +799,38 @@ async def location_verdict(db, mapped: Dict[str, str]) -> Dict[str, Any]:
     your mapped locations" from it would be a guess, and a loud one.
 
     Fail-soft (a tripwire never blocks a write); zero network when DARK."""
-    empty: Dict[str, Any] = {"stray": [], "dead": [], "read": False}
     try:
         read = await list_locations(db)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] locations read failed for the verdict: %s", exc)
-        return empty
-    rows = [r for r in (read.get("locations") or []) if isinstance(r, dict) and r.get("id")]
-    if read.get("reason") or not rows:
-        return empty
+        return score_locations([], mapped)
+    if read.get("reason"):
+        return score_locations([], mapped)
+    return score_locations(read.get("locations") or [], mapped)
+
+
+def score_locations(
+    rows: Iterable[Dict[str, Any]], mapped: Dict[str, str]
+) -> Dict[str, Any]:
+    """THE scorer, spelled ONCE: Shopify's own location list + the CURRENT
+    mapping -> ``{stray, dead, read, rows}``. Pure -- no db, no network.
+
+    Both halves are a function of the rows AND of ``mapped``, which is why the
+    recorded verdict is re-scored here on every read instead of being replayed
+    (round-6 P1/P2): a shop mapped AFTER the sweep was reported STRAY on every
+    later press and POS write-back, and -- the silent direction -- a shop
+    mapped after the sweep to a location that cannot sell online came back with
+    ``dead: []``, a fully green press over a storefront reading SOLD OUT. The
+    Shopify half only a human can change; the IMS half changes on the
+    Organization page between two sweeps.
+
+    ``read`` is False when the list is EMPTY: a shop always has at least one
+    location, so an empty list means the read told us NOTHING -- concluding
+    "Shopify does not list any of your mapped locations" from it would be a
+    guess, and a loud one."""
+    rows = [r for r in (rows or []) if isinstance(r, dict) and r.get("id")]
+    if not rows:
+        return {"stray": [], "dead": [], "read": False, "rows": []}
     have = set(mapped.values())
     by_gid = {r["id"]: r for r in rows}
     dead: List[Dict[str, Any]] = []
@@ -811,6 +851,17 @@ async def location_verdict(db, mapped: Dict[str, str]) -> Dict[str, Any]:
         ],
         "dead": dead,
         "read": True,
+        # What Shopify said, kept so a later caller can re-score it against ITS
+        # OWN mapping without a second network read.
+        "rows": [
+            {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "isActive": bool(r.get("isActive")),
+                "fulfillsOnlineOrders": bool(r.get("fulfillsOnlineOrders")),
+            }
+            for r in rows
+        ],
     }
 
 
@@ -854,32 +905,34 @@ _STRAY_LOCATIONS_DOC = "shopify_stray_locations"
 
 
 def record_location_verdict(db, verdict: Dict[str, Any]) -> None:
-    """Remember what the sweep just found (an empty verdict CLEARS it, so what
-    is stored is only ever as old as the last LIVE pass). Fail-soft."""
+    """Remember what SHOPIFY said -- the location rows, never the scored
+    verdict (round-6 P1/P2). A verdict is rows PLUS the IMS mapping, and the
+    mapping changes on the Organization page between two sweeps: replaying a
+    scored snapshot is how a shop mapped after the sweep read as STRAY on every
+    press, and how a shop remapped to a location that cannot sell online read
+    as ``dead: []``. Stored raw, ``last_location_verdict`` re-scores.
+
+    An unread verdict stores no rows, which reads back as "nothing recorded" --
+    so the next caller does the one read itself instead of inheriting a failed
+    read as "all clear". Fail-soft."""
     try:
         db[_SYNC_STATE_COLLECTION].update_one(
             {"_id": _STRAY_LOCATIONS_DOC},
-            {
-                "$set": {
-                    "locations": list(verdict.get("stray") or []),
-                    "dead": list(verdict.get("dead") or []),
-                    "at": _now(),
-                }
-            },
+            {"$set": {"rows": list(verdict.get("rows") or []), "at": _now()}},
             upsert=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SHOPIFY_STOCK] location verdict not recorded: %s", exc)
 
 
-def last_location_verdict(db) -> Optional[Dict[str, Any]]:
-    """The last LIVE pass's location verdict, or None when NO pass has ever
-    recorded one -- for a caller that must not read Shopify's locations every
-    time: the POS write-back runs once per sale and the product press once per
-    publish, while a stray or unticked location only appears when a human edits
-    Shopify admin, so a fresh read each time buys nothing. Carrying the sweep's
-    verdict is what stops a sale's or a press's own row from saying the website
-    was corrected while Shopify routes orders to a location IMS never writes.
+def last_location_verdict(db, mapped: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """The last LIVE pass's Shopify location list, RE-SCORED against ``mapped``
+    -- or None when no pass has ever recorded one. For a caller that must not
+    read Shopify's locations every time: the POS write-back runs once per sale
+    and the product press once per publish, while the SHOPIFY half of the
+    verdict only changes when a human edits Shopify admin. The IMS half is the
+    caller's own ``mapped``, read fresh every time, so a mapping change between
+    two sweeps is seen immediately (round-6 P1/P2).
 
     None (not an empty verdict) matters: on day 1 no sweep has run yet, and
     "nothing recorded" must make the first publish press do the one read itself
@@ -889,28 +942,31 @@ def last_location_verdict(db) -> Optional[Dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SHOPIFY_STOCK] location verdict unreadable: %s", exc)
         return None
-    if not doc:
+    rows = [r for r in ((doc or {}).get("rows") or []) if isinstance(r, dict)]
+    if not rows:
         return None
-    return {
-        "stray": [r for r in (doc.get("locations") or []) if isinstance(r, dict)],
-        "dead": [r for r in (doc.get("dead") or []) if isinstance(r, dict)],
-        "read": True,
-    }
+    return score_locations(rows, mapped)
 
 
 def last_stray_locations(db) -> List[Dict[str, Any]]:
     """Just the stray half of ``last_location_verdict`` (the POS write-back's
-    sync_runs line). Fail-soft -> []."""
-    return (last_location_verdict(db) or {}).get("stray") or []
+    sync_runs line), scored against the mapping as it is NOW. Fail-soft -> []."""
+    try:
+        mapped = _mapped(_stores(db))
+    except Exception as exc:  # noqa: BLE001 -- a log line never blocks a write
+        logger.debug("[SHOPIFY_STOCK] store list unknown for the stray line: %s", exc)
+        return []
+    return (last_location_verdict(db, mapped) or {}).get("stray") or []
 
 
 async def writer_location_verdict(db, mapped: Dict[str, str]) -> Dict[str, Any]:
     """The verdict for a writer that runs PER PRODUCT or PER SALE: the last
-    LIVE pass's recorded one, or -- when nothing has ever been recorded (day 1,
-    the owner's first "Send to website" press) -- ONE read of its own, recorded
-    for the next caller. Zero network in the steady state, because the sweep
-    records before it loops."""
-    stored = last_location_verdict(db)
+    LIVE pass's recorded location rows scored against THIS caller's ``mapped``,
+    or -- when nothing has ever been recorded (day 1, the owner's first "Send
+    to website" press) -- ONE read of its own, recorded for the next caller.
+    Zero network in the steady state, because the sweep records before it
+    loops."""
+    stored = last_location_verdict(db, mapped)
     if stored is not None:
         return stored
     verdict = await location_verdict(db, mapped)
@@ -933,6 +989,15 @@ def _unknown_error(names: List[str]) -> str:
     return (
         f"on-hand unknown at {', '.join(names)} -- written nowhere this pass "
         f"(never as 0); the other shops were written"
+    )
+
+
+def _unknown_sku_error(skus: List[str]) -> str:
+    """The SKU axis of the same unknown (the shop axis is ``_unknown_error``):
+    no spine row, or the read for it failed."""
+    return (
+        f"on-hand unknown for {', '.join(skus[:5])} -- that listing is written "
+        f"NOWHERE this pass (never as 0); the other listings were written"
     )
 
 
@@ -1126,6 +1191,7 @@ async def push_skus_stock(
     product_id: Optional[str] = None,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
+    delisting: bool = False,
 ) -> Dict[str, Any]:
     """THE quantity path. For every listed SKU, one row per MAPPED shop (an
     explicit 0 included) at that shop's location, through ``set_inventory_
@@ -1189,7 +1255,15 @@ async def push_skus_stock(
         )
         return summary
 
-    holders = unmapped_holders(db, quantities, stores, distinct, mapped)
+    # ``delisting`` is the ONE exception to the holders question, and it is the
+    # honest one (round-6 P6): the caller is taking this SKU OFF the website at
+    # every shop, so "a shop holds it and has no location" is the INTENT, not a
+    # fault. The delist door forced 0 everywhere and still got ok=False +
+    # STORE_UNMAPPED + a deduped P1 task for a fully successful delist of any
+    # size Gangadham Pune happens to hold -- a false P1 on prod today, because
+    # `unmapped_holders` re-reads the rule at buffer 0 instead of reading the
+    # caller's forced quantities.
+    holders = [] if delisting else unmapped_holders(db, quantities, stores, distinct, mapped)
     summary["unmapped_stores"] = holders
     summary["unknown_stores"] = _unknown_stores(
         quantities, [s.get("store_id") for s in stores], distinct
@@ -1328,33 +1402,79 @@ def _forget_store_baseline(db, store_id: str) -> int:
     listing -- those listings then matched the diff, noop'd, and the new
     location received no row for them at all. On the rebuilt 121-listing
     catalogue a corrected remap would re-arm one listing and leave ~120
-    advertising the old location's numbers. Fail-soft; returns the listings
-    touched."""
+    advertising the old location's numbers.
+
+    STRICT -- it RAISES, and ``release_store_location`` (its only caller) turns
+    that into a refused save. Fail-soft it was the same silent class one more
+    layer down: the zeroing lands on Shopify, the reset dies on a Mongo blip,
+    the door still answers ok, the save moves the gid -- and every listing whose
+    baseline still carries this shop then matches the diff, noops, and the NEW
+    location is never written at all. Returns the listings touched."""
     touched = 0
-    try:
-        coll = db["catalog_products"]
-        # Keyed by STORE, so the store id is the only thing to look for -- no
-        # SKU list, no listing resolver.
-        docs = list(coll.find({"ecom.online_stock.quantities": {"$exists": True}}))
-        for doc in docs:
-            pid = doc.get("id")
-            ecom = dict(doc.get("ecom") or {})
-            stock = ecom.get("online_stock")
-            if pid is None or not isinstance(stock, dict):
-                continue
-            quantities = {
-                sku: {sid: q for sid, q in dict(rows).items() if sid != store_id}
-                for sku, rows in dict(stock.get("quantities") or {}).items()
-                if isinstance(rows, dict)
-            }
-            if quantities == dict(stock.get("quantities") or {}):
-                continue
-            ecom["online_stock"] = {**stock, "quantities": quantities}
-            coll.update_one({"id": pid}, {"$set": {"ecom": ecom}})
-            touched += 1
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] baseline reset failed for %s: %s", store_id, exc)
+    coll = db["catalog_products"]
+    # Keyed by STORE, so the store id is the only thing to look for -- no SKU
+    # list, no listing resolver.
+    docs = list(coll.find({"ecom.online_stock.quantities": {"$exists": True}}))
+    for doc in docs:
+        pid = doc.get("id")
+        ecom = dict(doc.get("ecom") or {})
+        stock = ecom.get("online_stock")
+        if pid is None or not isinstance(stock, dict):
+            continue
+        quantities = {
+            sku: {sid: q for sid, q in dict(rows).items() if sid != store_id}
+            for sku, rows in dict(stock.get("quantities") or {}).items()
+            if isinstance(rows, dict)
+        }
+        if quantities == dict(stock.get("quantities") or {}):
+            continue
+        ecom["online_stock"] = {**stock, "quantities": quantities}
+        coll.update_one({"id": pid}, {"$set": {"ecom": ecom}})
+        touched += 1
     return touched
+
+
+def _baseline_skus_at(db, store_id: str) -> List[str]:
+    """The SKUs the last-sent baseline says are showing a POSITIVE number at
+    ``store_id`` -- i.e. what Shopify is ADVERTISING at that shop's location
+    right now. STRICT: a read failure raises (the caller refuses the save).
+
+    The SHELF is not that record (round-6 oversell P1). A write-back is
+    fail-soft by design: after three units go SOLD, if Shopify refused the
+    chunk or the token lapsed for ten minutes, the shelf reads 0 while
+    ``ecom.online_stock.quantities`` still says 3 -- and 3 is what the website
+    is selling. Releasing on the shelf alone wrote NOTHING, dropped the shop
+    from every baseline and left the gid in no store's map, so ``_mapped``
+    never targeted that location again: three phantom units, for ever, with the
+    stray-location guard merely REPORTING it at the next 01:00 sweep."""
+    out: set = set()
+    for doc in db["catalog_products"].find({"ecom.online_stock.quantities": {"$exists": True}}):
+        rows = ((doc.get("ecom") or {}).get("online_stock") or {}).get("quantities") or {}
+        for sku, per in dict(rows).items():
+            if isinstance(per, dict) and int(per.get(store_id, 0) or 0) > 0 and sku:
+                out.add(str(sku))
+    return sorted(out)
+
+
+def _rearm_or_refuse(db, store_id: str, out: Dict[str, Any]) -> bool:
+    """Re-arm the baseline and say whether the caller may save. The reset is
+    STRICT, so a Mongo blip here is a REFUSED save, not a silent one: the
+    zeroing has already landed on Shopify, and a stale baseline means every
+    listing that still carries this shop noops on the diff and the NEW location
+    is never written at all (the round-5 P2 hole, re-entered through a swallowed
+    exception). Re-running the door is idempotent -- it writes 0 again."""
+    try:
+        out["forgot"] = _forget_store_baseline(db, store_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- the door never raises; it refuses
+        logger.warning("[SHOPIFY_STOCK] baseline reset failed for %s: %s", store_id, exc)
+        out["ok"] = False
+        out["code"] = STOCK_BASELINE_NOT_RESET
+        out["error"] = (
+            f"the location was cleared on Shopify but this shop's last-sent record "
+            f"could not be reset ({exc}) -- nothing was saved; try again"
+        )
+        return False
 
 
 async def release_store_location(db, store_id: str, location_gid: str) -> Dict[str, Any]:
@@ -1374,11 +1494,26 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
         the shelf, a re-map of a shop holding no listed stock was a fully green
         NOOP that never wrote the NEW location at all.
 
-    DARK -> ok with zero network (a dark system never published a quantity), the
-    baseline still re-armed. Returns ``{ok, mode, set, skus, forgot, code,
-    error}``; never raises. ``code`` is STOCK_ONHAND_UNKNOWN when the shelf
-    could not be read (the caller refuses the save) and the writer's own code
-    when Shopify refused the zeroing."""
+    WHAT TO ZERO is the UNION of the shelf and the baseline (round-6 oversell
+    P1): the shelf is what the shop has, the baseline is what Shopify is
+    showing, and a fail-soft write-back is exactly how the two come apart.
+
+    DARK: ok with zero network only while the baseline says NOTHING was ever
+    published at this shop (a dark system that never published has nothing to
+    retract). With a live baseline behind it, DARK is an UNREACHABLE Shopify,
+    not "nothing to release" (round-6 oversell P2) -- the creds read is itself
+    fail-soft to False, so a ten-minute vault blip would otherwise save the new
+    mapping, forget the baseline and leave the old location selling for ever.
+    The baseline is re-armed only on a release that actually happened.
+
+    Returns ``{ok, mode, set, skus, forgot, code, error}``; never raises.
+    ``code`` is STOCK_ONHAND_UNKNOWN when the shelf could not be read (the
+    caller refuses the save), SHOPIFY_UNREACHABLE when the system is dark with
+    units published, STOCK_TARGET_MISSING when a SKU the location is
+    advertising resolves to no Shopify inventory item (it cannot be retracted
+    at all), STOCK_BASELINE_NOT_RESET when the zeroing landed but the last-sent
+    record could not be re-armed, and the writer's own code when Shopify refused
+    the zeroing."""
     from ..online_catalog import inventory_items_for_skus, listed_skus_on_hand_at
 
     out: Dict[str, Any] = {
@@ -1389,7 +1524,8 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
     if not gid or not store_id:
         return out
     try:
-        skus = listed_skus_on_hand_at(db, store_id)
+        published = _baseline_skus_at(db, store_id)
+        skus = sorted(set(listed_skus_on_hand_at(db, store_id)) | set(published))
     except Exception as exc:  # noqa: BLE001 -- STRICT read: refuse, never "nothing"
         out["ok"] = False
         out["code"] = STOCK_ONHAND_UNKNOWN
@@ -1399,11 +1535,38 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
     live, reason = _live_or_reason(db)
     if not live:
         out["reason"] = reason
-        out["forgot"] = _forget_store_baseline(db, store_id)
+        if published:
+            out["ok"] = False
+            out["code"] = SHOPIFY_UNREACHABLE
+            out["error"] = (
+                f"Shopify is unreachable ({reason}), so the {len(published)} SKU(s) this "
+                f"shop is advertising at that location cannot be zeroed -- try again once "
+                f"the connection is back"
+            )
+            return out
+        _rearm_or_refuse(db, store_id, out)
         return out
     out["mode"] = MODE_LIVE
     if skus:
+        # ``inventory_items_for_skus`` is fail-SOFT ({} on a bad read), and {}
+        # here reads as "nothing to zero" -- the round-6 oversell P1 failure
+        # rebuilt one layer down, on the very path that closed it: the union
+        # NAMES the SKU the old location is advertising and then writes no row
+        # for it, forgets the baseline and lets the gid walk away. A SKU with no
+        # Shopify inventory item cannot be retracted by ANY means, so the door
+        # refuses BEFORE a single row goes out (half-released then forgotten is
+        # the worst of the three outcomes) and the shop keeps its location, so
+        # the 01:00 sweep still writes it.
         targets = inventory_items_for_skus(db, skus)
+        unreachable = [s for s in skus if not targets.get(s)]
+        if unreachable:
+            out["ok"] = False
+            out["code"] = STOCK_TARGET_MISSING
+            out["error"] = (
+                f"{', '.join(unreachable[:5])} has no Shopify inventory item, so what that "
+                f"location is showing for it cannot be zeroed -- nothing was released"
+            )
+            return out
         rows = [
             (_as_shopify_gid(inv, "InventoryItem"), gid, 0)
             for inv in dict.fromkeys(targets.values())
@@ -1417,7 +1580,7 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
                 out["code"] = written.get("code") or STOCK_WRITE_FAILED
                 out["error"] = "; ".join(str(e) for e in written["errors"][:3])
                 return out
-    out["forgot"] = _forget_store_baseline(db, store_id)
+    _rearm_or_refuse(db, store_id, out)
     return out
 
 
@@ -1593,6 +1756,16 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         logger.warning("[SHOPIFY_STOCK] target lookup failed for the plan: %s", exc)
         have = {}
     missing = sorted({s for s in changed_skus if not have.get(s)})
+    # ...and the question NO guard asked: which SKU could not be READ at all.
+    # `unknown_stores` answers "which SHOP failed" and `target_missing` answers
+    # "which SKU has no Shopify item"; a SKU with no spine row -- the
+    # catalogue-stray class this repo documents, and what a transient Mongo
+    # failure in _sku_to_pid looks like -- is absent from `quantities`
+    # ENTIRELY, so it fell through both and the preview read green over a press
+    # that aborts the product with STOCK_ONHAND_UNKNOWN (round-6 first-push
+    # P3). The tell was already in the payload and unacted on: a `plan` row
+    # with `quantities: {}`.
+    unknown_skus = sorted({s for s in changed_skus if s not in quantities})
     # ...and the other half of the same (item, location) pair: two SKUs of ONE
     # listing stamped on one Shopify inventory item. Resolved PER LISTING, the
     # way the press resolves it, so the preview and the press agree exactly.
@@ -1607,6 +1780,14 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # preview runs it too so "Preview first" and the press agree.
     live, reason = _live_or_reason(db)
     locations = await location_verdict(db, mapped) if live else {}
+    # Recorded HERE, before the dry-run return (round-6 P4): "Preview first" is
+    # the step the first-push runbook makes mandatory, and it computed the
+    # truth and threw it away -- the owner read the correct red verdict, then
+    # pressed "Send to website" and that press carried the stale cache. The one
+    # button the runbook tells him to press could not fix what it had just
+    # measured.
+    if live:
+        record_location_verdict(db, locations)
     stray_locations = list(locations.get("stray") or [])
     dead_locations = list(locations.get("dead") or [])
     payload: Dict[str, Any] = {
@@ -1621,6 +1802,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         ),
         "orphan_stores": orphans,
         "target_missing": missing,
+        "unknown_skus": unknown_skus,
         "unmapped_locations": stray_locations,
         "dead_locations": dead_locations,
         "plan": [
@@ -1641,7 +1823,9 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             stray_locations=stray_locations,
             dead_locations=dead_locations,
             unknown_error=(
-                _unknown_error(_labels(stores, sorted(unknown))) if unknown else None
+                _unknown_error(_labels(stores, sorted(unknown)))
+                if unknown
+                else (_unknown_sku_error(unknown_skus) if unknown_skus else None)
             ),
             orphans=orphans,
             duplicate_targets=duplicate_targets,
@@ -1656,6 +1840,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             or stray_locations
             or dead_locations
             or unknown
+            or unknown_skus
             or orphans
             or duplicate_targets
             or missing
@@ -1676,7 +1861,6 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # The mitigation the design promises is a TASK, not a summary line: a
     # steady state where nothing changed still has to reach the task board
     # (push_skus_stock only files one for a product it is actually sending).
-    record_location_verdict(db, locations)
     for h in holders:
         _file_unmapped_task(db, h)
     # The stray-location TASK (not the verdict) waits until there is something
@@ -1706,7 +1890,18 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         # Nothing writable is a FAILED product, never a "synced" one: with no
         # mapped shop the page used to report "1 of 1 written" having written
         # nothing at all.
-        if res.get("errors") or not res.get("stores_mapped"):
+        #
+        # `set` -- rows Shopify ACCEPTED -- is the only honest measure
+        # (round-6 first-push P2). The two flags above miss the WHOLE-BATCH
+        # abort inside push_skus_stock, which sets `code` + `error` and returns
+        # with `errors == []` and `stores_mapped` ALREADY stamped: a
+        # single-SKU listing whose SKU has no spine row, or any transient Mongo
+        # failure mid-loop, scored as `synced`, and the sweep came back
+        # ok=True / "N of N written, 0 failed" with an empty transcript. The
+        # 121-product catalogue is single-SKU listings -- exactly the shape
+        # that takes that branch (a mixed-SKU product hits the per-SKU
+        # `errors.append` and was caught).
+        if res.get("errors") or not res.get("stores_mapped") or not res.get("set"):
             failed += 1
             pid = product.get("id") or product.get("product_id")
             errors.append(f"{pid}: {res.get('error') or 'stock not written'}")

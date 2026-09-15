@@ -226,7 +226,7 @@ async def push_product(
             metafields=metafields or None,
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
-            stock=plan_product_stock(db, product, variants),
+            stock=await plan_product_stock(db, product, variants),
             photos=plan_product_media(product, photos),
             tags=plan_product_tags(product, ims_tags),
         )
@@ -746,14 +746,20 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         )
     try:
         tracked = await _set_variant_tracking(db, payload["productId"], [variant_gid], "DENY")
-        # 0 at EVERY physical shop (mapped or not): the writer slices the
-        # mapped ones into rows and there is no holder to report.
+        # 0 at EVERY physical shop (mapped or not). `delisting=True` is what
+        # makes the second half of that sentence true: the writer's holders
+        # question re-reads the RULE at buffer 0, not the caller's forced
+        # quantities, so without it an unmapped shop that still holds this size
+        # (Gangadham Pune, today) turned a fully successful delist into
+        # ok=False + STORE_UNMAPPED + a P1 task. Taking a SKU off the website
+        # at a shop with no location IS the intent here.
         zero = {sku: {str(s.get("store_id")): 0 for s in _stores(db) if s.get("store_id")}}
         written = await push_skus_stock(
             db,
             [sku],
             quantities=zero,
             source="variant_delist",
+            delisting=True,
             product_id=str(parent_twin_id) if parent_twin_id else None,
             policy="DENY",
             tracked=bool(tracked.get("updated")),
