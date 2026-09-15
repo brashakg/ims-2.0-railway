@@ -1469,6 +1469,11 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** The per-shop stock sub-result (backend PushResult.stock) -- only what the
+   *  toast reads: `quantities` is {sku: {store_id: qty}} as ACCEPTED by
+   *  Shopify. All zeros on a successful press means the listing went live
+   *  SOLD OUT, which is correct (IMS is master) but must be said out loud. */
+  stock?: { ok?: boolean; quantities?: Record<string, Record<string, number>> | null } | null;
 }
 
 /** Per-entity pushed-vs-pending counts (shapes differ per entity, mirroring the

@@ -307,6 +307,20 @@ export function SyncChip({
 // the SIMULATED-vs-LIVE distinction explicit (so a dry-run is never mistaken for
 // a live write) and surfacing the shopify_id when present.
 // ----------------------------------------------------------------------------
+// wroteZeroEverywhere — a LIVE press that Shopify accepted, where every number
+// written was 0. Correct (IMS is master, the shelf really is empty) but the
+// listing is now live and SOLD OUT, and nothing said so: the press flips
+// tracked=true + DENY before it publishes, so a clean `ok` with no code read as
+// a plain success. On the rebuilt 121-product catalogue with one stock unit
+// that is nearly every press.
+export function wroteZeroEverywhere(r: PushResult): boolean {
+  if (r.mode !== 'LIVE') return false;
+  const numbers = Object.values(r.stock?.quantities || {}).flatMap((per) =>
+    Object.values(per || {}),
+  );
+  return numbers.length > 0 && numbers.every((n) => Number(n) === 0);
+}
+
 export function formatPushResult(label: string, r: PushResult): string {
   const where = r.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
   // An ok result that carries a code (PRICE_NOT_SYNCED: live, at the OLD
@@ -317,7 +331,8 @@ export function formatPushResult(label: string, r: PushResult): string {
   }
   const idPart = r.shopify_id ? ` · ${r.shopify_id}` : '';
   const actionPart = r.action ? ` (${r.action})` : '';
-  return `${label}: ${where}${actionPart}${idPart}`;
+  const soldOut = wroteZeroEverywhere(r) ? ' — 0 at every shop, so it is live and SOLD OUT' : '';
+  return `${label}: ${where}${actionPart}${idPart}${soldOut}`;
 }
 
 // ----------------------------------------------------------------------------
