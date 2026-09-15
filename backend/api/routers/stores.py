@@ -406,9 +406,59 @@ def _store_on_hand_units(db, store_id: str) -> Optional[str]:
     return f"{n} on-hand stock unit(s)" if n else None
 
 
+async def _release_location_or_refuse(db, store_id: str, location_gid) -> None:
+    """THE door behind every way a shop stops owning a Shopify location: a
+    remap, a clear, a DEACTIVATION and a soft DELETE. Zero the units that
+    location is advertising, re-arm the baseline, and refuse the save if that
+    could not be done.
+
+    Deactivation and delete were outside it (round-6 oversell P3) -- they ran
+    the dependents guard and saved. The dependents guard measures the SHELF,
+    and the shelf is not what Shopify is showing: three units sold with the
+    fail-soft write-back never landing left the shelf empty, the guard happy,
+    and 3 on the website. The save then dropped the shop out of
+    ``physical_stores``, so its gid left the store map and ``_mapped`` never
+    targeted that location again: the units stayed on sale indefinitely."""
+    if db is None or not location_gid:
+        return
+    from ..services import shopify_push as _push
+
+    released = await _push.release_store_location(db, store_id, location_gid)
+    if released.get("ok"):
+        return
+    if released.get("code") == _push.STOCK_ONHAND_UNKNOWN:
+        # STRICT: an unknown shelf is never "holds nothing".
+        raise _stock_unreadable(
+            RuntimeError(released.get("error") or "listed stock unreadable")
+        )
+    if released.get("code") == _push.STOCK_BASELINE_NOT_RESET:
+        # 503, not 400: nothing about the request is wrong and there is nothing
+        # for the owner to correct -- the whole door is idempotent, so a retry
+        # re-sends the zeroing and re-arms the record.
+        logger.warning("[STORES] baseline not re-armed (STRICT -> refuse): %s", released.get("error"))
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The website numbers came down, but this shop's last-sent record "
+                "could not be reset, so nothing was changed. Try again in a moment."
+            ),
+        )
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Could not zero this shop's units at its Shopify location, so nothing "
+            "was changed (they would keep showing on the website): "
+            f"{released.get('error') or 'Shopify refused the write'}"
+        ),
+    )
+
+
 def _store_active_dependents(db, store_id: str) -> Optional[str]:
     """Human description if a store still has stock / open orders / staff, so
-    deactivation can be blocked. Fail-soft."""
+    deactivation can be blocked. The STOCK half is STRICT -- an unreadable
+    shelf raises 503 through ``_on_hand_count``, never "holds nothing" (the
+    docstring used to say the whole function was fail-soft; only the orders and
+    staff halves are)."""
     if db is None:
         return None
     held = _store_on_hand_units(db, store_id)
@@ -939,23 +989,7 @@ async def update_store(
             # pass. The save only happens if that succeeded, so a failure
             # leaves the mapping as it was instead of stranding numbers on an
             # orphaned location -- or saving a gid the diff will never send.
-            from ..services import shopify_push as _push
-
-            released = await _push.release_store_location(db, store_id, release_old)
-            if not released.get("ok"):
-                if released.get("code") == _push.STOCK_ONHAND_UNKNOWN:
-                    # STRICT: an unknown shelf is never "holds nothing".
-                    raise _stock_unreadable(
-                        RuntimeError(released.get("error") or "listed stock unreadable")
-                    )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Could not zero this shop's units at its old Shopify location, "
-                        "so the location was not changed (they would keep showing on "
-                        f"the website): {released.get('error') or 'Shopify refused the write'}"
-                    ),
-                )
+            await _release_location_or_refuse(db, store_id, release_old)
         if update_data.get("shopify_location_id"):
             update_data["shopify_location_name"] = (
                 await _shopify_location_name(db, update_data["shopify_location_id"])
@@ -974,6 +1008,17 @@ async def update_store(
                         "Clear/transfer those first."
                     ),
                 )
+            # Going inactive drops the shop out of physical_stores, so its
+            # Shopify location leaves the store map and nothing writes it
+            # again. Release it first -- the gid the doc will carry AFTER this
+            # write, so a remap+deactivate in one PUT releases both.
+            await _release_location_or_refuse(
+                db,
+                store_id,
+                update_data.get("shopify_location_id")
+                if "shopify_location_id" in update_data
+                else existing.get("shopify_location_id"),
+            )
 
         # Re-derive the store GSTIN whenever its entity or state changes, so the
         # store always bills under the correct registration.
@@ -1010,7 +1055,8 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
     existing = repo.find_by_id(store_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Store not found")
-    dep = _store_active_dependents(_get_db(), store_id)
+    db = _get_db()
+    dep = _store_active_dependents(db, store_id)
     if dep:
         raise HTTPException(
             status_code=400,
@@ -1019,6 +1065,10 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
                 "Clear/transfer those first."
             ),
         )
+    # Same door as the PUT: a soft delete also takes the shop out of
+    # physical_stores, so whatever its location is advertising must come down
+    # first or it stays on sale for ever.
+    await _release_location_or_refuse(db, store_id, existing.get("shopify_location_id"))
     repo.update(
         store_id,
         {
