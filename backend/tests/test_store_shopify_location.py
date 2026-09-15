@@ -72,7 +72,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from strict_fakes import StrictDB  # noqa: E402
+from strict_fakes import StrictCollection, StrictDB  # noqa: E402
 from api.routers import stores  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.services import shopify_push  # noqa: E402
@@ -711,7 +711,7 @@ def test_R4_a_remap_is_refused_when_shopify_refuses_the_release(monkeypatch):
     _go_live(monkeypatch, _SET_REFUSED)
     r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
     assert r.status_code == 400, r.text
-    assert "old Shopify location" in r.json()["detail"]
+    assert "keep showing on the website" in r.json()["detail"]
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
 
 
@@ -976,3 +976,229 @@ def test_a_first_mapping_is_allowed_while_the_shop_holds_units(monkeypatch):
     r = c.put("/api/v1/stores/BV-DHN-02", json={"shopify_location_id": BOKARO})
     assert r.status_code == 200, r.text
     assert _saved(db, "BV-DHN-02")["shopify_location_id"] == BOKARO
+
+
+# ---------------------------------------------------------------------------
+# 11. Panel round 6 (2026-09-12): the release door reads what SHOPIFY IS
+#     SHOWING (not the shelf), refuses while Shopify is unreachable, and runs
+#     on DEACTIVATION and DELETE too -- the two doors that had no release at
+#     all.
+# ---------------------------------------------------------------------------
+
+
+def _showing(db, per_store, pid="cat-1", sku="SP-1"):
+    """The last-sent baseline: what Shopify is ADVERTISING at each shop right
+    now. Written by `_writeback_stock` after every accepted push."""
+    db.get_collection("catalog_products").update_one(
+        {"id": pid},
+        {"$set": {"ecom.online_stock": {"tracked": True, "quantities": {sku: dict(per_store)}}}},
+    )
+
+
+def test_R6_the_release_zeroes_what_shopify_is_showing_not_just_the_shelf(monkeypatch):
+    """ROUND-6 oversell P1 (phantom stock at a released location). The release
+    decided what to zero from the SHELF (`listed_skus_on_hand_at`), but the
+    record of what Shopify is SHOWING is the baseline. `push_skus_stock` is
+    fail-soft by design, so the two come apart exactly when it matters: three
+    units go SOLD and the post-sale write-back does not land (Shopify refused
+    the chunk, or the token lapsed for ten minutes). The shelf now reads 0, the
+    baseline still says 3, and 3 is what bettervision.in is selling.
+
+    On the shelf alone the remap wrote NOTHING, forgot the baseline and moved
+    the gid away, so the old location was in no store's map and `_mapped` never
+    targeted it again: three phantom units for ever, with the stray-location
+    guard merely REPORTING it at the next 01:00 sweep.
+
+    Narrow the union back to `listed_skus_on_hand_at` -> zero Shopify calls ->
+    this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [])  # all three sold; the shelf is empty
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 3})
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    sets = [x for x in calls if "inventorySetQuantities" in x["query"]]
+    assert len(sets) == 1
+    assert sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ], "what Shopify is SHOWING comes down, whatever the shelf says"
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+    assert _baseline_of(db) == {"SP-1": {}}
+
+
+def test_R6_a_dark_remap_is_refused_while_shopify_is_still_showing_units(monkeypatch):
+    """ROUND-6 oversell P2. `release_store_location` returned ok with zero
+    network when DARK, on the justification that "a dark system never published
+    a quantity" -- false for a system that was LIVE yesterday and is dark right
+    now. `_has_shopify_creds` is itself fail-soft to False on any vault or
+    credential read error, so a ten-minute blip saved the new mapping, forgot
+    the baseline, and left the old location selling a unit nothing would ever
+    write again.
+
+    DARK with a live baseline behind it is an UNREACHABLE Shopify, not "nothing
+    to release". Delete the `if published:` refusal -> 200 with the gid moved
+    -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 1})
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 400, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    assert _baseline_of(db) == {"SP-1": {"BV-BOK-02": 1}}, (
+        "the record of what is live survives a refusal -- forgetting it is how the "
+        "next pass stops re-sending that shop"
+    )
+
+
+def test_R6_a_dark_remap_with_nothing_published_still_saves(monkeypatch):
+    """The ceiling on that refusal: a shop that has NEVER been published from
+    (no baseline row) has nothing to retract, so the go-live remap still saves
+    while dark -- even holding listed units. Widen the refusal from the
+    baseline to the shelf -> 400 -> this fails, and first setup is blocked
+    until the storefront is armed."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 200, r.text
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == PUNE
+
+
+def test_R6_deactivating_a_mapped_shop_releases_its_shopify_location(monkeypatch):
+    """ROUND-6 oversell P3. `update_store` with is_active=False ran the
+    dependents guard and saved -- it never called `release_store_location`. And
+    the dependents guard measures the SHELF, the same wrong source as P1: three
+    units sold with the write-back never landing left the shelf empty, the
+    guard happy, and 3 on the website. The save then dropped the shop out of
+    `physical_stores`, so its gid left the store map and `_mapped` never
+    targeted that location again.
+
+    Delete the `_release_location_or_refuse` call in the deactivation branch ->
+    zero Shopify calls -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [])
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 3})
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"is_active": False})
+    assert r.status_code == 200, r.text
+    sets = [x for x in calls if "inventorySetQuantities" in x["query"]]
+    assert len(sets) == 1
+    assert sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ]
+    assert _saved(db, "BV-BOK-02")["is_active"] is False
+    assert _baseline_of(db) == {"SP-1": {}}
+
+
+def test_R6_deleting_a_mapped_shop_releases_its_shopify_location(monkeypatch):
+    """The same hole in the DELETE door (a soft delete is the same
+    deactivation). Delete the `_release_location_or_refuse` call in
+    `delete_store` -> zero Shopify calls -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [])
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 2})
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.delete("/api/v1/stores/BV-BOK-02")
+    assert r.status_code == 200, r.text
+    sets = [x for x in calls if "inventorySetQuantities" in x["query"]]
+    assert len(sets) == 1
+    assert sets[0]["variables"]["input"]["quantities"] == [
+        {"inventoryItemId": "gid://shopify/InventoryItem/9", "locationId": BOKARO, "quantity": 0}
+    ]
+    assert _saved(db, "BV-BOK-02")["is_active"] is False
+
+
+def test_R6_a_deactivation_is_refused_when_shopify_refuses_the_release(monkeypatch):
+    """The release is the precondition for the deactivation too, exactly as it
+    is for the remap: Shopify refusing the zeroing leaves the shop ACTIVE
+    rather than stranding its numbers on a location nothing writes again."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [])
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 3})
+    _go_live(monkeypatch, _SET_REFUSED)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"is_active": False})
+    assert r.status_code == 400, r.text
+    assert "keep showing on the website" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["is_active"] is True
+
+
+def test_R6_deactivating_an_unmapped_shop_touches_nothing(monkeypatch):
+    """The ceiling: a shop with no Shopify location has nothing to release, so
+    the ordinary deactivation is still one save and zero network."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02")])
+    db.seed("stock_units", [])
+    _list_it(db)
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"is_active": False})
+    assert r.status_code == 200, r.text
+    assert [x for x in calls if "inventorySetQuantities" in x["query"]] == []
+
+
+def test_R6_a_sku_the_location_advertises_with_no_shopify_item_refuses_the_release(monkeypatch):
+    """The other half of round-6 oversell P1. The union NAMES what Shopify is
+    advertising, but the retraction still had to resolve each SKU to a Shopify
+    inventory item -- and `inventory_items_for_skus` is fail-SOFT ({} on a bad
+    read). {} there reads as "nothing to zero": the door wrote no row, forgot
+    the baseline and let the gid walk away, which is the ORIGINAL phantom bug
+    rebuilt one layer down, on the very path that closed it.
+
+    Input: the baseline says BV-BOK-02 is showing 3 of a SKU that resolves to
+    no inventory item (a size retired off the parent after it was published, or
+    the same transient catalog read that makes the resolver answer {}). Nothing
+    can retract that number, so the save is refused BEFORE a single row goes
+    out -- the shop keeps its location, so the 01:00 sweep still writes it --
+    instead of half-releasing and then forgetting.
+
+    Drop the `unreachable` refusal -> 200, zero Shopify calls, gid at Pune and
+    the baseline forgotten -> this fails."""
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [])  # the shelf is empty; only the baseline knows
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 3}, sku="GONE-1")
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 400, r.text
+    assert "GONE-1" in r.json()["detail"]
+    assert [x for x in calls if "inventorySetQuantities" in x["query"]] == [], (
+        "nothing goes out at all -- half-released then forgotten is the worst outcome"
+    )
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    assert _baseline_of(db) == {"GONE-1": {"BV-BOK-02": 3}}, "the record of what is live survives"
+
+
+def test_R6_a_baseline_reset_that_dies_refuses_the_save(monkeypatch):
+    """The last swallowed exception on this door. The zeroing lands on Shopify
+    and THEN `_forget_store_baseline` -- fail-soft, logged at warning -- dies on
+    a Mongo blip. The door still answered ok, so the save moved the gid while
+    every listing whose baseline still carried this shop went on matching the
+    diff, nooping, and never writing the NEW location: round-5 P2 re-entered
+    through an `except Exception: pass`.
+
+    The reset is STRICT now and the door turns the raise into a refusal (the
+    whole door is idempotent -- a retry writes 0 again). Restore the
+    `except Exception: logger.warning(...)` inside `_forget_store_baseline`, or
+    drop `_rearm_or_refuse`'s `out["ok"] = False` -> 200 with the gid at Pune
+    -> this fails."""
+
+    class _WriteDies(StrictCollection):
+        def update_one(self, *a, **k):
+            raise RuntimeError("catalog_products write died")
+
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO)])
+    db.seed("stock_units", [_unit("BV-BOK-02")])
+    _list_it(db)
+    _showing(db, {"BV-BOK-02": 1})
+    live = db.get_collection("catalog_products")
+    db._collections["catalog_products"] = _WriteDies("catalog_products", live.docs)
+    calls = _go_live(monkeypatch, _SET_OK)
+    r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": PUNE})
+    assert r.status_code == 503, r.text  # a retry, not a correction he can make
+    assert "last-sent record could not be reset" in r.json()["detail"]
+    assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
+    # the retraction itself DID go out -- that half is idempotent and safe
+    assert len([x for x in calls if "inventorySetQuantities" in x["query"]]) == 1

@@ -52,6 +52,16 @@ DEAD_CALLS = {
     "zero_stock_ledger_entry",
 }
 DEAD_NAMES = {"_online_location_cache"}
+# DEAD CALL SHAPES: a live function that must never be called a particular way.
+# {function_name: (positional_index, keyword)} -- passing None there is the
+# offence. `_on_hand_for_skus(db, skus, None)` is the POOLED branch its own
+# docstring calls a LIVE TRAP: it returns a chain-pooled number that ignores
+# the SUPERADMIN online block and the per-shop safety buffer, i.e. the #1125
+# rule, and it is the exact shape three files used before this PR. Deletion is
+# deferred to PR 4 by design s3.6, so until then the shape is pinned here (its
+# own unit tests keep exercising the branch, which is why nothing else named
+# it). THE per-shop rule is online_stock_writeback.online_quantities_for_skus.
+DEAD_NONE_ARGS = {"_on_hand_for_skus": (2, "store_id")}
 # Only shrinks. Relative to backend/.
 ENV_PIN_ALLOWED = {
     "api/services/shopify_push/__init__.py",
@@ -70,6 +80,16 @@ def _offenders_in(path: pathlib.Path, rel: str) -> list:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             if name in DEAD_CALLS:
                 hits.append(f"{rel}:{node.lineno} calls {name}()")
+            elif name in DEAD_NONE_ARGS:
+                idx, kw = DEAD_NONE_ARGS[name]
+                passed = [
+                    a for i, a in enumerate(node.args) if i == idx
+                ] + [k.value for k in node.keywords if k.arg == kw]
+                if any(isinstance(a, ast.Constant) and a.value is None for a in passed):
+                    hits.append(
+                        f"{rel}:{node.lineno} calls {name}() with {kw}=None "
+                        f"(the pooled LIVE TRAP -- use online_quantities_for_skus)"
+                    )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in DEAD_CALLS:
             hits.append(f"{rel}:{node.lineno} defines {node.name}()")
         elif isinstance(node, ast.Name) and node.id in DEAD_NAMES:
@@ -122,3 +142,27 @@ def test_the_env_pin_allow_list_only_shrinks():
         assert ENV_PIN in path.read_text(encoding="utf-8"), (
             f"{rel} no longer reads {ENV_PIN} -- drop it from ENV_PIN_ALLOWED"
         )
+
+
+def test_the_pooled_on_hand_shape_is_an_offence(tmp_path):
+    """The guard's own discriminating power (round-6 P5). Every other dead rule
+    in the #1125 world is pinned by NAME; the pooled call is a LIVE shape of a
+    LIVE function, so it needed a shape rule -- and until this existed a future
+    `_on_hand_for_skus(db, skus, None)` compiled, passed CI and silently
+    published a chain-pooled quantity that ignores the SUPERADMIN online block
+    and the per-shop buffer.
+
+    Drop DEAD_NONE_ARGS (or its scan branch) -> no offenders -> this fails."""
+    bad = tmp_path / "regression.py"
+    bad.write_text(
+        "def go(db, skus):\n"
+        "    a = _on_hand_for_skus(db, skus, None)\n"
+        "    b = _on_hand_for_skus(db, skus, store_id=None)\n"
+        "    c = _on_hand_for_skus(db, skus, 'BV-DHN-02')\n"
+        "    return a, b, c\n",
+        encoding="utf-8",
+    )
+    hits = _offenders_in(bad, "regression.py")
+    assert len(hits) == 2, hits
+    assert all("store_id=None" in h for h in hits)
+    assert all("_on_hand_for_skus" in h for h in hits)
