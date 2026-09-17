@@ -2518,6 +2518,16 @@ def test_R7_a_single_sku_door_refuses_an_item_a_SECOND_sku_claims(monkeypatch):
     _live(monkeypatch, spy2)
     res = _run(shopify_push.sync_stock_levels(db))
     assert res.code == shopify_push.STOCK_TARGET_DUPLICATE and spy2.rows() == set()
+    # ...and the finding's own transcript, through the finding's own door: the
+    # POS sale of the size at BV-B. It used to come back pushed=1 failed=0 with
+    # rows (INV/9, LOC_A, 0), (INV/9, LOC_B, 1), (INV/9, LOC_C, 0) -- the
+    # SIZE's shelf written onto the PARENT's item, fully green.
+    spy3 = _Spy(_responses())
+    _live(monkeypatch, spy3)
+    sale = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-B", source="sale"))
+    assert spy3.rows() == set(), "the sale door is the same writer, so the same refusal"
+    assert sale["pushed"] == 0 and sale["failed"] == 1
+    assert _baseline(db) is None
 
 
 def test_R7_two_LISTINGS_on_one_inventory_item_write_NEITHER(monkeypatch):
@@ -2686,3 +2696,37 @@ def test_R7_a_dead_mapped_location_is_named_even_beside_a_stray_one(monkeypatch)
     assert "Gangadham Pune" in res.error, "...and the stray location is still named"
     assert [d["store_id"] for d in res.payload["dead_locations"]] == ["BV-A", "BV-B", "BV-C"]
     assert res.payload["unmapped_locations"] == [{"id": pune["id"], "name": "Gangadham Pune"}]
+
+
+def test_R7_an_unreadable_claim_check_is_UNKNOWN_on_the_sweep_as_on_the_press(monkeypatch):
+    """The claim read is STRICT on the press (round-7 P1): {} from a swallowed
+    exception is "nobody else claims this item", the one answer that lets an
+    absolute writer overwrite another SKU's shelf. The sweep caught the same
+    raise in the try that also resolves the TARGETS and reset `have` to {}, so
+    every changed SKU came out STOCK_TARGET_MISSING -- "no Shopify inventory
+    item mapped" -- a false statement about the data, and a second answer to
+    the failure the press codes STOCK_ONHAND_UNKNOWN. One rule: an unreadable
+    guard is UNKNOWN, nothing written, the same words on both doors.
+
+    Fold the claim read back into the target try -> `target_missing` fills and
+    the code is STOCK_TARGET_MISSING -> this fails."""
+    from api.services import online_catalog
+
+    def _boom(db, gids):  # noqa: ARG001
+        raise RuntimeError("catalog_variants read failed")
+
+    monkeypatch.setattr(online_catalog, "skus_claiming_inventory_items", _boom)
+    db = _listed(_db(a=2, b=1, c=0))
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert spy.rows() == set(), "an unreadable guard writes nothing"
+    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert res.payload["target_missing"] == [], "the item IS mapped; the CLAIM check is what failed"
+    assert "claim check" in (res.error or "")
+    # The preview says it too (zero network), and the press says it in the same words.
+    _live(monkeypatch, _explode)
+    plan = _run(shopify_push.sync_stock_levels(db, dry_run=True))
+    assert plan.ok is False and plan.code == shopify_push.STOCK_ONHAND_UNKNOWN
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", dry_run=True))
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and out["error"] == plan.error

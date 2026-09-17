@@ -1055,6 +1055,18 @@ def _unknown_error(names: List[str]) -> str:
     )
 
 
+def _claim_error(exc: Exception) -> str:
+    """The claim read (``skus_claiming_inventory_items``) could not be made.
+    {} from a swallowed exception reads as "nobody else claims this item" --
+    the one answer that lets an absolute writer overwrite another SKU's shelf
+    -- so it is UNKNOWN and nothing is written, on the press AND the sweep, in
+    these words."""
+    return (
+        f"the Shopify inventory-item claim check could not be read -- nothing "
+        f"written (two SKUs on one item would overwrite each other): {exc}"
+    )
+
+
 def _unknown_sku_error(skus: List[str]) -> str:
     """The SKU axis of the same unknown (the shop axis is ``_unknown_error``):
     no spine row, or the read for it failed."""
@@ -1403,10 +1415,7 @@ async def push_skus_stock(
         duplicate_targets = duplicate_inventory_items(db, targets)
     except Exception as exc:  # noqa: BLE001 -- the door never raises; it refuses
         summary["code"] = STOCK_ONHAND_UNKNOWN
-        summary["error"] = (
-            f"the Shopify inventory-item claim check could not be read -- nothing "
-            f"written (two SKUs on one item would overwrite each other): {exc}"
-        )
+        summary["error"] = _claim_error(exc)
         return summary
     for _gid, _skus in sorted(duplicate_targets.items()):
         summary["errors"].append(
@@ -1883,12 +1892,20 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # one item (ok=True, synced=2, the second call overwriting the first) are
     # caught, which a per-listing question never could.
     duplicate_targets: Dict[str, List[str]] = {}
+    claim_error: Optional[str] = None
     try:
         have = inventory_items_for_skus(db, changed_skus) if changed_skus else {}
-        duplicate_targets = duplicate_inventory_items(db, have) if have else {}
     except Exception as exc:  # noqa: BLE001 -- a plan never raises
         logger.warning("[SHOPIFY_STOCK] target lookup failed for the plan: %s", exc)
         have = {}
+    # Its OWN try: caught together with the target read, a failed CLAIM read
+    # reset `have` to {} and every changed SKU came out STOCK_TARGET_MISSING --
+    # "no Shopify inventory item mapped", a false statement about the data, and
+    # a second answer to the failure the press codes STOCK_ONHAND_UNKNOWN.
+    try:
+        duplicate_targets = duplicate_inventory_items(db, have) if have else {}
+    except Exception as exc:  # noqa: BLE001
+        claim_error = _claim_error(exc)
     missing = sorted({s for s in changed_skus if not have.get(s)})
     # ...and the question NO guard asked: which SKU could not be READ at all.
     # `unknown_stores` answers "which SHOP failed" and `target_missing` answers
@@ -1964,7 +1981,8 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             holders=holders,
             stray_locations=stray_locations,
             dead_locations=dead_locations,
-            unknown_error=(
+            unknown_error=claim_error
+            or (
                 _unknown_error(_labels(stores, sorted(unknown)))
                 if unknown
                 else (_unknown_sku_error(unknown_skus) if unknown_skus else None)
@@ -1982,6 +2000,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             or holders
             or stray_locations
             or dead_locations
+            or claim_error
             or unknown
             or unknown_skus
             or orphans
