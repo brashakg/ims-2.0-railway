@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "_comment": "Config for the keepalive-ping cron service ONLY. It builds from the repo root, so this file is the one Railway reads for it. The backend service has root directory /backend and reads backend/ config, not this file.",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "ops/keepalive/Dockerfile"
+  },
+  "deploy": {
+    "cronSchedule": "24 3,16,17,19,20,21 * * *",
+    "restartPolicyType": "NEVER",
+    "sleepApplication": false
+  }
+}
