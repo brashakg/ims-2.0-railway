@@ -1154,14 +1154,18 @@ def _claim_error(exc: Exception) -> str:
 
 
 def _target_error(exc: Exception) -> str:
-    """The TARGET read (``inventory_items_for_skus``) could not be made. It was
-    fail-soft to {} -- and {} reads as "this SKU is not online", so a POS sale
-    during a Mongo blip vanished as ``skipped_no_mapping`` with no run row, no
-    task, while the sweep coded every changed SKU STOCK_TARGET_MISSING ("no
-    Shopify inventory item mapped", a false statement about the data). One
-    answer on every door: UNKNOWN, nothing written, these words."""
+    """A read on the way from what a door knows to the Shopify inventory item
+    could not be made: the TARGET read (``inventory_items_for_skus``, SKU ->
+    item) on every door, or the SPINE read (product id -> SKU) one hop up on
+    the product-id doors (``online_stock_writeback._unknown_run``). Both were
+    fail-soft -- {} reads as "this SKU is not online", a debug line reads as
+    nothing at all -- so a POS sale or a transfer during a Mongo blip vanished
+    with no run row and no task, while the sweep coded every changed SKU
+    STOCK_TARGET_MISSING ("no Shopify inventory item mapped", a false
+    statement about the data). One answer on every door: UNKNOWN, nothing
+    written, these words."""
     return (
-        f"the Shopify inventory-item mapping could not be read -- nothing "
+        f"the IMS -> Shopify inventory-item mapping could not be read -- nothing "
         f"written (a SKU that cannot be read is not a SKU that is not online): {exc}"
     )
 

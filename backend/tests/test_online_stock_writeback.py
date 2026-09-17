@@ -592,15 +592,23 @@ def test_R8_a_units_left_door_whose_spine_read_dies_records_an_unknown_run(monke
     one failure, and the shop's location kept the pre-move number until the
     next 01:00/09:00 tick with every screen green.
 
+    ONE spelling (recheck round 2, one-rule): both doors answer through
+    `_unknown_run`, so the row is the sale door's row WORD FOR WORD
+    (`_target_error`), not a second hand-built message beside it.
+
     Put the `logger.debug` back on that except -> sync_runs stays EMPTY ->
-    this fails."""
+    this fails. Hand-build the row there instead of calling `_unknown_run`
+    -> the words differ from the sale door's -> this fails."""
+    from api.services.shopify_push.inventory import _target_error
+
     spy = _Spy()
     _live(monkeypatch, spy)
     db = _db(a=3, b=1)
+    boom = RuntimeError("products read died")
 
     class _Boom(StrictCollection):
         def find(self, *a, **k):
-            raise RuntimeError("products read died")
+            raise boom
 
     db._collections["products"] = _Boom("products", [])
     wb.writeback_after_units_left(db, ["P1"], "BV-A", source="transfer_ship")
@@ -610,5 +618,5 @@ def test_R8_a_units_left_door_whose_spine_read_dies_records_an_unknown_run(monke
     run = runs[0]
     assert run["ok"] is False
     assert run["source"] == "transfer_ship" and run["store_id"] == "BV-A"
-    assert "STOCK_ONHAND_UNKNOWN" in run["error"] and "products read died" in run["error"]
-    assert "could not be read" in run["error"], "the sale door's own words"
+    assert run["error"] == f"STOCK_ONHAND_UNKNOWN: {_target_error(boom)}", "the sale door's row, word for word"
+    assert "products read died" in run["error"]
