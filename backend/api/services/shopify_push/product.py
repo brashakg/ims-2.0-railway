@@ -44,6 +44,7 @@ from .variants import (
 from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_SPINE_ACTIVE,
+    STOCK_TRACKING_FAILED,
     _set_variant_tracking,
     _stores,
     plan_product_stock,
@@ -355,9 +356,10 @@ async def push_product(
         # just created, the stored ones -- gets tracked=true + the DENY policy,
         # and each SKU's own on-hand PER SHOP is written at that shop's Shopify
         # location (one row per mapped shop, an explicit 0 included).
-        # Fail-soft side channel: reported on the result and the audit row,
-        # never flips ok and never withholds the publish (first-publish
-        # behaviour is unchanged; the stock pass retries it on the next sync).
+        # Fail-soft side channel: reported on the result and the audit row.
+        # A QUANTITY failure never flips ok and never withholds the publish
+        # (the stock pass retries it on the next sync); a TRACKING failure
+        # withholds it -- see `tracking_ok` below.
         stock_summary = None
         if new_gid:
             stock_summary = await sync_product_stock(
@@ -386,6 +388,17 @@ async def push_product(
         #   * a press that needed NO seeding: every variant already carries the
         #     gid an earlier successful seed wrote, so its price is already on
         #     Shopify -- but IMS must still hold a positive price for every row.
+        #   * TRACKED + DENY BEFORE PUBLISH (design 4.2; recheck round 2, the
+        #     oversell direction): a variant whose tracking + policy call
+        #     FAILED is UNTRACKED -- Shopify sells it without limit whatever
+        #     the shelf holds, the worse failure, and one a code alone cannot
+        #     mend once the listing is visible. The quantities still go out
+        #     (they are true); the listing stays unpublished, invisible on
+        #     bettervision.in, until a press confirms tracking. The result is
+        #     then ok=False / publish_withheld with the stock pass's own code,
+        #     so the toast, the audit row, the tally and the sync page all say
+        #     so, and the row stays queued for the retry.
+        tracking_ok = (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
         pub_summary = None
         if new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
@@ -399,7 +412,7 @@ async def push_product(
                 priced_ok = False
             else:
                 priced_ok = _has_publishable_price(product, variants)
-            if priced_ok and photo_on_shopify:
+            if priced_ok and photo_on_shopify and tracking_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
@@ -414,10 +427,18 @@ async def push_product(
                     "published": False,
                     "error": "publish withheld: the photograph did not reach Shopify",
                 }
-            else:
+            elif not priced_ok:
                 pub_summary = {
                     "published": False,
                     "error": "publish withheld: variant unpriced or seeding failed",
+                }
+            else:
+                # Priced and photographed, but tracking + DENY did not stick:
+                # the stock pass's own line and code, under "withheld".
+                pub_summary = {
+                    "published": False,
+                    "code": STOCK_TRACKING_FAILED,
+                    "error": f"publish withheld: {(stock_summary or {}).get('error')}",
                 }
         # The press reached Shopify but the product is NOT visible. Leave it in
         # the queue so pressing again retries it once the price / photograph is

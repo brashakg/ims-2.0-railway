@@ -1929,14 +1929,15 @@ async def sync_product_stock(
         # the sweep toast read green and the bulk tally filed the listing under
         # `pushed` -- over a variant that is LIVE and UNTRACKED (Shopify sells
         # it without limit) for up to 12 h until the next tick re-sends
-        # tracking (the baseline records tracked=False). The quantity verdict,
+        # tracking (the baseline records tracked=False). The product press
+        # reads this code and WITHHOLDS the publish (product.py `tracking_ok`);
+        # the sweep re-sends tracking on the next tick. The quantity verdict,
         # if any, rides under it.
         why = "; ".join(str(e) for e in tracked["errors"][:3])
         summary["code"] = STOCK_TRACKING_FAILED
         summary["error"] = (
             f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
-            f"the listing sells WITHOUT LIMIT until the next stock pass re-sends "
-            f"it; press again"
+            f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
         ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
     elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])

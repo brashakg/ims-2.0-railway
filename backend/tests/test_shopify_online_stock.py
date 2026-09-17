@@ -3054,30 +3054,46 @@ class _ThrottledTracking(_Spy):
         return await super().__call__(db, query, variables)
 
 
-def test_R8_a_first_publish_whose_tracking_call_fails_carries_a_code(monkeypatch):
+def test_R8_a_first_publish_whose_tracking_call_fails_is_withheld_and_coded(monkeypatch):
     """RECHECK ROUND 2 (first-push, OVERSELL direction). productCreate ok,
     seeding ok, the productVariantsBulkUpdate carrying inventoryPolicy answers
-    userErrors [THROTTLED] -> the quantities are written, publishablePublish is
-    SENT, and the listing is LIVE and UNTRACKED: Shopify sells it without
+    userErrors [THROTTLED] -> the quantities were written, publishablePublish
+    was SENT, and the listing was LIVE and UNTRACKED: Shopify sells it without
     limit. `sync_product_stock` flipped ok=False with NO code, so the press
-    promoted nothing (it promotes stock code/error only), the drawer toast,
-    the sweep toast and the row tick were all GREEN, and `_tally` filed it
-    under `pushed`. The module's own comment calls an untracked item "the
-    worse failure"; it was the one failure with no name.
+    promoted nothing, the drawer toast, the sweep toast and the row tick were
+    all GREEN, and `_tally` filed it under `pushed`. The module's own comment
+    calls an untracked item "the worse failure"; it was the one failure with
+    no name -- and a name alone still left it live.
 
-    Drop the STOCK_TRACKING_FAILED branch in sync_product_stock -> code None
-    -> this fails."""
+    Now it is the design's "tracked + DENY before publish": the press
+    WITHHOLDS the publish. The transcript below has no publishablePublish, the
+    result is ok=False / publish_withheld / STOCK_TRACKING_FAILED, the twin
+    stays DRAFT and queued, and the sweep says the same.
+
+    Drop `tracking_ok` from the publish precondition in push_product -> the
+    publish is sent over an untracked variant -> this fails. Drop the
+    STOCK_TRACKING_FAILED branch in sync_product_stock -> no code -> the
+    precondition cannot see it -> this fails."""
     db = _db(a=2, b=1, c=0)
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
     spy = _ThrottledTracking(_responses())
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
-    assert res.mode == "LIVE" and res.action == "create" and res.ok is True, res  # live -- the danger
-    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}, "quantities went out"
-    assert res.stock["ok"] is False and res.stock["tracked"] == 0
-    assert res.stock["code"] == shopify_push.STOCK_TRACKING_FAILED
-    assert res.code == shopify_push.STOCK_TRACKING_FAILED, "promoted to the press like every stock code"
-    assert "WITHOUT LIMIT" in res.error and "Throttled" in res.error
+    # THE TRANSCRIPT: create -> tracking (refused) -> quantities -> NO publish.
+    assert spy.order("productCreate(", "productVariantsBulkUpdate", "inventorySetQuantities", "publishablePublish") == [
+        "productCreate(", "productVariantsBulkUpdate", "productVariantsBulkUpdate", "inventorySetQuantities",
+    ], [c["query"][:40] for c in spy.calls]
+    assert spy.calls_for("publishablePublish") == [], "an untracked variant is never published"
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}, "the true numbers still go out"
+    assert res.mode == "LIVE" and res.action == "create"
+    assert res.ok is False and res.reason == "publish_withheld", res
+    assert res.code == shopify_push.STOCK_TRACKING_FAILED, "the stock pass's own code, on the press"
+    assert res.error.startswith("publish withheld") and "WITHOUT LIMIT" in res.error and "Throttled" in res.error
+    assert res.publication == {"published": False, "code": shopify_push.STOCK_TRACKING_FAILED, "error": res.error}
+    assert res.stock["ok"] is False and res.stock["tracked"] == 0 and res.stock["code"] == shopify_push.STOCK_TRACKING_FAILED
+    twin = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]
+    assert twin["status"] == "DRAFT" and twin["shopify_product_id"] == PRODUCT_GID, "on Shopify, not on the storefront"
+    assert twin["locally_modified"] is True, "queued, so the next press retries tracking + publish"
     assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
     # The sweep under the same throttle is not green either, and says why.
     spy2 = _ThrottledTracking(_responses())
@@ -3085,6 +3101,12 @@ def test_R8_a_first_publish_whose_tracking_call_fails_carries_a_code(monkeypatch
     sw = _run(shopify_push.sync_stock_levels(db))
     assert sw.ok is False and sw.code == shopify_push.STOCK_TRACKING_FAILED, sw
     assert "WITHOUT LIMIT" in sw.error
+    # CONTROL: tracking accepted -> the same press publishes and is green.
+    ok_spy = _Spy(_responses())
+    _live(monkeypatch, ok_spy)
+    ok = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert ok.ok is True and ok.code is None and len(ok_spy.calls_for("publishablePublish")) == 1, ok
+    assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["status"] == "PUBLISHED"
 
 
 def test_R8_the_location_rung_never_hides_a_stray_sku(monkeypatch):
