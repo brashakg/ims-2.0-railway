@@ -563,6 +563,61 @@ def test_a_unit_parked_on_the_ONLINE_store_never_counts_as_on_hand(monkeypatch):
     assert out["summary"]["at_risk_count"] == 1
 
 
+def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(monkeypatch):
+    """PANEL ROUND 7 (one-rule P4, the OTHER screen the finding names). The
+    oversell-risk tile stopped counting a unit parked on BV-ONLINE-01 (the test
+    above) -- but the catalog reconciliation screen (GET
+    /catalog/online-stock-reconcile, "All stores") read the ROUTER's physical
+    counter, `routers.inventory._on_hand_by_product`, which never excluded the
+    ONLINE stores. Same breaking input, second screen: one AVAILABLE unit on
+    BV-ONLINE-01, the website listing 1, the shops holding 0 -> in_store 1,
+    status OK, the real oversell hidden on the screen whose job is to find it.
+
+    Two online screens, ONE reader. Point catalog.py back at the router helper
+    -> in_store reads 1 and the row is OK -> this fails."""
+    import asyncio
+
+    from api.routers import catalog
+    from api.services import stock_allocation
+
+    class _Db(_FakeDb):
+        # The router helper reads `db.get_collection`; the health reader reads
+        # `db[name]`. Both work here, so the REVERTED import counts the phantom
+        # unit (in_store 1) instead of failing soft to {} and passing by accident.
+        def get_collection(self, name):
+            return self[name]
+
+    db = _Db(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P9", "sku": "SKU-ONLINE-ONLY", "brand": "Phantom", "model": "X", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
+            ),
+        }
+    )
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        catalog, "online_status_for_skus", lambda db, skus: {"SKU-ONLINE-ONLY": {"online": True}}
+    )
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+
+    async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 1
+        return {"qty": {"SKU-ONLINE-ONLY": 1}, "live": 1, "mapped": 1}
+
+    monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
+
+    out = asyncio.run(
+        catalog.online_stock_reconcile(
+            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+        )
+    )
+    row = out["items"][0]
+    assert row["in_store"] == 0, "no shop can ship it, so no shop holds it -- same as the tile"
+    assert row["status"] == stock_allocation.OVERSELL_RISK
+
+
 def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
     """The other direction: the exclusion is the ONLINE stores, not the shops."""
     _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})

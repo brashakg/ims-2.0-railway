@@ -30,7 +30,14 @@ from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
 from ..services import online_delist as _delist
 from ..services.shopify_push import is_variant_of as _is_variant_of
-from .inventory import _on_hand_by_product
+# THE ONLINE on-hand reader, the one the oversell-risk tile reads (panel round
+# 7, one-rule P4). The reconciliation screen compares IMS against the WEBSITE's
+# listed number, and read the router's physical counter instead -- which does
+# not exclude the ONLINE stores, so an AVAILABLE unit parked on BV-ONLINE-01
+# (unpickable: no shelf, POS blocked) counted as in-store here while the writer
+# publishes 0 for it, and a real oversell classified OK on this screen after the
+# tile had stopped hiding it. Two online screens, one reader.
+from ..services.online_sync_health import _on_hand_by_product
 
 router = APIRouter()
 
