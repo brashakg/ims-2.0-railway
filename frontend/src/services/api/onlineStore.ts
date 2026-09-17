@@ -1607,11 +1607,16 @@ export interface PushSweepResult {
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
           /** Products that published but whose QUANTITIES reached no Shopify
-           *  location (no shop mapped, a location that cannot sell online, two
-           *  SKUs on one inventory item...). Counted in `pushed` too -- the
-           *  listing is live -- but live with tracked=true + DENY behind no
-           *  quantity is a listing that reads SOLD OUT. */
+           *  location at all (no shop mapped, two SKUs on one inventory
+           *  item...). Counted in `pushed` too -- the listing is live -- but
+           *  live with tracked=true + DENY behind no quantity is a listing that
+           *  reads SOLD OUT. */
           stock_not_written?: number;
+          /** Products that published with their mapped shops' quantities
+           *  WRITTEN, beside a stock warning (a stray Shopify location, one
+           *  shop unknown, a stray baseline SKU...). Not sold out -- the
+           *  stock card's lines say what the warning is. */
+          stock_warning?: number;
           /** Products a take-down is holding off the storefront: the sweep
            *  skips them until someone presses that one product explicitly. */
           taken_down_skipped?: number;
@@ -1624,6 +1629,12 @@ export interface PushSweepResult {
     | null;
   /** The per-doc PushResult rows (SIMULATED plans when DARK). */
   results?: PushResult[] | null;
+  /** The whole-catalogue STOCK pass that rides a products press (backend
+   *  `stock`, a PushResult with entity "stock"; null when no products were
+   *  swept). Its verdict is over EVERY listing, not only the rows above, so an
+   *  unchanged listing's stray SKU or unknown shop shows up HERE and nowhere
+   *  else on the press. */
+  stock?: PushResult | null;
 }
 
 /** One row of the read-only push HISTORY (the chained ONLINE_STORE_PUSH audit
@@ -1670,6 +1681,11 @@ export interface ShopifyLocation {
   province?: string | null;
   mapped_store_id?: string | null;
   mapped_store_code?: string | null;
+  /** Every shop whose record carries this gid (store codes). One entry is the
+   *  holder; TWO OR MORE is a location the writer writes for NOBODY
+   *  (`mapped_store_id` is then null) -- the dropdown says "claimed by" instead
+   *  of naming a holder the writer does not honour. */
+  claimed_by?: string[] | null;
   /** THE verdict, computed by the writer's own predicate
    *  (shopify_push.is_stray_fulfilling): this location sells online and maps to
    *  no IMS shop, so Shopify keeps selling whatever number it holds there and

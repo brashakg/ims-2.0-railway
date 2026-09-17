@@ -247,3 +247,27 @@ def test_the_one_locations_query_pages_fifty_wide_with_the_dropdown_fields():
     from api.services.shopify_push import queries
 
     assert not hasattr(queries, "_LOCATIONS_QUERY")
+
+
+def test_R8_a_location_two_shops_claim_maps_neither_and_names_both_claimants(client, world, monkeypatch):
+    """SECOND IMPLEMENTATION (recheck round 1, display). ``mapped_store_id``
+    was read off the RAW gid (last holder wins) while
+    ``unmapped_online_fulfilling`` on the same row was scored through the
+    writer's map, which maps NEITHER shop of a shared gid: the row said
+    "mapped to WIZ-BOK-01" and "maps to no shop" in one object, and the
+    dropdown named one holder for a location the writer writes for nobody.
+    Both fields now read the writer's map; ``claimed_by`` names every raw
+    claimant. Rebuild ``by_gid`` from the raw field -> mapped_store_id is a
+    shop -> this fails."""
+    world.get_collection("stores").insert_one({
+        "store_id": "WIZ-BOK-01", "store_code": "WIZ-BOK-01", "store_name": "WizOpt Bokaro",
+        "is_active": True, "store_type": "RETAIL", "shopify_location_id": BOKARO,
+    })
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    rows = {row["id"]: row for row in r.json()["locations"]}
+    shared = rows[BOKARO]
+    assert shared["mapped_store_id"] is None and shared["mapped_store_code"] is None
+    assert shared["claimed_by"] == ["BV-BOK-02", "WIZ-BOK-01"]
+    assert shared["unmapped_online_fulfilling"] is True, "written for nobody, so it IS stray"
+    assert rows[PUNE]["claimed_by"] == [] and rows[PUNE]["mapped_store_id"] is None

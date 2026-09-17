@@ -88,6 +88,14 @@ class _Spy:
         self.calls.append({"query": query, "variables": variables})
         if self.fail:
             raise RuntimeError("shopify exploded")
+        if "imsLocationList" in query:
+            # The two mapped shops' locations, ticked: an UNANSWERED read is no
+            # longer a green pass (recheck round 1), so a sale that should read
+            # clean needs Shopify to actually answer.
+            return {"data": {"locations": {"nodes": [
+                {"id": g, "name": g, "isActive": True, "fulfillsOnlineOrders": True, "shipsInventory": True}
+                for g in (LOC_A, LOC_B)
+            ]}}}
         return {"data": {"inventorySetQuantities": {"userErrors": [], "inventoryAdjustmentGroup": {}}}}
 
     def writes(self):
@@ -539,3 +547,29 @@ def test_after_sale_dispatches_for_sold_skus(monkeypatch):
     assert captured["skus"] == ["SP-1"]
     assert captured["store_id"] == "store-9"
     assert captured["source"] == "sale"
+
+
+def test_a_failed_target_read_is_a_loud_unknown_run_never_a_silent_skip(monkeypatch):
+    """SILENT FALLBACK (recheck round 1). The target read was fail-soft to {},
+    which the sale door scored as "this SKU is not online": skipped_no_mapping,
+    no sync_runs row, no task, one WARNING line -- and bettervision.in kept
+    the pre-sale number until the next tick. One layer down the SAME failure
+    was already coded STOCK_ONHAND_UNKNOWN. Make ``inventory_items_for_skus``
+    swallow again -> skipped_no_mapping 1, no run row -> this fails."""
+    db = _db(a=3, b=1)
+    orig = db.get_collection
+
+    class _Dead:
+        def find(self, *a, **k):
+            raise RuntimeError("catalog_variants unreadable")
+
+    monkeypatch.setattr(db, "get_collection", lambda name: _Dead() if name == "catalog_variants" else orig(name))
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    summary = _run(wb.writeback_skus(db, ["SP-1"], "BV-A", source="sale"))
+    assert spy.rows() == set(), "nothing written"
+    assert summary["skipped_no_mapping"] == 0 and summary["pushed"] == 0
+    assert summary["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "could not be read" in summary["error"]
+    runs = list(orig("sync_runs").find({}))
+    assert len(runs) == 1 and runs[0]["ok"] is False and "STOCK_ONHAND_UNKNOWN" in runs[0]["error"]

@@ -356,11 +356,27 @@ export default function OnlineShopifySyncPage() {
         const archived = Number(s?.archived_not_listed ?? 0);
         const oldPrice = Number(s?.price_not_synced ?? 0);
         // LIVE, BUT SOLD OUT. The listing published and its quantities reached
-        // no location (no shop mapped, a Shopify location that cannot sell, two
-        // SKUs on one inventory item...). It has its own count for the same
-        // reason the OLD price does -- and without it this press read GREEN over
-        // 121 listings whose stock was written nowhere.
+        // no location at all (no shop mapped, two SKUs on one inventory
+        // item...). It has its own count for the same reason the OLD price
+        // does -- and without it this press read GREEN over 121 listings whose
+        // stock was written nowhere.
         const noStock = Number(s?.stock_not_written ?? 0);
+        // LIVE, WRITTEN, WITH A WARNING. The mapped shops' numbers DID go out
+        // (Pune stray, one shop unknown, a stray baseline SKU). The backend
+        // splits this from the line above on what Shopify accepted; folded
+        // together, day 1 read "121 live with NO stock written (sold out)"
+        // beside a line quoting the opposite.
+        const stockWarn = Number(s?.stock_warning ?? 0);
+        // THE SWEEP'S OWN STOCK PASS. A products press ends with a whole-
+        // catalogue stock pass whose verdict is over EVERY listing -- an
+        // unchanged listing's stray SKU or unknown shop lives here and in no
+        // product row. It was returned and read nowhere; the toast said
+        // "25 processed" over it.
+        const stockPass = res.stock ?? null;
+        const stockPassBad = !!stockPass && stockPass.ok === false;
+        const stockPassLine = stockPassBad
+          ? ` · stock pass NOT ok${stockPass?.code ? ` [${stockPass.code}]` : ''}${stockPass?.error ? ` — ${stockPass.error}` : ''}`
+          : '';
         // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
         // first failed row's server message rides on the toast itself. A row
         // that is ok but carries a code (live at the OLD price) counts too.
@@ -378,8 +394,10 @@ export default function OnlineShopifySyncPage() {
           (archived ? ` · ${archived} archived (not listed)` : '') +
           (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
           (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
-          why;
-        if (refused || withheld || noStock || s?.failed) toast.warning(msg);
+          (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
+          why +
+          stockPassLine;
+        if (refused || withheld || noStock || stockWarn || stockPassBad || s?.failed) toast.warning(msg);
         else toast.success(msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
         // PRODUCTS number; collections/menus/images stop at the request limit.
@@ -909,23 +927,7 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
-            {lastRun.stock && (
-              <p
-                className={'mt-1 ' + (lastRun.stock.ok === false ? 'text-amber-800' : '')}
-                data-testid="live-sync-stock-line"
-              >
-                <span className="font-medium">Stock pass:</span>{' '}
-                {lastRun.stock.ok === false ? 'NOT ok' : 'ok'} · {fmt(lastRun.stock.changed)} changed ·{' '}
-                {fmt(lastRun.stock.synced)} written · {fmt(lastRun.stock.failed)} failed
-                {lastRun.stock.code && (
-                  <>
-                    {' '}
-                    · <code className="rounded bg-amber-50 px-1 text-[11px]">{lastRun.stock.code}</code>
-                  </>
-                )}
-                {lastRun.stock.error && <> · {lastRun.stock.error}</>}
-              </p>
-            )}
+            {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
             {(lastRun.failures?.length ?? 0) > 0 && (
               <ul className="mt-2 space-y-1" aria-label="Live sync failures">
                 {lastRun.failures!.map((f, i) => (
@@ -1096,10 +1098,24 @@ export default function OnlineShopifySyncPage() {
                         return noStock > 0 ? (
                           <span
                             className="inline-flex items-center gap-1 text-red-700"
-                            title="Live on the website with NO quantity written: the stock pass reached no location (no shop mapped, a Shopify location that cannot sell online, or two SKUs on one inventory item). The listing shows SOLD OUT until it is fixed and pressed again - the lines on the stock card say which."
+                            title="Live on the website with NO quantity written: the stock pass reached no location (no shop mapped, or two SKUs on one inventory item). The listing shows SOLD OUT until it is fixed and pressed again - the lines on the stock card say which."
                           >
                             <AlertTriangle className="w-3 h-3" /> {fmt(noStock)} live with NO stock
                             written
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const stockWarn = Number(
+                          (sweep.summary?.[ent.token]?.stock_warning ?? 0) as number,
+                        );
+                        return stockWarn > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Live, and the mapped shops' quantities WERE written - beside a warning the stock pass raised (a Shopify location that maps to no shop, one shop whose stock could not be read, a size the website still shows a number for). The stock line below says which."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(stockWarn)} live with a stock
+                            warning
                           </span>
                         ) : null;
                       })()}
@@ -1144,6 +1160,22 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                     </div>
+                    {/* THE SWEEP'S OWN STOCK PASS (products only): its verdict is
+                        over EVERY listing, so a stray SKU or an unknown shop on an
+                        UNCHANGED listing shows up here and in no product row. */}
+                    {sweep.stock && (
+                      <StockPassLine
+                        stock={{
+                          ok: sweep.stock.ok,
+                          code: sweep.stock.code,
+                          error: sweep.stock.error,
+                          changed: sweep.stock.payload?.changed,
+                          synced: sweep.stock.payload?.synced,
+                          failed: sweep.stock.payload?.failed,
+                        }}
+                        testId="sweep-stock-line"
+                      />
+                    )}
                     {/* OS-046: a capped sweep must not read as complete. */}
                     {sweep.limit_reached && (
                       <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700">
@@ -1479,6 +1511,37 @@ function DiagTile({
         <div className="space-y-1">{children}</div>
       )}
     </div>
+  );
+}
+
+/** ONE rendering of a stock pass verdict -- the scheduled run's and the
+ *  products press's own (they used to be one and none). */
+function StockPassLine({
+  stock,
+  testId,
+}: {
+  stock: {
+    ok?: boolean | null;
+    changed?: number | null;
+    synced?: number | null;
+    failed?: number | null;
+    code?: string | null;
+    error?: string | null;
+  };
+  testId: string;
+}) {
+  return (
+    <p className={'mt-1 text-[11px] ' + (stock.ok === false ? 'text-amber-800' : 'text-gray-700')} data-testid={testId}>
+      <span className="font-medium">Stock pass:</span> {stock.ok === false ? 'NOT ok' : 'ok'} ·{' '}
+      {fmt(stock.changed)} changed · {fmt(stock.synced)} written · {fmt(stock.failed)} failed
+      {stock.code && (
+        <>
+          {' '}
+          · <code className="rounded bg-amber-50 px-1 text-[11px]">{stock.code}</code>
+        </>
+      )}
+      {stock.error && <> · {stock.error}</>}
+    </p>
   );
 }
 

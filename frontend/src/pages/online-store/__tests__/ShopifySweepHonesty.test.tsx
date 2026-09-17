@@ -170,9 +170,15 @@ describe('the bulk press reports what it refused', () => {
   // no shop by the owner's own decision, so every one of the 121 presses carries
   // a stock code, and the owner could not tell from the sweep whether 1 or 121
   // listings went live reading SOLD OUT.
-  it('shows the listings that went live with NO stock written, and does not call it green', async () => {
+  //
+  // RECHECK ROUND 1: that bucket was "stock not OK", not "nothing written", so
+  // on day 1 (Pune ticked + unmapped, the three mapped shops WRITTEN) the toast
+  // read "12 live with NO stock written (sold out)" beside a line quoting the
+  // opposite. The backend now splits on what Shopify accepted; this screen
+  // says which it was.
+  it('shows the listings that went live with a stock WARNING (their shops were written), and does not call it green', async () => {
     (pushApi.pushAllPending as any).mockResolvedValue({
-      ...sweep({ pushed: 12, failed: 0, noop: 0, stock_not_written: 12 }, 12),
+      ...sweep({ pushed: 12, failed: 0, noop: 0, stock_warning: 12 }, 12),
       results: [
         {
           entity: 'product',
@@ -186,16 +192,71 @@ describe('the bulk press reports what it refused', () => {
 
     await pressProducts();
 
-    expect(await screen.findByText(/12 live with NO stock written/i)).toBeTruthy();
+    expect(await screen.findByText(/12 live with a stock warning/i)).toBeTruthy();
+    expect(screen.queryByText(/NO stock written/i)).toBeNull();
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
     const msg = toastCalls.map((t) => t.msg).join(' | ');
-    expect(msg).toMatch(/12 live with NO stock written \(sold out\)/i);
+    expect(msg).toMatch(/12 live with a stock warning/i);
+    expect(msg).not.toMatch(/sold out/i);
     expect(msg).toMatch(/SHOPIFY_LOCATION_UNMAPPED/);
     // ...and the row itself is not ticked green. `r.ok` alone painted it that
     // way; the rule is pushToastLevel, the same one the drawer press uses.
     const row = (await screen.findByText('product P1')).closest('li') as HTMLElement;
     expect(row.querySelector('.text-green-600')).toBeNull();
     expect(row.querySelector('.text-amber-600')).toBeTruthy();
+  });
+
+  it('shows the listings that went live with NO stock written (sold out), and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 3, failed: 0, noop: 0, stock_not_written: 3 }, 3),
+      results: [
+        {
+          entity: 'product',
+          target_id: 'P1',
+          ok: true,
+          code: 'STORE_UNMAPPED',
+          error: 'no shop has a Shopify location -- nothing written',
+        },
+      ],
+    });
+
+    await pressProducts();
+
+    expect(await screen.findByText(/3 live with NO stock written/i)).toBeTruthy();
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/3 live with NO stock written \(sold out\)/i);
+    expect(msg).toMatch(/STORE_UNMAPPED/);
+  });
+
+  // RECHECK ROUND 1: the products press ends with its OWN whole-catalogue stock
+  // pass, whose verdict is over EVERY listing -- a stray SKU on an UNCHANGED
+  // listing lives there and in no product row. The backend returned it as
+  // `stock`; the screen read it nowhere and toasted "25 processed" over it.
+  it("renders the press's own stock pass and never calls a NOT-ok one green", async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
+      stock: {
+        mode: 'LIVE',
+        entity: 'stock',
+        action: 'noop',
+        ok: false,
+        code: 'STOCK_BASELINE_STRAY',
+        error: 'the website is still showing a quantity for SP-1-L, which this listing no longer lists',
+        payload: { changed: 0, synced: 0, failed: 0 },
+      },
+    });
+
+    await pressProducts();
+
+    const line = await screen.findByTestId('sweep-stock-line');
+    expect(line.textContent).toMatch(/NOT ok/);
+    expect(line.textContent).toMatch(/STOCK_BASELINE_STRAY/);
+    expect(line.textContent).toMatch(/0 changed · 0 written · 0 failed/);
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/stock pass NOT ok \[STOCK_BASELINE_STRAY\]/);
+    expect(msg).toMatch(/SP-1-L/);
   });
 
   it('says nothing about refusals when there were none', async () => {
@@ -208,6 +269,8 @@ describe('the bulk press reports what it refused', () => {
     await screen.findByText(/25 processed/);
     expect(screen.queryByText(/refused/i)).toBeNull();
     expect(screen.queryByText(/NOT made visible/i)).toBeNull();
+    expect(screen.queryByText(/stock warning/i)).toBeNull();
+    expect(screen.queryByTestId('sweep-stock-line')).toBeNull();
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(true);
   });
 });

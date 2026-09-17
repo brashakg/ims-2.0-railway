@@ -149,6 +149,12 @@ class _Spy:
         for marker, body in sorted(self._responses.items(), key=lambda kv: -len(kv[0])):
             if marker in query:
                 return body
+        if "imsLocationList" in query:
+            # The one mapped shop's location, ticked: an UNANSWERED read is no
+            # longer a green pass (recheck round 1).
+            return {"data": {"locations": {"nodes": [
+                {"id": LOC, "name": "Shop", "isActive": True, "fulfillsOnlineOrders": True, "shipsInventory": True}
+            ]}}}
         return {"data": {}}
 
     def calls_for(self, marker):

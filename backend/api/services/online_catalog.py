@@ -172,9 +172,10 @@ def _match_query(fields: Tuple[str, ...], keys: List[str]) -> Dict[str, Any]:
     return {"$or": [{f: {"$in": keys}} for f in fields]}
 
 
-def _variants_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
+def _variants_by_key(db, keys: List[str], *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
     """{requested_key: catalog_variants doc} for every key that matches a
-    variant identifier (sku > store_barcode > barcode > gtin). Fail-soft {}."""
+    variant identifier (sku > store_barcode > barcode > gtin). Fail-soft {}
+    -- or, ``strict``, a raised read (the target reader's contract)."""
     coll = _coll(db, "catalog_variants")
     if coll is None or not keys:
         return {}
@@ -209,14 +210,16 @@ def _variants_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
                 if ident and ident in keyset and ident not in out:
                     out[ident] = doc
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         logger.warning("[ONLINE_CATALOG] variant lookup failed: %s", exc)
         return {}
     return out
 
 
-def _products_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
+def _products_by_key(db, keys: List[str], *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
     """{requested_key: catalog_products doc} for keys matching a product's
-    sku/barcode directly. Fail-soft {}."""
+    sku/barcode directly. Fail-soft {} -- or, ``strict``, a raised read."""
     coll = _coll(db, "catalog_products")
     if coll is None or not keys:
         return {}
@@ -237,6 +240,8 @@ def _products_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
                 if ident and ident in keyset and ident not in out:
                     out[ident] = doc
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         logger.warning("[ONLINE_CATALOG] product lookup failed: %s", exc)
         return {}
     return out
@@ -496,23 +501,37 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
     """{requested_key: shopify_inventory_item_id} for identifiers that map to an
     online variant carrying an InventoryItem gid (catalog_variants first, then
     the catalog_products ecom sub-doc fallback). ``listings_for_skus`` walks
-    the same two lookups to name the LISTING. Fail-soft {}."""
+    the same two lookups to name the LISTING.
+
+    STRICT (recheck round 1): a read failure RAISES. Every caller is a stock
+    writer or its guard, and {} here reads as "this SKU is not online" -- the
+    one answer that lets a POS sale during a Mongo blip vanish silently
+    (skipped_no_mapping, no run row, no task) while the same failure one layer
+    down (``skus_claiming_inventory_items``) was already coded UNKNOWN on both
+    doors. One contract for one read; the callers turn the raise into
+    STOCK_ONHAND_UNKNOWN in ``inventory._target_error``'s words."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
     out: Dict[str, str] = {}
-    variants = _variants_by_key(db, keys)
+    variants = _variants_by_key(db, keys, strict=True)
     for key, var in variants.items():
         inv = normalize_sku(var.get("shopify_inventory_item_id"))
         if inv:
             out[key] = inv
     remaining = [k for k in keys if k not in out]
     if remaining:
-        for key, doc in _products_by_key(db, remaining).items():
+        for key, doc in _products_by_key(db, remaining, strict=True).items():
             inv = normalize_sku((doc.get("ecom") or {}).get("shopify_inventory_item_id"))
             if inv:
                 out[key] = inv
     return out
+
+
+def _delisted_live(ecom: Dict[str, Any]) -> bool:
+    """This twin's take-down REACHED Shopify: ``online_state`` DELISTED from a
+    LIVE (not SIMULATED) delist. Spelled once for the claim read."""
+    return str(ecom.get("online_state") or "") == "DELISTED" and str(ecom.get("delist_mode") or "") == "LIVE"
 
 
 def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
@@ -528,10 +547,17 @@ def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
     guard is actually about, exactly as ``inventory._location_conflicts`` asks
     the OTHER axis of the same pair over the whole shop list.
 
-    A SOFT-DELETED listing (``deleted_at``) is not a claimant: it is off the
-    site and its gid is nobody's number, so counting it would freeze the live
-    SKU's writes for ever. The same SKU found on both sides counts ONCE (a twin
-    carrying its own variant's gid is not a collision).
+    A SOFT-DELETED listing (``deleted_at``) is not a claimant ONLY when its
+    take-down actually reached Shopify -- ``ecom.online_state == DELISTED``
+    stamped by a LIVE delist (``ecom.delist_mode``): then it is off the site
+    and its gid is nobody's number, and counting it would freeze the live
+    SKU's writes for ever. Any other soft-deleted twin -- the take-down failed
+    (the delete door is fail-soft, the delete stands), or it "succeeded" DARK
+    as a SIMULATED no-op with zero network -- is still ACTIVE on Shopify with a
+    live inventory item, and a SKU mis-stamped onto that item would otherwise
+    write its shelf onto a listing IMS believes is gone (recheck round 1). The
+    same SKU found on both sides counts ONCE (a twin carrying its own variant's
+    gid is not a collision).
 
     STRICT, unlike its forward twin: it RAISES on a read failure. {} here means
     "nobody else claims these items", which is the answer that lets an absolute
@@ -563,9 +589,10 @@ def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
             {"ecom.shopify_inventory_item_id": {"$in": items}},
             {"_id": 0, "sku": 1, "ecom": 1, "deleted_at": 1},
         ):
-            if doc.get("deleted_at"):
+            ecom = doc.get("ecom") or {}
+            if doc.get("deleted_at") and _delisted_live(ecom):
                 continue
-            _claim((doc.get("ecom") or {}).get("shopify_inventory_item_id"), doc.get("sku"))
+            _claim(ecom.get("shopify_inventory_item_id"), doc.get("sku"))
     return {gid: sorted(skus) for gid, skus in out.items()}
 
 

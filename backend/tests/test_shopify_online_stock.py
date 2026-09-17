@@ -211,6 +211,13 @@ def _responses(**override):
         "publications(": {"data": {"publications": {"nodes": [{"id": "gid://shopify/Publication/1", "name": "Online Store"}]}}},
         "publishablePublish": _ok_body("publishablePublish"),
         "metafieldsSet": _ok_body("metafieldsSet", metafields=[]),
+        # Shopify's location list, READ and answering the three mapped shops,
+        # ticked. It used to be unanswered ({'data': {}} -> nodes [] -> read
+        # False), so EVERY green pin in this file exercised the unread branch
+        # and none could notice that an unreadable list scored as "no stray,
+        # no dead" (recheck round 1). Unread is now its own not-ok line, so a
+        # green pin needs a real answer; override it to test the failures.
+        "imsLocationList": _locations(_loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4")),
     }
     base.update(override)
     return base
@@ -736,10 +743,14 @@ def test_T6_after_a_pos_writeback_the_scheduled_pass_is_a_zero_network_noop(monk
     assert summary["pushed"] == 1 and len(spy.calls_for("inventorySetQuantities")) == 1
     base = _baseline(db)
     assert base["quantities"] == {"SP-1": {"BV-A": 1, "BV-B": 1, "BV-C": 0}} and base["tracked"] is True
-    # The 01:00 / 09:00 pass diffs against the SAME baseline -> noop, no call.
-    _live(monkeypatch, _explode)
+    # The 01:00 / 09:00 pass diffs against the SAME baseline -> noop, no WRITE
+    # (a LIVE pass still makes its one read-only locations query -- and an
+    # unanswered one is no longer a green pass, so it is answered here).
+    quiet = _Spy(_responses())
+    _live(monkeypatch, quiet)
     res = _run(shopify_push.sync_stock_levels(db))
     assert res.action == "noop" and res.ok is True and res.payload["changed"] == 0
+    assert quiet.writes() == []
 
 
 def test_T6b_button_sweep_and_live_sync_each_hit_sync_stock_levels_exactly_once(monkeypatch):
@@ -1113,10 +1124,12 @@ def test_R5_two_skus_on_one_inventory_item_write_NEITHER(monkeypatch):
     assert "AAA-SIZE-L, PARENT-1" in out["error"] and INV_GID in out["error"]
     assert _baseline(db) is None, "nothing was written, so nothing enters the baseline"
     # The rule is spelled ONCE: the sweep's PREVIEW reports the same verdict as
-    # the press (no network at all on the preview).
-    _live(monkeypatch, _explode)
+    # the press (no WRITE on the preview; the one locations read is answered).
+    quiet = _Spy(_responses())
+    _live(monkeypatch, quiet)
     plan = _run(shopify_push.sync_stock_levels(db, dry_run=True))
     assert plan.ok is False and plan.code == shopify_push.STOCK_TARGET_DUPLICATE
+    assert quiet.writes() == []
     # ...and it never outranks a LIVE oversell report: an unmapped holder wins.
     db2 = _listed(_db(a=3, b=0, c=0, d=2, sku="PARENT-1"), sku="PARENT-1")
     db2.seed("catalog_variants", [
@@ -1199,16 +1212,20 @@ def test_T11b_preview_first_names_a_mapped_shop_whose_read_failed(monkeypatch):
     # payload key stays the id, the line the owner reads names the CODE.
     db.get_collection("stores").update_one({"store_id": "BV-B"}, {"$set": {"store_code": "HIRAPUR-DHN"}})
     _break_shop(db, "BV-B")
-    _live(monkeypatch, _explode)
+    quiet = _Spy(_responses())
+    _live(monkeypatch, quiet)
     res = _run(shopify_push.sync_stock_levels(db, dry_run=True))
     assert res.mode == "SIMULATED" and res.ok is False, res
+    assert quiet.writes() == [], "a preview never writes"
     assert res.code == shopify_push.STOCK_ONHAND_UNKNOWN and "HIRAPUR-DHN" in (res.error or "")
     assert res.payload["unknown_stores"] == ["BV-B"]
-    # ...and the POS door's summary names the code the same way.
+    assert res.payload["plan"][0]["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
+    assert _baseline(db) is None, "a preview writes no baseline"
+    # ...and the POS door's summary names the code the same way -- and writes
+    # the shops it COULD read, omitting the unknown one so the next pass re-sends it.
     s = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
     assert s["unknown_stores"] == ["BV-B"] and "HIRAPUR-DHN" in (s.get("error") or "")
-    assert res.payload["plan"][0]["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
-    assert _baseline(db) is None
+    assert _baseline(db)["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
 
 
 def test_a_retired_size_variant_is_zeroed_at_every_mapped_location(monkeypatch):
@@ -1498,9 +1515,11 @@ def test_preview_first_names_a_missing_shopify_target_the_press_would_refuse(mon
     Shopify target -- the likeliest first-press failure on a rebuilt
     catalogue read GREEN. Revert the `missing` branch and the preview is ok."""
     db = _listed(_db(a=3, b=0, c=0), shopify_inventory_item_id=None)
-    _live(monkeypatch, _explode)  # a preview makes ZERO calls
+    quiet = _Spy(_responses())
+    _live(monkeypatch, quiet)  # a preview makes ZERO writes
     prev = _run(shopify_push.sync_stock_levels(db, dry_run=True))
     assert prev.mode == "SIMULATED" and prev.ok is False
+    assert quiet.writes() == []
     assert prev.code == shopify_push.STOCK_TARGET_MISSING and "SP-1" in prev.error
     assert prev.payload["target_missing"] == ["SP-1"]
     spy = _Spy(_responses())
@@ -1794,12 +1813,21 @@ def test_R5_an_empty_locations_read_is_unknown_not_every_shop_dead(monkeypatch):
     so an empty list means the read told us nothing -- concluding "Shopify
     lists none of your mapped locations" from it would flag every shop on every
     pass. `read` is False for a dark, failed or empty answer. Drop the
-    `or not rows` term -> every mapped shop is reported dead -> this fails."""
+    `or not rows` term -> every mapped shop is reported dead -> this fails.
+
+    ...and UNKNOWN is not GREEN (recheck round 1): this pin used to assert
+    ok=True / code=None on the empty read, i.e. that "we could not read the
+    list" may score as "no stray, no dead". It may not. The rows still go
+    out; the run says the location question went unanswered, in its own code.
+    Drop the `locations_unread` rung -> ok True -> this fails."""
     db = _listed(_db(a=2, b=1, c=0))
-    _live(monkeypatch, _Spy(_responses(**{"imsLocationList": _locations()})))
+    spy = _Spy(_responses(**{"imsLocationList": _locations()}))
+    _live(monkeypatch, spy)
     res = _run(shopify_push.sync_stock_levels(db))
-    assert res.ok is True and res.code is None, res.error
-    assert res.payload["dead_locations"] == []
+    assert res.payload["dead_locations"] == [] and res.payload["unmapped_locations"] == []
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_UNREACHABLE, res.error
+    assert res.payload["locations_read"] is False and "could not be read" in (res.error or "")
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}, "still written"
 
 
 def test_R5_the_product_press_carries_invariant_2(monkeypatch):
@@ -2640,7 +2668,12 @@ def test_R7_a_stale_recorded_location_verdict_is_re_read_by_the_next_press(monke
     tick and every press still codes NOT_SELLING until a sweep runs.
 
     Drop the TTL in `last_location_verdict` -> the stale verdict is replayed,
-    zero reads, ok True -> this fails."""
+    zero reads, ok True -> this fails.
+
+    ONE MINUTE, not ten (recheck round 1): at ten, a press five minutes after
+    the untick was still green and still wrote at the dead location. The
+    record below is aged NINETY SECONDS -- put the TTL back to 600 and the
+    stale verdict is replayed with zero reads -> this fails."""
     from datetime import datetime, timedelta, timezone
 
     db = _listed(_db(a=2, b=1, c=0))
@@ -2657,10 +2690,10 @@ def test_R7_a_stale_recorded_location_verdict_is_re_read_by_the_next_press(monke
     _live(monkeypatch, fresh)
     out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
     assert fresh.calls_for("imsLocationList") == [] and out["dead_locations"] == []
-    # An hour later the same press re-reads -- and refuses to call it green.
+    # Ninety seconds later the same press re-reads -- and refuses to call it green.
     db.get_collection("online_sync_state").update_one(
         {"_id": "shopify_stray_locations"},
-        {"$set": {"at": datetime.now(timezone.utc) - timedelta(hours=1)}},
+        {"$set": {"at": datetime.now(timezone.utc) - timedelta(seconds=90)}},
     )
     stale = _Spy(_responses(**unticked))
     _live(monkeypatch, stale)
@@ -2724,9 +2757,268 @@ def test_R7_an_unreadable_claim_check_is_UNKNOWN_on_the_sweep_as_on_the_press(mo
     assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN
     assert res.payload["target_missing"] == [], "the item IS mapped; the CLAIM check is what failed"
     assert "claim check" in (res.error or "")
-    # The preview says it too (zero network), and the press says it in the same words.
-    _live(monkeypatch, _explode)
+    # The preview says it too (zero writes), and the press says it in the same words.
+    quiet = _Spy(_responses())
+    _live(monkeypatch, quiet)
     plan = _run(shopify_push.sync_stock_levels(db, dry_run=True))
+    assert quiet.writes() == []
     assert plan.ok is False and plan.code == shopify_push.STOCK_ONHAND_UNKNOWN
     out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", dry_run=True))
     assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and out["error"] == plan.error
+
+
+# ---------------------------------------------------------------------------
+# 12. Recheck round 1 (2026-09-17): the per-product doors, the unread list,
+#     the spelling axis, the soft-deleted claimant, the holders+dead line
+# ---------------------------------------------------------------------------
+
+
+def _same_listing_dup(other_spelling=INV_GID):
+    """cat-1 / SP-1 owns INV_GID (2 at BV-A); a size row SP-1-L (1 at BV-B) is
+    stamped on the SAME item, spelled ``other_spelling``."""
+    db = _listed(_db(a=2, b=0, c=0))
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.seed("stock_units", [
+        {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-B", "status": "AVAILABLE"}
+    ])
+    db.seed("catalog_variants", [
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": other_spelling}
+    ])
+    return db
+
+
+def test_R8_a_bare_id_claimant_beside_a_full_gid_row_is_still_a_duplicate(monkeypatch):
+    """OVERSELL (recheck round 1). The claim guard added both spellings of THIS
+    batch's stored value, while the reverse read matches the STORED string of
+    the OTHER row: with this row the full gid and the other row the bare id,
+    the parent's own POS sale wrote its shelf onto the item the size shares,
+    fully green -- while the size's door and the sweep refused the same
+    database. Drop the ``rsplit`` token from ``spellings`` -> rows written,
+    code None -> this fails."""
+    db = _same_listing_dup(other_spelling="9")  # the OTHER row is the BARE id
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="sale"))
+    assert spy.rows() == set(), ("the parent's sale wrote through a bare-id claimant", spy.rows())
+    assert out["ok"] is False and out["code"] == shopify_push.STOCK_TARGET_DUPLICATE
+    assert "SP-1, SP-1-L" in out["error"]
+    # ...and the mirror spelling (this row bare, the other the full gid) too.
+    db2 = _db(a=2, b=0, c=0)
+    db2.seed("catalog_products", [_catalog_row("cat-1", "SP-1", shopify_inventory_item_id="9")])
+    db2.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db2.seed("stock_units", [{"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-B", "status": "AVAILABLE"}])
+    db2.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}])
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    out2 = _run(shopify_push.push_skus_stock(db2, ["SP-1"], source="sale"))
+    assert spy2.rows() == set() and out2["code"] == shopify_push.STOCK_TARGET_DUPLICATE
+
+
+def _parent_whose_size_row_was_deleted(monkeypatch):
+    db = _listed(_db(a=1, b=0, c=0))
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.seed("stock_units", [{"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-A", "status": "AVAILABLE"}])
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_TWO}])
+    _live(monkeypatch, _Spy(_responses()))
+    assert _run(shopify_push.sync_stock_levels(db)).ok is True
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}
+    db.get_collection("catalog_variants").delete_one({"sku": "SP-1-L"})
+    return db
+
+
+def test_R8_the_press_the_preview_and_the_sale_row_name_a_stray_the_sweep_names(monkeypatch):
+    """PHANTOM (recheck round 1). Round 7 closed the retired-size phantom on
+    the SWEEP only: the Send-to-website press, the drawer preview and the POS
+    sale's own run row -- the doors the owner actually uses -- stayed green
+    while bettervision.in kept selling SP-1-L = 1 at BV-A. The stray question
+    is asked per LISTING wherever the listing is written. Drop
+    ``listing_strays`` from the press (or ``baseline_strays`` from the plan)
+    -> green -> this fails. The rows STILL go out: a stray is a report, and
+    withholding the sibling's true number would be a second oversell."""
+    db = _parent_whose_size_row_was_deleted(monkeypatch)
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    press = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", product_id="cat-1"))
+    assert press["ok"] is False and press["code"] == shopify_push.STOCK_BASELINE_STRAY
+    assert press["stray_skus"] == ["SP-1-L"] and "SP-1-L" in press["error"]
+    assert spy.rows() == {(INV_GID, LOC_A, 1), (INV_GID, LOC_B, 0), (INV_GID, LOC_C, 0)}, "still written"
+    # The drawer preview (DARK, zero network) says the same.
+    _dark(monkeypatch)
+    product = db.get_collection("catalog_products").find_one({"id": "cat-1"})
+    plan = _run(shopify_push.plan_product_stock(db, product, []))
+    assert plan["ok"] is False and plan["code"] == shopify_push.STOCK_BASELINE_STRAY
+    # ...and the POS sale's own run row (the door with only a SKU in hand).
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    sale = _run(wb.writeback_skus(db, ["SP-1"], "BV-A", source="sale"))
+    assert sale.get("code") == shopify_push.STOCK_BASELINE_STRAY and sale["pushed"] == 1
+    run = list(db.get_collection("sync_runs").find({}))[-1]
+    assert run["ok"] is False and "STOCK_BASELINE_STRAY" in run["error"]
+    assert "SP-1-L" in _baseline(db)["quantities"], "the merge keeps the stray so it stays named"
+
+
+def test_R8_the_per_product_preview_carries_the_data_defect_rungs(monkeypatch):
+    """PHANTOM (recheck round 1). ``plan_product_stock`` passed only the four
+    mapping inputs to the ladder: over the round-7 P1 database (a size row on
+    the parent's item) it read ok=True and PRINTED both SKUs as rows that
+    would be written while the press wrote neither; over a shop whose
+    aggregate died it read green with that shop silently absent. Drop
+    ``duplicate_targets`` / ``unknown_error`` from the plan's ladder call ->
+    ok True -> this fails."""
+    _dark(monkeypatch)
+    db = _same_listing_dup()
+    product = db.get_collection("catalog_products").find_one({"id": "cat-1"})
+    variants = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    plan = _run(shopify_push.plan_product_stock(db, product, variants))
+    assert plan["ok"] is False and plan["code"] == shopify_push.STOCK_TARGET_DUPLICATE
+    assert plan["quantities"] == {}, "neither SKU of a duplicated item is a row the press would write"
+    # A shop whose read died: the same code, the same words, as the press.
+    db2 = _listed(_db(a=2, b=1, c=0))
+    _break_shop(db2, "BV-B")
+    product2 = db2.get_collection("catalog_products").find_one({"id": "cat-1"})
+    plan2 = _run(shopify_push.plan_product_stock(db2, product2, []))
+    assert plan2["ok"] is False and plan2["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "BV-B" in plan2["error"] and plan2["quantities"] == {"SP-1": {"BV-A": 2, "BV-C": 0}}
+    # ...and the whole-batch unknown (no spine at all) is the press's own line.
+    db3 = StrictDB()
+    db3.seed("stores", [_store("BV-A", LOC_A)])
+    db3.seed("catalog_products", [_catalog_row("cat-1", "SP-1")])
+    plan3 = _run(shopify_push.plan_product_stock(db3, db3.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert plan3["ok"] is False and plan3["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "every listed SKU" in plan3["error"]
+
+
+def test_R8_a_soft_deleted_twin_whose_take_down_never_reached_shopify_still_claims_its_item(monkeypatch):
+    """OVERSELL (recheck round 1, low). The claim read dropped EVERY
+    soft-deleted twin on the premise that it is off the site -- but the delete
+    door's take-down is fail-soft (the delete stands if Shopify says no) and a
+    DARK delist is a SIMULATED ok stamped DELISTED with zero network. Such a
+    twin is still ACTIVE on Shopify with a live item, and a SKU mis-stamped on
+    that item wrote its shelf onto it. Only a LIVE DELISTED stamp lets the twin
+    go. Restore ``if deleted_at: continue`` -> the sale writes -> this fails."""
+    def _world(**ecom_marks):
+        db = _db(a=2, b=0, c=0)
+        dead = _catalog_row("cat-1", "SP-1", **ecom_marks)
+        dead["deleted_at"] = "2026-09-17T00:00:00"
+        db.seed("catalog_products", [dead, _catalog_row("cat-2", "SP-2")])
+        db.seed("products", [{"product_id": "spine-2", "sku": "SP-2"}])
+        db.seed("stock_units", [{"stock_id": "s2", "product_id": "spine-2", "store_id": "BV-B", "status": "AVAILABLE"}])
+        return db
+
+    for marks in ({}, {"online_state": "DELIST_FAILED"}, {"online_state": "DELISTED", "delist_mode": "SIMULATED"}):
+        db = _world(**marks)
+        spy = _Spy(_responses())
+        _live(monkeypatch, spy)
+        out = _run(wb.writeback_skus(db, ["SP-2"], "BV-B", source="sale"))
+        assert spy.rows() == set(), (marks, spy.rows())
+        assert out.get("code") == shopify_push.STOCK_TARGET_DUPLICATE, marks
+    # The one honest exception: a twin a LIVE take-down actually took down.
+    db = _world(online_state="DELISTED", delist_mode="LIVE")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    out = _run(wb.writeback_skus(db, ["SP-2"], "BV-B", source="sale"))
+    assert out.get("code") is None and spy.rows() == {(INV_GID, LOC_A, 0), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
+
+
+class _RaisingLocations(_Spy):
+    """Every mutation answers; the READ-ONLY locations list raises (a 429
+    after 121 product pushes, a token blip)."""
+
+    async def __call__(self, db, query, variables):
+        if "imsLocationList" in query:
+            self.calls.append({"query": query, "variables": variables})
+            raise RuntimeError("Throttled")
+        return await super().__call__(db, query, variables)
+
+
+def test_R8_an_unreadable_locations_list_is_UNKNOWN_on_the_preview_the_press_and_the_sweep(monkeypatch):
+    """SILENT FALLBACK (recheck round 1, LIVE, day-1 reachable). A raised read,
+    a Shopify error body or an empty node list all came back stray=[] dead=[]
+    and nothing downstream looked at ``read``, so the mandatory Preview-first
+    read GREEN over Pune stray and three unticked Jharkhand locations. Two
+    answers to one question from one database. Now: its own code on every
+    door, the rows still written, and NOT recorded (the next caller re-reads).
+    Drop the ``locations_unread`` rung -> ok True -> this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    spy = _RaisingLocations(_responses())
+    _live(monkeypatch, spy)
+    plan = _run(shopify_push.sync_stock_levels(db, dry_run=True))
+    assert plan.ok is False and plan.code == shopify_push.SHOPIFY_UNREACHABLE
+    assert plan.payload["locations_read"] is False and spy.writes() == []
+    # The press over the same failure: UNKNOWN, rows still written.
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert out["ok"] is False and out["code"] == shopify_push.SHOPIFY_UNREACHABLE
+    assert out["locations_unread"] is True and out["set"] == 3
+    assert out["dead_locations"] == [] and out["unmapped_locations"] == []
+    # The LIVE sweep too.
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_UNREACHABLE and res.error == out["error"]
+    assert (INV_GID, LOC_A, 2) in spy.rows()
+    # Nothing was recorded, so the next press with Shopify back does the one read.
+    good = _Spy(_responses())
+    _live(monkeypatch, good)
+    again = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert len(good.calls_for("imsLocationList")) == 1 and again["ok"] is True and again["code"] is None
+    # The drawer preview (a per-product plan) says it in the same words.
+    _live(monkeypatch, _RaisingLocations(_responses()))
+    db.get_collection("online_sync_state").delete_one({"_id": "shopify_stray_locations"})
+    product = db.get_collection("catalog_products").find_one({"id": "cat-1"})
+    plan2 = _run(shopify_push.plan_product_stock(db, product, []))
+    assert plan2["ok"] is False and plan2["code"] == shopify_push.SHOPIFY_UNREACHABLE and plan2["error"] == out["error"]
+
+
+def test_R8_an_unmapped_holder_never_hides_the_dead_mapped_shops(monkeypatch):
+    """LADDER (recheck round 1, the round-7 shape one rung up). Prod day 1: the
+    one stock unit sits at Pune, Pune is unmapped, the runbook unticks the
+    three Jharkhand locations -> the press said "map BV-D" and NOTHING about
+    every listing reading SOLD OUT until the owner had mapped Pune and pressed
+    again. Both are said; the holders line leads. Drop the concat under the
+    holders rung -> SOLD OUT vanishes from the line -> this fails."""
+    db = _listed(_db(a=0, b=0, c=0, d=1, with_d=True))
+    unticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro", fulfils=False), _loc(LOC_B, "Dhanbad", fulfils=False), _loc(LOC_C, "Sector 4", fulfils=False),
+    )}
+    _live(monkeypatch, _Spy(_responses(**unticked)))
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert out["ok"] is False and out["code"] == shopify_push.STORE_UNMAPPED
+    assert "BV-D" in out["error"] and "SOLD OUT" in out["error"] and "Bokaro" in out["error"]
+    assert [d["store_id"] for d in out["dead_locations"]] == ["BV-A", "BV-B", "BV-C"]
+    # The sweep's line is the same line.
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.code == shopify_push.STORE_UNMAPPED and "SOLD OUT" in res.error and "BV-D" in res.error
+
+
+def test_R8_an_unreadable_target_read_is_UNKNOWN_on_the_sweep_not_TARGET_MISSING(monkeypatch):
+    """SILENT FALLBACK (recheck round 1). ``inventory_items_for_skus`` was
+    fail-soft to {}, which the sweep read as "no Shopify inventory item mapped"
+    for every changed SKU (a false statement about the data) and the sale
+    door read as "not online" (a vanished write-back). STRICT now: one
+    answer, UNKNOWN, on every door. Make the reader swallow again -> the
+    sweep codes STOCK_TARGET_MISSING -> this fails."""
+    from api.services import online_catalog
+
+    def _boom(db, skus):  # noqa: ARG001
+        raise RuntimeError("catalog_variants read failed")
+
+    monkeypatch.setattr(online_catalog, "inventory_items_for_skus", _boom)
+    db = _listed(_db(a=2, b=1, c=0))
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert spy.rows() == set() and res.ok is False
+    assert res.code == shopify_push.STOCK_ONHAND_UNKNOWN and res.payload["target_missing"] == []
+    assert "mapping could not be read" in res.error
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and out["error"] == res.error
+    # ...and the reader itself raises rather than answering {} on a dead collection.
+    monkeypatch.undo()
+    db2 = _listed(_db())
+    orig = db2.get_collection
+
+    class _Dead:
+        def find(self, *a, **k):
+            raise RuntimeError("catalog_variants unreadable")
+
+    monkeypatch.setattr(db2, "get_collection", lambda name: _Dead() if name == "catalog_variants" else orig(name))
+    with pytest.raises(RuntimeError):
+        online_catalog.inventory_items_for_skus(db2, ["SP-1"])

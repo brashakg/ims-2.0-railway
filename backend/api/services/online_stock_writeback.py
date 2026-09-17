@@ -509,8 +509,21 @@ async def writeback_skus(
 
     # 1. Resolve the Shopify inventory-item targets from the IMS Mongo mapping
     #    (the ONE target reader). A SKU with no target is skipped -- and
-    #    checked below for the online-but-unmapped guard gap.
-    targets = online_catalog.inventory_items_for_skus(db, distinct)
+    #    checked below for the online-but-unmapped guard gap. A read that
+    #    FAILED is not a SKU that is not online (recheck round 1): fail-soft
+    #    to {} the sale's write-back vanished as skipped_no_mapping with no run
+    #    row and no task, and bettervision.in kept the pre-sale number until
+    #    the next tick. UNKNOWN, in the writer's own words, one not-ok row.
+    try:
+        targets = online_catalog.inventory_items_for_skus(db, distinct)
+    except Exception as exc:  # noqa: BLE001 -- the sale path never raises
+        from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
+
+        summary["code"] = STOCK_ONHAND_UNKNOWN
+        summary["error"] = _target_error(exc)
+        logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
+        _record_run(db, summary)
+        return summary
     if not targets:
         summary["skipped_no_mapping"] = len(distinct)
         _alert_unmapped_online(db, distinct, summary)

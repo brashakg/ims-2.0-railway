@@ -456,7 +456,12 @@ function StoreModal({
       setLocRead(r);
       setForm((p) => {
         if (p.shopify_location_id) return p;
-        const hit = exactLocationMatch(r.locations.filter((l) => !l.mapped_store_id), p);
+        // FREE = held by nobody: a location two shops claim maps neither
+        // (mapped_store_id null) but is not free either.
+        const hit = exactLocationMatch(
+          r.locations.filter((l) => !l.mapped_store_id && !(l.claimed_by ?? []).length),
+          p,
+        );
         if (!hit) return p;
         return { ...p, shopify_location_id: hit, shopify_location_name: r.locations.find((l) => l.id === hit)?.name ?? null };
       });
@@ -560,12 +565,20 @@ function StoreModal({
               )}
               {locs.map((l) => {
                 const other = !!l.mapped_store_id && l.mapped_store_id !== store?.store_id;
+                // A location TWO shops claim: the writer writes it for NEITHER
+                // (the backend's mapped_store_id is null), so it is not "mapped
+                // to X" -- naming one holder here sent the owner to a shop the
+                // writer does not honour. Say who claims it; offer it to nobody
+                // else (a third claimant would 409 anyway).
+                const claimants = l.claimed_by ?? [];
+                const contested = claimants.length > 1;
                 return (
-                  <option key={l.id} value={l.id} disabled={other}>
+                  <option key={l.id} value={l.id} disabled={other || (contested && l.id !== form.shopify_location_id)}>
                     {l.name || l.id}
                     {l.city ? ` - ${l.city}` : ''}
                     {l.isActive === false ? ' (inactive)' : ''}
                     {other ? ` (mapped to ${l.mapped_store_code || l.mapped_store_id})` : ''}
+                    {contested ? ` (claimed by ${claimants.join(', ')} - written for neither)` : ''}
                   </option>
                 );
               })}

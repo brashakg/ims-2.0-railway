@@ -1577,3 +1577,39 @@ def test_a_clean_bulk_press_says_nothing_about_stock(
     )
     s = r.json()["summary"]["products"]
     assert s["pushed"] == 1 and "stock_not_written" not in s
+
+
+def test_a_bulk_press_splits_a_stock_warning_from_stock_not_written(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """WORDING (recheck round 1, the day-1 NORMAL path). ``stock_not_written``
+    was "stock not OK", so with Gangadham Pune ticked and unmapped every one of
+    the 121 presses -- whose three mapped shops WERE written -- tallied there
+    and the toast read "N live with NO stock written (sold out)" beside a line
+    quoting the opposite. Split on what Shopify ACCEPTED: rows written beside
+    a warning is ``stock_warning``; zero rows is ``stock_not_written``. Fold
+    the two back into one bucket -> this fails."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _written_with_a_warning(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE",
+            entity="product",
+            action="update",
+            target_id=doc.get("id"),
+            ok=True,
+            code=shopify_push.SHOPIFY_LOCATION_UNMAPPED,
+            error="Shopify location(s) that fulfil online orders but map to no shop: Gangadham Pune",
+            stock={"ok": False, "set": 3, "code": shopify_push.SHOPIFY_LOCATION_UNMAPPED},
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _written_with_a_warning)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    s = r.json()["summary"]["products"]
+    assert s["stock_warning"] == 1 and "stock_not_written" not in s, s
+    assert s["pushed"] == 1 and s["failed"] == 0

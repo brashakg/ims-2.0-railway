@@ -45,6 +45,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from agents.nexus_providers import _as_shopify_gid
+
 from .auth import require_roles
 from ..services import shopify_push
 from ..services import shopify_live_sync as live_sync
@@ -305,19 +307,32 @@ async def push_locations(
     data = await shopify_push.list_locations(db)
     try:
         stores = physical_stores(db)
-        by_gid = {
-            s["shopify_location_id"]: s for s in stores if s.get("shopify_location_id")
+        # "Mapped" the way the writer means it, for BOTH fields: a location two
+        # shops claim maps NEITHER of them (it IS a stray location), so the
+        # holder is read off the writer's own map -- never off the raw gid,
+        # where the last claimant won and the row said "mapped to WIZ-DHN-01"
+        # beside "maps to no shop" (recheck round 1). `claimed_by` lists every
+        # raw claimant so the dropdown can say "claimed by two shops".
+        by_store = {str(s.get("store_id") or ""): s for s in stores}
+        holder_of = {
+            gid: by_store.get(sid) or {}
+            for sid, gid in shopify_push.mapped_store_locations(stores).items()
         }
-        # "Mapped" the way the writer means it: a location two shops claim maps
-        # NEITHER of them, so it IS a stray location.
-        mapped_gids = set(shopify_push.mapped_store_locations(stores).values())
+        claimants: Dict[str, list] = {}
+        for s in stores:
+            gid = str(s.get("shopify_location_id") or "").strip()
+            if gid:
+                claimants.setdefault(_as_shopify_gid(gid, "Location"), []).append(
+                    str(s.get("store_code") or s.get("store_id") or "")
+                )
     except Exception:  # noqa: BLE001 -- the join is a convenience, the list is the point
-        by_gid, mapped_gids = {}, set()
+        holder_of, claimants = {}, {}
     for row in data["locations"]:
-        holder = by_gid.get(row["id"])
+        holder = holder_of.get(row["id"])
         row["mapped_store_id"] = holder.get("store_id") if holder else None
         row["mapped_store_code"] = holder.get("store_code") if holder else None
-        row["unmapped_online_fulfilling"] = shopify_push.is_stray_fulfilling(row, mapped_gids)
+        row["claimed_by"] = sorted(claimants.get(row["id"]) or [])
+        row["unmapped_online_fulfilling"] = shopify_push.is_stray_fulfilling(row, set(holder_of))
     return data
 
 
@@ -674,19 +689,28 @@ async def push_all_pending(
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
             elif data.get("code"):
-                # ANY OTHER code on an ok push is the STOCK pass saying it wrote
-                # nothing (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*): the
-                # listing is live with tracked=true + DENY behind a quantity
-                # that reached no location, i.e. SOLD OUT on bettervision.in.
-                # Without its own bucket it left refused/withheld/failed all 0
-                # and the page painted the press GREEN -- and on day 1 that is
-                # the NORMAL path, not an edge (Gangadham Pune fulfils online
+                # ANY OTHER code on an ok push is the STOCK pass not being
+                # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without
+                # its own bucket it left refused/withheld/failed all 0 and the
+                # page painted the press GREEN -- and on day 1 that is the
+                # NORMAL path, not an edge (Gangadham Pune fulfils online
                 # orders and is deliberately mapped to no shop, so every one of
                 # the 121 presses carries SHOPIFY_LOCATION_UNMAPPED). Asked as
                 # "is there a code?", not as a list of codes, so a code added
                 # later cannot read green here the way these did: the single
                 # press already decides it that way (pushToastLevel).
-                bucket["stock_not_written"] = bucket.get("stock_not_written", 0) + 1
+                #
+                # TWO buckets, split on what Shopify ACCEPTED (recheck round
+                # 1): `set` == 0 is a listing live with tracked=true + DENY
+                # behind NO quantity, i.e. SOLD OUT; `set` > 0 is a listing
+                # whose mapped shops WERE written beside a warning (Pune stray,
+                # one shop unknown, a stray baseline SKU). The one bucket
+                # labelled every warning "NO stock written (sold out)" next to
+                # a line quoting the opposite.
+                if int(((data.get("stock") or {}).get("set")) or 0) > 0:
+                    bucket["stock_warning"] = bucket.get("stock_warning", 0) + 1
+                else:
+                    bucket["stock_not_written"] = bucket.get("stock_not_written", 0) + 1
         else:
             bucket["failed"] += 1
         results.append(data)
