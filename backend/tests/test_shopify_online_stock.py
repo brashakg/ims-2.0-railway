@@ -2469,8 +2469,11 @@ def test_R6_P6_a_delist_is_not_a_false_unmapped_report(monkeypatch):
     a deduped P1 SYSTEM task. On prod today that is every delist of any size
     held at the unmapped shop.
 
-    Drop `delisting=True` at the delist call (or the `[] if delisting` guard)
-    -> ok False with STORE_UNMAPPED -> this fails."""
+    Recheck round 2: the door no longer forces a 0 (and needs no `delisting`
+    exemption) -- the RULE writes, and an inactive spine is 0 at every shop,
+    the buffer-0 holders re-read included, so BV-D holds nothing the website
+    is asked to sell. Stop zeroing an inactive spine in `_sku_to_pid` -> BV-D
+    holds 2 -> ok False with STORE_UNMAPPED -> this fails."""
     child = {
         "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
         "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
@@ -3169,57 +3172,75 @@ def test_R8_the_location_rung_never_hides_a_listings_own_failure(monkeypatch):
     assert "cat-1" in res.error and "WITHOUT LIMIT" in res.error and "Throttled" in res.error, res.error
 
 
-def test_R8_a_delist_whose_spine_stayed_active_is_not_green(monkeypatch):
+def test_R8_a_delist_writes_the_rules_number_and_says_when_the_size_is_still_on_sale(monkeypatch):
     """RECHECK ROUND 2 (one rule: two implementations of 'this size is off
-    sale'). `_delist_variant_row` hands the writer a forced 0; the RULE's only
+    sale'). `_delist_variant_row` handed the writer a forced 0 (plus a
+    `delisting` exemption from the holders question) while the RULE's only
     off-sale marker is the spine's is_active. The DELETE door deactivates the
     spine fail-soft with the repository's answer unchecked, so a swallowed
     Mongo error there left the spine ACTIVE: the row wrote 0 green, and the
     next sync_stock_levels diffed shelf 1 vs sent 0 and put the deleted size
-    straight back on sale, ok=True, code None.
+    straight back on sale, ok=True, code None. Two answers to one SKU.
 
-    The 0 still goes out (off sale NOW); the verdict says whether it HOLDS.
-    Drop `_spine_relists` from the row -> ok True over a take-down the next
-    pass undoes -> this fails."""
+    ONE now -- the second spelling is deleted, the door writes the RULE's
+    number. Spine still active -> the shelf goes out (the true number, the
+    one the next pass writes too) and the door is NOT green: it names the
+    shop and the count and says the spine is still active. Spine off -> 0
+    everywhere, green. Either way the next pass AGREES with the door: a
+    zero-write noop. Spine unreadable -> UNKNOWN, nothing written.
+
+    Hand the writer a forced 0 from the door again -> the active-spine delist
+    writes 0 and goes green, and the sweep writes 1 back -> this fails. Drop
+    the still-on-sale check -> ok True over a shelf count -> this fails."""
     child = {
         "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
         "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
     }
-    db = _db(a=1, b=0, c=0, sku="SP-1-L")  # spine-1 / SP-1-L carries NO is_active -> ACTIVE
-    db.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
-    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
-    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
-                                  "shopify_variant_id": "gid://shopify/ProductVariant/52",
-                                  "shopify_inventory_item_id": INV_ROW}])
+    sent = {"quantities": {"SP-1": {"BV-A": 0, "BV-B": 0, "BV-C": 0}}, "tracked": True, "policy": "DENY"}
+    row = {"sku": "SP-1-L", "parent_product_id": "cat-1",
+           "shopify_variant_id": "gid://shopify/ProductVariant/52", "shopify_inventory_item_id": INV_ROW}
+
+    def _world():
+        w = _db(a=1, b=0, c=0, sku="SP-1-L")  # spine-1 / SP-1-L carries NO is_active -> ACTIVE; 1 unit at A
+        w.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
+        w.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, online_stock=dict(sent)), child])
+        w.seed("catalog_variants", [dict(row)])
+        return w
+
+    # 1. Spine ACTIVE (the swallowed deactivate): the rule's number, said red.
+    db = _world()
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
     res = _run(shopify_push._delist_variant_row(db, child))
-    assert spy.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}, "off sale NOW"
-    assert res.ok is False and res.code == shopify_push.STOCK_SPINE_ACTIVE, res
-    assert "SP-1-L" in res.error and "ACTIVE" in res.error and "back" in res.error
-    # ...and the pass the line warns about really does undo it: shelf 1 vs sent 0.
+    assert spy.rows() == {(INV_ROW, LOC_A, 1), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}, "the rule's number, never a forced 0"
+    assert res.ok is False and res.code is None, res
+    assert "SP-1-L is still on sale (BV-A: 1)" in res.error and "ACTIVE" in res.error, res.error
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}
     spy2 = _Spy(_responses())
     _live(monkeypatch, spy2)
-    _run(shopify_push.sync_stock_levels(db))
-    assert (INV_ROW, LOC_A, 1) in spy2.rows(), "the rule relists an active spine"
-    # The spine deactivated (what the doors do first) -> the same delist is green.
+    sw = _run(shopify_push.sync_stock_levels(db))
+    assert sw.action == "noop" and spy2.writes() == [], "the door and the sweep read ONE rule -- nothing to undo"
+    # 2. Spine OFF (what the doors do first): 0 everywhere, green, and the
+    #    next pass still agrees.
     _spine_off(db, "SP-1-L")
     spy3 = _Spy(_responses())
     _live(monkeypatch, spy3)
     ok = _run(shopify_push._delist_variant_row(db, child))
     assert ok.ok is True and ok.code is None, ok.error
-    # An unreadable spine is UNKNOWN, never "will hold".
-    db4 = _db(a=1, b=0, c=0, sku="SP-1-L")
-    db4.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
-    db4.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
-                                   "shopify_variant_id": "gid://shopify/ProductVariant/52",
-                                   "shopify_inventory_item_id": INV_ROW}])
+    assert spy3.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 0, "BV-B": 0, "BV-C": 0}
+    spy4 = _Spy(_responses())
+    _live(monkeypatch, spy4)
+    assert _run(shopify_push.sync_stock_levels(db)).action == "noop" and spy4.writes() == []
+    # 3. Spine UNREADABLE: unknown, nothing written, never "off sale".
+    db5 = _world()
 
     class _Dead(StrictCollection):
         def find(self, *a, **k):
             raise RuntimeError("products read died")
 
-    db4._collections["products"] = _Dead("products", [])
-    _live(monkeypatch, _Spy(_responses()))
-    unk = _run(shopify_push._delist_variant_row(db4, child))
-    assert unk.ok is False and unk.code == shopify_push.STOCK_SPINE_ACTIVE and "UNKNOWN" in unk.error
+    db5._collections["products"] = _Dead("products", [])
+    spy5 = _Spy(_responses())
+    _live(monkeypatch, spy5)
+    unk = _run(shopify_push._delist_variant_row(db5, child))
+    assert unk.ok is False and unk.code == shopify_push.STOCK_ONHAND_UNKNOWN and spy5.rows() == set(), unk

@@ -159,12 +159,6 @@ STOCK_BASELINE_NOT_RESET = "STOCK_BASELINE_NOT_RESET"
 # it used to ride out with ok=False and NO code -- so the press promoted
 # nothing, the toast read green and the bulk tally filed it under `pushed`.
 STOCK_TRACKING_FAILED = "STOCK_TRACKING_FAILED"
-# A size was taken off sale (0 at every location) while its SPINE is still
-# active -- the ONLY off-sale marker the quantity rule reads
-# (online_stock_writeback._sku_to_pid lists an inactive spine at 0), so the
-# next stock pass writes the shelf count straight back. Said on the delist,
-# never green over a take-down the rule will undo.
-STOCK_SPINE_ACTIVE = "STOCK_SPINE_ACTIVE"
 
 # Shopify's own userErrors code when an inventory item is not stocked at the
 # location a quantity was set for (InventorySetQuantitiesUserErrorCode).
@@ -1465,7 +1459,6 @@ async def push_skus_stock(
     product_id: Optional[str] = None,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
-    delisting: bool = False,
 ) -> Dict[str, Any]:
     """THE quantity path. For every listed SKU, one row per MAPPED shop (an
     explicit 0 included) at that shop's location, through ``set_inventory_
@@ -1528,15 +1521,14 @@ async def push_skus_stock(
         summary["error"] = _whole_batch_unknown_error()
         return summary
 
-    # ``delisting`` is the ONE exception to the holders question, and it is the
-    # honest one (round-6 P6): the caller is taking this SKU OFF the website at
-    # every shop, so "a shop holds it and has no location" is the INTENT, not a
-    # fault. The delist door forced 0 everywhere and still got ok=False +
-    # STORE_UNMAPPED + a deduped P1 task for a fully successful delist of any
-    # size Gangadham Pune happens to hold -- a false P1 on prod today, because
-    # `unmapped_holders` re-reads the rule at buffer 0 instead of reading the
-    # caller's forced quantities.
-    holders = [] if delisting else unmapped_holders(db, quantities, stores, distinct, mapped)
+    # No exemption from the holders question for a delist (recheck round 2):
+    # the delist door no longer forces a 0 the rule may disagree with -- it
+    # lets the rule write, and the rule lists an INACTIVE spine at 0 at every
+    # shop (the buffer-0 re-read in `unmapped_holders` included), so a size
+    # Gangadham Pune still keeps on its shelf is not a holder once its spine
+    # is off. A size whose spine is still active IS a holder there, and is
+    # still on sale -- one answer from one rule, on this door as on the sweep.
+    holders = unmapped_holders(db, quantities, stores, distinct, mapped)
     summary["unmapped_stores"] = holders
     summary["unknown_stores"] = _unknown_stores(
         quantities, [s.get("store_id") for s in stores], distinct

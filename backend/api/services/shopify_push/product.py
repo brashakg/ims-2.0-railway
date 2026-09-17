@@ -43,10 +43,8 @@ from .variants import (
 )
 from .publish import _publish_to_online_store
 from .inventory import (
-    STOCK_SPINE_ACTIVE,
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
-    _stores,
     plan_product_stock,
     push_skus_stock,
     sync_product_stock,
@@ -692,42 +690,16 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
 
 
 
-def _spine_relists(db, sku: str) -> Optional[str]:
-    """Why the next stock pass would put this delisted size BACK on sale, else
-    None -- asked of the RULE's own reader (online_stock_writeback._sku_to_pid),
-    never a second spelling of "off sale": a spine that is still active lists
-    its shelf count; an unreadable spine is UNKNOWN, never "will hold"; a
-    missing spine cannot be relisted (the rule reads no on-hand for it and
-    writes it nowhere)."""
-    from ..online_stock_writeback import _sku_to_pid
-
-    resolved = _sku_to_pid(db, [sku])
-    if resolved is None:
-        return (
-            f"the spine for {sku} could not be read, so whether the next stock "
-            f"pass puts it back on sale is UNKNOWN -- check the product is "
-            f"deactivated and press again"
-        )
-    sku_to_pid, inactive = resolved
-    if sku in sku_to_pid and sku not in inactive:
-        return (
-            f"the spine for {sku} is still ACTIVE -- the next stock pass writes "
-            f"its shelf count straight back (an inactive spine is the only "
-            f"off-sale marker the quantity rule reads); deactivate the product "
-            f"and press again"
-        )
-    return None
-
-
 async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
     """Take ONE size variant off sale WITHOUT touching the parent's listing:
-    inventoryPolicy DENY + quantity 0 on the child's own Shopify variant AT
-    EVERY MAPPED SHOP'S LOCATION (the parent's listing stays ACTIVE, every
-    other size keeps selling). The retire hook's door for a variant-of
-    product (online_delist.delist_if_live when the child spine's is_active
-    flips off) -- is_active is then the ONLY marker, and the quantity rule
-    (online_stock_writeback._on_hand_for_skus: an inactive spine lists 0)
-    keeps every later stock pass at 0 until the product is reactivated.
+    inventoryPolicy DENY + the RULE's number (0 once the spine is inactive)
+    on the child's own Shopify variant AT EVERY MAPPED SHOP'S LOCATION (the
+    parent's listing stays ACTIVE, every other size keeps selling). The
+    retire hook's door for a variant-of product (online_delist.delist_if_live
+    when the child spine's is_active flips off) -- is_active is the ONLY
+    off-sale marker, and the quantity rule (online_stock_writeback.
+    _on_hand_for_skus: an inactive spine lists 0) is what writes the 0 here
+    AND keeps every later stock pass at 0 until the product is reactivated.
     NEVER productUpdate, never a status change.
 
     Reads the bridge, never a second link: the child's catalog_variants row
@@ -736,11 +708,12 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
     bulk-update needs. Any of the three missing -> the same clean noop as an
     un-pushed product (nothing on Shopify to take down). DARK -> SIMULATED
     plan, zero network. LIVE -> ``_set_variant_tracking`` (DENY) then THE ONE
-    writer, ``push_skus_stock`` with the SKU forced to 0 at every physical
-    shop: one 0 row per MAPPED location (a size retired at one location
-    would keep selling from the other shops), and the PARENT's nested
-    baseline gets the 0 through the writer's own write-back so a
-    reactivation (on-hand 1 vs sent 0) diffs and is re-sent. Fail-soft."""
+    writer, ``push_skus_stock`` with no precomputed quantities: one row per
+    MAPPED location (a size retired at one location would keep selling from
+    the other shops), and the PARENT's nested baseline gets the 0 through the
+    writer's own write-back so a reactivation (on-hand 1 vs sent 0) diffs
+    and is re-sent. A row above 0 means the spine is still ACTIVE -- the
+    size is NOT off sale -- and the result says so. Fail-soft."""
     pid = product.get("id") or product.get("product_id")
     sku = str(product.get("sku") or "").strip()
     row: Dict[str, Any] = {}
@@ -795,20 +768,22 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         )
     try:
         tracked = await _set_variant_tracking(db, payload["productId"], [variant_gid], "DENY")
-        # 0 at EVERY physical shop (mapped or not). `delisting=True` is what
-        # makes the second half of that sentence true: the writer's holders
-        # question re-reads the RULE at buffer 0, not the caller's forced
-        # quantities, so without it an unmapped shop that still holds this size
-        # (Gangadham Pune, today) turned a fully successful delist into
-        # ok=False + STORE_UNMAPPED + a P1 task. Taking a SKU off the website
-        # at a shop with no location IS the intent here.
-        zero = {sku: {str(s.get("store_id")): 0 for s in _stores(db) if s.get("store_id")}}
+        # THE RULE decides the number (recheck round 2: one rule, one
+        # implementation). The spine's is_active is the only off-sale marker
+        # and the writer's rule reads it -- an inactive spine lists 0 at every
+        # shop it could read, so the writer's own holders question (the same
+        # rule at buffer 0) finds no holder either: an unmapped shop that still
+        # keeps the size on its shelf (Gangadham Pune, today) is not asked to
+        # sell it. This door used to hand the writer a forced 0 plus a
+        # `delisting` exemption from that question, so the door and the rule
+        # could disagree about the same SKU: the DELETE door deactivates the
+        # spine fail-soft, a swallowed error there left the spine ACTIVE, 0
+        # went out green, and the next stock pass wrote the shelf straight
+        # back. Now what goes out IS the rule's number.
         written = await push_skus_stock(
             db,
             [sku],
-            quantities=zero,
             source="variant_delist",
-            delisting=True,
             product_id=str(parent_twin_id) if parent_twin_id else None,
             policy="DENY",
             tracked=bool(tracked.get("updated")),
@@ -822,18 +797,22 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         # here -- every other door goes through the same guard.
         if code and not written.get("errors") and written.get("error"):
             errors.append(written["error"])
-        # THE PIN (recheck round 2). This door hands the writer a forced 0; the
-        # RULE's only off-sale marker is the spine's is_active. They agreed by
-        # convention only: the DELETE door deactivates the spine fail-soft with
-        # the repository's answer unchecked, so a swallowed Mongo error there
-        # left the spine ACTIVE, this row wrote 0 green, and the next stock
-        # pass diffed shelf 1 vs sent 0 and put the deleted size back on sale
-        # with ok=True. The 0 still goes out (the size is off sale NOW); the
-        # verdict says whether it will HOLD.
-        relist = _spine_relists(db, sku)
-        if relist:
-            code = code or STOCK_SPINE_ACTIVE
-            errors.append(relist)
+        # A row above 0 is the rule saying the size is NOT off sale -- its
+        # spine is still active -- and this door says so instead of reporting
+        # a green take-down the next pass would undo.
+        on_sale = {
+            sid: int(q or 0)
+            for sid, q in (payload["rows"].get(sku) or {}).items()
+            if int(q or 0) > 0
+        }
+        if on_sale:
+            errors.append(
+                f"{sku} is still on sale ("
+                + ", ".join(f"{s}: {q}" for s, q in sorted(on_sale.items()))
+                + ") -- its product spine is still ACTIVE, the only off-sale "
+                "marker the quantity rule reads; deactivate the product and "
+                "press again"
+            )
         if errors:
             return PushResult(
                 mode=MODE_LIVE,
