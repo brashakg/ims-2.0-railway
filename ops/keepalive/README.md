@@ -12,10 +12,12 @@ How: this folder is its own Railway service (source = this repo, root directory
 `ops/keepalive`) with a cron schedule and restart policy NEVER. On each run it pings
 `/health` six times, 90 s apart, then exits. Cost: a few container-minutes a day.
 
-Railway service settings:
-- Root directory: `ops/keepalive`
-- Cron schedule (UTC): `24 3,16,17,19,20,21 * * *`  (6 minutes before each IST slot)
-- Restart policy: NEVER
+Railway service settings come from `/railway.json` at the repo root (config-as-code), so
+nothing has to be clicked in the dashboard: Dockerfile `ops/keepalive/Dockerfile`, cron
+`24 3,16,17,19,20,21 * * *` UTC (6 minutes before each IST slot), restart policy NEVER.
+The service is created with `railway add --service keepalive-ping --repo brashakg/ims-2.0-railway`
+and its root directory is left at the repo root on purpose. The backend service reads
+`backend/` for its own config and is not affected by the root file.
 - Variables (optional): `PING_URL` (default https://api.uniparallel.com/health),
   `PING_HITS` (6), `PING_GAP_SECONDS` (90)
 
