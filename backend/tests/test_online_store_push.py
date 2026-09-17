@@ -1509,3 +1509,71 @@ def test_push_history_query_failure_reports_unavailable_not_a_false_empty(
     assert body["available"] is False
     assert body["count"] == 0
     assert body["entries"] == []
+
+
+def test_a_press_that_wrote_no_stock_is_not_tallied_as_a_clean_success(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """PANEL ROUND 7 (first-push). The bulk press SWALLOWED a stock code -- only
+    the single press warned. A product push that publishes the listing but writes
+    its quantities NOWHERE comes back ok=True with the stock code on it
+    (product.py promotes it exactly like PRICE_NOT_SYNCED): the listing is live
+    with tracked=true + DENY behind no quantity, i.e. SOLD OUT. `_tally` gave
+    price_not_synced, refused_no_photo, publish_withheld, archived_not_listed and
+    taken_down_skipped each their own bucket and this one NONE, so
+    refused/withheld/failed all read 0 and the sync page painted the sweep green.
+
+    On prod's day-1 state that is the NORMAL path, not an edge: Gangadham Pune
+    fulfils online orders and is mapped to no shop by the owner's own decision,
+    so every one of the 121 presses carries a stock code.
+
+    Drop the `elif data.get("code")` bucket in `_tally` -> no stock_not_written
+    key -> this fails."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _published_but_unwritten(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE",
+            entity="product",
+            action="update",
+            target_id=doc.get("id"),
+            ok=True,  # the listing IS live -- that is what makes it dangerous
+            code=shopify_push.STORE_UNMAPPED,
+            error="no shop has a Shopify location -- nothing was written anywhere",
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _published_but_unwritten)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    s = r.json()["summary"]["products"]
+    assert s["stock_not_written"] == 1, s
+    # ...and it is still a push (the listing is live), not a failure or a no-op.
+    assert s["pushed"] == 1 and s["failed"] == 0 and s["noop"] == 0
+    assert "price_not_synced" not in s, "the OLD-price line is a different fault"
+
+
+def test_a_clean_bulk_press_says_nothing_about_stock(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """The other direction: a bucket that is always there is as useless as one
+    that never is. A press whose stock pass wrote everything carries no code, so
+    no stock line."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _clean(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE", entity="product", action="update", target_id=doc.get("id"), ok=True
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _clean)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    s = r.json()["summary"]["products"]
+    assert s["pushed"] == 1 and "stock_not_written" not in s

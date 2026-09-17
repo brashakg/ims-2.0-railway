@@ -57,6 +57,7 @@ import {
 } from '../../services/api/onlineStore';
 import OnlineStoreSyncBanner, {
   formatPushResult,
+  pushToastLevel,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { useAuth } from '../../context/AuthContext';
@@ -354,6 +355,12 @@ export default function OnlineShopifySyncPage() {
         const heldDown = Number(s?.taken_down_skipped ?? 0);
         const archived = Number(s?.archived_not_listed ?? 0);
         const oldPrice = Number(s?.price_not_synced ?? 0);
+        // LIVE, BUT SOLD OUT. The listing published and its quantities reached
+        // no location (no shop mapped, a Shopify location that cannot sell, two
+        // SKUs on one inventory item...). It has its own count for the same
+        // reason the OLD price does -- and without it this press read GREEN over
+        // 121 listings whose stock was written nowhere.
+        const noStock = Number(s?.stock_not_written ?? 0);
         // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
         // first failed row's server message rides on the toast itself. A row
         // that is ok but carries a code (live at the OLD price) counts too.
@@ -370,8 +377,9 @@ export default function OnlineShopifySyncPage() {
           (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
           (archived ? ` · ${archived} archived (not listed)` : '') +
           (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
+          (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
           why;
-        if (refused || withheld || s?.failed) toast.warning(msg);
+        if (refused || withheld || noStock || s?.failed) toast.warning(msg);
         else toast.success(msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
         // PRODUCTS number; collections/menus/images stop at the request limit.
@@ -534,6 +542,10 @@ export default function OnlineShopifySyncPage() {
   // with no isActive field that the backend called fine. Empty when DARK (the
   // locations read is [] then).
   const unmappedFulfilling = locations.filter((l) => l.unmapped_online_fulfilling);
+  // ...and the SHOP axis of the same question, likewise the backend's answer
+  // (mode.unmapped_stores, built through the writer's inventory._mapped), so the
+  // gate chip and the per-shop table below it cannot disagree.
+  const unmappedStoreIds = new Set((mode?.unmapped_stores ?? []).map((s) => s.store_id ?? ''));
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -657,16 +669,28 @@ export default function OnlineShopifySyncPage() {
               <tbody>
                 {(mode?.stores ?? []).map((s) => {
                   const loc = locations.find((l) => l.id === s.shopify_location_id);
+                  // ONE answer to "is this shop mapped?", the WRITER's -- read
+                  // off the backend's own unmapped list (_shared builds it
+                  // through inventory._mapped) instead of re-deriving it from
+                  // the raw gid two lines under the chip that uses it. A
+                  // location two shops claim is written for NEITHER of them, so
+                  // the raw-gid reading printed those two rows as mapped while
+                  // the chip above called them unmapped: two contradictory
+                  // answers in one card.
+                  const mapped = !unmappedStoreIds.has(s.store_id ?? '');
+                  const locLabel = s.shopify_location_name || loc?.name || s.shopify_location_id;
                   return (
                     <tr key={s.store_id ?? s.store_code ?? ''} className="border-t border-gray-100">
                       <td className="pr-4 py-1 text-gray-800">{s.store_code || s.store_name || s.store_id}</td>
-                      <td className={'pr-4 py-1 ' + (s.shopify_location_id ? 'text-gray-700' : 'text-amber-800')}>
-                        {s.shopify_location_id
-                          ? s.shopify_location_name || loc?.name || s.shopify_location_id
-                          : 'not mapped — set it on the Organization page'}
+                      <td className={'pr-4 py-1 ' + (mapped ? 'text-gray-700' : 'text-amber-800')}>
+                        {mapped
+                          ? locLabel
+                          : s.shopify_location_id
+                            ? `${locLabel} — claimed by another shop too, so neither is written`
+                            : 'not mapped — set it on the Organization page'}
                       </td>
                       <td className="pr-4 py-1 text-gray-700">
-                        {!s.shopify_location_id
+                        {!mapped
                           ? '—'
                           : loc
                             ? loc.fulfillsOnlineOrders
@@ -1066,6 +1090,20 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                       {(() => {
+                        const noStock = Number(
+                          (sweep.summary?.[ent.token]?.stock_not_written ?? 0) as number,
+                        );
+                        return noStock > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="Live on the website with NO quantity written: the stock pass reached no location (no shop mapped, a Shopify location that cannot sell online, or two SKUs on one inventory item). The listing shows SOLD OUT until it is fixed and pressed again - the lines on the stock card say which."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(noStock)} live with NO stock
+                            written
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
                         const held = Number(
                           (sweep.summary?.[ent.token]?.taken_down_skipped ?? 0) as number,
                         );
@@ -1122,7 +1160,12 @@ export default function OnlineShopifySyncPage() {
                             key={(r.target_id ?? '') + i}
                             className="text-[11px] text-gray-600 flex items-center gap-1"
                           >
-                            {r.ok ? (
+                            {/* ONE rule for "did this press do all it was pressed
+                                for?" -- pushToastLevel, the same one the drawer
+                                press uses. `r.ok` alone painted a green tick
+                                beside a listing that published with its stock
+                                written nowhere. */}
+                            {pushToastLevel(r) === 'success' ? (
                               <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
                             ) : (
                               <XCircle className="w-3 h-3 text-amber-600 shrink-0" />

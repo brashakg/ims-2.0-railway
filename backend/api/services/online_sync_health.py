@@ -116,7 +116,22 @@ def _on_hand_by_product(
     """Count on-hand units per product from the serialized `stock_units`
     collection (one row per unit). Same shape as inventory._on_hand_by_product,
     reading the SAME on-hand decision, without a router dependency.
-    Fail-soft -> {}."""
+    Fail-soft -> {}.
+
+    With NO ``store_id`` this is the POOLED count, and it excludes the ONLINE
+    stores exactly as the WRITER's on-hand rule does
+    (online_stock_writeback._on_hand_for_skus). It did not, and the two readers
+    disagreed about the same unit: an AVAILABLE unit parked on BV-ONLINE-01 is
+    unpickable (the online store has no shelf and POS is blocked on it), so the
+    writer publishes 0 while this reader counted 1 -- and this reader is what
+    feeds the oversell-risk tile and the catalog reconciliation screen, so a
+    listing of 1 against a shelf of 0 classified as OK and a REAL oversell was
+    hidden. One rule, one spelling: the exclusion list is
+    ``_online_store_ids``.
+
+    Still POOLED, though (PR 4's job): it compares an IMS total that includes
+    the deliberately unmapped Gangadham Pune against a per-location Shopify
+    sum, so Pune's shelf still reads as covered online when it is invisible."""
     if db is None or not product_ids:
         return {}
     match: Dict[str, Any] = {
@@ -125,6 +140,12 @@ def _on_hand_by_product(
     }
     if store_id:
         match["store_id"] = store_id
+    else:
+        from .online_stock_writeback import _online_store_ids
+
+        online_ids = _online_store_ids(db)
+        if online_ids:
+            match["store_id"] = {"$nin": online_ids}
     out: Dict[str, int] = {}
     try:
         coll = _coll(db, "stock_units")

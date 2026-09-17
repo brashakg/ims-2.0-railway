@@ -673,6 +673,20 @@ async def push_all_pending(
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
+            elif data.get("code"):
+                # ANY OTHER code on an ok push is the STOCK pass saying it wrote
+                # nothing (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*): the
+                # listing is live with tracked=true + DENY behind a quantity
+                # that reached no location, i.e. SOLD OUT on bettervision.in.
+                # Without its own bucket it left refused/withheld/failed all 0
+                # and the page painted the press GREEN -- and on day 1 that is
+                # the NORMAL path, not an edge (Gangadham Pune fulfils online
+                # orders and is deliberately mapped to no shop, so every one of
+                # the 121 presses carries SHOPIFY_LOCATION_UNMAPPED). Asked as
+                # "is there a code?", not as a list of codes, so a code added
+                # later cannot read green here the way these did: the single
+                # press already decides it that way (pushToastLevel).
+                bucket["stock_not_written"] = bucket.get("stock_not_written", 0) + 1
         else:
             bucket["failed"] += 1
         results.append(data)

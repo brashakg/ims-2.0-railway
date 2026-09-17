@@ -33,7 +33,12 @@ vi.mock('../../../services/api/onlineStore', () => ({
   },
 }));
 
-vi.mock('../../../components/online-store/OnlineStoreSyncBanner', () => ({
+// The banner itself is stubbed out, but `pushToastLevel` is kept REAL: the
+// sweep panel decides its per-row tick with it, and a hand-rolled copy in the
+// mock would be exactly the second implementation this page just stopped
+// carrying.
+vi.mock('../../../components/online-store/OnlineStoreSyncBanner', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   __esModule: true,
   default: () => null,
   formatPushResult: (label: string) => label,
@@ -264,5 +269,39 @@ describe('per-shop stock on the sync page', () => {
     render(<OnlineShopifySyncPage />);
     await screen.findByRole('button', { name: /preview stock/i });
     expect(screen.queryByTestId('unmapped-fulfilling-locations')).toBeNull();
+  });
+
+  // PANEL ROUND 7 (one-rule P3). The shops table re-derived "is this shop
+  // mapped?" from the raw `shopify_location_id`, two lines under a chip that
+  // derives it from the WRITER (`mode.stores_mapped` / `unmapped_stores`, built
+  // through inventory._mapped so a gid claimed by two shops maps NEITHER). With
+  // both Jharkhand shops on one location the card said both things at once:
+  // "1 of 3 shops mapped -- not mapped: BV-DHN-02, WIZ-DHN-01" in the chip, and
+  // the location NAME in grey on those two rows. Read the backend's answer ->
+  // one story. Restore the `s.shopify_location_id ? ...` reading -> this fails.
+  it('a location two shops claim is not printed as mapped under a chip that says it is not', async () => {
+    const shared = 'gid://shopify/Location/1001';
+    const twinned = [
+      { store_id: 'BV-DHN-02', store_code: 'BV-DHN-02', store_name: 'Dhanbad', shopify_location_id: shared, shopify_location_name: 'Dhanbad' },
+      { store_id: 'WIZ-DHN-01', store_code: 'WIZ-DHN-01', store_name: 'WizOpt Dhanbad', shopify_location_id: shared, shopify_location_name: 'Dhanbad' },
+      STORES[0],
+    ];
+    vi.mocked(pushApi.getStatus).mockResolvedValue({
+      ...status(),
+      mode: {
+        ...LIVE_MODE,
+        stores: twinned,
+        stores_total: 3,
+        stores_mapped: 1,
+        unmapped_stores: [twinned[0], twinned[1]],
+      },
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    await screen.findByRole('button', { name: /preview stock/i });
+    expect(screen.getByText(/1 of 3 shops mapped/i)).toBeTruthy();
+    const rows = screen.getAllByText(/claimed by another shop too/i);
+    expect(rows.length).toBe(2);
+    // ...and neither row claims to sell online off a location nobody writes.
+    expect(screen.queryByText(/not mapped . set it on the Organization page/i)).toBeNull();
   });
 });

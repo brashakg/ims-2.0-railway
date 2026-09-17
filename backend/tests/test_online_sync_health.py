@@ -236,6 +236,22 @@ class _StockUnitsColl(_FakeColl):
             preds = [self._status_pred((c or {}).get("status")) for c in or_clause]
         elif "status" in match:
             preds = [self._status_pred(match["status"])]
+        # ...and the STORE predicate, because the pooled read excludes the
+        # ONLINE stores ({$nin: [...]}) and a double that ignored store_id
+        # would count a phantom online unit and prove nothing.
+        store_cond = match.get("store_id")
+
+        def _store_ok(sid):
+            if store_cond is None:
+                return True
+            if isinstance(store_cond, dict):
+                if "$nin" in store_cond:
+                    return sid not in store_cond["$nin"]
+                if "$in" in store_cond:
+                    return sid in store_cond["$in"]
+                return True
+            return sid == store_cond
+
         counts: Dict[str, int] = {}
         for r in self._rows:
             pid = r.get("product_id")
@@ -243,6 +259,8 @@ class _StockUnitsColl(_FakeColl):
                 continue
             st = r.get("status", None) if "status" in r else None
             if preds is not None and not any(p(st) for p in preds):
+                continue
+            if not _store_ok(r.get("store_id")):
                 continue
             counts[pid] = counts.get(pid, 0) + int(r.get("quantity", 1) or 1)
         return iter([{"_id": pid, "n": n} for pid, n in counts.items()])
@@ -508,3 +526,56 @@ def test_endpoint_requires_auth(client):
     # No token -> the route's own 401 (auth), never a silent 200.
     r = client.get(_EP)
     assert r.status_code in (401, 403)
+
+
+def test_a_unit_parked_on_the_ONLINE_store_never_counts_as_on_hand(monkeypatch):
+    """PANEL ROUND 7 (one-rule P4). `_on_hand_by_product` is a SECOND on-hand
+    reader: it shares `item_events.on_hand_match()` with the writer but did NOT
+    exclude the ONLINE stores, so the same unit was on hand to the tile and gone
+    to the writer. An AVAILABLE unit parked on BV-ONLINE-01 is unpickable (the
+    online store has no shelf, POS is blocked on it), so
+    online_stock_writeback publishes 0 for it -- while this reader counted it and
+    classified a listing of 1 against a shelf of 0 as OK. That is a REAL
+    oversell hidden by the tile whose whole job is to find them, and it
+    contradicts this branch's own T14 ("a phantom online unit never counts
+    anywhere").
+
+    Drop the `$nin` on the pooled branch -> the phantom unit is on hand again,
+    sellable 1, no risk -> this fails."""
+    _patch_online(monkeypatch, {"SKU-ONLINE-ONLY": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P9", "sku": "SKU-ONLINE-ONLY", "name": "Phantom", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
+            ),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-ONLINE-ONLY": 1})
+
+    row = out["items"][0]
+    assert row["on_hand"] == 0, "no shop can ship it, so no shop holds it"
+    assert row["sellable"] == 0
+    assert row["oversell_risk"] is True, "1 listed against 0 shippable IS the risk"
+    assert out["summary"]["at_risk_count"] == 1
+
+
+def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
+    """The other direction: the exclusion is the ONLINE stores, not the shops."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 1})
+    assert out["items"][0]["on_hand"] == 1 and out["items"][0]["oversell_risk"] is False

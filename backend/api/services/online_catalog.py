@@ -515,6 +515,60 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
     return out
 
 
+def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
+    """THE REVERSE of ``inventory_items_for_skus``: ``{inventory_item_gid:
+    [sku, ...]}`` for EVERY SKU in the catalogue that claims one of ``gids`` --
+    a ``catalog_variants`` row or a ``catalog_products.ecom`` sub-doc.
+
+    Shopify holds exactly ONE quantity per (inventory item, location), so an
+    item two SKUs claim is unwritable whoever is writing it. Asked forwards
+    ("do the SKUs in THIS call collide?") the question is batch-local and every
+    single-SKU door -- a POS sale, an ingest claim, a return restock -- writes
+    straight through it; asked backwards it is the database-global fact the
+    guard is actually about, exactly as ``inventory._location_conflicts`` asks
+    the OTHER axis of the same pair over the whole shop list.
+
+    A SOFT-DELETED listing (``deleted_at``) is not a claimant: it is off the
+    site and its gid is nobody's number, so counting it would freeze the live
+    SKU's writes for ever. The same SKU found on both sides counts ONCE (a twin
+    carrying its own variant's gid is not a collision).
+
+    STRICT, unlike its forward twin: it RAISES on a read failure. {} here means
+    "nobody else claims these items", which is the answer that lets an absolute
+    writer overwrite another SKU's shelf -- the one thing this guard exists to
+    stop. The caller (``inventory.push_skus_stock``) turns the raise into the
+    same whole-batch abort an unreadable shop list gets."""
+    wanted = {normalize_sku(g) for g in (gids or [])}
+    wanted.discard("")
+    if not wanted or db is None:
+        return {}
+    out: Dict[str, List[str]] = {}
+
+    def _claim(gid: Any, sku: Any) -> None:
+        gid, sku = normalize_sku(gid), normalize_sku(sku)
+        if gid in wanted and sku and sku not in out.setdefault(gid, []):
+            out[gid].append(sku)
+
+    items = sorted(wanted)
+    coll = _coll(db, "catalog_variants")
+    if coll is not None:
+        for doc in coll.find(
+            {"shopify_inventory_item_id": {"$in": items}},
+            {"_id": 0, "sku": 1, "shopify_inventory_item_id": 1},
+        ):
+            _claim(doc.get("shopify_inventory_item_id"), doc.get("sku"))
+    coll = _coll(db, "catalog_products")
+    if coll is not None:
+        for doc in coll.find(
+            {"ecom.shopify_inventory_item_id": {"$in": items}},
+            {"_id": 0, "sku": 1, "ecom": 1, "deleted_at": 1},
+        ):
+            if doc.get("deleted_at"):
+                continue
+            _claim((doc.get("ecom") or {}).get("shopify_inventory_item_id"), doc.get("sku"))
+    return {gid: sorted(skus) for gid, skus in out.items()}
+
+
 def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
     """``{catalog product id: [requested keys]}`` -- THE listing that carries
     each key, for the stock baseline (``ecom.online_stock`` lives on the

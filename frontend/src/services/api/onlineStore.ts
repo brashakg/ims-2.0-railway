@@ -1606,6 +1606,12 @@ export interface PushSweepResult {
            *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
+          /** Products that published but whose QUANTITIES reached no Shopify
+           *  location (no shop mapped, a location that cannot sell online, two
+           *  SKUs on one inventory item...). Counted in `pushed` too -- the
+           *  listing is live -- but live with tracked=true + DENY behind no
+           *  quantity is a listing that reads SOLD OUT. */
+          stock_not_written?: number;
           /** Products a take-down is holding off the storefront: the sweep
            *  skips them until someone presses that one product explicitly. */
           taken_down_skipped?: number;

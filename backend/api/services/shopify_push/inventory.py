@@ -76,6 +76,7 @@ sent is one rule in one place and catches every writer.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
@@ -115,6 +116,11 @@ STORE_LOCATION_DUPLICATE = "STORE_LOCATION_DUPLICATE"
 # On-hand parked at a store_id the `stores` collection does not know (the
 # UUID-vs-code hazard): those units are published NOWHERE.
 STOCK_STORE_ORPHAN = "STOCK_STORE_ORPHAN"
+# A SKU the last-sent baseline still shows a POSITIVE number for that the
+# listing no longer lists (a size row deleted off its parent): Shopify keeps
+# selling it, IMS writes it nowhere and can no longer zero it -- the gid went
+# with the row. Named every pass; only a human can close it.
+STOCK_BASELINE_STRAY = "STOCK_BASELINE_STRAY"
 
 # Shopify refused the write for a reason of its own (a location the owner
 # deleted / deactivated, an invalid quantity): the rows in that call were NOT
@@ -327,6 +333,32 @@ def stock_changed(
         keep = set(skus)
         prev = {s: q for s, q in prev.items() if s in keep}
     return prev != dict(quantities)
+
+
+def baseline_strays(product: Dict[str, Any], skus: Iterable[str]) -> List[str]:
+    """The SKUs this listing's last-sent baseline still shows a POSITIVE number
+    for at some shop, and which the listing no longer lists -- i.e. what
+    bettervision.in is advertising that IMS has stopped writing.
+
+    ``stock_changed`` deliberately drops such a SKU from BOTH sides of the diff
+    (permanent "changed" noise would bury a live STORE_UNMAPPED report), and
+    that trade is right -- but dropped from the diff it was also dropped from
+    the REPORT, so a size row deleted off a parent froze its Shopify number
+    under a permanently green noop, and stayed on sale after its unit was sold
+    at the counter. The number cannot be retracted from here (the row that
+    carried the Shopify gid is gone), so it is NAMED instead, every pass, until
+    a human re-adds the row or removes the variant in Shopify admin.
+
+    A SKU the delist door zeroed properly is advertising nothing and is not
+    named: only a positive last-sent number is a phantom."""
+    keep = set(skus)
+    out: List[str] = []
+    for sku, rows in dict(_last_sent(product).get("quantities") or {}).items():
+        if not sku or sku in keep or not isinstance(rows, dict):
+            continue
+        if any(int(q or 0) > 0 for q in rows.values()):
+            out.append(str(sku))
+    return sorted(out)
 
 
 def mapped_slice(
@@ -904,6 +936,23 @@ _SYNC_STATE_COLLECTION = "online_sync_state"
 _STRAY_LOCATIONS_DOC = "shopify_stray_locations"
 
 
+# How long a recorded Shopify location list may be replayed before a caller
+# re-reads it. The owner flips "Fulfill online orders" in Shopify admin between
+# presses on the same afternoon; a verdict older than this is a guess.
+_LOCATION_VERDICT_TTL_SECONDS = 600
+
+
+def _stale(at: Any) -> bool:
+    """True when a recorded ``at`` is missing, unreadable or older than the TTL.
+    A naive datetime is read as UTC (older records predate the tz-aware rule);
+    anything that is not a datetime at all is stale, never fresh."""
+    if not isinstance(at, datetime):
+        return True
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (_now() - at).total_seconds() > _LOCATION_VERDICT_TTL_SECONDS
+
+
 def record_location_verdict(db, verdict: Dict[str, Any]) -> None:
     """Remember what SHOPIFY said -- the location rows, never the scored
     verdict (round-6 P1/P2). A verdict is rows PLUS the IMS mapping, and the
@@ -936,14 +985,28 @@ def last_location_verdict(db, mapped: Dict[str, str]) -> Optional[Dict[str, Any]
 
     None (not an empty verdict) matters: on day 1 no sweep has run yet, and
     "nothing recorded" must make the first publish press do the one read itself
-    rather than read as "all clear". Fail-soft -> None."""
+    rather than read as "all clear". Fail-soft -> None.
+
+    AND None once the rows are STALE (round-7 first-push). ``at`` was stamped by
+    every recording and read by nobody, so the SHOPIFY half of the verdict was
+    frozen until the next sweep -- up to 12 hours between the 01:00 and 09:00
+    ticks. The owner unticks "Fulfill online orders" on a location in Shopify
+    admin and the presses five minutes later come back ok=True, code=None,
+    dead_locations=[] while writing numbers the storefront cannot sell, which is
+    exactly the silent direction SHOPIFY_LOCATION_NOT_SELLING exists to close;
+    the mirror is a false red that survives a fix. Design section 6 has the
+    owner creating locations and flipping that tick interleaved with presses on
+    the same afternoon, so the cache has to expire faster than he works.
+    ponytail: a flat TTL, not a change feed -- one read per ten minutes of
+    pressing is cheap; if it ever is not, record the verdict on the mapping
+    save too."""
     try:
         doc = db[_SYNC_STATE_COLLECTION].find_one({"_id": _STRAY_LOCATIONS_DOC})
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SHOPIFY_STOCK] location verdict unreadable: %s", exc)
         return None
     rows = [r for r in ((doc or {}).get("rows") or []) if isinstance(r, dict)]
-    if not rows:
+    if not rows or _stale((doc or {}).get("at")):
         return None
     return score_locations(rows, mapped)
 
@@ -1010,11 +1073,23 @@ def _duplicate_error(conflicts: Dict[str, List[str]]) -> str:
     )
 
 
-def duplicate_inventory_items(targets: Dict[str, Any]) -> Dict[str, List[str]]:
+def duplicate_inventory_items(db, targets: Dict[str, Any]) -> Dict[str, List[str]]:
     """``{inventory_item_gid: [sku, ...]}`` for a Shopify inventory item claimed
-    by MORE THAN ONE of ``targets``' SKUs -- the mirror of
-    ``_location_conflicts`` on the other axis of the same (item, location)
-    pair, spelled once so the writer and the preview cannot drift.
+    by MORE THAN ONE SKU -- the mirror of ``_location_conflicts`` on the other
+    axis of the same (item, location) pair, spelled once so the writer and the
+    preview cannot drift.
+
+    ASKED OF THE WHOLE CATALOGUE, never of the batch (round-7 P1, oversell).
+    The question used to be "do the SKUs in THIS call collide?", while the
+    invariant is database-GLOBAL: Shopify holds one quantity per (item,
+    location) whoever writes it. So every single-SKU door -- a POS sale, an
+    ingest claim, a return restock, a transfer ship, a quarantine, a write-off
+    -- saw one SKU, no collision, and wrote the SIZE's per-shop numbers onto the
+    PARENT's inventory item, fully green, while the sweep over the SAME database
+    refused that exact state as unwritable. ``_location_conflicts`` has always
+    asked its axis of the whole shop list; this one now asks the reverse
+    question of the catalogue (``skus_claiming_inventory_items``), which is the
+    same shape and one indexed read.
 
     Shopify takes ONE quantity per (inventory item, location). The writer used
     to name the SECOND SKU and skip it, so the winner was decided by iteration
@@ -1025,10 +1100,23 @@ def duplicate_inventory_items(targets: Dict[str, Any]) -> Dict[str, List[str]]:
     so the listing was "changed" with ok=False on every 01:00 / 09:00 pass
     forever and never self-healed."""
     claimed: Dict[str, List[str]] = {}
+    spellings: set = set()
     for sku, inv in (targets or {}).items():
         if not inv:
             continue
-        claimed.setdefault(_as_shopify_gid(inv, "InventoryItem"), []).append(str(sku))
+        gid = _as_shopify_gid(inv, "InventoryItem")
+        claimed.setdefault(gid, []).append(str(sku))
+        # Both spellings: a row may carry the bare id or the full gid, and the
+        # reverse read matches the STORED string.
+        spellings.update({gid, str(inv)})
+    if db is not None and claimed:
+        from ..online_catalog import skus_claiming_inventory_items
+
+        for stored, skus in skus_claiming_inventory_items(db, sorted(spellings)).items():
+            gid = _as_shopify_gid(stored, "InventoryItem")
+            for sku in skus:
+                if gid in claimed and sku not in claimed[gid]:
+                    claimed[gid].append(sku)
     return {gid: sorted(skus) for gid, skus in claimed.items() if len(skus) > 1}
 
 
@@ -1039,6 +1127,16 @@ def _duplicate_target_error(duplicates: Dict[str, List[str]]) -> str:
         f"written (Shopify holds one quantity per item and location, so one "
         f"SKU's count would become the other's); give each SKU its own Shopify "
         f"variant, or clear the duplicated shopify_inventory_item_id"
+    )
+
+
+def _stray_sku_error(skus: List[str]) -> str:
+    return (
+        f"the website is still showing a quantity for {', '.join(skus[:5])}, which "
+        f"this listing no longer lists -- IMS writes those numbers nowhere and can "
+        f"no longer zero them (the row that carried the Shopify id is gone), so the "
+        f"site keeps selling them; re-add the size row in IMS, or delete the variant "
+        f"in Shopify admin"
     )
 
 
@@ -1107,6 +1205,7 @@ def _verdict_for(
     dead_locations: Optional[List[Dict[str, Any]]] = None,
     unknown_error: Optional[str] = None,
     orphans: Optional[List[str]] = None,
+    stray_skus: Optional[List[str]] = None,
     duplicate_targets: Optional[Dict[str, List[str]]] = None,
     missing: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -1122,28 +1221,43 @@ def _verdict_for(
     and sold out.
 
     NOTHING WRITABLE first, then a duplicated location (neither shop written),
-    then an unmapped holder (the mapped shops WERE written), then a stray
-    Shopify location, a MAPPED location that cannot sell online (the mirror of
-    the stray -- the rung that did not exist at all until round 5), an
-    unreadable shop, an orphan store id, a duplicated
-    Shopify inventory item and last a missing Shopify target. The two
-    data-defect rungs stay at the BOTTOM on purpose: they are permanent until a
-    human fixes the mapping, and a permanent code must never outrank -- and so
-    hide -- a live STORE_UNMAPPED report."""
+    then an unmapped holder (the mapped shops WERE written), then the LOCATION
+    rung -- a stray Shopify location and a MAPPED location that cannot sell
+    online are ONE rung that names both, because on day 1 both are true at once
+    -- then an unreadable shop, an orphan store id, a SKU the site still shows
+    a number for that IMS no longer lists, a duplicated Shopify inventory item
+    and last a missing Shopify target. The data-defect rungs stay at the BOTTOM
+    on purpose: they are permanent until a human fixes the data, and a permanent
+    code must never outrank -- and so hide -- a live STORE_UNMAPPED report."""
     if no_mapping:
         return STORE_UNMAPPED, _no_mapping_error()
     if conflicts:
         return STORE_LOCATION_DUPLICATE, _duplicate_error(conflicts)
     if holders:
         return STORE_UNMAPPED, _unmapped_error(holders)
-    if stray_locations:
-        return SHOPIFY_LOCATION_UNMAPPED, _stray_location_error(list(stray_locations))
-    if dead_locations:
-        return SHOPIFY_LOCATION_NOT_SELLING, _dead_location_error(list(dead_locations))
+    # THE TWO LOCATION RUNGS ARE ONE RUNG (round-7 first-push). They are not
+    # alternatives -- the state the design's own runbook creates on day 1 has
+    # BOTH (Gangadham Pune ticked and deliberately mapped to no shop, the three
+    # mapped Jharkhand locations not ticked yet) -- and a press surfaces exactly
+    # one code + one error line. With the stray rung on top, that line sent the
+    # owner to fix the location holding nothing and never told him why all 121
+    # listings read SOLD OUT. Both are said; the storefront-wide one leads.
+    if dead_locations or stray_locations:
+        lines = []
+        if dead_locations:
+            lines.append(_dead_location_error(list(dead_locations)))
+        if stray_locations:
+            lines.append(_stray_location_error(list(stray_locations)))
+        return (
+            SHOPIFY_LOCATION_NOT_SELLING if dead_locations else SHOPIFY_LOCATION_UNMAPPED,
+            " -- ALSO: ".join(lines),
+        )
     if unknown_error:
         return STOCK_ONHAND_UNKNOWN, unknown_error
     if orphans:
         return STOCK_STORE_ORPHAN, _orphan_error(list(orphans))
+    if stray_skus:
+        return STOCK_BASELINE_STRAY, _stray_sku_error(list(stray_skus))
     if duplicate_targets:
         return STOCK_TARGET_DUPLICATE, _duplicate_target_error(dict(duplicate_targets))
     if missing:
@@ -1281,7 +1395,19 @@ async def push_skus_stock(
     # second and writing the first let iteration order pick which shelf the
     # website showed, and left the loser out of the baseline while the diff
     # compared both -- ok=False and "changed" on every pass, forever.
-    duplicate_targets = duplicate_inventory_items(targets)
+    # The claim read is STRICT (round-7 P1): {} from a swallowed exception reads
+    # as "nobody else claims this item", which is precisely the answer that lets
+    # this absolute writer overwrite another SKU's shelf. An unreadable guard
+    # aborts the batch, exactly as an unreadable shop list does above.
+    try:
+        duplicate_targets = duplicate_inventory_items(db, targets)
+    except Exception as exc:  # noqa: BLE001 -- the door never raises; it refuses
+        summary["code"] = STOCK_ONHAND_UNKNOWN
+        summary["error"] = (
+            f"the Shopify inventory-item claim check could not be read -- nothing "
+            f"written (two SKUs on one item would overwrite each other): {exc}"
+        )
+        return summary
     for _gid, _skus in sorted(duplicate_targets.items()):
         summary["errors"].append(
             f"{', '.join(_skus)}: one Shopify inventory item ({_gid}) -- neither written"
@@ -1750,8 +1876,16 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # item can only be caught here (over the CHANGED products -- the ones a
     # press would actually send).
     changed_skus = [s for _p, _v, sks, _q in changed for s in sks]
+    # ...and the other half of the same (item, location) pair: a Shopify
+    # inventory item claimed by more than one SKU ANYWHERE in the catalogue.
+    # Asked of the whole catalogue, the way the press asks it, so the preview
+    # and the press agree exactly -- and so two SEPARATE listings stamped with
+    # one item (ok=True, synced=2, the second call overwriting the first) are
+    # caught, which a per-listing question never could.
+    duplicate_targets: Dict[str, List[str]] = {}
     try:
         have = inventory_items_for_skus(db, changed_skus) if changed_skus else {}
+        duplicate_targets = duplicate_inventory_items(db, have) if have else {}
     except Exception as exc:  # noqa: BLE001 -- a plan never raises
         logger.warning("[SHOPIFY_STOCK] target lookup failed for the plan: %s", exc)
         have = {}
@@ -1765,15 +1899,22 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     # that aborts the product with STOCK_ONHAND_UNKNOWN (round-6 first-push
     # P3). The tell was already in the payload and unacted on: a `plan` row
     # with `quantities: {}`.
-    unknown_skus = sorted({s for s in changed_skus if s not in quantities})
-    # ...and the other half of the same (item, location) pair: two SKUs of ONE
-    # listing stamped on one Shopify inventory item. Resolved PER LISTING, the
-    # way the press resolves it, so the preview and the press agree exactly.
-    duplicate_targets: Dict[str, List[str]] = {}
-    for _p, _v, _sks, _q in changed:
-        duplicate_targets.update(
-            duplicate_inventory_items({s: have.get(s) for s in _sks})
-        )
+    #
+    # EVERY LISTED SKU, not only the changed ones (round-7 one-rule P1). Scoped
+    # to `changed_skus` this named the SKU LOUDLY on the first pass and went
+    # SILENT for ever after: `stock_changed` restricts both sides of the diff to
+    # the product's current SKUs, so an unreadable SKU keeps the listing at
+    # "unchanged", drops out of `changed_skus`, and is named by NOTHING again --
+    # while the press has already set tracked=true + DENY on its Shopify variant
+    # and nobody is writing its number. Invariant 5/6 is one rule: unknown is
+    # named on EVERY pass, mapped or not, changed or not.
+    unknown_skus = sorted({s for s in all_skus if s not in quantities})
+    # ...and the SKUs that left the catalogue while Shopify still shows a
+    # POSITIVE number for them (round-7 P2, phantom stock): dropped from BOTH
+    # sides of the diff, they froze under a permanently green noop. IMS can no
+    # longer zero them -- the gid went with the row -- so naming them every pass
+    # is the whole of what is left to do.
+    stray_skus = sorted({s for p, v in pairs for s in baseline_strays(p, product_skus(p, v))})
     # INVARIANT 2, in the backend verdict and not only in the React page: a
     # Shopify location that fulfils online orders and maps to no shop keeps
     # selling its own stale number. ONE read; zero network when DARK, and the
@@ -1803,6 +1944,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         "orphan_stores": orphans,
         "target_missing": missing,
         "unknown_skus": unknown_skus,
+        "stray_skus": stray_skus,
         "unmapped_locations": stray_locations,
         "dead_locations": dead_locations,
         "plan": [
@@ -1828,6 +1970,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
                 else (_unknown_sku_error(unknown_skus) if unknown_skus else None)
             ),
             orphans=orphans,
+            stray_skus=stray_skus,
             duplicate_targets=duplicate_targets,
             missing=missing,
         )
@@ -1842,6 +1985,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             or unknown
             or unknown_skus
             or orphans
+            or stray_skus
             or duplicate_targets
             or missing
         )

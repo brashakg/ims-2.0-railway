@@ -105,6 +105,8 @@ LOC_C = "gid://shopify/Location/1003"
 PRODUCT_GID = "gid://shopify/Product/111"
 VARIANT_GID = "gid://shopify/ProductVariant/5"
 INV_GID = "gid://shopify/InventoryItem/9"
+# A SECOND listing's own item -- one Shopify inventory item is ONE SKU's shelf.
+INV_TWO = "gid://shopify/InventoryItem/10"
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 
 
@@ -871,7 +873,11 @@ def test_sync_stock_levels_pushes_only_changed_gid_products(monkeypatch):
             # A: on Shopify, never sent -> changed.
             _catalog_row("cat-1", "SP-1", gid=True),
             # B: on Shopify, last send equals today's per-store numbers -> unchanged.
-            _catalog_row("cat-2", "SP-2", gid=True,
+            # Its OWN inventory item: one Shopify item is one SKU's shelf, and
+            # two listings sharing one is the STOCK_TARGET_DUPLICATE refusal
+            # (test_R7_two_LISTINGS_on_one_inventory_item_write_NEITHER), not
+            # the "only changed products go out" rule this test is about.
+            _catalog_row("cat-2", "SP-2", gid=True, shopify_inventory_item_id=INV_TWO,
                          online_stock={"quantities": {"SP-2": {"BV-A": 0, "BV-B": 1, "BV-C": 0}}, "tracked": True}),
             # C: NOT on Shopify -> never a candidate.
             _catalog_row("cat-3", "SP-3", gid=False),
@@ -2201,7 +2207,12 @@ def test_R4_P3_the_first_night_over_an_empty_catalogue_files_no_location_task(mo
     _live(monkeypatch, _Spy(_responses(**locations)))
     res = _run(shopify_push.sync_stock_levels(db))
     assert res.payload["candidates"] == 0
-    assert res.code == shopify_push.SHOPIFY_LOCATION_UNMAPPED, "the verdict still says it"
+    # Both location statements are true here -- these two Shopify locations map
+    # to no shop, and the three shops' own locations are absent from this list
+    # -- so the round-7 verdict names both on one rung, storefront-wide first.
+    assert res.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert [l["name"] for l in res.payload["unmapped_locations"]] == ["Sector 4", "Pune"]
+    assert "Pune" in (res.error or ""), "the verdict still says it"
     assert list(db.get_collection("tasks").find({})) == []
     # ...and the moment there IS a listing, the tasks are filed.
     _listed(db)
@@ -2462,3 +2473,216 @@ def test_R6_an_unreadable_online_block_is_unknown_not_unblocked():
 
     db._collections["ecom_collections"] = _Boom("ecom_collections", [])
     assert wb.online_quantities_for_skus(db, ["SP-1"]) == {}, "UNKNOWN, never 'not blocked'"
+
+
+# ---------------------------------------------------------------------------
+# Panel round 7 (2026-09-16)
+# ---------------------------------------------------------------------------
+
+
+def test_R7_a_single_sku_door_refuses_an_item_a_SECOND_sku_claims(monkeypatch):
+    """ROUND-7 P1 (OVERSELL, the lead finding). The duplicate-item guard asked a
+    BATCH-LOCAL question -- "do the SKUs in THIS call collide?" -- while the
+    invariant it protects is database-GLOBAL: Shopify holds one quantity per
+    (item, location) whoever writes it. Every single-SKU door (POS sale, ingest
+    claim, return restock, transfer ship, quarantine, write-off) wrote straight
+    through it: one SKU in, no collision visible, a fully green write of the
+    SIZE's per-shop numbers onto the PARENT's inventory item.
+
+    Its own mirror on the other axis, `_location_conflicts`, has always been
+    asked of the WHOLE shop list. One axis global, one axis batch-local: the
+    same database that answers STOCK_TARGET_DUPLICATE to the sweep answered
+    "fine, written" to the sale.
+
+    Revert `duplicate_inventory_items` to the batch-only claim (drop the
+    `skus_claiming_inventory_items` read) -> a row is written, code is None ->
+    this fails."""
+    db = _listed(_db(a=2, b=0, c=0))  # cat-1 / SP-1, its OWN item, 2 at BV-A
+    # The mis-stamp: a size row on the SAME Shopify inventory item, 1 at BV-B.
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.seed("stock_units", [
+        {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-B", "status": "AVAILABLE"}
+    ])
+    db.seed("catalog_variants", [
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_GID}
+    ])
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1-L"], source="sale"))
+    assert spy.rows() == set(), "the size's shelf must never be written onto the parent's item"
+    assert out["ok"] is False and out["code"] == shopify_push.STOCK_TARGET_DUPLICATE
+    assert "SP-1" in out["error"] and "SP-1-L" in out["error"]
+    assert _baseline(db) is None, "nothing written, so nothing enters the baseline"
+    # ONE rule: the sweep over the SAME database says exactly the same thing.
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.code == shopify_push.STOCK_TARGET_DUPLICATE and spy2.rows() == set()
+
+
+def test_R7_two_LISTINGS_on_one_inventory_item_write_NEITHER(monkeypatch):
+    """ROUND-7 P1, the cross-listing half. The sweep resolved duplicates PER
+    LISTING, so two different listings stamped with one inventory item passed
+    both checks: ok=True, synced=2, failed=0, the calls writing (INV, LOC_A, 0)
+    then (INV, LOC_A, 2) in order, so the shared item ended at 2 while cat-2's
+    baseline recorded 0 -- a lie about what the site now shows, cemented by the
+    next pass reading noop.
+
+    Scope the claim read to one listing's own SKUs -> both are written -> this
+    fails."""
+    db = _db(a=2, b=0, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1"), _catalog_row("cat-2", "SP-2")])
+    db.seed("products", [{"product_id": "spine-2", "sku": "SP-2"}])  # holds nothing
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert spy.rows() == set(), "one quantity per (item, location): neither listing is guessed at"
+    assert res.ok is False and res.code == shopify_push.STOCK_TARGET_DUPLICATE
+    assert "SP-1, SP-2" in res.error
+    assert res.payload["synced"] == 0 and res.payload["failed"] == 2
+
+
+def test_R7_a_listed_sku_that_cannot_be_read_is_named_on_EVERY_pass(monkeypatch):
+    """ROUND-7 one-rule P1 (silent fallback, write path). `unknown_skus` was
+    computed over the CHANGED products only, and `stock_changed` restricts both
+    sides of the diff to the product's current SKUs -- so a listed SKU whose
+    on-hand cannot be read AT ALL (no `products` spine row: the catalogue-stray
+    class) was named LOUDLY on the first pass and went SILENT for ever after,
+    while the press had already set tracked=true + DENY on its variant and
+    nobody was writing its number.
+
+    Invariant 5/6 is one rule: unknown is named on every pass, mapped or not.
+    Scope `unknown_skus` back to `changed_skus` -> pass 2 is a green noop ->
+    this fails."""
+    db = _listed(_db(a=1, b=0, c=0))
+    db.seed("catalog_variants", [
+        # a live Shopify item, but NO products spine row -> unreadable on-hand
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_ROW}
+    ])
+    _live(monkeypatch, _Spy(_responses()))
+    first = _run(shopify_push.sync_stock_levels(db))
+    assert first.ok is False and first.code == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert first.payload["unknown_skus"] == ["SP-1-L"]
+    _live(monkeypatch, _Spy(_responses()))
+    second = _run(shopify_push.sync_stock_levels(db))
+    assert second.action == "noop", "the diff still noops -- this is about the REPORT"
+    assert second.payload["unknown_skus"] == ["SP-1-L"], "silent from pass 2 on"
+    assert second.ok is False and second.code == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "SP-1-L" in (second.error or "")
+
+
+def test_R7_a_retired_size_shopify_still_shows_a_number_for_is_named(monkeypatch):
+    """ROUND-7 P2 (phantom stock). A SKU that leaves the rule's reach is dropped
+    from BOTH sides of the diff, so its live Shopify number freezes under a
+    permanently GREEN noop -- and once that unit sells at the counter the
+    website is selling stock IMS no longer holds anywhere.
+
+    Reachable through a runbook already on main: scripts/delete_catalog_products
+    drops `catalog_variants` rows that carry live Shopify gids. The number can
+    no longer be zeroed by IMS (the gid went with the row), so the only honest
+    answer left is to NAME it on every pass instead of noop'ing green over it.
+
+    A row the delist door zeroed properly is NOT named (its baseline is all
+    zeros -- nothing is being advertised). Drop the `stray_skus` rung or its
+    term in `_all_ok` -> a green noop -> this fails."""
+    db = _listed(_db(a=1, b=0, c=0))
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.seed("stock_units", [
+        {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-A", "status": "AVAILABLE"}
+    ])
+    db.seed("catalog_variants", [
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_ROW}
+    ])
+    _live(monkeypatch, _Spy(_responses()))
+    assert _run(shopify_push.sync_stock_levels(db)).ok is True
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}
+    # The hard-delete runbook takes the row away; Shopify keeps showing 1.
+    db.get_collection("catalog_variants").delete_one({"sku": "SP-1-L"})
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.action == "noop" and spy.rows() == set(), "nothing to write -- the gid is gone"
+    assert res.ok is False and res.code == shopify_push.STOCK_BASELINE_STRAY
+    assert res.payload["stray_skus"] == ["SP-1-L"]
+    assert "SP-1-L" in (res.error or "")
+    # A SKU the delist door zeroed everywhere is advertising nothing: silent.
+    db2 = _listed(
+        _db(a=1, b=0, c=0),
+        online_stock={"tracked": True, "quantities": {
+            "SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0},
+            "RETIRED": {"BV-A": 0, "BV-B": 0, "BV-C": 0},
+        }},
+    )
+    _live(monkeypatch, _Spy(_responses()))
+    res2 = _run(shopify_push.sync_stock_levels(db2))
+    assert res2.ok is True and res2.payload["stray_skus"] == []
+
+
+def test_R7_a_stale_recorded_location_verdict_is_re_read_by_the_next_press(monkeypatch):
+    """ROUND-7 first-push. `record_location_verdict` stamps `at` and NOTHING
+    ever read it, so the SHOPIFY half of the verdict was frozen until the next
+    sweep -- up to 12 hours. MEASURED: tick the locations, run a sweep, untick
+    "Fulfill online orders" in Shopify admin, press Send to website -> ZERO
+    locations reads and a fully green press over a shop the storefront can no
+    longer sell from. That is the exact silent direction
+    SHOPIFY_LOCATION_NOT_SELLING was added to close, reopened by the cache that
+    keeps the per-product press network-free. The mirror is a false red: fix a
+    tick and every press still codes NOT_SELLING until a sweep runs.
+
+    Drop the TTL in `last_location_verdict` -> the stale verdict is replayed,
+    zero reads, ok True -> this fails."""
+    from datetime import datetime, timedelta, timezone
+
+    db = _listed(_db(a=2, b=1, c=0))
+    ticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"),
+    )}
+    _live(monkeypatch, _Spy(_responses(**ticked)))
+    _run(shopify_push.sync_stock_levels(db))  # records what Shopify said
+    unticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4", fulfils=False),
+    )}
+    # Within the TTL the press still carries the cache: zero network, as designed.
+    fresh = _Spy(_responses(**unticked))
+    _live(monkeypatch, fresh)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert fresh.calls_for("imsLocationList") == [] and out["dead_locations"] == []
+    # An hour later the same press re-reads -- and refuses to call it green.
+    db.get_collection("online_sync_state").update_one(
+        {"_id": "shopify_stray_locations"},
+        {"$set": {"at": datetime.now(timezone.utc) - timedelta(hours=1)}},
+    )
+    stale = _Spy(_responses(**unticked))
+    _live(monkeypatch, stale)
+    out2 = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push"))
+    assert len(stale.calls_for("imsLocationList")) == 1, "a stale verdict is re-read, once"
+    assert out2["ok"] is False and out2["code"] == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert [d["store_id"] for d in out2["dead_locations"]] == ["BV-C"]
+
+
+def test_R7_a_dead_mapped_location_is_named_even_beside_a_stray_one(monkeypatch):
+    """ROUND-7 first-push (the ladder). The state the design's own runbook
+    creates on day 1 -- Gangadham Pune ticked and deliberately mapped to no
+    shop, the three mapped Jharkhand locations not ticked -- put the STRAY rung
+    above the DEAD one, so the single code+error line a press surfaces sent the
+    owner to fix the location that holds nothing and NEVER told him why all 121
+    listings read SOLD OUT.
+
+    Both are true at once, so both are said, and the storefront-wide one leads.
+    Revert the ladder to "stray wins, dead silent" -> the dead shops vanish from
+    the line -> this fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    pune = _loc("gid://shopify/Location/76684427513", "Gangadham Pune")
+    spy = _Spy(_responses(**{"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro", fulfils=False),
+        _loc(LOC_B, "Dhanbad", fulfils=False),
+        _loc(LOC_C, "Sector 4", fulfils=False),
+        pune,
+    )}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert "SOLD OUT" in res.error and "Bokaro" in res.error, "why every listing is sold out"
+    assert "Gangadham Pune" in res.error, "...and the stray location is still named"
+    assert [d["store_id"] for d in res.payload["dead_locations"]] == ["BV-A", "BV-B", "BV-C"]
+    assert res.payload["unmapped_locations"] == [{"id": pune["id"], "name": "Gangadham Pune"}]

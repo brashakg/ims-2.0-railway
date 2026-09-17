@@ -35,7 +35,12 @@ vi.mock('../../../services/api/onlineStore', () => ({
   },
 }));
 
-vi.mock('../../../components/online-store/OnlineStoreSyncBanner', () => ({
+// The banner itself is stubbed out, but `pushToastLevel` is kept REAL: the
+// sweep panel decides its per-row tick with it, and a hand-rolled copy in the
+// mock would be exactly the second implementation this page just stopped
+// carrying.
+vi.mock('../../../components/online-store/OnlineStoreSyncBanner', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   __esModule: true,
   default: () => null,
   formatPushResult: (label: string) => label,
@@ -155,6 +160,42 @@ describe('the bulk press reports what it refused', () => {
     expect(await screen.findByText(/5 NOT made visible/i)).toBeTruthy();
     // ...and the toast is NOT a green success over five invisible products.
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+  });
+
+  // PANEL ROUND 7 (first-push). The bulk press SWALLOWED the stock code: a
+  // product that published with its quantities written NOWHERE tallied as a
+  // plain `pushed`, so refused/withheld/failed all read 0 and this screen fired
+  // toast.success with a green tick beside each row. On prod's day-1 state that
+  // is the NORMAL path -- Gangadham Pune fulfils online orders and is mapped to
+  // no shop by the owner's own decision, so every one of the 121 presses carries
+  // a stock code, and the owner could not tell from the sweep whether 1 or 121
+  // listings went live reading SOLD OUT.
+  it('shows the listings that went live with NO stock written, and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 12, failed: 0, noop: 0, stock_not_written: 12 }, 12),
+      results: [
+        {
+          entity: 'product',
+          target_id: 'P1',
+          ok: true,
+          code: 'SHOPIFY_LOCATION_UNMAPPED',
+          error: 'Shopify location(s) that fulfil online orders but map to no shop: Gangadham Pune',
+        },
+      ],
+    });
+
+    await pressProducts();
+
+    expect(await screen.findByText(/12 live with NO stock written/i)).toBeTruthy();
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/12 live with NO stock written \(sold out\)/i);
+    expect(msg).toMatch(/SHOPIFY_LOCATION_UNMAPPED/);
+    // ...and the row itself is not ticked green. `r.ok` alone painted it that
+    // way; the rule is pushToastLevel, the same one the drawer press uses.
+    const row = (await screen.findByText('product P1')).closest('li') as HTMLElement;
+    expect(row.querySelector('.text-green-600')).toBeNull();
+    expect(row.querySelector('.text-amber-600')).toBeTruthy();
   });
 
   it('says nothing about refusals when there were none', async () => {
