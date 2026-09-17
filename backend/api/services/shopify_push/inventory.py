@@ -1648,8 +1648,22 @@ async def push_skus_stock(
         written = await set_inventory_quantities(db, rows)
         summary["set"] = written["set"]
         summary["errors"].extend(written["errors"])
-        if written.get("code"):
-            summary["code"] = summary["code"] or written["code"]
+        if written["errors"]:
+            # A refusal Shopify answered THIS press is the listing's own rung
+            # and takes the code (recheck round 1): under the day-1
+            # configuration the ladder ALWAYS sets SHOPIFY_LOCATION_NOT_SELLING
+            # -- a standing verdict, permanent until the accountant answers --
+            # and while it kept the code, the sale's run row and the press
+            # said the location line alone, and the sweep dropped the
+            # listing's line as "the run's own" because the codes matched: a
+            # refused write, the pre-sale number left on the website, and no
+            # refusal worded anywhere. The refusal leads; the ladder's line
+            # rides under it, so every true rung is still said.
+            summary["code"] = written.get("code") or STOCK_WRITE_FAILED
+            refused = "; ".join(str(e) for e in summary["errors"][:5])
+            summary["error"] = refused + (
+                f" -- ALSO: {summary['error']}" if summary.get("error") else ""
+            )
         for inv_gid, loc, qty in written["written"]:
             sku, sid = key_of[(inv_gid, loc)]
             written_per_sku.setdefault(sku, {})[sid] = qty
@@ -1877,6 +1891,25 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
     return out
 
 
+def listing_already_live(product: Dict[str, Any]) -> bool:
+    """The publish a press would do is NOT this listing's first -- the gate
+    design 4.2 puts on tracking + DENY applies to the FIRST publish only. It
+    carries a gid from an earlier press, IMS holds it PUBLISHED, and no stock
+    pass has recorded its tracking as unset (``ecom.online_stock.tracked``
+    False is the staged-PUBLISHED draft whose only tracking call failed: that
+    IS its first publish). A refused productVariantsBulkUpdate changes nothing
+    on Shopify, so such a listing keeps the tracking its first publish
+    confirmed -- reporting it "NOT made visible" and "UNTRACKED" while it was
+    visible and tracked was two screens giving two answers about one listing
+    (recheck round 1)."""
+    ecom = (product or {}).get("ecom") or {}
+    return (
+        bool(ecom.get("shopify_product_id"))
+        and str(ecom.get("status") or "").upper() == "PUBLISHED"
+        and (ecom.get("online_stock") or {}).get("tracked") is not False
+    )
+
+
 async def sync_product_stock(
     db,
     product: Dict[str, Any],
@@ -1913,7 +1946,10 @@ async def sync_product_stock(
         source="product_push",
         product_id=str(pid) if pid else None,
         policy=policy,
-        tracked=tracked["updated"] > 0,
+        # "Tracking is on Shopify": this call set it, or the listing's first
+        # publish did (a refused re-send changes nothing there). Recording
+        # False for a live listing would withhold its NEXT press instead.
+        tracked=tracked["updated"] > 0 or listing_already_live(product),
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
@@ -1931,10 +1967,20 @@ async def sync_product_stock(
         # if any, rides under it.
         why = "; ".join(str(e) for e in tracked["errors"][:3])
         summary["code"] = STOCK_TRACKING_FAILED
-        summary["error"] = (
-            f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
-            f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
-        ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
+        if listing_already_live(product):
+            line = (
+                f"tracking + {policy} could not be re-confirmed on the variant(s) "
+                f"({why}) -- the listing keeps the tracking its first publish set; "
+                f"press again"
+            )
+        else:
+            line = (
+                f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
+                f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
+            )
+        summary["error"] = line + (
+            f" -- ALSO: {summary['error']}" if summary.get("error") else ""
+        )
     elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary

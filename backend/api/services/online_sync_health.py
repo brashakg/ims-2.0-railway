@@ -112,11 +112,15 @@ def last_successful_shopify_sync_at(db) -> Optional[str]:
 
 def _on_hand_by_product(
     db, product_ids: List[str], store_id: Optional[str] = None
-) -> Dict[str, int]:
+) -> Optional[Dict[str, int]]:
     """Count on-hand units per product from the serialized `stock_units`
     collection (one row per unit). Same shape as inventory._on_hand_by_product,
     reading the SAME on-hand decision, without a router dependency.
-    Fail-soft -> {}.
+    Fail-soft -> {} for nothing to count; ``None`` when the count could not be
+    made (shop list or aggregate unreadable) -- UNKNOWN, which every consumer
+    carries as ``in_store=None`` (ONHAND_UNKNOWN), never as a confident 0:
+    one unreadable shop list turned every online SKU on the reconciliation
+    screen into on-hand 0 + OVERSELL_RISK (recheck round 1).
 
     With NO ``store_id`` this is the POOLED count over the WRITER's own shop
     list -- ``stores_util.physical_stores``: ACTIVE and not ONLINE -- exactly
@@ -132,8 +136,8 @@ def _on_hand_by_product(
     unit at a DEACTIVATED shop is published nowhere by the writer (T14,
     "inactive shop never counts anywhere") and was still on hand here. One
     rule, one reader: the shops the writer writes are the shops this counts.
-    An unreadable shop list is UNKNOWN -> {} (the tile shows no number), never
-    "every unit counts".
+    An unreadable shop list is UNKNOWN -> None, never "every unit counts" and
+    never "no unit counts".
 
     Still POOLED, though (PR 4's job): it compares an IMS total that includes
     the deliberately unmapped Gangadham Pune against a per-location Shopify
@@ -153,13 +157,13 @@ def _on_hand_by_product(
             shops = [str(s.get("store_id") or "") for s in physical_stores(db)]
         except Exception as exc:  # noqa: BLE001 -- UNKNOWN, never "all shops"
             logger.warning("[SYNC_HEALTH] shop list unknown for on-hand: %s", exc)
-            return {}
+            return None
         match["store_id"] = {"$in": [s for s in shops if s]}
     out: Dict[str, int] = {}
     try:
         coll = _coll(db, "stock_units")
         if coll is None:
-            return {}
+            return None
         for row in coll.aggregate(
             [
                 {"$match": match},
@@ -174,7 +178,7 @@ def _on_hand_by_product(
             out[row.get("_id")] = int(row.get("n") or 0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] on-hand aggregate failed: %s", exc)
-        return {}
+        return None
     return out
 
 
@@ -200,6 +204,7 @@ def pending_reconcile_summary(
         "over_allocated": 0,
         "pending": 0,
         "oversell_risk_units": 0,
+        "onhand_unknown": 0,
         "online_configured": online_mapping_available(db),
     }
     if db is None:
@@ -232,7 +237,8 @@ def pending_reconcile_summary(
         items.append(
             {
                 "sku": sku,
-                "in_store": on_hand.get(p.get("product_id"), 0),
+                # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never 0.
+                "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 # Listed qty is unknown without a live Shopify read (None -> 0
                 # in the pure reconciler; an unknown qty can never false-flag).
                 "online": int(o.get("online_stock") or 0),
@@ -250,6 +256,7 @@ def pending_reconcile_summary(
         "over_allocated": over_alloc,
         "pending": oversell + over_alloc,
         "oversell_risk_units": int(summary.get("oversell_risk_units") or 0),
+        "onhand_unknown": int(summary.get("onhand_unknown") or 0),
         "online_configured": online_mapping_available(db),
     }
 
@@ -398,6 +405,11 @@ def stock_tally_summary(
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids)
+    if on_hand is None:
+        # UNKNOWN is not "every shelf empty": nothing is tallied, and the
+        # page says why instead of printing 0 on hand for every listed SKU.
+        base["summary"]["on_hand_unknown"] = True
+        return base
     reserved = _reserved_by_product(db, pids)
     skus = [p.get("sku") for p in products if p.get("sku")]
     online = online_status_for_skus(db, skus)  # {} on any failure

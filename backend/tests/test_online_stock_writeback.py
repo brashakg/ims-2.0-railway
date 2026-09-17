@@ -620,3 +620,47 @@ def test_R8_a_units_left_door_whose_spine_read_dies_records_an_unknown_run(monke
     assert run["source"] == "transfer_ship" and run["store_id"] == "BV-A"
     assert run["error"] == f"STOCK_ONHAND_UNKNOWN: {_target_error(boom)}", "the sale door's row, word for word"
     assert "products read died" in run["error"]
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 1 after R8 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+def test_R9_a_sale_line_with_no_sku_key_still_reaches_the_writer(monkeypatch):
+    """OVERSELL (recheck round 1): the add-item door (orders/items.py) builds
+    its line with NO `sku` key at all and hands exactly that dict to
+    writeback_after_sale; `skus_from_items` keeps only lines with a truthy
+    sku, so the door THIS PR added was dead by construction -- the unit
+    flipped SOLD, ZERO inventorySetQuantities calls, sync_runs EMPTY, tasks
+    EMPTY, and bettervision.in kept selling it at that shop until the next
+    tick with nothing named anywhere. The POS create door stamps `sku`
+    straight off the client (optional), so an API client omitting it sold
+    silently too.
+
+    ONE guard in the shared entry: a sellable line naming a product but no
+    SKU goes through the product-id door that already exists. Drop the
+    product-id fallback from writeback_after_sale -> no rows, no run row ->
+    this fails."""
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    db = _db(a=3, b=1)
+    db.get_collection("stock_units").update_one({"stock_id": "BV-A-0"}, {"$set": {"status": "SOLD"}})
+    # The add-item door's exact line shape: item_type + product_id + quantity, no 'sku' key.
+    wb.writeback_after_sale(db, [{"item_type": "FRAME", "product_id": "P1", "quantity": 1}], "BV-A")
+    assert spy.rows() == {(INV, LOC_A, 2), (INV, LOC_B, 1)}, "one row set, the selling shop's number down"
+    runs = _runs(db)
+    assert len(runs) == 1 and runs[0]["ok"] is True, runs
+    assert runs[0]["source"] == "sale" and runs[0]["store_id"] == "BV-A"
+    # ONE filter: a service line or a virtual lens line with no sku is still nothing to write back.
+    spy.calls.clear()
+    wb.writeback_after_sale(
+        db, [{"item_type": "EYE_TEST", "product_id": "P1"}, {"item_type": "FRAME", "product_id": "lens-1"}], "BV-A"
+    )
+    assert spy.writes() == []
+    # A mixed cart: the sku-less line is named once; a line WITH a sku is the sku door's.
+    assert wb.product_ids_without_sku([
+        {"item_type": "FRAME", "product_id": "P1"},
+        {"item_type": "FRAME", "product_id": "P2", "sku": "X"},
+        {"item_type": "FRAME", "product_id": "P1", "sku": ""},
+    ]) == ["P1"]

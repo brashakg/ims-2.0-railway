@@ -158,6 +158,9 @@ export interface StockTallySummary {
   /** Live-read coverage: mapped SKUs that got a live quantity vs all mapped. */
   listed_live_rows?: number;
   listed_mapped_rows?: number;
+  /** True when IMS could not read the shops' on-hand: nothing is tallied and
+   *  nothing is shown as 0 on hand (an unreadable shelf is never "empty"). */
+  on_hand_unknown?: boolean;
 }
 
 export interface StockTallyResult {
@@ -266,6 +269,7 @@ export const onlineStoreApi = {
           listed_qty_live: !!s.listed_qty_live,
           listed_live_rows: num(s.listed_live_rows),
           listed_mapped_rows: num(s.listed_mapped_rows),
+          on_hand_unknown: !!s.on_hand_unknown,
         },
         available: true,
         reason: null,
