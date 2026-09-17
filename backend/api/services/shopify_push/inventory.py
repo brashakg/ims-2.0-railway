@@ -2220,6 +2220,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     synced = 0
     failed = 0
     errors: List[str] = []
+    failures: List[Tuple[Optional[str], str]] = []  # (the listing's own code, its line)
     product_code: Optional[str] = None
     accepted: List[Dict[str, Any]] = []
     for product, variants, _skus, _mine in changed:
@@ -2251,6 +2252,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             failed += 1
             pid = product.get("id") or product.get("product_id")
             errors.append(f"{pid}: {res.get('error') or 'stock not written'}")
+            failures.append((res.get("code"), errors[-1]))
         else:
             synced += 1
         product_code = product_code or res.get("code")
@@ -2270,6 +2272,23 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     code = code or product_code
     if errors and not error:
         error = "; ".join(errors[:3])
+    else:
+        # Every true rung is said (recheck round 2): a listing's OWN rung --
+        # a code the run-level ladder did not state (tracking refused, a
+        # chunk refused, a whole-listing abort) -- rides under the ladder's
+        # line instead of being dropped once the ladder set one; under the
+        # day-1 configuration (Pune ticked, the Jharkhand locations unticked)
+        # the ladder ALWAYS sets one. A listing whose code IS the run's is the
+        # ladder said once more per listing (each push_skus_stock re-scores
+        # it), so it is not repeated, and the ladder tail a listing's own line
+        # carries is cut.
+        own = [
+            line.removesuffix(f" -- ALSO: {error}")
+            for lcode, line in failures
+            if lcode and lcode != code
+        ]
+        if own:
+            error = f"{error} -- ALSO: {'; '.join(own[:3])}"
     return PushResult(
         mode=MODE_LIVE,
         entity="stock",

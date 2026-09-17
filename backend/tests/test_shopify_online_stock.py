@@ -3142,6 +3142,33 @@ def test_R8_the_location_rung_never_hides_a_stray_sku(monkeypatch):
     assert "SP-1-L" in press["error"] and "SOLD OUT" in press["error"]
 
 
+def test_R8_the_location_rung_never_hides_a_listings_own_failure(monkeypatch):
+    """The other half of the same masking (recheck round 2, first-push): the
+    sweep joined its per-listing failures into `error` ONLY when the ladder
+    had set none (`if errors and not error`). Under the day-1 configuration
+    the ladder always sets SHOPIFY_LOCATION_NOT_SELLING, so a listing whose
+    tracking call was THROTTLED (live and untracked) failed the run with a
+    line that never said which listing or why.
+
+    Every true rung is said: the listing's own line rides under the ladder's.
+    Put `and not error` back -> 'WITHOUT LIMIT' leaves the error -> this
+    fails."""
+    db = _db(a=2, b=1, c=0)
+    _listed(db, online_stock={"quantities": {}, "tracked": False, "policy": "DENY"})
+    unticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro", fulfils=False),
+        _loc(LOC_B, "Dhanbad", fulfils=False),
+        _loc(LOC_C, "Sector 4", fulfils=False),
+    )}
+    spy = _ThrottledTracking(_responses(**unticked))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING, res
+    assert res.payload["failed"] == 1 and "cat-1" in res.payload["errors"][0]
+    assert "SOLD OUT" in res.error, "the storefront-wide rung leads"
+    assert "cat-1" in res.error and "WITHOUT LIMIT" in res.error and "Throttled" in res.error, res.error
+
+
 def test_R8_a_delist_whose_spine_stayed_active_is_not_green(monkeypatch):
     """RECHECK ROUND 2 (one rule: two implementations of 'this size is off
     sale'). `_delist_variant_row` hands the writer a forced 0; the RULE's only
