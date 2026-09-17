@@ -859,12 +859,37 @@ def writeback_after_units_left(
         handle = _resolve_db(db)
         if not pids or handle is None:
             return
-        skus = [
-            str(p.get("sku") or "").strip()
-            for p in handle.get_collection("products").find(
-                {"product_id": {"$in": pids}}, {"_id": 0, "sku": 1}
-            )
-        ]
+        try:
+            skus = [
+                str(p.get("sku") or "").strip()
+                for p in handle.get_collection("products").find(
+                    {"product_id": {"$in": pids}}, {"_id": 0, "sku": 1}
+                )
+            ]
+        except Exception as exc:  # noqa: BLE001 -- the door never raises
+            # A spine read that FAILED is not a product with no SKU (recheck
+            # round 2, the sale door's class one layer up). It was
+            # `logger.debug` and nothing else: no run row, no task, no writer
+            # call -- the shop's location kept the pre-move number until the
+            # next tick while the SAME failure one step later (the target read
+            # in writeback_skus) records a not-ok STOCK_ONHAND_UNKNOWN run.
+            # One answer to one failure: the row the sale door already writes.
+            from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN
+
+            summary = {
+                "source": source,
+                "store_id": store_id,
+                "candidates": len(pids),
+                "code": STOCK_ONHAND_UNKNOWN,
+                "error": (
+                    f"the product spine could not be read for {len(pids)} "
+                    f"product id(s) -- nothing written (a SKU that cannot be "
+                    f"resolved is not a SKU that is not online): {exc}"
+                ),
+            }
+            logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
+            _record_run(handle, summary)
+            return
         writeback_after_restock(handle, [s for s in skus if s], store_id, source=source)
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] after-units-left skipped: %s", exc)

@@ -271,3 +271,43 @@ def test_R8_a_location_two_shops_claim_maps_neither_and_names_both_claimants(cli
     assert shared["claimed_by"] == ["BV-BOK-02", "WIZ-BOK-01"]
     assert shared["unmapped_online_fulfilling"] is True, "written for nobody, so it IS stray"
     assert rows[PUNE]["claimed_by"] == [] and rows[PUNE]["mapped_store_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+def test_R8_the_route_carries_the_writers_dead_verdict_per_mapped_shop(client, world, monkeypatch):
+    """RECHECK ROUND 2 (display, one rule). The sync page's shops table answered
+    "Sells online" from `fulfillsOnlineOrders` alone, re-deriving half of
+    `dead_mapped_reason` in TypeScript -- and Shopify's `locations(first: 50)`
+    omits DEACTIVATED locations, so the `isActive` half was answered by
+    ABSENCE: a deactivated location read "yes", a deleted one read "read needs
+    LIVE" on a live read, two lines under a stock line coding
+    SHOPIFY_LOCATION_NOT_SELLING for the same shop. The route now stamps the
+    writer's own `score_locations` verdict: `dead` per mapped shop, in the
+    words the stock pass uses, and `read`. Drop them -> this fails."""
+    world.get_collection("stores").update_one(
+        {"store_id": PUNE_UUID}, {"$set": {"shopify_location_id": "gid://shopify/Location/3"}}
+    )
+    world.seed("stores", [
+        {"store_id": "BV-GONE-01", "store_code": "BV-GONE-01", "store_name": "Gone", "is_active": True,
+         "store_type": "RETAIL", "shopify_location_id": "gid://shopify/Location/404"},
+    ])
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["read"] is True
+    dead = {d["store_id"]: d for d in body["dead"]}
+    assert "BV-BOK-02" not in dead, "active + ticked: sells online"
+    assert dead[PUNE_UUID]["reason"] == shopify_push.dead_mapped_reason(NODES[2])
+    assert "deactivated" in dead[PUNE_UUID]["reason"]
+    assert dead["BV-GONE-01"]["reason"] == shopify_push.dead_mapped_reason(None)
+    assert "does not list" in dead["BV-GONE-01"]["reason"]
+    # DARK: nothing was read, so nothing is dead -- and the page must not say "yes".
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    monkeypatch.setattr(shopify_push, "_graphql", _CountingBoom())
+    dark = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"])).json()
+    assert dark["read"] is False and dark["dead"] == []

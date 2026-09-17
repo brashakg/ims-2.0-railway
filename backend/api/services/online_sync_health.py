@@ -118,16 +118,22 @@ def _on_hand_by_product(
     reading the SAME on-hand decision, without a router dependency.
     Fail-soft -> {}.
 
-    With NO ``store_id`` this is the POOLED count, and it excludes the ONLINE
-    stores exactly as the WRITER's on-hand rule does
-    (online_stock_writeback._on_hand_for_skus). It did not, and the two readers
+    With NO ``store_id`` this is the POOLED count over the WRITER's own shop
+    list -- ``stores_util.physical_stores``: ACTIVE and not ONLINE -- exactly
+    the shops online_stock_writeback publishes (online_quantities_for_skus
+    loops that list and nothing else). It did not, and the two readers
     disagreed about the same unit: an AVAILABLE unit parked on BV-ONLINE-01 is
     unpickable (the online store has no shelf and POS is blocked on it), so the
     writer publishes 0 while this reader counted 1 -- and this reader is what
     feeds the oversell-risk tile and the catalog reconciliation screen, so a
     listing of 1 against a shelf of 0 classified as OK and a REAL oversell was
-    hidden. One rule, one spelling: the exclusion list is
-    ``_online_store_ids``.
+    hidden. The first fix excluded the online stores through
+    ``_online_store_ids`` and left the OTHER axis open (recheck round 2): a
+    unit at a DEACTIVATED shop is published nowhere by the writer (T14,
+    "inactive shop never counts anywhere") and was still on hand here. One
+    rule, one reader: the shops the writer writes are the shops this counts.
+    An unreadable shop list is UNKNOWN -> {} (the tile shows no number), never
+    "every unit counts".
 
     Still POOLED, though (PR 4's job): it compares an IMS total that includes
     the deliberately unmapped Gangadham Pune against a per-location Shopify
@@ -141,11 +147,14 @@ def _on_hand_by_product(
     if store_id:
         match["store_id"] = store_id
     else:
-        from .online_stock_writeback import _online_store_ids
+        from .stores_util import physical_stores
 
-        online_ids = _online_store_ids(db)
-        if online_ids:
-            match["store_id"] = {"$nin": online_ids}
+        try:
+            shops = [str(s.get("store_id") or "") for s in physical_stores(db)]
+        except Exception as exc:  # noqa: BLE001 -- UNKNOWN, never "all shops"
+            logger.warning("[SYNC_HEALTH] shop list unknown for on-hand: %s", exc)
+            return {}
+        match["store_id"] = {"$in": [s for s in shops if s]}
     out: Dict[str, int] = {}
     try:
         coll = _coll(db, "stock_units")

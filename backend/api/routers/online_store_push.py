@@ -301,10 +301,21 @@ async def push_locations(
     ``unmapped_online_fulfilling`` from the WRITER's own predicate
     (``shopify_push.is_stray_fulfilling``) -- the sync page used to re-derive
     that rule in TypeScript and the two spellings already disagreed on a
-    location with no ``isActive`` field. DARK -> ``locations: []`` plus the gate
-    reason and ZERO network. Read-only; nothing persisted. No DB -> 503."""
+    location with no ``isActive`` field. The MIRROR rides along the same way
+    (recheck round 2): ``dead`` is the writer's own ``score_locations`` verdict
+    -- every MAPPED shop whose location cannot sell online, with the reason
+    the stock pass codes (``dead_mapped_reason``: unticked / deactivated /
+    gone from Shopify's list) -- and ``read`` says whether Shopify answered at
+    all. The page's shops table used to answer "Sells online" from
+    ``fulfillsOnlineOrders`` alone, so a DEACTIVATED location read "yes" and a
+    DELETED one (absent from a list Shopify omits deactivated locations from)
+    read "read needs LIVE" on a live read, two lines under a stock line coding
+    SHOPIFY_LOCATION_NOT_SELLING for the same shop. DARK -> ``locations: []``
+    plus the gate reason, ``read: False``, ``dead: []`` and ZERO network.
+    Read-only; nothing persisted. No DB -> 503."""
     db = _require_db()
     data = await shopify_push.list_locations(db)
+    mapped: Dict[str, str] = {}
     try:
         stores = physical_stores(db)
         # "Mapped" the way the writer means it, for BOTH fields: a location two
@@ -314,10 +325,8 @@ async def push_locations(
         # beside "maps to no shop" (recheck round 1). `claimed_by` lists every
         # raw claimant so the dropdown can say "claimed by two shops".
         by_store = {str(s.get("store_id") or ""): s for s in stores}
-        holder_of = {
-            gid: by_store.get(sid) or {}
-            for sid, gid in shopify_push.mapped_store_locations(stores).items()
-        }
+        mapped = shopify_push.mapped_store_locations(stores)
+        holder_of = {gid: by_store.get(sid) or {} for sid, gid in mapped.items()}
         claimants: Dict[str, list] = {}
         for s in stores:
             gid = str(s.get("shopify_location_id") or "").strip()
@@ -333,6 +342,9 @@ async def push_locations(
         row["mapped_store_code"] = holder.get("store_code") if holder else None
         row["claimed_by"] = sorted(claimants.get(row["id"]) or [])
         row["unmapped_online_fulfilling"] = shopify_push.is_stray_fulfilling(row, set(holder_of))
+    verdict = shopify_push.score_locations(data["locations"], mapped)
+    data["read"] = verdict["read"]
+    data["dead"] = verdict["dead"]
     return data
 
 

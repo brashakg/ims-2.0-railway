@@ -154,6 +154,17 @@ SHOPIFY_UNREACHABLE = "SHOPIFY_UNREACHABLE"
 # a stale baseline every listing that still carries the shop noops on the diff
 # and the NEW location is written by nobody.
 STOCK_BASELINE_NOT_RESET = "STOCK_BASELINE_NOT_RESET"
+# The press wrote the quantities but could NOT switch tracking + DENY on the
+# variant(s): an UNTRACKED item sells without limit, the worse failure, and
+# it used to ride out with ok=False and NO code -- so the press promoted
+# nothing, the toast read green and the bulk tally filed it under `pushed`.
+STOCK_TRACKING_FAILED = "STOCK_TRACKING_FAILED"
+# A size was taken off sale (0 at every location) while its SPINE is still
+# active -- the ONLY off-sale marker the quantity rule reads
+# (online_stock_writeback._sku_to_pid lists an inactive spine at 0), so the
+# next stock pass writes the shelf count straight back. Said on the delist,
+# never green over a take-down the rule will undo.
+STOCK_SPINE_ACTIVE = "STOCK_SPINE_ACTIVE"
 
 # Shopify's own userErrors code when an inventory item is not stocked at the
 # location a quantity was set for (InventorySetQuantitiesUserErrorCode).
@@ -1351,7 +1362,8 @@ def _verdict_for(
     a number for that IMS no longer lists, a duplicated Shopify inventory item
     and last a missing Shopify target. The data-defect rungs stay at the BOTTOM
     on purpose: they are permanent until a human fixes the data, and a permanent
-    code must never outrank -- and so hide -- a live STORE_UNMAPPED report."""
+    code must never outrank a live STORE_UNMAPPED report -- and no rung ever
+    HIDES another: the error line names every rung that is true, top first."""
     # THE TWO LOCATION RUNGS ARE ONE RUNG (round-7 first-push). They are not
     # alternatives -- the state the design's own runbook creates on day 1 has
     # BOTH (Gangadham Pune ticked and deliberately mapped to no shop, the three
@@ -1359,49 +1371,56 @@ def _verdict_for(
     # one code + one error line. With the stray rung on top, that line sent the
     # owner to fix the location holding nothing and never told him why all 121
     # listings read SOLD OUT. Both are said; the storefront-wide one leads.
+    #
+    # EVERY TRUE RUNG IS SAID (recheck round 2). The top rung is the code; the
+    # rest ride under it as " -- ALSO:" lines, the way the location line
+    # already rode under holders. It was only that pair: in the configuration
+    # the runbook itself tells the owner to run on day 1 (Gangadham Pune ticked
+    # and unmapped, the Jharkhand locations unticked until the accountant
+    # answers) SHOPIFY_LOCATION_NOT_SELLING is the PERMANENT code of every
+    # press and every sweep, and the press surfaces exactly one code + one
+    # error line -- so a stray baseline SKU the site keeps selling, a duplicated
+    # inventory item (neither SKU written) and an orphan store id were invisible
+    # on every screen for as long as the locations stayed unticked.
     lines = []
     if dead_locations:
         lines.append(_dead_location_error(list(dead_locations)))
     if stray_locations:
         lines.append(_stray_location_error(list(stray_locations)))
     location_line = " -- ALSO: ".join(lines)
+    rungs: List[Tuple[str, str]] = []
     if no_mapping:
-        return STORE_UNMAPPED, _no_mapping_error()
+        rungs.append((STORE_UNMAPPED, _no_mapping_error()))
     if conflicts:
-        return STORE_LOCATION_DUPLICATE, _duplicate_error(conflicts)
+        rungs.append((STORE_LOCATION_DUPLICATE, _duplicate_error(conflicts)))
     if holders:
-        # The location line rides under the holders rung too (recheck round 1,
-        # the same shape one rung up): prod's one stock unit sits at Pune, Pune
-        # is unmapped, and the runbook unticks the three Jharkhand locations --
-        # so the press said "map BV-PUN-01" and nothing about every listing
-        # reading SOLD OUT until the owner had mapped it and pressed again.
-        return STORE_UNMAPPED, _unmapped_error(holders) + (
-            f" -- ALSO: {location_line}" if location_line else ""
-        )
+        rungs.append((STORE_UNMAPPED, _unmapped_error(holders)))
     if locations_unread:
         # The location question was ASKED and not ANSWERED: stray and dead are
         # both unknown, and unknown is never "no stray, no dead".
-        return SHOPIFY_UNREACHABLE, _unread_locations_error()
+        rungs.append((SHOPIFY_UNREACHABLE, _unread_locations_error()))
     if location_line:
-        return (
+        rungs.append((
             SHOPIFY_LOCATION_NOT_SELLING if dead_locations else SHOPIFY_LOCATION_UNMAPPED,
             location_line,
-        )
+        ))
     if unknown_error:
-        return STOCK_ONHAND_UNKNOWN, unknown_error
+        rungs.append((STOCK_ONHAND_UNKNOWN, unknown_error))
     if orphans:
-        return STOCK_STORE_ORPHAN, _orphan_error(list(orphans))
+        rungs.append((STOCK_STORE_ORPHAN, _orphan_error(list(orphans))))
     if stray_skus:
-        return STOCK_BASELINE_STRAY, _stray_sku_error(list(stray_skus))
+        rungs.append((STOCK_BASELINE_STRAY, _stray_sku_error(list(stray_skus))))
     if duplicate_targets:
-        return STOCK_TARGET_DUPLICATE, _duplicate_target_error(dict(duplicate_targets))
+        rungs.append((STOCK_TARGET_DUPLICATE, _duplicate_target_error(dict(duplicate_targets))))
     if missing:
         missing = list(missing)
-        return (
+        rungs.append((
             STOCK_TARGET_MISSING,
             f"no Shopify inventory item mapped for: {', '.join(missing[:5])}",
-        )
-    return None, None
+        ))
+    if not rungs:
+        return None, None
+    return rungs[0][0], " -- ALSO: ".join(line for _code, line in rungs)
 
 
 def _rows_ok(
@@ -1904,7 +1923,22 @@ async def sync_product_stock(
     summary["tracked"] = tracked["updated"]
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
     summary["ok"] = summary["ok"] and not tracked["errors"]
-    if summary["errors"] and not summary.get("error"):
+    if tracked["errors"]:
+        # The worse failure gets the code (recheck round 2, first-push): with
+        # ok=False and NO code the press promoted nothing, the drawer toast and
+        # the sweep toast read green and the bulk tally filed the listing under
+        # `pushed` -- over a variant that is LIVE and UNTRACKED (Shopify sells
+        # it without limit) for up to 12 h until the next tick re-sends
+        # tracking (the baseline records tracked=False). The quantity verdict,
+        # if any, rides under it.
+        why = "; ".join(str(e) for e in tracked["errors"][:3])
+        summary["code"] = STOCK_TRACKING_FAILED
+        summary["error"] = (
+            f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
+            f"the listing sells WITHOUT LIMIT until the next stock pass re-sends "
+            f"it; press again"
+        ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
+    elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
 

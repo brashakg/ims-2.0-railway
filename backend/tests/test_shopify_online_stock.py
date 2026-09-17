@@ -1021,6 +1021,12 @@ INV_2 = "gid://shopify/InventoryItem/92"
 INV_ROW = "gid://shopify/InventoryItem/952"
 
 
+def _spine_off(db, sku):
+    """What the retire hook / the DELETE door does BEFORE the delist row runs:
+    the spine's is_active off -- the only off-sale marker the rule reads."""
+    db.get_collection("products").update_one({"sku": sku}, {"$set": {"is_active": False}})
+
+
 def test_P2_a_sale_landing_while_the_sweep_is_mid_loop_is_written_not_overwritten(monkeypatch):
     """Two listings; the spy flips a unit of the SECOND product to SOLD the
     moment the FIRST product's quantity write lands (the POS sale that
@@ -1240,6 +1246,7 @@ def test_a_retired_size_variant_is_zeroed_at_every_mapped_location(monkeypatch):
         "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
     }
     db = _db(a=2, b=1, c=0, sku="SP-1-L")
+    _spine_off(db, "SP-1-L")  # the retire hook flipped the spine first
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
     db.seed(
         "catalog_variants",
@@ -1261,6 +1268,7 @@ def test_a_retired_size_variant_is_zeroed_at_every_mapped_location(monkeypatch):
     assert "online_stock" not in db.get_collection("catalog_products").find_one({"id": "cat-1-L"})["ecom"]
     # No shop mapped at all: nothing can be written -- said so, not ok.
     bare = _db(a=1, b=0, c=0, sku="SP-1-L")
+    _spine_off(bare, "SP-1-L")
     bare.get_collection("stores").update_many({}, {"$unset": {"shopify_location_id": ""}})
     bare.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
     bare.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
@@ -2468,6 +2476,7 @@ def test_R6_P6_a_delist_is_not_a_false_unmapped_report(monkeypatch):
         "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
     }
     db = _db(a=1, b=0, c=0, d=2, sku="SP-1-L")  # BV-D holds 2 and has NO location
+    _spine_off(db, "SP-1-L")
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
     db.seed(
         "catalog_variants",
@@ -3022,3 +3031,146 @@ def test_R8_an_unreadable_target_read_is_UNKNOWN_on_the_sweep_not_TARGET_MISSING
     monkeypatch.setattr(db2, "get_collection", lambda name: _Dead() if name == "catalog_variants" else orig(name))
     with pytest.raises(RuntimeError):
         online_catalog.inventory_items_for_skus(db2, ["SP-1"])
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+class _ThrottledTracking(_Spy):
+    """Shopify answers every other call as usual; the ONE productVariantsBulkUpdate
+    carrying inventoryPolicy (tracking + DENY) comes back with a userError --
+    a throttle after N of the 121 first presses."""
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "productVariantsBulkUpdate" in query and any(
+            "inventoryPolicy" in r for r in (variables.get("variants") or [])
+        ):
+            self.calls.append({"query": query, "variables": variables})
+            return {"data": {"productVariantsBulkUpdate": {"productVariants": [], "userErrors": [
+                {"field": ["variants"], "message": "Throttled", "code": "THROTTLED"}
+            ]}}}
+        return await super().__call__(db, query, variables)
+
+
+def test_R8_a_first_publish_whose_tracking_call_fails_carries_a_code(monkeypatch):
+    """RECHECK ROUND 2 (first-push, OVERSELL direction). productCreate ok,
+    seeding ok, the productVariantsBulkUpdate carrying inventoryPolicy answers
+    userErrors [THROTTLED] -> the quantities are written, publishablePublish is
+    SENT, and the listing is LIVE and UNTRACKED: Shopify sells it without
+    limit. `sync_product_stock` flipped ok=False with NO code, so the press
+    promoted nothing (it promotes stock code/error only), the drawer toast,
+    the sweep toast and the row tick were all GREEN, and `_tally` filed it
+    under `pushed`. The module's own comment calls an untracked item "the
+    worse failure"; it was the one failure with no name.
+
+    Drop the STOCK_TRACKING_FAILED branch in sync_product_stock -> code None
+    -> this fails."""
+    db = _db(a=2, b=1, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
+    spy = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res.mode == "LIVE" and res.action == "create" and res.ok is True, res  # live -- the danger
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}, "quantities went out"
+    assert res.stock["ok"] is False and res.stock["tracked"] == 0
+    assert res.stock["code"] == shopify_push.STOCK_TRACKING_FAILED
+    assert res.code == shopify_push.STOCK_TRACKING_FAILED, "promoted to the press like every stock code"
+    assert "WITHOUT LIMIT" in res.error and "Throttled" in res.error
+    assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
+    # The sweep under the same throttle is not green either, and says why.
+    spy2 = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy2)
+    sw = _run(shopify_push.sync_stock_levels(db))
+    assert sw.ok is False and sw.code == shopify_push.STOCK_TRACKING_FAILED, sw
+    assert "WITHOUT LIMIT" in sw.error
+
+
+def test_R8_the_location_rung_never_hides_a_stray_sku(monkeypatch):
+    """RECHECK ROUND 2 (first-push, phantom hidden). In the configuration the
+    runbook itself tells the owner to run on day 1 (Pune ticked only, the
+    three mapped Jharkhand locations unticked) SHOPIFY_LOCATION_NOT_SELLING is
+    the PERMANENT code of every press and every sweep -- and the ladder
+    returned exactly one line, so every rung below it was invisible: SP-1-L
+    written 1 at BV-A, its row deleted (the round-7 phantom), the locations
+    unticked -> code NOT_SELLING, an error that never said 'SP-1-L', and the
+    only place the name appeared was the audit payload JSON. bettervision.in
+    kept selling SP-1-L for as long as the locations stayed unticked, which
+    the runbook told him to keep them.
+
+    Every true rung is named, top first. Return only the top rung's line ->
+    'SP-1-L' leaves the error -> this fails."""
+    db = _parent_whose_size_row_was_deleted(monkeypatch)
+    unticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro", fulfils=False),
+        _loc(LOC_B, "Dhanbad", fulfils=False),
+        _loc(LOC_C, "Sector 4", fulfils=False),
+    )}
+    _live(monkeypatch, _Spy(_responses(**unticked)))
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert res.payload["stray_skus"] == ["SP-1-L"]
+    assert "SOLD OUT" in res.error, "the storefront-wide rung leads"
+    assert "SP-1-L" in res.error, "...and the stray the site keeps selling rides under it"
+    # The press on the parent -- the one line the owner reads -- says the same.
+    _live(monkeypatch, _Spy(_responses(**unticked)))
+    press = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", product_id="cat-1"))
+    assert press["code"] == shopify_push.SHOPIFY_LOCATION_NOT_SELLING
+    assert "SP-1-L" in press["error"] and "SOLD OUT" in press["error"]
+
+
+def test_R8_a_delist_whose_spine_stayed_active_is_not_green(monkeypatch):
+    """RECHECK ROUND 2 (one rule: two implementations of 'this size is off
+    sale'). `_delist_variant_row` hands the writer a forced 0; the RULE's only
+    off-sale marker is the spine's is_active. The DELETE door deactivates the
+    spine fail-soft with the repository's answer unchecked, so a swallowed
+    Mongo error there left the spine ACTIVE: the row wrote 0 green, and the
+    next sync_stock_levels diffed shelf 1 vs sent 0 and put the deleted size
+    straight back on sale, ok=True, code None.
+
+    The 0 still goes out (off sale NOW); the verdict says whether it HOLDS.
+    Drop `_spine_relists` from the row -> ok True over a take-down the next
+    pass undoes -> this fails."""
+    child = {
+        "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
+        "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
+    }
+    db = _db(a=1, b=0, c=0, sku="SP-1-L")  # spine-1 / SP-1-L carries NO is_active -> ACTIVE
+    db.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
+                                  "shopify_variant_id": "gid://shopify/ProductVariant/52",
+                                  "shopify_inventory_item_id": INV_ROW}])
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push._delist_variant_row(db, child))
+    assert spy.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}, "off sale NOW"
+    assert res.ok is False and res.code == shopify_push.STOCK_SPINE_ACTIVE, res
+    assert "SP-1-L" in res.error and "ACTIVE" in res.error and "back" in res.error
+    # ...and the pass the line warns about really does undo it: shelf 1 vs sent 0.
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    _run(shopify_push.sync_stock_levels(db))
+    assert (INV_ROW, LOC_A, 1) in spy2.rows(), "the rule relists an active spine"
+    # The spine deactivated (what the doors do first) -> the same delist is green.
+    _spine_off(db, "SP-1-L")
+    spy3 = _Spy(_responses())
+    _live(monkeypatch, spy3)
+    ok = _run(shopify_push._delist_variant_row(db, child))
+    assert ok.ok is True and ok.code is None, ok.error
+    # An unreadable spine is UNKNOWN, never "will hold".
+    db4 = _db(a=1, b=0, c=0, sku="SP-1-L")
+    db4.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), child])
+    db4.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1",
+                                   "shopify_variant_id": "gid://shopify/ProductVariant/52",
+                                   "shopify_inventory_item_id": INV_ROW}])
+
+    class _Dead(StrictCollection):
+        def find(self, *a, **k):
+            raise RuntimeError("products read died")
+
+    db4._collections["products"] = _Dead("products", [])
+    _live(monkeypatch, _Spy(_responses()))
+    unk = _run(shopify_push._delist_variant_row(db4, child))
+    assert unk.ok is False and unk.code == shopify_push.STOCK_SPINE_ACTIVE and "UNKNOWN" in unk.error

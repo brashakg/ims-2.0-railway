@@ -212,6 +212,8 @@ from .inventory import (  # noqa: F401
     SHOPIFY_LOCATION_NOT_SELLING,
     SHOPIFY_UNREACHABLE,
     STOCK_BASELINE_NOT_RESET,
+    STOCK_TRACKING_FAILED,
+    STOCK_SPINE_ACTIVE,
     location_verdict,
     score_locations,
     writer_location_verdict,

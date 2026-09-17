@@ -1697,10 +1697,25 @@ export interface ShopifyLocation {
 /** The locations read. DARK (a push gate off) or a failed read => `locations`
  *  is [] and `reason` says why; the dropdown must then keep whatever mapping
  *  the store already has instead of clearing it. */
+/** A MAPPED shop whose Shopify location cannot sell online, in the WRITER's
+ *  own words (shopify_push.dead_mapped_reason): not ticked to fulfil online
+ *  orders, deactivated, or gone from Shopify's list. The stock pass codes the
+ *  same shop SHOPIFY_LOCATION_NOT_SELLING for the same reason. */
+export interface DeadMappedLocation {
+  store_id: string;
+  location_id?: string | null;
+  name?: string | null;
+  reason: string;
+}
+
 export interface ShopifyLocationsRead {
   mode: 'LIVE' | 'SIMULATED';
   reason?: string | null;
   locations: ShopifyLocation[];
+  /** Did Shopify answer the location list at all? False when DARK, on an
+   *  error, or on an EMPTY answer (a shop always has one location). */
+  read?: boolean;
+  dead?: DeadMappedLocation[];
 }
 
 const PUSH_BASE = '/online-store/push';
@@ -1740,9 +1755,11 @@ export const pushApi = {
         mode: data.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
         reason: data.reason ?? null,
         locations: Array.isArray(data.locations) ? (data.locations as ShopifyLocation[]) : [],
+        read: data.read === true,
+        dead: Array.isArray(data.dead) ? (data.dead as DeadMappedLocation[]) : [],
       };
     } catch {
-      return { mode: 'SIMULATED', reason: 'unavailable', locations: [] };
+      return { mode: 'SIMULATED', reason: 'unavailable', locations: [], read: false, dead: [] };
     }
   },
 

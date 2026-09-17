@@ -573,3 +573,42 @@ def test_a_failed_target_read_is_a_loud_unknown_run_never_a_silent_skip(monkeypa
     assert "could not be read" in summary["error"]
     runs = list(orig("sync_runs").find({}))
     assert len(runs) == 1 and runs[0]["ok"] is False and "STOCK_ONHAND_UNKNOWN" in runs[0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+def test_R8_a_units_left_door_whose_spine_read_dies_records_an_unknown_run(monkeypatch):
+    """SILENT FALLBACK (recheck round 2, the sale door's class one layer up).
+    `writeback_after_units_left` -- the entry for the five product-id doors
+    (transfer ship, quarantine-in, stock-count write-off, the serial door, the
+    item_events ledger hook) -- resolves product_id -> sku with its OWN
+    `products` read BEFORE `writeback_skus`, and a failure there was
+    `logger.debug` and nothing else: no sync_runs row, no task, no writer
+    call. The SAME failure one step later (the target read inside
+    writeback_skus) records a not-ok STOCK_ONHAND_UNKNOWN run. Two answers to
+    one failure, and the shop's location kept the pre-move number until the
+    next 01:00/09:00 tick with every screen green.
+
+    Put the `logger.debug` back on that except -> sync_runs stays EMPTY ->
+    this fails."""
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    db = _db(a=3, b=1)
+
+    class _Boom(StrictCollection):
+        def find(self, *a, **k):
+            raise RuntimeError("products read died")
+
+    db._collections["products"] = _Boom("products", [])
+    wb.writeback_after_units_left(db, ["P1"], "BV-A", source="transfer_ship")
+    assert spy.writes() == [], "nothing written -- and nothing pretended"
+    runs = _runs(db)
+    assert len(runs) == 1, runs
+    run = runs[0]
+    assert run["ok"] is False
+    assert run["source"] == "transfer_ship" and run["store_id"] == "BV-A"
+    assert "STOCK_ONHAND_UNKNOWN" in run["error"] and "products read died" in run["error"]
+    assert "could not be read" in run["error"], "the sale door's own words"

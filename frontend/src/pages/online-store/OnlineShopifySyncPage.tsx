@@ -206,6 +206,18 @@ export default function OnlineShopifySyncPage() {
   const [locations, setLocations] = useState<
     Awaited<ReturnType<typeof pushApi.getLocations>>['locations']
   >([]);
+  // The WRITER's per-shop "cannot sell online" verdict (GET /push/locations
+  // `dead`, from shopify_push.score_locations) plus whether Shopify answered
+  // the list at all. The table's "Sells online" cell prints THIS, never a
+  // TypeScript re-derivation from `locations`: Shopify's list omits
+  // DEACTIVATED locations, so the `isActive` half of the verdict is answered
+  // by ABSENCE and a re-derivation read "yes" for a deactivated location and
+  // "read needs LIVE" for a deleted one -- on a live read, two lines under a
+  // stock line coding SHOPIFY_LOCATION_NOT_SELLING for the same shop.
+  const [locationVerdict, setLocationVerdict] = useState<{
+    read: boolean;
+    dead: NonNullable<Awaited<ReturnType<typeof pushApi.getLocations>>['dead']>;
+  }>({ read: false, dead: [] });
   // Variant-prices paged resync progress (OS-017): {done, total} while looping.
   const [resyncProgress, setResyncProgress] = useState<{ done: number; total: number | null } | null>(null);
 
@@ -220,7 +232,9 @@ export default function OnlineShopifySyncPage() {
       const s = await pushApi.getStatus();
       setStatus(s);
       // Never throws: [] when DARK or unreadable.
-      setLocations((await pushApi.getLocations()).locations);
+      const read = await pushApi.getLocations();
+      setLocations(read.locations);
+      setLocationVerdict({ read: read.read === true, dead: read.dead ?? [] });
     } finally {
       setLoading(false);
     }
@@ -697,6 +711,7 @@ export default function OnlineShopifySyncPage() {
                   // answers in one card.
                   const mapped = !unmappedStoreIds.has(s.store_id ?? '');
                   const locLabel = s.shopify_location_name || loc?.name || s.shopify_location_id;
+                  const deadReason = locationVerdict.dead.find((d) => d.store_id === s.store_id)?.reason;
                   return (
                     <tr key={s.store_id ?? s.store_code ?? ''} className="border-t border-gray-100">
                       <td className="pr-4 py-1 text-gray-800">{s.store_code || s.store_name || s.store_id}</td>
@@ -707,14 +722,14 @@ export default function OnlineShopifySyncPage() {
                             ? `${locLabel} — claimed by another shop too, so neither is written`
                             : 'not mapped — set it on the Organization page'}
                       </td>
-                      <td className="pr-4 py-1 text-gray-700">
+                      <td className="pr-4 py-1 text-gray-700" data-testid={`sells-online-${s.store_id ?? ''}`}>
                         {!mapped
                           ? '—'
-                          : loc
-                            ? loc.fulfillsOnlineOrders
-                              ? 'yes'
-                              : 'no (Shopify admin > Locations)'
-                            : '— (read needs LIVE)'}
+                          : !locationVerdict.read
+                            ? '— (Shopify location list not read)'
+                            : deadReason
+                              ? `no (${deadReason} — Shopify admin > Locations)`
+                              : 'yes'}
                       </td>
                     </tr>
                   );

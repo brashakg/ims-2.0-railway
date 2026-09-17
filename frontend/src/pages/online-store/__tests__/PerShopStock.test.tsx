@@ -304,4 +304,72 @@ describe('per-shop stock on the sync page', () => {
     // ...and neither row claims to sell online off a location nobody writes.
     expect(screen.queryByText(/not mapped . set it on the Organization page/i)).toBeNull();
   });
+
+  // RECHECK ROUND 2 (display, one rule -- the second spelling of "dead"). The
+  // "Sells online" cell answered `loc.fulfillsOnlineOrders` alone, and printed
+  // "— (read needs LIVE)" for a mapped gid absent from `locations` -- but
+  // Shopify's list OMITS deactivated locations, so the `isActive` half of the
+  // writer's `dead_mapped_reason` was answered here by ABSENCE: a deactivated
+  // Sec 4 Bokaro read "yes" and a deleted one read "read needs LIVE" on a LIVE
+  // read, two lines under a stock line coding SHOPIFY_LOCATION_NOT_SELLING for
+  // the same shop. The cell prints the backend's `dead` reason for the store
+  // (GET /push/locations, from shopify_push.score_locations) and nothing it
+  // derives itself. Restore `loc ? (loc.fulfillsOnlineOrders ? 'yes' : ...) :
+  // '— (read needs LIVE)'` -> "yes" / "read needs LIVE" -> this fails.
+  it('the Sells online cell is the WRITER\'s verdict: deactivated or deleted is "no (<its reason>)"', async () => {
+    const stores = [
+      STORES[0],
+      { store_id: 'BV-GONE-01', store_code: 'BV-GONE-01', store_name: 'Gone', shopify_location_id: 'gid://shopify/Location/404', shopify_location_name: 'Gone' },
+    ];
+    vi.mocked(pushApi.getStatus).mockResolvedValue({
+      ...status(),
+      mode: { ...LIVE_MODE, stores, stores_total: 2, stores_mapped: 2, unmapped_stores: [] },
+    } as any);
+    vi.mocked(pushApi.getLocations).mockResolvedValue({
+      mode: 'LIVE',
+      reason: null,
+      read: true,
+      // Shopify's own list on a LIVE read: Sec 4 is DEACTIVATED (still ticked),
+      // the deleted location is simply absent.
+      locations: [
+        { id: BOK, name: 'Better Vision Sector 4', isActive: false, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02', unmapped_online_fulfilling: false },
+      ],
+      dead: [
+        { store_id: 'BV-BOK-02', location_id: BOK, name: 'Better Vision Sector 4', reason: 'deactivated in Shopify' },
+        { store_id: 'BV-GONE-01', location_id: 'gid://shopify/Location/404', name: null, reason: 'Shopify does not list this location any more' },
+      ],
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    const bok = await screen.findByTestId('sells-online-BV-BOK-02');
+    expect(bok).toHaveTextContent(/^no \(deactivated in Shopify/);
+    expect(bok).not.toHaveTextContent(/yes/);
+    const gone = screen.getByTestId('sells-online-BV-GONE-01');
+    expect(gone).toHaveTextContent(/^no \(Shopify does not list this location any more/);
+    expect(gone).not.toHaveTextContent(/read needs LIVE/);
+  });
+
+  it('a mapped shop whose location Shopify lists as active and ticked sells online; an UNREAD list is said, never "yes"', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue({
+      ...status(),
+      mode: { ...LIVE_MODE, stores: [STORES[0]], stores_total: 1, stores_mapped: 1, unmapped_stores: [] },
+    } as any);
+    vi.mocked(pushApi.getLocations).mockResolvedValue({
+      mode: 'LIVE',
+      reason: null,
+      read: true,
+      locations: [{ id: BOK, name: 'Better Vision Sector 4', isActive: true, fulfillsOnlineOrders: true, mapped_store_id: 'BV-BOK-02', unmapped_online_fulfilling: false }],
+      dead: [],
+    } as any);
+    const { unmount } = render(<OnlineShopifySyncPage />);
+    expect(await screen.findByTestId('sells-online-BV-BOK-02')).toHaveTextContent(/^yes$/);
+    unmount();
+    // The list could not be read (a throttle): unknown is said, not scored green.
+    vi.mocked(pushApi.getLocations).mockResolvedValue({
+      mode: 'LIVE', reason: 'location lookup failed: 429 throttled', read: false, locations: [], dead: [],
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    const cell = await screen.findByTestId('sells-online-BV-BOK-02');
+    expect(cell).toHaveTextContent(/not read/);
+    expect(cell).not.toHaveTextContent(/yes/);
+  });
 });

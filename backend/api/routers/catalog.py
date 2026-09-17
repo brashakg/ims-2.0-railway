@@ -2160,20 +2160,6 @@ async def update_catalog_product(
     else:
         _save_catalog_product(to_write)
 
-    # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
-    # Shopify; back on -> queue it for the next press / live sync. The ONE
-    # rule lives in services/online_delist; runs AFTER the save (the full-doc
-    # $set above would clobber the take-down's own ecom write-back).
-    # Fail-soft: the catalog save stands even if Shopify says no.
-    if product.is_active is not None:
-        await _delist.on_active_flip(
-            _get_db(),
-            to_write,
-            was_active=pre_edit.get("is_active", True),
-            now_active=product.is_active,
-            actor=current_user,
-        )
-
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep
     # the two in sync (no shared helper: routers deliberately don't import each
@@ -2287,6 +2273,24 @@ async def update_catalog_product(
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
+        )
+
+    # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
+    # Shopify; back on -> queue it for the next press / live sync. The ONE
+    # rule lives in services/online_delist; runs AFTER the save (the full-doc
+    # $set above would clobber the take-down's own ecom write-back) AND AFTER
+    # the spine mirror above (recheck round 2): the spine's is_active is the
+    # only off-sale marker the quantity rule reads, and the delist row now
+    # refuses to be green while it is still active -- so the marker goes first
+    # and the take-down second, the order the DELETE door already uses.
+    # Fail-soft: the catalog save stands even if Shopify says no.
+    if product.is_active is not None:
+        await _delist.on_active_flip(
+            _get_db(),
+            to_write,
+            was_active=pre_edit.get("is_active", True),
+            now_active=product.is_active,
+            actor=current_user,
         )
 
     # A SIZE VARIANT (variant-of rule, owner 2026-09-06) owns no listing: its

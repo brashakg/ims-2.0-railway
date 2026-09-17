@@ -92,6 +92,22 @@ class _FakeDb:
     def __getitem__(self, name):
         return self._colls.get(name, _FakeColl([]))
 
+    # The ONE shop reader (stores_util.physical_stores) reads through
+    # `get_collection`, exactly like the writer it is shared with.
+    def get_collection(self, name):
+        return self[name]
+
+
+def _shops(*extra):
+    """The `stores` collection the on-hand reader scopes to: one ACTIVE
+    physical shop, plus whatever rows a test adds (a deactivated shop, ...)."""
+    return _FakeColl(
+        [
+            {"store_id": "BV-DHN-02", "store_code": "BV-DHN-02", "store_type": "RETAIL", "is_active": True},
+            *extra,
+        ]
+    )
+
 
 # ---------------------------------------------------------------------------
 # PURE service tests
@@ -276,18 +292,19 @@ def _tally_db():
             {"product_id": "P3", "sku": "SKU-OFFLINE", "name": "Local Only", "is_active": True},
         ]
     )
+    shop = {"store_id": "BV-DHN-02"}
     stock = _StockUnitsColl(
         [
             # P1: 5 AVAILABLE, 1 RESERVED -> sellable 4
-            *[{"product_id": "P1", "status": "AVAILABLE", "quantity": 1} for _ in range(5)],
-            {"product_id": "P1", "status": "RESERVED", "quantity": 1},
+            *[{"product_id": "P1", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(5)],
+            {"product_id": "P1", "status": "RESERVED", "quantity": 1, **shop},
             # P2: 2 AVAILABLE, 0 RESERVED -> sellable 2
-            *[{"product_id": "P2", "status": "AVAILABLE", "quantity": 1} for _ in range(2)],
+            *[{"product_id": "P2", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(2)],
             # P3: 3 AVAILABLE (but not listed online)
-            *[{"product_id": "P3", "status": "AVAILABLE", "quantity": 1} for _ in range(3)],
+            *[{"product_id": "P3", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(3)],
         ]
     )
-    return _FakeDb({"products": products, "stock_units": stock})
+    return _FakeDb({"products": products, "stock_units": stock, "stores": _shops()})
 
 
 def _patch_online(monkeypatch, mapping):
@@ -551,6 +568,7 @@ def test_a_unit_parked_on_the_ONLINE_store_never_counts_as_on_hand(monkeypatch):
             "stock_units": _StockUnitsColl(
                 [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
             ),
+            "stores": _shops(),
         }
     )
 
@@ -629,8 +647,69 @@ def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
             "stock_units": _StockUnitsColl(
                 [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
             ),
+            "stores": _shops(),
         }
     )
 
     out = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 1})
     assert out["items"][0]["on_hand"] == 1 and out["items"][0]["oversell_risk"] is False
+
+
+def test_R8_a_unit_at_a_deactivated_shop_never_counts_on_the_tile(monkeypatch):
+    """RECHECK ROUND 2 (one-rule, the second on-hand reader -- the round-7 P4
+    fix took the wrong spelling). `_on_hand_by_product` excluded the ONLINE
+    stores through `_online_store_ids`, while the WRITER's shop list is
+    `stores_util.physical_stores`: ACTIVE and not online. One AVAILABLE unit at
+    a DEACTIVATED shop (the writer suite's own BV-OLD row), Shopify listing 1,
+    active shops holding 0 -> the writer publishes 0 everywhere (T14, "an
+    inactive shop never counts anywhere") while this tile read in_store=1 and
+    classified OK: a hidden oversell on the tile and on the catalog
+    reconciliation screen, which imports the same function.
+
+    Put the `$nin: online_ids` spelling back -> BV-OLD's unit is on hand
+    again, no risk -> this fails."""
+    _patch_online(monkeypatch, {"SKU-OLD": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P7", "sku": "SKU-OLD", "name": "Old shop's", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P7", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-OLD"}]
+            ),
+            "stores": _shops(
+                {"store_id": "BV-OLD", "store_code": "BV-OLD", "store_type": "RETAIL", "is_active": False}
+            ),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-OLD": 1})
+
+    row = out["items"][0]
+    assert row["on_hand"] == 0, "the writer publishes it nowhere, so the tile holds it nowhere"
+    assert row["oversell_risk"] is True and out["summary"]["at_risk_count"] == 1
+
+
+def test_R8_an_unreadable_shop_list_is_unknown_on_the_tile_never_every_unit(monkeypatch):
+    """The polarity of the fix above: a shop list that cannot be read is
+    UNKNOWN ({} -- the tile shows no number), never "count every unit" -- the
+    writer aborts the batch on the same failure (STRICT). Fall back to an
+    unscoped count on the exception -> on_hand 1 -> this fails."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})
+
+    class _Dead(_FakeColl):
+        def find(self, *a, **k):
+            raise RuntimeError("stores read died")
+
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+            "stores": _Dead(),
+        }
+    )
+    assert sh._on_hand_by_product(db, ["P8"]) == {}

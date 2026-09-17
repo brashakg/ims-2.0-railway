@@ -566,6 +566,10 @@ def test_deactivating_a_child_denies_its_variant_and_never_drafts_the_parent(mon
     _live(monkeypatch, spy)
     _wire(monkeypatch, db)
 
+    # The hook fires AFTER the spine's flag flipped (both catalog doors mirror
+    # the spine first): the delist row refuses to be green over an ACTIVE
+    # spine, because the next stock pass would relist it (recheck round 2).
+    db["products"].update_one({"product_id": "sp-child"}, {"$set": {"is_active": False}})
     out = _run(online_delist.on_active_flip(
         _Conn(db), _spine(db, "sp-child"), was_active=True, now_active=False, actor=ADMIN
     ))
