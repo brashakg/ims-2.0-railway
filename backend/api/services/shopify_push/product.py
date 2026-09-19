@@ -368,6 +368,7 @@ async def push_product(
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or []),
+                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
             )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to

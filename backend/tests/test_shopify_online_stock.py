@@ -3419,6 +3419,70 @@ def test_R9_a_refused_tracking_re_send_on_a_live_listing_is_a_warning_not_a_with
     assert "WITHOUT LIMIT" in res2.error and spy2.calls_for("publishablePublish") == []
 
 
+def test_R10_a_size_minted_onto_a_live_listing_under_a_refused_tracking_call_is_said_untracked_and_re_sent(monkeypatch):
+    """OVERSELL (fix-seven verification, 2026-09-19 -- the first-publish
+    finding's own class, reopened by the live-listing exemption above). The
+    exemption covered the whole LISTING, so a size this press MINTED onto an
+    already-published product (productVariantsBulkCreate -> visible the moment
+    it exists) under a refused tracking call went out UNTRACKED while the line
+    read 'the listing keeps the tracking its first publish set', the baseline
+    recorded tracked=True, and -- the new SKU's row written beside it -- the
+    sweep saw no diff: nothing ever re-sent tracking. Measured on a754644.
+
+    For the minted variant this IS the first publish: the WITHOUT LIMIT line,
+    tracked=False on the baseline, and the next pass re-sends tracking to it.
+    Drop `and not [...]` from `live` in sync_product_stock -> 're-confirmed',
+    tracked True, the sweep a noop -> this fails."""
+    minted = "gid://shopify/ProductVariant/77"
+    db = _db(a=2, b=1, c=0)
+    db.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}, {"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.get_collection("stock_units").insert_one(
+        {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-A", "status": "AVAILABLE"}
+    )
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-S": {"BV-A": 0, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True, online_stock=sent)])
+    variants = [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "price": 1500, "option_size": "M",
+         "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-S", "parent_product_id": "cat-1", "price": 1500, "option_size": "S",
+         "shopify_variant_id": "gid://shopify/ProductVariant/6", "shopify_inventory_item_id": INV_TWO},
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "price": 1500, "option_size": "L"},  # the new size
+    ]
+    db.seed("catalog_variants", [dict(v) for v in variants])
+    upd = _product_body("productUpdate")
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = [
+        {"id": VARIANT_GID, "selectedOptions": [{"name": "Size", "value": "M"}], "inventoryItem": {"id": INV_GID}},
+        {"id": "gid://shopify/ProductVariant/6", "selectedOptions": [{"name": "Size", "value": "S"}], "inventoryItem": {"id": INV_TWO}},
+    ]
+    created = _ok_body("productVariantsBulkCreate", productVariants=[
+        {"id": minted, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": "gid://shopify/InventoryItem/777"}},
+    ])
+    responses = {"productUpdate(": upd, "productVariantsBulkCreate": created}
+    spy = _ThrottledTracking(_responses(**responses))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), variants))
+    assert len(spy.calls_for("productVariantsBulkCreate")) == 1, "the size was minted onto the live listing"
+    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "WITHOUT LIMIT" in res.error and "Throttled" in res.error, res.error
+    assert "keeps the tracking" not in res.error, "nothing ever confirmed tracking on the minted size"
+    assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}, "the true numbers still went out"
+    # The next tick, Shopify answering: tracking reaches the minted size with
+    # NO quantity change to carry it -- the baseline flag alone re-sends.
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    sw = _run(shopify_push.sync_stock_levels(db))
+    sent_tracking = [
+        r["id"]
+        for c in spy2.calls_for("productVariantsBulkUpdate")
+        for r in c["variables"]["variants"]
+        if (r.get("inventoryItem") or {}).get("tracked") is True and r.get("inventoryPolicy") == "DENY"
+    ]
+    assert minted in sent_tracking, (sw, [c["variables"] for c in spy2.calls_for("productVariantsBulkUpdate")])
+    assert _baseline(db)["tracked"] is True
+
+
 def test_R9_a_size_delist_that_landed_under_the_day1_verdict_is_delisted_with_a_warning(monkeypatch):
     """False 'Still live' (recheck round 1, inherited): under the day-1
     configuration a size delist that DID land -- DENY set, 0 accepted at all

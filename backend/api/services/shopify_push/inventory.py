@@ -802,7 +802,10 @@ def _writeback_stock(
         ecom["online_stock"] = {
             "quantities": quantities,
             "policy": policy if policy is not None else prev.get("policy"),
-            "tracked": bool(tracked) or bool(prev.get("tracked")),
+            # None leaves the flag alone (a POS write-back sets no tracking);
+            # an explicit False is SAID -- "or prev" kept an old True over a
+            # size minted untracked, so nothing ever re-sent its tracking.
+            "tracked": bool(prev.get("tracked")) if tracked is None else bool(tracked),
             "synced_at": _now(),
         }
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
@@ -1917,6 +1920,7 @@ async def sync_product_stock(
     product_gid: str,
     *,
     extra_variant_gids: Optional[List[Optional[str]]] = None,
+    minted_variant_gids: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates): tracking + policy on every
     known variant, then ``push_skus_stock`` for this product's SKUs -- one row
@@ -1930,6 +1934,20 @@ async def sync_product_stock(
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
     tracked: Dict[str, Any] = {"updated": 0, "errors": []}
+    # "Already live" covers the variants an earlier publish CONFIRMED, never
+    # one this press minted (``minted_variant_gids``: what seeding just put on
+    # Shopify, its gid on no IMS row yet). For that variant this IS the first
+    # publish, and on a published product it is visible the moment it exists:
+    # a size added to a live listing under a refused tracking call went out
+    # UNTRACKED while the line said "the listing keeps the tracking its first
+    # publish set" and the baseline recorded tracked=True -- with the new
+    # SKU's row written beside it the sweep saw no diff, so nothing ever
+    # re-sent tracking. Not live -> the WITHOUT LIMIT line, tracked=False, and
+    # the next pass re-sends it.
+    known = set(product_variant_gids(product, variants))
+    live = listing_already_live(product) and not [
+        g for g in product_variant_gids({}, None, minted_variant_gids) if g not in known
+    ]
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
     # an UNTRACKED item sells without limit, which is the worse failure. The
     # listing then reads sold out and push_skus_stock says so, loudly, instead
@@ -1949,7 +1967,7 @@ async def sync_product_stock(
         # "Tracking is on Shopify": this call set it, or the listing's first
         # publish did (a refused re-send changes nothing there). Recording
         # False for a live listing would withhold its NEXT press instead.
-        tracked=tracked["updated"] > 0 or listing_already_live(product),
+        tracked=tracked["updated"] > 0 or live,
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
@@ -1967,7 +1985,7 @@ async def sync_product_stock(
         # if any, rides under it.
         why = "; ".join(str(e) for e in tracked["errors"][:3])
         summary["code"] = STOCK_TRACKING_FAILED
-        if listing_already_live(product):
+        if live:
             line = (
                 f"tracking + {policy} could not be re-confirmed on the variant(s) "
                 f"({why}) -- the listing keeps the tracking its first publish set; "
