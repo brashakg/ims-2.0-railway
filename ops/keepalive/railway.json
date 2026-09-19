@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "_comment": "Config for the keepalive-ping cron service ONLY. It lives INSIDE ops/keepalive because Railway applies a repo-ROOT railway.json to EVERY service built from this repo - on 2026-09-17 a root copy of this file made the BACKEND service try to build this Dockerfile and its deploy failed. The keepalive service must have Root Directory = ops/keepalive so it reads this file and nothing else does.",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "cronSchedule": "24 3,16,17,19,20,21 * * *",
+    "restartPolicyType": "NEVER",
+    "sleepApplication": false
+  }
+}
