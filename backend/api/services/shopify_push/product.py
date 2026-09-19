@@ -43,12 +43,12 @@ from .variants import (
 )
 from .publish import _publish_to_online_store
 from .inventory import (
+    STOCK_TRACKING_FAILED,
     _set_variant_tracking,
+    listing_already_live,
     plan_product_stock,
-    resolve_online_location_id,
-    set_inventory_quantities,
+    push_skus_stock,
     sync_product_stock,
-    zero_stock_ledger_entry,
 )
 from .media import plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
@@ -227,7 +227,7 @@ async def push_product(
             metafields=metafields or None,
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
-            stock=plan_product_stock(db, product, variants),
+            stock=await plan_product_stock(db, product, variants),
             photos=plan_product_media(product, photos),
             tags=plan_product_tags(product, ims_tags),
         )
@@ -353,10 +353,12 @@ async def push_product(
         # 2026-09-07 -- the website sells only what the shops can ship). Every
         # variant gid this press knows -- the response nodes, whatever seeding
         # just created, the stored ones -- gets tracked=true + the DENY policy,
-        # and each SKU's pooled quantity is written at the online location.
-        # Fail-soft side channel: reported on the result and the audit row,
-        # never flips ok and never withholds the publish (first-publish
-        # behaviour is unchanged; the stock pass retries it on the next sync).
+        # and each SKU's own on-hand PER SHOP is written at that shop's Shopify
+        # location (one row per mapped shop, an explicit 0 included).
+        # Fail-soft side channel: reported on the result and the audit row.
+        # A QUANTITY failure never flips ok and never withholds the publish
+        # (the stock pass retries it on the next sync); a TRACKING failure
+        # withholds it -- see `tracking_ok` below.
         stock_summary = None
         if new_gid:
             stock_summary = await sync_product_stock(
@@ -366,6 +368,7 @@ async def push_product(
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or []),
+                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
             )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
@@ -385,6 +388,25 @@ async def push_product(
         #   * a press that needed NO seeding: every variant already carries the
         #     gid an earlier successful seed wrote, so its price is already on
         #     Shopify -- but IMS must still hold a positive price for every row.
+        #   * TRACKED + DENY BEFORE PUBLISH (design 4.2; recheck round 2, the
+        #     oversell direction): a variant whose tracking + policy call
+        #     FAILED is UNTRACKED -- Shopify sells it without limit whatever
+        #     the shelf holds, the worse failure, and one a code alone cannot
+        #     mend once the listing is visible. The quantities still go out
+        #     (they are true); the listing stays unpublished, invisible on
+        #     bettervision.in, until a press confirms tracking. The result is
+        #     then ok=False / publish_withheld with the stock pass's own code,
+        #     so the toast, the audit row, the tally and the sync page all say
+        #     so, and the row stays queued for the retry.
+        #   * ...and ONLY the first publish (recheck round 1). An already-live
+        #     listing keeps the tracking its first publish confirmed whatever a
+        #     refused re-send says (a refused bulk-update changes nothing on
+        #     Shopify), so it is reported live with a stock warning -- never
+        #     "NOT made visible" beside a catalog chip that reads "Live".
+        tracking_ok = (
+            (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
+            or listing_already_live(product)
+        )
         pub_summary = None
         if new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
@@ -398,7 +420,7 @@ async def push_product(
                 priced_ok = False
             else:
                 priced_ok = _has_publishable_price(product, variants)
-            if priced_ok and photo_on_shopify:
+            if priced_ok and photo_on_shopify and tracking_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
@@ -413,10 +435,18 @@ async def push_product(
                     "published": False,
                     "error": "publish withheld: the photograph did not reach Shopify",
                 }
-            else:
+            elif not priced_ok:
                 pub_summary = {
                     "published": False,
                     "error": "publish withheld: variant unpriced or seeding failed",
+                }
+            else:
+                # Priced and photographed, but tracking + DENY did not stick:
+                # the stock pass's own line and code, under "withheld".
+                pub_summary = {
+                    "published": False,
+                    "code": STOCK_TRACKING_FAILED,
+                    "error": f"publish withheld: {(stock_summary or {}).get('error')}",
                 }
         # The press reached Shopify but the product is NOT visible. Leave it in
         # the queue so pressing again retries it once the price / photograph is
@@ -470,6 +500,19 @@ async def push_product(
         # is re-queued and the result carries PRICE_NOT_SYNCED so the sync
         # page / audit say so and the next press or scheduled run retries.
         price_not_synced = bool(vp_summary) and not vp_summary["ok"]
+        # ...AND SO IS THE STOCK (same rule, same shape). The stock pass is a
+        # fail-soft side channel that never withholds the publish -- but on a
+        # fresh catalogue with no shop mapped yet it returns STORE_UNMAPPED
+        # having written nothing, while the press still switched tracking on
+        # with the DENY policy and published. That is a listing LIVE on
+        # bettervision.in reading sold out at every location, and every screen
+        # said it worked: nothing renders PushResult.stock, and formatPushResult
+        # reads only the top-level ok / code / error. ok stays True (the product
+        # IS live, exactly like PRICE_NOT_SYNCED) but the code and the plain
+        # line come out where the toast, the audit row and the sync page read
+        # them. No re-queue: the stock diff still sees this product as changed
+        # (nothing reached its baseline), so the next pass retries it.
+        stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
         # the wrong price. Either way the row goes BACK in the queue so the next
@@ -486,7 +529,21 @@ async def push_product(
             shopify_id=new_gid,
             payload=payload,
             error=(
-                (_PRICE_NOT_SYNCED_MSG if price_not_synced else None)
+                # BOTH said when both are true (recheck round 1): the price
+                # line used to win outright, and the stock line -- SOLD OUT,
+                # and every data-defect rung riding under it -- lived only in
+                # PushResult.stock, which nothing renders.
+                (
+                    " -- ALSO: ".join(
+                        line
+                        for line in (
+                            _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
+                            (stock_summary or {}).get("error") if stock_not_written else None,
+                        )
+                        if line
+                    )
+                    or None
+                )
                 if published_ok
                 else (
                     (pub_summary or {}).get("message")
@@ -495,7 +552,11 @@ async def push_product(
                 )
             ),
             code=(
-                (PRICE_NOT_SYNCED if price_not_synced else None)
+                (
+                    PRICE_NOT_SYNCED
+                    if price_not_synced
+                    else ((stock_summary or {}).get("code") if stock_not_written else None)
+                )
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),
@@ -651,34 +712,45 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
 
 async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
     """Take ONE size variant off sale WITHOUT touching the parent's listing:
-    inventoryPolicy DENY + quantity 0 on the child's own Shopify variant (the
+    inventoryPolicy DENY + the RULE's number (0 once the spine is inactive)
+    on the child's own Shopify variant AT EVERY MAPPED SHOP'S LOCATION (the
     parent's listing stays ACTIVE, every other size keeps selling). The
     retire hook's door for a variant-of product (online_delist.delist_if_live
-    when the child spine's is_active flips off) -- is_active is then the ONLY
-    marker, and the quantity rule (online_stock_writeback._on_hand_for_skus:
-    an inactive spine lists 0) keeps every later stock pass at 0 until the
-    product is reactivated. NEVER productUpdate, never a status change.
+    when the child spine's is_active flips off) -- is_active is the ONLY
+    off-sale marker, and the quantity rule (online_stock_writeback.
+    _on_hand_for_skus: an inactive spine lists 0) is what writes the 0 here
+    AND keeps every later stock pass at 0 until the product is reactivated.
+    NEVER productUpdate, never a status change.
 
     Reads the bridge, never a second link: the child's catalog_variants row
     by ``sku`` gives the variant + inventory-item gids AND parent_product_id
     (the parent twin), whose ecom.shopify_product_id is the productId the
     bulk-update needs. Any of the three missing -> the same clean noop as an
     un-pushed product (nothing on Shopify to take down). DARK -> SIMULATED
-    plan, zero network. LIVE -> the two existing stock primitives
-    (_set_variant_tracking, set_inventory_quantities) at the resolved online
-    location, then the child's entry in the PARENT's stock ledger is zeroed
-    so a reactivation (pooled 1 vs sent 0) diffs and is re-sent. Fail-soft."""
+    plan, zero network. LIVE -> ``_set_variant_tracking`` (DENY) then THE ONE
+    writer, ``push_skus_stock`` with no precomputed quantities: one row per
+    MAPPED location (a size retired at one location would keep selling from
+    the other shops), and the PARENT's nested baseline gets the 0 through the
+    writer's own write-back so a reactivation (on-hand 1 vs sent 0) diffs
+    and is re-sent. A row above 0 means the spine is still ACTIVE -- the
+    size is NOT off sale -- and the result says so. Fail-soft."""
     pid = product.get("id") or product.get("product_id")
     sku = str(product.get("sku") or "").strip()
     row: Dict[str, Any] = {}
     parent_gid = None
     parent_twin_id = None
     try:
+        from ..online_catalog import _parent_from, _parents_for_variants
+
         row = (db["catalog_variants"].find_one({"sku": sku}) if sku else None) or {}
-        parent_twin_id = row.get("parent_product_id")
-        parent = (
-            db["catalog_products"].find_one({"id": parent_twin_id}) if parent_twin_id else None
-        ) or {}
+        # The parent through BOTH links (parent_product_id OR parent_sku), the
+        # way the sweep and the target reader resolve it -- a row keyed on the
+        # SPINE id resolved to nothing here, the delist was a green noop and
+        # the size kept selling until the next sweep found the row through
+        # parent_sku (recheck round 1). STRICT: a dead read is reported,
+        # never "not on Shopify".
+        parent = _parent_from(_parents_for_variants(db, [row], strict=True), row) if row else {}
+        parent_twin_id = parent.get("id")
         parent_gid = (parent.get("ecom") or {}).get("shopify_product_id")
     except Exception as exc:  # noqa: BLE001 -- a lookup blip is reported, never raised
         return PushResult(
@@ -721,46 +793,76 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
             reason=reason,
         )
     try:
-        loc = await resolve_online_location_id(db)
-        if not loc.get("location_id"):
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="variant",
-                action="delist",
-                target_id=pid,
-                ok=False,
-                shopify_id=variant_gid,
-                payload=payload,
-                code=loc.get("code"),
-                error=loc.get("error"),
-            )
-        payload["locationId"] = loc["location_id"]
         tracked = await _set_variant_tracking(db, payload["productId"], [variant_gid], "DENY")
-        written = await set_inventory_quantities(
-            db, loc["location_id"], {payload["inventoryItemId"]: 0}
+        # THE RULE decides the number (recheck round 2: one rule, one
+        # implementation). The spine's is_active is the only off-sale marker
+        # and the writer's rule reads it -- an inactive spine lists 0 at every
+        # shop it could read, so the writer's own holders question (the same
+        # rule at buffer 0) finds no holder either: an unmapped shop that still
+        # keeps the size on its shelf (Gangadham Pune, today) is not asked to
+        # sell it. This door used to hand the writer a forced 0 plus a
+        # `delisting` exemption from that question, so the door and the rule
+        # could disagree about the same SKU: the DELETE door deactivates the
+        # spine fail-soft, a swallowed error there left the spine ACTIVE, 0
+        # went out green, and the next stock pass wrote the shelf straight
+        # back. Now what goes out IS the rule's number.
+        written = await push_skus_stock(
+            db,
+            [sku],
+            source="variant_delist",
+            product_id=str(parent_twin_id) if parent_twin_id else None,
+            policy="DENY",
+            tracked=bool(tracked.get("updated")),
         )
-        errors = list(tracked.get("errors") or []) + list(written.get("errors") or [])
-        if errors:
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="variant",
-                action="delist",
-                target_id=pid,
-                ok=False,
-                shopify_id=variant_gid,
-                payload=payload,
-                error="; ".join(str(e) for e in errors[:3]),
+        payload["rows"] = written.get("quantities") or {}
+        payload["stores_mapped"] = written.get("stores_mapped", 0)
+        own = list(tracked.get("errors") or [])
+        # A row above 0 is the rule saying the size is NOT off sale -- its
+        # spine is still active -- and this door says so instead of reporting
+        # a green take-down the next pass would undo.
+        on_sale = {
+            sid: int(q or 0)
+            for sid, q in (payload["rows"].get(sku) or {}).items()
+            if int(q or 0) > 0
+        }
+        if on_sale:
+            own.append(
+                f"{sku} is still on sale ("
+                + ", ".join(f"{s}: {q}" for s, q in sorted(on_sale.items()))
+                + ") -- its product spine is still ACTIVE, the only off-sale "
+                "marker the quantity rule reads; deactivate the product and "
+                "press again"
             )
-        if parent_twin_id and sku:
-            zero_stock_ledger_entry(db, parent_twin_id, sku)
+        # The take-down LANDED when DENY stuck and EVERY mapped shop's row was
+        # accepted -- nothing mapped, a shop unknown, a location conflicted or
+        # a refused write is not landed. The writer's STANDING verdict (a
+        # mapped location that cannot sell online, a stray one, a data
+        # defect) rides as code + error only, exactly as on the parent's
+        # press: under the day-1 configuration (the Jharkhand locations
+        # unticked) it stamped DELIST_FAILED / "Still live" over three
+        # accepted 0s, on every size delist, for as long as the locations
+        # stayed unticked (recheck round 1). "No shop mapped" stays the
+        # WRITER's rule (STORE_UNMAPPED, nothing accepted -> not landed).
+        accepted = payload["rows"].get(sku) or {}
+        landed = (
+            not own
+            and not written.get("errors")
+            and bool(accepted)
+            and len(accepted) == int(written.get("stores_mapped") or 0)
+        )
+        # The writer's own line already leads with its refusal when it has
+        # one and carries the ladder under it: one line each, never twice.
+        lines = own + ([written["error"]] if written.get("error") else [])
         return PushResult(
             mode=MODE_LIVE,
             entity="variant",
             action="delist",
             target_id=pid,
-            ok=True,
+            ok=landed,
             shopify_id=variant_gid,
             payload=payload,
+            code=written.get("code"),
+            error="; ".join(str(e) for e in lines[:3]) or None,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(

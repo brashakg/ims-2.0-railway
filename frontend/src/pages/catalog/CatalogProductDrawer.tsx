@@ -44,7 +44,10 @@ import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { pushApi } from '../../services/api/onlineStore';
-import { formatPushResult } from '../../components/online-store/OnlineStoreSyncBanner';
+import {
+  formatPushResult,
+  pushToastLevel,
+} from '../../components/online-store/OnlineStoreSyncBanner';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
 import {
   catalogProductsApi,
@@ -261,8 +264,7 @@ export function CatalogProductDrawer({
     try {
       const res = await pushApi.pushProduct(id);
       const msg = formatPushResult(name, res);
-      if (res.ok) toast.success(msg);
-      else toast.error(msg);
+      toast[pushToastLevel(res)](msg);
       if (res.ok && res.mode === 'LIVE') {
         // OS-059: a LIVE push mints/updates the ecom facts shown right here
         // (Shopify id, DRAFT/PUBLISHED chip, locally_modified) — re-fetch the

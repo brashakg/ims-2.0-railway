@@ -266,10 +266,11 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     assert res.ok is False and res.reason == "publish_withheld"
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
-    # The network boundary WAS hit: the product, then its photograph (the
-    # photo rides the SAME press since 2026-08-25), then the stock step's one
-    # `locations` lookup (2026-09-07; unresolved on this spy, so it stops there).
-    assert len(spy.calls) == 3
+    # The network boundary WAS hit: the product, then its photograph (the photo
+    # rides the SAME press since 2026-08-25). Nothing else: this fixture's
+    # productCreate returns no variant, so there is no tracking call, and the
+    # per-store writer reads its locations from Mongo, never from Shopify.
+    assert len(spy.calls) == 2
     assert "imsProductCreate(" in spy.calls[0]["query"]
     assert "productCreateMedia" in spy.calls[1]["query"]
 
@@ -962,10 +963,11 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
     assert res.mode == "LIVE"
     # (Unpriced fixture -> the publish is withheld; the metafield side channel
     # below is what this test is about.)
-    # Four network calls: productCreate, ONE metafieldsSet chunk, the
-    # photograph (which rides the same press since 2026-08-25), then the stock
-    # step's one `locations` lookup (2026-09-07).
-    assert len(spy.calls) == 4
+    # Three network calls: productCreate, ONE metafieldsSet chunk and the
+    # photograph (which rides the same press since 2026-08-25). The stock step
+    # adds none here: no variant came back to track, and the per-store writer
+    # reads its locations from Mongo.
+    assert len(spy.calls) == 3
     assert "metafieldsSet" in spy.calls[1]["query"]
     assert "productCreateMedia" in spy.calls[2]["query"]
     mfs = spy.calls[1]["variables"]["metafields"]
@@ -1009,7 +1011,7 @@ def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
     assert "boom" not in (res.error or "")
     assert res.metafields["set"] == 0
     assert any("boom" in e for e in res.metafields["errors"])
-    assert len(spy.calls) == 4  # + the photograph + the stock `locations` lookup
+    assert len(spy.calls) == 3  # + the photograph; the stock step adds none
 
 
 # ---------------------------------------------------------------------------
@@ -1507,3 +1509,107 @@ def test_push_history_query_failure_reports_unavailable_not_a_false_empty(
     assert body["available"] is False
     assert body["count"] == 0
     assert body["entries"] == []
+
+
+def test_a_press_that_wrote_no_stock_is_not_tallied_as_a_clean_success(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """PANEL ROUND 7 (first-push). The bulk press SWALLOWED a stock code -- only
+    the single press warned. A product push that publishes the listing but writes
+    its quantities NOWHERE comes back ok=True with the stock code on it
+    (product.py promotes it exactly like PRICE_NOT_SYNCED): the listing is live
+    with tracked=true + DENY behind no quantity, i.e. SOLD OUT. `_tally` gave
+    price_not_synced, refused_no_photo, publish_withheld, archived_not_listed and
+    taken_down_skipped each their own bucket and this one NONE, so
+    refused/withheld/failed all read 0 and the sync page painted the sweep green.
+
+    On prod's day-1 state that is the NORMAL path, not an edge: Gangadham Pune
+    fulfils online orders and is mapped to no shop by the owner's own decision,
+    so every one of the 121 presses carries a stock code.
+
+    Drop the `elif data.get("code")` bucket in `_tally` -> no stock_not_written
+    key -> this fails."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _published_but_unwritten(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE",
+            entity="product",
+            action="update",
+            target_id=doc.get("id"),
+            ok=True,  # the listing IS live -- that is what makes it dangerous
+            code=shopify_push.STORE_UNMAPPED,
+            error="no shop has a Shopify location -- nothing was written anywhere",
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _published_but_unwritten)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    s = r.json()["summary"]["products"]
+    assert s["stock_not_written"] == 1, s
+    # ...and it is still a push (the listing is live), not a failure or a no-op.
+    assert s["pushed"] == 1 and s["failed"] == 0 and s["noop"] == 0
+    assert "price_not_synced" not in s, "the OLD-price line is a different fault"
+
+
+def test_a_clean_bulk_press_says_nothing_about_stock(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """The other direction: a bucket that is always there is as useless as one
+    that never is. A press whose stock pass wrote everything carries no code, so
+    no stock line."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _clean(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE", entity="product", action="update", target_id=doc.get("id"), ok=True
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _clean)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    s = r.json()["summary"]["products"]
+    assert s["pushed"] == 1 and "stock_not_written" not in s
+
+
+def test_a_bulk_press_splits_a_stock_warning_from_stock_not_written(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """WORDING (recheck round 1, the day-1 NORMAL path). ``stock_not_written``
+    was "stock not OK", so with Gangadham Pune ticked and unmapped every one of
+    the 121 presses -- whose three mapped shops WERE written -- tallied there
+    and the toast read "N live with NO stock written (sold out)" beside a line
+    quoting the opposite. Split on what Shopify ACCEPTED: rows written beside
+    a warning is ``stock_warning``; zero rows is ``stock_not_written``. Fold
+    the two back into one bucket -> this fails."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _written_with_a_warning(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE",
+            entity="product",
+            action="update",
+            target_id=doc.get("id"),
+            ok=True,
+            code=shopify_push.SHOPIFY_LOCATION_UNMAPPED,
+            error="Shopify location(s) that fulfil online orders but map to no shop: Gangadham Pune",
+            stock={"ok": False, "set": 3, "code": shopify_push.SHOPIFY_LOCATION_UNMAPPED},
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _written_with_a_warning)
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    s = r.json()["summary"]["products"]
+    assert s["stock_warning"] == 1 and "stock_not_written" not in s, s
+    assert s["pushed"] == 1 and s["failed"] == 0

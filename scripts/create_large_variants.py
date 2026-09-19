@@ -158,9 +158,11 @@ OWNER_POINTS = (
     "listing. Block the parent's deactivation while a child is active, cascade, or accept for now?",
     "C. A CHILD'S ONLINE PRICE = ITS OWN MRP UNDER THE FAMILY'S DISCOUNT RULE, never its in-store "
     "offer_price (moot for these 11: mrp == offer_price, no gtin). Accepted?",
-    "D. A DEACTIVATED SIZE LANDS DELIST_FAILED ON PROD TODAY: SHOPIFY_ONLINE_LOCATION_ID is not set, so "
-    "the Catalog screen says 'take-down failed' for a deactivated size until the online-location "
-    "decision lands (the same blocker as the 49-unit stock press). Known?",
+    "D. A DEACTIVATED SIZE IS ZEROED AT EVERY MAPPED SHOP: the take-down of a size row now goes "
+    "through the per-store writer, whose only gate is 'is any shop mapped at all' -- so with no shop "
+    "mapped yet it lands STORE_UNMAPPED ('nothing written'), and once the shops are mapped it writes "
+    "an explicit 0 at each. (The old single SHOPIFY_ONLINE_LOCATION_ID is read by nothing on this "
+    "branch and the 49-unit Pune blocker died with the 2026-09-07 catalogue deletion.) Known?",
 )
 
 

@@ -428,6 +428,7 @@ def test_dark_gates_simulate_and_never_touch_the_network(db, monkeypatch):
     saved = _twin(db)
     assert saved["is_active"] is False
     assert saved["ecom"]["online_state"] == "DELISTED", "the intent is recorded"
+    assert saved["ecom"]["delist_mode"] == shopify_push.MODE_SIMULATED, "...and that it never reached Shopify"
 
 
 # ===========================================================================
@@ -505,3 +506,23 @@ def test_a_successful_publish_clears_the_delist_marks(db):
     for key in online_delist.DELIST_KEYS:
         assert key not in ecom
     assert ecom["status"] == "PUBLISHED"
+
+
+def test_the_delisted_stamp_carries_the_push_mode_it_came_from(db, spy):
+    """(recheck round 1) A DARK delist is a SIMULATED no-op stamped DELISTED
+    with zero network, and a LIVE one is the only proof the twin is off
+    Shopify. The stock writer's claim read (online_catalog.
+    skus_claiming_inventory_items) lets a soft-deleted twin go ONLY on a LIVE
+    DELISTED stamp -- otherwise its Shopify item is still selling and a SKU
+    mis-stamped on it must not write its shelf there. Drop ``delist_mode``
+    from the stamp -> the LIVE twin reads as a claimant -> this fails."""
+    from api.services.online_catalog import _delisted_live
+
+    _seed_live(db)
+    _run(catalog.delete_catalog_product("P1", current_user=ADMIN))
+    ecom = _twin(db)["ecom"]
+    assert ecom["online_state"] == "DELISTED" and ecom["delist_mode"] == shopify_push.MODE_LIVE
+    assert _delisted_live(ecom) is True
+    assert _delisted_live({"online_state": "DELISTED", "delist_mode": shopify_push.MODE_SIMULATED}) is False
+    assert _delisted_live({"online_state": "DELIST_FAILED", "delist_mode": shopify_push.MODE_LIVE}) is False
+    assert "delist_mode" in online_delist.DELIST_KEYS, "a republish clears it with the other marks"

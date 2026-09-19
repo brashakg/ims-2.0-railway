@@ -57,6 +57,7 @@ import {
 } from '../../services/api/onlineStore';
 import OnlineStoreSyncBanner, {
   formatPushResult,
+  pushToastLevel,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { useAuth } from '../../context/AuthContext';
@@ -193,10 +194,30 @@ export default function OnlineShopifySyncPage() {
   const [sweeps, setSweeps] = useState<Partial<Record<EntityKey, PushSweepResult>>>({});
   const [goingLive, setGoingLive] = useState(false);
   const [syncingLive, setSyncingLive] = useState(false);
-  // STOCK (2026-09-07, make website quantities real): the one-button pass
-  // that writes the pooled quantity of every listing whose number changed.
+  // STOCK (owner ruling 2026-09-06, per-store locations): the one-button pass
+  // that writes each shop's own quantity, per SKU, at that shop's Shopify
+  // location for every listing whose numbers changed. "Preview first" runs
+  // the same pass as a SIMULATED plan with zero network, even while LIVE.
   const [pushingStock, setPushingStock] = useState(false);
   const [stockResult, setStockResult] = useState<PushResult | null>(null);
+  const [previewFirst, setPreviewFirst] = useState(true);
+  // Shopify's own location list (empty when DARK) -- joined to the shops
+  // below so the table can say whether a mapped location sells online.
+  const [locations, setLocations] = useState<
+    Awaited<ReturnType<typeof pushApi.getLocations>>['locations']
+  >([]);
+  // The WRITER's per-shop "cannot sell online" verdict (GET /push/locations
+  // `dead`, from shopify_push.score_locations) plus whether Shopify answered
+  // the list at all. The table's "Sells online" cell prints THIS, never a
+  // TypeScript re-derivation from `locations`: Shopify's list omits
+  // DEACTIVATED locations, so the `isActive` half of the verdict is answered
+  // by ABSENCE and a re-derivation read "yes" for a deactivated location and
+  // "read needs LIVE" for a deleted one -- on a live read, two lines under a
+  // stock line coding SHOPIFY_LOCATION_NOT_SELLING for the same shop.
+  const [locationVerdict, setLocationVerdict] = useState<{
+    read: boolean;
+    dead: NonNullable<Awaited<ReturnType<typeof pushApi.getLocations>>['dead']>;
+  }>({ read: false, dead: [] });
   // Variant-prices paged resync progress (OS-017): {done, total} while looping.
   const [resyncProgress, setResyncProgress] = useState<{ done: number; total: number | null } | null>(null);
 
@@ -210,6 +231,10 @@ export default function OnlineShopifySyncPage() {
     try {
       const s = await pushApi.getStatus();
       setStatus(s);
+      // Never throws: [] when DARK or unreadable.
+      const read = await pushApi.getLocations();
+      setLocations(read.locations);
+      setLocationVerdict({ read: read.read === true, dead: read.dead ?? [] });
     } finally {
       setLoading(false);
     }
@@ -344,6 +369,28 @@ export default function OnlineShopifySyncPage() {
         const heldDown = Number(s?.taken_down_skipped ?? 0);
         const archived = Number(s?.archived_not_listed ?? 0);
         const oldPrice = Number(s?.price_not_synced ?? 0);
+        // LIVE, BUT SOLD OUT. The listing published and its quantities reached
+        // no location at all (no shop mapped, two SKUs on one inventory
+        // item...). It has its own count for the same reason the OLD price
+        // does -- and without it this press read GREEN over 121 listings whose
+        // stock was written nowhere.
+        const noStock = Number(s?.stock_not_written ?? 0);
+        // LIVE, WRITTEN, WITH A WARNING. The mapped shops' numbers DID go out
+        // (Pune stray, one shop unknown, a stray baseline SKU). The backend
+        // splits this from the line above on what Shopify accepted; folded
+        // together, day 1 read "121 live with NO stock written (sold out)"
+        // beside a line quoting the opposite.
+        const stockWarn = Number(s?.stock_warning ?? 0);
+        // THE SWEEP'S OWN STOCK PASS. A products press ends with a whole-
+        // catalogue stock pass whose verdict is over EVERY listing -- an
+        // unchanged listing's stray SKU or unknown shop lives here and in no
+        // product row. It was returned and read nowhere; the toast said
+        // "25 processed" over it.
+        const stockPass = res.stock ?? null;
+        const stockPassBad = !!stockPass && stockPass.ok === false;
+        const stockPassLine = stockPassBad
+          ? ` · stock pass NOT ok${stockPass?.code ? ` [${stockPass.code}]` : ''}${stockPass?.error ? ` — ${stockPass.error}` : ''}`
+          : '';
         // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
         // first failed row's server message rides on the toast itself. A row
         // that is ok but carries a code (live at the OLD price) counts too.
@@ -360,8 +407,11 @@ export default function OnlineShopifySyncPage() {
           (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
           (archived ? ` · ${archived} archived (not listed)` : '') +
           (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
-          why;
-        if (refused || withheld || s?.failed) toast.warning(msg);
+          (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
+          (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
+          why +
+          stockPassLine;
+        if (refused || withheld || noStock || stockWarn || stockPassBad || s?.failed) toast.warning(msg);
         else toast.success(msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
         // PRODUCTS number; collections/menus/images stop at the request limit.
@@ -472,17 +522,30 @@ export default function OnlineShopifySyncPage() {
   const pushStock = async () => {
     setPushingStock(true);
     try {
-      const res = await pushApi.pushStock();
+      const res = await pushApi.pushStock(previewFirst);
       setStockResult(res);
       const p = (res.payload ?? {}) as Record<string, any>;
-      const where = res.mode === 'LIVE' ? 'LIVE' : 'simulated';
+      const where = res.mode === 'LIVE' ? 'LIVE' : 'preview';
+      const unmapped = (p.unmapped_stores ?? []) as Array<{ store_code?: string; store_name?: string }>;
+      const line =
+        `Stock (${where}): ${p.changed ?? 0} of ${p.candidates ?? 0} listings changed` +
+        (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent');
       if (res.ok) {
-        toast.success(
-          `Stock (${where}): ${p.changed ?? 0} of ${p.candidates ?? 0} listings changed` +
-            (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent (dry-run)'),
-        );
+        toast.success(line);
       } else {
-        toast.warning(`Stock not written — ${res.error || res.code || 'see result'}`);
+        // ONE rule: the count line ALWAYS comes first, then the reason. A
+        // not-ok pass still writes every mapped row it can (STORE_UNMAPPED,
+        // SHOPIFY_LOCATION_UNMAPPED, SHOPIFY_LOCATION_NOT_SELLING,
+        // STOCK_ONHAND_UNKNOWN, STOCK_TARGET_MISSING/DUPLICATE,
+        // STOCK_STORE_ORPHAN, STORE_LOCATION_DUPLICATE), so the old
+        // "Stock not written" arm told the owner nothing had gone to Shopify
+        // over a press that had just written three shops' numbers.
+        const why =
+          res.code === 'STORE_UNMAPPED' && unmapped.length
+            ? 'not mapped, stock invisible online: ' +
+              unmapped.map((s) => s.store_code || s.store_name).join(', ')
+            : res.error || res.code || 'see result';
+        toast.warning(`${line}. ${why}`);
       }
       refreshAll();
     } catch (e: any) {
@@ -496,6 +559,25 @@ export default function OnlineShopifySyncPage() {
   const liveSync = status?.live_sync ?? null;
   const lastRun = liveSync?.last_run ?? null;
   const stockPayload = (stockResult?.payload ?? null) as Record<string, any> | null;
+  // The plan's inner keys are store_ids (Pune's is a UUID); the owner reads
+  // shop codes. mode.stores is the same store list the writer maps from.
+  const shopLabel = (sid: string) =>
+    (mode?.stores ?? []).find((s) => s.store_id === sid)?.store_code || sid;
+  // A Shopify location that fulfils online orders but maps to NO shop keeps
+  // selling whatever number it holds -- IMS never writes it (the phantom
+  // location the migration runbook warns about; IMS writes per shop, never a
+  // pooled total). The rule is the BACKEND's (shopify_push.is_stray_fulfilling,
+  // the same predicate behind the SHOPIFY_LOCATION_UNMAPPED verdict and the
+  // deduped task), stamped on every row of the locations read; this page only
+  // renders it. It used to be spelled a second time here in TypeScript, and the
+  // two spellings already differed: `isActive !== false` reported a location
+  // with no isActive field that the backend called fine. Empty when DARK (the
+  // locations read is [] then).
+  const unmappedFulfilling = locations.filter((l) => l.unmapped_online_fulfilling);
+  // ...and the SHOP axis of the same question, likewise the backend's answer
+  // (mode.unmapped_stores, built through the writer's inventory._mapped), so the
+  // gate chip and the per-shop table below it cannot disagree.
+  const unmappedStoreIds = new Set((mode?.unmapped_stores ?? []).map((s) => s.store_id ?? ''));
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -583,63 +665,195 @@ export default function OnlineShopifySyncPage() {
                 : 'NOT resolved — presses will publish nothing'
             }
           />
-          {/* THE FOURTH DOOR (2026-09-07): where the website's quantity lives.
-              Unresolved => every stock write refuses with a code; never guessed. */}
+          {/* THE FOURTH DOOR (owner ruling 2026-09-06): every physical shop is
+              its own Shopify location. A shop holding listed stock without one
+              is named by the stock pass (STORE_UNMAPPED) and its stock stays
+              invisible online; the mapped shops are still written. */}
           <GateChip
-            label="Online stock location"
-            on={!!mode?.online_location_id}
+            label="Stock locations"
+            on={
+              mode?.stores_total == null
+                ? null
+                : (mode.stores_mapped ?? 0) === mode.stores_total
+            }
             detail={
-              mode?.online_location_id
-                ? `location ${mode.online_location_source ?? 'resolved'}`
-                : mode?.online_location_code
-                  ? mode.online_location_code
-                  : 'NOT resolved — stock will not be written'
+              mode?.stores_total == null
+                ? 'shop list not readable'
+                : `${mode.stores_mapped ?? 0} of ${mode.stores_total} shops mapped` +
+                  ((mode.unmapped_stores ?? []).length
+                    ? ` — not mapped: ${(mode.unmapped_stores ?? [])
+                        .map((s) => s.store_code || s.store_name || s.store_id)
+                        .join(', ')}`
+                    : '')
             }
           />
         </div>
-        {mode?.is_live && !mode?.online_location_id && (
-          <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
+        {(mode?.stores ?? []).length > 0 && (
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-[28rem] text-[11px]">
+              <thead>
+                <tr className="text-left text-gray-500">
+                  <th className="pr-4 py-1 font-medium">Shop</th>
+                  <th className="pr-4 py-1 font-medium">Shopify location</th>
+                  <th className="pr-4 py-1 font-medium">Sells online</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(mode?.stores ?? []).map((s) => {
+                  const loc = locations.find((l) => l.id === s.shopify_location_id);
+                  // ONE answer to "is this shop mapped?", the WRITER's -- read
+                  // off the backend's own unmapped list (_shared builds it
+                  // through inventory._mapped) instead of re-deriving it from
+                  // the raw gid two lines under the chip that uses it. A
+                  // location two shops claim is written for NEITHER of them, so
+                  // the raw-gid reading printed those two rows as mapped while
+                  // the chip above called them unmapped: two contradictory
+                  // answers in one card.
+                  const mapped = !unmappedStoreIds.has(s.store_id ?? '');
+                  const locLabel = s.shopify_location_name || loc?.name || s.shopify_location_id;
+                  const deadReason = locationVerdict.dead.find((d) => d.store_id === s.store_id)?.reason;
+                  return (
+                    <tr key={s.store_id ?? s.store_code ?? ''} className="border-t border-gray-100">
+                      <td className="pr-4 py-1 text-gray-800">{s.store_code || s.store_name || s.store_id}</td>
+                      <td className={'pr-4 py-1 ' + (mapped ? 'text-gray-700' : 'text-amber-800')}>
+                        {mapped
+                          ? locLabel
+                          : s.shopify_location_id
+                            ? `${locLabel} — claimed by another shop too, so neither is written`
+                            : 'not mapped — set it on the Organization page'}
+                      </td>
+                      <td className="pr-4 py-1 text-gray-700" data-testid={`sells-online-${s.store_id ?? ''}`}>
+                        {!mapped
+                          ? '—'
+                          : !locationVerdict.read
+                            ? '— (Shopify location list not read)'
+                            : deadReason
+                              ? `no (${deadReason} — Shopify admin > Locations)`
+                              : 'yes'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {unmappedFulfilling.length > 0 && (
+          <p
+            className="mt-2 inline-flex items-start gap-1 text-[11px] text-amber-800"
+            data-testid="unmapped-fulfilling-locations"
+          >
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
             <span>
-              {mode?.online_location_error ||
-                'No Shopify location fulfils online orders, so quantities cannot be written. Enable one in Shopify admin (Settings > Locations) or pin SHOPIFY_ONLINE_LOCATION_ID.'}
+              Fulfils online orders but maps to no shop:{' '}
+              {unmappedFulfilling.map((l) => l.name || l.id).join(', ')} — Shopify keeps selling
+              from it with whatever number it holds; IMS never writes it. Map it to its shop on
+              the Organization page, or untick &quot;Fulfill online orders&quot; on it in Shopify
+              admin &gt; Locations.
             </span>
           </p>
         )}
         <div className="mt-3 flex flex-wrap items-center gap-3">
+          <label className="inline-flex items-center gap-1.5 text-xs text-gray-700">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5"
+              checked={previewFirst}
+              onChange={(e) => setPreviewFirst(e.target.checked)}
+              disabled={pushingStock}
+            />
+            Preview first
+          </label>
           <button
             type="button"
             onClick={pushStock}
             disabled={pushingStock || loading || !canGoLive}
             className={
               'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium border disabled:opacity-60 ' +
-              (isLive
+              (isLive && !previewFirst
                 ? 'bg-green-600 text-white border-green-600 hover:bg-green-700'
                 : 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800')
             }
             title={
-              isLive
-                ? 'Write the pooled quantity of every changed listing (LIVE)'
-                : 'Preview the stock pass (SIMULATED — no Shopify call)'
+              isLive && !previewFirst
+                ? "Write each shop's own quantity at its Shopify location (LIVE)"
+                : 'Preview the per-shop stock plan (SIMULATED — no Shopify call)'
             }
           >
             {pushingStock ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Package className="w-3.5 h-3.5" />}
-            {isLive ? 'Push stock' : 'Dry-run stock'}
+            {isLive && !previewFirst ? 'Push stock' : 'Preview stock'}
           </button>
           <span className="text-[11px] text-gray-500">
-            Pooled on-hand of every physical shop, per SKU, written to Shopify for listings whose
-            number changed since the last send. A product push and the all-pending press run this too.
+            Each shop&apos;s own on-hand, per SKU, written at that shop&apos;s Shopify location; 0 is
+            written for a shop that has none. A product push, the all-pending press and the
+            scheduled sync run this too.
           </span>
         </div>
         {stockResult && (
-          <p className={'mt-2 text-[11px] ' + (stockResult.ok ? 'text-gray-600' : 'text-amber-800')}>
-            Last stock pass ({stockResult.mode}): {stockPayload?.changed ?? 0} of {stockPayload?.candidates ?? 0}{' '}
-            listings changed
-            {stockResult.mode === 'LIVE'
-              ? `, ${stockPayload?.synced ?? 0} written, ${stockPayload?.failed ?? 0} failed`
-              : ' (dry-run, nothing sent)'}
-            {stockResult.error ? ` — ${stockResult.error}` : ''}
-          </p>
+          <div
+            className={'mt-2 text-[11px] ' + (stockResult.ok ? 'text-gray-600' : 'text-amber-800')}
+            data-testid="stock-pass-result"
+          >
+            <p>
+              Last stock pass ({stockResult.mode === 'LIVE' ? 'LIVE' : 'preview'}):{' '}
+              {stockPayload?.changed ?? 0} of {stockPayload?.candidates ?? 0} listings changed
+              {stockResult.mode === 'LIVE'
+                ? `, ${stockPayload?.synced ?? 0} written, ${stockPayload?.failed ?? 0} failed`
+                : ' (nothing sent)'}
+              {stockPayload?.stores_total != null
+                ? ` — ${stockPayload.stores_mapped ?? 0} of ${stockPayload.stores_total} shops mapped`
+                : ''}
+              {stockResult.error ? ` — ${stockResult.error}` : ''}
+            </p>
+            {Array.isArray(stockPayload?.unmapped_stores) && stockPayload.unmapped_stores.length > 0 && (
+              <p className="mt-1 inline-flex items-start gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Not mapped, stock invisible online until mapped:{' '}
+                  {/* units === null means the shelf could not be read this pass
+                      (round-4 P2/P3) -- say so; "0 unit(s)" is the silent
+                      phantom-stock line the backend refuses to print. */}
+                  {(stockPayload.unmapped_stores as Array<Record<string, any>>)
+                    .map(
+                      (s) =>
+                        `${s.store_code || s.store_name || s.store_id} (` +
+                        (s.units == null ? 'an unknown number of units' : `${s.units} unit(s)`) +
+                        ')',
+                    )
+                    .join(', ')}
+                </span>
+              </p>
+            )}
+            {Array.isArray(stockPayload?.unknown_stores) && stockPayload.unknown_stores.length > 0 && (
+              <p className="mt-1">
+                On-hand unknown this pass (written nowhere, never as 0):{' '}
+                {(stockPayload.unknown_stores as string[]).map(shopLabel).join(', ')}
+              </p>
+            )}
+            {Array.isArray(stockPayload?.plan) && stockPayload.plan.length > 0 && (
+              <p className="mt-1 text-gray-600">
+                {/* LIVE: what Shopify ACCEPTED (the backend replaces the plan with
+                    the accepted rows after the write, so a refused location never
+                    prints as written). Preview: what a press WOULD send. */}
+                {stockResult?.mode === 'LIVE' ? 'Per shop, written to Shopify:' : 'Per shop, planned:'}{' '}
+                {Object.entries(
+                  (stockPayload.plan as Array<{ quantities?: Record<string, Record<string, number>> }>).reduce<
+                    Record<string, number>
+                  >((acc, row) => {
+                    Object.values(row.quantities ?? {}).forEach((perStore) => {
+                      Object.entries(perStore ?? {}).forEach(([store, qty]) => {
+                        acc[store] = (acc[store] ?? 0) + (Number(qty) || 0);
+                      });
+                    });
+                    return acc;
+                  }, {}),
+                )
+                  .map(([store, units]) => `${shopLabel(store)}: ${units}`)
+                  .join(' · ') || 'no rows'}
+                {stockPayload.plan.length >= 50 ? ' (first 50 listings)' : ''}
+              </p>
+            )}
+          </div>
         )}
         {mode?.is_live && !mode?.online_store_publication_id && (
           <p className="mt-3 inline-flex items-start gap-1 text-[11px] text-amber-800">
@@ -728,6 +942,7 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
+            {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
             {(lastRun.failures?.length ?? 0) > 0 && (
               <ul className="mt-2 space-y-1" aria-label="Live sync failures">
                 {lastRun.failures!.map((f, i) => (
@@ -892,6 +1107,34 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                       {(() => {
+                        const noStock = Number(
+                          (sweep.summary?.[ent.token]?.stock_not_written ?? 0) as number,
+                        );
+                        return noStock > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="Live on the website with NO quantity written: the stock pass reached no location (no shop mapped, or two SKUs on one inventory item). The listing shows SOLD OUT until it is fixed and pressed again - the lines on the stock card say which."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(noStock)} live with NO stock
+                            written
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const stockWarn = Number(
+                          (sweep.summary?.[ent.token]?.stock_warning ?? 0) as number,
+                        );
+                        return stockWarn > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Live, and the mapped shops' quantities WERE written - beside a warning the stock pass raised (a Shopify location that maps to no shop, one shop whose stock could not be read, a size the website still shows a number for). The stock line below says which."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(stockWarn)} live with a stock
+                            warning
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
                         const held = Number(
                           (sweep.summary?.[ent.token]?.taken_down_skipped ?? 0) as number,
                         );
@@ -932,6 +1175,22 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                     </div>
+                    {/* THE SWEEP'S OWN STOCK PASS (products only): its verdict is
+                        over EVERY listing, so a stray SKU or an unknown shop on an
+                        UNCHANGED listing shows up here and in no product row. */}
+                    {sweep.stock && (
+                      <StockPassLine
+                        stock={{
+                          ok: sweep.stock.ok,
+                          code: sweep.stock.code,
+                          error: sweep.stock.error,
+                          changed: sweep.stock.payload?.changed,
+                          synced: sweep.stock.payload?.synced,
+                          failed: sweep.stock.payload?.failed,
+                        }}
+                        testId="sweep-stock-line"
+                      />
+                    )}
                     {/* OS-046: a capped sweep must not read as complete. */}
                     {sweep.limit_reached && (
                       <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700">
@@ -948,7 +1207,12 @@ export default function OnlineShopifySyncPage() {
                             key={(r.target_id ?? '') + i}
                             className="text-[11px] text-gray-600 flex items-center gap-1"
                           >
-                            {r.ok ? (
+                            {/* ONE rule for "did this press do all it was pressed
+                                for?" -- pushToastLevel, the same one the drawer
+                                press uses. `r.ok` alone painted a green tick
+                                beside a listing that published with its stock
+                                written nowhere. */}
+                            {pushToastLevel(r) === 'success' ? (
                               <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
                             ) : (
                               <XCircle className="w-3 h-3 text-amber-600 shrink-0" />
@@ -1262,6 +1526,37 @@ function DiagTile({
         <div className="space-y-1">{children}</div>
       )}
     </div>
+  );
+}
+
+/** ONE rendering of a stock pass verdict -- the scheduled run's and the
+ *  products press's own (they used to be one and none). */
+function StockPassLine({
+  stock,
+  testId,
+}: {
+  stock: {
+    ok?: boolean | null;
+    changed?: number | null;
+    synced?: number | null;
+    failed?: number | null;
+    code?: string | null;
+    error?: string | null;
+  };
+  testId: string;
+}) {
+  return (
+    <p className={'mt-1 text-[11px] ' + (stock.ok === false ? 'text-amber-800' : 'text-gray-700')} data-testid={testId}>
+      <span className="font-medium">Stock pass:</span> {stock.ok === false ? 'NOT ok' : 'ok'} ·{' '}
+      {fmt(stock.changed)} changed · {fmt(stock.synced)} written · {fmt(stock.failed)} failed
+      {stock.code && (
+        <>
+          {' '}
+          · <code className="rounded bg-amber-50 px-1 text-[11px]">{stock.code}</code>
+        </>
+      )}
+      {stock.error && <> · {stock.error}</>}
+    </p>
   );
 }
 

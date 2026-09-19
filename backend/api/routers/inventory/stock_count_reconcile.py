@@ -195,6 +195,7 @@ async def reconcile_stock_count(
         units_not_voided_total = 0
         shrinkage_value_total = 0.0
         lines_skipped_moved = 0
+        voided_pids: list = []
 
         for v in variances:
             pid = v.get("product_id", "")
@@ -295,6 +296,8 @@ async def reconcile_stock_count(
                 not_voided = shrinkage_qty - voided
                 units_voided_total += voided
                 units_not_voided_total += not_voided
+                if voided and pid not in voided_pids:
+                    voided_pids.append(pid)
                 shrinkage_value = round(voided * unit_cost, 2)
                 shrinkage_value_total += shrinkage_value
 
@@ -348,6 +351,19 @@ async def reconcile_stock_count(
                         "overage_quantity": net_variance,
                     }
                 )
+
+        # Per-store online stock (owner ruling 2026-09-06): the written-off
+        # units left this shop's shelf (VOID), so its Shopify location goes
+        # down now, like a POS sale. Fire-and-forget, fail-soft.
+        if voided_pids:
+            try:
+                from ...services.online_stock_writeback import writeback_after_units_left
+
+                writeback_after_units_left(
+                    db, voided_pids, store_id, source="stock_count_writeoff"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[INVENTORY] write-off online stock write-back skipped: %s", e)
 
         # Persist shrinkage audit rows. NOT swallowed -- a lost audit trail for
         # stock we have just destroyed is exactly the failure worth shouting

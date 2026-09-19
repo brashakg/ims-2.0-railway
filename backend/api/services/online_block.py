@@ -199,20 +199,27 @@ def classify_blocked_skus(db, skus: List[str]) -> Tuple[Set[str], bool]:
     return blocked_skus(db, clean), True
 
 
-def blocked_skus(db, skus: List[str]) -> Set[str]:
+def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
     """Batch form of ``is_blocked_from_online`` for the availability paths: given
     a list of SKUs, return the subset that is blocked from online sale.
 
     Efficient: loads the blocked collections ONCE, resolves membership via the
     materialised view + the manual list + (for SMART) a single batched product
     load. Fail-soft -> empty set (never wrongly mark a SKU blocked on error).
+
+    ``strict=True`` RE-RAISES instead: every membership source -- the config,
+    the materialised view and the SMART product load -- becomes UNKNOWN rather
+    than "not blocked". THE online quantity rule uses it (audit round-6 P4).
+    There the block is the only thing holding a blocked collection at 0 online,
+    so a swallowed read error published the SHELF count for a banned product as
+    an absolute quantity and recorded it as the baseline.
     """
     out: Set[str] = set()
     clean = [s for s in (skus or []) if s]
     if not clean or db is None:
         return out
     try:
-        blocked = _blocked_collections(db)
+        blocked = _blocked_collections(db, strict=strict)
         if not blocked:
             return out
         sku_set = set(clean)
@@ -228,7 +235,8 @@ def blocked_skus(db, skus: List[str]) -> Set[str]:
                     if s in sku_set:
                         out.add(s)
             except Exception:  # noqa: BLE001
-                pass
+                if strict:
+                    raise
 
         # 2. Manual CUSTOM membership (catches an un-materialised collection).
         for c in blocked:
@@ -246,7 +254,7 @@ def blocked_skus(db, skus: List[str]) -> Set[str]:
             if str(c.get("collection_type") or "").upper() == "SMART"
         ]
         if remaining and smart:
-            prod_by_sku = _load_products_by_sku(db, list(remaining))
+            prod_by_sku = _load_products_by_sku(db, list(remaining), strict=strict)
             for c in smart:
                 rules = ecom_smart_rules.normalize_rules(c.get("rules") or [])
                 if not rules:
@@ -261,12 +269,17 @@ def blocked_skus(db, skus: List[str]) -> Set[str]:
                         remaining.discard(s)
         return out
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return out
 
 
-def _load_products_by_sku(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
+def _load_products_by_sku(
+    db, skus: List[str], *, strict: bool = False
+) -> Dict[str, Dict[str, Any]]:
     """sku -> a product doc (spine `products` then `catalog_products`), for SMART
-    rule evaluation. Fail-soft -> {}."""
+    rule evaluation. Fail-soft -> {}; ``strict=True`` re-raises (see
+    ``blocked_skus``)."""
     out: Dict[str, Dict[str, Any]] = {}
     if db is None or not skus:
         return out
@@ -277,5 +290,7 @@ def _load_products_by_sku(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
                 if s and s not in out:
                     out[s] = {k: v for k, v in d.items() if k != "_id"}
         except Exception:  # noqa: BLE001
+            if strict:
+                raise
             continue
     return out

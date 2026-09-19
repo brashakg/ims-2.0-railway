@@ -9,8 +9,9 @@ Tests for:
   - Shopify sync error does NOT bubble to the caller
     (sale + return MUST succeed even when Shopify is broken)
 
-No live network calls: nexus_providers.shopify_set_inventory_available
-and the upi_qr.reconcile_upi_payment are monkeypatched throughout.
+No live network calls: online_stock_writeback.writeback_skus (the ONE path
+to the Shopify stock writer) and upi_qr.reconcile_upi_payment are
+monkeypatched throughout.
 No real DB: a minimal MockCollection / MockDB is defined below.
 """
 
@@ -325,25 +326,12 @@ def test_shopify_writeback_simulated_when_writes_disabled():
         }
     ]
 
-    # Patch shopify_set_inventory_available to a sentinel that raises if called
-    # in live mode.
-    call_log: List[str] = []
-
-    async def fake_set_inv(db, inv_id, loc_id, qty):
-        call_log.append("LIVE_CALL")
-        from agents.nexus_providers import SyncResult
-
-        return SyncResult(ok=True, provider="shopify", kind="push", notes="SIMULATED")
-
-    with patch(
-        "api.services.online_stock_writeback.writeback_skus"
-    ) as mock_wbs:
-        # writeback_after_sale schedules writeback_skus asynchronously.
-        # Since we've patched it, it won't execute (no live network).
+    with patch("api.services.online_stock_writeback.writeback_skus") as mock_wbs:
+        # writeback_after_sale schedules writeback_skus (the ONE path to the
+        # stock writer); patched, nothing can reach the network.
         mock_wbs.return_value = None
         writeback_after_sale(None, items, "BV-BOK-01")
-        # Verify call_log is empty (no live Shopify call happened).
-        assert call_log == []
+        assert mock_wbs.called
 
 
 def test_shopify_sync_error_does_not_bubble_in_sale():

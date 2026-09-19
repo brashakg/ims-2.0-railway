@@ -31,7 +31,7 @@ Mounted at /api/v1/online-store/push:
   POST /collection/{collection_id} push an ecom_collections doc (+ smart ruleSet)
   POST /menu/{menu_id}            push an ecom_menus doc (the nav / mega-menu)
   POST /image/{image_id}          push ONE APPROVED product image (productCreateMedia)
-  POST /stock                     write the pooled quantity of every changed listing
+  POST /stock                     write each shop's own quantity of every changed listing (?dry_run=true previews)
   GET  /status                    per-entity pushed-vs-pending + the current mode
   GET  /locations                 Shopify's locations, joined to the shop each maps to
 
@@ -43,7 +43,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from agents.nexus_providers import _as_shopify_gid
 
 from .auth import require_roles
 from ..services import shopify_push
@@ -262,15 +264,27 @@ async def push_image(
 
 @router.post("/stock")
 async def push_stock(
+    dry_run: bool = Query(
+        False,
+        description=(
+            "Preview first: return the SIMULATED per-store plan -- no WRITE of "
+            "any kind, even when the gates are LIVE. A LIVE-gated preview makes "
+            "the ONE read-only locations query the press makes, so preview and "
+            "press give the same verdict."
+        ),
+    ),
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
-    """Write the pooled quantity of every product already on Shopify whose
-    number changed since it was last sent (owner ruling 2026-09-07 -- make
-    website quantities real). Products only; never publishes anything. DARK
-    -> a SIMULATED plan and zero network. ONE chained audit row per run (the
-    per-product outcome is in its payload). No DB -> 503."""
+    """Write each shop's own quantity of every product already on Shopify
+    whose per-store numbers changed since they were last sent (owner ruling
+    2026-09-06 -- every physical shop is a Shopify location). Products only;
+    never publishes anything. DARK -> a SIMULATED plan and zero network;
+    ``?dry_run=true`` with LIVE gates -> the same SIMULATED plan with NO WRITE,
+    plus the ONE read-only locations query the press makes (invariant 2 -- a
+    preview that reads green must mean a press would too). ONE chained audit
+    row per run (the per-product outcome is in its payload). No DB -> 503."""
     db = _require_db()
-    data = (await shopify_push.sync_stock_levels(db)).to_dict()
+    data = (await shopify_push.sync_stock_levels(db, dry_run=dry_run)).to_dict()
     _write_audit(data, current_user)
     return data
 
@@ -283,23 +297,54 @@ async def push_locations(
     location" dropdown (owner ruling 2026-09-06: every physical shop is a
     location). Each row carries ``mapped_store_id`` / ``mapped_store_code``
     from the ONE store reader (stores_util.physical_stores) so the dropdown
-    can show which shop already holds a location. DARK -> ``locations: []``
-    plus the gate reason and ZERO network. Read-only; nothing persisted.
-    No DB -> 503."""
+    can show which shop already holds a location, plus
+    ``unmapped_online_fulfilling`` from the WRITER's own predicate
+    (``shopify_push.is_stray_fulfilling``) -- the sync page used to re-derive
+    that rule in TypeScript and the two spellings already disagreed on a
+    location with no ``isActive`` field. The MIRROR rides along the same way
+    (recheck round 2): ``dead`` is the writer's own ``score_locations`` verdict
+    -- every MAPPED shop whose location cannot sell online, with the reason
+    the stock pass codes (``dead_mapped_reason``: unticked / deactivated /
+    gone from Shopify's list) -- and ``read`` says whether Shopify answered at
+    all. The page's shops table used to answer "Sells online" from
+    ``fulfillsOnlineOrders`` alone, so a DEACTIVATED location read "yes" and a
+    DELETED one (absent from a list Shopify omits deactivated locations from)
+    read "read needs LIVE" on a live read, two lines under a stock line coding
+    SHOPIFY_LOCATION_NOT_SELLING for the same shop. DARK -> ``locations: []``
+    plus the gate reason, ``read: False``, ``dead: []`` and ZERO network.
+    Read-only; nothing persisted. No DB -> 503."""
     db = _require_db()
     data = await shopify_push.list_locations(db)
+    mapped: Dict[str, str] = {}
     try:
-        by_gid = {
-            s["shopify_location_id"]: s
-            for s in physical_stores(db)
-            if s.get("shopify_location_id")
-        }
+        stores = physical_stores(db)
+        # "Mapped" the way the writer means it, for BOTH fields: a location two
+        # shops claim maps NEITHER of them (it IS a stray location), so the
+        # holder is read off the writer's own map -- never off the raw gid,
+        # where the last claimant won and the row said "mapped to WIZ-DHN-01"
+        # beside "maps to no shop" (recheck round 1). `claimed_by` lists every
+        # raw claimant so the dropdown can say "claimed by two shops".
+        by_store = {str(s.get("store_id") or ""): s for s in stores}
+        mapped = shopify_push.mapped_store_locations(stores)
+        holder_of = {gid: by_store.get(sid) or {} for sid, gid in mapped.items()}
+        claimants: Dict[str, list] = {}
+        for s in stores:
+            gid = str(s.get("shopify_location_id") or "").strip()
+            if gid:
+                claimants.setdefault(_as_shopify_gid(gid, "Location"), []).append(
+                    str(s.get("store_code") or s.get("store_id") or "")
+                )
     except Exception:  # noqa: BLE001 -- the join is a convenience, the list is the point
-        by_gid = {}
+        holder_of, claimants = {}, {}
     for row in data["locations"]:
-        holder = by_gid.get(row["id"])
+        holder = holder_of.get(row["id"])
         row["mapped_store_id"] = holder.get("store_id") if holder else None
         row["mapped_store_code"] = holder.get("store_code") if holder else None
+        row["claimed_by"] = sorted(claimants.get(row["id"]) or [])
+        row["unmapped_online_fulfilling"] = shopify_push.is_stray_fulfilling(row, set(holder_of))
+    verdict = shopify_push.score_locations(data["locations"], mapped)
+    data["read"] = verdict["read"]
+    data["dead"] = verdict["dead"]
     return data
 
 
@@ -655,6 +700,29 @@ async def push_all_pending(
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
+            elif data.get("code"):
+                # ANY OTHER code on an ok push is the STOCK pass not being
+                # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without
+                # its own bucket it left refused/withheld/failed all 0 and the
+                # page painted the press GREEN -- and on day 1 that is the
+                # NORMAL path, not an edge (Gangadham Pune fulfils online
+                # orders and is deliberately mapped to no shop, so every one of
+                # the 121 presses carries SHOPIFY_LOCATION_UNMAPPED). Asked as
+                # "is there a code?", not as a list of codes, so a code added
+                # later cannot read green here the way these did: the single
+                # press already decides it that way (pushToastLevel).
+                #
+                # TWO buckets, split on what Shopify ACCEPTED (recheck round
+                # 1): `set` == 0 is a listing live with tracked=true + DENY
+                # behind NO quantity, i.e. SOLD OUT; `set` > 0 is a listing
+                # whose mapped shops WERE written beside a warning (Pune stray,
+                # one shop unknown, a stray baseline SKU). The one bucket
+                # labelled every warning "NO stock written (sold out)" next to
+                # a line quoting the opposite.
+                if int(((data.get("stock") or {}).get("set")) or 0) > 0:
+                    bucket["stock_warning"] = bucket.get("stock_warning", 0) + 1
+                else:
+                    bucket["stock_not_written"] = bucket.get("stock_not_written", 0) + 1
         else:
             bucket["failed"] += 1
         results.append(data)
@@ -694,7 +762,7 @@ async def push_all_pending(
                 "taken_down_skipped"
             ] = taken_down_skipped
         # A press also pushes STOCK (owner ruling 2026-09-07): every listing
-        # whose pooled quantity changed since it was last sent, in one pass,
+        # whose PER-SHOP quantities changed since they were last sent, in one pass,
         # AFTER the product pushes so a product this press just created is
         # covered too. Its OWN key (not a `results` row): `results` and
         # `pushed_count` are per-object pushes, and a stock pass is neither a

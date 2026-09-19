@@ -35,6 +35,11 @@ aborts the whole run, so a partial delete is impossible)
 ---------------------------------------------------------------------------
   * The product is live or pushed on Shopify (`ecom.shopify_product_id` set).
     Take it off Shopify first -- this script does not call Shopify.
+  * One of its catalog_variants rows carries a live Shopify variant
+    (`shopify_variant_id` / `shopify_inventory_item_id`). A size's own twin
+    never carries a product id (push_product refuses variant-of products), so
+    the row IS the only sign the size is on the website; dropping it strands a
+    sellable Shopify variant whose quantity IMS then writes nowhere.
   * The product appears on any order line (`orders.items.product_id`).
     Deleting it would gut an invoice. There is no override.
   * The product has a stock unit that is not AVAILABLE (SOLD / RESERVED /
@@ -304,6 +309,21 @@ def refusals_for(target: Dict[str, Any]) -> List[str]:
             f"it is on Shopify ({gid}). Take the listing down on Shopify first -- "
             "this script does not call Shopify, and deleting the IMS row here "
             "would strand the live listing."
+        )
+
+    live_rows = [
+        row
+        for row in target["variants"]
+        if row.get("shopify_variant_id") or row.get("shopify_inventory_item_id")
+    ]
+    if live_rows:
+        names = sorted({str(row.get("sku") or row.get("variant_id") or "?") for row in live_rows})
+        reasons.append(
+            f"{len(live_rows)} of its size row(s) are on Shopify ({', '.join(names[:5])}). "
+            "A size's own twin never carries a product id, so the row is the only sign "
+            "the size is on the website -- dropping it would strand a sellable Shopify "
+            "variant whose quantity IMS then writes nowhere. Delete the variant in "
+            "Shopify admin first."
         )
 
     if target["order_count"]:

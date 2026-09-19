@@ -325,6 +325,18 @@ async def add_order_item(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[STOCK] add-item mark_units_sold failed: %s", exc)
 
+        # IMS = inventory MASTER: the unit just left this shop's shelf, so its
+        # Shopify location must stop selling it now -- the same fail-soft,
+        # fire-and-forget call the create-order door makes. This route is a
+        # door too (an API client adding a line to a DRAFT order); without it
+        # the website kept the pre-sale number until the next scheduled pass.
+        try:
+            from ...services.online_stock_writeback import writeback_after_sale
+
+            writeback_after_sale(None, [item_data], _store_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[STOCK] online write-back skipped: %s", exc)
+
         return {"message": "Item added to order", "item_id": item_data["item_id"]}
 
     return {"message": "Item added to order"}

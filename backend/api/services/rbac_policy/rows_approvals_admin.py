@@ -415,16 +415,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/admin/online-store/sync-health",
         "allowed": ["SUPERADMIN"],
     },
-    # BVI safety nets (Steps 3, 4, 6): drift detector, oversell repush, parity oracle.
+    # BVI safety nets (Steps 3, 6): drift detector, parity oracle. (The Step-4
+    # oversell repush -- a second, pooled stock writer -- was deleted with the
+    # per-store locations, owner ruling 2026-09-06.)
     # All narrowed to SUPERADMIN inline (same posture as sync-health above).
     {
         "method": "GET",
         "path": "/api/v1/admin/online-store/drift",
-        "allowed": ["SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/admin/online-store/repush-oversell",
         "allowed": ["SUPERADMIN"],
     },
     {

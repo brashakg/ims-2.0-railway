@@ -181,6 +181,18 @@ def _user_errors(body: Dict[str, Any], mutation_field: str) -> Optional[str]:
     return None
 
 
+def _user_error_codes(body: Dict[str, Any], mutation_field: str) -> set:
+    """The machine `code` of every userError on the named mutation field, as a
+    set -- `_user_errors` flattens to a string and cannot be keyed on. Empty
+    on a clean body, a malformed body, or errors that carry no code."""
+    try:
+        data = (body or {}).get("data") or {}
+        ue = (data.get(mutation_field) or {}).get("userErrors") or []
+        return {str(e["code"]) for e in ue if isinstance(e, dict) and e.get("code")}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 PUBLISH_SCOPE_MISSING = "PUBLISH_SCOPE_MISSING"
 _PUBLISH_SCOPE_MISSING_MSG = (
     "Saved on Shopify but not made visible: the IMS app has no "

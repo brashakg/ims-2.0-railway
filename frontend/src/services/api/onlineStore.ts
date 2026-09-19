@@ -158,6 +158,9 @@ export interface StockTallySummary {
   /** Live-read coverage: mapped SKUs that got a live quantity vs all mapped. */
   listed_live_rows?: number;
   listed_mapped_rows?: number;
+  /** True when IMS could not read the shops' on-hand: nothing is tallied and
+   *  nothing is shown as 0 on hand (an unreadable shelf is never "empty"). */
+  on_hand_unknown?: boolean;
 }
 
 export interface StockTallyResult {
@@ -266,6 +269,7 @@ export const onlineStoreApi = {
           listed_qty_live: !!s.listed_qty_live,
           listed_live_rows: num(s.listed_live_rows),
           listed_mapped_rows: num(s.listed_mapped_rows),
+          on_hand_unknown: !!s.on_hand_unknown,
         },
         available: true,
         reason: null,
@@ -1405,6 +1409,17 @@ export const imagesApi = {
 // resolve, TS2614, per past sessions).
 // ============================================================================
 
+/** One physical shop as the push status reports it (owner ruling 2026-09-06:
+ *  every physical shop is its own Shopify location, mapped on the
+ *  Organization page). `shopify_location_id` null => not mapped yet. */
+export interface PushModeStore {
+  store_id?: string | null;
+  store_code?: string | null;
+  store_name?: string | null;
+  shopify_location_id?: string | null;
+  shopify_location_name?: string | null;
+}
+
 /** Effective push posture + the three gate components (mirrors
  *  shopify_push.push_mode_status). `is_live` is the single source of truth the
  *  UI keys off; the components explain WHY when DARK. */
@@ -1428,16 +1443,16 @@ export interface PushMode {
   /** 'pinned' (SHOPIFY_ONLINE_STORE_PUBLICATION_ID), 'looked_up', or
    *  'unresolved'. */
   online_store_publication_source?: string | null;
-  /** THE FOURTH DOOR (2026-09-07, make website quantities real): the Shopify
-   *  location the pooled quantity is written at. null => every stock write
-   *  refuses with a stable code (never guessed). */
-  online_location_id?: string | null;
-  /** 'pinned' (SHOPIFY_ONLINE_LOCATION_ID), 'stored' (a previous lookup,
-   *  persisted), 'looked_up', or 'unresolved'. */
-  online_location_source?: string | null;
-  /** ONLINE_LOCATION_UNRESOLVED | ONLINE_LOCATION_AMBIGUOUS when unresolved. */
-  online_location_code?: string | null;
-  online_location_error?: string | null;
+  /** THE FOURTH DOOR (owner ruling 2026-09-06, per-store locations): every
+   *  physical shop is its own Shopify location, set on the Organization page.
+   *  Counts are Mongo-only (no network); null => the store list could not be
+   *  read. A shop that HOLDS listed stock without a location makes the stock
+   *  pass report STORE_UNMAPPED (the mapped shops are still written). */
+  stores_total?: number | null;
+  stores_mapped?: number | null;
+  unmapped_stores?: PushModeStore[];
+  /** Every physical shop with its mapping (for the sync page's table). */
+  stores?: PushModeStore[];
   /** Advisory note (the single-writer / cutover explanation). */
   single_writer_note?: string | null;
 }
@@ -1458,6 +1473,11 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** The per-shop stock sub-result (backend PushResult.stock) -- only what the
+   *  toast reads: `quantities` is {sku: {store_id: qty}} as ACCEPTED by
+   *  Shopify. All zeros on a successful press means the listing went live
+   *  SOLD OUT, which is correct (IMS is master) but must be said out loud. */
+  stock?: { ok?: boolean; quantities?: Record<string, Record<string, number>> | null } | null;
 }
 
 /** Per-entity pushed-vs-pending counts (shapes differ per entity, mirroring the
@@ -1524,6 +1544,18 @@ export interface LiveSyncRun {
   limit?: number | null;
   limit_reached?: boolean | null;
   failures?: LiveSyncFailure[] | null;
+  /** The stock pass the run ends with (sync_stock_levels -- per-shop
+   *  quantities at each shop's Shopify location). `ok=false` with a code
+   *  (STORE_UNMAPPED / STOCK_ONHAND_UNKNOWN / ...) is the only trace a
+   *  scheduled tick leaves besides the task it files. */
+  stock?: {
+    ok?: boolean | null;
+    changed?: number | null;
+    synced?: number | null;
+    failed?: number | null;
+    code?: string | null;
+    error?: string | null;
+  } | null;
 }
 
 export interface LiveSyncStatus {
@@ -1578,6 +1610,17 @@ export interface PushSweepResult {
            *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
+          /** Products that published but whose QUANTITIES reached no Shopify
+           *  location at all (no shop mapped, two SKUs on one inventory
+           *  item...). Counted in `pushed` too -- the listing is live -- but
+           *  live with tracked=true + DENY behind no quantity is a listing that
+           *  reads SOLD OUT. */
+          stock_not_written?: number;
+          /** Products that published with their mapped shops' quantities
+           *  WRITTEN, beside a stock warning (a stray Shopify location, one
+           *  shop unknown, a stray baseline SKU...). Not sold out -- the
+           *  stock card's lines say what the warning is. */
+          stock_warning?: number;
           /** Products a take-down is holding off the storefront: the sweep
            *  skips them until someone presses that one product explicitly. */
           taken_down_skipped?: number;
@@ -1590,6 +1633,12 @@ export interface PushSweepResult {
     | null;
   /** The per-doc PushResult rows (SIMULATED plans when DARK). */
   results?: PushResult[] | null;
+  /** The whole-catalogue STOCK pass that rides a products press (backend
+   *  `stock`, a PushResult with entity "stock"; null when no products were
+   *  swept). Its verdict is over EVERY listing, not only the rows above, so an
+   *  unchanged listing's stray SKU or unknown shop shows up HERE and nowhere
+   *  else on the press. */
+  stock?: PushResult | null;
 }
 
 /** One row of the read-only push HISTORY (the chained ONLINE_STORE_PUSH audit
@@ -1636,15 +1685,41 @@ export interface ShopifyLocation {
   province?: string | null;
   mapped_store_id?: string | null;
   mapped_store_code?: string | null;
+  /** Every shop whose record carries this gid (store codes). One entry is the
+   *  holder; TWO OR MORE is a location the writer writes for NOBODY
+   *  (`mapped_store_id` is then null) -- the dropdown says "claimed by" instead
+   *  of naming a holder the writer does not honour. */
+  claimed_by?: string[] | null;
+  /** THE verdict, computed by the writer's own predicate
+   *  (shopify_push.is_stray_fulfilling): this location sells online and maps to
+   *  no IMS shop, so Shopify keeps selling whatever number it holds there and
+   *  IMS never writes it. Re-deriving it here in TypeScript is what made the
+   *  page and the backend disagree on a location with no `isActive` field. */
+  unmapped_online_fulfilling?: boolean;
 }
 
 /** The locations read. DARK (a push gate off) or a failed read => `locations`
  *  is [] and `reason` says why; the dropdown must then keep whatever mapping
  *  the store already has instead of clearing it. */
+/** A MAPPED shop whose Shopify location cannot sell online, in the WRITER's
+ *  own words (shopify_push.dead_mapped_reason): not ticked to fulfil online
+ *  orders, deactivated, or gone from Shopify's list. The stock pass codes the
+ *  same shop SHOPIFY_LOCATION_NOT_SELLING for the same reason. */
+export interface DeadMappedLocation {
+  store_id: string;
+  location_id?: string | null;
+  name?: string | null;
+  reason: string;
+}
+
 export interface ShopifyLocationsRead {
   mode: 'LIVE' | 'SIMULATED';
   reason?: string | null;
   locations: ShopifyLocation[];
+  /** Did Shopify answer the location list at all? False when DARK, on an
+   *  error, or on an EMPTY answer (a shop always has one location). */
+  read?: boolean;
+  dead?: DeadMappedLocation[];
 }
 
 const PUSH_BASE = '/online-store/push';
@@ -1684,9 +1759,11 @@ export const pushApi = {
         mode: data.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
         reason: data.reason ?? null,
         locations: Array.isArray(data.locations) ? (data.locations as ShopifyLocation[]) : [],
+        read: data.read === true,
+        dead: Array.isArray(data.dead) ? (data.dead as DeadMappedLocation[]) : [],
       };
     } catch {
-      return { mode: 'SIMULATED', reason: 'unavailable', locations: [] };
+      return { mode: 'SIMULATED', reason: 'unavailable', locations: [], read: false, dead: [] };
     }
   },
 
@@ -1708,10 +1785,10 @@ export const pushApi = {
           api_version: mode.api_version ?? null,
           online_store_publication_id: mode.online_store_publication_id ?? null,
           online_store_publication_source: mode.online_store_publication_source ?? null,
-          online_location_id: mode.online_location_id ?? null,
-          online_location_source: mode.online_location_source ?? null,
-          online_location_code: mode.online_location_code ?? null,
-          online_location_error: mode.online_location_error ?? null,
+          stores_total: mode.stores_total ?? null,
+          stores_mapped: mode.stores_mapped ?? null,
+          unmapped_stores: Array.isArray(mode.unmapped_stores) ? mode.unmapped_stores : [],
+          stores: Array.isArray(mode.stores) ? mode.stores : [],
           single_writer_note: mode.single_writer_note ?? null,
         },
         db_connected: !!data.db_connected,
@@ -1823,12 +1900,20 @@ export const pushApi = {
     };
   },
 
-  /** Write the pooled quantity of every listing whose number changed since it
-   *  was last sent (POST /push/stock, 2026-09-07). Products already on Shopify
-   *  only; publishes nothing. SIMULATED (a plan, no Shopify call) when the
-   *  gates are dark. Throws on HTTP failure so the caller can toast. */
-  pushStock: async (): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/stock`, undefined, SWEEP_TIMEOUT);
+  /** Write each shop's own quantity, per SKU, at that shop's Shopify location
+   *  for every listing whose per-store numbers changed since they were last
+   *  sent (POST /push/stock; owner ruling 2026-09-06). Products already on
+   *  Shopify only; publishes nothing. SIMULATED (a plan, NO write of any kind)
+   *  when the gates are dark OR when `dryRun` is set ("Preview first"). Dark
+   *  means zero network; a LIVE-gated preview still makes the ONE read-only
+   *  locations query the press makes, so both give the same verdict. Throws on
+   *  HTTP failure so the caller can toast. */
+  pushStock: async (dryRun = false): Promise<PushResult> => {
+    const res = await api.post(
+      `${PUSH_BASE}/stock${dryRun ? '?dry_run=true' : ''}`,
+      undefined,
+      SWEEP_TIMEOUT,
+    );
     return (res?.data ?? {}) as PushResult;
   },
 

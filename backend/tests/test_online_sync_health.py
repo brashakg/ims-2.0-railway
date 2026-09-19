@@ -92,6 +92,22 @@ class _FakeDb:
     def __getitem__(self, name):
         return self._colls.get(name, _FakeColl([]))
 
+    # The ONE shop reader (stores_util.physical_stores) reads through
+    # `get_collection`, exactly like the writer it is shared with.
+    def get_collection(self, name):
+        return self[name]
+
+
+def _shops(*extra):
+    """The `stores` collection the on-hand reader scopes to: one ACTIVE
+    physical shop, plus whatever rows a test adds (a deactivated shop, ...)."""
+    return _FakeColl(
+        [
+            {"store_id": "BV-DHN-02", "store_code": "BV-DHN-02", "store_type": "RETAIL", "is_active": True},
+            *extra,
+        ]
+    )
+
 
 # ---------------------------------------------------------------------------
 # PURE service tests
@@ -236,6 +252,22 @@ class _StockUnitsColl(_FakeColl):
             preds = [self._status_pred((c or {}).get("status")) for c in or_clause]
         elif "status" in match:
             preds = [self._status_pred(match["status"])]
+        # ...and the STORE predicate, because the pooled read excludes the
+        # ONLINE stores ({$nin: [...]}) and a double that ignored store_id
+        # would count a phantom online unit and prove nothing.
+        store_cond = match.get("store_id")
+
+        def _store_ok(sid):
+            if store_cond is None:
+                return True
+            if isinstance(store_cond, dict):
+                if "$nin" in store_cond:
+                    return sid not in store_cond["$nin"]
+                if "$in" in store_cond:
+                    return sid in store_cond["$in"]
+                return True
+            return sid == store_cond
+
         counts: Dict[str, int] = {}
         for r in self._rows:
             pid = r.get("product_id")
@@ -243,6 +275,8 @@ class _StockUnitsColl(_FakeColl):
                 continue
             st = r.get("status", None) if "status" in r else None
             if preds is not None and not any(p(st) for p in preds):
+                continue
+            if not _store_ok(r.get("store_id")):
                 continue
             counts[pid] = counts.get(pid, 0) + int(r.get("quantity", 1) or 1)
         return iter([{"_id": pid, "n": n} for pid, n in counts.items()])
@@ -258,18 +292,19 @@ def _tally_db():
             {"product_id": "P3", "sku": "SKU-OFFLINE", "name": "Local Only", "is_active": True},
         ]
     )
+    shop = {"store_id": "BV-DHN-02"}
     stock = _StockUnitsColl(
         [
             # P1: 5 AVAILABLE, 1 RESERVED -> sellable 4
-            *[{"product_id": "P1", "status": "AVAILABLE", "quantity": 1} for _ in range(5)],
-            {"product_id": "P1", "status": "RESERVED", "quantity": 1},
+            *[{"product_id": "P1", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(5)],
+            {"product_id": "P1", "status": "RESERVED", "quantity": 1, **shop},
             # P2: 2 AVAILABLE, 0 RESERVED -> sellable 2
-            *[{"product_id": "P2", "status": "AVAILABLE", "quantity": 1} for _ in range(2)],
+            *[{"product_id": "P2", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(2)],
             # P3: 3 AVAILABLE (but not listed online)
-            *[{"product_id": "P3", "status": "AVAILABLE", "quantity": 1} for _ in range(3)],
+            *[{"product_id": "P3", "status": "AVAILABLE", "quantity": 1, **shop} for _ in range(3)],
         ]
     )
-    return _FakeDb({"products": products, "stock_units": stock})
+    return _FakeDb({"products": products, "stock_units": stock, "stores": _shops()})
 
 
 def _patch_online(monkeypatch, mapping):
@@ -508,3 +543,252 @@ def test_endpoint_requires_auth(client):
     # No token -> the route's own 401 (auth), never a silent 200.
     r = client.get(_EP)
     assert r.status_code in (401, 403)
+
+
+def test_a_unit_parked_on_the_ONLINE_store_never_counts_as_on_hand(monkeypatch):
+    """PANEL ROUND 7 (one-rule P4). `_on_hand_by_product` is a SECOND on-hand
+    reader: it shares `item_events.on_hand_match()` with the writer but did NOT
+    exclude the ONLINE stores, so the same unit was on hand to the tile and gone
+    to the writer. An AVAILABLE unit parked on BV-ONLINE-01 is unpickable (the
+    online store has no shelf, POS is blocked on it), so
+    online_stock_writeback publishes 0 for it -- while this reader counted it and
+    classified a listing of 1 against a shelf of 0 as OK. That is a REAL
+    oversell hidden by the tile whose whole job is to find them, and it
+    contradicts this branch's own T14 ("a phantom online unit never counts
+    anywhere").
+
+    Drop the `$nin` on the pooled branch -> the phantom unit is on hand again,
+    sellable 1, no risk -> this fails."""
+    _patch_online(monkeypatch, {"SKU-ONLINE-ONLY": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P9", "sku": "SKU-ONLINE-ONLY", "name": "Phantom", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
+            ),
+            "stores": _shops(),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-ONLINE-ONLY": 1})
+
+    row = out["items"][0]
+    assert row["on_hand"] == 0, "no shop can ship it, so no shop holds it"
+    assert row["sellable"] == 0
+    assert row["oversell_risk"] is True, "1 listed against 0 shippable IS the risk"
+    assert out["summary"]["at_risk_count"] == 1
+
+
+def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(monkeypatch):
+    """PANEL ROUND 7 (one-rule P4, the OTHER screen the finding names). The
+    oversell-risk tile stopped counting a unit parked on BV-ONLINE-01 (the test
+    above) -- but the catalog reconciliation screen (GET
+    /catalog/online-stock-reconcile, "All stores") read the ROUTER's physical
+    counter, `routers.inventory._on_hand_by_product`, which never excluded the
+    ONLINE stores. Same breaking input, second screen: one AVAILABLE unit on
+    BV-ONLINE-01, the website listing 1, the shops holding 0 -> in_store 1,
+    status OK, the real oversell hidden on the screen whose job is to find it.
+
+    Two online screens, ONE reader. Point catalog.py back at the router helper
+    -> in_store reads 1 and the row is OK -> this fails."""
+    import asyncio
+
+    from api.routers import catalog
+    from api.services import stock_allocation
+
+    class _Db(_FakeDb):
+        # The router helper reads `db.get_collection`; the health reader reads
+        # `db[name]`. Both work here, so the REVERTED import counts the phantom
+        # unit (in_store 1) instead of failing soft to {} and passing by accident.
+        def get_collection(self, name):
+            return self[name]
+
+    db = _Db(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P9", "sku": "SKU-ONLINE-ONLY", "brand": "Phantom", "model": "X", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
+            ),
+        }
+    )
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        catalog, "online_status_for_skus", lambda db, skus: {"SKU-ONLINE-ONLY": {"online": True}}
+    )
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+
+    async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 1
+        return {"qty": {"SKU-ONLINE-ONLY": 1}, "live": 1, "mapped": 1}
+
+    monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
+
+    out = asyncio.run(
+        catalog.online_stock_reconcile(
+            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+        )
+    )
+    row = out["items"][0]
+    assert row["in_store"] == 0, "no shop can ship it, so no shop holds it -- same as the tile"
+    assert row["status"] == stock_allocation.OVERSELL_RISK
+
+
+def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
+    """The other direction: the exclusion is the ONLINE stores, not the shops."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+            "stores": _shops(),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 1})
+    assert out["items"][0]["on_hand"] == 1 and out["items"][0]["oversell_risk"] is False
+
+
+def test_R8_a_unit_at_a_deactivated_shop_never_counts_on_the_tile(monkeypatch):
+    """RECHECK ROUND 2 (one-rule, the second on-hand reader -- the round-7 P4
+    fix took the wrong spelling). `_on_hand_by_product` excluded the ONLINE
+    stores through `_online_store_ids`, while the WRITER's shop list is
+    `stores_util.physical_stores`: ACTIVE and not online. One AVAILABLE unit at
+    a DEACTIVATED shop (the writer suite's own BV-OLD row), Shopify listing 1,
+    active shops holding 0 -> the writer publishes 0 everywhere (T14, "an
+    inactive shop never counts anywhere") while this tile read in_store=1 and
+    classified OK: a hidden oversell on the tile and on the catalog
+    reconciliation screen, which imports the same function.
+
+    Put the `$nin: online_ids` spelling back -> BV-OLD's unit is on hand
+    again, no risk -> this fails."""
+    _patch_online(monkeypatch, {"SKU-OLD": {"online": True, "online_stock": None}})
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P7", "sku": "SKU-OLD", "name": "Old shop's", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P7", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-OLD"}]
+            ),
+            "stores": _shops(
+                {"store_id": "BV-OLD", "store_code": "BV-OLD", "store_type": "RETAIL", "is_active": False}
+            ),
+        }
+    )
+
+    out = sh.stock_tally_summary(db, online_qty={"SKU-OLD": 1})
+
+    row = out["items"][0]
+    assert row["on_hand"] == 0, "the writer publishes it nowhere, so the tile holds it nowhere"
+    assert row["oversell_risk"] is True and out["summary"]["at_risk_count"] == 1
+
+
+def test_R8_an_unreadable_shop_list_is_unknown_on_the_tile_never_every_unit(monkeypatch):
+    """The polarity of the fix above: a shop list that cannot be read is
+    UNKNOWN (None -- see test_R9 below for what the tile does with it), never
+    "count every unit" -- the writer aborts the batch on the same failure
+    (STRICT). Fall back to an unscoped count on the exception -> on_hand 1 ->
+    this fails."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})
+
+    class _Dead(_FakeColl):
+        def find(self, *a, **k):
+            raise RuntimeError("stores read died")
+
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+            "stores": _Dead(),
+        }
+    )
+    assert sh._on_hand_by_product(db, ["P8"]) is None
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 1 after R8 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+class _DeadStores(_FakeColl):
+    def find(self, *a, **k):
+        raise RuntimeError("stores read died")
+
+
+def _unknown_shelf_db(**product_extra):
+    return _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "brand": "Real", "model": "X",
+                  "is_active": True, **product_extra}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+            "stores": _DeadStores(),
+        }
+    )
+
+
+def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tile_or_the_tally(monkeypatch):
+    """Display fallback, unknown printed as 0 (recheck round 1).
+    `_on_hand_by_product` returned {} when the shop list could not be read
+    (its docstring: 'the tile shows no number') -- and BOTH consumers
+    defaulted the missing key to a confident 0: one unreadable shop list
+    turned every online SKU into on-hand 0 + OVERSELL_RISK under page copy
+    that said the on-hand numbers were live. The writer's own forbidden line
+    ('never 0 for unknown'), one reader over.
+
+    UNKNOWN is None: the tile counts it as onhand_unknown (never oversell),
+    the tally says on_hand_unknown and tallies nothing. Return {} from the
+    unknown branch again -> in_store 0 against a listed 3 -> OVERSELL_RISK ->
+    this fails."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": 3}})
+    db = _unknown_shelf_db()
+    assert sh._on_hand_by_product(db, ["P8"]) is None
+    tile = sh.pending_reconcile_summary(db)
+    assert tile["scanned"] == 1 and tile["onhand_unknown"] == 1, tile
+    assert tile["oversell_risk"] == 0 and tile["pending"] == 0 and tile["oversell_risk_units"] == 0, tile
+    tally = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 3})
+    assert tally["items"] == [] and tally["summary"]["on_hand_unknown"] is True, tally
+    assert tally["summary"]["at_risk_count"] == 0 and tally["summary"]["total_on_hand"] == 0
+
+
+def test_R9_the_reconciliation_screen_shows_an_unknown_on_hand_as_unknown(monkeypatch):
+    """The other consumer (GET /catalog/online-stock-reconcile): in_store
+    None, recommended None, ONHAND_UNKNOWN -- never 0 + OVERSELL_RISK. Default
+    the missing key to 0 again -> OVERSELL_RISK -> this fails."""
+    import asyncio
+
+    from api.routers import catalog
+    from api.services import stock_allocation
+
+    db = _unknown_shelf_db()
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {"SKU-REAL": {"online": True}})
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+
+    async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 3
+        return {"qty": {"SKU-REAL": 3}, "live": 1, "mapped": 1}
+
+    monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
+    out = asyncio.run(
+        catalog.online_stock_reconcile(
+            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+        )
+    )
+    row = out["items"][0]
+    assert row["in_store"] is None and row["recommended"] is None and row["delta"] is None, row
+    assert row["status"] == stock_allocation.ONHAND_UNKNOWN
+    assert out["summary"]["oversell_risk"] == 0 and out["summary"]["onhand_unknown"] == 1

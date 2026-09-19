@@ -828,30 +828,6 @@ async def online_store_drift(
     return await detect_drift(_sync_health_db(), limit=limit)
 
 
-@router.post("/online-store/repush-oversell")
-async def online_store_repush_oversell(
-    dry_run: bool = True,
-    current_user: dict = Depends(get_current_user),
-):
-    """SUPERADMIN-only re-push sweep for oversell-risk SKUs (Step 4 BVI safety net).
-
-    Identifies SKUs where the online-listed quantity exceeds physical on-hand
-    (oversell risk) and re-runs the absolute Shopify inventory writeback via
-    nexus_providers.shopify_set_inventory_available.
-
-    DARK by default (dry_run=True): returns the plan without touching Shopify.
-    Live execution requires dry_run=False AND IMS_SHOPIFY_WRITES=1 AND
-    DISPATCH_MODE=live AND Shopify creds. Never 500s."""
-    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
-        raise HTTPException(
-            status_code=403,
-            detail="Repush sweep is restricted to SUPERADMIN",
-        )
-    from ..services.online_sync_health import repush_oversell_risk
-
-    return await repush_oversell_risk(_sync_health_db(), dry_run=dry_run)
-
-
 @router.get("/online-store/parity")
 async def online_store_parity(
     current_user: dict = Depends(get_current_user),

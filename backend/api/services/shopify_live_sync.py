@@ -173,18 +173,16 @@ def all_docs(db, name: str) -> List[Dict]:
 
 
 def variants_for_product(db, product: Dict) -> List[Dict]:
-    """All catalog_variants whose parent is this product (by parent_product_id or
-    parent_sku). Fail-soft -> []."""
+    """All catalog_variants whose parent is this product -- the UNION of the
+    parent_product_id and parent_sku links (online_catalog.variant_rows_for_
+    product, the ONE reader). It used to fall back from one link to the other,
+    which DROPS every sku-linked row of a parent that also has one id-linked
+    row: this is the PRICE push, so that size shipped at the parent's price
+    forever. Fail-soft -> []."""
     try:
-        from database.repositories import CatalogVariantRepository
+        from .online_catalog import variant_rows_for_product
 
-        repo = CatalogVariantRepository(db["catalog_variants"])
-        pid = product.get("id") or product.get("product_id")
-        rows = repo.list_by_parent(pid) if pid else []
-        if not rows and product.get("sku"):
-            # Fall back to parent_sku linkage when the id link wasn't set.
-            rows = repo.find_many({"parent_sku": product.get("sku")})
-        return rows or []
+        return variant_rows_for_product(db, product)
     except Exception:  # noqa: BLE001
         return []
 
@@ -477,7 +475,7 @@ async def sync_live_products(
     limit: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Re-push every product that is already on Shopify AND dirty, then run
-    the stock pass (sync_stock_levels) over every listing whose pooled
+    the stock pass (sync_stock_levels) over every listing whose per-shop
     quantity changed. Never publishes a gid-less product (counted, not
     pushed). Runs the
     engine behind the same three gates (DARK => SIMULATED, no network), writes

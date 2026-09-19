@@ -35,6 +35,7 @@ vi.mock('../../../services/api/onlineStore', () => ({
   onlineStoreApi: { getSummary: vi.fn() },
   pushApi: {
     getStatus: vi.fn(),
+    getLocations: vi.fn().mockResolvedValue({ mode: 'SIMULATED', reason: null, locations: [] }),
     pushAllPending: vi.fn(),
     getHistory: vi.fn(),
     pushProduct: vi.fn(),
@@ -87,7 +88,11 @@ vi.mock('react-router-dom', () => ({
 
 import OnlineProductsPage from '../OnlineProductsPage';
 import OnlineShopifySyncPage from '../OnlineShopifySyncPage';
-import { formatPushResult } from '../../../components/online-store/OnlineStoreSyncBanner';
+import {
+  formatPushResult,
+  pushToastLevel,
+  wroteZeroEverywhere,
+} from '../../../components/online-store/OnlineStoreSyncBanner';
 import { onlineStoreApi, pushApi, syncHealthApi } from '../../../services/api/onlineStore';
 import { catalogProductsApi } from '../../../services/api/catalog';
 import { buildApiError } from '../../../services/api/client';
@@ -163,6 +168,60 @@ describe('formatPushResult', () => {
     const line = formatPushResult('Ray-Ban RB2140', OLD_PRICE);
     expect(line).toContain(OLD_PRICE_MSG);
     expect(line).toContain('[PRICE_NOT_SYNCED]');
+  });
+});
+
+describe('a live listing that went out SOLD OUT says so', () => {
+  // Round 6, first-push P4. With 121 products and one stock unit, every first
+  // publish writes an explicit 0 at all three mapped locations and goes
+  // tracked=true + DENY. That is CORRECT (IMS is master) but no code named it:
+  // res.stock.ok is true with code null, so the toast read "Frame X: LIVE
+  // (create)" in plain green over a listing that is live and sold out. Only
+  // the sync page's aggregate line said it, and the per-product drawer press
+  // never renders res.stock.quantities at all.
+  const LIVE_ZERO = {
+    mode: 'LIVE' as const,
+    entity: 'product',
+    action: 'create',
+    ok: true,
+    shopify_id: 'gid://shopify/Product/111',
+    stock: { ok: true, quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'WIZ-DHN-01': 0, 'BV-BOK-02': 0 } } },
+  };
+
+  it('names the sold-out press and leaves a real quantity alone', () => {
+    expect(wroteZeroEverywhere(LIVE_ZERO as any)).toBe(true);
+    expect(formatPushResult('Carrera 1', LIVE_ZERO as any)).toContain('SOLD OUT');
+    const withStock = {
+      ...LIVE_ZERO,
+      stock: { ok: true, quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'BV-BOK-02': 1 } } },
+    };
+    expect(wroteZeroEverywhere(withStock as any)).toBe(false);
+    expect(formatPushResult('Carrera 1', withStock as any)).not.toContain('SOLD OUT');
+  });
+
+  it('a dry run and a press that wrote nothing at all are not sold-out claims', () => {
+    expect(wroteZeroEverywhere({ ...LIVE_ZERO, mode: 'SIMULATED' } as any)).toBe(false);
+    expect(wroteZeroEverywhere({ ...LIVE_ZERO, stock: { ok: false, quantities: {} } } as any)).toBe(
+      false,
+    );
+    expect(wroteZeroEverywhere({ ...LIVE_ZERO, stock: null } as any)).toBe(false);
+  });
+});
+
+describe('pushToastLevel', () => {
+  // Round 3, ops P5: the owner's first "Send to website" press on the rebuilt
+  // catalogue publishes a tracked + DENY listing whose stock write was refused
+  // (STORE_UNMAPPED: sold out at every location until a shop is mapped). The
+  // press comes back ok=True with a code, and `if (res.ok) toast.success(msg)`
+  // painted that green. Revert pushToastLevel's `r.code ? 'warning'` -> the
+  // second expectation fails.
+  it('green only for a clean push; a coded ok is a warning, not a success', () => {
+    expect(pushToastLevel({ ...OLD_PRICE, code: null, error: null } as any)).toBe('success');
+    expect(pushToastLevel(OLD_PRICE as any)).toBe('warning');
+    expect(
+      pushToastLevel({ ...OLD_PRICE, code: 'STORE_UNMAPPED', error: 'no shop mapped' } as any),
+    ).toBe('warning');
+    expect(pushToastLevel(DENIED as any)).toBe('error');
   });
 });
 

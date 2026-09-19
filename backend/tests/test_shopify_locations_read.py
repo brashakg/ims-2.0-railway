@@ -12,10 +12,10 @@ per-store "Shopify location" dropdown. Pinned here, each REVERT-PROOF:
   3. The route joins each location to the shop already holding it through the
      ONE store reader (mapped_store_id / mapped_store_code).
   4. The rbac row is {ADMIN, SUPERADMIN} and the module :read union is
-     unchanged; BOTH locations queries page 50 wide; the dropdown's own
-     query (_LOCATIONS_LIST_QUERY) carries shipsInventory/address while the
-     picker's (_LOCATIONS_QUERY, the live Push-stock path) keeps #1125's
-     shape -- the read used here is the list query.
+     unchanged; the ONE locations query (_LOCATIONS_LIST_QUERY -- #1125's
+     single-online-location picker is deleted, see
+     test_no_single_online_location.py) pages 50 wide and carries
+     shipsInventory/address for the dropdown.
 
 Every Shopify call is MOCKED at shopify_push._graphql. No Mongo.
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_shopify_locations_read.py -q
@@ -37,7 +37,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from strict_fakes import StrictDB  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
 from api.services import shopify_push  # noqa: E402
-from api.services.shopify_push.queries import _LOCATIONS_LIST_QUERY, _LOCATIONS_QUERY  # noqa: E402
+from api.services.shopify_push.queries import _LOCATIONS_LIST_QUERY  # noqa: E402
 
 BOKARO = "gid://shopify/Location/58793230523"
 PUNE = "gid://shopify/Location/76684427513"
@@ -111,7 +111,7 @@ def test_live_maps_every_node_and_promotes_a_bare_id(monkeypatch):
     _live(monkeypatch, spy)
     out = _run(shopify_push.list_locations(StrictDB()))
     assert out["mode"] == "LIVE" and out["reason"] is None
-    assert spy.calls == [_LOCATIONS_LIST_QUERY]  # the dropdown's query, not the picker's
+    assert spy.calls == [_LOCATIONS_LIST_QUERY]  # the ONE locations query
     assert out["locations"] == [
         {"id": BOKARO, "name": "Better Vision Sector 4", "isActive": True, "fulfillsOnlineOrders": True,
          "shipsInventory": True, "city": "Bokaro", "province": "Jharkhand"},
@@ -180,6 +180,25 @@ def test_route_joins_mapped_store_through_physical_stores(client, world, monkeyp
     assert rows["gid://shopify/Location/3"]["mapped_store_id"] is None
 
 
+def test_R4_P4_the_route_stamps_the_writers_own_stray_location_verdict(client, world, monkeypatch):
+    """ROUND-4 P4 (one rule, two implementations -- display echo). The sync page
+    re-derived "fulfils online orders and maps to no IMS shop" in TypeScript
+    from the raw locations plus the shop list, duplicating
+    inventory.is_stray_fulfilling (the predicate behind location_verdict) --
+    and the two already differed
+    (`isActive !== false` on the page, truthy `isActive` in the backend). The
+    route now stamps the WRITER's own predicate on every row and the page just
+    renders it. Drop `unmapped_online_fulfilling` from the route -> fails."""
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    rows = {row["id"]: row for row in r.json()["locations"]}
+    assert rows[BOKARO]["unmapped_online_fulfilling"] is False, "BV-BOK-02 holds it"
+    assert rows[PUNE]["unmapped_online_fulfilling"] is True, (
+        "an ONLINE store carrying the gid by hand is not a shop, so Pune is stray"
+    )
+    assert rows["gid://shopify/Location/3"]["unmapped_online_fulfilling"] is False
+
+
 def test_route_dark_is_empty_with_reason_and_zero_network(client, world, monkeypatch):
     boom = _CountingBoom()
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
@@ -220,10 +239,75 @@ def test_rbac_row_is_admin_superadmin_and_the_read_union_is_unchanged():
     }
 
 
-def test_locations_queries_page_fifty_wide_and_the_picker_shape_is_untouched():
-    for q in (_LOCATIONS_QUERY, _LOCATIONS_LIST_QUERY):
-        assert "first: 50" in q and "first: 10" not in q
-    for field in ("shipsInventory", "address", "city", "province"):
+def test_the_one_locations_query_pages_fifty_wide_with_the_dropdown_fields():
+    assert "first: 50" in _LOCATIONS_LIST_QUERY and "first: 10" not in _LOCATIONS_LIST_QUERY
+    for field in ("shipsInventory", "address", "city", "province", "fulfillsOnlineOrders"):
         assert field in _LOCATIONS_LIST_QUERY
-        assert field not in _LOCATIONS_QUERY  # the live stock path's read shape is #1125's
-    assert "{ nodes { id name isActive fulfillsOnlineOrders } }" in _LOCATIONS_QUERY
+    # #1125's single-online-location picker query is GONE with its module.
+    from api.services.shopify_push import queries
+
+    assert not hasattr(queries, "_LOCATIONS_QUERY")
+
+
+def test_R8_a_location_two_shops_claim_maps_neither_and_names_both_claimants(client, world, monkeypatch):
+    """SECOND IMPLEMENTATION (recheck round 1, display). ``mapped_store_id``
+    was read off the RAW gid (last holder wins) while
+    ``unmapped_online_fulfilling`` on the same row was scored through the
+    writer's map, which maps NEITHER shop of a shared gid: the row said
+    "mapped to WIZ-BOK-01" and "maps to no shop" in one object, and the
+    dropdown named one holder for a location the writer writes for nobody.
+    Both fields now read the writer's map; ``claimed_by`` names every raw
+    claimant. Rebuild ``by_gid`` from the raw field -> mapped_store_id is a
+    shop -> this fails."""
+    world.get_collection("stores").insert_one({
+        "store_id": "WIZ-BOK-01", "store_code": "WIZ-BOK-01", "store_name": "WizOpt Bokaro",
+        "is_active": True, "store_type": "RETAIL", "shopify_location_id": BOKARO,
+    })
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    rows = {row["id"]: row for row in r.json()["locations"]}
+    shared = rows[BOKARO]
+    assert shared["mapped_store_id"] is None and shared["mapped_store_code"] is None
+    assert shared["claimed_by"] == ["BV-BOK-02", "WIZ-BOK-01"]
+    assert shared["unmapped_online_fulfilling"] is True, "written for nobody, so it IS stray"
+    assert rows[PUNE]["claimed_by"] == [] and rows[PUNE]["mapped_store_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+def test_R8_the_route_carries_the_writers_dead_verdict_per_mapped_shop(client, world, monkeypatch):
+    """RECHECK ROUND 2 (display, one rule). The sync page's shops table answered
+    "Sells online" from `fulfillsOnlineOrders` alone, re-deriving half of
+    `dead_mapped_reason` in TypeScript -- and Shopify's `locations(first: 50)`
+    omits DEACTIVATED locations, so the `isActive` half was answered by
+    ABSENCE: a deactivated location read "yes", a deleted one read "read needs
+    LIVE" on a live read, two lines under a stock line coding
+    SHOPIFY_LOCATION_NOT_SELLING for the same shop. The route now stamps the
+    writer's own `score_locations` verdict: `dead` per mapped shop, in the
+    words the stock pass uses, and `read`. Drop them -> this fails."""
+    world.get_collection("stores").update_one(
+        {"store_id": PUNE_UUID}, {"$set": {"shopify_location_id": "gid://shopify/Location/3"}}
+    )
+    world.seed("stores", [
+        {"store_id": "BV-GONE-01", "store_code": "BV-GONE-01", "store_name": "Gone", "is_active": True,
+         "store_type": "RETAIL", "shopify_location_id": "gid://shopify/Location/404"},
+    ])
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    r = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["read"] is True
+    dead = {d["store_id"]: d for d in body["dead"]}
+    assert "BV-BOK-02" not in dead, "active + ticked: sells online"
+    assert dead[PUNE_UUID]["reason"] == shopify_push.dead_mapped_reason(NODES[2])
+    assert "deactivated" in dead[PUNE_UUID]["reason"]
+    assert dead["BV-GONE-01"]["reason"] == shopify_push.dead_mapped_reason(None)
+    assert "does not list" in dead["BV-GONE-01"]["reason"]
+    # DARK: nothing was read, so nothing is dead -- and the page must not say "yes".
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    monkeypatch.setattr(shopify_push, "_graphql", _CountingBoom())
+    dark = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"])).json()
+    assert dark["read"] is False and dark["dead"] == []

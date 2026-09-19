@@ -12,6 +12,7 @@ Covers:
   - warranty lookup -> unit + sale + customer,
   - route RBAC: a cashier cannot capture/mark-sold (403) but CAN read a warranty,
   - route store-scope: a cross-store actor is blocked,
+  - every status-changing route feeds the online stock write-back (oversell),
   - a non-serialized category is a no-op (no forced serial).
 
 No whole-JSON substring asserts; the unique index is emulated in the fake. No emoji.
@@ -199,3 +200,43 @@ def test_route_capture_cross_store_blocked(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(r.capture(body, _MGR))
     assert ei.value.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# The online oversell guard: every serial door feeds the Shopify write-back
+# --------------------------------------------------------------------------- #
+def test_every_serial_status_change_feeds_the_online_stock_writeback(monkeypatch):
+    """A live door that moves on-hand and fed NO writer: these routes flip
+    stock_units with a raw find_one_and_update, so neither item_events'
+    on-hand hook nor any POS door fires -- the shop sold the unit and Shopify
+    kept the pre-sale number (a real oversell window). IN_STOCK is an on-hand
+    alias, so sold / recalled / returned / captured all move the shop's count.
+    Revert any _sync_online_stock call in api/routers/serial_tracking.py and
+    the matching source below is missing."""
+    from api.routers import serial_tracking as r
+    from api.services import online_stock_writeback as owb
+
+    db = _DB()
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "validate_store_access", lambda s, u: s)
+    monkeypatch.setattr(r, "_audit", lambda *a, **k: None)
+    fired = []
+    monkeypatch.setattr(
+        owb,
+        "writeback_after_units_left",
+        lambda d, pids, sid, *, source: fired.append((tuple(pids), sid, source)),
+    )
+
+    asyncio.run(r.capture(r.CaptureBody(serial="SN-9", product_id="P1", store_id="S1"), _MGR))
+    asyncio.run(r.mark_sold("SN-9", r.MarkSoldBody(order_id="ORD-9"), _MGR))
+    asyncio.run(r.capture(r.CaptureBody(serial="SN-8", product_id="P2", store_id="S1"), _MGR))
+    asyncio.run(r.recall("SN-8", r.RecallBody(reason="battery"), _MGR))
+    asyncio.run(r.return_unit("SN-9", _MGR))
+
+    assert fired == [
+        (("P1",), "S1", "serial_capture"),
+        (("P1",), "S1", "serial_sold"),
+        (("P2",), "S1", "serial_capture"),
+        (("P2",), "S1", "serial_recall"),
+        (("P1",), "S1", "serial_return"),
+    ]
