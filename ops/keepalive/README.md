@@ -12,13 +12,12 @@ How: this folder is its own Railway service (source = this repo, root directory
 `ops/keepalive`) with a cron schedule and restart policy NEVER. On each run it pings
 `/health` six times, 90 s apart, then exits. Cost: a few container-minutes a day.
 
-Railway service settings come from `/railway.json` at the repo root (config-as-code), so
-nothing has to be clicked in the dashboard: Dockerfile `ops/keepalive/Dockerfile`, cron
-`24 3,16,17,19,20,21 * * *` UTC (6 minutes before each IST slot), restart policy NEVER.
-The service is created with `railway add --service keepalive-ping --repo brashakg/ims-2.0-railway`
-and its root directory is left at the repo root on purpose. The backend service reads
-`backend/` for its own config and is not affected by the root file.
-- Variables (optional): `PING_URL` (default https://api.uniparallel.com/health),
-  `PING_HITS` (6), `PING_GAP_SECONDS` (90)
+Railway service settings (dashboard, once):
+- Source: this repo. **Root Directory: `ops/keepalive`** - required. The cron schedule
+  (`24 3,16,17,19,20,21 * * *` UTC, six minutes before each IST slot), restart policy NEVER and
+  the Dockerfile path are then read from `ops/keepalive/railway.json`.
+- NEVER put a `railway.json` at the repo root: Railway applies a root config to every service
+  built from the repo. On 2026-09-17 a root copy made the backend service try to build this
+  ping container and its deploy failed (the previous deployment kept serving).
 
 If the live-sync slots are changed in Settings > Shopify live sync, update the cron.
