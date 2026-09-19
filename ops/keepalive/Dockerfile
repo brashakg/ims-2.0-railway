@@ -2,6 +2,6 @@
 # Railway runs this container on the service's cron schedule; it pings and exits.
 FROM alpine:3.20
 RUN apk add --no-cache curl
-# Build context is the REPO ROOT (see /railway.json), hence the full path.
-COPY ops/keepalive/ping.sh /ping.sh
+# Build context is this folder: the service's Root Directory is ops/keepalive.
+COPY ping.sh /ping.sh
 CMD ["/bin/sh", "/ping.sh"]
