@@ -183,7 +183,8 @@ async def online_stock_reconcile(
             {
                 "sku": sku,
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
-                "in_store": on_hand.get(p.get("product_id"), 0),
+                # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
+                "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 "online": (listed if is_online else 0),
                 "is_online": is_online,
             }

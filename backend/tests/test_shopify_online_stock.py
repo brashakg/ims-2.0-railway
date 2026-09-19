@@ -3244,3 +3244,224 @@ def test_R8_a_delist_writes_the_rules_number_and_says_when_the_size_is_still_on_
     _live(monkeypatch, spy5)
     unk = _run(shopify_push._delist_variant_row(db5, child))
     assert unk.ok is False and unk.code == shopify_push.STOCK_ONHAND_UNKNOWN and spy5.rows() == set(), unk
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 1 after R8 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+_DAY1_UNTICKED = _locations(
+    _loc(LOC_A, "Bokaro", fulfils=False),
+    _loc(LOC_B, "Dhanbad", fulfils=False),
+    _loc(LOC_C, "Sector 4", fulfils=False),
+)
+_DAY1_WITH_PUNE = _locations(
+    _loc(LOC_A, "Bokaro", fulfils=False),
+    _loc(LOC_B, "Dhanbad", fulfils=False),
+    _loc(LOC_C, "Sector 4", fulfils=False),
+    _loc("gid://shopify/Location/76684427513", "Gangadham Pune"),
+)
+
+_CHILD_L = {
+    "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
+    "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
+}
+
+
+def test_R9_a_size_row_keyed_on_the_spine_id_is_still_delisted(monkeypatch):
+    """OVERSELL, low (recheck round 1: one link, two resolvers).
+    `_delist_variant_row` resolved the parent by `row.parent_product_id` ONLY
+    while every other reader of the same link (variant_rows_for_product,
+    listings_for_skus) also takes `parent_sku` -- and merge_variant_rows's own
+    docstring says rows keyed on the SPINE id exist. Such a row: 'not on
+    Shopify -- nothing to delist', ZERO writes, delist_if_live records
+    NOTHING, and the size's variant kept selling until the next sweep found
+    the row through parent_sku and wrote 0 (up to 12 h, green door).
+
+    ONE resolver now (online_catalog._parent_from over _parents_for_variants,
+    strict). Look the parent up by the bare id again -> noop, no rows -> this
+    fails. Fail-soft the parent read -> "not on Shopify" over a dead read ->
+    the second half fails."""
+    row = {"sku": "SP-1-L", "parent_product_id": "spine-P", "parent_sku": "SP-1",  # the SPINE id: no catalog doc has it
+           "shopify_variant_id": "gid://shopify/ProductVariant/52", "shopify_inventory_item_id": INV_ROW}
+    db = _db(a=1, b=0, c=0, sku="SP-1-L")
+    db.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True), dict(_CHILD_L)])
+    db.seed("catalog_variants", [dict(row)])
+    _spine_off(db, "SP-1-L")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push._delist_variant_row(db, _CHILD_L))
+    assert res.action == "delist" and res.ok is True and res.mode == "LIVE", res
+    assert spy.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}
+    assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 0, "BV-B": 0, "BV-C": 0}, "the baseline lands on the parent TWIN"
+
+    # STRICT: a dead catalog_products read is reported, never "not on Shopify".
+    class _Dead(StrictCollection):
+        def find(self, *a, **k):
+            raise RuntimeError("catalog_products read died")
+
+    db._collections["catalog_products"] = _Dead("catalog_products", [])
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    dead = _run(shopify_push._delist_variant_row(db, _CHILD_L))
+    assert dead.action == "delist" and dead.ok is False and "variant lookup failed" in dead.error, dead
+    assert spy2.writes() == []
+
+
+def test_R9_a_shopify_refusal_is_worded_under_the_day1_location_verdict(monkeypatch):
+    """OVERSELL display (recheck round 1): a Shopify WRITE refusal is not a
+    ladder rung, so under the day-1 configuration (the Jharkhand locations
+    unticked) -- where the ladder ALWAYS sets SHOPIFY_LOCATION_NOT_SELLING --
+    the refusal was counted but never worded: the writer kept the ladder's
+    code, the sale's run row and the press printed the location line alone,
+    and the sweep dropped the listing's line as "the run's own" because the
+    codes matched. Shopify keeps the pre-sale number until the tick retries.
+
+    A refusal Shopify answered THIS press is the listing's own rung: it takes
+    the code and leads the line; the ladder rides under it. Put
+    `summary["code"] or written["code"]` back -> 'Shopify refused' leaves the
+    run row, the press and the sweep -> this fails."""
+    refused = {"imsLocationList": _DAY1_UNTICKED, "inventorySetQuantities": _set_error("INVALID", "Shopify refused")}
+    # 1. the sale at BV-A
+    db = _listed(_db(a=2, b=1, c=0))
+    _live(monkeypatch, _Spy(_responses(**refused)))
+    sale = _run(wb.writeback_skus(db, ["SP-1"], "BV-A", source="sale"))
+    assert sale["failed"] == 1 and sale["code"] == shopify_push.STOCK_WRITE_FAILED, sale
+    assert "Shopify refused" in sale["error"] and "SOLD OUT" in sale["error"], sale["error"]
+    assert sale["error"].index("Shopify refused") < sale["error"].index("SOLD OUT"), "the refusal leads"
+    run = list(db.get_collection("sync_runs").find({}))[-1]
+    assert run["ok"] is False and "Shopify refused" in run["error"] and "SOLD OUT" in run["error"], run["error"]
+    # 2. the press on the same listing
+    _live(monkeypatch, _Spy(_responses(**refused)))
+    press = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", product_id="cat-1"))
+    assert press["ok"] is False and press["set"] == 0 and press["code"] == shopify_push.STOCK_WRITE_FAILED, press
+    assert "Shopify refused" in press["error"] and "SOLD OUT" in press["error"], press["error"]
+    # 3. the sweep keeps the listing's own line under the run's ladder line
+    _live(monkeypatch, _Spy(_responses(**refused)))
+    sw = _run(shopify_push.sync_stock_levels(db))
+    assert sw.ok is False and sw.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING and sw.payload["failed"] == 1, sw
+    assert "SOLD OUT" in sw.error and "cat-1" in sw.error and "Shopify refused" in sw.error, sw.error
+
+
+def test_R9_the_press_says_the_stock_line_under_the_price_line(monkeypatch):
+    """One rung hides another on the PRESS (recheck round 1): push_product
+    picked ONE of two lines -- the price line when the variant price push
+    failed, ELSE the stock line -- so on an update press whose price push was
+    refused, 'SOLD OUT' (and every data-defect rung riding under it) lived
+    only in PushResult.stock, which nothing renders. Code stays
+    PRICE_NOT_SYNCED; both lines are said. Pick one again -> 'SOLD OUT'
+    leaves the error -> this fails."""
+    from api.services.shopify_push import product as product_mod
+    from api.services.shopify_push._shared import MODE_LIVE, PushResult
+
+    db = _db(a=2, b=1, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True)])  # an UPDATE press, nothing to reseed
+    _live(monkeypatch, _Spy(_responses(imsLocationList=_DAY1_UNTICKED)))
+
+    async def _price_refused(db, product, variants):  # noqa: ARG001
+        return PushResult(mode=MODE_LIVE, entity="variant", action="update", ok=False, error="price refused: Throttled")
+
+    monkeypatch.setattr(product_mod, "push_variant_prices", _price_refused)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res.ok is True and res.code == shopify_push.PRICE_NOT_SYNCED, res
+    assert res.stock["code"] == shopify_push.SHOPIFY_LOCATION_NOT_SELLING and res.stock["set"] == 3
+    assert res.error.startswith("Live on the website at the OLD price"), res.error
+    assert "SOLD OUT" in res.error, "the stock rung rides under the price line"
+
+
+def test_R9_a_refused_tracking_re_send_on_a_live_listing_is_a_warning_not_a_withheld_publish(monkeypatch):
+    """False statement, safe direction (recheck round 1): the tracking-failure
+    publish gate (2b6ec7f) fired on EVERY press, so an ALREADY-PUBLISHED
+    product re-pushed by the 01:00 run under a throttled bulk update was
+    reported 'NOT made visible' / 'UNTRACKED listing sells WITHOUT LIMIT' and
+    tallied publish_withheld -- while it was visible and still tracked (a
+    refused bulk-update changes nothing on Shopify) and the catalog chip read
+    'Live'. Two screens, two answers about one listing.
+
+    Design 4.2 gates the FIRST publish only. A live listing: ok=True + the
+    code, a line saying tracking could not be re-confirmed (never
+    'UNTRACKED'), no withholding, no publish_withheld reason, and the
+    baseline keeps tracked=True so the NEXT press is not withheld either.
+    Drop `or listing_already_live(product)` from the gate -> withheld ->
+    this fails. The one exception stays: a staged-PUBLISHED draft whose only
+    tracking call failed (baseline tracked False) IS its first publish."""
+    db = _db(a=2, b=1, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True)])
+    spy = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res.ok is True and res.reason is None and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "publish withheld" not in res.error and "UNTRACKED" not in res.error, res.error
+    assert "re-confirmed" in res.error and "Throttled" in res.error, res.error
+    assert spy.rows() == {(INV_GID, LOC_A, 2), (INV_GID, LOC_B, 1), (INV_GID, LOC_C, 0)}
+    assert len(spy.calls_for("publishablePublish")) == 1, "the idempotent re-publish still goes out"
+    twin = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]
+    assert twin["status"] == "PUBLISHED"
+    assert _baseline(db)["tracked"] is True, "a refused re-send never records a live listing as untracked"
+    # ...so the sweep under the same throttle words it the same way.
+    _live(monkeypatch, _ThrottledTracking(_responses()))
+    db.get_collection("stock_units").insert_one(
+        {"stock_id": "b9", "product_id": "spine-1", "store_id": "BV-B", "status": "AVAILABLE"}
+    )
+    sw = _run(shopify_push.sync_stock_levels(db))
+    assert sw.code == shopify_push.STOCK_TRACKING_FAILED and "re-confirmed" in sw.error and "UNTRACKED" not in sw.error, sw
+    # The exception: gid + PUBLISHED but the baseline says tracking was never set.
+    db2 = _db(a=2, b=1, c=0)
+    db2.seed("catalog_products", [_catalog_row(
+        "cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True,
+        online_stock={"quantities": {}, "tracked": False, "policy": "DENY"},
+    )])
+    spy2 = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy2)
+    res2 = _run(shopify_push.push_product(db2, db2.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res2.ok is False and res2.reason == "publish_withheld" and res2.code == shopify_push.STOCK_TRACKING_FAILED, res2
+    assert "WITHOUT LIMIT" in res2.error and spy2.calls_for("publishablePublish") == []
+
+
+def test_R9_a_size_delist_that_landed_under_the_day1_verdict_is_delisted_with_a_warning(monkeypatch):
+    """False 'Still live' (recheck round 1, inherited): under the day-1
+    configuration a size delist that DID land -- DENY set, 0 accepted at all
+    three mapped locations -- was stamped DELIST_FAILED because the delist
+    door turned the writer's standing location verdict into ok=False, while
+    the PARENT's press under the identical verdict was ok=True (live with a
+    warning). CatalogManagerPage rendered that as 'Still live on Shopify -
+    take-down failed', permanently, for every size delist, for as long as the
+    locations stayed unticked -- which the runbook tells the owner to keep.
+
+    The door mirrors the press: ok = every mapped row accepted and DENY set;
+    the verdict rides as code + error. Append the location line to `errors`
+    again -> ok False, DELIST_FAILED -> this fails. A take-down that did NOT
+    land (one shop unknown) stays not ok."""
+    from api.services import online_delist
+
+    sent = {"quantities": {"SP-1": {"BV-A": 0, "BV-B": 0, "BV-C": 0}}, "tracked": True, "policy": "DENY"}
+    row = {"sku": "SP-1-L", "parent_product_id": "cat-1",
+           "shopify_variant_id": "gid://shopify/ProductVariant/52", "shopify_inventory_item_id": INV_ROW}
+    db = _db(a=1, b=0, c=0, sku="SP-1-L")
+    db.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, online_stock=dict(sent)), dict(_CHILD_L)])
+    db.seed("catalog_variants", [dict(row)])
+    _spine_off(db, "SP-1-L")
+    spy = _Spy(_responses(imsLocationList=_DAY1_WITH_PUNE))
+    _live(monkeypatch, spy)
+    out = _run(online_delist.delist_if_live(db, dict(_CHILD_L), reason="deleted", actor={"user_id": "u"}))
+    assert spy.rows() == {(INV_ROW, LOC_A, 0), (INV_ROW, LOC_B, 0), (INV_ROW, LOC_C, 0)}
+    assert out["ok"] is True and out["code"] == shopify_push.SHOPIFY_LOCATION_NOT_SELLING, out
+    assert "SOLD OUT" in out["error"] and "Gangadham Pune" in out["error"], out["error"]
+    tw = db.get_collection("catalog_products").find_one({"id": "cat-1-L"})["ecom"]
+    assert tw["online_state"] == online_delist.STATE_DELISTED and tw.get("delist_error") is None, tw
+    # Parity: the parent's press under the identical verdict.
+    _live(monkeypatch, _Spy(_responses(imsLocationList=_DAY1_WITH_PUNE)))
+    pr = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert pr.ok is True and pr.code == shopify_push.SHOPIFY_LOCATION_NOT_SELLING, pr
+    # Not landed: one mapped shop's read died -> its location keeps selling -> not ok.
+    db3 = _db(a=1, b=0, c=0, sku="SP-1-L")
+    db3.seed("products", [{"product_id": "spine-P", "sku": "SP-1"}])
+    db3.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, online_stock=dict(sent)), dict(_CHILD_L)])
+    db3.seed("catalog_variants", [dict(row)])
+    _spine_off(db3, "SP-1-L")
+    _break_shop(db3, "BV-B")
+    _live(monkeypatch, _Spy(_responses(imsLocationList=_DAY1_WITH_PUNE)))
+    part = _run(shopify_push._delist_variant_row(db3, _CHILD_L))
+    assert part.ok is False and part.payload["rows"] == {"SP-1-L": {"BV-A": 0, "BV-C": 0}}, part

@@ -118,23 +118,46 @@ def _safety_buffer(db) -> int:
     return _DEFAULT_SAFETY_BUFFER
 
 
-def skus_from_items(items_data: List[dict]) -> List[str]:
-    """Extract the distinct, sellable-good SKUs from order items. Skips service /
-    virtual lines and blank SKUs. Pure."""
-    seen: List[str] = []
+def _sellable_lines(items_data: List[dict]):
+    """The order lines that carry serialized stock -- service / virtual lines
+    skipped. THE one filter every sale-door reader applies. Pure."""
     for line in items_data or []:
         if not isinstance(line, dict):
             continue
         item_type = (line.get("item_type") or "").upper()
         if item_type in _NON_SERIALIZED_ITEM_TYPES:
             continue
-        pid = line.get("product_id") or ""
+        pid = str(line.get("product_id") or "")
         if pid.startswith(_VIRTUAL_PID_PREFIXES):
             continue
+        yield line
+
+
+def skus_from_items(items_data: List[dict]) -> List[str]:
+    """Extract the distinct, sellable-good SKUs from order items. Skips service /
+    virtual lines and blank SKUs. Pure."""
+    seen: List[str] = []
+    for line in _sellable_lines(items_data):
         sku = line.get("sku")
         sku = str(sku).strip() if sku not in (None, "") else ""
         if sku and sku not in seen:
             seen.append(sku)
+    return seen
+
+
+def product_ids_without_sku(items_data: List[dict]) -> List[str]:
+    """The distinct PRODUCT ids of the sellable lines that carry no SKU -- the
+    add-item door's line shape (orders/items.py builds no ``sku`` key at all)
+    and any API client that omits it on the create door (``OrderItemCreate.sku``
+    is optional and stamped straight off the client). Pure."""
+    seen: List[str] = []
+    for line in _sellable_lines(items_data):
+        sku = line.get("sku")
+        if sku not in (None, "") and str(sku).strip():
+            continue
+        pid = str(line.get("product_id") or "").strip()
+        if pid and pid not in seen:
+            seen.append(pid)
     return seen
 
 
@@ -835,12 +858,22 @@ def writeback_after_sale(db, items_data: List[dict], store_id: Optional[str]) ->
     """Fail-soft entrypoint for the POS create-order path. Schedules a Shopify
     stock push for the sold SKUs and returns IMMEDIATELY -- the sale is never
     blocked or slowed. store_id is context only; quantities are per shop by
-    construction (the selling shop's own location goes down). NEVER raises."""
+    construction (the selling shop's own location goes down). NEVER raises.
+
+    A line that names the PRODUCT but no SKU is not a line with nothing to
+    write back (recheck round 1, oversell direction): the add-item door builds
+    no ``sku`` key at all, so its unit flipped SOLD and bettervision.in kept
+    selling it until the next tick with nothing named anywhere. Such a line
+    goes through the product-id door that already exists
+    (``writeback_after_units_left``), which resolves the spine SKU and records
+    its own not-ok row when that read dies."""
     try:
         skus = skus_from_items(items_data)
-        if not skus:
-            return
-        _dispatch(writeback_skus(db, skus, store_id, source="sale"))
+        if skus:
+            _dispatch(writeback_skus(db, skus, store_id, source="sale"))
+        pids = product_ids_without_sku(items_data)
+        if pids:
+            writeback_after_units_left(db, pids, store_id, source="sale")
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] after-sale skipped: %s", exc)
 

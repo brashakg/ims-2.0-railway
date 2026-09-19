@@ -692,9 +692,10 @@ def test_R8_a_unit_at_a_deactivated_shop_never_counts_on_the_tile(monkeypatch):
 
 def test_R8_an_unreadable_shop_list_is_unknown_on_the_tile_never_every_unit(monkeypatch):
     """The polarity of the fix above: a shop list that cannot be read is
-    UNKNOWN ({} -- the tile shows no number), never "count every unit" -- the
-    writer aborts the batch on the same failure (STRICT). Fall back to an
-    unscoped count on the exception -> on_hand 1 -> this fails."""
+    UNKNOWN (None -- see test_R9 below for what the tile does with it), never
+    "count every unit" -- the writer aborts the batch on the same failure
+    (STRICT). Fall back to an unscoped count on the exception -> on_hand 1 ->
+    this fails."""
     _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})
 
     class _Dead(_FakeColl):
@@ -712,4 +713,82 @@ def test_R8_an_unreadable_shop_list_is_unknown_on_the_tile_never_every_unit(monk
             "stores": _Dead(),
         }
     )
-    assert sh._on_hand_by_product(db, ["P8"]) == {}
+    assert sh._on_hand_by_product(db, ["P8"]) is None
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 1 after R8 (2026-09-17)
+# ---------------------------------------------------------------------------
+
+
+class _DeadStores(_FakeColl):
+    def find(self, *a, **k):
+        raise RuntimeError("stores read died")
+
+
+def _unknown_shelf_db(**product_extra):
+    return _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P8", "sku": "SKU-REAL", "name": "Real", "brand": "Real", "model": "X",
+                  "is_active": True, **product_extra}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [{"product_id": "P8", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"}]
+            ),
+            "stores": _DeadStores(),
+        }
+    )
+
+
+def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tile_or_the_tally(monkeypatch):
+    """Display fallback, unknown printed as 0 (recheck round 1).
+    `_on_hand_by_product` returned {} when the shop list could not be read
+    (its docstring: 'the tile shows no number') -- and BOTH consumers
+    defaulted the missing key to a confident 0: one unreadable shop list
+    turned every online SKU into on-hand 0 + OVERSELL_RISK under page copy
+    that said the on-hand numbers were live. The writer's own forbidden line
+    ('never 0 for unknown'), one reader over.
+
+    UNKNOWN is None: the tile counts it as onhand_unknown (never oversell),
+    the tally says on_hand_unknown and tallies nothing. Return {} from the
+    unknown branch again -> in_store 0 against a listed 3 -> OVERSELL_RISK ->
+    this fails."""
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": 3}})
+    db = _unknown_shelf_db()
+    assert sh._on_hand_by_product(db, ["P8"]) is None
+    tile = sh.pending_reconcile_summary(db)
+    assert tile["scanned"] == 1 and tile["onhand_unknown"] == 1, tile
+    assert tile["oversell_risk"] == 0 and tile["pending"] == 0 and tile["oversell_risk_units"] == 0, tile
+    tally = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 3})
+    assert tally["items"] == [] and tally["summary"]["on_hand_unknown"] is True, tally
+    assert tally["summary"]["at_risk_count"] == 0 and tally["summary"]["total_on_hand"] == 0
+
+
+def test_R9_the_reconciliation_screen_shows_an_unknown_on_hand_as_unknown(monkeypatch):
+    """The other consumer (GET /catalog/online-stock-reconcile): in_store
+    None, recommended None, ONHAND_UNKNOWN -- never 0 + OVERSELL_RISK. Default
+    the missing key to 0 again -> OVERSELL_RISK -> this fails."""
+    import asyncio
+
+    from api.routers import catalog
+    from api.services import stock_allocation
+
+    db = _unknown_shelf_db()
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {"SKU-REAL": {"online": True}})
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+
+    async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 3
+        return {"qty": {"SKU-REAL": 3}, "live": 1, "mapped": 1}
+
+    monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
+    out = asyncio.run(
+        catalog.online_stock_reconcile(
+            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+        )
+    )
+    row = out["items"][0]
+    assert row["in_store"] is None and row["recommended"] is None and row["delta"] is None, row
+    assert row["status"] == stock_allocation.ONHAND_UNKNOWN
+    assert out["summary"]["oversell_risk"] == 0 and out["summary"]["onhand_unknown"] == 1

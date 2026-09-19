@@ -247,9 +247,13 @@ def _products_by_key(db, keys: List[str], *, strict: bool = False) -> Dict[str, 
     return out
 
 
-def _parents_for_variants(db, variants: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _parents_for_variants(
+    db, variants: List[Dict[str, Any]], *, strict: bool = False
+) -> Dict[str, Dict[str, Any]]:
     """Fetch the parent catalog_products docs for matched variants, keyed by
-    BOTH product id and product sku (so either linkage resolves). Fail-soft {}."""
+    BOTH product id and product sku (so either linkage resolves). Fail-soft {}
+    -- or, ``strict``, a raised read (a door that must report a dead read,
+    never answer "not on Shopify")."""
     coll = _coll(db, "catalog_products")
     if coll is None or not variants:
         return {}
@@ -272,9 +276,24 @@ def _parents_for_variants(db, variants: List[Dict[str, Any]]) -> Dict[str, Dict[
             if doc.get("sku"):
                 out.setdefault(normalize_sku(doc.get("sku")), doc)
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         logger.warning("[ONLINE_CATALOG] parent lookup failed: %s", exc)
         return {}
     return out
+
+
+def _parent_from(parents: Dict[str, Dict[str, Any]], row: Dict[str, Any]) -> Dict[str, Any]:
+    """THE parent of a catalog_variants row, from a ``_parents_for_variants``
+    answer: ``parent_product_id`` OR ``parent_sku`` -- the one way every
+    reader resolves the link (``merge_variant_rows`` says why both exist: a
+    size created before the parent's catalog twin carries the SPINE id, which
+    no catalog doc has). ``{}`` when neither link lands."""
+    return (
+        parents.get(str(row.get("parent_product_id") or ""))
+        or parents.get(normalize_sku(row.get("parent_sku")))
+        or {}
+    )
 
 
 def _ecom_online(ecom: Dict[str, Any]) -> bool:
@@ -618,10 +637,7 @@ def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
     variants = _variants_by_key(db, keys)
     parents = _parents_for_variants(db, list(variants.values()))
     for key, var in variants.items():
-        parent = parents.get(str(var.get("parent_product_id") or "")) or parents.get(
-            normalize_sku(var.get("parent_sku"))
-        )
-        _add((parent or {}).get("id"), key)
+        _add(_parent_from(parents, var).get("id"), key)
     remaining = [k for k in keys if k not in variants]
     for key, doc in _products_by_key(db, remaining).items():
         link = (doc.get("ecom") or {}).get("variant_of")
