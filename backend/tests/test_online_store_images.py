@@ -48,7 +48,7 @@ def repo():
 
 def test_create_then_get_roundtrip_with_defaults(repo):
     """A fresh image enters the queue as kind=RAW, status=QUEUED, source=UPLOAD,
-    position 0, with null lifecycle fields + a null shopify_image_id (PUSH-DARK)."""
+    position 0, with null lifecycle fields and no Shopify id of its own."""
     created = repo.create({"product_id": "P1", "url": "http://x/raw.jpg"})
     assert created is not None
     assert created["image_id"]
@@ -64,8 +64,9 @@ def test_create_then_get_roundtrip_with_defaults(repo):
     assert created["assigned_to"] is None
     assert created["reviewed_by"] is None
     assert created["approved_at"] is None
-    # PUSH-DARK: not pushed to Shopify yet.
-    assert created["shopify_image_id"] is None
+    # No Shopify id on the row: once pressed, its identity on Shopify is the
+    # parent twin's ecom.media_map row (shopify_push.media), never a field here.
+    assert "shopify_image_id" not in created
     assert "created_at" in created and "updated_at" in created
 
     fetched = repo.get_by_id(created["image_id"])

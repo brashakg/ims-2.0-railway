@@ -6,8 +6,9 @@ ProductImage + VariantImage tables AND the design-team work queue that wraps
 them, folded into IMS (BVI_MERGE_PLAN.md A.1 / Phase 4).
 
 PUSH-DARK: every route here stores/edits image records + drives their design
-lifecycle inside IMS Mongo ONLY. No Shopify network write happens in Phase 4
-(the GraphQL image push that fills `shopify_image_id` is Phase 5).
+lifecycle inside IMS Mongo ONLY. No Shopify network write happens here (the
+press is online_store_push / shopify_push.push_image; an image's identity on
+Shopify is the parent twin's ecom.media_map row, never a field on this row).
 
 One row = one image of a product (variant_id=null) or a specific variant
 (variant_id set). The design QUEUE is just `GET /` filtered by status/assignee.
@@ -364,8 +365,8 @@ async def upload_image(
     IMAGE_STORAGE_PROVIDER=s3 + IMAGE_S3_*, fail-soft to local disk in dev), then
     hands the durable URL back so the caller can attach it (Attach edited / queue).
 
-    PUSH-DARK: this does NOT touch Shopify -- shopify_image_id stays null until the
-    Phase-5 push. It only writes bytes + an audit row; it does not create an image
+    PUSH-DARK: this does NOT touch Shopify (the press is a separate, explicit
+    door). It only writes bytes + an audit row; it does not create an image
     record (the FE consumes the returned url exactly where a pasted url is used).
 
     SECURITY:

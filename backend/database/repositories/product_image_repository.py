@@ -7,8 +7,8 @@ IMS Mongo (BVI_MERGE_PLAN.md A.1 / Phase 4).
 
 PUSH-DARK: this repo STORES + EDITS image records + drives their
 RAW->EDITED->APPROVED design lifecycle inside IMS only. No Shopify network write
-happens in Phase 4 (the GraphQL image push that fills `shopify_image_id` is
-Phase 5).
+happens here (the press is shopify_push.push_image; an image's identity on
+Shopify is the parent twin's ecom.media_map row, never a field on this row).
 
 One row = one image of a product (variant_id=null) or of a specific variant
 (variant_id set) -- BVI's two image tables merged + discriminated by variant_id.
@@ -72,7 +72,6 @@ _PATCHABLE_FIELDS = (
     "design_notes",
     "variant_id",
     "submitted_by",
-    "shopify_image_id",
 )
 
 
@@ -155,8 +154,10 @@ class ProductImageRepository(BaseRepository):
         row without either rather than mint a useless orphan.
 
         Defaults: a fresh image enters the queue as kind=RAW, status=QUEUED,
-        source=UPLOAD, position=0, variant_id=None, shopify_image_id=None. The
-        caller's values win where supplied. The image_id is server-minted.
+        source=UPLOAD, position=0, variant_id=None. The caller's values win
+        where supplied. The image_id is server-minted. The row carries NO
+        Shopify id: once pushed, its identity on the listing is the parent
+        twin's ecom.media_map row for its url (shopify_push.media).
         """
         if not data or not data.get("product_id") or not data.get("url"):
             return None
@@ -174,14 +175,12 @@ class ProductImageRepository(BaseRepository):
         doc.setdefault("assigned_to", None)
         doc.setdefault("reviewed_by", None)
         doc.setdefault("approved_at", None)
-        # PUSH-DARK: never pushed to Shopify yet.
-        doc.setdefault("shopify_image_id", None)
         # base_repository.create assigns _id + created_at/updated_at and inserts.
         return super().create(doc)
 
     def update(self, image_id: str, data: Dict) -> bool:
         """Patch an image's presentation/linkage fields (url / kind / source /
-        position / alt_text / design_notes / variant_id / shopify_image_id).
+        position / alt_text / design_notes / variant_id).
 
         Identity, lifecycle-controlled fields (status / assigned_to / edited_url /
         reviewed_by / approved_at) and server timestamps are stripped -- those

@@ -2045,8 +2045,9 @@ COLLECTIONS.update({
 # AND the design-team work queue that wraps them (BVI_MERGE_PLAN.md section A.1
 # "ProductImage" / "VariantImage" -> NEW product_images, and section B Phase 4).
 # It is PUSH-DARK: image records + their RAW->EDITED->APPROVED design lifecycle
-# are tracked inside IMS Mongo only; nothing is written to Shopify in Phase 4
-# (the GraphQL image push that fills `shopify_image_id` is Phase 5).
+# are tracked inside IMS Mongo only; nothing is written to Shopify from here
+# (the press is shopify_push.push_image, and an image's identity on Shopify is
+# the parent twin's ecom.media_map row for its url -- no field on this doc).
 #
 # One doc = one image of a product (or a specific variant). BVI's two tables
 # (ProductImage on the parent, VariantImage on the variant) are merged into this
@@ -2068,8 +2069,7 @@ COLLECTIONS.update({
 #
 # Idempotent join keys (never key on Mongo `_id`):
 #   image_id (internal uuid, primary) | product_id (-> catalog_products) |
-#   variant_id (-> catalog_variants, optional). `shopify_image_id` stays null in
-#   Phase 4; it is the Phase-5 push reverse-lookup. `url`/`edited_url` are the
+#   variant_id (-> catalog_variants, optional). `url`/`edited_url` are the
 #   asset locations (the P4 re-host audit rewrites BVI /uploads/ paths into these).
 #
 # Every field beyond image_id/product_id/url is optional/additive so a partial
@@ -2112,8 +2112,6 @@ PRODUCT_IMAGE_SCHEMA = {
         "submitted_by": {"bsonType": ["string", "null"]},  # who queued it
         "reviewed_by": {"bsonType": ["string", "null"]},   # who approved/rejected
         "approved_at": {"bsonType": ["date", "null"]},
-        # Shopify-side identity (set on the Phase-5 push; null while PUSH-DARK).
-        "shopify_image_id": {"bsonType": ["string", "null"]},
         "created_at": {"bsonType": "date"},
         "updated_at": {"bsonType": "date"},
     },
