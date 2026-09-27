@@ -615,38 +615,22 @@ def test_commission_payload_carries_no_salary_figure(payroll_client):
         }, item
 
 
-def test_hr_payroll_list_is_admin_only(hr_client):
-    """GET /hr/payroll returns base_salary / gross / deductions / net per named
-    employee, and reuses the payroll router's gate so the two cannot drift."""
-    for role in NON_ADMIN_PAY_ROLES:
-        tok = _token([role], user_id=SELF_ID, store_ids=[STORE_A])
-        r = hr_client.get(
-            "/hr/payroll", params={"year": 2026, "month": 5}, headers=_auth(tok)
-        )
-        assert r.status_code == 403, f"{role}: {r.text}"
+def test_hr_payroll_routes_are_gone(hr_client):
+    """A6 (owner ruling 2026-09-27): payroll has ONE door, routers/payroll.py.
+    The hr.py generator (naive base/26 * present_days, flat 10%) and its list /
+    approve / salary-slip stub were DELETED, not restricted: even an ADMIN gets
+    404 now. tests/test_rbac_policy.py fails on any stale POLICY row."""
     tok = _token(["ADMIN"], user_id="u-admin", store_ids=[])
-    assert (
-        hr_client.get(
-            "/hr/payroll", params={"year": 2026, "month": 5}, headers=_auth(tok)
-        ).status_code
-        == 200
-    )
-
-
-def test_hr_salary_slip_stub_is_self_or_admin(hr_client):
-    tok = _token(["STORE_MANAGER"], user_id=SELF_ID, store_ids=[STORE_A])
-    other = hr_client.get(
-        f"/hr/employee/{OTHER_ID}/salary-slip",
-        params={"year": 2026, "month": 5},
-        headers=_auth(tok),
-    )
-    assert other.status_code == 403, other.text
-    own = hr_client.get(
-        f"/hr/employee/{SELF_ID}/salary-slip",
-        params={"year": 2026, "month": 5},
-        headers=_auth(tok),
-    )
-    assert own.status_code == 200, own.text
+    for method, path in (
+        ("get", "/hr/payroll"),
+        ("post", "/hr/payroll/generate"),
+        ("post", "/hr/payroll/pr-1/approve"),
+        ("get", f"/hr/employee/{SELF_ID}/salary-slip"),
+    ):
+        r = getattr(hr_client, method)(
+            path, params={"year": 2026, "month": 5}, headers=_auth(tok)
+        )
+        assert r.status_code == 404, f"{method} {path}: {r.status_code} {r.text}"
 
 
 def test_salary_403_detail_is_plain_english_for_the_screen():
@@ -693,10 +677,10 @@ def test_floor_staff_self_service_payslip_is_untouched(monkeypatch):
 # A3. PAYROLL SIGN-OFF (owner ruling 2026-08-10)
 # ===========================================================================
 # "Whoever approves payroll should be able to see what they are approving."
-# There are TWO approve routes, in different routers, and the HR one had the
-# WIDER gate of the pair (_HR_READ_ROLES let a STORE_MANAGER approve).
 # POST /payroll/lock was already ADMIN-only and is asserted here so the whole
-# sign-off family is pinned in one place.
+# sign-off family is pinned in one place. The SECOND approve route
+# (POST /hr/payroll/{id}/approve) was DELETED with the rest of the hr.py
+# payroll generator on 2026-09-27 -- see test_hr_payroll_routes_are_gone.
 
 
 @pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
@@ -740,31 +724,6 @@ def test_payroll_approve_still_works_for_admin(payroll_client, role):
         headers=_auth(_token([role], user_id="u-admin", store_ids=[])),
     )
     assert r.status_code == 200, f"{role}: {r.text}"
-
-
-@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
-def test_hr_payroll_approve_is_admin_only(hr_client, role):
-    """The SECOND approve route. Its old gate (_HR_READ_ROLES) also admitted
-    AREA_MANAGER and STORE_MANAGER, not just the accountant."""
-    r = hr_client.post(
-        "/hr/payroll/pr-1/approve",
-        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
-    )
-    assert r.status_code == 403, f"{role}: {r.text}"
-    # _HR_READ_ROLES admitted all three, so here the NEW gate is what refuses
-    # every one of them -- and its wording is what the user sees.
-    assert "administrator" in r.text.lower()
-    assert "approve a payroll record" in r.text
-
-
-def test_hr_payroll_approve_reaches_the_handler_for_admin(hr_client):
-    """An ADMIN gets past the gate. The fake repo has no such record, so the
-    handler's own 404 is the proof it was reached -- not a 403."""
-    r = hr_client.post(
-        "/hr/payroll/pr-does-not-exist/approve",
-        headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
-    )
-    assert r.status_code != 403, r.text
 
 
 def test_signoff_403_names_the_action_not_just_the_data():
@@ -1282,63 +1241,6 @@ def test_explicit_cross_store_still_403_on_the_reports(hr_reports_client):
 
 
 # --------------------------------------------------------------------- MF2 --
-
-
-class _FakePayrollRepo:
-    def __init__(self):
-        self.created = []
-
-    def find_one(self, flt):
-        return None
-
-    def find_many(self, flt=None, sort=None, skip=0, limit=100):
-        return []
-
-    def find_by_id(self, pid):
-        return None
-
-    def create(self, doc):
-        self.created.append(dict(doc))
-        return doc
-
-
-@pytest.fixture()
-def hr_write_client(monkeypatch):
-    repo = _FakePayrollRepo()
-    monkeypatch.setattr(hr_mod, "get_user_repository", lambda: _FakeUserRepo(_USERS))
-    monkeypatch.setattr(
-        hr_mod, "get_attendance_repository", lambda: _FakeAttendanceRepo(_RECORDS)
-    )
-    monkeypatch.setattr(hr_mod, "get_payroll_repository", lambda: repo)
-    client = TestClient(_mounted(hr_mod.router, "/hr"))
-    return client, repo
-
-
-@pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
-def test_hr_payroll_generate_is_admin_only(hr_write_client, role):
-    """MF2 write 1. A STORE_MANAGER could author DRAFT payroll rows from a naive
-    base_salary/26 * present_days with a flat 10% deduction -- rows they cannot
-    then read back, that an ADMIN blanket-approves, and that feed the PF ECR and
-    the statutory filing. Authoring salary is now ADMIN-only, matching the read
-    sibling GET /hr/payroll."""
-    client, repo = hr_write_client
-    r = client.post(
-        "/hr/payroll/generate",
-        params={"year": 2026, "month": 5},
-        headers=_auth(_token([role], user_id=SELF_ID, store_ids=[STORE_A])),
-    )
-    assert r.status_code == 403, f"{role}: {r.text}"
-    assert repo.created == [], f"{role} authored {len(repo.created)} payroll rows"
-
-
-def test_hr_payroll_generate_still_works_for_admin(hr_write_client):
-    client, repo = hr_write_client
-    r = client.post(
-        "/hr/payroll/generate",
-        params={"year": 2026, "month": 5},
-        headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
-    )
-    assert r.status_code == 200, r.text
 
 
 @pytest.mark.parametrize("role", NON_ADMIN_PAY_ROLES)
