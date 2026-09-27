@@ -340,7 +340,9 @@ def test_fulfilment_ims_missed_lands_shipped_with_awb_once(swept):
 
 def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
     """Only the NEWEST Shopify fulfilment is compared (the reconcile stores one
-    id): a re-shipment after a cancelled label lands its new AWB."""
+    id): a fulfilment re-created under the SAME AWB (label cancelled and
+    re-issued) is recognised by its id alone, and a later re-shipment with a
+    new AWB lands that."""
     _book(swept, 30017)
     swept["state"]["orders"] = [
         _pulled(30017, fulfillment_status="fulfilled", fulfillments=[_fulfilment(30017, 1)])
@@ -348,13 +350,21 @@ def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
     swept["run"]()
     assert _doc(swept, 30017)["shopify_fulfillment_id"] == "1"
 
-    newer = _fulfilment(30017, 2, tracking_number="AWB-RESHIP", updated_at="2026-09-06T02:00:00Z")
+    same_awb = _fulfilment(30017, 2, updated_at="2026-09-06T02:00:00Z")
     swept["state"]["orders"] = [
-        _pulled(30017, fulfillment_status="fulfilled", fulfillments=[_fulfilment(30017, 1), newer])
+        _pulled(30017, fulfillment_status="fulfilled", fulfillments=[_fulfilment(30017, 1), same_awb])
     ]
     assert swept["run"]().payload["status_synced"] == ["30017"]
     doc = _doc(swept, 30017)
-    assert doc["shopify_fulfillment_id"] == "2" and doc["awb"] == "AWB-RESHIP"
+    assert doc["shopify_fulfillment_id"] == "2" and doc["awb"] == "AWB30017"
+
+    reship = _fulfilment(30017, 3, tracking_number="AWB-RESHIP", updated_at="2026-09-06T03:00:00Z")
+    swept["state"]["orders"] = [
+        _pulled(30017, fulfillment_status="fulfilled", fulfillments=[same_awb, reship, _fulfilment(30017, 1)])
+    ]
+    assert swept["run"]().payload["status_synced"] == ["30017"]
+    doc = _doc(swept, 30017)
+    assert doc["shopify_fulfillment_id"] == "3" and doc["awb"] == "AWB-RESHIP"
 
 
 # ---------------------------------------------------------------------------
