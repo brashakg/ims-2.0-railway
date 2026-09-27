@@ -432,10 +432,17 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
     try:
         # The mapper and the fulfilment reconcile skip a HISTORICAL import
         # (pre-IMS customer-360 rows): comparing one would only report a false
-        # failure every hour. The refund leg below still runs -- its handler
-        # has a narrower rule (our own shopify_order_history import books real
-        # revenue, so a NEW refund on it must still reach the accountant).
-        if not (existing.get("historical") or existing.get("source") == "bvi_import"):
+        # failure every hour. A body older than the last applied webhook (one
+        # landed between the fetch and this sweep) is the mapper's own stale
+        # skip, and it covers the body's fulfilments too -- the reconcile has
+        # no watermark, so the older fulfilment would overwrite the tracking a
+        # newer webhook applied. A benign race the next hour re-reads, not a
+        # failure. The refund leg below still runs in both cases -- it is
+        # id-deduped, and its handler has a narrower import rule (our own
+        # shopify_order_history import books real revenue, so a NEW refund on
+        # it must still reach the accountant).
+        historical = existing.get("historical") or existing.get("source") == "bvi_import"
+        if not historical and not _shopify_payload_stale(existing, raw):
             # Fulfilment first, then the order facts -- both compared against
             # the doc as it stood BEFORE the sweep, exactly the pair of deliveries
             # Shopify makes (fulfillments/create, then orders/fulfilled|updated),
@@ -450,10 +457,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
                 [p for p in (existing.get("payments") or []) if isinstance(p, dict)],
             )
             topic = _order_topic(st, money, existing)
-            # A body older than the last applied webhook (one landed between
-            # the fetch and this sweep) is the mapper's own stale skip -- a
-            # benign race the next hour re-reads, not a failure to report.
-            if topic and not _shopify_payload_stale(existing, raw):
+            if topic:
                 applied = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
                 # The mapper's own terminal rule kept the lifecycle status while
                 # the payment / fulfilment facts landed: reported, so the

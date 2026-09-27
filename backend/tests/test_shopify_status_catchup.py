@@ -919,6 +919,30 @@ def test_a_body_older_than_the_last_applied_webhook_is_not_a_failure(swept):
     assert _snap(_doc(swept, 30029)) == before
 
 
+def test_a_stale_body_never_rewinds_the_fulfilment_a_newer_webhook_applied(swept):
+    """The stale skip covers the body's fulfilments too: the reconcile keeps no
+    watermark of its own, so the older pulled fulfilment would overwrite the
+    tracking / shipment status a newer fulfillments/update already applied."""
+    _book(swept, 30031)
+    newer = "2026-09-06T03:00:00Z"
+    f2 = _fulfilment(30031, 2, tracking_number="AWB-NEW", shipment_status="delivered", updated_at=newer)
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], f2, topic="fulfillments/update")
+    swept["real_map"](
+        _pulled(30031, updated_at=newer, fulfillment_status="fulfilled", fulfillments=[f2]),
+        swept["db"], webhook_id="real-upd-31", topic="orders/updated",
+    )
+    before = _snap(_doc(swept, 30031))
+    assert (before["shopify_fulfillment_id"], before["awb"]) == ("2", "AWB-NEW")
+    swept["seen"].clear()
+
+    f1 = _fulfilment(30031, 1, tracking_number="AWB-OLD", shipment_status="in_transit")
+    swept["state"]["orders"] = [_pulled(30031, fulfillment_status="fulfilled", fulfillments=[f1])]
+    p = swept["run"]().payload
+
+    assert p["status_synced"] == [] and p["status_failed"] == [] and swept["seen"] == []
+    assert _snap(_doc(swept, 30031)) == before
+
+
 # ---------------------------------------------------------------------------
 # Rule: an imported order's status legs are left alone (the mapper and the
 # reconcile skip every import), but its refund leg is the REFUND HANDLER's
