@@ -21,6 +21,8 @@ from ._shared import (
     _blocked_result,
     _live_or_reason,
     is_variant_of,
+    online_block_refusal,
+    online_block_status,
     price_on_update_enabled,
     push_lock_reason,
 )
@@ -122,32 +124,17 @@ async def push_product(
     # already-synced blocked product is done separately by push_product_delist,
     # which is NOT gated here (it IS the block action).
     if blocked is None:
-        try:
-            from ..online_block import is_blocked_from_online_strict
-
-            blocked = is_blocked_from_online_strict(product, db)
-        except Exception:  # noqa: BLE001 -- classifier must never break a push
-            blocked = None
-    if blocked is None:
+        blocked = online_block_status(db, product)
+    refusal = online_block_refusal(blocked)
+    if refusal:
         return PushResult(
             mode=MODE_BLOCKED,
             entity="product",
             action="skip",
             target_id=pid,
             ok=False,
-            error="block status unverifiable (block-config read error) -- "
-            "push skipped (fail-closed)",
-            reason="block_status_unverifiable",
-        )
-    if blocked:
-        return PushResult(
-            mode=MODE_BLOCKED,
-            entity="product",
-            action="skip",
-            target_id=pid,
-            ok=False,
-            error="blocked from online (member of an online_sync_blocked collection)",
-            reason="online_sync_blocked",
+            error=refusal[1],
+            reason=refusal[0],
         )
     variants = variants or []
     ecom = product.get("ecom") or {}

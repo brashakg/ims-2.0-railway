@@ -160,6 +160,11 @@ class _FakeColl:
     def delete_one(self, _flt):
         return None
 
+    # The online-block config read (no collection is blocked here) -- an
+    # unreadable config refuses the press (fail closed).
+    def find(self, *_args, **_kwargs):
+        return []
+
 
 class _FakeDB:
     """The parent product and the one queue row the press re-reads."""

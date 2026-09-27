@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 import asyncio
 import os
@@ -31,6 +31,8 @@ from ._shared import (
     _live_or_reason,
     is_variant_of,
     logger,
+    online_block_refusal,
+    online_block_status,
     push_lock_reason,
 )
 from .transport import _graphql, _now
@@ -136,12 +138,16 @@ def _listing_map(parent: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 
 def image_press_plan(
-    parent: Optional[Dict[str, Any]], image: Dict[str, Any], *, lock: Optional[str] = None
+    parent: Optional[Dict[str, Any]],
+    image: Dict[str, Any],
+    *,
+    lock: Optional[str] = None,
+    blocked: Optional[bool] = False,
 ) -> Dict[str, Any]:
     """PURE: what a press of this design-queue row does, read off the parent
     twin and its ``ecom.media_map`` alone -- THE one predicate the press, the
-    sweep's skip and the pushed/pending counts all ask, so they can never
-    disagree about a row:
+    sweep's skip and the pushed/pending counts all ask (read_image_press
+    supplies the db facts), so they can never disagree about a row:
       gid     the MediaImage the row's source url maps to; None when the
               image is not on the listing (or the parent is a size-variant
               twin, which owns no listing);
@@ -153,9 +159,12 @@ def image_press_plan(
               'update' (mapped, a drop still pending: the press runs the pass
               to take the old asset down), 'create' (not on the listing) or
               'skip' -- the press REFUSES before it sends anything, with
-              ``reason`` (push_locked | no_url | no_photo | not_on_shopify |
+              ``reason`` (push_locked | online_sync_blocked |
+              block_status_unverifiable | no_url | no_photo | not_on_shopify |
               hands_off) and ``error`` (the line the press reports). ``lock``
-              is the parent's push_lock_reason, a db fact the caller supplies.
+              is the parent's push_lock_reason and ``blocked`` its online-block
+              status (True / False / None = unreadable, fail closed) -- db
+              facts the caller supplies.
     A refusal is part of the answer so a row the press will never send is
     not 'pending' forever and the sweep does not press it every run."""
     src = image_source_url(image)
@@ -167,8 +176,15 @@ def image_press_plan(
         and not is_variant_of(parent)
         and bool((parent.get("ecom") or {}).get("shopify_product_id"))
     )
+    refusal = online_block_refusal(blocked) if parent is not None else None
     if lock:
         skip = ("push_locked", "push-locked: " + lock)
+    elif refusal:
+        # THE BLOCK, MIRRORED (push_product's gate, same verdict): a product
+        # in an online_sync_blocked collection must never be written on
+        # Shopify -- a media attach onto its listing included; an unreadable
+        # block status refuses too (fail closed).
+        skip = refusal
     elif not src:
         skip = (
             "no_url",
@@ -204,6 +220,19 @@ def image_press_plan(
     else:
         return plan
     return {**plan, "action": "skip", "reason": skip[0], "error": skip[1]}
+
+
+def read_image_press(db, image: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+    """(parent twin, its push-lock, image_press_plan): the db facts the one
+    predicate needs -- the parent, its push_lock_reason and its online-block
+    status -- read HERE, the one way, for the press and for the sweep's skip
+    and the counts alike. Never raises."""
+    parent = _resolve_product_doc(db, image.get("product_id"))
+    if parent is None:
+        return None, None, image_press_plan(None, image)
+    lock = push_lock_reason(db, "product", parent)
+    blocked = online_block_status(db, parent)
+    return parent, lock, image_press_plan(parent, image, lock=lock, blocked=blocked)
 
 
 def image_lane_media(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -1023,7 +1052,9 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     GUARDS: only an APPROVED image is push-eligible (the design queue gate).
     Anything else returns ok=False action=skip (Fail Loudly) without a network
     call. A product IMS would not publish (no photograph of its own --
-    push_product's gate, same reason ``no_photo``) gets no design image either.
+    push_product's gate, same reason ``no_photo``) gets no design image
+    either, nor does one push_product refuses as blocked from online (the
+    same verdict, ``online_sync_blocked`` / ``block_status_unverifiable``).
     The parent product MUST already be on Shopify (ecom.shopify_product_id) --
     without it there is nothing to attach the media to; that is a skip too.
 
@@ -1062,14 +1093,15 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
     # Phase 5 push-lock (defense-in-depth, FIRST gate: an image attaches to
     # its parent product, so a push-locked brand's image must NEVER reach
     # Shopify either, even if the product got there before its brand was
-    # locked; fail-CLOSED on a real match), an unfetchable url, the photo
-    # rule mirrored from push_product (a product with no photograph of its
-    # own is never published, so it takes no design image either -- without
-    # this a design press would run the pass over a listing the product press
-    # refuses to touch), and a parent that owns no listing.
-    _parent = _resolve_product_doc(db, image.get("product_id"))
-    _img_lock = push_lock_reason(db, "product", _parent) if _parent is not None else None
-    press = image_press_plan(_parent, image, lock=_img_lock)
+    # locked; fail-CLOSED on a real match), the online block mirrored from
+    # push_product (a product in an online_sync_blocked collection -- or
+    # whose block status cannot be read -- is never written on Shopify, a
+    # media attach included), an unfetchable url, the photo rule mirrored
+    # from push_product (a product with no photograph of its own is never
+    # published, so it takes no design image either -- without this a design
+    # press would run the pass over a listing the product press refuses to
+    # touch), and a parent that owns no listing.
+    _parent, _img_lock, press = read_image_press(db, image)
     if press.get("reason") == "push_locked":
         return _blocked_result("image", iid, _img_lock)
 
@@ -1091,7 +1123,11 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
     if press["action"] == "skip":
         # A skip before the dark/live split, zero network either way.
         return PushResult(
-            mode=MODE_BLOCKED if press["reason"] == "no_photo" else MODE_SIMULATED,
+            mode=(
+                MODE_BLOCKED
+                if press["reason"] in ("no_photo", "online_sync_blocked", "block_status_unverifiable")
+                else MODE_SIMULATED
+            ),
             entity="image",
             action="skip",
             target_id=iid,

@@ -72,6 +72,8 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_a_row_delete_waits...        media_lease that claims nothing (P4)       -> red
   test_deleting_a_promoted_rows...  delete_image without the map write (P1)    -> red
   test_the_delete_gate_fails...     the gate on _resolve_product_doc (P2)      -> red
+  -- round 6 --
+  test_a_product_blocked_from_on..  image_press_plan without the block refusal -> red
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
 """
@@ -1417,3 +1419,46 @@ def test_the_delete_gate_fails_closed_on_a_parent_read_error(gates, monkeypatch)
     assert failed.value.status_code == 503
     assert _row(db, "I1") is not None
     assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+
+
+# ===========================================================================
+# Round 6: a product blocked from online takes no design image
+# ===========================================================================
+
+
+def test_a_product_blocked_from_online_takes_no_design_image(gates, monkeypatch):
+    """R2 (the design press wrote to a product the product press refuses). P1
+    is on Shopify (delisted to DRAFT, gid kept) and a member of an
+    online_sync_blocked collection: push_product refuses it with zero calls,
+    and so must the design press -- the one predicate refuses it the same
+    way, so the sweep skips it and the counts never call it pending. An
+    unreadable block config refuses too (fail closed).
+    REVERT-PROOF: image_press_plan without the online-block refusal -> red."""
+    from api.routers import online_store_push as router
+
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))], status="DRAFT"))
+    _image(db, "I1", NEW)
+    db["ecom_collections"].insert_one(
+        {"collection_id": "C-BAN", "collection_type": "CUSTOM", "online_sync_blocked": True,
+         "products": [{"sku": "SKU-1", "position": 0}]}
+    )
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    img = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert (prod.action, prod.ok, prod.reason) == ("skip", False, "online_sync_blocked")
+    assert (img.action, img.ok, img.reason, img.mode) == ("skip", False, "online_sync_blocked", "BLOCKED")
+    assert router._press_plan(db, _row(db, "I1"))["action"] == "skip", "the sweep skips it"
+    assert router._image_counts(db) == {"approved": 1, "pushed": 0, "pending": 0}
+    assert fake.calls == [], "nothing written on a banned product"
+
+    def _unreadable(*args, **kwargs):
+        raise RuntimeError("ecom_collections read timed out")
+
+    monkeypatch.setattr(db["ecom_collections"], "find", _unreadable)
+    img = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert (img.action, img.ok, img.reason) == ("skip", False, "block_status_unverifiable")
+    assert fake.calls == [] and _map_of(db) == [{"url": OWN, "id": _m(1)}]

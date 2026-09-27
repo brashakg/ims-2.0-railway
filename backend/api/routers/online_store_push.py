@@ -847,13 +847,12 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
 
 def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     """The ONE 'what does a press of this design-queue image do' rule
-    (media.image_press_plan) read off the parent twin and its ecom.media_map,
-    the parent's push-lock included: the sweep skips a row only when the
-    press itself would be a no-op or a refusal, and the counts call a row
-    pending on the same answer. The row itself carries no Shopify id."""
-    parent = shopify_push._resolve_product_doc(db, doc.get("product_id"))
-    lock = shopify_push.push_lock_reason(db, "product", parent) if parent is not None else None
-    return shopify_push.image_press_plan(parent, doc, lock=lock)
+    (media.image_press_plan) read off the parent twin and its ecom.media_map
+    by the press's own reader (media.read_image_press: the parent's push-lock
+    and online block included): the sweep skips a row only when the press
+    itself would be a no-op or a refusal, and the counts call a row pending
+    on the same answer. The row itself carries no Shopify id."""
+    return shopify_push.read_image_press(db, doc)[2]
 
 
 def _image_counts(db) -> Dict[str, int]:
