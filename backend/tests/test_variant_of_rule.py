@@ -1098,13 +1098,21 @@ def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeyp
     assert _media._resolve_product_gid(db, "tw-child") is None
 
     image = {"image_id": "img-child", "product_id": "tw-child", "status": "APPROVED", "url": CHILD_PHOTO}
+    db["product_images"].insert_one(dict(image))
     res = _run(shopify_push.push_image(db, image))
     assert (res.action, res.ok) == ("skip", False) and spy.calls == [], "zero network"
     assert "not on Shopify" in (res.error or "")
     assert res.payload["productId"] is None
 
-    # the parent's image goes through as before
-    parent_image = {**image, "image_id": "img-parent", "product_id": "tw-parent", "url": PARENT_PHOTO}
+    # the parent's image goes through as before (a design asset of its own, on
+    # a listing IMS manages: one owned among no foreign media -- a listing IMS
+    # owns NOTHING on is refused, hands off)
+    parent = db["catalog_products"].find_one({"id": "tw-parent"})
+    parent["ecom"]["media_map"] = [{"url": PARENT_PHOTO, "id": "gid://shopify/MediaImage/1"}]
+    parent_image = {
+        **image, "image_id": "img-parent", "product_id": "tw-parent",
+        "url": "https://cdn.example.com/parent-design.jpg",
+    }
     db["product_images"].insert_one(dict(parent_image))
     res = _run(shopify_push.push_image(db, parent_image))
     assert res.ok and res.action == "create"

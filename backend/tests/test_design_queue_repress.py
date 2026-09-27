@@ -62,6 +62,13 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_a_product_press_on_a_stale. map written from the snapshot, no merge (P2) -> red
   test_a_design_press_on_a_stale.. same revert, the other door (P2)           -> red
   test_the_refusals_are_the_plans. image_press_plan without the skip fold (P4) -> red
+  -- round 5 --
+  test_a_listing_ims_owns_nothing.. image_press_plan without hands_off (P3)    -> red
+  test_a_row_whose_lane_flips...    _merge by lane, not by id (P1)             -> red
+  test_two_presses_on_one_product.. media_lease that claims nothing (P1/P2)    -> red
+  test_the_press_reads_the_queue..  press the passed copy, no re-read          -> red
+  test_replacing_one_rows_asset...  heirs={} (P2 sibling)                      -> red
+  test_an_attach_whose_answer...    plan_product_media without adopt           -> red
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
 """
@@ -77,6 +84,7 @@ import asyncio  # noqa: E402
 import copy  # noqa: E402
 
 import pytest  # noqa: E402
+from pymongo.errors import DuplicateKeyError  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
@@ -112,6 +120,13 @@ class _Coll:
     def find_one(self, *args, **kwargs):
         return copy.deepcopy(self._m.find_one(*args, **kwargs))
 
+    def insert_one(self, doc):
+        # Mongo's unique _id: a second insert of one _id is REFUSED (the media
+        # lease is exactly that claim; MockCollection would overwrite).
+        if doc.get("_id") is not None and self._m.find_one({"_id": doc["_id"]}) is not None:
+            raise DuplicateKeyError("E11000 duplicate key error")
+        return self._m.insert_one(doc)
+
     def __getattr__(self, name):
         return getattr(self._m, name)
 
@@ -142,14 +157,21 @@ class _Shopify:
     so the fake's listing is what the next read returns. ``fail_delete_once``
     answers the next productDeleteMedia with a mediaUserError and removes
     nothing. ``on_read`` (once) runs just before the next media read answers:
-    another door's press landing inside this press's window."""
+    another door's press landing inside this press's window; ``before[op]``
+    (once) does the same for any operation. ``lose_create_once`` lands the
+    next productCreateMedia on the listing and then raises, as the transport
+    does when the response is lost (a timeout after Shopify accepted it).
+    Every call AWAITS once, as the real transport does, so two presses
+    gathered on one loop interleave exactly as two workers would."""
 
     def __init__(self, media_nodes=None):
         self.calls = []
         self.media_nodes = list(media_nodes or [])
         self.next_media = 100
         self.fail_delete_once = False
+        self.lose_create_once = False
         self.on_read = None
+        self.before = {}
 
     @staticmethod
     def _op(query):
@@ -182,8 +204,12 @@ class _Shopify:
         return [n["id"] for n in self.media_nodes]
 
     async def __call__(self, db, query, variables):
+        await asyncio.sleep(0)
         op = self._op(query)
         self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
+        hook = self.before.pop(op, None)
+        if hook:
+            hook()
         variant = {
             "id": "gid://shopify/ProductVariant/901",
             "title": "Default Title",
@@ -201,11 +227,20 @@ class _Shopify:
             }
         if op == "imsProductCreateMedia":
             out = []
-            for _ in variables.get("media") or []:
+            for m in variables.get("media") or []:
                 gid = _m(self.next_media)
                 self.next_media += 1
                 out.append({"id": gid, "status": "PROCESSING"})
-                self.media_nodes.append({"id": gid, "image": {"url": "https://cdn.shopify.com/%s.jpg" % gid.rsplit("/", 1)[-1]}})
+                self.media_nodes.append(
+                    {
+                        "id": gid,
+                        "image": {"url": "https://cdn.shopify.com/%s.jpg" % gid.rsplit("/", 1)[-1]},
+                        "originalSource": {"url": m["originalSource"]},
+                    }
+                )
+            if self.lose_create_once:
+                self.lose_create_once = False
+                raise RuntimeError("shopify request failed after 3 attempts (timeout)")
             return {"data": {"productCreateMedia": {"media": out, "mediaUserErrors": []}}}
         if op == "imsProductDeleteMedia":
             if self.fail_delete_once:
@@ -424,8 +459,8 @@ def test_a_failed_delete_keeps_the_old_asset_mapped_until_a_re_press_takes_it_do
     assert fake.listing() == [_m(1), _m(2), _m(100)]
     assert _map_of(db) == [
         {"url": OWN, "id": _m(1)},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
         {"url": OLD, "id": _m(2), "image_id": "I1"},
+        {"url": NEW, "id": _m(100), "image_id": "I1"},
     ], "OLD stays mapped: its delete has not happened"
 
     n = len(fake.calls)
@@ -469,18 +504,28 @@ def test_a_listing_ims_owns_nothing_on_is_refused_not_attached_to_blind(gates, m
     """A pre-map listing (hand uploads, no media_map): the product press keeps
     its hands off, and so does this one -- a loud refusal pointing at the
     adoption runbook, ZERO mutations. Attaching blind here is exactly how the
-    24 orphan rows were minted."""
+    24 orphan rows were minted.
+    Round 5 (P3): the refusal is read off the TWIN, so it is part of the one
+    predicate -- the plan says skip/hands_off, the counts do not call the row
+    pending, and the press refuses with ZERO calls (it used to read the
+    listing first, answer 'create' everywhere else, and so stay pending and
+    be re-pressed by every images sweep forever).
+    REVERT-PROOF: drop the hands_off branch of image_press_plan -> red."""
+    from api.routers import online_store_push as router
+
     fake = _live(monkeypatch, _hand())
     db = _DB()
     _seed(db, _product([OWN]))  # no map
     img = _image(db, "I1", NEW)
 
+    plan = shopify_push.image_press_plan(_parent(db), img)
+    assert (plan["action"], plan["reason"]) == ("skip", "hands_off")
+    assert router._image_counts(db) == {"approved": 1, "pushed": 0, "pending": 0}
     res = _run(shopify_push.push_image(db, img))
 
-    assert res.ok is False and res.action == "create"
+    assert (res.ok, res.action, res.reason) == (False, "skip", "hands_off")
     assert "adopt" in (res.error or "") and "hands off" in (res.error or "")
-    assert fake.ops() == ["imsProductMedia"], "a read, never a mutation"
-    assert res.photos["hands_off"] is True
+    assert fake.calls == [], "zero calls, not even the read"
     assert fake.listing() == [HAND]
     assert _map_of(db) is None
 
@@ -554,7 +599,7 @@ def test_the_product_press_neither_attaches_nor_drops_design_media(gates, monkey
     assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
     assert res.photos == {
         "attached": 0, "deleted": 1, "reordered": False,
-        "unmanaged": 0, "hands_off": False, "on_shopify": 2,
+        "unmanaged": 0, "adopted": 0, "hands_off": False, "on_shopify": 2,
     }
 
 
@@ -575,6 +620,7 @@ def test_the_product_press_leaves_a_design_media_in_its_slot(gates, monkeypatch)
     assert plan == {
         "attach": [], "delete": [], "reorder": [], "unmanaged": 0, "hands_off": False,
         "owned": [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}],
+        "adopt": [],
     }
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
 
@@ -1056,3 +1102,187 @@ def test_the_refusals_are_the_plans_answer_and_the_press_sends_nothing(gates, mo
         res = _run(shopify_push.push_image(db, img))
         assert (res.action, res.ok) == ("skip", False), (iid, res)
     assert fake.calls == [], "zero network"
+
+
+# ===========================================================================
+# Round 5: one pass per product (the lease), the map merged by id, the row
+# pressed as it is now, a shared image handed over, a lost attach adopted,
+# the delete gate closed
+# ===========================================================================
+
+
+def test_a_row_whose_lane_flips_mid_pass_is_never_dropped_from_the_map(gates, monkeypatch):
+    """P1 (lane re-derived at write time). The product press plans while OLD
+    is a design media (stamped I1); while its attach is in flight the
+    operator makes OLD one of the product's photographs. The write keeps
+    every stored row BY ID -- a lane worked out again at write time put OLD
+    in neither list and dropped it, and the next press attached OLD a
+    second time over a media no door governs any more.
+    REVERT-PROOF: _merge by lane (mine from the plan, theirs from the write
+    read) -> red."""
+    fake = _live(monkeypatch, _nodes(1, 2))
+    db = _DB()
+    _seed(db, _product([OWN, OWN2], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+
+    def _promote():
+        db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2, OLD]}})
+
+    fake.before["imsProductCreateMedia"] = _promote
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.ok is True, prod.error
+    assert fake.listing() == [_m(1), _m(2), _m(100)]
+    assert sorted(r["id"] for r in _map_of(db)) == [_m(1), _m(100), _m(2)], "OLD stays IMS's"
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+    assert again.ok is True and again.photos["attached"] == 0, again.photos
+    assert fake.listing() == [_m(1), _m(2), _m(100)], "OLD once"
+
+
+def test_two_presses_on_one_product_run_one_at_a_time(gates, monkeypatch):
+    """P1/P2 (interleaved presses). A double click reaching two workers, the
+    images sweep beside a human press, the 01:00/09:00 sweep beside a human
+    press: every pair planned on one listing and read the other's half-done
+    attach as foreign media -> a duplicate on the storefront and an orphan
+    no door governs. Under the product's media lease the second press waits
+    and then reads a listing and a map that agree.
+    REVERT-PROOF: media_lease that yields without claiming -> red."""
+    # (H) two presses of ONE row
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", NEW)
+
+    async def _twice():
+        return await asyncio.gather(
+            shopify_push.push_image(db, _row(db, "I1")), shopify_push.push_image(db, _row(db, "I1"))
+        )
+
+    a, b = _run(_twice())
+    assert sorted([a.action, b.action]) == ["create", "noop"] and a.ok and b.ok
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1
+    assert fake.listing() == [_m(1), _m(100)]
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+
+    # (C) the sweep's product press (a doc loaded before OWN2 was added) and a
+    # human design press of OWN2 -- an own photograph -- on the same product
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    stale = _parent(db)
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
+    _image(db, "I1", OWN2)
+
+    async def _both():
+        return await asyncio.gather(
+            shopify_push.push_product(db, stale, []), shopify_push.push_image(db, _row(db, "I1"))
+        )
+
+    prod, img = _run(_both())
+    assert prod.ok is True and img.ok is True, (prod.error, img.error)
+    attached = [m["originalSource"] for c in fake.calls_of("imsProductCreateMedia") for m in c["variables"]["media"]]
+    assert attached == [OWN2], "OWN2 attached once"
+    assert fake.listing() == [_m(1), _m(100)]
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(100)}]
+
+
+def test_the_press_reads_the_queue_row_as_it_is_now_not_the_sweeps_copy(gates, monkeypatch):
+    """The images sweep loads every row up front and presses each copy. (a) A
+    row deleted since (its lane was empty, so the delete was allowed) must
+    not be pressed from the copy: that minted a media for a row that no
+    longer exists. (b) A row re-pointed and pressed since must not be pressed
+    from its old url: that took the new asset down and put the replaced one
+    back up.
+    REVERT-PROOF: _press_image on the passed copy (no re-read) -> red."""
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    gone = _image(db, "I2", OLD)
+    db["product_images"].delete_one({"image_id": "I2"})
+
+    res = _run(shopify_push.push_image(db, gone))
+
+    assert (res.action, res.ok, res.reason) == ("skip", False, "row_gone") and fake.calls == []
+
+    stale = _image(db, "I1", OLD)
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": NEW}})
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).shopify_id == _m(100)
+    n = len(fake.calls)
+
+    res = _run(shopify_push.push_image(db, stale))
+
+    assert res.action == "noop" and res.shopify_id == _m(100) and len(fake.calls) == n
+    assert fake.listing() == [_m(1), _m(100)] and list(db[TOMB].find({})) == []
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+
+
+def test_replacing_one_rows_asset_hands_a_shared_image_to_its_sibling(gates, monkeypatch):
+    """P2 (two identities for one media). I1 and I2 both source OLD; I1's
+    press put it up (m100, stamped I1) and I2's press read it by url (noop,
+    Synced). Replacing I1's asset used to delete m100 -- I2's image too. The
+    media is HANDED to I2's lane instead, and both rows read no-op after.
+    REVERT-PROOF: push_image with heirs={} -> red."""
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", OLD)
+    _image(db, "I2", OLD)
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).shopify_id == _m(100)
+    assert _run(shopify_push.push_image(db, _row(db, "I2"))).action == "noop"
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": NEW}})
+
+    res = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert res.ok is True and res.shopify_id == _m(101)
+    assert fake.calls_of("imsProductDeleteMedia") == [] and list(db[TOMB].find({})) == []
+    assert fake.listing() == [_m(1), _m(100), _m(101)]
+    assert _map_of(db) == [
+        {"url": OWN, "id": _m(1)},
+        {"url": OLD, "id": _m(100), "image_id": "I2"},
+        {"url": NEW, "id": _m(101), "image_id": "I1"},
+    ]
+    for iid, gid in (("I1", _m(101)), ("I2", _m(100))):
+        plan = shopify_push.image_press_plan(_parent(db), _row(db, iid))
+        assert (plan["action"], plan["gid"]) == ("noop", gid), iid
+
+
+def test_an_attach_whose_answer_was_lost_is_adopted_not_attached_again(gates, monkeypatch):
+    """A crash or a lost response between the Shopify call and the map write:
+    the media is on the listing, the map never heard of it. The next press
+    of either door recognises its own attach by the originalSource IMS
+    handed over (match_media_to_photos' R1) and MAPS it -- it used to attach
+    the url a second time and leave the first copy unmanaged forever.
+    REVERT-PROOF: plan_product_media without the adopt pass -> red."""
+    from api.services.shopify_push import queries
+
+    fake = _live(monkeypatch, _nodes(1))
+    fake.lose_create_once = True
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", NEW)
+
+    first = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert first.ok is False and "timeout" in (first.error or "")
+    assert fake.listing() == [_m(1), _m(100)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+
+    again = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert again.ok is True and again.shopify_id == _m(100) and again.photos["adopted"] == 1
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1, "never attached twice"
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+
+    # the product door: the worker dies after the attach, before the map write
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
+    real = _media._writeback_media_map
+    monkeypatch.setattr(_media, "_writeback_media_map", lambda db, pid, rows: False)
+    _run(shopify_push.push_product(db, _parent(db), []))
+    monkeypatch.setattr(_media, "_writeback_media_map", real)
+    assert fake.listing() == [_m(1), _m(100), _m(101)] and len(_map_of(db)) == 2
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos["attached"] == 0 and prod.photos["adopted"] == 1, prod.photos
+    assert fake.listing() == [_m(1), _m(100), _m(101)]
+    assert {"url": OWN2, "id": _m(101)} in _map_of(db)
+    # ... which needs the source url on the product press's own read of the listing
+    for mutation in (queries._PRODUCT_CREATE, queries._PRODUCT_UPDATE):
+        assert "originalSource { url }" in mutation

@@ -288,7 +288,7 @@ def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch)
     assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
     assert res.photos == {
         "attached": 0, "deleted": 0, "reordered": False,
-        "unmanaged": 0, "hands_off": False, "on_shopify": 2,
+        "unmanaged": 0, "adopted": 0, "hands_off": False, "on_shopify": 2,
     }
 
 
@@ -488,6 +488,7 @@ def test_dark_press_returns_the_media_plan_and_makes_no_call(db, monkeypatch):
         "unmanaged": 0,
         "hands_off": False,
         "owned": [{"url": U1, "id": _m(1)}],
+        "adopt": [],
     }
 
 

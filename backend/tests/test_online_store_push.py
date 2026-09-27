@@ -215,11 +215,14 @@ def test_push_collection_menu_image_simulated_no_network(monkeypatch):
                        "resource_id": "gid://shopify/Collection/9", "children": []}]}
     img = {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
            "status": "APPROVED"}
-    # The parent is on Shopify with a photograph: a press of a row whose parent
-    # is not is a SKIP, dark or live (image_press_plan's refusals).
+    # The parent is on Shopify with a photograph IMS owns on its listing: a
+    # press of a row whose parent is not is a SKIP, dark or live
+    # (image_press_plan's refusals). The press re-reads its queue row.
     db["catalog_products"].insert_one(
         {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
-         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}})
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111", "media_map": [
+             {"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"}]}})
+    db["product_images"].insert_one(dict(img))
 
     rc = _run(shopify_push.push_collection(db, coll))
     rm = _run(shopify_push.push_menu(db, menu))
@@ -239,7 +242,9 @@ def test_push_image_non_approved_is_skipped_even_dark(monkeypatch):
     the gate (the design-queue go-live gate). No network either."""
     _force_dark(monkeypatch, "writes_off")
     img = {"image_id": "I2", "product_id": "P1", "url": "u", "status": "REVIEW"}
-    res = _run(shopify_push.push_image(_EngineDB(), img))
+    db = _EngineDB()
+    db["product_images"].insert_one(dict(img))
+    res = _run(shopify_push.push_image(db, img))
     assert res.action == "skip" and res.ok is False
     assert "APPROVED" in (res.error or "")
 

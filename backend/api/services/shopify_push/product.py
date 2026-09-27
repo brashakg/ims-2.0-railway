@@ -6,6 +6,7 @@ variant seeding, photos, publish) and `push_product_delist`.
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
@@ -50,7 +51,7 @@ from .inventory import (
     sync_product_stock,
     zero_stock_ledger_entry,
 )
-from .media import plan_product_media, product_photo_urls, sync_product_media
+from .media import media_lease, plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -240,7 +241,13 @@ async def push_product(
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
+    # ONE MEDIA PASS PER PRODUCT (media.media_lease): the lease is held from
+    # BEFORE the write whose response is this press's read of the listing
+    # until the photo pass has written the map -- a design press (or another
+    # sweep) on this product waits, and never plans on half of this one.
+    lease = AsyncExitStack()
     try:
+        await lease.enter_async_context(media_lease(db, pid))
         body = await _graphql(db, query, {"input": payload})
         err = _user_errors(body, field_name)
         if err:
@@ -528,6 +535,8 @@ async def push_product(
             payload=payload,
             error=str(e),
         )
+    finally:
+        await lease.aclose()
 
 
 async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
