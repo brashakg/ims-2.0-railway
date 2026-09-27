@@ -165,7 +165,6 @@ def _make_app(monkeypatch, attendance_records=None, leave_records=None,
     )
     # Other repos not needed for these tests.
     monkeypatch.setattr(hr, "get_user_repository", lambda: None)
-    monkeypatch.setattr(hr, "get_payroll_repository", lambda: None)
     return TestClient(app)
 
 
