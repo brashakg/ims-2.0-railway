@@ -614,3 +614,26 @@ def test_admin_can_sign_off(client, auth_headers, patched_db):
                     json={"status": "APPROVED"})
     assert r.status_code == 200, r.text
     assert r.json()["image"]["status"] == "APPROVED"
+
+
+def test_live_list_reads_the_synced_chip_off_the_parents_media_map(client, auth_headers, patched_db):
+    """`shopify_media_id` on a listed row -- the Synced chip on the Design
+    Queue card -- is the parent twin's ecom.media_map gid for the row's
+    source url (the one identity a pushed design image has), read at list
+    time and never stored on the row. A row not on the listing reads null."""
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "ecom": {"media_map": [
+            {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900", "image_id": "I1"}]}})
+    conn.db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
+         "edited_url": "http://x/edited.jpg", "status": "APPROVED"})
+    conn.db["product_images"].insert_one(
+        {"image_id": "I2", "product_id": "P1", "url": "http://x/other.jpg", "status": "APPROVED"})
+
+    r = client.get("/api/v1/online-store/images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    by_id = {row["id"]: row for row in r.json()["images"]}
+    assert by_id["I1"]["shopify_media_id"] == "gid://shopify/MediaImage/900"
+    assert by_id["I2"]["shopify_media_id"] is None
+    assert "shopify_media_id" not in conn.db["product_images"].find_one({"image_id": "I1"}), "read, never stored"

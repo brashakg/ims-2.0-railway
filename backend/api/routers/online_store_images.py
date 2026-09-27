@@ -311,6 +311,20 @@ async def list_images(
         skip=skip,
         limit=limit,
     )
+    # `shopify_media_id` -- the Synced chip on the card -- is READ off the
+    # parent twin's ecom.media_map (shopify_push.image_media_gid, the one
+    # identity a pushed design image has); never stored on the row. One
+    # parent read per product, whatever the page size.
+    from ..services import shopify_push
+
+    db = _get_db()
+    parents: Dict = {}
+    for pid in {row.get("product_id") for row in rows}:
+        parents[pid] = shopify_push._resolve_product_doc(db, pid)
+    rows = [
+        {**row, "shopify_media_id": shopify_push.image_media_gid(parents[row.get("product_id")], row)}
+        for row in rows
+    ]
     return {"images": _with_id(rows), "count": len(rows), "db_connected": True}
 
 
