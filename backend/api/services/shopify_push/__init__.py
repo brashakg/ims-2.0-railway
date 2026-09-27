@@ -283,6 +283,7 @@ from .media import (  # noqa: F401
     product_photo_urls,
     _attach_product_photos,
     owned_media,
+    pending_media,
     match_media_to_photos,
     plan_product_media,
     sync_product_media,

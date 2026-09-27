@@ -508,7 +508,10 @@ async def delete_image(
     image_id -- the asset it carries now OR one it carried before it was
     edited): the design press takes a media down only through its row, so
     deleting the row first would leave the media up and its map row orphaned
-    forever, with no door able to remove either. Take it down first (remove
+    forever, with no door able to remove either. REFUSED too while an attach
+    made for it never heard back (the twin's media_pending row in its lane:
+    the media may be on the listing with no map row) -- a press of the image
+    or the product settles it. Take it down first (remove
     it in the Shopify admin and press the product, which prunes the map),
     then delete. A row whose url is one of the product's own photographs
     maps nothing in its lane (that media is the product's) and deletes --
@@ -537,6 +540,15 @@ async def delete_image(
                     status_code=503, detail="Could not read the parent product (%s); try again" % exc
                 )
             lane = shopify_push.image_lane_media(parent, existing)
+            if any(not r.get("id") for r in lane):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "An earlier press of this image never heard back from Shopify, "
+                        "so it may be on the listing; press the image (or the product) "
+                        "again to settle it, then delete"
+                    ),
+                )
             if lane:
                 raise HTTPException(
                     status_code=409,

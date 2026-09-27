@@ -73,6 +73,9 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_deleting_a_promoted_rows...  delete_image without the map write (P1)    -> red
   test_the_delete_gate_fails...     the gate on _resolve_product_doc (P2)      -> red
   -- round 6 --
+  test_a_rows_delete_is_refused..   image_lane_media without pending_media     -> red
+                                    the attach sent with no pending record     -> red
+  test_a_lost_attach_of_a_row_re..  plan_product_media without the settle      -> red
   test_a_product_blocked_from_on..  image_press_plan without the block refusal -> red
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
@@ -699,12 +702,36 @@ def test_dark_press_makes_zero_network_calls(monkeypatch):
     assert _map_of(db) == [_row_of(e) for e in before]
 
 
+def _die_after_the_record(monkeypatch):
+    """The pass's record of its attach (media_pending, written BEFORE
+    productCreateMedia) lands; every media write after it fails -- the twin
+    stops taking writes, or the worker dies right after the attach."""
+    real = _media._writeback_media_map
+    state = {"recorded": False}
+
+    def _write(db, pid, rows, pending=None):
+        if state["recorded"] or not pending:
+            return False
+        state["recorded"] = True
+        return real(db, pid, rows, pending=pending)
+
+    monkeypatch.setattr(_media, "_writeback_media_map", _write)
+    return lambda: monkeypatch.setattr(_media, "_writeback_media_map", real)
+
+
+def _pending_of(db, pid="P1"):
+    return (db["catalog_products"].find_one({"id": pid}) or {})["ecom"].get("media_pending") or []
+
+
 def test_a_map_writeback_failure_is_loud_and_keeps_the_gid(gates, monkeypatch):
     """The media attached on Shopify but the twin could not record it: ok=False
     (a silent ok=True on an un-recorded create is exactly what let a re-run
-    duplicate media), the minted gid kept on the result for reconcile."""
+    duplicate media), the minted gid kept on the result for reconcile -- and
+    the attach's pending row, written before the call, stays for the next
+    press to settle. When even that record cannot be written, nothing is
+    sent: no record, no attach."""
     fake = _live(monkeypatch, _nodes(1))
-    monkeypatch.setattr(_media, "_writeback_media_map", lambda db, pid, rows: False)
+    _die_after_the_record(monkeypatch)
     db = _DB()
     _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
     img = _image(db, "I1", NEW)
@@ -715,6 +742,25 @@ def test_a_map_writeback_failure_is_loud_and_keeps_the_gid(gates, monkeypatch):
     assert res.shopify_id == _m(100), "the orphaned gid rides the audit row"
     assert fake.listing() == [_m(1), _m(100)]
     assert _map_of(db) == [{"url": OWN, "id": _m(1)}], "the map did not change"
+    assert _pending_of(db) == [{"url": NEW, "image_id": "I1"}], "the attach stays on record"
+    # ... so the row it was made for is not deletable (a dead worker's lease
+    # has expired by now; the gate reads the record, not the lease)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as refused:
+        _run(_delete_route(monkeypatch, db)("I1"))
+    assert refused.value.status_code == 409 and _row(db, "I1") is not None
+
+    fake = _live(monkeypatch, _nodes(1))
+    monkeypatch.setattr(_media, "_writeback_media_map", lambda db, pid, rows, pending=None: False)
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    img = _image(db, "I1", NEW)
+
+    res = _run(shopify_push.push_image(db, img))
+
+    assert res.ok is False and "nothing was sent" in (res.error or ""), res.error
+    assert fake.ops() == ["imsProductMedia"] and fake.listing() == [_m(1)]
 
 
 def test_an_unfetchable_asset_is_refused_before_the_network(gates, monkeypatch):
@@ -1335,26 +1381,28 @@ def test_an_attach_whose_answer_was_lost_is_adopted_not_attached_again(gates, mo
     first = _run(shopify_push.push_image(db, _row(db, "I1")))
     assert first.ok is False and "timeout" in (first.error or "")
     assert fake.listing() == [_m(1), _m(100)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+    assert _pending_of(db) == [{"url": NEW, "image_id": "I1"}]
 
     again = _run(shopify_push.push_image(db, _row(db, "I1")))
 
     assert again.ok is True and again.shopify_id == _m(100) and again.photos["adopted"] == 1
     assert len(fake.calls_of("imsProductCreateMedia")) == 1, "never attached twice"
     assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _pending_of(db) == [], "settled"
 
     # the product door: the worker dies after the attach, before the map write
     db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
-    real = _media._writeback_media_map
-    monkeypatch.setattr(_media, "_writeback_media_map", lambda db, pid, rows: False)
+    restore = _die_after_the_record(monkeypatch)
     _run(shopify_push.push_product(db, _parent(db), []))
-    monkeypatch.setattr(_media, "_writeback_media_map", real)
+    restore()
     assert fake.listing() == [_m(1), _m(100), _m(101)] and len(_map_of(db)) == 2
+    assert _pending_of(db) == [{"url": OWN2}]
 
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert prod.photos["attached"] == 0 and prod.photos["adopted"] == 1, prod.photos
     assert fake.listing() == [_m(1), _m(100), _m(101)]
-    assert {"url": OWN2, "id": _m(101)} in _map_of(db)
+    assert {"url": OWN2, "id": _m(101)} in _map_of(db) and _pending_of(db) == []
     # ... which needs the source url on the product press's own read of the listing
     for mutation in (queries._PRODUCT_CREATE, queries._PRODUCT_UPDATE):
         assert "originalSource { url }" in mutation
@@ -1422,8 +1470,79 @@ def test_the_delete_gate_fails_closed_on_a_parent_read_error(gates, monkeypatch)
 
 
 # ===========================================================================
-# Round 6: a product blocked from online takes no design image
+# Round 6: a lost attach is on record until a press settles it (the delete
+# gate honours it); a product blocked from online takes no design image
 # ===========================================================================
+
+
+def _lost_attach(monkeypatch, db):
+    """I1 (url NEW) pressed on P1 (listing [m1], map [{OWN, m1}]); the
+    productCreateMedia lands as m100 and its answer is lost."""
+    fake = _live(monkeypatch, _nodes(1))
+    fake.lose_create_once = True
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", NEW)
+    first = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert first.ok is False and "timeout" in (first.error or "")
+    assert fake.listing() == [_m(1), _m(100)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+    return fake
+
+
+def test_a_rows_delete_is_refused_while_its_lost_attach_is_unsettled(gates, monkeypatch):
+    """R2 P1 (the delete orphaned a lost attach). The press's productCreateMedia
+    reached Shopify but its answer was lost, so the map never heard of m100;
+    the delete gate read the map alone, deleted the row -- the only repair
+    path -- and m100 stayed on the storefront as unmanaged forever. The
+    attach is recorded (media_pending, in I1's lane) BEFORE the call: the
+    delete is refused, and the next press of either door maps m100 in I1's
+    lane, where the gate sees it as on the listing.
+    REVERT-PROOF: image_lane_media without pending_media -> red."""
+    from fastapi import HTTPException
+
+    db = _DB()
+    delete = _delete_route(monkeypatch, db)
+    fake = _lost_attach(monkeypatch, db)
+    assert shopify_push.image_press_plan(_parent(db), _row(db, "I1"))["action"] == "create"
+
+    with pytest.raises(HTTPException) as refused:
+        _run(delete("I1"))
+
+    assert refused.value.status_code == 409 and "never heard back" in refused.value.detail
+    assert _row(db, "I1") is not None
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.ok is True, prod.error
+    assert (prod.photos["unmanaged"], prod.photos["adopted"], prod.photos["attached"]) == (0, 1, 0)
+    assert fake.listing() == [_m(1), _m(100)]
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _pending_of(db) == []
+    with pytest.raises(HTTPException) as on_listing:
+        _run(delete("I1"))
+    assert on_listing.value.status_code == 409 and _m(100) in on_listing.value.detail
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
+
+
+def test_a_lost_attach_of_a_row_re_pointed_since_is_taken_down_by_its_press(gates, monkeypatch):
+    """The lost attach's row is re-pointed before anything settles it: R1
+    adoption only knows the row's url NOW, so m100 (the old url) would never
+    be claimed. The pending row names it: the press maps it in I1's lane and,
+    since I1 no longer sources it, tombstones and deletes it after the new
+    asset lands -- one media on the listing for the row, nothing orphaned.
+    REVERT-PROOF: plan_product_media without the pending settle -> red."""
+    db = _DB()
+    fake = _lost_attach(monkeypatch, db)
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": OTHER}})
+    plan = shopify_push.image_press_plan(_parent(db), _row(db, "I1"))
+    assert (plan["action"], plan["drop"]) == ("create", [NEW])
+
+    res = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert res.ok is True and res.shopify_id == _m(101), res.error
+    assert fake.listing() == [_m(1), _m(101)], "the lost attach taken down"
+    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(100)]
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OTHER, "id": _m(101), "image_id": "I1"}]
+    assert _pending_of(db) == []
 
 
 def test_a_product_blocked_from_online_takes_no_design_image(gates, monkeypatch):
