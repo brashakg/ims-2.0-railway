@@ -189,17 +189,23 @@ def _shopify_pull_since(db, floor_hours: int) -> datetime:
 
 
 async def _shopify_fetch_orders(
-    shop_url: str, access_token: str, *, created_at_min: str
+    shop_url: str, access_token: str, *, updated_at_min: str
 ) -> tuple:
-    """REST orders.json (status=any, created_at_min), following Link rel=next.
+    """REST orders.json (status=any, updated_at_min), following Link rel=next.
     Returns (orders, complete). REST on purpose: the REST Order resource IS the
     webhook body shape the mapper was written against, so a pulled order feeds
     the mapper byte-for-byte like a delivered one (a GraphQL pull would need a
-    shape translator = a second implementation of the order contract)."""
+    shape translator = a second implementation of the order contract).
+
+    updated_at_min, not created_at_min: every status change (cancel, payment,
+    fulfilment, refund) bumps updated_at, so a months-old order cancelled today
+    is in the window; and updated_at >= created_at, so every order CREATED in
+    the window is in it too. The create catch-up re-applies its own created_at
+    window client-side (shopify_pull_orders)."""
     url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
     params: Optional[Dict[str, Any]] = {
         "status": "any",
-        "created_at_min": created_at_min,
+        "updated_at_min": updated_at_min,
         "limit": SHOPIFY_PULL_PAGE_LIMIT,
     }
     headers = {"X-Shopify-Access-Token": access_token}
@@ -221,15 +227,25 @@ async def _shopify_fetch_orders(
     return orders, False
 
 
+def _booked_order(db, sid: str) -> Optional[Dict[str, Any]]:
+    """The IMS order booked for this Shopify id (the key the mapper/ingest
+    dedupe on), or None. A lookup blip answers None: the order then takes the
+    create path, whose layer-1 guard re-checks and answers 'duplicate'."""
+    if not sid:
+        return None
+    try:
+        return db.get_collection("orders").find_one({"shopify_order_id": sid})
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
-    """One pulled order -> (bucket, reason). Bucket is one of already_in_ims /
-    skipped_dark / mapped / failed. Never raises."""
+    """One pulled order NOT yet in IMS -> (bucket, reason). Bucket is one of
+    mapped / skipped_dark / failed / already_in_ims (booked between the
+    caller's lookup and the mapper). Never raises."""
     if not sid:
         return "failed", "no_shopify_order_id"
     try:
-        # Same key the mapper/ingest dedupe on (orders.shopify_order_id).
-        if db.get_collection("orders").find_one({"shopify_order_id": sid}, {"_id": 1}):
-            return "already_in_ims", None
         if not live:
             return "skipped_dark", None
         from api.services.online_order_mapper import map_shopify_order
@@ -254,21 +270,192 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
         return "failed", f"{type(e).__name__}: {e}"
 
 
-async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -> SyncResult:
-    """Missed-webhook catch-up: fetch every Shopify order CREATED in the window
-    and feed each one not yet in IMS through the SAME mapper the webhook path
-    uses (api.services.online_order_mapper.map_shopify_order). Orders already
-    in IMS are counted and skipped. Gated on shopify_dispatch_mode()=='live'
-    exactly like every other unattended Shopify write in this module: when not
-    live the run records what it WOULD have mapped (skipped_dark) and maps
-    nothing. Every attempted order is also written to webhook_inbox (source=
-    shopify_pull) so the FAILED queue and the remap door work for pulled orders.
+# --- Status catch-up on orders IMS already booked ---------------------------
+#
+# A cancellation / payment / fulfilment / refund whose webhook Shopify failed to
+# deliver leaves the booked IMS order stale (units claimed by a cancelled order,
+# a paid order shown unpaid, a shipped order still CONFIRMED). For every pulled
+# order that IS in IMS the sweep compares the Shopify-owned facts against the
+# IMS doc and, for each one that moved, feeds the SAME payload through the SAME
+# handler NEXUS's webhook drain would have called:
+#   order facts (cancelled_at / financial_status / fulfillment_status)
+#       -> online_order_mapper.map_shopify_order(topic=orders/*)   (_dispatch_shopify_order)
+#   the newest fulfillments[] entry
+#       -> shopify_fulfillment.reconcile_fulfillment(topic=fulfillments/update)
+#   each refunds[] entry the refund handler has not seen
+#       -> shopify_refund.handle_shopify_refund(topic=refunds/create)
+# The sweep decides only WHETHER to call, never WHAT to write: the handlers keep
+# their own idempotency ($set of the same values, refund-id dedupe, Rx hold,
+# the fulfilment reconcile's terminal guard), so a re-run re-applies nothing.
+# Units of a cancelled order come back the way they do on the webhook path --
+# through the cancel Refund's restock (accountant queue by default) -- a
+# mapper-side release would clear the unit's order_id first and the refund's
+# restock would then MINT a phantom second unit.
 
-    SyncResult.payload: {fetched, already_in_ims, mapped: [ids], skipped_dark:
-    [ids], failed: [ids], failed_reasons: {id: why}, since, complete,
-    watermark_advanced}. Per-order failures never abort the run (ok stays
-    True); the watermark advances only on a live run that fetched its whole
-    window, so a failed/partial/dark run is re-covered next time."""
+# Handler verdicts that mean "the handler owns this now" (applied, or its own
+# idempotency says it already was). Anything else is surfaced as a failure.
+_SWEEP_OK = {
+    "fulfillments": {"reconciled"},
+    "refunds": {"queued", "credited", "duplicate"},
+}
+
+
+def _newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """reconcile_fulfillment stores exactly ONE fulfilment id per order, so
+    only the newest Shopify fulfilment is compared."""
+    from api.services.shopify_ingest import _to_naive_utc
+
+    rows = [f for f in (order.get("fulfillments") or []) if isinstance(f, dict) and f.get("id")]
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda f: _to_naive_utc(f.get("updated_at") or f.get("created_at")) or datetime.min,
+    )
+
+
+def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
+    """True when the newest Shopify fulfilment is not the one the IMS order
+    carries (id / shipment_status / tracking -- the fields the reconcile $sets)."""
+    tracking = str(f.get("tracking_number") or (f.get("tracking_numbers") or [""])[0] or "")
+    return (
+        str(f.get("id")) != str(existing.get("shopify_fulfillment_id") or "")
+        or str(f.get("shipment_status") or "").lower()
+        != str(existing.get("shipment_status") or "").lower()
+        or (bool(tracking) and tracking != str(existing.get("tracking_number") or ""))
+    )
+
+
+def _order_topic(st: Dict[str, Any], existing: Dict[str, Any]) -> Optional[str]:
+    """The orders/* topic Shopify would have delivered for the order-level facts
+    that moved (`st` = the mapper's own _derive_statuses of the Shopify body),
+    or None when the IMS doc already reflects them. Triggers ONLY on the three
+    Shopify-owned facts, never on `status != derived`: the mapper has no forward
+    guard, so that trigger would re-fire hourly on every order staff advanced
+    (PROCESSING/READY) and knock it back to CONFIRMED."""
+    if st["cancelled"] and existing.get("status") != "CANCELLED":
+        return "orders/cancelled"
+    stored_pay = existing.get("payment_status")
+    # PAID stays PAID over a Shopify partial/pending: IMS may hold the counter
+    # tender Shopify never sees (the mapper floors at staff tenders and would
+    # write PAID straight back -- a churn write every hour, or a regression).
+    pay_moved = st["payment_status"] != stored_pay and not (
+        stored_pay == "PAID" and st["payment_status"] in ("PARTIAL", "UNPAID")
+    )
+    # The create path writes no fulfillment_status: absent == UNFULFILLED.
+    ful_moved = st["fulfillment_status"] != (existing.get("fulfillment_status") or "UNFULFILLED")
+    if pay_moved and st["payment_status"] == "PAID":
+        return "orders/paid"
+    if ful_moved and st["fulfillment_status"] == "FULFILLED":
+        return "orders/fulfilled"
+    return "orders/updated" if (pay_moved or ful_moved) else None
+
+
+def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple:
+    """Status catch-up for ONE order IMS already booked -> (buckets, reason).
+    `order` is the body the mapper may stamp; `raw` the untouched copy the inbox
+    keeps and the child handlers read. buckets is a subset of {status_synced,
+    status_skipped_terminal, status_failed, skipped_dark} (empty when Shopify
+    and IMS agree; status_failed and status_synced are exclusive). Never raises."""
+    if existing.get("historical") or existing.get("source") == "bvi_import":
+        return [], None  # every handler skips these; comparing would only report false failures
+    from api.routers.webhooks import record_pulled_order
+    from api.services.online_order_mapper import _derive_statuses, map_shopify_order
+    from api.services.shopify_fulfillment import _TERMINAL_STATUSES, reconcile_fulfillment
+    from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
+
+    key = f"pull:{sid}:{raw.get('updated_at') or ''}"
+    dark = (
+        None if live
+        else f"shopify_dispatch_mode={shopify_dispatch_mode()} -- not live, status not applied"
+    )
+    buckets: set = set()
+    errors: List[str] = []
+
+    def feed(topic: str, payload: Dict[str, Any], call) -> None:
+        """One handler call, recorded in the inbox like the delivery would be
+        (source=shopify_pull, the synthesised topic) so the FAILED queue and the
+        remap door see it. Dark: the row records what WOULD have been applied."""
+        family = topic.split("/")[0]
+        row_id = key if family == "orders" else f"{key}:{topic}:{payload.get('id')}"
+        error = None
+        if live:
+            try:
+                res = call() or {}
+                ok = (
+                    bool(res.get("status_synced")) if family == "orders"
+                    else res.get("status") in _SWEEP_OK[family]
+                )
+                if not ok:
+                    detail = res.get("reason") or res.get("error") or ""
+                    error = f"{topic}:{res.get('status')}:{detail}".rstrip(":")
+            except Exception as e:  # noqa: BLE001 - one handler never aborts the order
+                error = f"{topic}:{type(e).__name__}: {e}"
+        record_pulled_order(
+            db, copy.deepcopy(payload), webhook_id=row_id, topic=topic,
+            skipped_reason=dark, handler_error=error,
+        )
+        if not live:
+            buckets.add("skipped_dark")
+        elif error:
+            errors.append(error)
+        else:
+            buckets.add("status_synced")
+
+    try:
+        # Fulfilment first, so the end state matches the webhook sequence
+        # (fulfillments/create -> orders/updated); the re-read lets the order
+        # step see what the reconcile just landed.
+        f = _newest_fulfilment(raw)
+        if f is not None and _fulfilment_moved(f, existing):
+            feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
+            if live:
+                existing = _booked_order(db, sid) or existing
+        st = _derive_statuses(raw)
+        topic = _order_topic(st, existing)
+        if topic:
+            # The mapper has no terminal guard of its own: never let it knock a
+            # DELIVERED/CANCELLED/REFUNDED order back to CONFIRMED.
+            if existing.get("status") in _TERMINAL_STATUSES and st["order_status"] != existing.get("status"):
+                buckets.add("status_skipped_terminal")
+            else:
+                feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
+        for r in raw.get("refunds") or []:
+            rid = str(r.get("id") or "") if isinstance(r, dict) else ""
+            # The handler's own idempotency guard, asked up front so a refund
+            # it already queued/credited costs nothing every hour.
+            if rid and not _refund_already_processed(db, rid):
+                feed("refunds/create", r, lambda r=r: handle_shopify_refund(db, r, webhook_id=None, topic="refunds/create"))
+    except Exception as e:  # noqa: BLE001 - one bad order never aborts the run
+        errors.append(f"{type(e).__name__}: {e}")
+    if errors:
+        buckets.discard("status_synced")
+        buckets.add("status_failed")
+    return sorted(buckets), "; ".join(errors) or None
+
+
+async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -> SyncResult:
+    """Missed-webhook catch-up: fetch every Shopify order UPDATED in the window.
+    One not yet in IMS (and CREATED in the window -- an older order touched
+    today is never booked, it would mint a GST invoice for a stale sale) is fed
+    through the SAME mapper the webhook path uses (api.services.
+    online_order_mapper.map_shopify_order). One already in IMS is swept for
+    STATUS changes IMS missed -- cancelled / paid / fulfilled / refunded -- each
+    fed through the handler its webhook would have reached (see the status
+    catch-up block above). Gated on shopify_dispatch_mode()=='live' exactly
+    like every other unattended Shopify write in this module: when not live
+    the run records what it WOULD have done (skipped_dark) and applies nothing.
+    Every attempted order/handler call is also written to webhook_inbox
+    (source=shopify_pull) so the FAILED queue and the remap door work for
+    pulled orders.
+
+    SyncResult.payload: {fetched, already_in_ims, outside_create_window,
+    mapped: [ids], status_synced: [ids], status_skipped_terminal: [ids],
+    status_failed: [ids], skipped_dark: [ids], failed: [ids], failed_reasons:
+    {id: why}, since, complete, watermark_advanced}. Per-order failures never
+    abort the run (ok stays True); the watermark advances only on a live run
+    that fetched its whole window, so a failed/partial/dark run is re-covered
+    next time."""
     # Resolve creds via the shared resolver (OAuth client-credentials preferred;
     # the stored Mongo token is stale/401s). Lazy import avoids an import cycle
     # (shopify_auth imports this module for its vault fallback).
@@ -291,7 +478,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
     since = _shopify_pull_since(db, since_hours)
     try:
         orders, complete = await _shopify_fetch_orders(
-            shop_url, access_token, created_at_min=since.isoformat()
+            shop_url, access_token, updated_at_min=since.isoformat()
         )
     except httpx.TimeoutException:
         return SyncResult(ok=False, provider="shopify", kind="pull", error="timeout")
@@ -302,7 +489,11 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
     tally: Dict[str, Any] = {
         "fetched": len(orders),
         "already_in_ims": 0,
+        "outside_create_window": 0,
         "mapped": [],
+        "status_synced": [],
+        "status_skipped_terminal": [],
+        "status_failed": [],
         "skipped_dark": [],
         "failed": [],
         "failed_reasons": {},
@@ -311,10 +502,25 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
         "watermark_advanced": bool(complete and live),
     }
     from api.routers.webhooks import record_pulled_order
+    from api.services.shopify_ingest import _to_naive_utc
 
+    since_naive = since.astimezone(timezone.utc).replace(tzinfo=None)  # Shopify stamps parse naive-UTC
     for order in orders:
         sid = str(order.get("id") or "").strip()
         raw = copy.deepcopy(order)  # the mapper stamps _ims_* keys; the inbox keeps Shopify's body
+        existing = _booked_order(db, sid)
+        if existing:
+            tally["already_in_ims"] += 1
+            buckets, reason = _sweep_booked_order(db, order, raw, existing, sid, live)
+            for bucket in buckets:
+                tally[bucket].append(sid)
+            if reason:
+                tally["failed_reasons"][sid] = reason
+            continue
+        created = _to_naive_utc(order.get("created_at"))
+        if created is not None and created < since_naive:
+            tally["outside_create_window"] += 1  # the #1130 create window, re-applied client-side
+            continue
         bucket, reason = _catch_up_one(db, order, sid, live)
         if bucket == "already_in_ims":
             tally[bucket] += 1
@@ -338,10 +544,13 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
         ok=True,
         provider="shopify",
         kind="pull",
-        items_synced=len(tally["mapped"]),
+        items_synced=len(tally["mapped"]) + len(tally["status_synced"]),
         notes=(
             f"since {tally['since']}: fetched {tally['fetched']}, "
             f"already in IMS {tally['already_in_ims']}, mapped {len(tally['mapped'])}, "
+            f"status synced {len(tally['status_synced'])}, "
+            f"terminal-skipped {len(tally['status_skipped_terminal'])}, "
+            f"status failed {len(tally['status_failed'])}, "
             f"dark {len(tally['skipped_dark'])}, failed {len(tally['failed'])}"
             + ("" if complete else " (TRUNCATED -- watermark held)")
         ),
