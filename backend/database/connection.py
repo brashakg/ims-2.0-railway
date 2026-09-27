@@ -673,6 +673,18 @@ class DatabaseConnection:
             sparse=True,
             background=True,
         )
+        # The REVERSE claim read behind the per-store stock writer (PR #1141,
+        # panel round 7 P1): "which SKUs claim these Shopify inventory items?"
+        # runs on every POS sale of a listed SKU and every press
+        # (online_catalog.skus_claiming_inventory_items, a $in on the stored
+        # gid over BOTH collections). Sparse: only pushed rows carry the gid.
+        # NOT unique: a twin and its own base variant row legitimately share
+        # one gid (the same SKU, counted once) -- the writer's guard is the
+        # rule; these only make it one indexed read.
+        _idx("catalog_variants", "shopify_inventory_item_id", sparse=True, background=True)
+        _idx(
+            "catalog_products", "ecom.shopify_inventory_item_id", sparse=True, background=True
+        )
 
         # Catalog products (PIM superset; BVI/Shopify lineage). Unification
         # step 1: this collection previously had ZERO DB indexes, so a

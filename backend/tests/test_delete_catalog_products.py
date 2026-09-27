@@ -19,6 +19,9 @@ Discriminating power (each test goes red when its rule is removed):
   * every refusal: on Shopify, on an order line, and a stock unit that is not
     plain AVAILABLE stock -- including an UNKNOWN status, which must refuse
     rather than be assumed safe.
+  * a size row carrying a live Shopify variant refuses on its own: the twin of
+    a size never carries a product id, so the twin-only arm let the runbook
+    strand a sellable Shopify variant (PR #1141 panel round 7, P2).
   * refusals are batch-wide: one bad product stops the whole run, so a clean
     product beside it is NOT deleted.
   * the snapshot holds every document the delete removes (round-trip), and is
@@ -289,6 +292,20 @@ def test_a_product_on_shopify_is_refused():
     db["catalog_products"].docs[0]["ecom"] = {"shopify_product_id": "gid://shopify/Product/7"}
     reasons = script.refusals_for(target_for(db))
     assert len(reasons) == 1 and "Shopify" in reasons[0]
+
+
+@pytest.mark.parametrize("field", ["shopify_variant_id", "shopify_inventory_item_id"])
+def test_a_size_row_live_on_shopify_is_refused(field):
+    """A size variant's twin never carries `ecom.shopify_product_id`
+    (push_product refuses variant-of products outright), so the twin-only guard
+    let the runbook drop a catalog_variants row whose Shopify variant was live
+    and sellable -- and the per-store writer then wrote its quantity nowhere
+    while the website kept selling it. Either Shopify id on the row is the
+    tell. Drop the variant-row arm of refusals_for -> this fails."""
+    db = door_created_db()
+    db["catalog_variants"].docs[0][field] = "gid://shopify/InventoryItem/9"
+    reasons = script.refusals_for(target_for(db))
+    assert len(reasons) == 1 and "size row" in reasons[0] and "V1" in reasons[0]
 
 
 def test_a_product_on_an_order_line_is_refused():

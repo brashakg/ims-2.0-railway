@@ -49,6 +49,7 @@ import { onlineStoreApi, pushApi, type OnlineStoreSummary } from '../../services
 import OnlineStoreSyncBanner, {
   SyncChip,
   formatPushResult,
+  pushToastLevel,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { Pagination } from '../../components/common/Pagination';
@@ -291,8 +292,7 @@ export default function OnlineProductsPage() {
     try {
       const res = await pushApi.pushProduct(row.product_id);
       const msg = formatPushResult(row.title, res);
-      if (res.ok) toast.success(msg);
-      else toast.error(msg);
+      toast[pushToastLevel(res)](msg);
       // A LIVE push may have mapped a Shopify id -> refresh rows, header
       // counts AND the posture banner.
       load();
@@ -322,8 +322,7 @@ export default function OnlineProductsPage() {
     try {
       const res = await pushApi.takeDownProduct(row.product_id);
       const msg = formatPushResult(row.title, res);
-      if (res.ok) toast.success(msg);
-      else toast.error(msg);
+      toast[pushToastLevel(res)](msg);
       load();
       bannerRef.current?.refresh();
     } catch (e: any) {
