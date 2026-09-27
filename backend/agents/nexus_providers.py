@@ -286,7 +286,8 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
 #       -> shopify_refund.handle_shopify_refund(topic=refunds/create)
 # The sweep decides only WHETHER to call, never WHAT to write: the handlers keep
 # their own idempotency ($set of the same values, refund-id dedupe, Rx hold,
-# the fulfilment reconcile's terminal guard), so a re-run re-applies nothing.
+# the mapper's and the fulfilment reconcile's never-knock-back-a-terminal-status
+# rule), so a re-run re-applies nothing.
 # Units of a cancelled order come back the way they do on the webhook path --
 # through the cancel Refund's restock (accountant queue by default) -- a
 # mapper-side release would clear the unit's order_id first and the refund's
@@ -298,6 +299,12 @@ _SWEEP_OK = {
     "fulfillments": {"reconciled"},
     "refunds": {"queued", "credited", "duplicate"},
 }
+# (status, reason) verdicts the handler settles on WITHOUT applying anything --
+# its own rule says there is nothing here for IMS (a shipping-only / goodwill
+# refund has no IMS line to credit). Not a sync, not a failure. The refund
+# pre-filter cannot see these (the handler writes no row for them), so the
+# verdict is read instead of re-raising the same failure every hour.
+_SWEEP_SETTLED = {("skipped", "no_mappable_refund_lines")}
 
 
 def _newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -336,11 +343,15 @@ def _order_topic(st: Dict[str, Any], existing: Dict[str, Any]) -> Optional[str]:
     if st["cancelled"] and existing.get("status") != "CANCELLED":
         return "orders/cancelled"
     stored_pay = existing.get("payment_status")
-    # PAID stays PAID over a Shopify partial/pending: IMS may hold the counter
-    # tender Shopify never sees (the mapper floors at staff tenders and would
-    # write PAID straight back -- a churn write every hour, or a regression).
-    pay_moved = st["payment_status"] != stored_pay and not (
-        stored_pay == "PAID" and st["payment_status"] in ("PARTIAL", "UNPAID")
+    # Shopify pending / authorized / partially_paid never beats what IMS holds:
+    # the counter may have taken a tender Shopify never sees (an advance
+    # PARTIAL, PAID, CREDIT/khata) and the mapper would write Shopify's lesser
+    # state straight over it every hour. Fires only when Shopify ADVANCED: paid,
+    # a post-payment fact only Shopify knows (refunded / voided), or
+    # partially_paid over nothing collected at all.
+    pay_moved = st["payment_status"] != stored_pay and (
+        st["payment_status"] not in ("UNPAID", "PARTIAL")
+        or (st["payment_status"], stored_pay) == ("PARTIAL", "UNPAID")
     )
     # The create path writes no fulfillment_status: absent == UNFULFILLED.
     ful_moved = st["fulfillment_status"] != (existing.get("fulfillment_status") or "UNFULFILLED")
@@ -360,8 +371,12 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
     if existing.get("historical") or existing.get("source") == "bvi_import":
         return [], None  # every handler skips these; comparing would only report false failures
     from api.routers.webhooks import record_pulled_order
-    from api.services.online_order_mapper import _derive_statuses, map_shopify_order
-    from api.services.shopify_fulfillment import _TERMINAL_STATUSES, reconcile_fulfillment
+    from api.services.online_order_mapper import (
+        _derive_statuses,
+        _terminal_status_withheld,
+        map_shopify_order,
+    )
+    from api.services.shopify_fulfillment import reconcile_fulfillment
     from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
 
     key = f"pull:{sid}:{raw.get('updated_at') or ''}"
@@ -372,21 +387,22 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
     buckets: set = set()
     errors: List[str] = []
 
-    def feed(topic: str, payload: Dict[str, Any], call) -> None:
+    def feed(topic: str, payload: Dict[str, Any], call) -> bool:
         """One handler call, recorded in the inbox like the delivery would be
         (source=shopify_pull, the synthesised topic) so the FAILED queue and the
-        remap door see it. Dark: the row records what WOULD have been applied."""
+        remap door see it. Dark: the row records what WOULD have been applied.
+        Returns True when the handler applied something."""
         family = topic.split("/")[0]
         row_id = key if family == "orders" else f"{key}:{topic}:{payload.get('id')}"
-        error = None
+        applied, error = False, None
         if live:
             try:
                 res = call() or {}
-                ok = (
+                applied = (
                     bool(res.get("status_synced")) if family == "orders"
                     else res.get("status") in _SWEEP_OK[family]
                 )
-                if not ok:
+                if not applied and (res.get("status"), res.get("reason")) not in _SWEEP_SETTLED:
                     detail = res.get("reason") or res.get("error") or ""
                     error = f"{topic}:{res.get('status')}:{detail}".rstrip(":")
             except Exception as e:  # noqa: BLE001 - one handler never aborts the order
@@ -399,8 +415,9 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             buckets.add("skipped_dark")
         elif error:
             errors.append(error)
-        else:
+        elif applied:
             buckets.add("status_synced")
+        return applied
 
     try:
         # Fulfilment first, so the end state matches the webhook sequence
@@ -414,12 +431,12 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         st = _derive_statuses(raw)
         topic = _order_topic(st, existing)
         if topic:
-            # The mapper has no terminal guard of its own: never let it knock a
-            # DELIVERED/CANCELLED/REFUNDED order back to CONFIRMED.
-            if existing.get("status") in _TERMINAL_STATUSES and st["order_status"] != existing.get("status"):
+            applied = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
+            # The mapper's own terminal rule kept the lifecycle status while the
+            # payment / fulfilment facts landed: reported, so the operator sees
+            # the order IMS and Shopify disagree on.
+            if applied and _terminal_status_withheld(existing.get("status"), st["order_status"]):
                 buckets.add("status_skipped_terminal")
-            else:
-                feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
         for r in raw.get("refunds") or []:
             rid = str(r.get("id") or "") if isinstance(r, dict) else ""
             # The handler's own idempotency guard, asked up front so a refund
