@@ -1,0 +1,76 @@
+// ============================================================================
+// IMS 2.0 - Expenses: shared constants
+// ============================================================================
+// Wave 6 split, step 1: the constants the old ExpenseTracker page's tabs
+// share, moved byte-identical out of that page ahead of splitting its tabs
+// into one page per section.
+
+interface ApiError {
+  // FastAPI returns a string detail for our own HTTPExceptions and a list of
+  // field errors for a 422 (schema validation, e.g. an unknown advance type).
+  response?: { status?: number; data?: { detail?: string | { msg?: string }[] } };
+}
+
+// Expense categories carry NO status meaning, so they all share one neutral
+// chip (was a decorative rainbow — off the muted house theme).
+//
+// OWNER RULING 2026-08-14: this is a CLOSED list, and since 2026-08-15 the
+// server enforces it too — POST /expenses rejects any other category with a 422
+// naming these, so pay can no longer be recorded as a shop expense. Keep this
+// array identical to EXPENSE_CATEGORIES in backend/api/routers/expenses.py; a
+// backend test (test_expense_category_fixed_list.py) reads THIS file and fails
+// if they drift, because the symptom of drift is a form that 422s after the
+// user has typed everything.
+//
+// The mixed casing (eight lowercase, PETTY_CASH uppercase) is pre-existing and
+// deliberate: stored expenses, the petty-cash float rule and the spend caps all
+// already key off these exact strings. Do not tidy it.
+//
+// "Miscellaneous" stays EXACTLY as it is by the owner's explicit decision — no
+// cap, no warning, no nudge.
+const CATEGORIES: { value: string; label: string; color: string }[] = [
+  { value: 'utilities', label: 'Utilities', color: 'bg-gray-100 text-gray-700' },
+  { value: 'rent', label: 'Rent / Lease', color: 'bg-gray-100 text-gray-700' },
+  { value: 'maintenance', label: 'Maintenance', color: 'bg-gray-100 text-gray-700' },
+  { value: 'supplies', label: 'Supplies', color: 'bg-gray-100 text-gray-700' },
+  { value: 'travel', label: 'Travel', color: 'bg-gray-100 text-gray-700' },
+  { value: 'food', label: 'Food & Beverage', color: 'bg-gray-100 text-gray-700' },
+  { value: 'marketing', label: 'Marketing', color: 'bg-gray-100 text-gray-700' },
+  { value: 'miscellaneous', label: 'Miscellaneous', color: 'bg-gray-100 text-gray-700' },
+  // F17: a petty-cash payout draws down the store float on approval. Neutral
+  // badge -- the category carries no status meaning (no colour-flag).
+  { value: 'PETTY_CASH', label: 'Petty Cash Payout', color: 'bg-gray-100 text-gray-700' },
+];
+
+const PAYMENT_MODES: { value: string; label: string }[] = [
+  { value: 'CASH', label: 'Cash' },
+  { value: 'UPI', label: 'UPI' },
+  { value: 'CARD', label: 'Card' },
+  { value: 'BANK_TRANSFER', label: 'Bank transfer' },
+  { value: 'CHEQUE', label: 'Cheque' },
+];
+
+const STATUS_META: Record<string, { label: string; badge: string }> = {
+  DRAFT: { label: 'Draft', badge: 'bg-gray-100 text-gray-600' },
+  PENDING: { label: 'Pending', badge: 'bg-amber-50 text-amber-700' },
+  APPROVED: { label: 'Approved', badge: 'bg-green-50 text-green-700' },
+  REJECTED: { label: 'Rejected', badge: 'bg-red-50 text-red-700' },
+  SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-50 text-blue-700' },
+  ENTERED: { label: 'Entered', badge: 'bg-green-50 text-green-700' },
+};
+
+const catLabel = (v: string) => CATEGORIES.find((c) => c.value === v)?.label || v;
+const catColor = (v: string) => CATEGORIES.find((c) => c.value === v)?.color || 'bg-gray-100 text-gray-700';
+const payLabel = (v?: string | null) => PAYMENT_MODES.find((p) => p.value === v)?.label || v || '—';
+const fc = (n: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
+
+export {
+  CATEGORIES,
+  PAYMENT_MODES,
+  STATUS_META,
+  catLabel,
+  catColor,
+  payLabel,
+  fc,
+};
+export type { ApiError };

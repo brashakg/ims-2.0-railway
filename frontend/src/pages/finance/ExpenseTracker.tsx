@@ -28,59 +28,24 @@ import {
 } from '../../services/api/expenses';
 import { formatDateIST } from '../../utils/datetime';
 import clsx from 'clsx';
+import {
+  CATEGORIES,
+  PAYMENT_MODES,
+  STATUS_META,
+  catLabel,
+  catColor,
+  fc,
+  type ApiError,
+} from './expenses/expenseShared';
+import { StatusPill, ExpenseTable, Card, Row, Labeled } from './expenses/expenseWidgets';
 
 type TabType =
   | 'my' | 'approvals' | 'entry' | 'aging' | 'duplicates' | 'summary'
   | 'float' | 'settle' | 'advances';
 
-interface ApiError {
-  // FastAPI returns a string detail for our own HTTPExceptions and a list of
-  // field errors for a 422 (schema validation, e.g. an unknown advance type).
-  response?: { status?: number; data?: { detail?: string | { msg?: string }[] } };
-}
-
-// Expense categories carry NO status meaning, so they all share one neutral
-// chip (was a decorative rainbow — off the muted house theme).
-//
-// OWNER RULING 2026-08-14: this is a CLOSED list, and since 2026-08-15 the
-// server enforces it too — POST /expenses rejects any other category with a 422
-// naming these, so pay can no longer be recorded as a shop expense. Keep this
-// array identical to EXPENSE_CATEGORIES in backend/api/routers/expenses.py; a
-// backend test (test_expense_category_fixed_list.py) reads THIS file and fails
-// if they drift, because the symptom of drift is a form that 422s after the
-// user has typed everything.
-//
-// The mixed casing (eight lowercase, PETTY_CASH uppercase) is pre-existing and
-// deliberate: stored expenses, the petty-cash float rule and the spend caps all
-// already key off these exact strings. Do not tidy it.
-//
-// "Miscellaneous" stays EXACTLY as it is by the owner's explicit decision — no
-// cap, no warning, no nudge.
-const CATEGORIES: { value: string; label: string; color: string }[] = [
-  { value: 'utilities', label: 'Utilities', color: 'bg-gray-100 text-gray-700' },
-  { value: 'rent', label: 'Rent / Lease', color: 'bg-gray-100 text-gray-700' },
-  { value: 'maintenance', label: 'Maintenance', color: 'bg-gray-100 text-gray-700' },
-  { value: 'supplies', label: 'Supplies', color: 'bg-gray-100 text-gray-700' },
-  { value: 'travel', label: 'Travel', color: 'bg-gray-100 text-gray-700' },
-  { value: 'food', label: 'Food & Beverage', color: 'bg-gray-100 text-gray-700' },
-  { value: 'marketing', label: 'Marketing', color: 'bg-gray-100 text-gray-700' },
-  { value: 'miscellaneous', label: 'Miscellaneous', color: 'bg-gray-100 text-gray-700' },
-  // F17: a petty-cash payout draws down the store float on approval. Neutral
-  // badge -- the category carries no status meaning (no colour-flag).
-  { value: 'PETTY_CASH', label: 'Petty Cash Payout', color: 'bg-gray-100 text-gray-700' },
-];
-
 // F17: a petty-cash claim strictly above this rupee amount needs a receipt
 // before it can be approved (mirrors petty_cash_service.receipt_required_above).
 const RECEIPT_REQUIRED_ABOVE = 200;
-
-const PAYMENT_MODES: { value: string; label: string }[] = [
-  { value: 'CASH', label: 'Cash' },
-  { value: 'UPI', label: 'UPI' },
-  { value: 'CARD', label: 'Card' },
-  { value: 'BANK_TRANSFER', label: 'Bank transfer' },
-  { value: 'CHEQUE', label: 'Cheque' },
-];
 
 const ADVANCE_STATUS_META: Record<string, { label: string; badge: string }> = {
   PENDING: { label: 'Awaiting approval', badge: 'bg-amber-50 text-amber-700' },
@@ -89,20 +54,6 @@ const ADVANCE_STATUS_META: Record<string, { label: string; badge: string }> = {
   PARTIALLY_SETTLED: { label: 'Partly settled', badge: 'bg-amber-50 text-amber-700' },
   SETTLED: { label: 'Settled', badge: 'bg-gray-100 text-gray-600' },
 };
-
-const STATUS_META: Record<string, { label: string; badge: string }> = {
-  DRAFT: { label: 'Draft', badge: 'bg-gray-100 text-gray-600' },
-  PENDING: { label: 'Pending', badge: 'bg-amber-50 text-amber-700' },
-  APPROVED: { label: 'Approved', badge: 'bg-green-50 text-green-700' },
-  REJECTED: { label: 'Rejected', badge: 'bg-red-50 text-red-700' },
-  SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-50 text-blue-700' },
-  ENTERED: { label: 'Entered', badge: 'bg-green-50 text-green-700' },
-};
-
-const catLabel = (v: string) => CATEGORIES.find((c) => c.value === v)?.label || v;
-const catColor = (v: string) => CATEGORIES.find((c) => c.value === v)?.color || 'bg-gray-100 text-gray-700';
-const payLabel = (v?: string | null) => PAYMENT_MODES.find((p) => p.value === v)?.label || v || '—';
-const fc = (n: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 
 export default function ExpenseTracker() {
   const { user } = useAuth();
@@ -438,11 +389,6 @@ export default function ExpenseTracker() {
   const byCategory = CATEGORIES.map((c) => ({
     ...c, amount: mine.filter((e) => e.category === c.value).reduce((s, e) => s + (e.amount || 0), 0),
   }));
-
-  const StatusPill = ({ status }: { status: string }) => {
-    const m = STATUS_META[(status || '').toUpperCase()] || STATUS_META.PENDING;
-    return <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', m.badge)}>{m.label}</span>;
-  };
 
   if (isLoading && mine.length === 0) {
     return <div className="flex items-center justify-center h-96"><Loader2 className="w-8 h-8 text-bv-red-600 animate-spin" /></div>;
@@ -1157,70 +1103,6 @@ export default function ExpenseTracker() {
     </div>
   );
 
-  function ExpenseTable({ rows, showOwner, empty, renderActions }: {
-    rows: ExpenseRecord[]; showOwner: boolean; empty?: string;
-    renderActions?: (e: ExpenseRecord) => React.ReactNode;
-  }) {
-    return (
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase">
-              <th className="px-4 py-3">Date</th>
-              {showOwner && <th className="px-4 py-3">By</th>}
-              <th className="px-4 py-3">Category</th>
-              <th className="px-4 py-3">Payment</th>
-              <th className="px-4 py-3 text-right">Amount</th>
-              <th className="px-4 py-3">Description</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((e) => (
-              <tr key={e.expense_id} className="border-b border-gray-100 hover:bg-gray-50">
-                <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{formatDateIST(e.expense_date || e.created_at)}</td>
-                {showOwner && <td className="px-4 py-3 text-sm text-gray-700">{e.employee_name || e.employee_id || '—'}</td>}
-                <td className="px-4 py-3 text-sm"><span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', catColor(e.category))}>{catLabel(e.category)}</span></td>
-                <td className="px-4 py-3 text-sm text-gray-600">{payLabel(e.payment_mode)}</td>
-                <td className="px-4 py-3 text-sm font-semibold text-gray-900 text-right">{fc(e.amount)}</td>
-                <td className="px-4 py-3 text-sm text-gray-600 max-w-xs">
-                  <div className="truncate" title={e.description}>{e.description}</div>
-                  {e.duplicate_bill && (
-                    <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700"
-                      title={e.duplicate_of ? `Matches expense ${e.duplicate_of}` : 'Bill matches an earlier receipt'}>
-                      <AlertTriangle className="w-3 h-3" /> Duplicate bill
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-3"><StatusPill status={e.status} /></td>
-                <td className="px-4 py-3 text-right">{renderActions?.(e)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {rows.length === 0 && <div className="p-10 text-center text-gray-500 text-sm">{empty || 'No expenses found'}</div>}
-      </div>
-    );
-  }
-}
-
-function Card({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="bg-white border border-gray-200 rounded-lg p-5">
-      <p className="text-gray-500 text-sm mb-1">{label}</p>
-      <p className={clsx('text-2xl font-bold', color || 'text-gray-900')}>{value}</p>
-    </div>
-  );
-}
-
-function Row({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="flex justify-between items-center pb-3 border-b border-gray-100 last:border-0">
-      <span className="text-gray-500">{label}</span>
-      <span className={clsx('text-xl font-bold', color || 'text-gray-900')}>{value}</span>
-    </div>
-  );
 }
 
 function VarianceBadge({ status }: { status: 'BALANCED' | 'OVER' | 'SHORT' | string }) {
@@ -1233,14 +1115,5 @@ function VarianceBadge({ status }: { status: 'BALANCED' | 'OVER' | 'SHORT' | str
     <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', map[status] || 'bg-gray-100 text-gray-700')}>
       {status === 'BALANCED' ? 'Balanced' : status === 'OVER' ? 'Over (excess)' : status === 'SHORT' ? 'Short (missing)' : status}
     </span>
-  );
-}
-
-function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="block text-sm font-medium text-gray-600 mb-1">{label}</span>
-      {children}
-    </label>
   );
 }
