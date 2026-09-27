@@ -57,6 +57,11 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_a_replaced_asset_already..  map written only on attach/delete (P4)     -> red
   test_a_design_media_deleted...   same: the no-change product press writes   -> red
   test_the_press_the_sweep...      sweep/counts on image_media_gid alone (P5) -> red
+  -- round 4 --
+  test_a_design_asset_promoted...  owned_media without the by-url lane (P1)    -> red
+  test_a_product_press_on_a_stale. map written from the snapshot, no merge (P2) -> red
+  test_a_design_press_on_a_stale.. same revert, the other door (P2)           -> red
+  test_the_refusals_are_the_plans. image_press_plan without the skip fold (P4) -> red
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
 """
@@ -120,13 +125,15 @@ class _Shopify:
     mints one MediaImage per input (100, 101, ...) and a delete removes them,
     so the fake's listing is what the next read returns. ``fail_delete_once``
     answers the next productDeleteMedia with a mediaUserError and removes
-    nothing."""
+    nothing. ``on_read`` (once) runs just before the next media read answers:
+    another door's press landing inside this press's window."""
 
     def __init__(self, media_nodes=None):
         self.calls = []
         self.media_nodes = list(media_nodes or [])
         self.next_media = 100
         self.fail_delete_once = False
+        self.on_read = None
 
     @staticmethod
     def _op(query):
@@ -168,6 +175,9 @@ class _Shopify:
             "inventoryItem": {"id": "gid://shopify/InventoryItem/902"},
         }
         if op == "imsProductMedia":
+            hook, self.on_read = self.on_read, None
+            if hook:
+                hook()
             return {
                 "data": {
                     "product": {"id": variables["id"], "media": {"nodes": copy.deepcopy(self.media_nodes)}}
@@ -907,3 +917,126 @@ def test_the_press_the_sweep_and_the_counts_read_one_predicate(gates, monkeypatc
     assert res.ok and res.action == "update" and res.payload["drop"] == [OLD]
     assert router._press_plan(db, _row(db, "I1")) == {"gid": _m(100), "drop": [], "action": "noop"}
     assert router._image_counts(db) == {"approved": 1, "pushed": 1, "pending": 0}
+
+
+# ===========================================================================
+# Round 4: the lane is decided by url, the map merges by lane, refusals are
+# part of the one predicate
+# ===========================================================================
+
+
+def test_a_design_asset_promoted_to_a_product_photo_is_never_deleted_by_its_old_rows_press(gates, monkeypatch):
+    """P1. OLD was pressed through row I1 (stamped I1 on the map), then the
+    operator made it one of the product's own photographs, and the designer
+    replaced I1's asset with NEW. A url that is one of the product's own
+    photographs is the product's lane whichever door attached it -- decided
+    by url on every read of the map -- so I1's press attaches NEW and deletes
+    NOTHING: OLD is a photograph the product lists and IMS never removed. The
+    map stores OLD in the product's lane from then on, and the product press
+    behind it has nothing to do."""
+    fake = _live(monkeypatch, _nodes(1, 2))
+    db = _DB()
+    _seed(db, _product([OWN, OLD], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+    img = _image(db, "I1", OLD, edited_url=NEW)
+
+    assert shopify_push.image_press_plan(_parent(db), img) == {"gid": None, "drop": [], "action": "create"}
+    res = _run(shopify_push.push_image(db, img))
+
+    assert res.ok is True and res.action == "create" and res.shopify_id == _m(100)
+    assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia"], "no delete"
+    assert list(db[TOMB].find({})) == []
+    assert fake.listing() == [_m(1), _m(2), _m(100)]
+    assert _map_of(db) == [
+        {"url": OWN, "id": _m(1)},
+        {"url": OLD, "id": _m(2)},
+        {"url": NEW, "id": _m(100), "image_id": "I1"},
+    ]
+    n = len(fake.calls)
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    assert prod.ok is True and not [o for o in fake.ops()[n:] if o.endswith("Media")], fake.ops()[n:]
+    assert fake.listing() == [_m(1), _m(2), _m(100)]
+
+
+def test_a_product_press_on_a_stale_snapshot_keeps_the_design_row_written_since(gates, monkeypatch):
+    """P2, door A over door B. The 01:00/09:00 sweep loads its docs up front;
+    a human presses a design image inside that window. The product press
+    then writes the map from a snapshot that never held the design row: it
+    must keep that row (the other lane is taken from the twin at write time),
+    or the next design press attaches the image a second time and the first
+    copy is unmanaged forever."""
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    stale = _parent(db)
+    assert _run(shopify_push.push_image(db, _image(db, "I1", NEW))).shopify_id == _m(100)
+
+    prod = _run(shopify_push.push_product(db, stale, []))
+
+    assert prod.ok is True, prod.error
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    n = len(fake.calls)
+    again = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert again.action == "noop" and len(fake.calls) == n
+    assert fake.listing() == [_m(1), _m(100)], "one copy"
+
+
+def test_a_design_press_on_a_stale_parent_keeps_the_product_photo_attached_since(gates, monkeypatch):
+    """P2, door B over door A. The design press read the parent; before it
+    writes the map a product press puts OWN2 up and maps it. The design
+    press's write must keep OWN2's row, or the next product press attaches
+    OWN2 a second time."""
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    img = _image(db, "I1", NEW)
+
+    def _product_press_lands():
+        fake.media_nodes += _nodes(50)
+        ecom = dict(_parent(db)["ecom"], media_map=[{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(50)}])
+        db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2], "ecom": ecom}})
+
+    fake.on_read = _product_press_lands
+    res = _run(shopify_push.push_image(db, img))
+
+    assert res.ok is True and res.shopify_id == _m(100)
+    assert _map_of(db) == [
+        {"url": OWN, "id": _m(1)},
+        {"url": OWN2, "id": _m(50)},
+        {"url": NEW, "id": _m(100), "image_id": "I1"},
+    ]
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    assert prod.ok is True and prod.photos["attached"] == 0, prod.photos
+    assert fake.listing() == [_m(1), _m(50), _m(100)], "OWN2 once"
+
+
+def test_the_refusals_are_the_plans_answer_and_the_press_sends_nothing(gates, monkeypatch):
+    """P4. Every refusal the press makes before it sends anything is part of
+    image_press_plan's answer ('skip' + reason), so the press, the sweep's
+    skip and the counts agree: none of these rows reads 'create' while the
+    LIVE press refuses it with zero network."""
+    from api.services import policy_engine
+
+    monkeypatch.setattr(
+        policy_engine, "get_policy",
+        lambda key, default=None: {"brands": ["Cartier"]} if key == "ecom.shopify_push_locks" else default,
+    )
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN], pid="P2", shopify_product_id=None))
+    _seed(db, _product([], pid="P3"))
+    _seed(db, dict(_product([OWN], pid="P4"), brand="Cartier"))
+    rows = {
+        "I1": ("P1", "/uploads/design.jpg", "no_url"),
+        "I2": ("P2", NEW, "not_on_shopify"),
+        "I3": ("P3", NEW, "no_photo"),
+        "I4": ("P4", NEW, "push_locked"),
+    }
+    for iid, (pid, url, _r) in rows.items():
+        img = _image(db, iid, url, product_id=pid)
+        lock = shopify_push.push_lock_reason(db, "product", _parent(db, pid))
+        plan = shopify_push.image_press_plan(_parent(db, pid), img, lock=lock)
+        assert (plan["action"], plan["reason"]) == ("skip", rows[iid][2]), iid
+        res = _run(shopify_push.push_image(db, img))
+        assert (res.action, res.ok) == ("skip", False), (iid, res)
+    assert fake.calls == [], "zero network"

@@ -764,7 +764,7 @@ async def push_all_pending(
             if len(results) >= limit:
                 break
             is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-            if not is_approved or _press_plan(db, doc)["action"] == "noop":
+            if not is_approved or _press_plan(db, doc)["action"] in ("noop", "skip"):
                 continue
             data = (await shopify_push.push_image(db, doc)).to_dict()
             _write_audit(data, current_user)
@@ -847,26 +847,27 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
 
 def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     """The ONE 'what does a press of this design-queue image do' rule
-    (media.image_press_plan) read off the parent twin's ecom.media_map: the
-    sweep skips a row only when the press itself would be a no-op, and the
-    counts call a row pending on the same answer. The row itself carries no
-    Shopify id."""
-    return shopify_push.image_press_plan(
-        shopify_push._resolve_product_doc(db, doc.get("product_id")), doc
-    )
+    (media.image_press_plan) read off the parent twin and its ecom.media_map,
+    the parent's push-lock included: the sweep skips a row only when the
+    press itself would be a no-op or a refusal, and the counts call a row
+    pending on the same answer. The row itself carries no Shopify id."""
+    parent = shopify_push._resolve_product_doc(db, doc.get("product_id"))
+    lock = shopify_push.push_lock_reason(db, "product", parent) if parent is not None else None
+    return shopify_push.image_press_plan(parent, doc, lock=lock)
 
 
 def _image_counts(db) -> Dict[str, int]:
     """approved (push-eligible) / pushed (on the parent's listing per its
-    media_map) / pending (APPROVED and a press would still do something:
-    not yet on the listing, or a replaced asset still to take down)."""
+    media_map) / pending (APPROVED and a press would still SEND something:
+    not yet on the listing, or a replaced asset still to take down -- never
+    a row the press refuses, which no sweep will ever send)."""
     approved = pushed = pending = 0
     for doc in _all_docs(db, "product_images"):
         is_approved = str(doc.get("status") or "").upper() == "APPROVED"
         plan = _press_plan(db, doc)
         if is_approved:
             approved += 1
-            if plan["action"] != "noop":
+            if plan["action"] in ("create", "update"):
                 pending += 1
         if plan["gid"]:
             pushed += 1

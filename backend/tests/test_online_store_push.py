@@ -215,6 +215,11 @@ def test_push_collection_menu_image_simulated_no_network(monkeypatch):
                        "resource_id": "gid://shopify/Collection/9", "children": []}]}
     img = {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
            "status": "APPROVED"}
+    # The parent is on Shopify with a photograph: a press of a row whose parent
+    # is not is a SKIP, dark or live (image_press_plan's refusals).
+    db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}})
 
     rc = _run(shopify_push.push_collection(db, coll))
     rm = _run(shopify_push.push_menu(db, menu))
@@ -702,6 +707,9 @@ def _seed_pending(conn):
         {"id": "P1", "title": "RB", "brand": "RB",
          "images": ["https://cdn.example.com/p.jpg"],
          "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True,
+                  # On Shopify, so I1 below is a press the sweep makes (a row
+                  # whose parent is not on Shopify is a refusal, never swept).
+                  "shopify_product_id": "gid://shopify/Product/1",
                   # I2 below is already on the listing: its url is in the map.
                   "media_map": [{"url": "http://x/b.jpg", "id": "gid://shopify/MediaImage/9"}]}})
     conn.db["catalog_products"].insert_one(  # clean -> NOT swept
@@ -1554,3 +1562,57 @@ def test_push_all_pending_presses_a_mapped_image_whose_old_asset_is_still_up(cli
     (res,) = body["results"]
     assert res["action"] == "update" and res["payload"]["drop"] == ["http://x/old.jpg"]
     assert res["shopify_id"] == "gid://shopify/MediaImage/9"
+
+
+def test_push_all_pending_never_presses_a_row_the_press_refuses(client, auth_headers, patched_db, monkeypatch):
+    """Round 4 P4: the press refuses four kinds of APPROVED row before it
+    sends anything -- a url Shopify cannot fetch, a parent not on Shopify, a
+    parent with no photograph, a push-locked brand. Those refusals are part
+    of the ONE predicate (image_press_plan -> 'skip' + reason), so the sweep
+    presses none of them (no result, no audit row, no 'failed' tally every
+    run) and the counts call none of them pending.
+    REVERT-PROOF: the sweep skipping on 'noop' alone -> red (4 presses);
+    the counts' pending on != 'noop' -> red (pending 4)."""
+    from api.routers import online_store_push as router
+    from api.services import policy_engine
+
+    conn, audit_repo = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    monkeypatch.setattr(
+        policy_engine, "get_policy",
+        lambda key, default=None: {"brands": ["Cartier"]} if key == "ecom.shopify_push_locks" else default,
+    )
+    photo = "https://cdn.example.com/p.jpg"
+    on = {"shopify_product_id": "gid://shopify/Product/1"}
+    for doc in (
+        {"id": "P1", "images": [photo], "ecom": dict(on)},
+        {"id": "P2", "images": [photo], "ecom": {}},
+        {"id": "P3", "images": [], "ecom": dict(on)},
+        {"id": "P4", "images": [photo], "brand": "Cartier", "ecom": dict(on)},
+    ):
+        conn.db["catalog_products"].insert_one(doc)
+    rows = (("I1", "P1", "/uploads/x.jpg"), ("I2", "P2", "http://x/a.jpg"),
+            ("I3", "P3", "http://x/b.jpg"), ("I4", "P4", "http://x/c.jpg"))
+    for iid, pid, url in rows:
+        conn.db["product_images"].insert_one(
+            {"image_id": iid, "product_id": pid, "url": url, "status": "APPROVED"})
+
+    plans = {iid: router._press_plan(conn.db, conn.db["product_images"].find_one({"image_id": iid}))
+             for iid, _p, _u in rows}
+    assert {k: (p["action"], p["reason"]) for k, p in plans.items()} == {
+        "I1": ("skip", "no_url"), "I2": ("skip", "not_on_shopify"),
+        "I3": ("skip", "no_photo"), "I4": ("skip", "push_locked"),
+    }
+    # The press gives the SAME answer the predicate did, zero network.
+    for iid, _p, _u in rows:
+        res = _run(shopify_push.push_image(conn.db, conn.db["product_images"].find_one({"image_id": iid})))
+        assert (res.action, res.ok) == ("skip", False), (iid, res)
+        # the lock refusal keeps its Hub Phase 5 shape (BLOCKED, the lock line)
+        assert res.reason == plans[iid]["reason"] or (iid == "I4" and res.mode == "BLOCKED"), (iid, res)
+    assert router._image_counts(conn.db) == {"approved": 4, "pushed": 0, "pending": 0}
+
+    r = client.post("/api/v1/online-store/push/all-pending?entities=images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["results"] == [] and body["pushed_count"] == 0, body
+    assert audit_repo.find_many({"action": "ONLINE_STORE_PUSH"}) == []
