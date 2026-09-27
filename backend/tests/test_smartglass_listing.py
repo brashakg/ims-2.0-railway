@@ -448,18 +448,14 @@ def test_html_is_escaped():
 # 3. The form and the server agree, field for field
 # ---------------------------------------------------------------------------
 
-_FE_SHARED = (
-    Path(__file__).resolve().parents[2]
-    / "frontend"
-    / "src"
-    / "pages"
-    / "catalog"
-    / "productAddShared.ts"
-)
+_FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
+# Skip only when the frontend is absent; if categoryFields.ts moves, the pin
+# must FAIL (FileNotFoundError), not quietly skip.
+_FE_SHARED = _FRONTEND / "src" / "domain" / "catalog" / "productAdd" / "categoryFields.ts"
 
 
 def _fe_smartglass_field_names():
-    """Parse the SMTFR field list out of productAddShared.ts. Reading the real
+    """Parse the SMTFR field list out of categoryFields.ts. Reading the real
     file (not a fixture that would just restate the answer) is what makes this
     a PIN: the two lists cannot drift without this failing."""
     src = _FE_SHARED.read_text(encoding="utf-8")
@@ -468,7 +464,7 @@ def _fe_smartglass_field_names():
     return re.findall(r"\{ name: '([a-z0-9_]+)'", src[start:end])
 
 
-@pytest.mark.skipif(not _FE_SHARED.exists(), reason="frontend not checked out")
+@pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
 def test_frontend_list_and_backend_registry_agree_field_for_field():
     fe = _fe_smartglass_field_names()
     be = list(pm.required_fields("SMARTGLASSES")) + list(
@@ -481,12 +477,13 @@ def test_frontend_list_and_backend_registry_agree_field_for_field():
     assert len(fe) == len(be) == len(set(be))
 
 
-@pytest.mark.skipif(not _FE_SHARED.exists(), reason="frontend not checked out")
+@pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
 def test_there_is_only_one_smartglasses_tile_in_the_picker():
     """There used to be two tiles (SMTSG + SMTFR) for the ONE canonical
     category, so half the operators filled the shorter form."""
     src = _FE_SHARED.read_text(encoding="utf-8")
-    picker = src[src.index("export const CATEGORIES = [") : src.index("] as const;")]
+    start = src.index("export const CATEGORIES = [")
+    picker = src[start : src.index("] as const", start)]
     tiles = re.findall(r"\{ code: '([A-Z]+)', name: '([^']+)'", picker)
     smart = [name for code, name in tiles if name.startswith("Smartglasses")]
     assert smart == ["Smartglasses"], smart
