@@ -14,7 +14,10 @@ Rig: the order-catchup `pull` fixture (mapper FakeDB + REAL mapper/ingest, a
 faked Shopify fetch, faked creds, live dispatch) plus the phase-0 webhook
 test's returns/stock wiring so the REAL refund handler runs too. Nothing here
 is hollow: every rule has a test that goes red when that rule alone is
-reverted (table in the PR body).
+reverted (table in the PR body). Even the "whether" is the mapper's own: the money
+trigger is what _recompute_money WOULD write, the stale skip is
+_shopify_payload_stale, the terminal report is _terminal_status_withheld --
+each pinned on the webhook drain in the same test that pins the sweep.
 """
 
 from __future__ import annotations
@@ -325,13 +328,22 @@ def test_ims_money_state_is_never_knocked_back_by_a_lesser_shopify_state(
     swept["orders"].update_one({"shopify_order_id": "30016"}, {"$set": ims_money})
     before = _snap(_doc(swept, 30016))
 
-    swept["state"]["orders"] = [
-        _pulled(30016, financial_status=shopify_financial, total_outstanding="999.00")
-    ]
+    body = _pulled(30016, financial_status=shopify_financial, total_outstanding="999.00")
+    swept["state"]["orders"] = [body]
     p = swept["run"]().payload
 
     assert p["status_synced"] == [] and p["status_failed"] == [] and swept["seen"] == []
     assert _snap(_doc(swept, 30016)) == before
+
+    # The SAME body through the REAL webhook drain (any Shopify edit -- a note,
+    # a tag -- delivers orders/updated): the money is withheld THERE too, by the
+    # one rule in the mapper. Before, the drain wrote payment_status UNPAID +
+    # bill_type PENDING over amount_paid 999 -- an incoherent doc.
+    res = swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id="real-edit-1", topic="orders/updated")
+    assert res["status"] == "duplicate" and res["status_synced"] is True
+    after = _doc(swept, 30016)
+    for k in ("payment_status", "amount_paid", "balance_due", "bill_type", "payments"):
+        assert after.get(k) == before.get(k), k
 
 
 def test_shopify_partially_paid_over_nothing_collected_lands(swept):
@@ -354,35 +366,106 @@ def test_shopify_partially_paid_over_nothing_collected_lands(swept):
     assert swept["run"]().payload["status_synced"] == [] and swept["seen"] == []
 
 
-# ---------------------------------------------------------------------------
-# Rule: a fulfilment IMS never saw -> SHIPPED with the AWB via the fulfilment
-# reconcile (the mapper is not needed once the reconcile landed the fact)
-# ---------------------------------------------------------------------------
-
-
-def test_fulfilment_ims_missed_lands_shipped_with_awb_once(swept):
-    _book(swept, 30004)
-
+def test_a_second_partial_payment_on_shopify_lands(swept):
+    """partially_paid -> partially_paid with a smaller total_outstanding: the
+    label never moves, the money does. The sweep asks the mapper's own money
+    function what it WOULD write, so the new gateway money lands -- once."""
+    _book(swept, 30028, financial_status="pending")
     swept["state"]["orders"] = [
-        _pulled(30004, fulfillment_status="fulfilled", fulfillments=[_fulfilment(30004, 88804)])
+        _pulled(30028, financial_status="partially_paid", total_outstanding="499.00")
     ]
-    assert swept["run"]().payload["status_synced"] == ["30004"]
+    assert swept["run"]().payload["status_synced"] == ["30028"]
+    assert _doc(swept, 30028)["amount_paid"] == 500.0
 
-    doc = _doc(swept, 30004)
-    assert doc["status"] == "SHIPPED"
-    assert doc["awb"] == "AWB30004" and doc["tracking_company"] == "Delhivery"
-    assert doc["fulfillment_status"] == "FULFILLED"
-    assert doc["shopify_fulfillment_id"] == "88804"
-    # The reconcile landed the fulfilment fact, so the mapper had nothing left
-    # to sync (and did not flip the parcel to DELIVERED on its own).
-    assert swept["seen"] == []
+    later = "2026-09-06T02:00:00Z"
+    swept["state"]["orders"] = [
+        _pulled(30028, financial_status="partially_paid", total_outstanding="199.00", updated_at=later)
+    ]
+    assert swept["run"]().payload["status_synced"] == ["30028"]
+    doc = _doc(swept, 30028)
+    assert doc["payment_status"] == "PARTIAL"
+    assert doc["amount_paid"] == 800.0 and doc["balance_due"] == 199.0
+    assert [p["amount"] for p in doc["payments"]] == [800.0], "the ONE gateway row, re-amounted"
+    assert swept["inbox"].find_one({"_id": f"pull:30028:{later}"})["headers"]["x-shopify-topic"] == "orders/updated"
+
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == [] and swept["seen"] == []
+    assert _doc(swept, 30028)["amount_paid"] == 800.0
+
+
+# ---------------------------------------------------------------------------
+# Rule: a fulfilment IMS never saw lands EXACTLY what the drain lands for the
+# pair of deliveries Shopify makes -- fulfillments/create (the reconcile: AWB,
+# tracking, SHIPPED) then orders/fulfilled (the mapper: fulfilled -> DELIVERED,
+# its pre-existing rule; whether Shopify "fulfilled" should mean DELIVERED or
+# SHIPPED is an owner call for BOTH paths, never a sweep-only rule)
+# ---------------------------------------------------------------------------
+
+
+def _fulfilled_body(oid, fid):
+    return _pulled(oid, fulfillment_status="fulfilled", fulfillments=[_fulfilment(oid, fid)])
+
+
+def _shipping_snap(doc):
+    return {
+        k: doc.get(k)
+        for k in ("status", "fulfillment_status", "shopify_fulfillment_id", "awb",
+                  "tracking_number", "tracking_company", "tracking_url", "payment_status")
+    }
+
+
+def test_fulfilment_ims_missed_lands_like_the_drain_once(swept):
+    _book(swept, 30004)
+    _book(swept, 30027)
+
+    swept["state"]["orders"] = [_fulfilled_body(30004, 88804)]
+    assert swept["run"]().payload["status_synced"] == ["30004"]
+    # Both deliveries were synthesised, in Shopify's order, and recorded.
+    assert swept["seen"] == ["30004"]
     row = swept["inbox"].find_one({"_id": f"pull:30004:{UPDATED}:fulfillments/update:88804"})
     assert row["headers"]["x-shopify-topic"] == "fulfillments/update"
     assert row["payload"]["id"] == 88804 and row["source"] == "shopify_pull"
+    assert swept["inbox"].find_one({"_id": f"pull:30004:{UPDATED}"})["headers"]["x-shopify-topic"] == "orders/fulfilled"
+
+    # The SAME body through the REAL drain: fulfillments/create then orders/fulfilled.
+    body = _fulfilled_body(30027, 88827)
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], body["fulfillments"][0], topic="fulfillments/create")
+    swept["real_map"](body, swept["db"], webhook_id="real-ful-1", topic="orders/fulfilled")
+
+    doc = _doc(swept, 30004)
+    assert doc["status"] == "DELIVERED" and doc["fulfillment_status"] == "FULFILLED"
+    assert doc["awb"] == "AWB30004" and doc["tracking_company"] == "Delhivery"
+    assert doc["shopify_fulfillment_id"] == "88804"
+    drain = _shipping_snap(_doc(swept, 30027))
+    assert _shipping_snap(doc) == {**drain, "shopify_fulfillment_id": "88804", "awb": "AWB30004",
+                                   "tracking_number": "AWB30004", "tracking_url": "https://track/AWB30004"}
 
     before = _snap(doc)
-    assert swept["run"]().payload["status_synced"] == []
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == [] and swept["seen"] == []
     assert _snap(_doc(swept, 30004)) == before
+
+
+def test_an_ims_pushed_fulfilment_stamped_as_a_gid_is_the_same_fulfilment(swept):
+    """IMS shipped and pushed the fulfilment itself (shopify_fulfillment_push
+    stamps the GraphQL gid); orders.json carries the bare numeric id. Nothing
+    moved: no call, no re-stamp, no status_synced noise."""
+    _book(swept, 30030)
+    swept["orders"].update_one(
+        {"shopify_order_id": "30030"},
+        {"$set": {
+            "status": "SHIPPED", "fulfillment_status": "FULFILLED",
+            "shopify_fulfillment_id": "gid://shopify/Fulfillment/5008",
+            "awb": "AWB30030", "tracking_number": "AWB30030",
+        }},
+    )
+    before = _snap(_doc(swept, 30030))
+
+    swept["state"]["orders"] = [_fulfilled_body(30030, 5008)]
+    p = swept["run"]().payload
+
+    assert p["status_synced"] == [] and p["status_failed"] == [] and swept["seen"] == []
+    assert _snap(_doc(swept, 30030)) == before
 
 
 def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
@@ -756,6 +839,12 @@ def test_a_handler_that_fails_soft_is_reported_not_counted_as_synced(swept):
     assert p["failed_reasons"]["30021"] == "fulfillments/update:error:write failed"
     row = swept["inbox"].find_one({"_id": f"pull:30020:{UPDATED}"})
     assert row["handler_error"] == "orders/cancelled:skipped:exception:KeyError"
+    # Where the operator sees it: the run payload (above) and the remap door,
+    # which replays the sweep's orders/* row for the booked order. NOT the
+    # FAILED queue -- that lists unbooked orders only, by construction.
+    payload, webhook_id, topic = oso._load_last_shopify_payload(swept["db"], "30020")
+    assert (payload["id"], webhook_id, topic) == (30020, f"pull:30020:{UPDATED}", "orders/cancelled")
+    assert oso._unbooked_webhook_rows(swept["db"], search=None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +874,78 @@ def test_status_sweep_sees_an_old_order_but_the_create_path_never_books_one(swep
     # The fetch was asked by updated_at (the fake's keyword-only signature pins
     # the parameter name); the window value itself is covered next door.
     assert swept["state"]["calls"] and swept["state"]["calls"][-1] == p["since"]
+
+
+# ---------------------------------------------------------------------------
+# Rule: a body that lost the race with a webhook (older than the last applied
+# updated_at) is the mapper's own stale skip on both paths -- a benign race
+# the next hour re-reads, never a failure
+# ---------------------------------------------------------------------------
+
+
+def test_a_body_older_than_the_last_applied_webhook_is_not_a_failure(swept):
+    _book(swept, 30029)
+    newer = "2026-09-06T02:00:00Z"  # a real orders/updated landed after the fetch
+    swept["real_map"](_pulled(30029, updated_at=newer), swept["db"], webhook_id="real-upd-9", topic="orders/updated")
+    before = _snap(_doc(swept, 30029))
+    swept["seen"].clear()
+
+    stale = _pulled(30029, cancelled_at=CANCELLED_AT)  # updated_at=UPDATED, 01:00 < 02:00
+    swept["state"]["orders"] = [stale]
+    p = swept["run"]().payload
+
+    assert p["status_failed"] == [] and p["failed_reasons"] == {} and p["status_synced"] == []
+    assert swept["seen"] == [], "the mapper was not even asked"
+    assert _snap(_doc(swept, 30029)) == before
+    # The same predicate is the drain's guard: the stale body through the real
+    # webhook path is skipped whole, too.
+    res = swept["real_map"](copy.deepcopy(stale), swept["db"], webhook_id="real-stale-1", topic="orders/cancelled")
+    assert res["status"] == "duplicate" and res["status_synced"] is False
+    assert _snap(_doc(swept, 30029)) == before
+
+
+# ---------------------------------------------------------------------------
+# Rule: an imported order's status legs are left alone (the mapper and the
+# reconcile skip every import), but its refund leg is the REFUND HANDLER's
+# call: our own shopify_order_history import books real revenue, so a NEW
+# refund on it must still reach the accountant; a pre-IMS bvi_import is
+# settled by the handler's own verdict, not reported as a failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "import_stamp, review_rows",
+    [
+        ({"historical": True, "import_source": "shopify_order_history", "status": "DELIVERED"}, 1),
+        ({"historical": True, "source": "bvi_import", "status": "HISTORICAL"}, 0),
+    ],
+)
+def test_a_new_refund_on_an_import_is_the_refund_handlers_call(swept, import_stamp, review_rows):
+    _book(swept, 30031)
+    swept["orders"].update_one({"shopify_order_id": "30031"}, {"$set": import_stamp})
+    before = _snap(_doc(swept, 30031))
+
+    swept["state"]["orders"] = [
+        _pulled(
+            30031,
+            cancelled_at=CANCELLED_AT,
+            financial_status="refunded",
+            fulfillments=[_fulfilment(30031, 31)],
+            refunds=[_refund(700331, 30031, restock_type="return")],
+        )
+    ]
+    for _ in range(2):
+        p = swept["run"]().payload
+        assert p["status_failed"] == [] and p["failed_reasons"] == {}
+        assert p["already_in_ims"] == 1
+
+    assert swept["seen"] == [], "the mapper is never asked about an import"
+    assert _snap(_doc(swept, 30031)) == before, "no status / fulfilment / money write"
+    assert swept["refund_calls"][:1] == ["700331"]
+    assert swept["review"].count_documents({"shopify_refund_id": "700331"}) == review_rows
+    if review_rows:
+        assert swept["refund_calls"] == ["700331"], "queued once; the 2nd sweep asks the pre-filter only"
+        assert swept["review"].find_one({"shopify_refund_id": "700331"})["status"] == "PENDING"
 
 
 # ---------------------------------------------------------------------------
