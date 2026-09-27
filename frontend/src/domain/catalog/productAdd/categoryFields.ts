@@ -9,7 +9,9 @@
 // Catalog Dictionary options at runtime; this file holds the UI metadata
 // (labels, input types, select options, placeholders) and the offline
 // fallback flags. backend/tests/test_smartglass_listing.py parses THIS file
-// (the SMTFR list and the CATEGORIES picker) to pin the form to the registry.
+// (the CATEGORIES picker and every picker code's field list) to pin the form
+// to the registry; drift that predates the pin is recorded there as
+// _KNOWN_FIELD_DRIFT, which may only shrink.
 
 import type {
   CategoryRegistryEntry,

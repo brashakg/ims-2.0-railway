@@ -454,19 +454,27 @@ _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _FE_SHARED = _FRONTEND / "src" / "domain" / "catalog" / "productAdd" / "categoryFields.ts"
 
 
-def _fe_smartglass_field_names():
-    """Parse the SMTFR field list out of categoryFields.ts. Reading the real
-    file (not a fixture that would just restate the answer) is what makes this
-    a PIN: the two lists cannot drift without this failing."""
+def _fe_field_names(code):
+    """Parse one picker code's field list out of categoryFields.ts. Reading the
+    real file (not a fixture that would just restate the answer) is what makes
+    this a PIN: the two lists cannot drift without a test failing."""
     src = _FE_SHARED.read_text(encoding="utf-8")
-    start = src.index("\n  SMTFR: [")
+    start = src.index(f"\n  {code}: [")
     end = src.index("\n  ],", start)
     return re.findall(r"\{ name: '([a-z0-9_]+)'", src[start:end])
 
 
+def _fe_picker_tiles():
+    """(code, name) for every tile in the CATEGORIES picker."""
+    src = _FE_SHARED.read_text(encoding="utf-8")
+    start = src.index("export const CATEGORIES = [")
+    picker = src[start : src.index("] as const", start)]
+    return re.findall(r"\{ code: '([A-Z]+)', name: '([^']+)'", picker)
+
+
 @pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
 def test_frontend_list_and_backend_registry_agree_field_for_field():
-    fe = _fe_smartglass_field_names()
+    fe = _fe_field_names("SMTFR")
     be = list(pm.required_fields("SMARTGLASSES")) + list(
         pm.optional_fields("SMARTGLASSES")
     )
@@ -481,13 +489,67 @@ def test_frontend_list_and_backend_registry_agree_field_for_field():
 def test_there_is_only_one_smartglasses_tile_in_the_picker():
     """There used to be two tiles (SMTSG + SMTFR) for the ONE canonical
     category, so half the operators filled the shorter form."""
-    src = _FE_SHARED.read_text(encoding="utf-8")
-    start = src.index("export const CATEGORIES = [")
-    picker = src[start : src.index("] as const", start)]
-    tiles = re.findall(r"\{ code: '([A-Z]+)', name: '([^']+)'", picker)
+    tiles = _fe_picker_tiles()
     smart = [name for code, name in tiles if name.startswith("Smartglasses")]
     assert smart == ["Smartglasses"], smart
     assert "SMTSG" not in [code for code, _ in tiles]
+
+
+# Field-list drift that already existed on 2026-09-28, per picker code:
+# (only in the form, only in the registry). A RATCHET - it may only shrink.
+# A new mismatch fails; so does fixing one without deleting its entry here.
+# The form still works with these (getCategoryFields appends registry-only
+# fields and keeps form-only ones), but each entry is a field the two sides
+# disagree about - e.g. WT's dial_colour (form) vs dial_color (registry).
+_KNOWN_FIELD_DRIFT = {
+    "CL": (
+        {"base_curve", "cl_add", "cl_axis", "cl_cyl", "cl_series", "diameter"},
+        {"subbrand"},
+    ),
+    "CCL": (
+        {"base_curve", "cl_axis", "cl_cyl", "cl_series", "diameter"},
+        {"subbrand"},
+    ),
+    "LS": (
+        {"add", "add_on_1", "add_on_2", "add_on_3", "axis", "cyl",
+         "lens_category", "sph"},
+        {"lens_type", "material"},
+    ),
+    "RG": ({"bridge_width", "lens_size", "temple_length"}, set()),
+    "WT": (
+        {"belt_colour", "belt_size", "dial_colour", "dial_size",
+         "watch_category"},
+        {"dial_color", "strap_material"},
+    ),
+    "CK": (
+        {"battery_size", "body_colour", "clock_category", "dial_colour",
+         "dial_size"},
+        set(),
+    ),
+    "ACC": ({"accessory_type", "expiry_date"}, set()),
+    "SMTWT": (
+        {"belt_colour", "belt_size", "body_colour", "dial_size",
+         "year_of_launch"},
+        set(),
+    ),
+}
+
+
+@pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
+def test_every_picker_category_matches_the_registry_except_recorded_drift():
+    """The two-registry rule (categoryFields.ts header, product_master
+    _CATEGORY_SPECS) for EVERY picker tile, not just smartglasses."""
+    codes = [code for code, _ in _fe_picker_tiles()]
+    assert set(_KNOWN_FIELD_DRIFT) <= set(codes), "drift entry for a retired tile"
+    got = {}
+    for code in codes:
+        assert pm.resolve_category(code) is not None, code
+        fe = set(_fe_field_names(code))
+        be = set(pm.required_fields(code)) | set(pm.optional_fields(code))
+        drift = (fe - be, be - fe)
+        if drift != (set(), set()):
+            got[code] = drift
+    assert got == _KNOWN_FIELD_DRIFT
 
 
 # ---------------------------------------------------------------------------
