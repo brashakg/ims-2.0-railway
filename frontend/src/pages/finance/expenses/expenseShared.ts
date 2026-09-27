@@ -1,9 +1,14 @@
 // ============================================================================
-// IMS 2.0 - Expenses: shared constants
+// IMS 2.0 - Expenses: shared constants, role lists and the section context
 // ============================================================================
-// Wave 6 split, step 1: the constants the old ExpenseTracker page's tabs
-// share, moved byte-identical out of that page ahead of splitting its tabs
-// into one page per section.
+// Wave 6 split: the old ExpenseTracker page held nine role-gated tabs behind
+// one URL in useState. Each tab is now its own page under ExpensesLayout
+// (/finance/expenses/<section>). What two or more of those pages read lives
+// here, moved byte-identical from the old page.
+
+import { useOutletContext } from 'react-router-dom';
+import type { UserRole } from '../../../types';
+import type { AgingReport, ExpenseRecord } from '../../../services/api/expenses';
 
 interface ApiError {
   // FastAPI returns a string detail for our own HTTPExceptions and a list of
@@ -64,6 +69,35 @@ const catColor = (v: string) => CATEGORIES.find((c) => c.value === v)?.color || 
 const payLabel = (v?: string | null) => PAYMENT_MODES.find((p) => p.value === v)?.label || v || '—';
 const fc = (n: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 
+// WHO SEES WHICH SECTION. Each list is the old page's JSX gate, verbatim
+// (isApprover / isAccountant / canViewFloat / canManageFloat). The router
+// gates in routes/financeRoutes.tsx and the layout's nav + loaders read these
+// same four lists, so a section can never be offered to a role its route
+// refuses.
+const EXPENSE_APPROVER_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
+const EXPENSE_ACCOUNTANT_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+const FLOAT_VIEW_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
+const FLOAT_MANAGE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+
+/** What ExpensesLayout hands its section pages through <Outlet context>.
+ *  The layout owns the one expenses load (its header cards and nav counts
+ *  need it too); sections read it here instead of loading a second copy. */
+interface ExpensesOutletContext {
+  isApprover: boolean;
+  canManageFloat: boolean;
+  mine: ExpenseRecord[];
+  approvals: ExpenseRecord[];
+  toEnter: ExpenseRecord[];
+  aging: AgingReport | null;
+  duplicates: ExpenseRecord[];
+  doAction: (fn: () => Promise<unknown>, ok: string) => Promise<void>;
+  totalAmt: number;
+  pendingCount: number;
+  approvedCount: number;
+}
+
+const useExpensesContext = () => useOutletContext<ExpensesOutletContext>();
+
 export {
   CATEGORIES,
   PAYMENT_MODES,
@@ -72,5 +106,10 @@ export {
   catColor,
   payLabel,
   fc,
+  EXPENSE_APPROVER_ROLES,
+  EXPENSE_ACCOUNTANT_ROLES,
+  FLOAT_VIEW_ROLES,
+  FLOAT_MANAGE_ROLES,
+  useExpensesContext,
 };
-export type { ApiError };
+export type { ApiError, ExpensesOutletContext };
