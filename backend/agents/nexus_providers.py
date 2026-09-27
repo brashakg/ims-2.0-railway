@@ -62,9 +62,14 @@ class SyncResult:
 
 
 def _load_integration_config(
-    db, integration_type: str, storefront_id: Optional[str] = None
+    db, integration_type: str, storefront_id: Optional[str] = None, *, strict: bool = False
 ) -> Dict[str, Any]:
     """Look up {type, enabled, config:{...}} for one integration. Returns {} if missing.
+
+    ``strict``: a read that FAILED raises instead of answering {} (the same
+    knob online_catalog's key lookups carry). {} is "no config", and for a
+    reader whose config is part of an absolute stock rule (the oversell
+    safety buffer) a dead read must never pass as "no buffer configured".
 
     `storefront_id` (optional) keys the lookup to ONE storefront (WizOpt
     multi-storefront Phase 0). It is BACKWARD-COMPATIBLE: the live Shopify
@@ -91,6 +96,8 @@ def _load_integration_config(
 
         return cred_crypto.decrypt_config(doc.get("config") or {})
     except Exception as e:
+        if strict:
+            raise
         logger.debug(f"[NEXUS] Config read failed for {integration_type}: {e}")
         return {}
 

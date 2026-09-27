@@ -378,10 +378,18 @@ def online_mapping_available(db) -> bool:
     return False
 
 
-def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
+def online_status_for_skus(
+    db, skus: List[str], *, strict: bool = False
+) -> Dict[str, Dict[str, Any]]:
     """Return {requested_key: {online, sellable_online, online_stock, status}}
     for identifiers that exist in the IMS online catalog (catalog_products.ecom,
     resolved directly or via a matching catalog_variants row).
+
+    ``strict``: a catalog read that FAILED raises (the three key lookups
+    carry the same knob). Fail-soft, a dead read answered {} -- "not sellable
+    online" -- to the one caller for which that answer is the oversell
+    (the post-sale guard gap alarm, online_stock_writeback): a read that
+    died is not a SKU that is not online.
 
     online          -- DISPLAY + assessment flag: pushed to Shopify (product
                        gid, or the product's OWN variant carrying a variant /
@@ -407,7 +415,7 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
     if not keys or db is None:
         return {}
 
-    products = _products_by_key(db, keys)
+    products = _products_by_key(db, keys, strict=strict)
     # ALL keys, not just the ones the product branch missed. The product branch
     # is resolved FIRST and wins, so scoping this to the residue would let a
     # catalog_products row SHADOW its own variant's live Shopify gid -- and the
@@ -419,8 +427,8 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
     # THE PRICE OF WIDENING: both loops below must now enforce ownership
     # (_own_variant), not just the product loop -- see the check in the variant
     # loop for the ecom-less-row hole widening alone would have re-opened.
-    variants = _variants_by_key(db, keys)
-    parents = _parents_for_variants(db, list(variants.values()))
+    variants = _variants_by_key(db, keys, strict=strict)
+    parents = _parents_for_variants(db, list(variants.values()), strict=strict)
 
     out: Dict[str, Dict[str, Any]] = {}
     for key, doc in products.items():

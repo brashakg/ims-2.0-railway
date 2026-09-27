@@ -206,6 +206,24 @@ describe('the bulk press reports what it refused', () => {
     expect(row.querySelector('.text-amber-600')).toBeTruthy();
   });
 
+  // RECHECK ROUND 2 (one rule, display). A clean press whose every accepted
+  // number was 0 landed in `pushed` and the summary line said nothing, while
+  // the drawer toast for the same press said "live and SOLD OUT" from its own
+  // TypeScript re-derivation. The backend writer now stamps `sold_out` and the
+  // tally counts it; this line prints the count. Drop the `sold_out` term from
+  // the summary line -> this fails.
+  it('shows the listings that went live cleanly but SOLD OUT (0 at every shop)', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 7, failed: 0, noop: 0, sold_out: 7 }, 7),
+    );
+
+    await pressProducts();
+
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/7 live and SOLD OUT \(0 at every shop\)/);
+    expect(msg).not.toMatch(/NO stock written/i);
+  });
+
   it('shows the listings that went live with NO stock written (sold out), and does not call it green', async () => {
     (pushApi.pushAllPending as any).mockResolvedValue({
       ...sweep({ pushed: 3, failed: 0, noop: 0, stock_not_written: 3 }, 3),

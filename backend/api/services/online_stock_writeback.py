@@ -54,7 +54,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -94,20 +94,38 @@ def _resolve_db(db):
     return None
 
 
-def _safety_buffer(db) -> int:
+def _safety_buffer(db) -> Optional[int]:
     """Resolve the oversell safety buffer: integrations.shopify.config.safety_buffer
-    wins, else ONLINE_STOCK_SAFETY_BUFFER env, else the default. Fail-soft."""
+    wins, else ONLINE_STOCK_SAFETY_BUFFER env, else the default.
+
+    ``None`` when the integration doc could not be READ -- the buffer is part
+    of THE ONE RULE (``on_hand - buffer``), so an unreadable buffer is an
+    unknown rule, exactly as ``_blocked_online`` treats an unreadable block
+    (recheck round 2): fail-soft to the env / default, a dead ``integrations``
+    read published the FULL shelf, recorded it as the baseline, and the
+    margin the owner set to keep the last unit off the website was gone
+    silently until a later pass with a working read -- and that pass then
+    saw nothing to re-send. STRICT on the read; a missing doc is still "no
+    override" (0 / env), never unknown."""
     import os
 
     # 1. Per-tenant override on the shopify integration doc.
     try:
         from agents.nexus_providers import _load_integration_config
 
-        cfg = _load_integration_config(db, "shopify")
-        if cfg and cfg.get("safety_buffer") is not None:
+        cfg = _load_integration_config(db, "shopify", strict=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[STOCK_WRITEBACK] safety buffer unreadable (STRICT -> batch abort, "
+            "never 'no buffer'): %s",
+            exc,
+        )
+        return None
+    if cfg and cfg.get("safety_buffer") is not None:
+        try:
             return max(0, int(cfg.get("safety_buffer")))
-    except Exception:  # noqa: BLE001
-        pass
+        except (TypeError, ValueError):
+            pass
     # 2. Env override.
     raw = os.getenv("ONLINE_STOCK_SAFETY_BUFFER")
     if raw is not None and str(raw).strip() != "":
@@ -434,6 +452,8 @@ def online_quantities_for_skus(
     from . import stock_allocation
 
     buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
+    if buf is None:
+        return {}  # the buffer is part of the rule: unknown -> the rule is unknown
     out: Dict[str, Dict[str, int]] = {}
     read: List[str] = []
     for store in stores:
@@ -544,6 +564,7 @@ async def writeback_skus(
     if not targets:
         summary["skipped_no_mapping"] = len(distinct)
         _alert_unmapped_online(db, distinct, summary)
+        _name_baseline_strays(db, distinct, summary)
         _record_run(db, summary)
         return summary
 
@@ -596,9 +617,48 @@ async def writeback_skus(
     # SKUs with no online mapping (present in distinct but not targets).
     if unmapped:
         _alert_unmapped_online(db, unmapped, summary)
+        _name_baseline_strays(db, unmapped, summary, named=res.get("stray_skus") or [])
 
     _record_run(db, summary)
     return summary
+
+
+def _name_baseline_strays(
+    db, skus: List[str], summary: Dict[str, Any], *, named: Iterable[str] = ()
+) -> None:
+    """The writer's stray question (a SKU the website still shows a POSITIVE
+    number for that no listing lists any more -- the round-7 phantom), asked
+    from the SKU side for the SKUs this door could resolve NO target for.
+
+    The writer asks it per LISTING (``listing_strays``), and a listing is
+    resolved through a variant row or a product row -- the very rows the
+    phantom no longer has. So the sale of the LAST phantom unit at the
+    counter answered two ways (recheck round 2): beside a mapped SKU of the
+    same listing the writer named it, STOCK_BASELINE_STRAY, not-ok row; alone
+    in the basket it fell out on the no-target branch as
+    ``skipped_no_mapping`` with no row, no task, no line -- bettervision.in
+    kept listing it until the sweep's all-pairs scan at the next tick, up to
+    12 h. One question, one wording (``_stray_sku_error``), on both branches;
+    ``named`` is what the writer already said, never said twice. Fail-soft:
+    the read is the writer's own (``stray_baseline_skus``), a report never
+    blocks a sale."""
+    from .shopify_push.inventory import (
+        STOCK_BASELINE_STRAY,
+        _stray_sku_error,
+        stray_baseline_skus,
+    )
+
+    said = set(named)
+    strays = [s for s in stray_baseline_skus(db, skus) if s not in said]
+    if not strays:
+        return
+    summary["stray_skus"] = strays
+    line = _stray_sku_error(strays)
+    if summary.get("code"):
+        summary["error"] = f"{summary.get('error') or summary['code']} -- ALSO: {line}"
+    else:
+        summary["code"] = STOCK_BASELINE_STRAY
+        summary["error"] = line
 
 
 def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None:
@@ -616,13 +676,23 @@ def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None
     Alerts LOUDLY, never silently: structured ERROR log + a deduped,
     SELF-UPDATING SYSTEM task (new gap SKUs are $addToSet-ed into the open
     task's payload) and stamps summary['unmapped_online'] so _record_run
-    writes a not-ok sync_runs row. Fail-soft: never raises into the sale path."""
+    writes a not-ok sync_runs row. Fail-soft: never raises into the sale path.
+
+    A read that DIED is not a SKU that is not online (recheck round 2, the
+    round-1 class one hop later): the sellable-online read is STRICT, and its
+    failure is said the way the target read's failure is said one hop
+    earlier -- STOCK_ONHAND_UNKNOWN in ``_target_error``'s words on the
+    caller's row (``_say_unknown``; the caller records it, once). It used to
+    be ``logger.debug`` + return, with the catalog lookups inside
+    ``online_status_for_skus`` fail-soft to {} besides, so a dead catalog read
+    read as "not sellable online": no row, no P1 task, the storefront kept
+    the pre-sale number with every screen green."""
     try:
         from . import online_catalog
 
-        statuses = online_catalog.online_status_for_skus(db, skus)
+        statuses = online_catalog.online_status_for_skus(db, skus, strict=True)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] unmapped-online check skipped: %s", exc)
+        _say_unknown(summary, exc)
         return
     online_unmapped = sorted(
         s for s in skus if (statuses.get(s) or {}).get("sellable_online")
@@ -781,13 +851,23 @@ def _unknown_run(db, summary: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
     pre-move number until the next tick with every screen green; a second
     spelling of the row (recheck round 2) is how two doors come to answer the
     same failure differently. Never raises."""
-    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
-
-    summary["code"] = STOCK_ONHAND_UNKNOWN
-    summary["error"] = _target_error(exc)
-    logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
+    _say_unknown(summary, exc)
     _record_run(db, summary)
     return summary
+
+
+def _say_unknown(summary: Dict[str, Any], exc: Exception) -> None:
+    """Stamp THE unknown verdict on a summary, in the writer's words. The dead
+    read leads (as a refusal Shopify answered leads on the writer); whatever
+    the summary already said rides under it as an ' -- ALSO:' line, never
+    lost. Split from ``_unknown_run`` for a guard that runs inside a door
+    which records its own row (``_alert_unmapped_online``): one row, not two."""
+    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
+
+    prior = summary.get("error")
+    summary["code"] = STOCK_ONHAND_UNKNOWN
+    summary["error"] = _target_error(exc) + (f" -- ALSO: {prior}" if prior else "")
+    logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
 
 
 def _dispatch(coro) -> None:

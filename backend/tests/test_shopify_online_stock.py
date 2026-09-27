@@ -3724,3 +3724,48 @@ def test_R11_press_again_after_a_size_minted_untracked_is_not_a_withheld_first_p
     assert "WITHOUT LIMIT" in res.error and "publish withheld" not in res.error, res.error
     assert len(spy.calls_for("publishablePublish")) == 1, "the idempotent re-publish still goes out"
     assert _baseline(db)["tracked"] is False, "still untracked, so the next pass re-sends tracking"
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-27): SOLD OUT is the writer's word
+# ---------------------------------------------------------------------------
+
+
+def test_R13_the_writer_stamps_sold_out_once_and_the_screens_print_it(monkeypatch):
+    """ONE RULE, display (recheck round 2, the round-9 4/7 class). "Live and
+    SOLD OUT" -- a LIVE press Shopify accepted where every number written was
+    0 -- was spelled twice on one page: the drawer toast re-derived it in
+    TypeScript from `stock.quantities`, the sweep's tally spelled it as
+    `set == 0` under a code, and the writer itself stamped nothing for an
+    ok / no-code press, so the same press said SOLD OUT on the toast and
+    nothing on the summary line. On the rebuilt catalogue with one stock unit
+    that is nearly every press.
+
+    `push_skus_stock` stamps `sold_out` (written, and every accepted number
+    0); the route's tally and both frontend cells print that stamp. Nothing
+    written is NOT sold_out (that is the code's own line). Drop the stamp ->
+    this fails; stamp it from the plan instead of what Shopify accepted ->
+    the refused press claims it -> this fails."""
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    empty = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0)), ["SP-1"], source="sale"))
+    assert empty["ok"] is True and empty["code"] is None and empty["set"] == 3, empty
+    assert empty["sold_out"] is True, "0 at every shop, said by the writer"
+    one = _run(shopify_push.push_skus_stock(_listed(_db(a=1, b=0, c=0)), ["SP-1"], source="sale"))
+    assert one["sold_out"] is False, "a unit somewhere is not sold out"
+    # Nothing accepted: the refusal is the line, never a sold-out claim.
+    refused = _Spy(_responses(inventorySetQuantities=_set_error("ITEM_NOT_STOCKED_AT_LOCATION")))
+    _live(monkeypatch, refused)
+    none = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0)), ["SP-1"], source="sale"))
+    assert none["ok"] is False and none["set"] == 0 and none["sold_out"] is False, none
+    # Dark: a plan is not a write, so it is not sold out either.
+    _dark(monkeypatch)
+    plan = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0)), ["SP-1"], source="sale"))
+    assert plan["mode"] == "SIMULATED" and plan["sold_out"] is False, plan
+    # The press carries it where the drawer toast reads it (PushResult.stock).
+    spy3 = _Spy(_responses())
+    _live(monkeypatch, spy3)
+    db = _db(a=0, b=0, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert res.ok is True and res.code is None and (res.stock or {}).get("sold_out") is True, res

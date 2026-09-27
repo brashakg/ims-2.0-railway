@@ -704,6 +704,14 @@ async def push_all_pending(
             bucket["noop"] += 1
         elif data.get("ok"):
             bucket["pushed"] += 1
+            # LIVE AND SOLD OUT: the writer's own stamp (push_skus_stock
+            # `sold_out`, every accepted number 0), never re-derived here or
+            # in TypeScript (recheck round 2). Correct -- IMS is master and
+            # the shelf is empty -- and on the rebuilt catalogue with one
+            # stock unit it is nearly every press, so it gets its own count
+            # beside `pushed` instead of the summary line saying nothing.
+            if (data.get("stock") or {}).get("sold_out"):
+                bucket["sold_out"] = bucket.get("sold_out", 0) + 1
             if data.get("code") == shopify_push.PRICE_NOT_SYNCED:
                 # Live, but the price step failed: the product IS on the
                 # storefront (so it is pushed), at the OLD price (so it gets

@@ -1613,3 +1613,42 @@ def test_a_bulk_press_splits_a_stock_warning_from_stock_not_written(
     s = r.json()["summary"]["products"]
     assert s["stock_warning"] == 1 and "stock_not_written" not in s, s
     assert s["pushed"] == 1 and s["failed"] == 0
+
+
+def test_a_bulk_press_counts_the_listings_that_went_live_sold_out_from_the_writers_stamp(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """ONE RULE, display (recheck round 2). A clean press whose every accepted
+    number was 0 landed in `pushed` and the summary line said nothing, while
+    the drawer toast for the same press said "live and SOLD OUT" from its own
+    TypeScript re-derivation of `stock.quantities` -- and this tally spelled
+    "sold out" a third way (`set == 0` under a code). The writer now stamps
+    `stock.sold_out`; this tally counts THAT, and a clean press without the
+    stamp stays a plain push. Drop the `sold_out` bucket -> this fails."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    async def _clean_but_empty(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE", entity="product", action="update", target_id=doc.get("id"), ok=True,
+            stock={"ok": True, "set": 3, "code": None, "sold_out": True},
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", _clean_but_empty)
+    r = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    s = r.json()["summary"]["products"]
+    assert s["sold_out"] == 1 and s["pushed"] == 1, s
+    assert "stock_not_written" not in s and "stock_warning" not in s, "written, cleanly -- just as 0"
+
+    async def _clean_with_a_unit(db, doc, variants=None, **kw):
+        return shopify_push.PushResult(
+            mode="LIVE", entity="product", action="update", target_id=doc.get("id"), ok=True,
+            stock={"ok": True, "set": 3, "code": None, "sold_out": False},
+        )
+
+    conn.db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom.locally_modified": True}})
+    monkeypatch.setattr(shopify_push, "push_product", _clean_with_a_unit)
+    s2 = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers).json()["summary"]["products"]
+    assert s2["pushed"] == 1 and "sold_out" not in s2, s2

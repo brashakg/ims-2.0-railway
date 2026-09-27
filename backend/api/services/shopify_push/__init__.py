@@ -229,6 +229,7 @@ from .inventory import (  # noqa: F401
     product_variant_gids,
     stock_changed,
     baseline_strays,
+    stray_baseline_skus,
     mapped_slice,
     unmapped_holders,
     plan_product_stock,

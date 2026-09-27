@@ -211,6 +211,12 @@ function sweepToast(
   // together, day 1 read "121 live with NO stock written (sold out)"
   // beside a line quoting the opposite.
   const stockWarn = n('stock_warning');
+  // LIVE AND SOLD OUT, CLEANLY. Every number the writer sent was 0 -- the
+  // backend's own stamp (`stock.sold_out`), the same word the drawer toast
+  // prints, never re-derived from the quantities here. Correct (IMS is
+  // master) but said, because on the rebuilt catalogue with one stock unit
+  // it is nearly every press and the line used to say nothing.
+  const soldOut = n('sold_out');
   // THE SWEEP'S OWN STOCK PASS. A products press ends with a whole-
   // catalogue stock pass whose verdict is over EVERY listing -- an
   // unchanged listing's stray SKU or unknown shop lives here and in no
@@ -239,6 +245,7 @@ function sweepToast(
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
     (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
     (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
+    (soldOut ? ` · ${soldOut} live and SOLD OUT (0 at every shop)` : '') +
     why +
     stockPassLine;
   const bad = refused || withheld || noStock || stockWarn || stockPassBad || failed;

@@ -397,6 +397,37 @@ def listing_strays(db, listing_ids: Iterable[str]) -> List[str]:
     return sorted(out)
 
 
+def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
+    """``baseline_strays`` asked from the SKU side: which of ``skus`` does
+    SOME listing's last-sent baseline still advertise a positive number for,
+    while listing it no more. For a door holding a SKU it could resolve NO
+    listing for -- the round-7 phantom has no variant row and no product row,
+    so ``listings_for_skus`` cannot name its listing and ``listing_strays``
+    is never asked (recheck round 2). The SAME predicate as the sweep and the
+    press (``baseline_strays`` over ``product_skus``), never a second one.
+    Fail-soft: a report never blocks a write. ponytail: one scan of the
+    listings that carry a baseline (121 docs today), only on a sale whose SKU
+    has no target -- a query on a dynamic ``quantities.<sku>`` key scans the
+    same collection without an index and cannot take a dotted SKU."""
+    from ..online_catalog import variant_rows_for_product
+
+    wanted = {str(s) for s in skus if s}
+    out: set = set()
+    if not wanted:
+        return []
+    try:
+        coll = db["catalog_products"]
+        for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
+            carried = set((_last_sent(doc).get("quantities") or {}).keys())
+            if not (carried & wanted):
+                continue
+            strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc)))
+            out.update(s for s in strays if s in wanted)
+    except Exception as exc:  # noqa: BLE001 -- a report never raises
+        logger.warning("[SHOPIFY_STOCK] stray read failed for the SKU(s): %s", exc)
+    return sorted(out)
+
+
 def mapped_slice(
     quantities: Dict[str, Dict[str, int]], mapped: Dict[str, str], skus: Iterable[str]
 ) -> Dict[str, Dict[str, int]]:
@@ -1454,6 +1485,7 @@ async def push_skus_stock(
         "dead_locations": [],
         "locations_unread": False,
         "stray_skus": [],
+        "sold_out": False,
     }
     if not distinct:
         summary["ok"] = True
@@ -1638,6 +1670,16 @@ async def push_skus_stock(
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).
     summary["quantities"] = written_per_sku
+    # LIVE AND SOLD OUT, said by the writer (recheck round 2): every number
+    # Shopify accepted was 0. Correct (IMS is master, the shelf is empty) but
+    # the listing now reads sold out with no code to say so -- and the drawer
+    # toast re-derived it in TypeScript from `quantities` while the sweep's
+    # tally spelled "sold out" as `set == 0` under a code and the summary
+    # line said nothing. One fact, one stamp; both screens print it. Nothing
+    # written is NOT this (that is the code's line, "NO stock written").
+    summary["sold_out"] = bool(written_per_sku) and all(
+        int(q) == 0 for rows in written_per_sku.values() for q in rows.values()
+    )
     summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
     if summary["errors"] and not summary["error"]:
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])

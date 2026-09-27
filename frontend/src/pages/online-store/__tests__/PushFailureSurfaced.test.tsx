@@ -91,7 +91,6 @@ import OnlineShopifySyncPage from '../OnlineShopifySyncPage';
 import {
   formatPushResult,
   pushToastLevel,
-  wroteZeroEverywhere,
 } from '../../../components/online-store/OnlineStoreSyncBanner';
 import { onlineStoreApi, pushApi, syncHealthApi } from '../../../services/api/onlineStore';
 import { catalogProductsApi } from '../../../services/api/catalog';
@@ -171,40 +170,51 @@ describe('formatPushResult', () => {
   });
 });
 
-describe('a live listing that went out SOLD OUT says so', () => {
+describe('a live listing that went out SOLD OUT says so -- in the WRITER\'s word', () => {
   // Round 6, first-push P4. With 121 products and one stock unit, every first
   // publish writes an explicit 0 at all three mapped locations and goes
   // tracked=true + DENY. That is CORRECT (IMS is master) but no code named it:
   // res.stock.ok is true with code null, so the toast read "Frame X: LIVE
-  // (create)" in plain green over a listing that is live and sold out. Only
-  // the sync page's aggregate line said it, and the per-product drawer press
-  // never renders res.stock.quantities at all.
+  // (create)" in plain green over a listing that is live and sold out.
+  //
+  // RECHECK ROUND 2 (one rule). The toast re-derived "sold out" here from
+  // `stock.quantities` while the sweep's tally spelled it as `set == 0` under
+  // a code and the summary line said nothing: two spellings of one fact on
+  // one page. The backend writer now stamps `stock.sold_out` and BOTH cells
+  // print that stamp. Re-derive it from the quantities again -> the all-zeros
+  // result the writer did NOT stamp prints SOLD OUT -> this fails.
   const LIVE_ZERO = {
     mode: 'LIVE' as const,
     entity: 'product',
     action: 'create',
     ok: true,
     shopify_id: 'gid://shopify/Product/111',
-    stock: { ok: true, quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'WIZ-DHN-01': 0, 'BV-BOK-02': 0 } } },
+    stock: {
+      ok: true,
+      sold_out: true,
+      quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'WIZ-DHN-01': 0, 'BV-BOK-02': 0 } },
+    },
   };
 
-  it('names the sold-out press and leaves a real quantity alone', () => {
-    expect(wroteZeroEverywhere(LIVE_ZERO as any)).toBe(true);
+  it('prints the stamp, and leaves a press the writer did not stamp alone', () => {
     expect(formatPushResult('Carrera 1', LIVE_ZERO as any)).toContain('SOLD OUT');
+    // Same all-zero numbers, no stamp: the page does not have its own opinion.
+    const unstamped = { ...LIVE_ZERO, stock: { ...LIVE_ZERO.stock, sold_out: false } };
+    expect(formatPushResult('Carrera 1', unstamped as any)).not.toContain('SOLD OUT');
     const withStock = {
       ...LIVE_ZERO,
-      stock: { ok: true, quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'BV-BOK-02': 1 } } },
+      stock: { ok: true, sold_out: false, quantities: { 'CAR-1': { 'BV-DHN-02': 0, 'BV-BOK-02': 1 } } },
     };
-    expect(wroteZeroEverywhere(withStock as any)).toBe(false);
     expect(formatPushResult('Carrera 1', withStock as any)).not.toContain('SOLD OUT');
   });
 
-  it('a dry run and a press that wrote nothing at all are not sold-out claims', () => {
-    expect(wroteZeroEverywhere({ ...LIVE_ZERO, mode: 'SIMULATED' } as any)).toBe(false);
-    expect(wroteZeroEverywhere({ ...LIVE_ZERO, stock: { ok: false, quantities: {} } } as any)).toBe(
-      false,
+  it('a press that wrote nothing at all is not a sold-out claim', () => {
+    expect(formatPushResult('Carrera 1', { ...LIVE_ZERO, stock: null } as any)).not.toContain(
+      'SOLD OUT',
     );
-    expect(wroteZeroEverywhere({ ...LIVE_ZERO, stock: null } as any)).toBe(false);
+    expect(
+      formatPushResult('Carrera 1', { ...LIVE_ZERO, stock: { ok: false, quantities: {} } } as any),
+    ).not.toContain('SOLD OUT');
   });
 });
 

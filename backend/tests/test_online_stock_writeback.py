@@ -188,7 +188,7 @@ def test_no_mapping_is_skipped(monkeypatch):
     _live(monkeypatch, spy)
     import api.services.online_catalog as oc
     # The SKU is NOT listed online -> a silent, correct no-op (no alert).
-    monkeypatch.setattr(oc, "online_status_for_skus", lambda db, skus: {})
+    monkeypatch.setattr(oc, "online_status_for_skus", lambda db, skus, **_k: {})
     summary = _run(wb.writeback_skus(_db(listed=False), ["NOT-ONLINE"], "BV-A"))
     assert summary["pushed"] == 0
     assert summary["skipped_no_mapping"] == 1
@@ -207,7 +207,7 @@ def test_unmapped_but_sellable_online_sku_alerts_loudly(monkeypatch):
     monkeypatch.setattr(oc, "inventory_items_for_skus", lambda db, skus: {})
     monkeypatch.setattr(
         oc, "online_status_for_skus",
-        lambda db, skus: {
+        lambda db, skus, **_k: {
             "SP-ONLINE": {"online": True, "sellable_online": True, "online_stock": None, "status": "PUBLISHED"}
         },
     )
@@ -235,7 +235,7 @@ def test_unmapped_draft_sku_never_alerts(monkeypatch):
     monkeypatch.setattr(oc, "inventory_items_for_skus", lambda db, skus: {})
     monkeypatch.setattr(
         oc, "online_status_for_skus",
-        lambda db, skus: {
+        lambda db, skus, **_k: {
             "SP-DRAFT": {"online": True, "sellable_online": False, "online_stock": None, "status": "DRAFT"}
         },
     )
@@ -338,7 +338,7 @@ def test_aggregate_mid_iteration_raise_discards_partial_and_aborts(monkeypatch):
     import api.services.online_catalog as oc
     monkeypatch.setattr(
         oc, "online_status_for_skus",
-        lambda db, skus: {
+        lambda db, skus, **_k: {
             "SP-GAP": {"online": True, "sellable_online": True, "online_stock": None, "status": "PUBLISHED"}
         },
     )
@@ -668,3 +668,190 @@ def test_R9_a_sale_line_with_no_sku_key_still_reaches_the_writer(monkeypatch):
         {"item_type": "FRAME", "product_id": "P2", "sku": "X"},
         {"item_type": "FRAME", "product_id": "P1", "sku": ""},
     ]) == ["P1"]
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 2 (2026-09-27): one rule, opposite polarity / silent fallbacks
+# ---------------------------------------------------------------------------
+
+
+def test_R13_a_dead_buffer_read_is_unknown_never_the_full_shelf(monkeypatch):
+    """OVERSELL, latent (recheck round 2, one rule / opposite polarity). The
+    safety buffer is the OTHER half of THE ONE RULE (on_hand - buffer), and
+    `_safety_buffer` swallowed a dead `integrations` read and fell through to
+    the env var, then 0 -- while `_blocked_online` two screens down is STRICT
+    (None -> whole-batch abort) for exactly the polarity argument in its own
+    docstring. With a configured buffer of 1 and shelf A:3 B:1, the rule read
+    {A:2, B:0}; make the read die and it read {A:3, B:1}: a LIVE sale wrote
+    the full shelf with ok=True, code=None, recorded it as the baseline, and
+    the margin the owner set to keep the last unit off the website was gone
+    silently -- the next working pass then saw nothing to re-send.
+
+    `_safety_buffer` is None on that except and the rule treats None as the
+    whole-batch unknown, exactly as it treats a None block. A MISSING doc is
+    still "no override" (control). Put the `except: pass` back (0 on a dead
+    read) -> the rule reads the shelf and the sale writes it -> this fails."""
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    monkeypatch.delenv("ONLINE_STOCK_SAFETY_BUFFER", raising=False)
+    db = _db(a=3, b=1)
+    db.seed("integrations", [{"type": "shopify", "enabled": True, "config": {"safety_buffer": 1}}])
+    assert wb.online_quantities_for_skus(db, ["SP-1"]) == {"SP-1": {"BV-A": 2, "BV-B": 0}}, "buffer 1 honoured"
+
+    class _DeadIntegrations(StrictCollection):
+        def find_one(self, *a, **k):
+            raise RuntimeError("integrations read died")
+
+    db._collections["integrations"] = _DeadIntegrations("integrations", [])
+    assert wb._safety_buffer(db) is None, "unreadable is UNKNOWN, not 0"
+    assert wb.online_quantities_for_skus(db, ["SP-1"]) == {}, "the rule is unknown when its buffer is"
+    summary = _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    assert spy.writes() == [], "nothing written -- never the full shelf"
+    assert summary["pushed"] == 0 and summary["skipped_no_onhand"] == 1, summary
+    runs = _runs(db)
+    assert len(runs) == 1 and runs[0]["ok"] is False and "UNKNOWN" in runs[0]["error"], runs
+    # Control: no doc at all is "no override" -> the env / default, never unknown.
+    plain = _db(a=3, b=1)
+    assert wb._safety_buffer(plain) == 0
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
+    assert wb._safety_buffer(plain) == 1
+
+
+def _phantom_world(*, last_sent=1):
+    """The round-7 phantom: cat-1 is LIVE, its baseline still advertises the
+    size SP-1-L at A (`last_sent`), and SP-1-L's catalog_variants row is GONE
+    -- nothing maps it to an inventory item any more. Its spine still exists
+    (the counter can sell it)."""
+    db = _db(a=1, b=0)
+    db.seed("products", [{"product_id": "P1L", "sku": "SP-1-L"}])
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"},
+        {"$set": {"ecom.online_stock": {
+            "tracked": True, "policy": "DENY",
+            "quantities": {"SP-1": {"BV-A": 1, "BV-B": 0}, "SP-1-L": {"BV-A": last_sent, "BV-B": 0}},
+        }}},
+    )
+    return db
+
+
+def test_R13_a_counter_sale_of_only_the_phantom_size_is_named_like_a_sale_beside_its_parent(monkeypatch):
+    """SILENT FALLBACK, oversell direction (recheck round 2, one rule). The
+    sale door answered the round-7 phantom two ways. The LAST SP-1-L unit sells
+    at the counter alone: `writeback_skus(['SP-1-L'])` found no target and
+    returned on the `not targets` branch BEFORE the stray question -- no row,
+    no task, zero writes; bettervision.in kept listing SP-1-L = 1 until the
+    sweep's all-pairs stray scan at the next tick, up to 12 h. The SAME sale
+    with SP-1 in the basket went through the writer, whose per-LISTING stray
+    question (asked of the parent's listing) named SP-1-L in a not-ok
+    STOCK_BASELINE_STRAY row. Root: a phantom has no variant row and no
+    product row, so `listings_for_skus` cannot name its listing and the
+    per-listing question cannot even be asked from that branch.
+
+    The question is asked from the SKU side (`stray_baseline_skus`, the
+    writer's own `baseline_strays` predicate) for every SKU this door found
+    no target for, on BOTH branches, in the writer's words. Put the early
+    return back -> the alone-sale records nothing -> this fails."""
+    from api.services.shopify_push.inventory import _stray_sku_error
+
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    db = _phantom_world()
+    alone = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-A", source="sale"))
+    assert spy.writes() == [], "nothing to write -- the gid went with the row"
+    assert alone["skipped_no_mapping"] == 1 and alone["code"] == shopify_push.STOCK_BASELINE_STRAY, alone
+    assert alone["error"] == _stray_sku_error(["SP-1-L"]), "the writer's words, not a second spelling"
+    runs = _runs(db)
+    assert len(runs) == 1 and runs[0]["ok"] is False, runs
+    assert "SP-1-L" in runs[0]["error"] and "STOCK_BASELINE_STRAY" in runs[0]["error"], runs[0]
+
+    # The same sale beside its parent: the writer names it (its listing's
+    # stray question), and the door does not say it a second time.
+    db2 = _phantom_world()
+    spy.calls.clear()
+    beside = _run(wb.writeback_skus(db2, ["SP-1", "SP-1-L"], "BV-A", source="sale"))
+    assert spy.rows() == {(INV, LOC_A, 1), (INV, LOC_B, 0)}, "the parent's own numbers still go out"
+    assert beside["code"] == shopify_push.STOCK_BASELINE_STRAY, beside
+    assert beside["error"].count("SP-1-L") == 1, beside["error"]
+    runs2 = _runs(db2)
+    assert len(runs2) == 1 and runs2[0]["ok"] is False and "SP-1-L" in runs2[0]["error"], runs2
+
+    # A size the delist door zeroed properly advertises nothing: not a stray,
+    # no row -- the line is never always-on.
+    db3 = _phantom_world(last_sent=0)
+    quiet = _run(wb.writeback_skus(db3, ["SP-1-L"], "BV-A", source="sale"))
+    assert quiet.get("code") is None and _runs(db3) == [], (quiet, _runs(db3))
+
+
+def test_R13_a_dead_sellable_online_read_on_the_unmapped_path_is_unknown_not_silent(monkeypatch):
+    """SILENT FALLBACK (recheck round 2, the round-1 class one hop later). The
+    TARGET read dying (`inventory_items_for_skus`) is a not-ok
+    STOCK_ONHAND_UNKNOWN row; the SELLABLE-ONLINE read dying one hop later
+    (`_alert_unmapped_online` -> `online_status_for_skus`) was `logger.debug`
+    + return: unmapped_online stayed 0, `_record_run`'s gate stayed shut, no
+    row, no P1 task. Two answers to one failure class ("a read that died is
+    not a SKU that is not online"). One layer down the same silence was built
+    in: `online_status_for_skus` called the key lookups fail-soft, so a dead
+    catalog read INSIDE it read as "not sellable online" and that except was
+    mostly dead code.
+
+    ONE row, the sale door's words (`_target_error`), on both: the guard
+    stamps the unknown on the caller's summary (`_say_unknown`) and the
+    caller records it once; `online_status_for_skus(strict=True)` raises a
+    dead key lookup. Put the `logger.debug` back -> no row -> this fails.
+    Drop `strict` from the lookups inside `online_status_for_skus` -> the
+    dead parent read reads as "not sellable", no row -> the second half
+    fails."""
+    from api.services import online_catalog as oc
+    from api.services.shopify_push.inventory import _target_error
+
+    spy = _Spy()
+    _live(monkeypatch, spy)
+    db = _db(a=3, b=1)
+    boom = RuntimeError("catalog read died")
+
+    def _raise(*a, **k):
+        raise boom
+
+    monkeypatch.setattr(oc, "online_status_for_skus", _raise)
+    out = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-A", source="sale"))
+    assert spy.writes() == []
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and out["error"] == _target_error(boom), out
+    runs = _runs(db)
+    assert len(runs) == 1, "one row -- the guard stamps, the door records"
+    assert runs[0]["ok"] is False and runs[0]["error"] == f"STOCK_ONHAND_UNKNOWN: {_target_error(boom)}"
+    monkeypatch.undo()
+
+    # The built-in silence: SP-1-L has a size row (minted in IMS, no inventory
+    # item yet -> no target) and its PARENT read dies inside
+    # online_status_for_skus. The target read never touches parents, so this
+    # is the sellable-online read alone.
+    spy2 = _Spy()
+    _live(monkeypatch, spy2)
+    db2 = _db(a=3, b=1)
+    db2.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1"}])
+    parent_boom = RuntimeError("parent read died")
+
+    class _DeadParents(StrictCollection):
+        def find(self, filter=None, *a, **k):
+            if any("id" in c for c in (filter or {}).get("$or", [])):
+                raise parent_boom
+            return super().find(filter, *a, **k)
+
+    db2._collections["catalog_products"] = _DeadParents(
+        "catalog_products", db2.get_collection("catalog_products").docs
+    )
+    out2 = _run(wb.writeback_skus(db2, ["SP-1-L"], "BV-A", source="sale"))
+    assert spy2.writes() == []
+    assert out2["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and "parent read died" in out2["error"], out2
+    runs2 = _runs(db2)
+    assert len(runs2) == 1 and runs2[0]["ok"] is False and "parent read died" in runs2[0]["error"], runs2
+    # ...and a read that answers still answers: the same size row under a
+    # parent that is a never-pushed DRAFT is simply not sellable online --
+    # no row, no alarm.
+    db3 = _db(a=3, b=1)
+    db3.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1"}])
+    db3.get_collection("catalog_products").update_one(
+        {"id": "cat-1"}, {"$set": {"ecom": {"status": "DRAFT"}}}
+    )
+    quiet = _run(wb.writeback_skus(db3, ["SP-1-L"], "BV-A", source="sale"))
+    assert quiet.get("code") is None and _runs(db3) == [], (quiet, _runs(db3))
