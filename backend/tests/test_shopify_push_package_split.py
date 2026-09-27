@@ -66,7 +66,6 @@ _LOAD_BEARING = (
     "_has_shopify_creds",
     "_live_or_reason",
     "_writeback_product",
-    "_writeback_image",
     "_publication_id_cache",
     "_MAX_RETRIES",
     "product_photo_urls",

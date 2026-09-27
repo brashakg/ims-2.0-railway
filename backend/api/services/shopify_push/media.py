@@ -1,8 +1,8 @@
 """Shopify push -- media
 
-Images/media: the `product_photo_urls` photo predicate, attaching
-photos on create, media inputs, `push_image` and its resolve/write-back
-helpers.
+Images/media: the `product_photo_urls` photo predicate, the listing's
+ordered url list (`listing_photo_urls`: own photos + APPROVED design-queue
+images), the media diff pass BOTH doors run, media inputs and `push_image`.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from .queries import (
     _MEDIA_LIMIT,
     _PRODUCT_CREATE_MEDIA,
     _PRODUCT_DELETE_MEDIA,
+    _PRODUCT_MEDIA_QUERY,
     _PRODUCT_REORDER_MEDIA,
 )
 
@@ -63,24 +64,20 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     default -- it is NOT a photograph, exactly as before: what reaches the
     storefront never changes by a code deploy alone.
 
-    NOTE: this deliberately does NOT read the `product_images` design queue.
-    Those rows push on their own, LATER press (push_image), and a photo that
-    arrives after the product is already visible does not protect the
-    storefront. A product whose only photo lives in the design queue is refused
-    rather than published bare -- conservative, and the operator fixes it by
-    putting the photo on the product."""
+    NOTE: this deliberately does NOT read the `product_images` design queue:
+    the publish rule counts only the product's OWN photographs, so a product
+    whose only photo lives in the design queue is refused rather than
+    published bare -- conservative, and the operator fixes it by putting the
+    photo on the product. The APPROVED design-queue images join the LISTING's
+    media list through ``listing_photo_urls`` (the one list both doors sync
+    against), after that gate."""
     out: List[str] = []
-    public_base = (os.getenv("PUBLIC_API_BASE_URL") or "").strip().rstrip("/")
 
     def _add(value: Any) -> None:
         if isinstance(value, dict):
             value = value.get("url") or value.get("src")
-        if not isinstance(value, str):
-            return
-        url = value.strip()
-        if public_base and url.startswith(_APP_IMAGE_PATH):
-            url = public_base + url
-        if url.lower().startswith(("http://", "https://")) and url not in out:
+        url = _photo_url(value)
+        if url and url not in out:
             out.append(url)
 
     _add(product.get("image_url"))
@@ -90,6 +87,69 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
             _add(item)
     _add(product.get("image"))
     return out
+
+
+def _photo_url(value: Any) -> Optional[str]:
+    """ONE usable photograph url, or None: absolute http(s) only, the in-app
+    serve path made absolute through PUBLIC_API_BASE_URL (see the
+    product_photo_urls docstring for why). Pure."""
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    public_base = (os.getenv("PUBLIC_API_BASE_URL") or "").strip().rstrip("/")
+    if public_base and url.startswith(_APP_IMAGE_PATH):
+        url = public_base + url
+    return url if url.lower().startswith(("http://", "https://")) else None
+
+
+def image_source_url(image: Dict[str, Any]) -> Optional[str]:
+    """The url a design-queue row sends to Shopify: the designer's edited
+    asset, else the source. THE identity of that row on the listing -- the
+    media input, the media_map row and the 'already on the listing' check
+    all key on this one value. Pure."""
+    src = image.get("edited_url") or image.get("url")
+    return str(src).strip() if src else None
+
+
+def design_queue_urls(db, product_id: Optional[str]) -> List[str]:
+    """A product's APPROVED design-queue images (product_images), by position:
+    each row's ``image_source_url`` as a photograph (``_photo_url``), deduped.
+    Fail-soft [] -- the queue is a side lane, never why a product press fails."""
+    if not product_id or db is None:
+        return []
+    try:
+        rows = list(db["product_images"].find({"product_id": product_id}))
+    except Exception:  # noqa: BLE001
+        return []
+    rows = [r for r in rows if str(r.get("status") or "").upper() == "APPROVED"]
+    rows.sort(key=lambda r: r.get("position") or 0)
+    out: List[str] = []
+    for r in rows:
+        url = _photo_url(image_source_url(r))
+        if url and url not in out:
+            out.append(url)
+    return out
+
+
+def listing_photo_urls(db, product: Dict[str, Any]) -> List[str]:
+    """The ORDERED url list IMS wants on the listing: the product's own
+    photographs (product_photo_urls), then its APPROVED design-queue images.
+    BOTH doors -- the product press and the design-queue press -- sync the
+    listing's media against THIS list, so a media either door attached is
+    owned, kept, reordered and (when IMS drops it) deleted by the same pass."""
+    photos = product_photo_urls(product)
+    return photos + [u for u in design_queue_urls(db, product.get("id")) if u not in photos]
+
+
+def image_media_gid(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> Optional[str]:
+    """The MediaImage gid the parent twin's ``ecom.media_map`` holds for this
+    design-queue row's source url -- None when it is not on the listing. The
+    ONE 'is this image on Shopify' rule: the press's no-op, the sweep's skip
+    and the pushed/pending counts all ask it. Pure."""
+    src = image_source_url(image)
+    if not src:
+        return None
+    return {r["url"]: r["id"] for r in owned_media(parent or {})}.get(src)
 
 
 async def _attach_product_photos(
@@ -165,9 +225,11 @@ async def _attach_product_photos(
 #
 # OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
 # twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``
-# (written on attach, pruned on delete). Media that is on Shopify but not in
-# the map -- the hand-uploaded photographs on the connector-created Ray-Ban
-# Meta products, anything the design queue (push_image) attached, anything a
+# (written on attach, pruned on delete). BOTH doors write it -- the product
+# press and the design-queue press (push_image) run this same pass over
+# ``listing_photo_urls`` -- so a design-queue media is owned like any other.
+# Media that is on Shopify but not in the map -- the hand-uploaded
+# photographs on the connector-created Ray-Ban Meta products, anything a
 # human added in the Shopify admin -- is NEVER deleted or re-attached: it is
 # counted as ``unmanaged`` and left exactly where it is. When IMS owns nothing
 # on a product that already carries media, the pass keeps its hands off
@@ -496,6 +558,9 @@ async def sync_product_media(
         res = await _attach_product_photos(db, product_gid, plan["attach"])
         summary["attached"] = int(res.get("attached") or 0)
         summary["on_shopify"] += summary["attached"]
+        # The gids this pass minted, url by url -- so a caller can still name
+        # a media that landed on Shopify when the map write-back below fails.
+        summary["attached_map"] = list(res.get("media_map") or [])
         owned.extend(res.get("media_map") or [])
         if pid and res.get("media_map"):
             _writeback_media_map(db, pid, _in_ims_order(owned, photos))
@@ -560,7 +625,7 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     designer's edited asset; fall back to the source url."""
     out: List[Dict[str, Any]] = []
     for img in images:
-        src = img.get("edited_url") or img.get("url")
+        src = image_source_url(img)
         if not src:
             continue
         out.append(
@@ -574,17 +639,49 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 
+async def _product_media(db, product_gid: str) -> List[Dict[str, Any]]:
+    """The media a live product carries RIGHT NOW (_PRODUCT_MEDIA_QUERY), in
+    the node shape the product press reads off its create/update response --
+    so the design-queue press can run the same pass. Raises on a GraphQL
+    error body or a product Shopify does not know: an unknown listing must
+    never read as 'no media' (the pass would then attach every photograph
+    again -- the duplicate this whole door exists to stop)."""
+    body = await _graphql(db, _PRODUCT_MEDIA_QUERY, {"id": product_gid})
+    if not isinstance(body, dict):
+        raise RuntimeError("malformed graphql response")
+    if body.get("errors"):
+        raise RuntimeError("graphql errors: %s" % str(body["errors"])[:300])
+    product = (body.get("data") or {}).get("product")
+    if product is None:
+        raise RuntimeError("product %s not found on Shopify" % product_gid)
+    return (product.get("media") or {}).get("nodes") or []
+
+
 async def push_image(db, image: Dict[str, Any]) -> PushResult:
-    """Push ONE APPROVED product image to Shopify (productCreateMedia) onto its
-    parent product. DARK by default; LIVE behind the gates with the returned
-    MediaImage gid written back to shopify_image_id. Never raises.
+    """Press ONE APPROVED design-queue image onto its parent product's listing.
+    DARK by default; LIVE behind the gates. Never raises.
+
+    ONE identity, ONE writer: a design-queue image is on Shopify iff the parent
+    twin's ``ecom.media_map`` maps its source url (``image_media_gid``); the
+    row itself carries no Shopify id. The LIVE press never calls
+    productCreateMedia on its own -- it runs the SAME photo pass the product
+    press runs (``sync_product_media`` over ``listing_photo_urls``, against
+    the media the listing carries right now), so:
+      * an image already on the listing is a no-op (zero network, its gid in
+        the payload) -- a re-press can never mint a second MediaImage;
+      * a row whose asset was replaced has the old media tombstoned and
+        deleted and the new one attached, exactly once;
+      * the map is written through ``_writeback_media_map``, so the product
+        press manages that media from then on (reorder, delete on drop);
+      * media IMS does not own on the listing is never touched, and a
+        listing IMS owns nothing on is refused (adopt it first), never
+        attached to blind.
 
     GUARD: only an APPROVED image is push-eligible (the design queue gate).
     Anything else returns ok=False action=skip (Fail Loudly) without a network
     call. The parent product MUST already be on Shopify (ecom.shopify_product_id)
     -- without it there is nothing to attach the media to; that is a skip too."""
     iid = image.get("image_id")
-    existing_gid = image.get("shopify_image_id")
 
     # Hub Phase 5 push-lock (defense-in-depth, FIRST gate): an image attaches to
     # its parent product, so a push-locked brand's image must NEVER reach Shopify
@@ -612,17 +709,32 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     product_gid = _resolve_product_gid(db, image.get("product_id"))
     media = build_media_inputs([image])
     payload: Dict[str, Any] = {"productId": product_gid, "media": media}
-    action = "update" if existing_gid else "create"
-
     live, reason = _live_or_reason(db)
+
+    # ALREADY ON THE LISTING -> nothing to send, dark or live. The map is the
+    # only identity a design-queue media has, so this is the check the 09-06
+    # sync audit found missing: the one that stops a re-press from attaching
+    # the same source url again.
+    have = image_media_gid(_parent, image)
+    if have:
+        return PushResult(
+            mode=MODE_LIVE if live else MODE_SIMULATED,
+            entity="image",
+            action="noop",
+            target_id=iid,
+            ok=True,
+            shopify_id=have,
+            payload={**payload, "media_gid": have},
+            reason="already on the listing",
+        )
+
     if not live:
         return PushResult(
             mode=MODE_SIMULATED,
             entity="image",
-            action=action,
+            action="create",
             target_id=iid,
             ok=True,
-            shopify_id=existing_gid,
             payload=payload,
             reason=reason,
         )
@@ -647,70 +759,66 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             payload=payload,
             error="no image url to push",
         )
-    try:
-        body = await _graphql(
-            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
-        )
-        err = _user_errors_media(body)
-        if err:
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="image",
-                action=action,
-                target_id=iid,
-                ok=False,
-                payload=payload,
-                error=err,
-            )
-        media_nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get(
-            "media"
-        ) or []
-        new_gid = (media_nodes[0].get("id") if media_nodes else None) or existing_gid
-        # Persist the MediaImage gid for idempotency. _writeback_image now takes
-        # the WHOLE image doc so it can locate the row even when image_id is null
-        # (the BVI-migrated docs) via the natural key (product_id + url). If it
-        # STILL cannot persist, the media WAS created on Shopify but we have no
-        # way to record it -> Fail Loudly (ok=False) instead of a silent success,
-        # because a clean-looking ok=True on an un-recorded create is exactly what
-        # let a re-run duplicate media. shopify_id is still returned so the audit
-        # row captures the orphaned gid for manual reconcile.
-        if new_gid:
-            persisted = _writeback_image(db, image, new_gid)
-            if not persisted:
-                return PushResult(
-                    mode=MODE_LIVE,
-                    entity="image",
-                    action=action,
-                    target_id=iid,
-                    ok=False,
-                    shopify_id=new_gid,
-                    payload=payload,
-                    error=(
-                        "media attached on Shopify (%s) but shopify_image_id "
-                        "write-back failed: no stable image key (image_id or "
-                        "product_id+url) to persist it -- manual reconcile "
-                        "required to avoid a duplicate on re-push" % new_gid
-                    ),
-                )
+    src = media[0]["originalSource"]
+    photos = listing_photo_urls(db, _parent or {})
+    if src not in photos:
         return PushResult(
             mode=MODE_LIVE,
             entity="image",
-            action=action,
+            action="skip",
             target_id=iid,
-            ok=True,
-            shopify_id=new_gid,
+            ok=False,
             payload=payload,
+            error="not a fetchable photograph: Shopify pulls the bytes from the "
+            "url, so it must be an absolute http(s) url",
         )
+    try:
+        current = await _product_media(db, product_gid)
+        summary = await sync_product_media(db, _parent, product_gid, photos, current)
     except Exception as e:  # noqa: BLE001
         return PushResult(
             mode=MODE_LIVE,
             entity="image",
-            action=action,
+            action="create",
             target_id=iid,
             ok=False,
             payload=payload,
             error=str(e),
         )
+    # THE FACT LIVES ON THE TWIN: read the map back rather than trust the
+    # pass. A media that landed on Shopify but is not in the stored map would
+    # be attached again by the next press, so that is a loud failure with the
+    # minted gid kept for reconcile (attached_map), never a silent ok=True.
+    new_gid = image_media_gid(_resolve_product_doc(db, image.get("product_id")), image)
+    minted = {r["url"]: r["id"] for r in summary.get("attached_map") or []}.get(src)
+    error = summary.get("error")
+    if not new_gid and not error:
+        if minted:
+            error = (
+                "media attached on Shopify (%s) but the media_map write-back "
+                "failed -- manual reconcile required to avoid a duplicate on "
+                "re-push" % minted
+            )
+        elif summary.get("hands_off"):
+            error = (
+                "hands off: IMS owns none of the %d media on this listing -- "
+                "adopt them first (scripts/adopt_shopify_media_map.py)"
+                % int(summary.get("on_shopify") or 0)
+            )
+        else:
+            error = "the photo pass attached nothing for this image"
+    return PushResult(
+        mode=MODE_LIVE,
+        entity="image",
+        action="create",
+        target_id=iid,
+        ok=not error,
+        shopify_id=new_gid or minted,
+        payload=payload,
+        photos=summary,
+        error=error,
+        code=summary.get("code"),
+    )
 
 
 def _user_errors_media(body: Dict[str, Any], field: str = "productCreateMedia") -> Optional[str]:
@@ -755,53 +863,3 @@ def _resolve_product_gid(db, product_id: Optional[str]) -> Optional[str]:
         return _as_shopify_gid(gid, "Product") if gid else None
     except Exception:  # noqa: BLE001
         return None
-
-
-def _image_writeback_filter(image: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The Mongo filter that uniquely locates this image doc for a write-back.
-
-    Prefers the primary key `image_id`. When it is missing/null (the BVI-migrated
-    docs are stored with image_id=None) it falls back to the documented natural
-    key product_id + url (ProductImageRepository: "Idempotent keys (never _id):
-    image_id | product_id | variant_id"). Returns None when NEITHER is available
-    -- there is then no safe way to target exactly one row, so the caller must
-    fail loudly rather than write blindly."""
-    iid = image.get("image_id")
-    if iid:
-        return {"image_id": iid}
-    pid = image.get("product_id")
-    url = image.get("url")
-    if pid and url:
-        return {"product_id": pid, "url": url}
-    return None
-
-
-def _writeback_image(db, image: Dict[str, Any], shopify_id: str) -> bool:
-    """Persist shopify_image_id on the product_images doc. Returns True iff a row
-    was actually located + written, False otherwise (no usable key, or a fail-soft
-    error). The gid presence is the idempotency key (the image has no
-    locally_modified flag), so a reliable write-back is what stops a re-push from
-    duplicating media.
-
-    Takes the WHOLE image doc (not just an id) so it can locate the row via the
-    natural key when image_id is null -- the exact condition that made the
-    BVI-migrated docs silently skip their write-back before this fix."""
-    filt = _image_writeback_filter(image)
-    if filt is None:
-        return False
-    try:
-        res = db["product_images"].update_one(
-            filt,
-            {"$set": {"shopify_image_id": shopify_id, "updated_at": _now()}},
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            f"[SHOPIFY_PUSH] image write-back failed {filt}: {e}"
-        )
-        return False
-    # matched_count on real pymongo; MockCollection exposes modified_count only.
-    touched = getattr(res, "matched_count", None)
-    if touched is None:
-        touched = getattr(res, "modified_count", 0)
-    return bool(touched)
-

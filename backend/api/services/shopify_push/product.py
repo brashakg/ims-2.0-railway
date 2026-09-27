@@ -50,7 +50,12 @@ from .inventory import (
     sync_product_stock,
     zero_stock_ledger_entry,
 )
-from .media import plan_product_media, product_photo_urls, sync_product_media
+from .media import (
+    listing_photo_urls,
+    plan_product_media,
+    product_photo_urls,
+    sync_product_media,
+)
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -172,6 +177,12 @@ async def push_product(
             "never published to the storefront",
             reason="no_photo",
         )
+    # THE LISTING'S LIST: the product's own photographs, then its APPROVED
+    # design-queue images -- the ONE list both doors sync the media against
+    # (media.listing_photo_urls), so a media the design-queue press attached
+    # is owned here too (kept, reordered, deleted when IMS drops it) and a
+    # design image this press attaches makes that press a no-op.
+    photos = listing_photo_urls(db, product)
 
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)

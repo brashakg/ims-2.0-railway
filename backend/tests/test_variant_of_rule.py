@@ -185,6 +185,10 @@ def _responses():
     return {
         "productCreate(": _product_body("productCreate"),
         "productUpdate(": _product_body("productUpdate"),
+        # The design-queue press reads the listing's media before its pass
+        # (media._product_media); a bare listing here, so the parent's own
+        # image attaches (the P3 test below asserts exactly that call).
+        "imsProductMedia": {"data": {"product": {"id": P_GID, "media": {"nodes": []}}}},
         "productVariantsBulkUpdate": _ok("productVariantsBulkUpdate", productVariants=[]),
         "productVariantsBulkCreate": _ok("productVariantsBulkCreate", productVariants=[]),
         "inventorySetQuantities": _ok("inventorySetQuantities", inventoryAdjustmentGroup={"createdAt": "now"}),

@@ -112,7 +112,8 @@ class PushResult:
     # media diff plan {attach, delete, reorder, unmanaged, hands_off}; LIVE ->
     # {attached, deleted, reordered, unmanaged, on_shopify, hands_off, error?,
     # code?} from media.sync_product_media. None when the push never got that
-    # far (refusal, transport error).
+    # far (refusal, transport error). A LIVE design-queue image press carries
+    # the same summary: it runs the same pass.
     photos: Optional[Any] = None
     # Product pushes only: the STOCK side channel (owner ruling 2026-09-07 --
     # make website quantities real). SIMULATED -> the plan {policy, quantities,

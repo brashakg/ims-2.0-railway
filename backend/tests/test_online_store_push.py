@@ -365,30 +365,46 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
     assert spy.calls[0]["variables"]["handle"] == "main-menu"
 
 
-def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
-    """An APPROVED image whose parent product is already on Shopify pushes via
-    productCreateMedia and writes back the MediaImage gid."""
+def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
+    """An APPROVED image whose parent product is already on Shopify goes through
+    the listing's photo pass: one media read, one productCreateMedia for the
+    edited asset, and the MediaImage gid lands in the parent's ecom.media_map
+    (the ONE writer) -- never on the image row."""
     spy = _force_live(monkeypatch, {
-        "data": {"productCreateMedia": {
-            "media": [{"id": "gid://shopify/MediaImage/900"}],
-            "mediaUserErrors": [],
-        }}
+        "data": {
+            "product": {"id": "gid://shopify/Product/111",
+                        "media": {"nodes": [{"id": "gid://shopify/MediaImage/1"}]}},
+            "productCreateMedia": {
+                "media": [{"id": "gid://shopify/MediaImage/900"}],
+                "mediaUserErrors": [],
+            },
+        }
     })
     db = _EngineDB()
-    # Parent product must already carry a Shopify gid (media attaches to a product).
+    # Parent product must already carry a Shopify gid (media attaches to a product);
+    # its own photograph is already on the listing and mapped.
     db["catalog_products"].insert_one(
-        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111",
+                  "media_map": [{"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"}]}}
     )
     db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
-         "edited_url": "http://x/edited.jpg", "status": "APPROVED", "shopify_image_id": None}
+         "edited_url": "http://x/edited.jpg", "status": "APPROVED"}
     )
     img = db["product_images"].find_one({"image_id": "I1"})
     res = _run(shopify_push.push_image(db, img))
     assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
-    assert db["product_images"].find_one({"image_id": "I1"})["shopify_image_id"] == "gid://shopify/MediaImage/900"
-    # Prefer the EDITED asset as the source.
-    assert spy.calls[0]["variables"]["media"][0]["originalSource"] == "http://x/edited.jpg"
+    assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["media_map"] == [
+        {"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"},
+        {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900"},
+    ]
+    assert db["product_images"].find_one({"image_id": "I1"}).get("shopify_image_id") is None
+    # The read came first; the create carries ONLY the new asset, and prefers
+    # the EDITED asset as the source.
+    assert [c["variables"].get("media") for c in spy.calls] == [
+        None, [{"originalSource": "http://x/edited.jpg", "alt": "", "mediaContentType": "IMAGE"}]
+    ]
 
 
 def test_push_image_live_skips_when_parent_not_on_shopify(monkeypatch):
@@ -682,7 +698,10 @@ def _seed_pending(conn):
     """Seed a mix of pending + already-pushed/clean docs across all four entities."""
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "title": "RB", "brand": "RB",
-         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+         "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True,
+                  # I2 below is already on the listing: its url is in the map.
+                  "media_map": [{"url": "http://x/b.jpg", "id": "gid://shopify/MediaImage/9"}]}})
     conn.db["catalog_products"].insert_one(  # clean -> NOT swept
         {"id": "P2", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
     conn.db["ecom_collections"].insert_one(
@@ -694,9 +713,9 @@ def _seed_pending(conn):
     conn.db["product_images"].insert_one(  # APPROVED + unpushed -> swept
         {"image_id": "I1", "product_id": "P1", "url": "http://x/a.jpg",
          "status": "APPROVED"})
-    conn.db["product_images"].insert_one(  # already pushed -> NOT swept
+    conn.db["product_images"].insert_one(  # already on the listing (mapped) -> NOT swept
         {"image_id": "I2", "product_id": "P1", "url": "http://x/b.jpg",
-         "status": "APPROVED", "shopify_image_id": "gid://shopify/MediaImage/9"})
+         "status": "APPROVED"})
 
 
 def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patched_db, monkeypatch):

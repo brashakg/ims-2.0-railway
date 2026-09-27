@@ -30,10 +30,12 @@ We REUSE the existing, code-verified safety primitives rather than reinvent them
 
 IDEMPOTENT: on a LIVE push the Shopify gid returned by the mutation is written
 BACK onto the IMS doc (ecom.shopify_product_id / shopify_variant_id /
-shopify_collection_id / shopify_menu_id / shopify_image_id), keyed on the IMS
-join key (never Mongo _id), so a re-push UPDATES the same Shopify object instead
-of creating a duplicate. The presence of a stored Shopify id is what selects
-create-vs-update in the mutation.
+shopify_collection_id / shopify_menu_id), keyed on the IMS join key (never
+Mongo _id), so a re-push UPDATES the same Shopify object instead of creating a
+duplicate. The presence of a stored Shopify id is what selects
+create-vs-update in the mutation. A design-queue IMAGE has no row id of its
+own: its identity is the parent twin's ecom.media_map row for its url, and a
+press whose url is already mapped is a no-op (media.push_image).
 
 VARIANT SEEDING ON CREATE (2026-07 fix -- IMS is the sole Shopify writer):
 ProductInput carries NO price and NO sku (the 2024-04+ product model moved both
@@ -285,12 +287,14 @@ from .media import (  # noqa: F401
     plan_product_media,
     sync_product_media,
     build_media_inputs,
+    image_source_url,
+    design_queue_urls,
+    listing_photo_urls,
+    image_media_gid,
     push_image,
     _user_errors_media,
     _resolve_product_doc,
     _resolve_product_gid,
-    _image_writeback_filter,
-    _writeback_image,
 )
 from .writeback import (  # noqa: F401
     _writeback_product,
