@@ -91,6 +91,31 @@ def _raise_hold_conflict_task(db, order: Dict[str, Any], *, source: str) -> None
         )
 
 
+# The fulfilment's own out-of-order watermark (the payload's updated_at, naive
+# UTC) -- the order-level one (shopify_updated_at) is the mapper's, and an order
+# body's updated_at is a different clock from a fulfilment's.
+FULFILLMENT_WATERMARK = "shopify_fulfillment_updated_at"
+
+
+def _tracking_fields(payload: Dict[str, Any]) -> Dict[str, str]:
+    """The tracking fields a fulfilment payload $sets on the IMS order -- only
+    the NON-EMPTY ones: an empty one never clears what an older fulfilment
+    wrote. ONE extraction for the reconcile and for the hourly pull sweep's
+    "did the fulfilment move" (nexus_providers._fulfilment_moved)."""
+    tracking_number = _norm(payload.get("tracking_number")) or _norm(
+        (payload.get("tracking_numbers") or [None])[0]
+    )
+    fields = {
+        "awb": tracking_number,
+        "tracking_number": tracking_number,
+        "tracking_company": _norm(payload.get("tracking_company")),
+        "tracking_url": _norm(payload.get("tracking_url"))
+        or _norm((payload.get("tracking_urls") or [None])[0]),
+        "shipment_status": _norm(payload.get("shipment_status")).lower(),
+    }
+    return {k: v for k, v in fields.items() if v}
+
+
 def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
     if db is None or not shopify_order_id:
         return None
@@ -137,56 +162,55 @@ def reconcile_fulfillment(
         if order.get("historical") or order.get("source") == "bvi_import":
             return {"status": "skipped", "reason": "historical_import_order"}
 
+        from .online_order_mapper import _shopify_payload_stale, _terminal_status_withheld
+        from .shopify_ingest import _to_naive_utc
+
+        # OUT-OF-ORDER guard: the mapper's stale rule on the fulfilment's own
+        # clock. A fulfilment payload STRICTLY older than the one last applied
+        # (a retried create landing after a newer update, or the hourly pull's
+        # body losing the race with a fulfillments/update) never rewinds the
+        # tracking / shipment status. Fail-open without a stamp on either side.
+        if _shopify_payload_stale(order, payload, field=FULFILLMENT_WATERMARK):
+            return {"status": "skipped", "reason": "stale_fulfillment"}
+
         ful_status = _FULFILLMENT_STATUS_MAP.get(
             _norm(payload.get("status")).lower(), "FULFILLED"
         )
-        shipment_status = _norm(payload.get("shipment_status")).lower()
-        tracking_number = (
-            _norm(payload.get("tracking_number"))
-            or _norm((payload.get("tracking_numbers") or [None])[0])
-        )
-        tracking_company = _norm(payload.get("tracking_company"))
-        tracking_url = (
-            _norm(payload.get("tracking_url"))
-            or _norm((payload.get("tracking_urls") or [None])[0])
-        )
+        tracking = _tracking_fields(payload)
+        shipment_status = tracking.get("shipment_status", "")
+        tracking_number = tracking.get("tracking_number", "")
 
         now = datetime.now(timezone.utc).isoformat()
         update: Dict[str, Any] = {
             "fulfillment_status": ful_status,
             "updated_at": now,
             "shopify_fulfillment_id": fulfillment_id,
+            **tracking,
         }
-        if tracking_number:
-            update["awb"] = tracking_number
-            update["tracking_number"] = tracking_number
-        if tracking_company:
-            update["tracking_company"] = tracking_company
-        if tracking_url:
-            update["tracking_url"] = tracking_url
-        if shipment_status:
-            update["shipment_status"] = shipment_status
+        watermark = _to_naive_utc(payload.get("updated_at"))
+        if watermark is not None:
+            update[FULFILLMENT_WATERMARK] = watermark
 
-        # Advance the lifecycle status -- but NEVER regress a terminal one, and
-        # NEVER silently flip a HELD (Rx flag-and-hold) order to SHIPPED/
-        # DELIVERED via a webhook -- that would bypass the deliver-guard and the
-        # ADMIN/SUPERADMIN-only clear-rx-hold release path entirely (see module
-        # docstring). Tracking / fulfillment_status / shipment_status above are
-        # written regardless; only the terminal status flip is withheld.
+        # Advance the lifecycle status -- but NEVER regress a terminal one (the
+        # mapper's ONE terminal rule, so the pull sweep can report what was
+        # held back), and NEVER silently flip a HELD (Rx flag-and-hold) order
+        # to SHIPPED/DELIVERED via a webhook -- that would bypass the
+        # deliver-guard and the ADMIN/SUPERADMIN-only clear-rx-hold release
+        # path entirely (see module docstring). Tracking / fulfillment_status /
+        # shipment_status above are written regardless; only the flip is withheld.
         current_status = _norm(order.get("status")).upper()
-        would_advance = shipment_status in _DELIVERED_SHIPMENT or (
-            ful_status == "FULFILLED" or tracking_number
-        )
-        held = False
-        if current_status not in _TERMINAL_STATUSES and would_advance:
-            from ..routers.orders import order_has_active_rx_hold
+        if shipment_status in _DELIVERED_SHIPMENT:
+            would_be = "DELIVERED"
+        elif ful_status == "FULFILLED" or tracking_number:
+            would_be = "SHIPPED"
+        else:
+            would_be = ""
+        withheld = bool(would_be) and _terminal_status_withheld(current_status, would_be)
+        from ..routers.orders import order_has_active_rx_hold
 
-            held = order_has_active_rx_hold(order)
-        if current_status not in _TERMINAL_STATUSES and not held:
-            if shipment_status in _DELIVERED_SHIPMENT:
-                update["status"] = "DELIVERED"
-            elif ful_status == "FULFILLED" or tracking_number:
-                update["status"] = "SHIPPED"
+        held = bool(would_be) and not withheld and order_has_active_rx_hold(order)
+        if would_be and not withheld and not held:
+            update["status"] = would_be
         elif held:
             logger.warning(
                 "[SHOPIFY_FULFILL] order=%s is on an active Rx hold -- withheld "
@@ -221,6 +245,10 @@ def reconcile_fulfillment(
             "fulfillment_status": ful_status,
             "order_status": update.get("status", current_status),
             "awb": tracking_number,
+            # The terminal rule kept the lifecycle status (a fulfilment on an
+            # order IMS holds DELIVERED / CANCELLED / ...): the pull sweep
+            # reports it as status_skipped_terminal.
+            "terminal_withheld": withheld,
         }
     except Exception as exc:  # noqa: BLE001 -- the drain loop must never die here
         logger.warning("[SHOPIFY_FULFILL] reconcile_fulfillment failed soft: %s", exc)

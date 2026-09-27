@@ -566,6 +566,46 @@ def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
     assert doc["shopify_fulfillment_id"] == "3" and doc["awb"] == "AWB-RESHIP"
 
 
+def _spy_reconcile(swept):
+    calls = []
+    real = shopify_fulfillment.reconcile_fulfillment
+
+    def spy(db, payload, **kw):
+        calls.append(payload.get("id"))
+        return real(db, payload, **kw)
+
+    swept["mp"].setattr(shopify_fulfillment, "reconcile_fulfillment", spy)
+    return calls
+
+
+@pytest.mark.parametrize("oid, shopify_ful, f1_shipment", [
+    (30108, "fulfilled", "delivered"),  # D: one order, two parcels
+    (30109, "partial", "in_transit"),   # D2: split shipment
+])
+def test_a_newest_fulfilment_without_shipment_status_is_reconciled_once(swept, oid, shopify_ful, f1_shipment):
+    """The reconcile never clears shipment_status with an empty one (it writes
+    only the non-empty tracking fields), so the sweep compares only those:
+    the older parcel's status the doc keeps is no difference, and the handler
+    is fed once -- not every hour for the 48h the order stays in the fetch
+    (D2 used to flip CONFIRMED/SHIPPED and PARTIAL/FULFILLED hourly)."""
+    _book(swept, oid)
+    f1 = _fulfilment(oid, 1, shipment_status=f1_shipment, updated_at="2026-09-06T00:40:00Z")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], f1, topic="fulfillments/update")
+    calls = _spy_reconcile(swept)
+    f2 = _fulfilment(oid, 2, tracking_number="AWB-2", updated_at="2026-09-06T00:59:00Z")
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status=shopify_ful, fulfillments=[f1, f2])]
+
+    assert swept["run"]().payload["status_synced"] == [str(oid)]
+    settled = _snap(_doc(swept, oid))
+    assert (settled["shopify_fulfillment_id"], settled["awb"]) == ("2", "AWB-2")
+    assert settled["shipment_status"] == f1_shipment, "an empty field never clears the older one"
+    for _ in range(3):
+        p = swept["run"]().payload
+        assert p["status_synced"] == [] and p["status_failed"] == []
+        assert _snap(_doc(swept, oid)) == settled
+    assert calls == [2]
+
+
 # ---------------------------------------------------------------------------
 # Rule: a terminal IMS status is replaced only by a Shopify cancellation or
 # refund (never knocked back to CONFIRMED, never DELIVERED over a cancelled
@@ -700,6 +740,61 @@ def test_a_fact_that_keeps_the_terminal_status_still_lands(swept):
     assert p["status_synced"] == ["30018"] and p["status_skipped_terminal"] == []
     doc = _doc(swept, 30018)
     assert doc["status"] == "CANCELLED" and doc["payment_status"] == "REFUNDED"
+
+
+_SHIPPED_THEN_STAFF_CANCELLED = {
+    "status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z", "cancelled_by": "staff-1",
+    "fulfillment_status": "PARTIAL", "shopify_fulfillment_id": "49",
+    "shipment_status": "in_transit", "awb": "AWB40011", "tracking_number": "AWB40011",
+}
+
+
+@pytest.mark.parametrize("ims_state, shopify_body, landed", [
+    # A partial shipment landed SHIPPED, staff then cancelled at the counter
+    # (cancel.py blocks only DELIVERED): Shopify says the parcel was delivered.
+    (
+        _SHIPPED_THEN_STAFF_CANCELLED,
+        {"fulfillment_status": "partial", "fulfillments": [
+            _fulfilment(40011, 49, shipment_status="delivered", tracking_number="AWB40011")]},
+        {"shipment_status": "delivered"},
+    ),
+    (
+        {"status": "CANCELLED", "fulfillment_status": "FULFILLED", "shopify_fulfillment_id": "45",
+         "shipment_status": "in_transit", "awb": "AWB40011", "tracking_number": "AWB40011"},
+        {"fulfillment_status": "fulfilled", "fulfillments": [_fulfilment(40011, 45, shipment_status="delivered")]},
+        {"shipment_status": "delivered"},
+    ),
+    (
+        {"status": "CANCELLED"},
+        {"fulfillment_status": None, "fulfillments": [_fulfilment(40011, 46, status="open")]},
+        {"shopify_fulfillment_id": "46", "awb": "AWB40011"},
+    ),
+    (
+        {"status": "DELIVERED", "fulfillment_status": "FULFILLED"},
+        {"fulfillment_status": "fulfilled", "fulfillments": [_fulfilment(40011, 47, shipment_status="in_transit")]},
+        {"shopify_fulfillment_id": "47", "shipment_status": "in_transit"},
+    ),
+])
+def test_a_terminal_status_the_fulfilment_leg_held_back_is_reported(swept, ims_state, shopify_body, landed):
+    """The fulfilment reconcile decides with the mapper's ONE terminal rule and
+    says when it held the SHIPPED / DELIVERED flip back: the operator is told
+    Shopify shipped / delivered an order IMS holds cancelled or delivered."""
+    _book(swept, 40011)
+    swept["orders"].update_one({"shopify_order_id": "40011"}, {"$set": ims_state})
+
+    swept["state"]["orders"] = [_pulled(40011, **shopify_body)]
+    res = swept["run"]()
+
+    p = res.payload
+    assert p["status_synced"] == ["40011"] and p["status_skipped_terminal"] == ["40011"]
+    assert "terminal-skipped 1" in res.notes
+    doc = _doc(swept, 40011)
+    assert doc["status"] == ims_state["status"]
+    for field, value in landed.items():
+        assert doc[field] == value
+    # The drain's answer for the same fulfilment is the same rule's.
+    again = shopify_fulfillment.reconcile_fulfillment(swept["db"], shopify_body["fulfillments"][0])
+    assert again["terminal_withheld"] is True and _doc(swept, 40011)["status"] == ims_state["status"]
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1105,51 @@ def test_a_stale_body_never_rewinds_the_fulfilment_a_newer_webhook_applied(swept
 
     assert p["status_synced"] == [] and p["status_failed"] == [] and swept["seen"] == []
     assert _snap(_doc(swept, 30031)) == before
+
+
+NEWER = "2026-09-06T03:00:00Z"
+
+
+@pytest.mark.parametrize("variant", ["A", "A2", "B", "C"])
+def test_a_body_older_than_the_last_fulfilment_webhook_never_rewinds_it(swept, variant):
+    """A fulfillments/* webhook stamps no ORDER watermark, so the body's order
+    clock cannot see it lost the race: the reconcile keeps its own (the
+    fulfilment's updated_at) and the SAME stale rule reads it on both paths.
+    The older body neither re-stamps an older fulfilment (A, A2 new id; B the
+    same id's carrier event) nor fires orders/updated on a fulfillment_status
+    it predates (C: the pre-fulfilment body rewound SHIPPED to CONFIRMED)."""
+    oid = 30101
+    _book(swept, oid)
+    if variant in ("A2", "B"):  # an orders/updated at 00:30: an order watermark OLDER than the body
+        swept["real_map"](_pulled(oid, updated_at="2026-09-06T00:30:00Z"), swept["db"],
+                          webhook_id="real-030", topic="orders/updated")
+    if variant in ("A", "A2"):
+        newer_f = _fulfilment(oid, 2, tracking_number="AWB-NEW", shipment_status="delivered", updated_at=NEWER)
+        body = _pulled(oid, fulfillment_status="fulfilled", fulfillments=[
+            _fulfilment(oid, 1, tracking_number="AWB-OLD", shipment_status="in_transit")])
+    elif variant == "B":
+        newer_f = _fulfilment(oid, 1, tracking_number="AWB-B", shipment_status="delivered", updated_at=NEWER)
+        body = _pulled(oid, fulfillment_status="fulfilled", fulfillments=[
+            _fulfilment(oid, 1, tracking_number="AWB-B", shipment_status="in_transit")])
+    else:
+        newer_f = _fulfilment(oid, 1, tracking_number="AWB-C", updated_at=NEWER)
+        body = _pulled(oid)  # 01:00, before the fulfilment: no fulfilments at all
+    topic = "fulfillments/create" if variant == "C" else "fulfillments/update"
+    assert shopify_fulfillment.reconcile_fulfillment(swept["db"], newer_f, topic=topic)["status"] == "reconciled"
+    before = _snap(_doc(swept, oid))
+    swept["seen"].clear()
+    calls = _spy_reconcile(swept)
+
+    swept["state"]["orders"] = [body]
+    p = swept["run"]().payload
+
+    assert p["status_synced"] == [] and p["status_failed"] == [] and p["failed_reasons"] == {}
+    assert swept["seen"] == [] and calls == []
+    assert _snap(_doc(swept, oid)) == before
+    # The drain asks the same rule: the older fulfilment as a late webhook is skipped whole.
+    for f in body.get("fulfillments") or []:
+        assert shopify_fulfillment.reconcile_fulfillment(swept["db"], f)["reason"] == "stale_fulfillment"
+    assert _snap(_doc(swept, oid)) == before
 
 
 # ---------------------------------------------------------------------------

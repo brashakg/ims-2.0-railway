@@ -330,21 +330,25 @@ def _newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
     """True when the newest Shopify fulfilment is not the one the IMS order
-    carries (id / shipment_status / tracking -- the fields the reconcile $sets)."""
-    tracking = str(f.get("tracking_number") or (f.get("tracking_numbers") or [""])[0] or "")
+    carries: its id, or a tracking number / shipment status the reconcile
+    WOULD write -- its own _tracking_fields, which leaves out an empty one (an
+    empty field never clears the older fulfilment's, so comparing it would
+    re-fire the reconcile every hour)."""
+    from api.services.shopify_fulfillment import _tracking_fields
+
+    fields = _tracking_fields(f)
     # The IMS->Shopify push stamps the GraphQL gid (gid://shopify/Fulfillment/N);
     # the REST body and the webhook reconcile carry the bare N. Same fulfilment.
     stamped = str(existing.get("shopify_fulfillment_id") or "").rsplit("/", 1)[-1]
-    return (
-        str(f.get("id")) != stamped
-        or str(f.get("shipment_status") or "").lower()
-        != str(existing.get("shipment_status") or "").lower()
-        or (bool(tracking) and tracking != str(existing.get("tracking_number") or ""))
+    return str(f.get("id")) != stamped or any(
+        fields[k].lower() != str(existing.get(k) or "").lower()
+        for k in ("tracking_number", "shipment_status")
+        if k in fields
     )
 
 
 def _order_topic(
-    st: Dict[str, Any], money: Dict[str, Any], existing: Dict[str, Any]
+    st: Dict[str, Any], money: Dict[str, Any], existing: Dict[str, Any], ful_stale: bool
 ) -> Optional[str]:
     """The orders/* topic Shopify would have delivered for the order-level facts
     that moved, or None when the IMS doc already reflects them. `st` is the
@@ -355,14 +359,18 @@ def _order_topic(
     payment comes back as a bigger amount_paid. Triggers ONLY on Shopify-owned
     facts, never on `status != derived`: the mapper has no forward guard, so
     that trigger would re-fire hourly on every order staff advanced
-    (PROCESSING/READY) and knock it back to CONFIRMED."""
+    (PROCESSING/READY) and knock it back to CONFIRMED. `ful_stale`: the body's
+    fulfilments are older than the one IMS applied (the reconcile's own
+    watermark), so its fulfillment_status is no fact that moved."""
     if st["cancelled"] and existing.get("status") != "CANCELLED":
         return "orders/cancelled"
     # bill_type follows payment_status and the create path never stamps it --
     # it alone is not a Shopify fact that moved (it lands with the next one).
     pay_moved = any(existing.get(k) != v for k, v in money.items() if k != "bill_type")
     # The create path writes no fulfillment_status: absent == UNFULFILLED.
-    ful_moved = st["fulfillment_status"] != (existing.get("fulfillment_status") or "UNFULFILLED")
+    ful_moved = not ful_stale and st["fulfillment_status"] != (
+        existing.get("fulfillment_status") or "UNFULFILLED"
+    )
     if pay_moved and st["payment_status"] == "PAID":
         return "orders/paid"
     if ful_moved and st["fulfillment_status"] == "FULFILLED":
@@ -384,7 +392,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         _terminal_status_withheld,
         map_shopify_order,
     )
-    from api.services.shopify_fulfillment import reconcile_fulfillment
+    from api.services.shopify_fulfillment import FULFILLMENT_WATERMARK, reconcile_fulfillment
     from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
 
     key = f"pull:{sid}:{raw.get('updated_at') or ''}"
@@ -403,10 +411,11 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         reported in the run's payload (status_failed + failed_reasons, the
         sync_runs ledger NEXUS shows) -- NOT the FAILED queue, which lists
         unbooked orders only. Dark: the row records what WOULD have been
-        applied. Returns True when the handler applied something."""
+        applied. Returns the handler's result when it applied something,
+        else {}."""
         family = topic.split("/")[0]
         row_id = key if family == "orders" else f"{key}:{topic}:{payload.get('id')}"
-        applied, error = False, None
+        applied, error, res = False, None, {}
         if live:
             try:
                 res = call() or {}
@@ -429,17 +438,19 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             errors.append(error)
         elif applied:
             buckets.add("status_synced")
-        return applied
+        return res if applied else {}
 
     try:
         # The mapper and the fulfilment reconcile skip a HISTORICAL import
         # (pre-IMS customer-360 rows): comparing one would only report a false
         # failure every hour. A body older than the last applied webhook (one
-        # landed between the fetch and this sweep) is the mapper's own stale
-        # skip, and it covers the body's fulfilments too -- the reconcile has
-        # no watermark, so the older fulfilment would overwrite the tracking a
-        # newer webhook applied. A benign race the next hour re-reads, not a
-        # failure. The refund leg below still runs in both cases -- it is
+        # landed between the fetch and this sweep) is the stale rule on each
+        # leg's own clock: the mapper's watermark for the whole body, the
+        # reconcile's for its fulfilments (a fulfillments/* webhook stamps no
+        # order watermark) -- an older fulfilment neither overwrites the
+        # tracking a newer one applied nor counts as a fulfillment_status that
+        # moved. A benign race the next hour re-reads, not a failure. The
+        # refund leg below still runs in both cases -- it is
         # id-deduped, and its handler has a narrower import rule (our own
         # shopify_order_history import books real revenue, so a NEW refund on
         # it must still reach the accountant).
@@ -451,14 +462,20 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             # so the end state is the drain's (the mapper's fulfilled ->
             # DELIVERED lands over the reconcile's SHIPPED, as it does there).
             f = _newest_fulfilment(raw)
-            if f is not None and _fulfilment_moved(f, existing):
-                feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
+            # No fulfilment on the body at all: the body itself predates the one
+            # IMS holds when it is older than that fulfilment's stamp.
+            ful_stale = _shopify_payload_stale(existing, f or raw, field=FULFILLMENT_WATERMARK)
+            if f is not None and not ful_stale and _fulfilment_moved(f, existing):
+                res = feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
+                # The same terminal rule held the SHIPPED / DELIVERED flip back.
+                if res.get("terminal_withheld"):
+                    buckets.add("status_skipped_terminal")
             st = _derive_statuses(raw)
             money = _recompute_money(
                 existing, st, raw,
                 [p for p in (existing.get("payments") or []) if isinstance(p, dict)],
             )
-            topic = _order_topic(st, money, existing)
+            topic = _order_topic(st, money, existing, ful_stale)
             if topic:
                 applied = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
                 # The mapper's own terminal rule kept the lifecycle status while

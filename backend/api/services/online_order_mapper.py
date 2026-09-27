@@ -751,11 +751,16 @@ def _terminal_status_withheld(existing_status: Any, derived_status: str) -> bool
     )
 
 
-def _shopify_payload_stale(existing: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+def _shopify_payload_stale(
+    existing: Dict[str, Any], payload: Dict[str, Any], *, field: str = "shopify_updated_at"
+) -> bool:
     """ONE rule for the webhook drain AND the hourly pull sweep (OUT-OF-ORDER
     guard, money-panel follow-up P2): a payload whose OWN `updated_at` is
-    STRICTLY older than the one last applied (existing.shopify_updated_at) is
-    skipped whole. Shopify delivery is unordered -- a stale orders/updated (a
+    STRICTLY older than the one last applied (existing[field]) is skipped
+    whole. `field` is the watermark of the clock the payload runs on: the
+    order body's (shopify_updated_at, this mapper's) or a fulfilment's
+    (shopify_fulfillment.FULFILLMENT_WATERMARK, the reconcile's). Shopify
+    delivery is unordered -- a stale orders/updated (a
     partially_paid retried) can land AFTER the orders/paid -- and a pulled
     body can lose the race with a webhook that lands between the fetch and the
     sweep; recomputing money/status from the older body would transiently
@@ -767,7 +772,7 @@ def _shopify_payload_stale(existing: Dict[str, Any], payload: Dict[str, Any]) ->
     except Exception:  # noqa: BLE001 -- staleness is best-effort, never blocks
         return False
     incoming = _to_naive_utc(payload.get("updated_at"))
-    stored = _to_naive_utc(existing.get("shopify_updated_at"))
+    stored = _to_naive_utc(existing.get(field))
     return incoming is not None and stored is not None and incoming < stored
 
 
