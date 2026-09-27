@@ -74,7 +74,7 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_the_delete_gate_fails...     the gate on _resolve_product_doc (P2)      -> red
   -- round 6 --
   test_a_rows_delete_is_refused..   image_lane_media without pending_media     -> red
-                                    the attach sent with no pending record     -> red
+  test_a_map_writeback_failure..    the attach sent with no pending record     -> red
   test_a_lost_attach_of_a_row_re..  plan_product_media without the settle      -> red
   test_a_product_blocked_from_on..  image_press_plan without the block refusal -> red
 
