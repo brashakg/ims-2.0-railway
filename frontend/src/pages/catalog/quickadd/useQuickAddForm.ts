@@ -220,8 +220,9 @@ export function useQuickAddForm() {
   }, [selectedCategory, isReviewMode]);
 
   // Does the HSN on the form still imply the rate the form is showing?
-  // The rule itself lives in productAddShared.hsnImpliesCategoryRate, where it
-  // can be tested without standing this whole page up.
+  // The rule itself lives in domain/catalog/productAdd/formModel.ts
+  // (hsnImpliesCategoryRate), where it can be tested without standing this
+  // whole page up.
   const hsnMatchesCategory = useMemo(
     () => hsnImpliesCategoryRate(selectedCategory, hsnCode),
     [hsnCode, selectedCategory],

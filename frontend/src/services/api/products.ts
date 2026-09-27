@@ -380,7 +380,8 @@ export const productApi = {
   // THE canonical per-category field registry (single source of truth). Drives
   // the required/optional fields all three product-entry doors render + validate,
   // sourced from the backend product_master CATEGORY_SPECS the create gate
-  // enforces. See productAddShared.ts loadCategoryRegistry (cached once).
+  // enforces. See loadCategoryRegistry in
+  // domain/catalog/productAdd/categoryFields.ts (cached once).
   getCategoryRegistry: async (): Promise<CategoryRegistryResponse> => {
     const response = await api.get('/products/categories');
     return response.data;

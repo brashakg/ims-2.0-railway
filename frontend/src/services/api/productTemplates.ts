@@ -12,7 +12,7 @@
 // ============================================================================
 
 import api from './client';
-import type { ProductFormValues } from '../../pages/catalog/productAddShared';
+import type { ProductFormValues } from '../../domain/catalog/productAdd';
 
 export interface ProductTemplate {
   template_id: string;
