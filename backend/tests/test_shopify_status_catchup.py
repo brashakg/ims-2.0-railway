@@ -633,6 +633,33 @@ def test_status_sweep_sees_an_old_order_but_the_create_path_never_books_one(swep
 
 
 # ---------------------------------------------------------------------------
+# Rule: the booked-order lookup hands the comparisons the WHOLE doc. The mapper
+# FakeCollection ignores projections, so no end-to-end test above can tell a
+# projected lookup (#1130's {_id: 1}) from a full one -- on real Mongo it would
+# hand every comparison None: each cancelled order re-fed hourly, and the
+# terminal guard blind to DELIVERED. Pinned against a stub that honours the
+# projection the way Mongo does.
+# ---------------------------------------------------------------------------
+
+
+def test_booked_order_lookup_is_not_projected():
+    doc = {"_id": "x", "shopify_order_id": "1", "status": "DELIVERED", "payment_status": "PAID"}
+
+    class _Coll:
+        def find_one(self, filter_, projection=None):
+            assert filter_ == {"shopify_order_id": "1"}
+            return {k: doc[k] for k in projection if k in doc} if projection else dict(doc)
+
+    class _DB:
+        def get_collection(self, name):
+            assert name == "orders"
+            return _Coll()
+
+    assert np._booked_order(_DB(), "1")["status"] == "DELIVERED"
+    assert np._booked_order(_DB(), "") is None
+
+
+# ---------------------------------------------------------------------------
 # Rule: a HISTORICAL import is left alone (every handler skips it; comparing it
 # would only report a false failure every hour)
 # ---------------------------------------------------------------------------
