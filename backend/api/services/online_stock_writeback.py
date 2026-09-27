@@ -700,17 +700,6 @@ def _file_guard_gap_task(db, skus: List[str]) -> None:
         logger.debug("[STOCK_WRITEBACK] guard-gap task skipped: %s", exc)
 
 
-def _last_stray_locations(db) -> List[Dict[str, Any]]:
-    """The last LIVE stock sweep's stray-location verdict. Fail-soft -> []."""
-    try:
-        from .shopify_push.inventory import last_stray_locations
-
-        return last_stray_locations(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] stray-location verdict unavailable: %s", exc)
-        return []
-
-
 def _record_run(db, summary: Dict[str, Any]) -> None:
     """Best-effort sync_runs row so the SUPERADMIN online-store sync-health tile
     can see write-back activity. Never raises."""
@@ -732,25 +721,20 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
         return
     unmapped_online = int(summary.get("unmapped_online", 0) or 0)
     skipped_no_onhand = int(summary.get("skipped_no_onhand", 0) or 0)
-    unmapped_stores = list(summary.get("unmapped_stores") or [])
-    unknown_stores = list(summary.get("unknown_stores") or [])
+    # THE WRITER'S VERDICT, IN THE WRITER'S WORDS, ONCE (recheck round 3). This
+    # row used to spell STORE_UNMAPPED, the unknown shops and the stray location
+    # itself, and then dropped the writer's own line because its code was
+    # "already said" -- and with it every " -- ALSO:" rung under it. With
+    # Gangadham Pune an unmapped holder that was every sale: the row the
+    # sync-health tile reads said "map BV-D" and never SOLD OUT, a stray SKU, a
+    # duplicated item or an orphan. The row adds only what the writer cannot
+    # know: the failed count, the guard gap and the SKUs skipped before it ran.
+    code = str(summary.get("code") or "")
     errors = []
     if summary.get("failed"):
         errors.append(f"{summary.get('failed')} push(es) failed")
-    if unmapped_stores:
-        names = ", ".join(
-            str(s.get("store_code") or s.get("store_name") or s.get("store_id"))
-            for s in unmapped_stores
-        )
-        errors.append(
-            f"STORE_UNMAPPED: {names} hold listed stock with no Shopify location "
-            f"(invisible online until mapped)"
-        )
-    if unknown_stores:
-        errors.append(
-            f"on-hand UNKNOWN at {', '.join(unknown_stores)} (written nowhere, "
-            f"never as 0)"
-        )
+    if code:
+        errors.append(f"{code}: {summary.get('error') or 'nothing written'}")
     if unmapped_online:
         errors.append(
             f"{unmapped_online} online SKU(s) had no Shopify inventory mapping "
@@ -760,26 +744,6 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
         errors.append(
             f"{skipped_no_onhand} SKU(s) skipped: on-hand UNKNOWN "
             f"(never written as 0)"
-        )
-    # Any machine code the writer reported (no shop mapped, two shops on one
-    # location, an orphan store id) is a not-ok run: the row must never say the
-    # website was corrected when the writer refused to write.
-    code = str(summary.get("code") or "")
-    if code and not any(code in e for e in errors):
-        errors.append(f"{code}: {summary.get('error') or 'nothing written'}")
-    # INVARIANT 2 on the SALE path. The stray-location guard (a Shopify location
-    # that fulfils online orders and maps to no IMS shop) lives in the sweep,
-    # which reads Shopify's locations once per run; a per-sale read would buy
-    # nothing (a stray location only appears when a human edits Shopify admin).
-    # So the sale's row CARRIES the last sweep's verdict instead: without it the
-    # row a POS sale produced said the website had been corrected while Shopify
-    # kept routing online orders to a location IMS never writes.
-    stray = _last_stray_locations(db)
-    if stray:
-        errors.append(
-            "SHOPIFY_LOCATION_UNMAPPED: "
-            + ", ".join(str(loc.get("name") or loc.get("id")) for loc in stray)
-            + " fulfil online orders but map to no shop (IMS never writes them)"
         )
     try:
         coll = db.get_collection("sync_runs")
@@ -793,10 +757,9 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
                     summary.get("failed", 0) == 0
                     and unmapped_online == 0
                     and skipped_no_onhand == 0
-                    and not unmapped_stores
-                    and not unknown_stores
+                    and not summary.get("unmapped_stores")
+                    and not summary.get("unknown_stores")
                     and not code
-                    and not stray
                 ),
                 "items_synced": int(summary.get("pushed", 0)),
                 "error": ("; ".join(errors) if errors else None),

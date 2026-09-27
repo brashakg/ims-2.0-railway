@@ -496,97 +496,43 @@ def _unknown_stores(
 
 
 async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    """The dry-run stock plan (SIMULATED branch): policy, the per-store
-    quantity rows that WOULD be written at each mapped shop, and the shops
-    that hold listed units but have no location. Read-only; zero network
-    except the ONE locations read the press would make on day 1.
+    """The dry-run stock plan: the ``stock`` block of the dry-run product push,
+    the preview an operator reads before a first publish. Read-only; zero
+    network except the ONE locations read the press would make on day 1.
 
-    It carries the WRITER'S OWN code/error (round 2 fixed this preview-vs-press
-    divergence for ``sync_stock_levels`` and left the per-product plan behind):
-    this dict is the ``stock`` block of the dry-run product push -- the preview
-    an operator reads before a first publish -- so a shop list that could not
-    be read, a duplicated location, an unmapped holder or "no shop mapped at
-    all" must say so here exactly as the live press would, instead of a
-    silently green plan over a press that writes nothing. ``stores_total`` is
-    None (not 0) when the shop list itself is unknown.
+    IT IS THE WRITER'S OWN SIMULATED BRANCH (recheck round 3), not a second
+    assembly of it. This function used to rebuild the ladder's inputs by hand
+    and was synced to the writer rung by rung over three rounds -- the shop
+    list, the four mapping rungs, the data-defect rungs, the day-1 locations
+    read -- and still dropped one: a listed SKU with no spine row, which the
+    press refuses ("on-hand unknown -- not written", STOCK_ONHAND_UNKNOWN),
+    read GREEN here. A preview that reads green must mean a press would too,
+    and the only way to keep that promise is to ask the same function.
 
-    EVERY rung the press reads, not only the four mapping ones (recheck round
-    1): the plan skipped the data-defect rungs -- a duplicated inventory item,
-    a shop whose read died, an orphan store id, a stray baseline SKU, the
-    whole-batch unknown -- and PRINTED both SKUs of a duplicated item as rows
-    that would be written while the press wrote neither and coded
-    STOCK_TARGET_DUPLICATE. The one rung deliberately NOT carried is a missing
-    Shopify target: a never-pushed product has none yet by definition, and the
-    press creates it."""
-    from ..online_catalog import inventory_items_for_skus
-    from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
-
-    skus = product_skus(product, variants)
-    quantities = online_quantities_for_skus(db, skus) if skus else {}
-    stores: List[Dict[str, Any]] = []
-    read_error: Optional[str] = None
-    try:
-        stores = _stores(db)
-    except Exception as exc:  # noqa: BLE001 -- a plan must never raise
-        logger.warning("[SHOPIFY_STOCK] store list unknown for the plan: %s", exc)
-        read_error = f"shop list unknown (store read failed) -- nothing written: {exc}"
-    mapped = _mapped(stores)
-    conflicts = _location_conflicts(stores)
-    holders = unmapped_holders(db, quantities, stores, skus, mapped)
-    unknown_stores = _unknown_stores(quantities, [s.get("store_id") for s in stores], skus)
-    orphans = orphan_stock_stores(db, skus)
-    targets: Dict[str, str] = {}
-    try:
-        targets = inventory_items_for_skus(db, skus) if skus else {}
-        duplicate_targets, unknown_read = _duplicates_or_error(db, targets)
-    except Exception as exc:  # noqa: BLE001 -- a plan never raises; it says UNKNOWN
-        duplicate_targets, unknown_read = {}, _target_error(exc)
-    # EXACTLY the press's line (round-6 P3): the plan used to read the recorded
-    # verdict with NO day-1 fallback while the press read Shopify itself when
-    # nothing had ever been recorded, so on the rebuilt catalogue the preview
-    # came back green (ok=True, code=None) over a press that codes
-    # SHOPIFY_LOCATION_UNMAPPED. This module promises twice that a preview
-    # reading green means a press would too; it has to ask the same question of
-    # the same source.
-    live, _reason = _live_or_reason(db)
-    locations = await writer_location_verdict(db, mapped) if live else {}
-    if read_error:
-        # An unknown SHOP LIST outranks the ladder, exactly as it does in the
-        # writer (which returns before it): with no list, "no shop is mapped"
-        # would be a guess dressed as a fact.
-        code: Optional[str] = STOCK_ONHAND_UNKNOWN
-        error: Optional[str] = read_error
-    else:
-        code, error = _verdict_for(
-            no_mapping=bool(skus) and not mapped,
-            conflicts=conflicts,
-            holders=holders,
-            stray_locations=list(locations.get("stray") or []),
-            dead_locations=list(locations.get("dead") or []),
-            locations_unread=bool(live and not locations.get("read")),
-            unknown_error=unknown_read
-            or (_whole_batch_unknown_error() if skus and not quantities else None)
-            or (_unknown_error(_labels(stores, unknown_stores)) if unknown_stores else None),
-            orphans=orphans,
-            stray_skus=baseline_strays(product, skus),
-            duplicate_targets=duplicate_targets,
-        )
-    # The rows the press WOULD write: neither SKU of a duplicated item.
-    planned = mapped_slice(quantities, mapped, skus)
-    for sku in list(planned):
-        inv = targets.get(sku)
-        if inv and _as_shopify_gid(inv, "InventoryItem") in duplicate_targets:
-            del planned[sku]
+    The one deliberate difference is ``targets_pending``: a never-pushed
+    product has no Shopify inventory item yet by definition -- the press mints
+    it -- so a missing target is neither a rung nor a reason to drop the row
+    from the plan. ``stores_total`` is None (not 0) when the shop list itself
+    is unknown."""
+    pid = product.get("id") or product.get("product_id")
+    out = await push_skus_stock(
+        db,
+        product_skus(product, variants),
+        source="product_push",
+        product_id=str(pid) if pid else None,
+        dry_run=True,
+        targets_pending=True,
+    )
     return {
-        "ok": code is None,
-        "code": code,
-        "error": error,
+        "ok": out["ok"],
+        "code": out["code"],
+        "error": out["error"],
         "tracked": True,
         "policy": inventory_policy_for(product),
-        "quantities": planned,
-        "stores_mapped": len(mapped),
-        "stores_total": None if read_error else len(stores),
-        "unmapped_stores": holders,
+        "quantities": out["quantities"],
+        "stores_mapped": out["stores_mapped"],
+        "stores_total": out["stores_total"],
+        "unmapped_stores": out["unmapped_stores"],
     }
 
 
@@ -1086,8 +1032,10 @@ def last_location_verdict(db, mapped: Dict[str, str]) -> Optional[Dict[str, Any]
 
 
 def last_stray_locations(db) -> List[Dict[str, Any]]:
-    """Just the stray half of ``last_location_verdict`` (the POS write-back's
-    sync_runs line), scored against the mapping as it is NOW. Fail-soft -> []."""
+    """Just the stray half of ``last_location_verdict``, scored against the
+    mapping as it is NOW. Fail-soft -> []. A read-back of what was RECORDED
+    (the tests' window on it): no door words a line from it any more -- the
+    POS write-back's row prints the writer's own verdict (recheck round 3)."""
     try:
         mapped = _mapped(_stores(db))
     except Exception as exc:  # noqa: BLE001 -- a log line never blocks a write
@@ -1462,6 +1410,7 @@ async def push_skus_stock(
     product_id: Optional[str] = None,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
+    targets_pending: bool = False,
 ) -> Dict[str, Any]:
     """THE quantity path. For every listed SKU, one row per MAPPED shop (an
     explicit 0 included) at that shop's location, through ``set_inventory_
@@ -1476,7 +1425,11 @@ async def push_skus_stock(
     unmapped holder (STORE_UNMAPPED) or either location verdict -- the mapped
     rows are written either way. A LIVE call carries the last sweep's location
     verdict (zero network) and makes the ONE read-only locations query itself
-    only when no pass has ever recorded one. Never raises."""
+    only when no pass has ever recorded one. Never raises.
+
+    ``targets_pending`` (with ``dry_run`` only -- the per-product preview): a
+    SKU with no Shopify inventory item yet is one the press is about to mint,
+    so it is planned, not refused as STOCK_TARGET_MISSING."""
     from ..online_catalog import inventory_items_for_skus, listings_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
@@ -1510,6 +1463,7 @@ async def push_skus_stock(
     except Exception as exc:  # noqa: BLE001
         summary["code"] = STOCK_ONHAND_UNKNOWN
         summary["error"] = f"shop list unknown (store read failed) -- nothing written: {exc}"
+        summary["stores_total"] = None  # unknown is never 0
         return summary
     mapped = _mapped(stores)
     summary["stores_total"] = len(stores)
@@ -1608,9 +1562,10 @@ async def push_skus_stock(
 
     rows: List[Tuple[str, str, int]] = []
     key_of: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    pending = bool(targets_pending and dry_run)
     for sku in distinct:
         inv = targets.get(sku)
-        if not inv:
+        if not inv and not pending:
             summary["target_missing"].append(sku)
             summary["code"] = summary["code"] or STOCK_TARGET_MISSING
             summary["errors"].append(f"{sku}: no Shopify inventory item mapped")
@@ -1620,7 +1575,7 @@ async def push_skus_stock(
             summary["code"] = summary["code"] or STOCK_ONHAND_UNKNOWN
             summary["errors"].append(f"{sku}: on-hand unknown -- not written")
             continue
-        inv_gid = _as_shopify_gid(inv, "InventoryItem")
+        inv_gid = _as_shopify_gid(inv, "InventoryItem") if inv else None
         if inv_gid in duplicate_targets:
             continue
         for sid, loc in mapped.items():
@@ -1629,8 +1584,9 @@ async def push_skus_stock(
                 # unknown_stores + the code, never counted as a failed push).
                 summary["code"] = summary["code"] or STOCK_ONHAND_UNKNOWN
                 continue
-            rows.append((inv_gid, loc, int(per[sid])))
-            key_of[(inv_gid, loc)] = (sku, sid)
+            if inv_gid:  # None only in a preview whose target the press mints
+                rows.append((inv_gid, loc, int(per[sid])))
+                key_of[(inv_gid, loc)] = (sku, sid)
             summary["quantities"].setdefault(sku, {})[sid] = int(per[sid])
 
     if not live or dry_run:
@@ -1894,23 +1850,36 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
     return out
 
 
-def listing_already_live(product: Dict[str, Any]) -> bool:
+def listing_visible(product: Dict[str, Any]) -> bool:
     """The publish a press would do is NOT this listing's first -- the gate
     design 4.2 puts on tracking + DENY applies to the FIRST publish only. It
-    carries a gid from an earlier press, IMS holds it PUBLISHED, and no stock
-    pass has recorded its tracking as unset (``ecom.online_stock.tracked``
-    False is the staged-PUBLISHED draft whose only tracking call failed: that
-    IS its first publish). A refused productVariantsBulkUpdate changes nothing
-    on Shopify, so such a listing keeps the tracking its first publish
-    confirmed -- reporting it "NOT made visible" and "UNTRACKED" while it was
-    visible and tracked was two screens giving two answers about one listing
-    (recheck round 1)."""
+    carries a gid and IMS holds it PUBLISHED, which the press writes only
+    after a CONFIRMED publish (a take-down writes DRAFT back). The one
+    exception is the staged-PUBLISHED draft: a baseline that says tracking was
+    never set AND holds no quantity any press ever had accepted -- no stock
+    pass of a confirmed publish leaves that behind, so that IS its first
+    publish. Withholding an idempotent re-publish of a visible listing buys no
+    safety and tells the owner it is off the storefront when it is not."""
     ecom = (product or {}).get("ecom") or {}
+    stock = ecom.get("online_stock") if isinstance(ecom.get("online_stock"), dict) else {}
+    staged = stock.get("tracked") is False and not stock.get("quantities")
     return (
         bool(ecom.get("shopify_product_id"))
         and str(ecom.get("status") or "").upper() == "PUBLISHED"
-        and (ecom.get("online_stock") or {}).get("tracked") is not False
+        and not staged
     )
+
+
+def listing_already_live(product: Dict[str, Any]) -> bool:
+    """Visible AND no stock pass has recorded its tracking as unset
+    (``ecom.online_stock.tracked`` False: a size minted untracked, or the
+    staged draft above). Picks the WORDS of a refused tracking re-send and
+    what the baseline records: a refused productVariantsBulkUpdate changes
+    nothing on Shopify, so a listing whose tracking was confirmed keeps it --
+    reporting it "UNTRACKED" while it was visible and tracked was two screens
+    giving two answers about one listing (recheck round 1)."""
+    ecom = (product or {}).get("ecom") or {}
+    return listing_visible(product) and (ecom.get("online_stock") or {}).get("tracked") is not False
 
 
 async def sync_product_stock(

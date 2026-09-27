@@ -193,6 +193,35 @@ describe('Live sync card', () => {
     await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalledTimes(2));
   });
 
+  // Recheck round 3: the button's toast was an unconditional GREEN printing
+  // pushed_ok / failed / awaiting only. The backend keeps publish_withheld OUT
+  // of `failed` on purpose, and the run's stock verdict was on no toast -- so a
+  // first publish withheld under a throttled tracking call read
+  // "0 updated, 0 failed, 0 awaiting first publish" in green, and under the
+  // day-1 locations run.stock.ok is false on EVERY run. Make the toast an
+  // unconditional success again and this fails.
+  it('the button is a WARNING over a withheld publish or a not-ok stock pass', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: null }) as any);
+    vi.mocked(pushApi.syncLiveNow).mockResolvedValue({
+      run: {
+        ...LAST_RUN, trigger: 'manual', mode: 'SIMULATED', pushed_ok: 0, failed: 0, awaiting_first_publish: 0,
+        publish_withheld: 1, failures: [],
+        stock: { ok: false, code: 'STOCK_TRACKING_FAILED', error: 'an UNTRACKED listing sells WITHOUT LIMIT' },
+      },
+      live_sync: SCHEDULE_ON,
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    const card = await screen.findByTestId('live-sync-card');
+    await userEvent.click(within(card).getByRole('button', { name: /sync live products now/i }));
+    await waitFor(() => expect(pushApi.syncLiveNow).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    const warn = toastCalls.find((t) => t.kind === 'warning')!;
+    expect(warn.msg).toContain('0 updated, 0 failed, 0 awaiting first publish, 1 NOT made visible');
+    expect(warn.msg).toContain('stock pass NOT ok [STOCK_TRACKING_FAILED]');
+    expect(warn.msg).toContain('WITHOUT LIMIT');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+  });
+
   it('says the schedule is OFF and shows no next slot when disabled', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(
       status({ ...SCHEDULE_ON, enabled: false, next_slot: null, last_run: null }) as any,

@@ -311,3 +311,32 @@ def test_R8_the_route_carries_the_writers_dead_verdict_per_mapped_shop(client, w
     monkeypatch.setattr(shopify_push, "_graphql", _CountingBoom())
     dark = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"])).json()
     assert dark["read"] is False and dark["dead"] == []
+
+
+def test_R11_a_dead_shop_read_is_unknown_never_every_mapped_shop_sells_online(client, world, monkeypatch):
+    """RECHECK ROUND 3 (display-only silent fallback). The route's own store
+    read failing left `mapped = {}`, and `score_locations(rows, {})` answered
+    read=True / dead=[] -- "every mapped shop sells online" -- while EVERY
+    ticked location was stamped `unmapped_online_fulfilling`. The sync page
+    then printed 'Sells online: yes' beside a shop whose location is
+    deactivated. Unknown is said as unknown: read False, no dead, no stray
+    stamp, and the reason. Score against `data["locations"]` again on the
+    except path -> read True -> this fails."""
+    from api.routers import online_store_push as osp
+
+    world.get_collection("stores").update_one(
+        {"store_id": PUNE_UUID}, {"$set": {"shopify_location_id": "gid://shopify/Location/3"}}
+    )
+    _live(monkeypatch, _Spy({"data": {"locations": {"nodes": NODES}}}))
+    ok = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"])).json()
+    assert ok["read"] is True and [d["store_id"] for d in ok["dead"]] == [PUNE_UUID], "control"
+
+    def _boom(_db):
+        raise RuntimeError("stores unreadable")
+
+    monkeypatch.setattr(osp, "physical_stores", _boom)
+    bad = client.get("/api/v1/online-store/push/locations", headers=_headers(["ADMIN"])).json()
+    assert [row["id"] for row in bad["locations"]] == [row["id"] for row in ok["locations"]], "the list still goes out"
+    assert bad["read"] is False and bad["dead"] == []
+    assert not any(row["unmapped_online_fulfilling"] for row in bad["locations"])
+    assert "store read failed" in bad["reason"]

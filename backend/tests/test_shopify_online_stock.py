@@ -2175,8 +2175,9 @@ def test_R4_P3_a_stray_location_makes_the_sales_own_run_row_not_ok(monkeypatch):
     per-sale locations read is not worth it (a stray location only appears when
     a human edits Shopify admin), so the sale CARRIES the last sweep's verdict.
 
-    Revert the `_last_stray_locations` block in `_record_run` -> ok True ->
-    this fails."""
+    The verdict is carried by THE WRITER (`writer_location_verdict`), so the
+    row prints it once in the writer's words. Drop the carried verdict from
+    `push_skus_stock` -> ok True -> this fails."""
     db = _listed(_db(a=2, b=1, c=0, sold=0))
     stray = {"id": "gid://shopify/Location/1004", "name": "Gangadham Pune"}
     nodes = [
@@ -3529,3 +3530,197 @@ def test_R9_a_size_delist_that_landed_under_the_day1_verdict_is_delisted_with_a_
     _live(monkeypatch, _Spy(_responses(imsLocationList=_DAY1_WITH_PUNE)))
     part = _run(shopify_push._delist_variant_row(db3, _CHILD_L))
     assert part.ok is False and part.payload["rows"] == {"SP-1-L": {"BV-A": 0, "BV-C": 0}}, part
+
+
+# ---------------------------------------------------------------------------
+# Recheck round 3 (2026-09-19)
+# ---------------------------------------------------------------------------
+
+
+def test_R11_the_sale_row_prints_the_writers_line_once_with_every_rung(monkeypatch):
+    """ONE RULE (recheck round 3, P-A). `_record_run` hand-wrote its own
+    'STORE_UNMAPPED: <names> hold listed stock' line, then its `code in e`
+    dedupe saw the code "already said" and DROPPED the writer's line -- with
+    every ' -- ALSO:' rung under it. Prod's own shape (Pune an unmapped holder,
+    the mapped locations unticked): the row the sync-health tile reads never
+    said SOLD OUT. Same function: it re-read the cached stray verdict and named
+    Gangadham Pune a second time in a second spelling.
+
+    The row is `<code>: <the writer's error>`, once. Put the row's own
+    STORE_UNMAPPED line (and the dedupe) back -> SOLD OUT leaves the row ->
+    this fails; put the `_last_stray_locations` block back -> Pune twice ->
+    this fails."""
+    db = _listed(_db(a=2, b=1, c=0, d=1, with_d=True))
+    unticked = {"imsLocationList": _locations(
+        _loc(LOC_A, "Bokaro", fulfils=False), _loc(LOC_B, "Dhanbad", fulfils=False),
+        _loc(LOC_C, "Sector 4", fulfils=False))}
+    _live(monkeypatch, _Spy(_responses(**unticked)))
+    out = _run(wb.writeback_skus(db, ["SP-1"], "BV-A", source="sale"))
+    row = list(db.get_collection("sync_runs").find({}))[-1]
+    assert out["code"] == shopify_push.STORE_UNMAPPED and "SOLD OUT" in out["error"]
+    assert row["ok"] is False and row["error"] == f"{out['code']}: {out['error']}", row["error"]
+    # The stray location: named ONCE, in the writer's spelling.
+    db2 = _listed(_db(a=2, b=1, c=0))
+    _live(monkeypatch, _Spy(_responses(imsLocationList=_DAY1_WITH_PUNE)))
+    out2 = _run(wb.writeback_skus(db2, ["SP-1"], "BV-A", source="sale"))
+    row2 = list(db2.get_collection("sync_runs").find({}))[-1]
+    assert row2["ok"] is False and row2["error"] == f"{out2['code']}: {out2['error']}"
+    assert row2["error"].count("Gangadham Pune") == 1 and "SOLD OUT" in row2["error"], row2["error"]
+
+
+def test_R11_the_per_product_preview_is_the_writers_own_simulated_branch(monkeypatch):
+    """ONE RULE (recheck round 3, P-B). `plan_product_stock` re-assembled the
+    ladder's inputs by hand and was synced to the writer rung by rung over
+    three rounds -- and still dropped one: a listed SKU with NO spine row,
+    which the press refuses ('on-hand unknown -- not written',
+    STOCK_ONHAND_UNKNOWN), read ok=True / code=None in the drawer preview and
+    its audit row. The plan IS `push_skus_stock(dry_run=True)` now, so the two
+    cannot disagree. Restore the hand assembly -> the plan reads green -> this
+    fails. The ONE deliberate difference stays pinned below: drop
+    `targets_pending=True` -> a never-pushed product codes
+    STOCK_TARGET_MISSING and plans no rows -> this fails."""
+    db = _listed(_db(a=1, b=0, c=0))
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_TWO}])
+    _dark(monkeypatch)
+    product = db.get_collection("catalog_products").find_one({"id": "cat-1"})
+    variants = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    skus = shopify_push.product_skus(product, variants)
+    assert "SP-1-L" in skus
+    press = _run(shopify_push.push_skus_stock(db, skus, source="product_push", product_id="cat-1", dry_run=True))
+    assert press["ok"] is False and press["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, "control: the press refuses it"
+    plan = _run(shopify_push.plan_product_stock(db, product, variants))
+    assert (plan["ok"], plan["code"], plan["error"]) == (press["ok"], press["code"], press["error"])
+    assert "SP-1-L" in plan["error"] and plan["quantities"] == press["quantities"]
+    # A NEVER-PUSHED product has no Shopify target yet -- the press mints it --
+    # so the preview plans its rows and does not call that a missing target.
+    db2 = _db(a=2, b=1, c=0)
+    db2.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
+    plan2 = _run(shopify_push.plan_product_stock(db2, db2.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
+    assert plan2["ok"] is True and plan2["code"] is None, plan2
+    assert plan2["quantities"] == {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}
+    # ...while the same SKU list on the WRITER's door (no pending flag) still names it.
+    bare = _run(shopify_push.push_skus_stock(db2, ["SP-1"], source="button", dry_run=True))
+    assert bare["code"] == shopify_push.STOCK_TARGET_MISSING and bare["quantities"] == {}
+
+
+
+def _tracking_sent(spy):
+    return [
+        r["id"]
+        for c in spy.calls_for("productVariantsBulkUpdate")
+        for r in c["variables"]["variants"]
+        if (r.get("inventoryItem") or {}).get("tracked") is True
+    ]
+
+
+def test_R11_a_size_delist_never_writes_the_listings_tracked_flag(monkeypatch):
+    """TRUTH OF SCREEN + OVERSELL (recheck round 3, a third caller of
+    `_writeback_stock`). The size-delist door passed
+    `tracked=bool(tracked['updated'])` with product_id = the PARENT twin, and
+    since a97ec1d an explicit False is written. So a refused DENY re-send on
+    ONE size recorded the whole LIVE parent as untracked, and the parent's next
+    press under the same throttle said 'UNTRACKED ... WITHOUT LIMIT' about a
+    visible, tracked listing. The other direction was worse: an ACCEPTED DENY
+    on one size wrote True over the False a size minted untracked had left
+    (test_R10), so no pass ever re-sent that size its tracking. The flag is the
+    LISTING's; this door confirms one size and passes None.
+    `tracked=bool(tracked.get('updated'))` again -> both halves fail."""
+    db = _db(a=2, b=1, c=0)
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L", "is_active": False}])
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-L": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db.seed("catalog_products", [
+        _catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True, online_stock=sent),
+        dict(_CHILD_L),
+    ])
+    db.seed("catalog_variants", [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "price": 1500, "option_size": "M",
+         "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "price": 1500, "option_size": "L",
+         "shopify_variant_id": "gid://shopify/ProductVariant/52", "shopify_inventory_item_id": INV_TWO},
+    ])
+    spy = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push._delist_variant_row(db, _CHILD_L))
+    assert res.ok is False and (INV_TWO, LOC_A, 0) in spy.rows(), "DENY refused: not landed, the 0s still went out"
+    assert _baseline(db)["tracked"] is True, "one size's refused DENY is not the listing's tracking"
+    # ...so the parent's press under the same throttle is the live-listing warning.
+    upd = _product_body("productUpdate")
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = [
+        {"id": VARIANT_GID, "selectedOptions": [{"name": "Size", "value": "M"}], "inventoryItem": {"id": INV_GID}},
+        {"id": "gid://shopify/ProductVariant/52", "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": INV_TWO}},
+    ]
+    spy2 = _ThrottledTracking(_responses(**{"productUpdate(": upd}))
+    _live(monkeypatch, spy2)
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    press = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), rows))
+    assert press.ok is True and press.reason is None and press.code == shopify_push.STOCK_TRACKING_FAILED, press
+    assert "re-confirmed" in press.error and "UNTRACKED" not in press.error, press.error
+    # THE OTHER DIRECTION: a size minted untracked left the flag False; an
+    # ACCEPTED delist of a sibling must not clear it.
+    minted = "gid://shopify/ProductVariant/77"
+    db2 = _db(a=2, b=1, c=0)
+    db2.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S", "is_active": False},
+                          {"product_id": "spine-L", "sku": "SP-1-L"}])
+    left = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0},
+                           "SP-1-S": {"BV-A": 0, "BV-B": 0, "BV-C": 0},
+                           "SP-1-L": {"BV-A": 0, "BV-B": 0, "BV-C": 0}},
+            "tracked": False, "policy": "DENY"}
+    child_s = {"id": "cat-S", "sku": "SP-1-S", "ecom": {"variant_of": {"twin_id": "cat-1"}}, "variant_of": "cat-1"}
+    db2.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", online_stock=left), child_s])
+    db2.seed("catalog_variants", [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-S", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/6", "shopify_inventory_item_id": INV_TWO},
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_variant_id": minted, "shopify_inventory_item_id": "gid://shopify/InventoryItem/777"},
+    ])
+    _live(monkeypatch, _Spy(_responses()))
+    done = _run(shopify_push._delist_variant_row(db2, child_s))
+    assert done.ok is True, done
+    assert _baseline(db2)["tracked"] is False, "the minted size is still untracked"
+    spy3 = _Spy(_responses())
+    _live(monkeypatch, spy3)
+    _run(shopify_push.sync_stock_levels(db2))
+    assert minted in _tracking_sent(spy3), "the next pass re-sends tracking to the minted size"
+
+
+def test_R11_press_again_after_a_size_minted_untracked_is_not_a_withheld_first_publish(monkeypatch):
+    """TRUTH OF SCREEN, OVERSELL direction (recheck round 3, the a97ec1d path
+    itself). After test_R10's press (a size minted onto a LIVE listing under a
+    refused tracking call: ok=True, WITHOUT LIMIT, baseline tracked=False) the
+    'press again' that line asks for, the throttle still on, was gated as a
+    FIRST publish because the gate read the baseline flag that press had just
+    set False: ok=False / publish_withheld / 'NOT made visible' -- about a
+    listing that IS visible with an untracked size, which the owner reads as
+    safely off the storefront. The gate asks whether the PUBLISH is the first
+    (`listing_visible`). Put `listing_already_live(product)` back in
+    `tracking_ok` -> withheld -> this fails. (The staged-PUBLISHED draft --
+    tracked False over an EMPTY baseline -- stays withheld: test_R9's db2.)"""
+    minted = "gid://shopify/ProductVariant/77"
+    db = _db(a=2, b=1, c=0)
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    db.get_collection("stock_units").insert_one(
+        {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-A", "status": "AVAILABLE"}
+    )
+    # What test_R10's press leaves behind.
+    left = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-L": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": False, "policy": "DENY"}
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True, online_stock=left)])
+    rows = [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "price": 1500, "option_size": "M",
+         "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-L", "parent_product_id": "cat-1", "price": 1500, "option_size": "L",
+         "shopify_variant_id": minted, "shopify_inventory_item_id": "gid://shopify/InventoryItem/777"},
+    ]
+    db.seed("catalog_variants", [dict(v) for v in rows])
+    upd = _product_body("productUpdate")
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = [
+        {"id": VARIANT_GID, "selectedOptions": [{"name": "Size", "value": "M"}], "inventoryItem": {"id": INV_GID}},
+        {"id": minted, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": "gid://shopify/InventoryItem/777"}},
+    ]
+    spy = _ThrottledTracking(_responses(**{"productUpdate(": upd}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), rows))
+    assert res.ok is True and res.reason is None and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "WITHOUT LIMIT" in res.error and "publish withheld" not in res.error, res.error
+    assert len(spy.calls_for("publishablePublish")) == 1, "the idempotent re-publish still goes out"
+    assert _baseline(db)["tracked"] is False, "still untracked, so the next pass re-sends tracking"

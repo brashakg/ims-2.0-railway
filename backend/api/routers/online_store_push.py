@@ -334,15 +334,24 @@ async def push_locations(
                 claimants.setdefault(_as_shopify_gid(gid, "Location"), []).append(
                     str(s.get("store_code") or s.get("store_id") or "")
                 )
-    except Exception:  # noqa: BLE001 -- the join is a convenience, the list is the point
-        holder_of, claimants = {}, {}
+        stores_read = True
+    except Exception as exc:  # noqa: BLE001 -- the list still goes out; the VERDICT does not
+        # UNKNOWN IS NEVER A VERDICT (recheck round 3). With the shop list
+        # unread, scoring against an empty mapping answered read=True / dead=[]
+        # ("every mapped shop sells online") and stamped EVERY ticked location
+        # stray -- the polarity every writer-side read in this module was
+        # changed away from. Scored against nothing instead: read False.
+        holder_of, claimants, stores_read = {}, {}, False
+        data["reason"] = data.get("reason") or f"shop list unknown (store read failed): {exc}"
     for row in data["locations"]:
         holder = holder_of.get(row["id"])
         row["mapped_store_id"] = holder.get("store_id") if holder else None
         row["mapped_store_code"] = holder.get("store_code") if holder else None
         row["claimed_by"] = sorted(claimants.get(row["id"]) or [])
-        row["unmapped_online_fulfilling"] = shopify_push.is_stray_fulfilling(row, set(holder_of))
-    verdict = shopify_push.score_locations(data["locations"], mapped)
+        row["unmapped_online_fulfilling"] = stores_read and shopify_push.is_stray_fulfilling(
+            row, set(holder_of)
+        )
+    verdict = shopify_push.score_locations(data["locations"] if stores_read else [], mapped)
     data["read"] = verdict["read"]
     data["dead"] = verdict["dead"]
     return data

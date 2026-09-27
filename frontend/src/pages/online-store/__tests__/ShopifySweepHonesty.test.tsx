@@ -425,3 +425,70 @@ describe('the cap notice must not promise progress a repeat press cannot make', 
     expect(screen.queryByText(/pressing again will not help/i)).toBeNull();
   });
 });
+
+// Recheck round 3: ONE endpoint, TWO toasts. "Push all pending to live
+// storefront" -- the page's largest green button on deploy day -- calls the same
+// POST /push/all-pending as the per-entity Push button and answered with an
+// unconditional green "N objects processed": it read none of the buckets nor
+// the sweep's stock pass, and never showed the sweep, so its own "the lines
+// below say why" pointed at nothing. Both buttons now speak through ONE builder
+// (sweepToast). Put the unconditional toast.success back and the first two
+// tests fail; the third keeps the builder from turning permanently amber.
+describe('the cutover press speaks through the same builder as the per-entity press', () => {
+  async function pressCutover() {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<OnlineShopifySyncPage />);
+    await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
+    const button = await screen.findByRole('button', { name: /push all pending to live storefront/i });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    await userEvent.click(button);
+    await waitFor(() => expect(pushApi.pushAllPending).toHaveBeenCalledWith(undefined, 500));
+  }
+
+  it('is a WARNING over the day-1 configuration, with the buckets and the stock pass on the line', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({}, 28),
+      summary: {
+        products: { pushed: 25, failed: 0, noop: 0, stock_warning: 25 },
+        collections: { pushed: 3, failed: 0, noop: 0 },
+      },
+      stock: {
+        ok: false,
+        code: 'SHOPIFY_LOCATION_NOT_SELLING',
+        error: 'mapped shop(s) whose Shopify location cannot sell online: BV-A -- listings read SOLD OUT',
+        payload: { changed: 25, synced: 25, failed: 0 },
+      },
+    });
+
+    await pressCutover();
+
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    const warn = toastCalls.find((t) => t.kind === 'warning')!;
+    expect(warn.msg).toContain('Cutover push');
+    expect(warn.msg).toContain('28 processed');
+    expect(warn.msg).toContain('25 live with a stock warning');
+    expect(warn.msg).toContain('SHOPIFY_LOCATION_NOT_SELLING');
+    expect(warn.msg).toContain('SOLD OUT');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+    // ...and the press is SHOWN: the Products card carries its stock pass.
+    expect(await screen.findByTestId('sweep-stock-line')).toHaveTextContent('SHOPIFY_LOCATION_NOT_SELLING');
+  });
+
+  it('is a WARNING over a withheld publish', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 0, failed: 0, noop: 0, publish_withheld: 2 }, 0),
+    );
+    await pressCutover();
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    expect(toastCalls.find((t) => t.kind === 'warning')!.msg).toContain('2 NOT made visible');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+  });
+
+  it('is green over a clean cutover', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(sweep({ pushed: 25, failed: 0, noop: 0 }, 25));
+    await pressCutover();
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'success')).toBe(true));
+    expect(toastCalls.filter((t) => t.kind === 'warning')).toEqual([]);
+    expect(toastCalls.find((t) => t.kind === 'success')!.msg).toContain('25 processed');
+  });
+});

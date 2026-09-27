@@ -45,7 +45,7 @@ from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
-    listing_already_live,
+    listing_visible,
     plan_product_stock,
     push_skus_stock,
     sync_product_stock,
@@ -403,9 +403,17 @@ async def push_product(
         #     refused re-send says (a refused bulk-update changes nothing on
         #     Shopify), so it is reported live with a stock warning -- never
         #     "NOT made visible" beside a catalog chip that reads "Live".
+        #     "First" is asked of the PUBLISH (`listing_visible`), not of the
+        #     baseline's tracked flag (recheck round 3): a size minted
+        #     untracked onto a live listing sets that flag False, and the
+        #     "press again" its own line asks for was then withheld as a first
+        #     publish -- "NOT made visible" about a listing that IS visible
+        #     with an untracked size, the opposite of the risk. Withholding an
+        #     idempotent re-publish un-publishes nothing; the truthful result
+        #     is ok + the code + the WITHOUT LIMIT line.
         tracking_ok = (
             (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
-            or listing_already_live(product)
+            or listing_visible(product)
         )
         pub_summary = None
         if new_gid and payload.get("status") == "ACTIVE":
@@ -812,7 +820,14 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
             source="variant_delist",
             product_id=str(parent_twin_id) if parent_twin_id else None,
             policy="DENY",
-            tracked=bool(tracked.get("updated")),
+            # The LISTING's tracked flag is not this door's to write (recheck
+            # round 3): it confirms DENY on ONE size. Writing False for a
+            # refused re-send recorded the whole LIVE parent as untracked (its
+            # next press then read "publish withheld / NOT made visible" over
+            # a visible, tracked listing); writing True for an accepted one
+            # cleared the flag a size minted untracked had left, so nothing
+            # ever re-sent that size its tracking. None leaves the flag alone.
+            tracked=None,
         )
         payload["rows"] = written.get("quantities") or {}
         payload["stores_mapped"] = written.get("stores_mapped", 0)

@@ -460,7 +460,9 @@ def test_record_run_gate_opens_on_an_unmapped_holder_even_when_nothing_was_pushe
     assert summary["unknown_stores"] == ["BV-A", "BV-B"]
     runs = _runs(db)
     assert len(runs) == 1 and runs[0]["ok"] is False, runs
-    assert "BV-D" in runs[0]["error"] and "UNKNOWN" in runs[0]["error"]
+    # The writer's own line, once: the holder leads, the unknown shops ride under it.
+    assert runs[0]["error"] == f"STORE_UNMAPPED: {summary['error']}"
+    assert "BV-D" in runs[0]["error"] and "on-hand unknown at BV-A, BV-B" in runs[0]["error"]
 
 
 def test_record_run_writes_sync_row_for_guard_gap():
@@ -485,12 +487,14 @@ def test_record_run_writes_sync_row_for_guard_gap():
     wb._record_run(_Db(), {"pushed": 0, "failed": 0, "unmapped_online": 0, "source": "sale"})
     assert rows == []  # pure no-op -> no spam
 
-    # Critic 9: the two per-store gates.
+    # Critic 9: the two per-store gates open the row and make it not-ok. The
+    # WORDS are the writer's (summary code + error), never a second spelling here.
     wb._record_run(_Db(), {"pushed": 0, "failed": 0, "source": "sale",
                            "unmapped_stores": [{"store_id": "BV-D", "store_code": "BV-D"}]})
-    assert rows[-1]["ok"] is False and "BV-D" in rows[-1]["error"]
-    wb._record_run(_Db(), {"pushed": 1, "failed": 0, "source": "sale", "unknown_stores": ["BV-B"]})
-    assert rows[-1]["ok"] is False and "BV-B" in rows[-1]["error"]
+    assert rows[-1]["ok"] is False
+    wb._record_run(_Db(), {"pushed": 1, "failed": 0, "source": "sale", "unknown_stores": ["BV-B"],
+                           "code": "STOCK_ONHAND_UNKNOWN", "error": "on-hand unknown at BV-B"})
+    assert rows[-1]["ok"] is False and rows[-1]["error"] == "STOCK_ONHAND_UNKNOWN: on-hand unknown at BV-B"
 
 
 def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):

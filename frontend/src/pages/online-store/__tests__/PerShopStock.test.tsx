@@ -187,6 +187,42 @@ describe('per-shop stock on the sync page', () => {
     expect(toastCalls.map((t) => t.msg).join(' ')).not.toContain('Stock not written');
   });
 
+  // Recheck round 3: one rung re-spelled in TypeScript. When the code was
+  // STORE_UNMAPPED the toast printed its OWN "not mapped, stock invisible
+  // online: <shops>" and dropped the backend's `error` -- so "nothing was
+  // written anywhere" and every " -- ALSO:" rung riding under the holders line
+  // (SOLD OUT, a stray SKU) never reached the toast. Restore the STORE_UNMAPPED
+  // arm and this fails.
+  it('the stock toast prints the backend line whole, never its own spelling of STORE_UNMAPPED', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status() as any);
+    vi.mocked(pushApi.pushStock).mockResolvedValue({
+      mode: 'LIVE',
+      entity: 'stock',
+      action: 'sync',
+      ok: false,
+      code: 'STORE_UNMAPPED',
+      error:
+        'shops holding listed stock with no Shopify location: BV-PUN-01 -- ALSO: mapped shop(s) whose ' +
+        'Shopify location cannot sell online: BV-BOK-02 -- listings read SOLD OUT',
+      payload: {
+        candidates: 1, changed: 1, synced: 1, failed: 0,
+        unmapped_stores: [{ store_id: PUNE_UUID, store_code: 'BV-PUN-01', store_name: 'Pune' }],
+      },
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    await userEvent.click(await screen.findByRole('checkbox'));
+    const button = await screen.findByRole('button', { name: /push stock/i });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    await userEvent.click(button);
+
+    await waitFor(() => expect(pushApi.pushStock).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    const warn = toastCalls.find((t) => t.kind === 'warning')!;
+    expect(warn.msg).toContain('1 of 1 listings changed, 1 written');
+    expect(warn.msg).toContain('SOLD OUT');
+    expect(warn.msg).not.toContain('not mapped, stock invisible online');
+  });
+
   it("shows the scheduled run's stock verdict on the Live sync card", async () => {
     const run = {
       run_id: 'r1',

@@ -172,6 +172,79 @@ function GateChip({
   );
 }
 
+// ONE message + ONE level for POST /push/all-pending, whichever button pressed
+// it. The per-entity Push button and the cutover button ("Push all pending to
+// live storefront") call the SAME endpoint; only the first read the buckets, so
+// on deploy day the page's largest green button answered "25 objects processed"
+// in GREEN over 25 listings live with a stock warning and a stock pass that was
+// not ok. `token` undefined = the cutover press over EVERY entity: the buckets
+// are summed across them.
+function sweepToast(
+  label: string,
+  res: PushSweepResult,
+  token?: string,
+): { level: 'success' | 'warning'; msg: string } {
+  const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
+  const buckets = token ? [res.summary?.[token] ?? {}] : Object.values(res.summary ?? {});
+  const n = (k: string) =>
+    buckets.reduce((t, b) => t + Number((b as Record<string, unknown>)?.[k] ?? 0), 0);
+  // WHAT DID NOT GO. A refusal (no photograph) and a withheld publish (the
+  // product reached Shopify but no customer can see it) are neither
+  // successes nor Shopify breakages — and a press that reports only its
+  // successes is the "pending: 0 over an empty queue" lie one screen over.
+  const failed = n('failed');
+  const noop = n('noop');
+  const refused = n('refused_no_photo');
+  const withheld = n('publish_withheld');
+  const heldDown = n('taken_down_skipped');
+  const archived = n('archived_not_listed');
+  const oldPrice = n('price_not_synced');
+  // LIVE, BUT SOLD OUT. The listing published and its quantities reached
+  // no location at all (no shop mapped, two SKUs on one inventory
+  // item...). It has its own count for the same reason the OLD price
+  // does -- and without it this press read GREEN over 121 listings whose
+  // stock was written nowhere.
+  const noStock = n('stock_not_written');
+  // LIVE, WRITTEN, WITH A WARNING. The mapped shops' numbers DID go out
+  // (Pune stray, one shop unknown, a stray baseline SKU). The backend
+  // splits this from the line above on what Shopify accepted; folded
+  // together, day 1 read "121 live with NO stock written (sold out)"
+  // beside a line quoting the opposite.
+  const stockWarn = n('stock_warning');
+  // THE SWEEP'S OWN STOCK PASS. A products press ends with a whole-
+  // catalogue stock pass whose verdict is over EVERY listing -- an
+  // unchanged listing's stray SKU or unknown shop lives here and in no
+  // product row. It was returned and read nowhere; the toast said
+  // "25 processed" over it.
+  const stockPass = res.stock ?? null;
+  const stockPassBad = !!stockPass && stockPass.ok === false;
+  const stockPassLine = stockPassBad
+    ? ` · stock pass NOT ok${stockPass?.code ? ` [${stockPass.code}]` : ''}${stockPass?.error ? ` — ${stockPass.error}` : ''}`
+    : '';
+  // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
+  // first failed row's server message rides on the toast itself. A row
+  // that is ok but carries a code (live at the OLD price) counts too.
+  const firstFail = (res.results ?? []).find((r) => (!r.ok || r.code) && (r.error || r.reason));
+  const why = firstFail
+    ? ` — ${firstFail.error || firstFail.reason}${firstFail.code ? ` [${firstFail.code}]` : ''}`
+    : '';
+  const msg =
+    `${label}: ${where} — ${res.pushed_count ?? 0} processed` +
+    (failed ? ` · ${failed} failed` : '') +
+    (noop ? ` · ${noop} no-op` : '') +
+    (refused ? ` · ${refused} refused (no photograph)` : '') +
+    (withheld ? ` · ${withheld} NOT made visible` : '') +
+    (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
+    (archived ? ` · ${archived} archived (not listed)` : '') +
+    (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
+    (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
+    (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
+    why +
+    stockPassLine;
+  const bad = refused || withheld || noStock || stockWarn || stockPassBad || failed;
+  return { level: bad ? 'warning' : 'success', msg };
+}
+
 export default function OnlineShopifySyncPage() {
   const toast = useToast();
   const { hasRole } = useAuth();
@@ -358,61 +431,8 @@ export default function OnlineShopifySyncPage() {
       } else {
         const res = await pushApi.pushAllPending(ent.token, 100);
         setSweeps((prev) => ({ ...prev, [ent.key]: res }));
-        const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
-        const s = res.summary?.[ent.token] ?? {};
-        // WHAT DID NOT GO. A refusal (no photograph) and a withheld publish (the
-        // product reached Shopify but no customer can see it) are neither
-        // successes nor Shopify breakages — and a press that reports only its
-        // successes is the "pending: 0 over an empty queue" lie one screen over.
-        const refused = Number(s?.refused_no_photo ?? 0);
-        const withheld = Number(s?.publish_withheld ?? 0);
-        const heldDown = Number(s?.taken_down_skipped ?? 0);
-        const archived = Number(s?.archived_not_listed ?? 0);
-        const oldPrice = Number(s?.price_not_synced ?? 0);
-        // LIVE, BUT SOLD OUT. The listing published and its quantities reached
-        // no location at all (no shop mapped, two SKUs on one inventory
-        // item...). It has its own count for the same reason the OLD price
-        // does -- and without it this press read GREEN over 121 listings whose
-        // stock was written nowhere.
-        const noStock = Number(s?.stock_not_written ?? 0);
-        // LIVE, WRITTEN, WITH A WARNING. The mapped shops' numbers DID go out
-        // (Pune stray, one shop unknown, a stray baseline SKU). The backend
-        // splits this from the line above on what Shopify accepted; folded
-        // together, day 1 read "121 live with NO stock written (sold out)"
-        // beside a line quoting the opposite.
-        const stockWarn = Number(s?.stock_warning ?? 0);
-        // THE SWEEP'S OWN STOCK PASS. A products press ends with a whole-
-        // catalogue stock pass whose verdict is over EVERY listing -- an
-        // unchanged listing's stray SKU or unknown shop lives here and in no
-        // product row. It was returned and read nowhere; the toast said
-        // "25 processed" over it.
-        const stockPass = res.stock ?? null;
-        const stockPassBad = !!stockPass && stockPass.ok === false;
-        const stockPassLine = stockPassBad
-          ? ` · stock pass NOT ok${stockPass?.code ? ` [${stockPass.code}]` : ''}${stockPass?.error ? ` — ${stockPass.error}` : ''}`
-          : '';
-        // WHY. Counts alone ("6 NOT made visible") send the owner hunting; the
-        // first failed row's server message rides on the toast itself. A row
-        // that is ok but carries a code (live at the OLD price) counts too.
-        const firstFail = (res.results ?? []).find((r) => (!r.ok || r.code) && (r.error || r.reason));
-        const why = firstFail
-          ? ` — ${firstFail.error || firstFail.reason}${firstFail.code ? ` [${firstFail.code}]` : ''}`
-          : '';
-        const msg =
-          `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
-          (s?.failed ? ` · ${s.failed} failed` : '') +
-          (s?.noop ? ` · ${s.noop} no-op` : '') +
-          (refused ? ` · ${refused} refused (no photograph)` : '') +
-          (withheld ? ` · ${withheld} NOT made visible` : '') +
-          (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
-          (archived ? ` · ${archived} archived (not listed)` : '') +
-          (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
-          (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
-          (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
-          why +
-          stockPassLine;
-        if (refused || withheld || noStock || stockWarn || stockPassBad || s?.failed) toast.warning(msg);
-        else toast.success(msg);
+        const said = sweepToast(ent.label, res, ent.token);
+        toast[said.level](said.msg);
         // OS-046: never let a capped sweep read as complete. The batch cap is a
         // PRODUCTS number; collections/menus/images stop at the request limit.
         if (res.limit_reached) {
@@ -459,8 +479,19 @@ export default function OnlineShopifySyncPage() {
     setGoingLive(true);
     try {
       const res = await pushApi.pushAllPending(undefined, 500);
-      const where = res.mode?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
-      toast.success(`Cutover push (${where}): ${res.pushed_count ?? 0} objects processed`);
+      // The SAME builder as the per-entity button -- one endpoint, one toast.
+      // The Products card gets the press's product rows, buckets and stock
+      // pass, so "the lines below say why" points at something.
+      setSweeps((prev) => ({
+        ...prev,
+        products: {
+          ...res,
+          pushed_count: Number(res.summary?.products?.pushed ?? 0),
+          results: (res.results ?? []).filter((r) => r.entity === 'product'),
+        },
+      }));
+      const said = sweepToast('Cutover push', res);
+      toast[said.level](said.msg);
       // OS-046: a capped run must never read as "cutover done". Products stop at
       // the backend's hard batch cap (one press = a bounded number of listings in
       // front of customers); everything else at the 500-object valve.
@@ -502,10 +533,21 @@ export default function OnlineShopifySyncPage() {
     try {
       const { run } = await pushApi.syncLiveNow();
       const where = run?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
-      toast.success(
+      // The backend keeps publish_withheld OUT of `failed` on purpose, and the
+      // run's stock verdict was on no toast: a withheld first publish under a
+      // throttled tracking call read "0 updated, 0 failed" in GREEN, and under
+      // the day-1 locations run.stock.ok is false on EVERY run.
+      const withheld = Number(run?.publish_withheld ?? 0);
+      const stockBad = run?.stock?.ok === false;
+      const line =
         `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.failed ?? 0} failed, ` +
-          `${run?.awaiting_first_publish ?? 0} awaiting first publish`,
-      );
+        `${run?.awaiting_first_publish ?? 0} awaiting first publish` +
+        (withheld ? `, ${withheld} NOT made visible` : '') +
+        (stockBad
+          ? ` · stock pass NOT ok${run?.stock?.code ? ` [${run.stock.code}]` : ''}${run?.stock?.error ? ` — ${run.stock.error}` : ''}`
+          : '');
+      if (run?.failed || withheld || stockBad) toast.warning(line);
+      else toast.success(line);
       if (run?.limit_reached) {
         toast.info(`Stopped at the per-run cap (${run.limit ?? '?'} products) — run again to continue.`);
       }
@@ -526,7 +568,6 @@ export default function OnlineShopifySyncPage() {
       setStockResult(res);
       const p = (res.payload ?? {}) as Record<string, any>;
       const where = res.mode === 'LIVE' ? 'LIVE' : 'preview';
-      const unmapped = (p.unmapped_stores ?? []) as Array<{ store_code?: string; store_name?: string }>;
       const line =
         `Stock (${where}): ${p.changed ?? 0} of ${p.candidates ?? 0} listings changed` +
         (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent');
@@ -540,12 +581,10 @@ export default function OnlineShopifySyncPage() {
         // STOCK_STORE_ORPHAN, STORE_LOCATION_DUPLICATE), so the old
         // "Stock not written" arm told the owner nothing had gone to Shopify
         // over a press that had just written three shops' numbers.
-        const why =
-          res.code === 'STORE_UNMAPPED' && unmapped.length
-            ? 'not mapped, stock invisible online: ' +
-              unmapped.map((s) => s.store_code || s.store_name).join(', ')
-            : res.error || res.code || 'see result';
-        toast.warning(`${line}. ${why}`);
+        // The reason is the BACKEND's line, whole: a TypeScript re-spelling of
+        // the STORE_UNMAPPED rung dropped "nothing was written anywhere" and
+        // every " -- ALSO:" rung riding under it (SOLD OUT, a stray SKU...).
+        toast.warning(`${line}. ${res.error || res.code || 'see result'}`);
       }
       refreshAll();
     } catch (e: any) {
