@@ -2723,48 +2723,6 @@ async def update_feature_toggles_patch(
     return _save_feature_toggles(store_id, payload.features)
 
 
-@router.get("/audit-logs/summary")
-async def get_audit_summary(current_user: dict = Depends(get_current_user)):
-    """Get audit log summary for dashboard"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    audit_repo = get_audit_repository()
-    if audit_repo is not None:
-        # Get today's summary
-        from datetime import date, timedelta
-
-        today = date.today()
-        week_start = today - timedelta(days=7)
-
-        # Count today's actions
-        today_count = audit_repo.count({"date": today.isoformat()})
-        week_count = audit_repo.count({})  # Would need date range query
-
-        return {
-            "today": {
-                "total_actions": today_count,
-                "logins": 0,
-                "orders_created": 0,
-                "products_updated": 0,
-                "users_created": 0,
-            },
-            "this_week": {"total_actions": week_count, "top_users": []},
-        }
-
-    # Return empty summary when no database
-    return {
-        "today": {
-            "total_actions": 0,
-            "logins": 0,
-            "orders_created": 0,
-            "products_updated": 0,
-            "users_created": 0,
-        },
-        "this_week": {"total_actions": 0, "top_users": []},
-    }
-
-
 # ============================================================================
 # TDS RATES (editable; SUPERADMIN). National set per the owner decision.
 # ============================================================================
