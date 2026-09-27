@@ -69,6 +69,9 @@ REVERT-PROOF (each test names the one-line revert that turns it red):
   test_the_press_reads_the_queue..  press the passed copy, no re-read          -> red
   test_replacing_one_rows_asset...  heirs={} (P2 sibling)                      -> red
   test_an_attach_whose_answer...    plan_product_media without adopt           -> red
+  test_a_row_delete_waits...        media_lease that claims nothing (P4)       -> red
+  test_deleting_a_promoted_rows...  delete_image without the map write (P1)    -> red
+  test_the_delete_gate_fails...     the gate on _resolve_product_doc (P2)      -> red
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
 """
@@ -1111,6 +1114,14 @@ def test_the_refusals_are_the_plans_answer_and_the_press_sends_nothing(gates, mo
 # ===========================================================================
 
 
+def _delete_route(monkeypatch, db):
+    """DELETE /online-store/images/{id} bound to this test's db."""
+    from api.routers import online_store_images as images
+
+    monkeypatch.setattr(images, "_get_db", lambda: db)
+    return lambda iid: images.delete_image(iid, current_user={})
+
+
 def test_a_row_whose_lane_flips_mid_pass_is_never_dropped_from_the_map(gates, monkeypatch):
     """P1 (lane re-derived at write time). The product press plans while OLD
     is a design media (stamped I1); while its attach is in flight the
@@ -1183,6 +1194,65 @@ def test_two_presses_on_one_product_run_one_at_a_time(gates, monkeypatch):
     assert attached == [OWN2], "OWN2 attached once"
     assert fake.listing() == [_m(1), _m(100)]
     assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(100)}]
+
+
+def test_a_row_delete_waits_for_a_press_of_its_product(gates, monkeypatch):
+    """P4 (a delete inside a press's window). The press read the listing and
+    is attaching; the delete's lane check still read empty, so the row went
+    and the media it pressed stayed up with no door able to take it down.
+    The delete runs under the same lease: it waits, sees the lane, 409.
+    REVERT-PROOF: media_lease that yields without claiming -> red."""
+    from fastapi import HTTPException
+
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    delete = _delete_route(monkeypatch, db)
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", NEW)
+
+    async def _both():
+        return await asyncio.gather(
+            shopify_push.push_image(db, _row(db, "I1")), delete("I1"), return_exceptions=True
+        )
+
+    press, deleted = _run(_both())
+    assert press.ok is True and press.shopify_id == _m(100)
+    assert isinstance(deleted, HTTPException) and deleted.status_code == 409, deleted
+    assert _row(db, "I1") is not None, "the row that governs m100 is kept"
+    assert fake.listing() == [_m(1), _m(100)]
+
+
+def test_a_held_lease_refuses_every_door_and_an_expired_one_is_taken_over(gates, monkeypatch):
+    """The lease itself: while another worker holds the product's lease the
+    design press, the product press and the row delete all refuse with
+    'press again' and send nothing; a lease a dead worker left behind
+    expires and the next press takes it over, then releases it."""
+    from datetime import datetime, timedelta, timezone
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(_media, "_LEASE_WAIT_SECONDS", 0.05)
+    fake = _live(monkeypatch, _nodes(1))
+    db = _DB()
+    delete = _delete_route(monkeypatch, db)
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _image(db, "I1", NEW)
+    leases = db[_media.LEASES_COLLECTION]
+    leases.insert_one({"_id": "P1", "token": "other", "until": datetime.now(timezone.utc) + timedelta(minutes=5)})
+
+    img = _run(shopify_push.push_image(db, _row(db, "I1")))
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    with pytest.raises(HTTPException) as busy:
+        _run(delete("I1"))
+
+    assert (img.ok, img.action) == (False, "skip") and "press again" in (img.error or "")
+    assert prod.ok is False and "press again" in (prod.error or "")
+    assert busy.value.status_code == 409 and "press again" in busy.value.detail
+    assert fake.calls == [], "nothing sent under another worker's lease"
+
+    leases.update_one({"_id": "P1"}, {"$set": {"until": datetime.now(timezone.utc) - timedelta(seconds=1)}})
+    res = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert res.ok is True and res.shopify_id == _m(100)
+    assert leases.find_one({"_id": "P1"}) is None, "released"
 
 
 def test_the_press_reads_the_queue_row_as_it_is_now_not_the_sweeps_copy(gates, monkeypatch):
@@ -1286,3 +1356,64 @@ def test_an_attach_whose_answer_was_lost_is_adopted_not_attached_again(gates, mo
     # ... which needs the source url on the product press's own read of the listing
     for mutation in (queries._PRODUCT_CREATE, queries._PRODUCT_UPDATE):
         assert "originalSource { url }" in mutation
+
+
+def test_deleting_a_promoted_rows_queue_entry_stores_the_map_as_it_reads(gates, monkeypatch):
+    """P1 (the delete gate read the by-url lane; the stored stamp outlived it).
+    I1's media m100 is stamped I1; the operator makes NEW one of the
+    product's photos, so the lane reads empty and the delete is allowed --
+    but the map still stored the I1 stamp, so when NEW was later removed
+    from the product the stamp put m100 back in the (deleted) row's lane and
+    no press could take it down. The delete now stores the map as it reads.
+    REVERT-PROOF: drop the normalising write in delete_image -> red."""
+    from fastapi import HTTPException
+
+    fake = _live(monkeypatch, _nodes(1, 100))
+    db = _DB()
+    delete = _delete_route(monkeypatch, db)
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _image(db, "I1", NEW)
+    with pytest.raises(HTTPException) as refused:
+        _run(delete("I1"))
+    assert refused.value.status_code == 409
+
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, NEW]}})
+    assert _run(delete("I1"))["deleted"] is True
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100)}], "the product's lane, stored"
+
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN]}})
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.ok is True and prod.photos["deleted"] == 1, prod.photos
+    assert fake.listing() == [_m(1)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+
+
+def test_the_delete_gate_fails_closed_on_a_parent_read_error(gates, monkeypatch):
+    """P2 (the gate failed OPEN). A transient error reading the parent read as
+    'no parent, empty lane' and the row was deleted while its media was on
+    the listing. It is a 503 now and the row stays.
+    REVERT-PROOF: the gate on _resolve_product_doc (swallows) -> red."""
+    from fastapi import HTTPException
+
+    _live(monkeypatch, _nodes(1, 100))
+    db = _DB()
+    delete = _delete_route(monkeypatch, db)
+    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _image(db, "I1", NEW)
+    parents = db["catalog_products"]
+    real_find_one = parents.find_one
+    fails = {"left": 1}
+
+    def _flaky(*args, **kwargs):
+        if fails["left"]:
+            fails["left"] -= 1
+            raise RuntimeError("catalog_products read timed out")
+        return real_find_one(*args, **kwargs)
+
+    monkeypatch.setattr(parents, "find_one", _flaky)
+    with pytest.raises(HTTPException) as failed:
+        _run(delete("I1"))
+
+    assert failed.value.status_code == 503
+    assert _row(db, "I1") is not None
+    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]

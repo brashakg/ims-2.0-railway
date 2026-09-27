@@ -511,28 +511,49 @@ async def delete_image(
     forever, with no door able to remove either. Take it down first (remove
     it in the Shopify admin and press the product, which prunes the map),
     then delete. A row whose url is one of the product's own photographs
-    maps nothing in its lane (that media is the product's) and deletes."""
+    maps nothing in its lane (that media is the product's) and deletes --
+    and the map is first STORED that way (a stamp the map still carries for
+    it is dropped), so no later read can put that media back in a lane whose
+    row is gone.
+
+    The check and the delete run under the product's media lease (no press
+    lands in between), and the parent is read directly: a read that FAILS is
+    a 503, never an empty lane."""
     repo = _require_repo()
     existing = repo.get_by_id(image_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Image not found")
     from ..services import shopify_push
+    from ..services.shopify_push.media import MediaBusy, _writeback_media_map, media_lease
 
-    lane = shopify_push.image_lane_media(
-        shopify_push._resolve_product_doc(_get_db(), existing.get("product_id")), existing
-    )
-    if lane:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Image is on the Shopify listing (%s); take it down first "
-                "(remove it in the Shopify admin and push the product), then delete"
-                % ", ".join(r["id"] for r in lane)
-            ),
-        )
-    ok = repo.delete(image_id)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Failed to delete image")
+    db = _get_db()
+    pid = existing.get("product_id")
+    try:
+        async with media_lease(db, pid):
+            try:
+                parent = db["catalog_products"].find_one({"id": pid}) if pid and db is not None else None
+            except Exception as exc:  # noqa: BLE001 -- fail CLOSED
+                raise HTTPException(
+                    status_code=503, detail="Could not read the parent product (%s); try again" % exc
+                )
+            lane = shopify_push.image_lane_media(parent, existing)
+            if lane:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Image is on the Shopify listing (%s); take it down first "
+                        "(remove it in the Shopify admin and push the product), then delete"
+                        % ", ".join(r["id"] for r in lane)
+                    ),
+                )
+            if parent is not None and not _writeback_media_map(db, pid, lambda rows: rows):
+                raise HTTPException(
+                    status_code=503, detail="Could not store the product's media map; try again"
+                )
+            if not repo.delete(image_id):
+                raise HTTPException(status_code=500, detail="Failed to delete image")
+    except MediaBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"deleted": True, "image_id": image_id}
 
 
