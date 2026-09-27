@@ -797,6 +797,49 @@ def test_a_terminal_status_the_fulfilment_leg_held_back_is_reported(swept, ims_s
     assert again["terminal_withheld"] is True and _doc(swept, 40011)["status"] == ims_state["status"]
 
 
+def test_a_delivered_order_and_a_newer_delivered_fulfilment_is_no_terminal_hold(swept):
+    """The fulfilment leg asks the mapper's ONE rule -- 'would it CHANGE a
+    terminal status' -- not 'is the order terminal': a newer delivered parcel
+    on an order both sides hold DELIVERED lands its tracking and reports
+    nothing held back."""
+    _book(swept, 53004)
+    swept["orders"].update_one({"shopify_order_id": "53004"}, {"$set": {
+        "status": "DELIVERED", "fulfillment_status": "FULFILLED", "shopify_fulfillment_id": "70",
+        "awb": "AWB-70", "tracking_number": "AWB-70", "shipment_status": "in_transit",
+    }})
+    swept["state"]["orders"] = [_pulled(53004, fulfillment_status="fulfilled", fulfillments=[
+        _fulfilment(53004, 71, shipment_status="delivered")])]
+
+    p = swept["run"]().payload
+
+    assert p["status_synced"] == ["53004"] and p["status_skipped_terminal"] == []
+    doc = _doc(swept, 53004)
+    assert (doc["status"], doc["shopify_fulfillment_id"], doc["shipment_status"]) == (
+        "DELIVERED", "71", "delivered")
+
+
+def test_the_report_is_the_mappers_own_verdict_after_the_fulfilment_leg(swept):
+    """The report is what the handler DID, not the rule re-asked of the doc as
+    it stood before the sweep: the fulfilment leg lands DELIVERED (a delivered
+    parcel), then the mapper's terminal rule keeps it over Shopify's
+    'partially fulfilled' -- and the operator is told. The drain's mapper
+    returns the same verdict for the same body."""
+    _book(swept, 53001)
+    body = _pulled(53001, fulfillment_status="partial", fulfillments=[
+        _fulfilment(53001, 61, shipment_status="delivered", tracking_number="AWB53001")])
+    swept["state"]["orders"] = [body]
+
+    res = swept["run"]()
+
+    p = res.payload
+    assert p["status_synced"] == ["53001"] and p["status_skipped_terminal"] == ["53001"]
+    assert "terminal-skipped 1" in res.notes
+    doc = _doc(swept, 53001)
+    assert (doc["status"], doc["fulfillment_status"]) == ("DELIVERED", "PARTIAL")
+    drain = swept["real_map"](body, swept["db"], webhook_id="real-upd-53001", topic="orders/updated")
+    assert drain["status_synced"] is True and drain["terminal_withheld"] is True
+
+
 # ---------------------------------------------------------------------------
 # Rule: a refund IMS never saw -> one accountant review row; the handler's own
 # dedupe is asked first so a seen refund costs no handler call every hour

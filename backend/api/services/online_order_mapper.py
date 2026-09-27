@@ -936,7 +936,10 @@ def _recompute_money(
 
 
 def _sync_existing_order_status(
-    db, shopify_order_id: str, payload: Dict[str, Any]
+    db,
+    shopify_order_id: str,
+    payload: Dict[str, Any],
+    verdict: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Update an EXISTING IMS order's status fields from a re-ingested Shopify
     payload (orders/updated, orders/paid, orders/cancelled). Does NOT touch money
@@ -944,7 +947,9 @@ def _sync_existing_order_status(
     status, payment_status, fulfillment_status, balance_due + amount_paid on a
     paid/partial transition (plus the ingest-synthesized gateway payment row kept
     coherent with amount_paid), and cancelled_at. Returns True on a write.
-    Fail-soft."""
+    `verdict`, when given, gets terminal_withheld=True when the terminal rule
+    kept the doc's status -- decided HERE, on the doc as it is now, so the
+    pull sweep reports the handler's own answer. Fail-soft."""
     if db is None or not shopify_order_id:
         return False
     try:
@@ -1023,6 +1028,8 @@ def _sync_existing_order_status(
             order_status,
         )
         order_status = existing["status"]
+        if verdict is not None:
+            verdict["terminal_withheld"] = True
 
     # LIFECYCLE fields never depend on the payments snapshot (only on the
     # payload + `now`), so they are computed and written ONCE, unconditionally
@@ -1207,7 +1214,9 @@ def map_shopify_order(
 
     Returns the ingest result dict, augmented:
       {... , "customer_id": <id or None>, "store_id": <bucket>,
-       "status_synced": <bool, only on a re-ingest>}.
+       "status_synced": <bool, only on a re-ingest>,
+       "terminal_withheld": <bool, only on a re-ingest: the terminal rule kept
+       the IMS status (_terminal_status_withheld)>}.
 
     NEVER raises -- a bad payload yields {"status": "skipped", "reason": ...}. The
     NEXUS drain loop relies on this.
@@ -1279,14 +1288,16 @@ def map_shopify_order(
 
         # If this is a status-only re-ingest (no line_items) of an order we already
         # have, sync status and return without touching the create path.
+        verdict: Dict[str, Any] = {"terminal_withheld": False}
         if not payload.get("line_items"):
-            synced = _sync_existing_order_status(db, shopify_order_id, payload)
+            synced = _sync_existing_order_status(db, shopify_order_id, payload, verdict)
             if synced:
                 return {
                     "status": "status_synced",
                     "shopify_order_id": shopify_order_id,
                     "store_id": store_id,
                     "status_synced": True,
+                    **verdict,
                 }
             return {
                 "status": "skipped",
@@ -1355,12 +1366,13 @@ def map_shopify_order(
         # advanced financial_status / fulfillment since the first ingest).
         status_synced = False
         if status in ("duplicate", "replayed"):
-            status_synced = _sync_existing_order_status(db, shopify_order_id, payload)
+            status_synced = _sync_existing_order_status(db, shopify_order_id, payload, verdict)
 
         result["customer_id"] = customer_id
         result["store_id"] = store_id
         if status in ("duplicate", "replayed"):
             result["status_synced"] = status_synced
+            result.update(verdict)
         return result
     except Exception as exc:  # noqa: BLE001 - the drain loop must never die here
         logger.warning("[ONLINE_MAP] map_shopify_order failed soft: %s", exc)

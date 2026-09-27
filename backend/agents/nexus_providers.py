@@ -389,7 +389,6 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         _derive_statuses,
         _recompute_money,
         _shopify_payload_stale,
-        _terminal_status_withheld,
         map_shopify_order,
     )
     from api.services.shopify_fulfillment import FULFILLMENT_WATERMARK, reconcile_fulfillment
@@ -477,11 +476,13 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             )
             topic = _order_topic(st, money, existing, ful_stale)
             if topic:
-                applied = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
+                res = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
                 # The mapper's own terminal rule kept the lifecycle status while
                 # the payment / fulfilment facts landed: reported, so the
-                # operator sees the order IMS and Shopify disagree on.
-                if applied and _terminal_status_withheld(existing.get("status"), st["order_status"]):
+                # operator sees the order IMS and Shopify disagree on. Its
+                # verdict, decided on the doc the fulfilment leg just wrote --
+                # never the rule re-asked of the pre-sweep snapshot.
+                if res.get("terminal_withheld"):
                     buckets.add("status_skipped_terminal")
         for r in raw.get("refunds") or []:
             rid = str(r.get("id") or "") if isinstance(r, dict) else ""
