@@ -561,6 +561,38 @@ def test_a_handler_exception_on_one_order_never_stops_the_others(swept):
     assert "RuntimeError" in row["handler_error"]
 
 
+def test_a_handler_that_fails_soft_is_reported_not_counted_as_synced(swept):
+    """The handlers never raise -- they answer {'status': 'skipped'/'error'} on
+    an internal failure -- so the sweep must read the verdict, not the return."""
+    for oid in (30020, 30021):
+        _book(swept, oid)
+    real_map = swept["real_map"]
+    swept["mp"].setattr(
+        online_order_mapper,
+        "map_shopify_order",
+        lambda payload, db, **kw: (
+            {"status": "skipped", "reason": "exception:KeyError"}
+            if str(payload.get("id")) == "30020" else real_map(payload, db, **kw)
+        ),
+    )
+    swept["mp"].setattr(
+        shopify_fulfillment,
+        "reconcile_fulfillment",
+        lambda db, payload, **kw: {"status": "error", "error": "write failed"},
+    )
+    swept["state"]["orders"] = [
+        _pulled(30020, cancelled_at=CANCELLED_AT),
+        _pulled(30021, fulfillment_status="fulfilled", fulfillments=[_fulfilment(30021, 21)]),
+    ]
+    p = swept["run"]().payload
+
+    assert p["status_failed"] == ["30020", "30021"] and p["status_synced"] == []
+    assert p["failed_reasons"]["30020"] == "orders/cancelled:skipped:exception:KeyError"
+    assert p["failed_reasons"]["30021"] == "fulfillments/update:error:write failed"
+    row = swept["inbox"].find_one({"_id": f"pull:30020:{UPDATED}"})
+    assert row["handler_error"] == "orders/cancelled:skipped:exception:KeyError"
+
+
 # ---------------------------------------------------------------------------
 # Rule: the STATUS window is by updated_at (an old order cancelled today is
 # seen) while the CREATE window stays #1130's created_at (an old order IMS
