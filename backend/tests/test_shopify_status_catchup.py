@@ -16,7 +16,8 @@ test's returns/stock wiring so the REAL refund handler runs too. Nothing here
 is hollow: every rule has a test that goes red when that rule alone is
 reverted (table in the PR body). Even the "whether" is the mapper's own: the money
 trigger is what _recompute_money WOULD write, the stale skip is
-_shopify_payload_stale, the terminal report is _terminal_status_withheld --
+_shopify_payload_stale, the terminal report is the handlers' own
+terminal_withheld verdict (both decide with _terminal_status_withheld) --
 each pinned on the webhook drain in the same test that pins the sweep.
 """
 
@@ -729,7 +730,8 @@ def test_a_newest_fulfilment_without_shipment_status_is_reconciled_once(swept, o
 # Rule: a terminal IMS status is replaced only by a Shopify cancellation or
 # refund (never knocked back to CONFIRMED, never DELIVERED over a cancelled
 # order) -- ONE rule in the mapper (_terminal_status_withheld) that the webhook
-# drain enforces and the sweep reports; the payment / fulfilment facts still
+# drain enforces and the sweep reports from each handler's own verdict
+# (terminal_withheld on the mapper and the reconcile); the payment / fulfilment facts still
 # land, and cancelled / refunded still land over any status
 # ---------------------------------------------------------------------------
 
