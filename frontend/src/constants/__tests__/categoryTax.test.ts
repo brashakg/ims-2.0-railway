@@ -28,7 +28,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { HSN_CODES, CATEGORY_TAX } from '../gst';
-import { CATEGORIES } from '../../pages/catalog/productAddShared';
+import { CATEGORIES } from '../../domain/catalog/productAdd';
 
 const TAX = CATEGORY_TAX as Record<string, { hsn: string; rate: number } | undefined>;
 
