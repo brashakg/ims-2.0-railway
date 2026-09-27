@@ -100,12 +100,28 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+class _Coll:
+    """A MockCollection read with real Mongo's semantics: find_one hands back
+    a COPY, so a doc a press read is a snapshot a later write does not mutate
+    (MockCollection returns the stored dict itself, which would hide every
+    interleaving between two presses). Everything else is delegated."""
+
+    def __init__(self, name):
+        self._m = MockCollection(name)
+
+    def find_one(self, *args, **kwargs):
+        return copy.deepcopy(self._m.find_one(*args, **kwargs))
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+
 class _DB:
     def __init__(self):
         self._c = {}
 
     def __getitem__(self, name):
-        return self._c.setdefault(name, MockCollection(name))
+        return self._c.setdefault(name, _Coll(name))
 
 
 class _NoQueueDB(_DB):
