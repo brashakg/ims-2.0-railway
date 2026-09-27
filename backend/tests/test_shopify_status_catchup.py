@@ -290,21 +290,68 @@ def test_payment_landed_on_shopify_is_recorded_once(swept):
     assert _doc(swept, 30003)["payments"] == payments
 
 
-def test_ims_paid_by_the_counter_is_not_knocked_back_by_shopify_pending(swept):
-    """A COD order the shop collected at the counter is PAID in IMS while
-    Shopify still says pending; the sweep must not re-fire the mapper every
-    hour over it (the mapper has no knowledge of the till's tender)."""
-    _book(swept, 30016, financial_status="pending")
-    swept["orders"].update_one(
-        {"shopify_order_id": "30016"},
-        {"$set": {"payment_status": "PAID", "amount_paid": 999.0, "balance_due": 0.0}},
-    )
+# A Rs 500 CASH advance taken at the counter (routers/orders/payments.py) with
+# the order moved on to READY -- money and lifecycle state Shopify never sees.
+_ADVANCE = {
+    "payment_status": "PARTIAL",
+    "amount_paid": 500.0,
+    "balance_due": 499.0,
+    "bill_type": "ADVANCE",
+    "payments": [{"method": "CASH", "amount": 500.0}],
+    "status": "READY",
+}
 
-    swept["state"]["orders"] = [_pulled(30016, financial_status="pending")]
+
+@pytest.mark.parametrize(
+    "ims_money, shopify_financial",
+    [
+        # COD collected at the counter: PAID in IMS, Shopify still pending.
+        ({"payment_status": "PAID", "amount_paid": 999.0, "balance_due": 0.0}, "pending"),
+        (_ADVANCE, "pending"),
+        (_ADVANCE, "authorized"),
+        # Khata / store credit: an IMS-only money state Shopify cannot derive.
+        ({"payment_status": "CREDIT", "bill_type": "CREDIT"}, "partially_paid"),
+    ],
+)
+def test_ims_money_state_is_never_knocked_back_by_a_lesser_shopify_state(
+    swept, ims_money, shopify_financial
+):
+    """Shopify pending / authorized / partially_paid says only "the gateway has
+    not collected it all" -- the till may have. The sweep must not fire the
+    mapper over it: no webhook would have (Shopify did not change), and the
+    mapper would write UNPAID / bill_type PENDING / status CONFIRMED over the
+    advance every hour."""
+    _book(swept, 30016, financial_status="pending")
+    swept["orders"].update_one({"shopify_order_id": "30016"}, {"$set": ims_money})
+    before = _snap(_doc(swept, 30016))
+
+    swept["state"]["orders"] = [
+        _pulled(30016, financial_status=shopify_financial, total_outstanding="999.00")
+    ]
     p = swept["run"]().payload
 
-    assert p["status_synced"] == [] and swept["seen"] == []
-    assert _doc(swept, 30016)["payment_status"] == "PAID"
+    assert p["status_synced"] == [] and p["status_failed"] == [] and swept["seen"] == []
+    assert _snap(_doc(swept, 30016)) == before
+
+
+def test_shopify_partially_paid_over_nothing_collected_lands(swept):
+    """Shopify ADVANCED (a partial payment landed there) and IMS holds nothing:
+    the mapper's money leg records Shopify's collected amount, once."""
+    doc = _book(swept, 30025, financial_status="pending")
+    assert doc["payment_status"] == "UNPAID" and doc["amount_paid"] == 0.0
+
+    swept["state"]["orders"] = [
+        _pulled(30025, financial_status="partially_paid", total_outstanding="499.00")
+    ]
+    assert swept["run"]().payload["status_synced"] == ["30025"]
+
+    doc = _doc(swept, 30025)
+    assert doc["payment_status"] == "PARTIAL"
+    assert doc["amount_paid"] == 500.0 and doc["balance_due"] == 499.0
+    row = swept["inbox"].find_one({"_id": f"pull:30025:{UPDATED}"})
+    assert row["headers"]["x-shopify-topic"] == "orders/updated"
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == [] and swept["seen"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -368,34 +415,108 @@ def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
 
 
 # ---------------------------------------------------------------------------
-# Rule: a terminal IMS status is never knocked back -- the mapper has no guard
-# of its own, so the sweep withholds the call and reports it
+# Rule: a terminal IMS status is never knocked back to CONFIRMED -- ONE rule in
+# the mapper (_terminal_status_withheld) that the webhook drain enforces and
+# the sweep reports; the payment / fulfilment facts still land, and the
+# Shopify-owned terminal facts (cancelled / refunded / delivered) still land
+# over one another
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "ims_state, shopify_body",
+    "ims_state, shopify_body, landed",
     [
-        # Delivered in IMS; Shopify later shows the fulfilment restocked -> the
-        # mapper would derive CONFIRMED.
-        ({"status": "DELIVERED", "fulfillment_status": "FULFILLED"}, {"fulfillment_status": "restocked"}),
+        # Delivered at the counter; Shopify later shows the fulfilment restocked
+        # -> the mapper derives CONFIRMED (its default); the fact lands.
+        (
+            {"status": "DELIVERED", "fulfillment_status": "FULFILLED"},
+            {"fulfillment_status": "restocked"},
+            {"fulfillment_status": "RESTOCKED"},
+        ),
         # Cancelled by staff in IMS; Shopify (still open there) partially refunds.
-        ({"status": "CANCELLED"}, {"financial_status": "partially_refunded"}),
+        (
+            {"status": "CANCELLED"},
+            {"financial_status": "partially_refunded"},
+            {"payment_status": "PARTIAL_REFUND"},
+        ),
     ],
 )
-def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_body):
+def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_body, landed):
     _book(swept, 30005)
     swept["orders"].update_one({"shopify_order_id": "30005"}, {"$set": ims_state})
-    before = _snap(_doc(swept, 30005))
 
     swept["state"]["orders"] = [_pulled(30005, **shopify_body)]
-    p = swept["run"]().payload
+    res = swept["run"]()
 
-    assert p["status_skipped_terminal"] == ["30005"]
-    assert p["status_synced"] == [] and p["status_failed"] == []
+    p = res.payload
+    assert p["status_synced"] == ["30005"] and p["status_skipped_terminal"] == ["30005"]
+    assert p["status_failed"] == []
+    assert "terminal-skipped 1" in res.notes
+    doc = _doc(swept, 30005)
+    assert doc["status"] == ims_state["status"]
+    for field, value in landed.items():
+        assert doc[field] == value
+    # Second sweep: the facts agree now -> no call, nothing reported.
+    swept["seen"].clear()
+    p2 = swept["run"]().payload
+    assert p2["status_synced"] == [] and p2["status_skipped_terminal"] == []
     assert swept["seen"] == []
-    assert _snap(_doc(swept, 30005)) == before
-    assert "terminal-skipped 1" in swept["run"]().notes
+
+
+def test_the_webhook_drain_shares_the_terminal_rule(swept):
+    """The same body through the REAL webhook path (map_shopify_order as
+    nexus._dispatch_shopify_order calls it) keeps the terminal status too --
+    the rule lives in the mapper, not in the sweep."""
+    _book(swept, 30026)
+    swept["orders"].update_one(
+        {"shopify_order_id": "30026"},
+        {"$set": {"status": "DELIVERED", "fulfillment_status": "FULFILLED"}},
+    )
+
+    res = swept["real_map"](
+        _pulled(30026, fulfillment_status="restocked"), swept["db"],
+        webhook_id="real-upd-1", topic="orders/updated",
+    )
+
+    assert res["status"] == "duplicate" and res["status_synced"] is True
+    doc = _doc(swept, 30026)
+    assert doc["status"] == "DELIVERED" and doc["fulfillment_status"] == "RESTOCKED"
+
+
+def _refunded_after_delivery(oid):
+    return _pulled(
+        oid,
+        financial_status="refunded",
+        fulfillment_status="fulfilled",
+        refunds=[_refund(700000 + oid, oid, restock_type="return")],
+    )
+
+
+def test_a_refund_after_delivery_lands_refunded_on_both_paths(swept):
+    """The most common refund -- after delivery. REFUNDED is a Shopify-owned
+    fact over DELIVERED, never withheld: the sweep and the webhook drain land
+    the same doc, and the sweep does not report it as terminal-skipped hourly."""
+    for oid in (30022, 30023):
+        _book(swept, oid)
+        swept["orders"].update_one(
+            {"shopify_order_id": str(oid)},
+            {"$set": {"status": "DELIVERED", "fulfillment_status": "FULFILLED"}},
+        )
+
+    swept["state"]["orders"] = [_refunded_after_delivery(30022)]
+    p = swept["run"]().payload
+    assert p["status_synced"] == ["30022"]
+    assert p["status_skipped_terminal"] == [] and p["status_failed"] == []
+    swept["real_map"](
+        _refunded_after_delivery(30023), swept["db"], webhook_id="real-upd-2", topic="orders/updated"
+    )
+
+    for oid in (30022, 30023):
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["payment_status"]) == ("REFUNDED", "REFUNDED")
+    assert swept["review"].find_one({"shopify_refund_id": "730022"})["status"] == "PENDING"
+    p2 = swept["run"]().payload
+    assert p2["status_synced"] == [] and p2["status_skipped_terminal"] == []
 
 
 def test_a_fact_that_keeps_the_terminal_status_still_lands(swept):
@@ -441,6 +562,40 @@ def test_refund_ims_missed_is_queued_for_the_accountant_once(swept):
     swept["run"]()
     assert swept["refund_calls"] == ["700306"], "a seen refund is not re-fed"
     assert swept["review"].count_documents({"shopify_refund_id": "700306"}) == 1
+
+
+def test_a_refund_with_no_ims_line_is_settled_not_churned(swept):
+    """A shipping-only / goodwill refund (refund_line_items empty, the money in
+    transactions[] + order_adjustments[]) is a routine Shopify refund. The
+    refund handler answers skipped:no_mappable_refund_lines -- nothing for IMS
+    to credit -- so the sweep settles it: not a failure (which would mask the
+    order's real syncs), not re-raised hourly; the order's own facts land."""
+    _book(swept, 30024)
+    goodwill = {
+        "id": 700424,
+        "order_id": 30024,
+        "restock": False,
+        "created_at": UPDATED,
+        "refund_line_items": [],
+        "order_adjustments": [{"kind": "shipping_refund", "amount": "-99.00"}],
+        "transactions": [{"kind": "refund", "status": "success", "amount": "99.00"}],
+    }
+    swept["state"]["orders"] = [
+        _pulled(30024, financial_status="partially_refunded", refunds=[goodwill])
+    ]
+
+    for _ in range(2):
+        p = swept["run"]().payload
+        assert p["status_failed"] == [] and p["failed_reasons"] == {}
+
+    assert _doc(swept, 30024)["payment_status"] == "PARTIAL_REFUND"
+    row = swept["inbox"].find_one({"_id": f"pull:30024:{UPDATED}:refunds/create:700424"})
+    assert row["handler_error"] is None
+    # The handler writes no row for this verdict, so the pre-filter asks it
+    # again each hour (a read-only call); a handler-side review row for
+    # lines-less refunds is the upgrade path.
+    assert swept["refund_calls"] == ["700424", "700424"]
+    assert swept["review"].count_documents({}) == 0
 
 
 # ---------------------------------------------------------------------------
