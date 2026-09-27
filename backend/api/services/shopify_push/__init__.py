@@ -288,6 +288,7 @@ from .media import (  # noqa: F401
     sync_product_media,
     build_media_inputs,
     image_source_url,
+    image_press_plan,
     image_media_gid,
     push_image,
     _user_errors_media,

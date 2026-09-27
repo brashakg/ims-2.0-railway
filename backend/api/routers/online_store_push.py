@@ -764,7 +764,7 @@ async def push_all_pending(
             if len(results) >= limit:
                 break
             is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-            if not is_approved or _listing_gid(db, doc):
+            if not is_approved or _press_plan(db, doc)["action"] == "noop":
                 continue
             data = (await shopify_push.push_image(db, doc)).to_dict()
             _write_audit(data, current_user)
@@ -845,27 +845,30 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
     return {"total": total, "pushed": pushed, "pending": pending}
 
 
-def _listing_gid(db, doc: Dict[str, Any]) -> Optional[str]:
-    """The ONE 'is this design-queue image on Shopify' rule
-    (media.image_media_gid): the parent twin's ecom.media_map row for the
-    image's source url. The row itself carries no Shopify id."""
-    return shopify_push.image_media_gid(
+def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """The ONE 'what does a press of this design-queue image do' rule
+    (media.image_press_plan) read off the parent twin's ecom.media_map: the
+    sweep skips a row only when the press itself would be a no-op, and the
+    counts call a row pending on the same answer. The row itself carries no
+    Shopify id."""
+    return shopify_push.image_press_plan(
         shopify_push._resolve_product_doc(db, doc.get("product_id")), doc
     )
 
 
 def _image_counts(db) -> Dict[str, int]:
     """approved (push-eligible) / pushed (on the parent's listing per its
-    media_map) / pending (APPROVED but not yet on the listing)."""
+    media_map) / pending (APPROVED and a press would still do something:
+    not yet on the listing, or a replaced asset still to take down)."""
     approved = pushed = pending = 0
     for doc in _all_docs(db, "product_images"):
         is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-        has_gid = bool(_listing_gid(db, doc))
+        plan = _press_plan(db, doc)
         if is_approved:
             approved += 1
-            if not has_gid:
+            if plan["action"] != "noop":
                 pending += 1
-        if has_gid:
+        if plan["gid"]:
             pushed += 1
     return {"approved": approved, "pushed": pushed, "pending": pending}
 

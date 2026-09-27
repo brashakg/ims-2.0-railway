@@ -16,6 +16,7 @@ import re
 from agents.nexus_providers import _as_shopify_gid
 
 from ._shared import (
+    MODE_BLOCKED,
     MODE_LIVE,
     MODE_SIMULATED,
     PushResult,
@@ -69,9 +70,10 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     never through the product press or the scheduled sync; a product whose
     only photo lives in the design queue is refused rather than published
     bare -- conservative, and the operator fixes it by putting the photo on
-    the product. Once pressed, a design-queue media is remembered on the same
-    ``ecom.media_map`` as an ``image_id`` row and kept, never touched, by the
-    product press (see plan_product_media)."""
+    the product (the design press refuses such a product too: same gate,
+    same reason). Once pressed, a design-queue media is remembered on the
+    same ``ecom.media_map`` as an ``image_id`` row -- its own lane, which the
+    product press keeps and never touches (see plan_product_media)."""
     out: List[str] = []
 
     def _add(value: Any) -> None:
@@ -126,20 +128,38 @@ def _listing_map(parent: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
     return owned_media(parent)
 
 
-def image_media_gid(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> Optional[str]:
-    """The MediaImage gid the parent twin's ``ecom.media_map`` holds for this
-    design-queue row's source url -- None when it is not on the listing (or
-    the parent is a size-variant twin). The ONE 'is this image on Shopify'
-    rule: the press's no-op, the sweep's skip and the pushed/pending counts
-    all ask it. Pure."""
+def image_press_plan(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> Dict[str, Any]:
+    """PURE: what a press of this design-queue row does, read off the parent
+    twin's ``ecom.media_map`` alone -- THE one predicate the press, the
+    sweep's skip and the pushed/pending counts all ask, so they can never
+    disagree about a row:
+      gid     the MediaImage the row's source url maps to; None when the
+              image is not on the listing (or the parent is a size-variant
+              twin, which owns no listing);
+      drop    the urls this row (its ``image_id``) still maps that are NOT
+              its source url -- the asset it carried before it was replaced,
+              whose delete has not happened yet;
+      action  'noop' (mapped, nothing to drop: the press makes zero calls),
+              'update' (mapped, a drop still pending: the press runs the pass
+              to take the old asset down) or 'create' (not on the listing)."""
     src = image_source_url(image)
-    if not src:
-        return None
-    return {r["url"]: r["id"] for r in _listing_map(parent)}.get(src)
+    rows = _listing_map(parent)
+    gid = {r["url"]: r["id"] for r in rows}.get(src) if src else None
+    iid = str(image.get("image_id") or "")
+    drop = [r["url"] for r in rows if iid and r.get("image_id") == iid and r["url"] != src]
+    action = "create" if not gid else ("update" if drop else "noop")
+    return {"gid": gid, "drop": drop, "action": action}
+
+
+def image_media_gid(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> Optional[str]:
+    """The MediaImage gid the parent twin's map holds for this design-queue
+    row's source url, None when it is not on the listing (``image_press_plan``,
+    the gid alone -- what a screen shows next to the row). Pure."""
+    return image_press_plan(parent, image)["gid"]
 
 
 async def _attach_product_photos(
-    db, product_gid: str, urls: List[str]
+    db, product_gid: str, urls: List[str], alts: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """LIVE-only: attach the product's photographs to the Shopify product in the
     SAME press that wrote the product (productCreateMedia). Fail-SOFT side
@@ -150,8 +170,10 @@ async def _attach_product_photos(
     Returns ``media_map`` too -- the ``[{url, id}]`` pairs Shopify minted for
     the urls it was given, IN INPUT ORDER (productCreateMedia answers one node
     per input, in order) -- so the photo pass can record which Shopify media
-    IMS owns and never attach the same photograph twice."""
-    media = build_media_inputs([{"url": u} for u in urls])
+    IMS owns and never attach the same photograph twice. ``alts`` (``{url:
+    alt text}``) is the design queue's alt for its row; a product's own
+    photograph carries alt '' (see match_media_to_photos on why)."""
+    media = build_media_inputs([{"url": u, "alt_text": (alts or {}).get(u)} for u in urls])
     if not media:
         return {"attached": 0, "error": "no usable photograph"}
     try:
@@ -210,18 +232,33 @@ async def _attach_product_photos(
 # a photo, and reordering, update Shopify instead of silently doing nothing."
 #
 # OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
-# twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``
-# (written on attach, pruned once a delete has SUCCEEDED). BOTH doors write it
-# through the one writer (_writeback_media_map): the product press and the
-# design-queue press (push_image) run this same pass. A design-queue media is
-# a row that also carries the queue row's ``image_id`` -- that key is the
-# lane: the product press (and so the 01:00/09:00 sync) never attaches,
-# deletes or reorders such a row, it only keeps it, so a design image reaches
-# or leaves Shopify ONLY through a human press of that row (an attach, or the
-# drop of the asset that row mapped before it was replaced). Media that is
-# on Shopify but not in the map -- the hand-uploaded photographs on the
-# connector-created Ray-Ban Meta products, anything a human added in the
-# Shopify admin -- is NEVER deleted or re-attached: it is counted as
+# twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``.
+# BOTH doors write it through the one writer (_writeback_media_map): the
+# product press and the design-queue press (push_image) run this same pass,
+# and the pass writes the map on EVERY run -- the rows still on the listing,
+# what it minted, the rows whose delete has not happened yet -- so a media
+# that left Shopify behind IMS's back (deleted in the admin, a lost delete
+# response) is pruned on the next press of either door and the map converges.
+#
+# TWO LANES, ONE MAP. A map row is either the product's own photograph (no
+# ``image_id``) or a design-queue media (it carries the queue row's
+# ``image_id``, stamped when the design press attached it). Each press GOVERNS
+# exactly one lane -- attaches into it, deletes from it, reorders it -- and
+# KEEPS the other lane exactly where it is:
+#   * the product press (and so the 01:00/09:00 sync) governs the own-photo
+#     rows against product_photo_urls; it never attaches, deletes or reorders
+#     a design row and never reads the design queue at all;
+#   * the design press governs the rows of the ONE image_id it is pressing:
+#     it attaches that row's url and drops the asset the row mapped before it
+#     was replaced. It never attaches an own photograph the product press has
+#     not put up yet, never drops one IMS removed, never reorders -- those are
+#     the product press's calls, made under its own publish gate.
+# A url that is one of the product's own photographs is the product's lane
+# whichever door attached it (the design press stamps no image_id on it), so
+# removing that photo from the product still takes it down on Shopify.
+# Media that is on Shopify but not in the map -- the hand-uploaded photographs
+# on the connector-created Ray-Ban Meta products, anything a human added in
+# the Shopify admin -- is NEVER deleted or re-attached: it is counted as
 # ``unmanaged`` and left exactly where it is. When IMS owns nothing on a
 # product that already carries media, the pass keeps its hands off entirely
 # (no attach either): that is today's behaviour for the products that went
@@ -419,28 +456,32 @@ def plan_product_media(
     photos: List[str],
     shopify_media: Optional[List[Dict[str, Any]]] = None,
     *,
-    design_rows: Optional[Dict[str, str]] = None,
+    design_row: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """PURE diff of IMS's ordered photo list against the media IMS owns on
     Shopify. ``shopify_media`` is the product's current media node list (the
     create/update response); None means UNKNOWN (the dark plan), in which
     case the stored map is trusted as-is.
 
-    THE DESIGN-QUEUE LANE: a map row carrying an ``image_id`` was attached by
-    a design-queue press. ``photos`` never governs it -- it is not attached
-    (it is mapped), not deleted when the list omits it and not reordered: the
-    product press keeps its hands off that lane, exactly as it does for
-    unmanaged media, except that the map REMEMBERS it. ``design_rows``
-    (``{url: image_id}``) names the row(s) a design-queue press is pressing:
-    only for THOSE image_ids does an omitted url mean 'drop it' (the asset
-    the row mapped before it was replaced).
+    THE LANES (see the ownership note): without ``design_row`` this is the
+    product press's plan and it governs the own-photo rows only (no
+    ``image_id``); with ``design_row`` (the design-queue row being pressed)
+    it governs the rows stamped with THAT row's ``image_id`` only. A row of
+    the other lane is never attached (it is mapped), never deleted when
+    ``photos`` omits it and never reordered -- kept, exactly as unmanaged
+    media is, except that the map REMEMBERS it. A url ``photos`` names that
+    is mapped in EITHER lane is on the listing and is not attached again.
 
     Returns {attach: [url], delete: [{url, id, shopify_url[, image_id]}],
     reorder: [gid] (the desired order of the IMS-owned media, [] when already
     in order), unmanaged: n, hands_off: bool, owned: [{url, id[, image_id]}]
     (the rows that survive the delete; the attach's new gids are not known
     until it runs)}."""
-    pressed = {str(v) for v in (design_rows or {}).values() if v}
+    lane = str((design_row or {}).get("image_id") or "")
+
+    def _governed(r: Dict[str, str]) -> bool:
+        return (r.get("image_id") == lane) if design_row else not r.get("image_id")
+
     owned = owned_media(product)
     cdn: Dict[str, Optional[str]] = {}
     if shopify_media is None:
@@ -465,8 +506,7 @@ def plan_product_media(
         else [
             {**r, "shopify_url": cdn.get(r["id"])}
             for r in live_owned
-            if r["url"] not in photos
-            and (not r.get("image_id") or r["image_id"] in pressed)
+            if _governed(r) and r["url"] not in photos
         ]
     )
     delete_ids = {d["id"] for d in delete}
@@ -474,8 +514,8 @@ def plan_product_media(
     desired = [by_url[u] for u in photos if u in by_url]
     reorder: List[str] = []
     if current_ids is not None and not hands_off:
-        # Only the media ``photos`` names has a desired slot; a design-queue
-        # row the list omits keeps its place, like unmanaged media.
+        # Only the media ``photos`` names has a desired slot; a row the list
+        # omits (the other lane) keeps its place, like unmanaged media.
         want = set(desired)
         owned_now = [i for i in current_ids if i in want]
         if owned_now != desired:
@@ -520,7 +560,10 @@ def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -
         if doc is None:
             return False
         ecom = dict(doc.get("ecom") or {})
-        if ecom.get("media_map") == media_map:
+        # An absent map and an empty one are the same fact (owned_media reads
+        # both as 'IMS owns nothing'): a pass that owns nothing never mints
+        # an empty key on a twin the adoption runbook has not visited.
+        if (ecom.get("media_map") or []) == media_map:
             return True
         ecom["media_map"] = media_map
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
@@ -530,18 +573,19 @@ def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -
         return False
 
 
-def _in_ims_order(owned: List[Dict[str, str]], photos: List[str]) -> List[Dict[str, str]]:
-    """The map as stored: one row per IMS photo that has a gid, in IMS order,
-    then the design-queue rows (``image_id``) the list does not name, in map
-    order -- the product press keeps them, it never governs them."""
-    by_url = {r["url"]: r for r in owned}
-    rows = [_map_row(by_url[u]) for u in photos if u in by_url]
-    seen = set(photos)
-    for r in owned:
-        if r.get("image_id") and r["url"] not in seen:
-            rows.append(_map_row(r))
+def _in_ims_order(rows: List[Dict[str, str]], order: List[str]) -> List[Dict[str, str]]:
+    """The map as stored: the rows ``order`` names first, in that order (the
+    product press: its own photographs in IMS order), then every other row
+    in the order given -- the other lane, and a row whose delete is still
+    pending, are kept, never governed here. A url appears once."""
+    by_url = {r["url"]: r for r in rows}
+    out = [_map_row(by_url[u]) for u in order if u in by_url]
+    seen = {r["url"] for r in out}
+    for r in rows:
+        if r["url"] not in seen:
+            out.append(_map_row(r))
             seen.add(r["url"])
-    return rows
+    return out
 
 
 async def sync_product_media(
@@ -551,19 +595,25 @@ async def sync_product_media(
     photos: List[str],
     shopify_media: List[Dict[str, Any]],
     *,
-    design_rows: Optional[Dict[str, str]] = None,
+    design_row: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """LIVE-only (the caller has passed the gates): make the IMS-owned media on
-    the Shopify product match ``photos`` -- attach what is missing, delete what
-    IMS dropped, reorder to IMS order -- per the ownership rule above.
-    ``design_rows`` (``{url: image_id}``, the design-queue press only) stamps
-    the rows this pass attaches for those urls with their queue row's
-    image_id and lets the plan drop the asset that row mapped before.
+    """LIVE-only (the caller has passed the gates): make the media IMS owns
+    on the Shopify product, in the lane this pass governs, match ``photos``
+    -- attach what is missing, delete what IMS dropped, reorder to IMS order
+    -- per the ownership rule above. ``design_row`` (the design-queue row
+    being pressed; ``photos`` is then that row's url alone) selects the
+    design lane: the row this pass attaches is stamped with the queue row's
+    ``image_id`` (unless its url is one of the product's own photographs --
+    that media is the product's lane whichever door put it up) and carries
+    the row's alt text; the asset the row mapped before is dropped.
+    The map is written on EVERY pass, whatever happened (see the ownership
+    note: a media gone from the listing is pruned, a row whose delete failed
+    stays until it is off Shopify).
     Fail-soft summary, never raises: {attached, deleted, reordered, unmanaged,
     on_shopify (the media count after the pass -- the publish precondition),
     hands_off, attached_map? ([{url, id}] this pass minted), error?, code?}."""
     pid = product.get("id") or product.get("product_id")
-    plan = plan_product_media(product, photos, shopify_media, design_rows=design_rows)
+    plan = plan_product_media(product, photos, shopify_media, design_row=design_row)
     current = [str(n["id"]) for n in shopify_media if isinstance(n, dict) and n.get("id")]
     summary: Dict[str, Any] = {
         "attached": 0,
@@ -588,78 +638,87 @@ async def sync_product_media(
     # makes an orphan no pass can ever see again -- and a design-queue
     # re-press would then read 'already on the listing' over that orphan.
     pending = [_map_row(d) for d in plan["delete"]]
-    # 1. ATTACH what IMS has and Shopify lacks (the replacement lands first).
-    if plan["attach"]:
-        res = await _attach_product_photos(db, product_gid, plan["attach"])
-        summary["attached"] = int(res.get("attached") or 0)
-        summary["on_shopify"] += summary["attached"]
-        # The gids this pass minted, url by url, stamped with the design-queue
-        # row's image_id where a press asked for it -- so a caller can still
-        # name a media that landed on Shopify when the map write-back fails.
-        minted = [
-            _map_row({**r, "image_id": (design_rows or {}).get(r["url"])})
-            for r in res.get("media_map") or []
-        ]
-        summary["attached_map"] = minted
-        owned.extend(minted)
-        if pid and minted:
-            _writeback_media_map(
-                db, pid, _in_ims_order(owned + pending, photos + [r["url"] for r in pending])
-            )
-        if res.get("error"):
-            summary["error"] = res["error"]
-            return summary
-    # 2. DELETE what IMS dropped -- tombstone first, then the call.
-    if plan["delete"]:
-        try:
-            _tombstone_media(db, pid, plan["delete"])
-            body = await _graphql(
-                db,
-                _PRODUCT_DELETE_MEDIA,
-                {"productId": product_gid, "mediaIds": [d["id"] for d in plan["delete"]]},
-            )
-            err = _user_errors_media(body, "productDeleteMedia")
-        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
-            err = str(exc)
-        if err:
-            summary["error"] = err
-            return summary
-        summary["deleted"] = len(plan["delete"])
-        summary["on_shopify"] -= summary["deleted"]
+    lane = str((design_row or {}).get("image_id") or "") or None
+    own = product_photo_urls(product) if design_row else []
+    alts = {image_source_url(design_row): design_row.get("alt_text")} if design_row else None
+    try:
+        # 1. ATTACH what IMS has and Shopify lacks (the replacement lands first).
+        if plan["attach"]:
+            res = await _attach_product_photos(db, product_gid, plan["attach"], alts)
+            summary["attached"] = int(res.get("attached") or 0)
+            summary["on_shopify"] += summary["attached"]
+            # The gids this pass minted, url by url, stamped with the design
+            # row's image_id where the design press asked for it (never on an
+            # own photograph) -- so a caller can still name a media that
+            # landed on Shopify when the map write-back fails.
+            minted = [
+                _map_row({**r, "image_id": None if r["url"] in own else lane})
+                for r in res.get("media_map") or []
+            ]
+            summary["attached_map"] = minted
+            owned.extend(minted)
+            if res.get("error"):
+                summary["error"] = res["error"]
+                return summary
+        # 2. DELETE what IMS dropped -- tombstone first, then the call.
+        if plan["delete"]:
+            try:
+                _tombstone_media(db, pid, plan["delete"])
+                body = await _graphql(
+                    db,
+                    _PRODUCT_DELETE_MEDIA,
+                    {"productId": product_gid, "mediaIds": [d["id"] for d in plan["delete"]]},
+                )
+                err = _user_errors_media(body, "productDeleteMedia")
+            except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+                err = str(exc)
+            if err:
+                summary["error"] = err
+                return summary
+            summary["deleted"] = len(plan["delete"])
+            summary["on_shopify"] -= summary["deleted"]
+            pending = []
+        # 3. REORDER the IMS-owned media into IMS order, in the SLOTS they
+        # already occupy (the attach appended its new media at the end): media
+        # IMS does not own keeps its exact position, so a hero shot a human
+        # placed first in the Shopify admin stays first.
+        by_url = {r["url"]: r["id"] for r in owned}
+        desired = [by_url[u] for u in photos if u in by_url]
+        deleted_ids = {d["id"] for d in plan["delete"]}
+        survivors = [i for i in current if i not in deleted_ids]
+        survivors += [r["id"] for r in owned if r["id"] not in survivors]
+        slots = [i for i, gid in enumerate(survivors) if gid in set(desired)]
+        owned_now = [survivors[i] for i in slots]
+        if desired and owned_now != desired:
+            try:
+                body = await _graphql(
+                    db,
+                    _PRODUCT_REORDER_MEDIA,
+                    {
+                        "id": product_gid,
+                        "moves": [
+                            {"id": gid, "newPosition": str(slots[k])}
+                            for k, gid in enumerate(desired)
+                        ],
+                    },
+                )
+                err = _user_errors_media(body, "productReorderMedia")
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+            if err:
+                summary["error"] = err
+                return summary
+            summary["reordered"] = True
+        return summary
+    finally:
+        # THE MAP, ON EVERY PASS, whichever step it ended on: the rows still on
+        # the listing (a media that left Shopify behind IMS's back is gone from
+        # ``owned``: pruned), what this pass minted, and the rows whose delete
+        # has not happened yet. The writer no-ops when nothing changed.
         if pid:
-            _writeback_media_map(db, pid, _in_ims_order(owned, photos))
-    # 3. REORDER the IMS-owned media into IMS order, in the SLOTS they already
-    # occupy (the attach appended its new media at the end): media IMS does
-    # not own keeps its exact position, so a hero shot a human placed first
-    # in the Shopify admin stays first.
-    by_url = {r["url"]: r["id"] for r in owned}
-    desired = [by_url[u] for u in photos if u in by_url]
-    deleted_ids = {d["id"] for d in plan["delete"]}
-    survivors = [i for i in current if i not in deleted_ids]
-    survivors += [r["id"] for r in owned if r["id"] not in survivors]
-    slots = [i for i, gid in enumerate(survivors) if gid in set(desired)]
-    owned_now = [survivors[i] for i in slots]
-    if desired and owned_now != desired:
-        try:
-            body = await _graphql(
-                db,
-                _PRODUCT_REORDER_MEDIA,
-                {
-                    "id": product_gid,
-                    "moves": [
-                        {"id": gid, "newPosition": str(slots[k])}
-                        for k, gid in enumerate(desired)
-                    ],
-                },
+            _writeback_media_map(
+                db, pid, _in_ims_order(owned + pending, [] if design_row else photos)
             )
-            err = _user_errors_media(body, "productReorderMedia")
-        except Exception as exc:  # noqa: BLE001
-            err = str(exc)
-        if err:
-            summary["error"] = err
-            return summary
-        summary["reordered"] = True
-    return summary
 
 
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -703,31 +762,39 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     """Press ONE APPROVED design-queue image onto its parent product's listing.
     DARK by default; LIVE behind the gates. Never raises.
 
-    ONE identity, ONE writer: a design-queue image is on Shopify iff the parent
-    twin's ``ecom.media_map`` maps its source url (``image_media_gid``); the
-    row itself carries no Shopify id. The LIVE press never calls
-    productCreateMedia on its own -- it runs the SAME photo pass the product
-    press runs (``sync_product_media`` over the product's own photographs
-    plus THIS row's url, against the media the listing carries right now,
-    with ``design_rows={url: image_id}`` naming the row), so:
+    ONE identity, ONE writer, ONE predicate: a design-queue image is on
+    Shopify iff the parent twin's ``ecom.media_map`` maps its source url, and
+    what a press does is read off that map by ``image_press_plan`` (the same
+    call the sweep's skip and the pushed/pending counts make); the row itself
+    carries no Shopify id. The LIVE press never calls productCreateMedia on
+    its own -- it runs the SAME photo pass the product press runs
+    (``sync_product_media`` in the DESIGN lane: ``photos`` is this row's url
+    alone, ``design_row`` is the row, against the media the listing carries
+    right now), so:
       * an image already on the listing is a no-op (zero network, its gid in
         the payload) -- a re-press can never mint a second MediaImage;
       * a row whose asset was replaced has the old media tombstoned and
         deleted and the new one attached, exactly once -- and only THIS
         row's old asset: pressing one image never attaches or drops a
         sibling row's, so the press is exactly the image the human pressed;
+      * the product's own photographs are never touched by this press -- not
+        attached when the product press has not put them up, not dropped
+        when IMS removed them, not reordered: those are the product press's
+        calls, made under its own publish gate;
       * the map row is written through ``_writeback_media_map`` with the
-        row's image_id, so the product press keeps that media (never
-        attaches, deletes or reorders it -- a design image reaches or leaves
-        Shopify only through a press of its row);
+        row's image_id (the design lane), so the product press keeps that
+        media -- a design image reaches or leaves Shopify only through a
+        press of its row;
       * media IMS does not own on the listing is never touched, and a
         listing IMS owns nothing on is refused (adopt it first), never
         attached to blind.
 
-    GUARD: only an APPROVED image is push-eligible (the design queue gate).
+    GUARDS: only an APPROVED image is push-eligible (the design queue gate).
     Anything else returns ok=False action=skip (Fail Loudly) without a network
-    call. The parent product MUST already be on Shopify (ecom.shopify_product_id)
-    -- without it there is nothing to attach the media to; that is a skip too."""
+    call. A product IMS would not publish (no photograph of its own --
+    push_product's gate, same reason ``no_photo``) gets no design image either.
+    The parent product MUST already be on Shopify (ecom.shopify_product_id) --
+    without it there is nothing to attach the media to; that is a skip too."""
     iid = image.get("image_id")
 
     # Hub Phase 5 push-lock (defense-in-depth, FIRST gate): an image attaches to
@@ -770,19 +837,38 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             "so it must be an absolute http(s) url",
         )
     src = media[0]["originalSource"]
+    # THE PHOTO RULE, MIRRORED (push_product's gate, same reason): a product
+    # with no photograph of its own is never published, so it gets no design
+    # image either -- dark or live, before anything is read. Without this a
+    # design press would run the pass over a listing the product press
+    # refuses to touch (a product whose own photos were removed, or a
+    # PUBLIC_API_BASE_URL drift that makes every in-app photo unfetchable).
+    if _parent is not None and not product_photo_urls(_parent):
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="image",
+            action="skip",
+            target_id=iid,
+            ok=False,
+            payload=payload,
+            error="refused: the product has no photograph -- a product with no "
+            "photograph is never published, so it takes no design image either "
+            "(put a photo on the product and push it first)",
+            reason="no_photo",
+        )
     live, reason = _live_or_reason(db)
 
-    # ALREADY ON THE LISTING -> nothing to send, dark or live. The map is the
-    # only identity a design-queue media has, so this is the check the 09-06
-    # sync audit found missing: the one that stops a re-press from attaching
-    # the same source url again. UNLESS this row still maps the asset it
-    # carried before it was replaced (a delete that failed): that press must
-    # run again to take the old media down -- a no-op over an orphan is
-    # exactly the silent success this door exists to end.
-    owned = _listing_map(_parent)
-    have = image_media_gid(_parent, image)
-    replaced = [r["url"] for r in owned if r.get("image_id") == iid and r["url"] != src]
-    if have and not replaced:
+    # WHAT THIS PRESS DOES is read off the map (image_press_plan -- the one
+    # predicate the sweep and the counts share). ALREADY ON THE LISTING ->
+    # nothing to send, dark or live: this is the check the 09-06 sync audit
+    # found missing, the one that stops a re-press from attaching the same
+    # source url again. UNLESS this row still maps the asset it carried
+    # before it was replaced (a delete that failed): that press must run
+    # again to take the old media down -- a no-op over an orphan is exactly
+    # the silent success this door exists to end.
+    press = image_press_plan(_parent, image)
+    have = press["gid"]
+    if press["action"] == "noop":
         return PushResult(
             mode=MODE_LIVE if live else MODE_SIMULATED,
             entity="image",
@@ -793,14 +879,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             payload={**payload, "media_gid": have},
             reason="already on the listing",
         )
-    if replaced:
-        payload["drop"] = replaced
+    if press["drop"]:
+        payload["drop"] = press["drop"]
 
     if not live:
         return PushResult(
             mode=MODE_SIMULATED,
             entity="image",
-            action="update" if have else "create",
+            action=press["action"],
             target_id=iid,
             ok=True,
             shopify_id=have,
@@ -818,18 +904,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             payload=payload,
             error="parent product not on Shopify yet (push the product first)",
         )
-    # THE LIST THIS PRESS SYNCS AGAINST: the product's own photographs (kept,
-    # never re-attached: they are mapped) and THIS row's url. Every other
-    # design-queue row on the map is left exactly where it is by the plan;
-    # the asset this row mapped before it was replaced is dropped because
-    # design_rows names this row.
-    photos = product_photo_urls(_parent)
-    if src not in photos:
-        photos.append(src)
+    # THE DESIGN LANE: the pass governs the rows of THIS image_id only --
+    # it attaches this row's url and drops the asset the row mapped before
+    # it was replaced. The product's own photographs and every other design
+    # row are kept exactly where they are (see the ownership note).
     try:
         current = await _product_media(db, product_gid)
         summary = await sync_product_media(
-            db, _parent, product_gid, photos, current, design_rows={src: iid}
+            db, _parent, product_gid, [src], current, design_row=image
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(

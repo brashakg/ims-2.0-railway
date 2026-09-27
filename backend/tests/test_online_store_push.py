@@ -1528,3 +1528,29 @@ def test_push_history_query_failure_reports_unavailable_not_a_false_empty(
     assert body["available"] is False
     assert body["count"] == 0
     assert body["entries"] == []
+
+
+def test_push_all_pending_presses_a_mapped_image_whose_old_asset_is_still_up(client, auth_headers, patched_db, monkeypatch):
+    """The sweep's skip IS the press's own predicate (image_press_plan): a row
+    already on the listing that still maps the asset it carried before it was
+    replaced is NOT skipped -- the press (dark here) plans the drop. Skipping
+    on 'has a gid' alone left that row pressable only by hand."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1",
+                  "media_map": [
+                      {"url": "http://x/new.jpg", "id": "gid://shopify/MediaImage/9", "image_id": "I1"},
+                      {"url": "http://x/old.jpg", "id": "gid://shopify/MediaImage/8", "image_id": "I1"},
+                  ]}})
+    conn.db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/new.jpg", "status": "APPROVED"})
+
+    r = client.post("/api/v1/online-store/push/all-pending?entities=images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"]["images"]["pushed"] == 1, body
+    (res,) = body["results"]
+    assert res["action"] == "update" and res["payload"]["drop"] == ["http://x/old.jpg"]
+    assert res["shopify_id"] == "gid://shopify/MediaImage/9"
