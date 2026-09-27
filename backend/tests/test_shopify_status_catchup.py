@@ -265,7 +265,17 @@ def test_cancel_refund_puts_the_claimed_unit_back_once_under_auto_posture(swept,
     assert swept["refund_calls"] == ["700302"]
 
 
-def test_a_refund_on_an_order_the_ims_cancel_door_released_restocks_nothing(swept, monkeypatch):
+@pytest.mark.parametrize(
+    "door_stamps",
+    [
+        # The door's claim + its release stamp (a completed cancel).
+        {"cancelled_by": "staff-1", "cancel_stock_released": ["stk-1"]},
+        # The claim only: the release stamp was lost (base_repository.update
+        # swallows the blip) -- the door still ran and owns the retry.
+        {"cancelled_by": "staff-1"},
+    ],
+)
+def test_a_refund_on_an_order_the_ims_cancel_door_released_restocks_nothing(swept, monkeypatch, door_stamps):
     """Staff cancelled at the counter (the IMS cancel door put the unit back and
     stamped the order), Shopify cancels later with a restocking Refund. Even
     under AUTO the handler queues it for the accountant (no ledger, no returns
@@ -276,8 +286,7 @@ def test_a_refund_on_an_order_the_ims_cancel_door_released_restocks_nothing(swep
     _claim_unit(swept, doc)
     swept["orders"].update_one(
         {"shopify_order_id": "30032"},
-        {"$set": {"status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z",
-                  "cancelled_by": "staff-1", "cancel_stock_released": ["stk-1"]}},
+        {"$set": {"status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z", **door_stamps}},
     )
     swept["stock_repo"].units[0].update(status="AVAILABLE", order_id=None)
 
@@ -294,6 +303,34 @@ def test_a_refund_on_an_order_the_ims_cancel_door_released_restocks_nothing(swep
     assert [r["restock"] for r in review["proposed_restock"]] == [False]
 
     shopify_refund.post_from_review(swept["db"], review)
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "AVAILABLE")]
+
+
+def test_a_queued_refund_confirmed_after_the_ims_cancel_door_ran_restocks_nothing(swept):
+    """The door can run AFTER the refund was queued: Shopify cancels (the unit is
+    still SOLD, the review row proposes its restock), then staff re-POST the IMS
+    cancel -- its retry door puts the unit back and stamps only
+    cancel_stock_released. The accountant's later confirm must not restock:
+    the SOLD unit is gone, so the restock would mint a phantom. The credit
+    note still posts."""
+    doc = _book(swept, 30033)
+    _claim_unit(swept, doc)
+    swept["state"]["orders"] = [
+        _pulled(30033, cancelled_at=CANCELLED_AT, financial_status="refunded",
+                refunds=[_refund(740033, 30033)])
+    ]
+    assert swept["run"]().payload["status_synced"] == ["30033"]
+    review = swept["review"].find_one({"shopify_refund_id": "740033"})
+    assert review["status"] == "PENDING"
+    assert [r["restock"] for r in review["proposed_restock"]] == [True]
+
+    swept["orders"].update_one(
+        {"shopify_order_id": "30033"}, {"$set": {"cancel_stock_released": ["stk-1"]}}
+    )
+    swept["stock_repo"].units[0].update(status="AVAILABLE", order_id=None)
+
+    res = shopify_refund.post_from_review(swept["db"], review)
+    assert res["status"] == "credited" and swept["ledger"].count_documents({}) == 1
     assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "AVAILABLE")]
 
 

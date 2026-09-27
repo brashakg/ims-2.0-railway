@@ -977,7 +977,13 @@ def _post_credit_and_restock(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
 
-    # (b) Restock the refunded serialized units back to the fulfilling store.
+    # (b) Restock the refunded serialized units back to the fulfilling store --
+    # unless the IMS cancel door already put them back. Asked HERE, at post
+    # time, because the door can run AFTER the refund was queued (staff cancel
+    # while the accountant's review row still proposes the restock): the SOLD
+    # unit is gone by the confirm, and the restock would mint a phantom.
+    if _ims_cancel_door_ran(order):
+        return_lines = [line.model_copy(update={"restock": False}) for line in return_lines]
     restock_result: Dict[str, Any] = {
         "restocked": [],
         "restock_stock_ids": [],
@@ -1170,6 +1176,10 @@ _FULFILMENT_CONTEXT_KEYS = (
     "fulfillment_breakdown",
     "channel",
     "interstate",
+    # The IMS cancel door's stamps (_ims_cancel_door_ran): a door that ran
+    # after the review row was queued means the units are already back.
+    "cancelled_by",
+    "cancel_stock_released",
 )
 
 
