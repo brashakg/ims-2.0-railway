@@ -489,6 +489,42 @@ def test_live_get_and_delete_unknown_is_404(client, auth_headers, patched_db):
     assert client.delete(f"{base}/no-such", headers=auth_headers).status_code == 404
 
 
+def test_live_delete_is_refused_while_the_rows_media_is_on_the_listing(client, auth_headers, patched_db):
+    """Round 4 P3: the design press takes a media down only through its row,
+    so deleting a row whose lane still maps media on the parent's listing
+    (here the asset it carried BEFORE it was edited -- its current url maps
+    nothing, so 'has a gid' alone would let it through) would leave that
+    media up and its map row orphaned forever. 409, the row kept. Once the
+    media is off the listing (the product press prunes the row), it deletes.
+    A row whose url is one of the product's own photographs maps nothing in
+    its lane (that media is the product's) and deletes.
+    REVERT-PROOF: drop the lane refusal in delete_image -> red (200)."""
+    conn, _ = patched_db
+    base = "/api/v1/online-store/images"
+    own, v1 = "https://cdn.example.com/own.jpg", "https://cdn.example.com/design-v1.jpg"
+    iid = client.post(base, headers=auth_headers, json={
+        "product_id": "P1", "url": "https://cdn.example.com/design-v2.jpg"}).json()["image"]["image_id"]
+    own_iid = client.post(base, headers=auth_headers, json={
+        "product_id": "P1", "url": own}).json()["image"]["image_id"]
+    ecom = {"shopify_product_id": "gid://shopify/Product/1", "media_map": [
+        {"url": own, "id": "gid://shopify/MediaImage/1", "image_id": own_iid},
+        {"url": v1, "id": "gid://shopify/MediaImage/100", "image_id": iid},
+    ]}
+    conn.db["catalog_products"].insert_one({"id": "P1", "images": [own], "ecom": ecom})
+
+    r = client.delete(f"{base}/{iid}", headers=auth_headers)
+    assert r.status_code == 409, r.text
+    assert "MediaImage/100" in r.text
+    assert client.get(f"{base}/{iid}", headers=auth_headers).status_code == 200, "the row is kept"
+
+    assert client.delete(f"{base}/{own_iid}", headers=auth_headers).status_code == 200, "the product's lane"
+
+    ecom["media_map"] = ecom["media_map"][:1]
+    conn.db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom": ecom}})
+    assert client.delete(f"{base}/{iid}", headers=auth_headers).status_code == 200
+    assert client.get(f"{base}/{iid}", headers=auth_headers).status_code == 404
+
+
 # --- OS-024: sign-off (APPROVE/REJECT) is approver-only in the HANDLER --------
 
 

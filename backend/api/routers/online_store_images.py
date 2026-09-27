@@ -34,7 +34,7 @@ Routes:
   POST   /{image_id}/assign        assign to a DESIGN_MANAGER
   POST   /{image_id}/status        transition status (valid-transition guard -> 409)
   POST   /{image_id}/edited        attach edited_url + move to REVIEW
-  DELETE /{image_id}               delete
+  DELETE /{image_id}               delete (409 while its media is on the listing)
 
 Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 """
@@ -503,9 +503,33 @@ async def delete_image(
     image_id: str,
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
 ) -> Dict:
+    """Delete a queue row -- REFUSED (409) while any media of its lane is on
+    the parent's Shopify listing (the twin's media_map rows stamped with its
+    image_id -- the asset it carries now OR one it carried before it was
+    edited): the design press takes a media down only through its row, so
+    deleting the row first would leave the media up and its map row orphaned
+    forever, with no door able to remove either. Take it down first (remove
+    it in the Shopify admin and press the product, which prunes the map),
+    then delete. A row whose url is one of the product's own photographs
+    maps nothing in its lane (that media is the product's) and deletes."""
     repo = _require_repo()
-    if repo.get_by_id(image_id) is None:
+    existing = repo.get_by_id(image_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Image not found")
+    from ..services import shopify_push
+
+    lane = shopify_push.image_lane_media(
+        shopify_push._resolve_product_doc(_get_db(), existing.get("product_id")), existing
+    )
+    if lane:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Image is on the Shopify listing (%s); take it down first "
+                "(remove it in the Shopify admin and push the product), then delete"
+                % ", ".join(r["id"] for r in lane)
+            ),
+        )
     ok = repo.delete(image_id)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to delete image")
